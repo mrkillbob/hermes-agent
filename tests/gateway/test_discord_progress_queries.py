@@ -68,6 +68,7 @@ def test_progress_pre_router_answers_before_model_specialist_classifier(adapter,
     assert captured["request"] == "How did the burndown go and what else do we need to do?"
     assert captured["source"].platform == "discord"
     assert captured["source"].chat_id == "trading-bot"
+    assert not hasattr(captured["source"], "session_id")
     assert captured["board"] == "tradingbot-burndown"
     adapter._classify_specialist_event.assert_not_awaited()
     adapter.send.assert_awaited_once_with(

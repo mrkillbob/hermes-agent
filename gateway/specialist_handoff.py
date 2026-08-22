@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
+from gateway.configured_board import configured_board_db_path
 from gateway.specialist_routing import SpecialistRouteDecision
 
 
@@ -88,7 +89,7 @@ def create_specialist_handoff(*, decision: SpecialistRouteDecision, source: Hand
         from hermes_cli import kanban_db as kb
 
         key = _idempotency_key(source)
-        conn = kb.connect(board=board)
+        conn = kb.connect(db_path=configured_board_db_path(board), board=board)
         try:
             existing_id = None
             if key:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -46,7 +47,6 @@ def _task(
     branch_name=None,
     created_by=None,
     idempotency_key=None,
-    session_id=None,
 ):
     task_id = kb.create_task(
         conn,
@@ -57,25 +57,38 @@ def _task(
         branch_name=branch_name,
         created_by=created_by,
         idempotency_key=idempotency_key,
-        session_id=session_id,
     )
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
     return task_id
 
 
-def _run(conn, task_id, *, status, outcome=None, summary=None, metadata=None, error=None):
+def _run(
+    conn,
+    task_id,
+    *,
+    status,
+    outcome=None,
+    summary=None,
+    metadata=None,
+    error=None,
+    started_at=100,
+    ended_at=None,
+):
+    if ended_at is None and status != "running":
+        ended_at = started_at + 1
     with kb.write_txn(conn):
         conn.execute(
             """
             INSERT INTO task_runs
                 (task_id, status, started_at, ended_at, outcome, summary, metadata, error)
-            VALUES (?, ?, 100, CASE WHEN ? = 'running' THEN NULL ELSE 101 END, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
                 status,
-                status,
+                started_at,
+                ended_at,
                 outcome,
                 summary,
                 json.dumps(metadata) if metadata is not None else None,
@@ -89,7 +102,6 @@ def _source(
     chat_id="trading-bot",
     thread_id=None,
     reply_to_message_id=None,
-    session_id=None,
 ):
     from gateway.progress_queries import ProgressSource
 
@@ -98,7 +110,6 @@ def _source(
         chat_id=chat_id,
         thread_id=thread_id,
         reply_to_message_id=reply_to_message_id,
-        session_id=session_id,
     )
 
 
@@ -223,8 +234,7 @@ def test_generic_how_did_it_go_requires_trusted_linkage(kanban_home):
     assert result.reason == "no_match"
 
 
-@pytest.mark.parametrize("link_kind", ["reply", "session"])
-def test_generic_how_did_it_go_resolves_one_trusted_linked_root(kanban_home, link_kind):
+def test_generic_how_did_it_go_resolves_one_trusted_reply_linked_root(kanban_home):
     from gateway.progress_queries import resolve_progress_query
 
     with kb.connect(board=BOARD) as conn:
@@ -234,16 +244,12 @@ def test_generic_how_did_it_go_resolves_one_trusted_linked_root(kanban_home, lin
             status="done",
             created_by="specialist-routing",
             idempotency_key="specialist-routing:discord::trading-bot::request-42",
-            session_id="session-42",
         )
         _sub(conn, root, delivery_metadata={"origin_message_id": "request-42"})
 
-    source = (
-        _source(reply_to_message_id="request-42")
-        if link_kind == "reply"
-        else _source(session_id="session-42")
+    result = resolve_progress_query(
+        "How did it go?", source=_source(reply_to_message_id="request-42"), board=BOARD
     )
-    result = resolve_progress_query("How did it go?", source=source, board=BOARD)
 
     assert result.handled is True
     assert result.reason == "resolved"
@@ -279,6 +285,17 @@ def test_non_progress_message_falls_through_without_database_response(kanban_hom
     assert result.response == ""
 
 
+def test_ordinary_what_else_chat_falls_through(kanban_home):
+    from gateway.progress_queries import resolve_progress_query
+
+    result = resolve_progress_query(
+        "What else can you help with?", source=_source(), board=BOARD
+    )
+
+    assert result.handled is False
+    assert result.reason == "irrelevant"
+
+
 def test_question_shaped_action_request_falls_through_to_specialist_routing(kanban_home):
     from gateway.progress_queries import resolve_progress_query
 
@@ -297,6 +314,19 @@ def test_mixed_progress_and_action_clause_falls_through_to_specialist_routing(ka
 
     result = resolve_progress_query(
         "How did the burndown go, and patch any remaining failures?",
+        source=_source(),
+        board=BOARD,
+    )
+
+    assert result.handled is False
+    assert result.reason == "irrelevant"
+
+
+def test_indirect_mixed_action_falls_through_to_specialist_routing(kanban_home):
+    from gateway.progress_queries import resolve_progress_query
+
+    result = resolve_progress_query(
+        "How did the burndown go, and have the bot patch any remaining failures?",
         source=_source(),
         board=BOARD,
     )
@@ -382,6 +412,127 @@ def test_progress_reads_existing_board_without_using_mutating_connection(kanban_
     assert result.handled is True
     assert result.reason == "resolved"
     assert root in result.response
+
+
+def test_progress_snapshot_includes_committed_wal_without_touching_source_sidecars(
+    kanban_home,
+):
+    from gateway.progress_queries import resolve_progress_query
+
+    source_path = kb.kanban_db_path(board=BOARD)
+    conn = kb.connect(board=BOARD)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+        wal_path = Path(str(source_path) + "-wal")
+        assert wal_path.is_file()
+        assert wal_path.stat().st_size > 0
+
+        tracked_paths = [source_path, wal_path, Path(str(source_path) + "-shm")]
+
+        def signatures():
+            return {
+                path: (
+                    path.exists(),
+                    path.stat().st_ino if path.exists() else None,
+                    path.stat().st_size if path.exists() else None,
+                    path.stat().st_mtime_ns if path.exists() else None,
+                )
+                for path in tracked_paths
+            }
+
+        before = signatures()
+        result = resolve_progress_query(
+            "How did the burndown go?", source=_source(), board=BOARD
+        )
+
+        assert result.handled is True
+        assert result.reason == "resolved"
+        assert root in result.response
+        assert signatures() == before
+    finally:
+        conn.close()
+
+
+def test_progress_snapshot_race_fails_unavailable(kanban_home, monkeypatch):
+    import gateway.progress_queries as progress_queries
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+
+    real_copy = progress_queries._copy_snapshot_file
+
+    def racing_copy(source, destination, expected):
+        real_copy(source, destination, expected)
+        source_stat = source.stat()
+        os.utime(source, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns + 1))
+
+    monkeypatch.setattr(progress_queries, "_copy_snapshot_file", racing_copy)
+    result = progress_queries.resolve_progress_query(
+        "How did the burndown go?", source=_source(), board=BOARD
+    )
+
+    assert result.handled is False
+    assert result.reason == "unavailable"
+
+
+def test_progress_explicit_board_ignores_database_environment_override(
+    kanban_home, monkeypatch, tmp_path
+):
+    from gateway.progress_queries import resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+    override_path = tmp_path / "override" / "kanban.db"
+    with kb.connect(db_path=override_path):
+        pass
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(override_path))
+
+    result = resolve_progress_query(
+        "How did the burndown go?", source=_source(), board=BOARD
+    )
+
+    assert result.handled is True
+    assert result.reason == "resolved"
+    assert root in result.response
+
+
+def test_progress_counts_root_and_separates_blocked_from_failed(kanban_home):
+    from gateway.progress_queries import resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _task(conn, "Failed patch", parents=[root], status="failed")
+        _task(conn, "Blocked acceptance", parents=[root], status="blocked")
+        _task(conn, "Running audit", parents=[root], status="running")
+        _sub(conn, root)
+
+    result = resolve_progress_query(
+        "How did the burndown go?", source=_source(), board=BOARD
+    )
+
+    assert "1 completed, 1 failed, 1 blocked, 1 running" in result.response
+
+
+def test_progress_uses_newest_receipt_across_entire_graph(kanban_home):
+    from gateway.progress_queries import resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        child = _task(conn, "Acceptance follow-up", parents=[root], status="done")
+        _sub(conn, root)
+        _run(conn, root, status="done", summary="Older root receipt.", started_at=100)
+        _run(conn, child, status="done", summary="Newest graph receipt.", started_at=200)
+
+    result = resolve_progress_query(
+        "How did the burndown go?", source=_source(), board=BOARD
+    )
+
+    assert "Newest graph receipt." in result.response
+    assert "Older root receipt." not in result.response
 
 
 def test_missing_board_is_unavailable_without_creating_files(kanban_home):

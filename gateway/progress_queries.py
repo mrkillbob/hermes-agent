@@ -9,11 +9,18 @@ work, following paths, or interpreting prose as authority.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import sqlite3
 import stat
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Optional
+
+from gateway.configured_board import configured_board_db_path
 
 
 MAX_PROGRESS_RESPONSE_CHARS = 1_600
@@ -21,6 +28,8 @@ _MAX_GRAPH_TASKS = 24
 _MAX_NEXT_TASKS = 3
 _MAX_AMBIGUOUS_ROOTS = 3
 _MAX_RECEIPT_CHARS = 280
+_MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
+_SNAPSHOT_ATTEMPTS = 3
 _BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TASK_ID_RE = re.compile(r"\bt_[a-z0-9]+\b", re.IGNORECASE)
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
@@ -44,8 +53,16 @@ _STOP_WORDS = frozenset(
     }
 )
 _QUESTION_MARKERS = (
-    "how did ", "how is ", "how's ", "what else", "what remains", "what is left",
-    "what's left", "where are we", "give me an update", "status of ", "progress on ",
+    "how did ",
+    "how is ",
+    "how's ",
+    "what remains",
+    "what is left",
+    "what's left",
+    "where are we",
+    "give me an update",
+    "status of ",
+    "progress on ",
 )
 _PROGRESS_TERMS = ("burndown", "status", "progress", "remaining", "left", "next", "complete")
 _ACTION_VERBS = r"start|fix|patch|audit|implement|create|run|investigate|change|finish|complete"
@@ -55,12 +72,18 @@ _ACTION_REQUEST_RE = re.compile(
     rf"|\b(?:and|then|also)\s+(?:(?:then|please)\s+)?(?:{_ACTION_VERBS})\b"
     rf"|\b(?:can|could|would|will|should)\s+(?:you|we)\s+(?:{_ACTION_VERBS})\b"
     rf"|[;,.!?]\s*(?:please\s+)?(?:{_ACTION_VERBS})\b"
+    rf"|\b(?:ask|tell|have)\s+(?:the\s+)?(?:bot|agent|hermes|it|them)\s+"
+    rf"(?:to\s+)?(?:{_ACTION_VERBS})\b"
+    rf"|\b(?:ask|tell|have|get|let)\s+(?:the\s+)?(?:[a-z0-9_-]+\s+){{0,4}}"
+    rf"(?:to\s+)?(?:{_ACTION_VERBS})\b"
+    rf"|\b(?:i\s+)?(?:want|need)\s+(?:you|it|them|the\s+bot|hermes)\s+to\s+"
+    rf"(?:{_ACTION_VERBS})\b"
     rf")",
     re.IGNORECASE,
 )
 _GENERIC_PROGRESS_RE = re.compile(r"^how did it go\?$", re.IGNORECASE)
 _NONTERMINAL_STATUSES = frozenset({"triage", "todo", "ready", "review"})
-_FAILED_STATUSES = frozenset({"failed", "blocked", "timed_out", "crashed"})
+_FAILED_STATUSES = frozenset({"failed", "timed_out", "crashed"})
 
 
 @dataclass(frozen=True)
@@ -71,7 +94,6 @@ class ProgressSource:
     chat_id: str
     thread_id: Optional[str] = None
     reply_to_message_id: Optional[str] = None
-    session_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -137,18 +159,85 @@ def _source_subscription_rows(conn, source: ProgressSource) -> list[sqlite3.Row]
     return list(rows)
 
 
-def _open_existing_board_readonly(board: str) -> sqlite3.Connection:
-    """Open one existing regular board DB without init, migration, or writes."""
-    from hermes_cli import kanban_db as kb
-
-    path = kb.kanban_db_path(board=board).expanduser()
+def _regular_file_signature(path: Path) -> tuple[int, int, int, int]:
     file_stat = path.lstat()
     if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
-        raise OSError("Kanban board database must be a regular non-symlink file")
-    resolved = path.resolve(strict=True)
-    conn = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+        raise OSError("Kanban snapshot source must be a regular non-symlink file")
+    return (file_stat.st_dev, file_stat.st_ino, file_stat.st_size, file_stat.st_mtime_ns)
+
+
+def _optional_file_signature(path: Path) -> Optional[tuple[int, int, int, int]]:
+    try:
+        return _regular_file_signature(path)
+    except FileNotFoundError:
+        return None
+
+
+def _snapshot_source_state(
+    source: Path,
+) -> tuple[tuple[int, int, int, int], Optional[tuple[int, int, int, int]]]:
+    return _regular_file_signature(source), _optional_file_signature(Path(str(source) + "-wal"))
+
+
+def _copy_snapshot_file(
+    source: Path,
+    destination: Path,
+    expected: tuple[int, int, int, int],
+) -> None:
+    """Copy exactly the captured bytes and reject short or oversized copies."""
+    expected_size = expected[2]
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source, flags)
+    try:
+        opened_stat = os.fstat(descriptor)
+        opened_signature = (
+            opened_stat.st_dev,
+            opened_stat.st_ino,
+            opened_stat.st_size,
+            opened_stat.st_mtime_ns,
+        )
+        if opened_signature != expected or not stat.S_ISREG(opened_stat.st_mode):
+            raise OSError("Kanban snapshot source changed before copy")
+        with os.fdopen(descriptor, "rb", closefd=False) as reader:
+            with destination.open("xb") as writer:
+                shutil.copyfileobj(reader, writer, length=1024 * 1024)
+    finally:
+        os.close(descriptor)
+    if destination.stat().st_size != expected_size:
+        raise OSError("Kanban snapshot source changed during copy")
+
+
+@contextmanager
+def _open_existing_board_readonly(board: str):
+    """Query a validated private DB+WAL snapshot without opening the source DB."""
+    source = configured_board_db_path(board)
+    wal_source = Path(str(source) + "-wal")
+
+    for _attempt in range(_SNAPSHOT_ATTEMPTS):
+        before = _snapshot_source_state(source)
+        total_size = before[0][2] + (before[1][2] if before[1] is not None else 0)
+        if total_size > _MAX_SNAPSHOT_BYTES:
+            raise OSError("Kanban snapshot exceeds the bounded copy limit")
+
+        with tempfile.TemporaryDirectory(prefix="hermes-progress-") as temp_dir:
+            snapshot = Path(temp_dir) / "kanban.db"
+            _copy_snapshot_file(source, snapshot, before[0])
+            if before[1] is not None:
+                _copy_snapshot_file(wal_source, Path(str(snapshot) + "-wal"), before[1])
+            if _snapshot_source_state(source) != before:
+                continue
+
+            conn = sqlite3.connect(snapshot.as_uri() + "?mode=ro", uri=True)
+            try:
+                conn.row_factory = sqlite3.Row
+                checks = conn.execute("PRAGMA quick_check").fetchall()
+                if not checks or any(str(row[0]).casefold() != "ok" for row in checks):
+                    raise sqlite3.DatabaseError("Kanban snapshot integrity check failed")
+                yield conn
+                return
+            finally:
+                conn.close()
+    raise OSError("Kanban board changed during bounded snapshot attempts")
 
 
 def _roots_for_tasks(conn, task_ids: Iterable[str]) -> list[str]:
@@ -204,16 +293,10 @@ def _root_has_trusted_linkage(
     source: ProgressSource,
     subscription_rows: list[sqlite3.Row],
 ) -> bool:
-    """Bind a generic follow-up to structured reply/session provenance only."""
+    """Bind a generic follow-up to structured reply provenance only."""
     from hermes_cli import kanban_db as kb
 
     graph_ids = set(_graph_task_ids(conn, root_id))
-    if source.session_id:
-        for task_id in graph_ids:
-            task = kb.get_task(conn, task_id)
-            if task is not None and task.session_id == source.session_id:
-                return True
-
     reply_id = str(source.reply_to_message_id or "")
     if not reply_id:
         return False
@@ -294,18 +377,28 @@ def _select_root(
     return "resolved", top[0][2]
 
 
-def _task_receipt(conn, task) -> tuple[Optional[str], list[str]]:
-    """Read one safe human-readable receipt plus structured commit identities."""
+def _task_receipt(
+    conn, task
+) -> tuple[Optional[tuple[int, int, int]], Optional[str], list[str]]:
+    """Read the newest safe receipt key plus structured commit identities."""
     from hermes_cli import kanban_db as kb
 
     receipt = None
+    receipt_key = None
     commits: list[str] = []
     branch = _safe_branch(task.branch_name)
     if branch:
         commits.append(f"branch {branch}")
-    for run in reversed(kb.list_runs(conn, task.id)):
-        if receipt is None:
-            receipt = _safe_text(run.summary or run.error)
+    for run in kb.list_runs(conn, task.id):
+        candidate = _safe_text(run.summary or run.error)
+        key = (
+            run.ended_at if run.ended_at is not None else run.started_at,
+            run.started_at,
+            run.id,
+        )
+        if candidate and (receipt_key is None or key > receipt_key):
+            receipt = candidate
+            receipt_key = key
         metadata = run.metadata if isinstance(run.metadata, dict) else {}
         commit = _safe_commit(metadata.get("commit") or metadata.get("commit_sha"))
         if commit:
@@ -313,7 +406,7 @@ def _task_receipt(conn, task) -> tuple[Optional[str], list[str]]:
         run_branch = _safe_branch(metadata.get("branch") or metadata.get("branch_name"))
         if run_branch:
             commits.append(f"branch {run_branch}")
-    return receipt, list(dict.fromkeys(commits))
+    return receipt_key, receipt, list(dict.fromkeys(commits))
 
 
 def _bounded(response: str) -> str:
@@ -327,15 +420,16 @@ def _format_progress(conn, root) -> str:
     tasks = [kb.get_task(conn, task_id) for task_id in graph_ids]
     tasks = [task for task in tasks if task is not None]
     children = [task for task in tasks if task.id != root.id]
-    completed = sum(task.status == "done" for task in children)
-    failed = sum(task.status in _FAILED_STATUSES for task in children)
-    running = sum(task.status == "running" for task in children)
+    completed = sum(task.status == "done" for task in tasks)
+    failed = sum(task.status in _FAILED_STATUSES for task in tasks)
+    blocked = sum(task.status == "blocked" for task in tasks)
+    running = sum(task.status == "running" for task in tasks)
     next_tasks = [task for task in children if task.status in _NONTERMINAL_STATUSES]
     next_tasks.sort(key=lambda task: (task.priority * -1, task.created_at, task.id))
 
     lines = [
         f"Progress for `{root.id}` — {_safe_text(root.title, limit=160)}: "
-        f"{completed} completed, {failed} failed, {running} running."
+        f"{completed} completed, {failed} failed, {blocked} blocked, {running} running."
     ]
     if next_tasks:
         next_text = "; ".join(
@@ -347,10 +441,12 @@ def _format_progress(conn, root) -> str:
     receipt = None
     identifiers: list[str] = []
     receipt_task_id = None
+    receipt_key = None
     latest_comment = None
     for task in tasks:
-        task_receipt, task_identifiers = _task_receipt(conn, task)
-        if receipt is None and task_receipt:
+        task_receipt_key, task_receipt, task_identifiers = _task_receipt(conn, task)
+        if task_receipt and (receipt_key is None or task_receipt_key > receipt_key):
+            receipt_key = task_receipt_key
             receipt = task_receipt
             receipt_task_id = task.id
         identifiers.extend(task_identifiers)
@@ -389,8 +485,7 @@ def resolve_progress_query(
     ):
         return ProgressQueryResult(False, "", "unavailable")
     try:
-        conn = _open_existing_board_readonly(board)
-        try:
+        with _open_existing_board_readonly(board) as conn:
             subscription_rows = _source_subscription_rows(conn, source)
             subscribed_ids = [str(row["task_id"]) for row in subscription_rows]
             root_ids = _roots_for_tasks(conn, subscribed_ids)
@@ -424,7 +519,5 @@ def resolve_progress_query(
                     "ambiguous",
                 )
             return ProgressQueryResult(True, _format_progress(conn, value), "resolved")
-        finally:
-            conn.close()
     except Exception:
         return ProgressQueryResult(False, "", "unavailable")
