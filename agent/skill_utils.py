@@ -747,16 +747,39 @@ def _git_common_dir(root: Path) -> Optional[Path]:
 
 
 def is_project_root_trusted(root: Path) -> bool:
-    """True when *root* or its linked Git repository is explicitly trusted."""
+    """True for an explicit root, its linked worktree, or an owned worker root."""
     try:
-        resolved = Path(root).resolve()
-        trusted = _project_trusted_dirs_from_config()
-        if resolved in trusted:
+        resolved_root = Path(root).resolve()
+        trusted_roots = _project_trusted_dirs_from_config()
+        if resolved_root in trusted_roots:
             return True
-        common_dir = _git_common_dir(resolved)
-        return common_dir is not None and any(
-            _git_common_dir(candidate) == common_dir for candidate in trusted
+
+        common_dir = _git_common_dir(resolved_root)
+        if common_dir is not None and any(
+            _git_common_dir(candidate) == common_dir for candidate in trusted_roots
+        ):
+            return True
+
+        task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+        workspace = os.environ.get("HERMES_KANBAN_WORKSPACE", "").strip()
+        workspaces_root = os.environ.get(
+            "HERMES_KANBAN_WORKSPACES_ROOT", ""
+        ).strip()
+        if not task_id or task_id != resolved_root.name or not workspace or not workspaces_root:
+            return False
+        resolved_workspace = Path(workspace).resolve()
+        resolved_workspaces_root = Path(workspaces_root).resolve()
+        board_owned_workspace = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent == resolved_workspaces_root
+            and resolved_workspaces_root.parent in trusted_roots
         )
+        migrated_trusted_worktree = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent.name == ".worktrees"
+            and resolved_root.parent.parent in trusted_roots
+        )
+        return board_owned_workspace or migrated_trusted_worktree
     except OSError:
         return False
 
