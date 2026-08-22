@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import sqlite3
 import stat
 import tempfile
@@ -29,6 +28,7 @@ _MAX_NEXT_TASKS = 3
 _MAX_AMBIGUOUS_ROOTS = 3
 _MAX_RECEIPT_CHARS = 280
 _MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
+_SNAPSHOT_COPY_CHUNK_BYTES = 1024 * 1024
 _SNAPSHOT_ATTEMPTS = 3
 _BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TASK_ID_RE = re.compile(r"\bt_[a-z0-9]+\b", re.IGNORECASE)
@@ -78,6 +78,8 @@ _ACTION_REQUEST_RE = re.compile(
     rf"(?:to\s+)?(?:{_ACTION_VERBS})\b"
     rf"|\b(?:i\s+)?(?:want|need)\s+(?:you|it|them|the\s+bot|hermes)\s+to\s+"
     rf"(?:{_ACTION_VERBS})\b"
+    rf"|\b(?:(?:i|we)\s+would|(?:i|we)['’]d)\s+like\s+"
+    rf"(?:(?:you|it|them|the\s+bot|hermes)\s+)?to\s+(?:{_ACTION_VERBS})\b"
     rf")",
     re.IGNORECASE,
 )
@@ -103,6 +105,10 @@ class ProgressQueryResult:
     handled: bool
     response: str
     reason: str
+
+
+class _SnapshotChangedError(OSError):
+    """The captured source identity or byte extent changed during copy."""
 
 
 def is_progress_query(request: object) -> bool:
@@ -184,10 +190,13 @@ def _copy_snapshot_file(
     destination: Path,
     expected: tuple[int, int, int, int],
 ) -> None:
-    """Copy exactly the captured bytes and reject short or oversized copies."""
+    """Copy the captured byte extent, then perform one bounded EOF probe."""
     expected_size = expected[2]
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(source, flags)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise _SnapshotChangedError("Kanban snapshot source changed before copy") from exc
     try:
         opened_stat = os.fstat(descriptor)
         opened_signature = (
@@ -197,14 +206,38 @@ def _copy_snapshot_file(
             opened_stat.st_mtime_ns,
         )
         if opened_signature != expected or not stat.S_ISREG(opened_stat.st_mode):
-            raise OSError("Kanban snapshot source changed before copy")
-        with os.fdopen(descriptor, "rb", closefd=False) as reader:
-            with destination.open("xb") as writer:
-                shutil.copyfileobj(reader, writer, length=1024 * 1024)
+            raise _SnapshotChangedError("Kanban snapshot source changed before copy")
+        remaining = expected_size
+        with destination.open("xb") as writer:
+            while remaining:
+                chunk = os.read(descriptor, min(_SNAPSHOT_COPY_CHUNK_BYTES, remaining))
+                if not chunk:
+                    raise _SnapshotChangedError(
+                        "Kanban snapshot source changed during copy"
+                    )
+                if writer.write(chunk) != len(chunk):
+                    raise OSError("Kanban snapshot destination write was incomplete")
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise _SnapshotChangedError("Kanban snapshot source changed during copy")
+
+        closed_stat = os.fstat(descriptor)
+        closed_signature = (
+            closed_stat.st_dev,
+            closed_stat.st_ino,
+            closed_stat.st_size,
+            closed_stat.st_mtime_ns,
+        )
+        try:
+            path_signature = _regular_file_signature(source)
+        except OSError as exc:
+            raise _SnapshotChangedError("Kanban snapshot source changed after copy") from exc
+        if closed_signature != expected or path_signature != expected:
+            raise _SnapshotChangedError("Kanban snapshot source changed after copy")
     finally:
         os.close(descriptor)
     if destination.stat().st_size != expected_size:
-        raise OSError("Kanban snapshot source changed during copy")
+        raise _SnapshotChangedError("Kanban snapshot source changed during copy")
 
 
 @contextmanager
@@ -220,11 +253,17 @@ def _open_existing_board_readonly(board: str):
             raise OSError("Kanban snapshot exceeds the bounded copy limit")
 
         with tempfile.TemporaryDirectory(prefix="hermes-progress-") as temp_dir:
-            snapshot = Path(temp_dir) / "kanban.db"
-            _copy_snapshot_file(source, snapshot, before[0])
-            if before[1] is not None:
-                _copy_snapshot_file(wal_source, Path(str(snapshot) + "-wal"), before[1])
-            if _snapshot_source_state(source) != before:
+            try:
+                snapshot = Path(temp_dir) / "kanban.db"
+                _copy_snapshot_file(source, snapshot, before[0])
+                if before[1] is not None:
+                    _copy_snapshot_file(wal_source, Path(str(snapshot) + "-wal"), before[1])
+                if _snapshot_source_state(source) != before:
+                    raise _SnapshotChangedError(
+                        "Kanban board changed during snapshot copy"
+                    )
+
+            except _SnapshotChangedError:
                 continue
 
             conn = sqlite3.connect(snapshot.as_uri() + "?mode=ro", uri=True)
@@ -263,8 +302,8 @@ def _roots_for_tasks(conn, task_ids: Iterable[str]) -> list[str]:
     return sorted(roots)
 
 
-def _graph_task_ids(conn, root_id: str) -> list[str]:
-    """Return a bounded root-plus-descendants graph without following text links."""
+def _graph_task_ids(conn, root_id: str) -> tuple[list[str], bool]:
+    """Return bounded graph IDs and whether unvisited descendants remain."""
     from hermes_cli import kanban_db as kb
 
     ordered: list[str] = []
@@ -277,7 +316,8 @@ def _graph_task_ids(conn, root_id: str) -> list[str]:
         seen.add(task_id)
         ordered.append(task_id)
         frontier.extend(kb.child_ids(conn, task_id))
-    return ordered
+    truncated = any(task_id not in seen for task_id in frontier)
+    return ordered, truncated
 
 
 def _query_terms(request: str) -> set[str]:
@@ -296,7 +336,7 @@ def _root_has_trusted_linkage(
     """Bind a generic follow-up to structured reply provenance only."""
     from hermes_cli import kanban_db as kb
 
-    graph_ids = set(_graph_task_ids(conn, root_id))
+    graph_ids = set(_graph_task_ids(conn, root_id)[0])
     reply_id = str(source.reply_to_message_id or "")
     if not reply_id:
         return False
@@ -340,7 +380,7 @@ def _select_root(
     terms = _query_terms(request)
     ranked = []
     for root_id in root_ids:
-        graph_ids = _graph_task_ids(conn, root_id)
+        graph_ids, _truncated = _graph_task_ids(conn, root_id)
         tasks = [kb.get_task(conn, task_id) for task_id in graph_ids]
         tasks = [task for task in tasks if task is not None]
         graph_id_set = {task.id.casefold() for task in tasks}
@@ -416,7 +456,7 @@ def _bounded(response: str) -> str:
 def _format_progress(conn, root) -> str:
     from hermes_cli import kanban_db as kb
 
-    graph_ids = _graph_task_ids(conn, root.id)
+    graph_ids, truncated = _graph_task_ids(conn, root.id)
     tasks = [kb.get_task(conn, task_id) for task_id in graph_ids]
     tasks = [task for task in tasks if task is not None]
     children = [task for task in tasks if task.id != root.id]
@@ -431,6 +471,11 @@ def _format_progress(conn, root) -> str:
         f"Progress for `{root.id}` — {_safe_text(root.title, limit=160)}: "
         f"{completed} completed, {failed} failed, {blocked} blocked, {running} running."
     ]
+    if truncated:
+        lines.append(
+            f"Scope: counts and receipt cover only the first {len(tasks)} tasks "
+            "in this bounded graph traversal."
+        )
     if next_tasks:
         next_text = "; ".join(
             f"`{task.id}` {_safe_text(task.title, limit=100)} ({task.status})"
@@ -455,11 +500,24 @@ def _format_progress(conn, root) -> str:
             if latest_comment is None or candidate_key > (latest_comment.created_at, latest_comment.id):
                 latest_comment = comment
     if receipt and receipt_task_id:
-        lines.append(f"Latest receipt for `{receipt_task_id}`: {receipt}")
+        if truncated:
+            lines.append(
+                f"Newest receipt within first {len(tasks)} tasks for "
+                f"`{receipt_task_id}`: {receipt}"
+            )
+        else:
+            lines.append(f"Latest receipt for `{receipt_task_id}`: {receipt}")
     if identifiers:
         lines.append("Structured metadata: " + ", ".join(dict.fromkeys(identifiers)) + ".")
     if latest_comment is not None:
-        lines.append("Latest note: " + _safe_text(latest_comment.body) + ".")
+        if truncated:
+            lines.append(
+                f"Newest note within first {len(tasks)} tasks: "
+                + _safe_text(latest_comment.body)
+                + "."
+            )
+        else:
+            lines.append("Latest note: " + _safe_text(latest_comment.body) + ".")
     return _bounded(" ".join(lines))
 
 

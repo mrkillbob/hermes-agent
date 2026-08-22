@@ -335,6 +335,31 @@ def test_indirect_mixed_action_falls_through_to_specialist_routing(kanban_home):
     assert result.reason == "irrelevant"
 
 
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "How did the burndown go? I’d like you to fix the remaining failures.",
+        "How did the burndown go? I'd like you to patch the remaining failures.",
+        "How did the burndown go? I would like the bot to fix the remaining failures.",
+    ],
+)
+def test_mixed_progress_and_intent_phrase_falls_through_to_specialist_routing(
+    kanban_home, request_text
+):
+    from gateway.progress_queries import resolve_progress_query
+
+    result = resolve_progress_query(request_text, source=_source(), board=BOARD)
+
+    assert result.handled is False
+    assert result.reason == "irrelevant"
+
+
+def test_patch_completion_question_remains_a_progress_query(kanban_home):
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query("Is the patch complete?") is True
+
+
 def test_progress_output_is_bounded_and_redacts_secret_and_path_content(kanban_home):
     from gateway.progress_queries import MAX_PROGRESS_RESPONSE_CHARS, resolve_progress_query
 
@@ -478,6 +503,38 @@ def test_progress_snapshot_race_fails_unavailable(kanban_home, monkeypatch):
     assert result.reason == "unavailable"
 
 
+def test_snapshot_copy_reads_only_captured_bytes_and_rejects_append(tmp_path, monkeypatch):
+    import gateway.progress_queries as progress_queries
+
+    source = tmp_path / "source.db"
+    destination = tmp_path / "snapshot.db"
+    captured = b"captured-database-bytes"
+    appended = b"-appended-after-read"
+    source.write_bytes(captured)
+    expected = progress_queries._regular_file_signature(source)
+    real_read = os.read
+    requested_sizes = []
+    did_append = False
+
+    def append_after_first_read(descriptor, byte_count):
+        nonlocal did_append
+        requested_sizes.append(byte_count)
+        data = real_read(descriptor, byte_count)
+        if data and not did_append:
+            did_append = True
+            with source.open("ab") as writer:
+                writer.write(appended)
+        return data
+
+    monkeypatch.setattr(os, "read", append_after_first_read)
+
+    with pytest.raises(OSError, match="changed"):
+        progress_queries._copy_snapshot_file(source, destination, expected)
+
+    assert destination.read_bytes() == captured
+    assert sum(requested_sizes) == len(captured) + 1
+
+
 def test_progress_explicit_board_ignores_database_environment_override(
     kanban_home, monkeypatch, tmp_path
 ):
@@ -533,6 +590,31 @@ def test_progress_uses_newest_receipt_across_entire_graph(kanban_home):
 
     assert "Newest graph receipt." in result.response
     assert "Older root receipt." not in result.response
+
+
+def test_progress_discloses_scope_when_graph_exceeds_task_limit(kanban_home):
+    from gateway.progress_queries import resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+        _run(conn, root, status="done", summary="Root receipt.", started_at=100)
+        kb.add_comment(conn, root, "worker", "Root note.")
+        for index in range(24):
+            _task(conn, f"Completed child {index}", parents=[root], status="done")
+
+    result = resolve_progress_query(
+        "How did the burndown go?", source=_source(), board=BOARD
+    )
+
+    assert result.handled is True
+    assert "first 24 tasks" in result.response
+    assert "counts and receipt" in result.response.casefold()
+    assert "24 completed" in result.response
+    assert "Newest receipt within first 24 tasks" in result.response
+    assert "Latest receipt" not in result.response
+    assert "Newest note within first 24 tasks" in result.response
+    assert "Latest note" not in result.response
 
 
 def test_missing_board_is_unavailable_without_creating_files(kanban_home):
