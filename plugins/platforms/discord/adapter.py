@@ -7028,6 +7028,10 @@ class DiscordAdapter(BasePlatformAdapter):
             enabled = enabled.strip().lower() in {"true", "1", "yes", "on"}
         if not enabled:
             return {"enabled": False}
+        board = raw.get("board")
+        if not isinstance(board, str) or not board.strip():
+            return {"enabled": False}
+        board = board.strip()
         try:
             threshold = float(raw.get("confidence_threshold", 0.80))
         except (TypeError, ValueError):
@@ -7040,7 +7044,43 @@ class DiscordAdapter(BasePlatformAdapter):
             timeout = 12.0
         return {"enabled": True, "confidence_threshold": threshold,
                 "timeout_seconds": max(1.0, min(30.0, timeout)),
-                "model": str(raw.get("model") or "").strip()}
+                "model": str(raw.get("model") or "").strip(), "board": board}
+
+    async def _maybe_answer_progress_event(self, event: MessageEvent) -> bool:
+        """Answer a source-scoped status question before model specialist routing."""
+        settings = self._specialist_routing_settings()
+        if not settings.get("enabled") or event.message_type is not MessageType.TEXT:
+            return False
+        if not (event.text or "").strip() or getattr(event.source, "is_bot", False):
+            return False
+        try:
+            from gateway.progress_queries import (
+                ProgressSource,
+                is_progress_query,
+                resolve_progress_query,
+            )
+
+            if not is_progress_query(event.text):
+                return False
+            platform = getattr(event.source.platform, "value", event.source.platform)
+            source = ProgressSource(
+                platform=str(platform),
+                chat_id=str(event.source.chat_id),
+                thread_id=(str(event.source.thread_id) if event.source.thread_id else None),
+            )
+            result = await asyncio.to_thread(
+                resolve_progress_query,
+                event.text,
+                source=source,
+                board=settings["board"],
+            )
+        except Exception:
+            logger.warning("[Discord] progress query lookup failed", exc_info=True)
+            return False
+        if not result.handled:
+            return False
+        await self.send(event.source.chat_id, content=result.response, reply_to=event.message_id)
+        return True
 
     async def _classify_specialist_event(self, event: MessageEvent):
         """Ask the bounded auxiliary router for one typed routing decision."""
@@ -7103,6 +7143,7 @@ class DiscordAdapter(BasePlatformAdapter):
             result = await asyncio.to_thread(
                 create_specialist_handoff, decision=decision, source=source,
                 request=event.text, router_model=settings["model"] or "configured_auxiliary",
+                board=settings["board"],
             )
         except Exception:
             logger.warning("[Discord] specialist routing handoff failed", exc_info=True)
@@ -8779,6 +8820,8 @@ class DiscordAdapter(BasePlatformAdapter):
         # A high-confidence natural-language task request becomes one durable,
         # subscribed Kanban card. General, invalid, unavailable, and failed
         # classifications return false and preserve the existing chat flow.
+        if not recovered and await self._maybe_answer_progress_event(event):
+            return True
         if not recovered and await self._maybe_route_specialist_event(event):
             return True
 
