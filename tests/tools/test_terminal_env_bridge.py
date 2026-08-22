@@ -85,6 +85,21 @@ def test_explicit_config_key_overrides_matching_env_value(monkeypatch):
     assert config["docker_image"] == "config/image:1"
 
 
+def test_kanban_workspace_pin_overrides_profile_cwd(monkeypatch, tmp_path):
+    stable = tmp_path / "stable"
+    workspace = stable / ".worktrees" / "t_example"
+    workspace.mkdir(parents=True)
+    _write_config(f"terminal:\n  backend: local\n  cwd: {stable}\n")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_example")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+    monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+
+    config = terminal_tool._get_env_config()
+
+    assert os.environ["TERMINAL_CWD"] == str(workspace)
+    assert config["cwd"] == str(workspace)
+
+
 def test_ssh_config_preserves_remote_tilde_cwd(monkeypatch):
     """SSH ``~`` belongs to the remote user, not the Hermes host/container."""
     _write_config("terminal:\n  backend: ssh\n  cwd: '~'\n")
