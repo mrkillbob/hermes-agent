@@ -39,7 +39,7 @@ _SECRET_LINE_RE = re.compile(
 )
 _SECRET_RE = re.compile(
     rf"(?i)\b(?:{_SECRET_KEY_PATTERN})"
-    r"\s*(?:=|:)\s*(?:bearer\s+)?(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s;,]+)"
+    r"\s*(?:=|:)\s*(?:bearer\s+)?[^\n]*"
 )
 _PATH_RE = re.compile(r"(?:(?:[A-Za-z]:)?[\\/](?:Users|home|private|tmp|var|etc)[^\s,;]*)")
 _PROSE_COMMIT_RE = re.compile(r"\b[0-9a-f]{7,64}\b", re.IGNORECASE)
@@ -65,7 +65,10 @@ _QUESTION_MARKERS = (
     "progress on ",
 )
 _PROGRESS_TERMS = ("burndown", "status", "progress", "remaining", "left", "next", "complete")
-_ACTION_VERBS = r"start|fix|patch|audit|implement|create|run|investigate|change|finish|complete"
+_ACTION_VERBS = (
+    r"start|fix|patch|audit|implement|create|run|investigate|change|finish|complete|"
+    r"delegate|resolve|remediate|address|repair|review|validate|verify|test|debug|deploy|update"
+)
 _ACTION_REQUEST_RE = re.compile(
     rf"(?:"
     rf"^(?:(?:can|could|would)\s+you\s+|please\s+)?(?:{_ACTION_VERBS})\b"
@@ -129,11 +132,9 @@ def _safe_text(value: object, *, limit: int = _MAX_RECEIPT_CHARS) -> str:
     raw = str(value or "").replace("\x00", " ")
     redacted_lines = []
     for line in raw.splitlines() or [raw]:
-        redacted_lines.append(
-            _SECRET_LINE_RE.sub(lambda match: match.group(1) + "[redacted]", line)
-        )
+        line = _SECRET_LINE_RE.sub(lambda match: match.group(1) + "[redacted]", line)
+        redacted_lines.append(_SECRET_RE.sub("[redacted]", line))
     text = " ".join("\n".join(redacted_lines).split())
-    text = _SECRET_RE.sub("[redacted]", text)
     text = _PATH_RE.sub("[path redacted]", text)
     # A hash mentioned in a free-form worker receipt is not provenance. Only
     # the explicit structured metadata fields below may identify a commit.
@@ -481,7 +482,10 @@ def _format_progress(conn, root) -> str:
             f"`{task.id}` {_safe_text(task.title, limit=100)} ({task.status})"
             for task in next_tasks[:_MAX_NEXT_TASKS]
         )
-        lines.append(f"Next: {next_text}.")
+        next_label = (
+            f"Next (partial; first {len(tasks)} tasks only)" if truncated else "Next"
+        )
+        lines.append(f"{next_label}: {next_text}.")
 
     receipt = None
     identifiers: list[str] = []

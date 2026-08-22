@@ -322,6 +322,56 @@ def test_mixed_progress_and_action_clause_falls_through_to_specialist_routing(ka
     assert result.reason == "irrelevant"
 
 
+def test_mixed_progress_and_direct_delegate_falls_through_to_specialist_routing(
+    kanban_home,
+):
+    from gateway.progress_queries import resolve_progress_query
+
+    result = resolve_progress_query(
+        "How did the burndown go? Delegate the remaining failures.",
+        source=_source(),
+        board=BOARD,
+    )
+
+    assert result.handled is False
+    assert result.reason == "irrelevant"
+
+
+def test_mixed_progress_and_please_resolve_falls_through_to_specialist_routing(
+    kanban_home,
+):
+    from gateway.progress_queries import resolve_progress_query
+
+    result = resolve_progress_query(
+        "How did the burndown go? Please resolve the remaining failures.",
+        source=_source(),
+        board=BOARD,
+    )
+
+    assert result.handled is False
+    assert result.reason == "irrelevant"
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "How did the burndown go? I'd like you to remediate the remaining failures.",
+        "How did the burndown go? Could you address the remaining failures?",
+        "How did the burndown go, and please delegate the remaining failures?",
+        "How did the burndown go; resolve the remaining failures.",
+    ],
+)
+def test_mixed_progress_and_engineering_imperative_falls_through_to_specialist_routing(
+    kanban_home, request_text
+):
+    from gateway.progress_queries import resolve_progress_query
+
+    result = resolve_progress_query(request_text, source=_source(), board=BOARD)
+
+    assert result.handled is False
+    assert result.reason == "irrelevant"
+
+
 def test_indirect_mixed_action_falls_through_to_specialist_routing(kanban_home):
     from gateway.progress_queries import resolve_progress_query
 
@@ -358,6 +408,20 @@ def test_patch_completion_question_remains_a_progress_query(kanban_home):
     from gateway.progress_queries import is_progress_query
 
     assert is_progress_query("Is the patch complete?") is True
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "What remains to address?",
+        "How is the delegate migration progressing?",
+        "Is the remediation complete?",
+    ],
+)
+def test_question_shaped_engineering_status_remains_a_progress_query(request_text):
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query(request_text) is True
 
 
 def test_progress_output_is_bounded_and_redacts_secret_and_path_content(kanban_home):
@@ -419,6 +483,35 @@ def test_progress_redacts_complete_multiline_secret_values_but_keeps_other_prose
     assert "database-sentinel" not in result.response
     assert "unquoted multiword tail" not in result.response
     assert "Unrelated acceptance evidence remains visible." in result.response
+
+
+def test_progress_redacts_inline_multiword_secret_values_and_preserves_prefix_prose(
+    kanban_home,
+):
+    from gateway.progress_queries import resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+        _run(
+            conn,
+            root,
+            status="done",
+            outcome="completed",
+            summary=(
+                "Worker note: Authorization: Bearer header-sentinel trailing-secret\n"
+                "Deployment note: DATABASE_PASSWORD=database sentinel trailing secret"
+            ),
+        )
+
+    result = resolve_progress_query("How did the burndown go?", source=_source(), board=BOARD)
+
+    assert result.handled is True
+    assert "Worker note:" in result.response
+    assert "Deployment note:" in result.response
+    assert "header-sentinel" not in result.response
+    assert "trailing-secret" not in result.response
+    assert "database sentinel trailing secret" not in result.response
 
 
 def test_progress_reads_existing_board_without_using_mutating_connection(kanban_home, monkeypatch):
@@ -615,6 +708,26 @@ def test_progress_discloses_scope_when_graph_exceeds_task_limit(kanban_home):
     assert "Latest receipt" not in result.response
     assert "Newest note within first 24 tasks" in result.response
     assert "Latest note" not in result.response
+
+
+def test_truncated_progress_labels_next_list_as_partial(kanban_home):
+    from gateway.progress_queries import resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+        _task(conn, "Ready child", parents=[root], status="ready")
+        for index in range(23):
+            _task(conn, f"Completed child {index}", parents=[root], status="done")
+
+    result = resolve_progress_query(
+        "How did the burndown go?", source=_source(), board=BOARD
+    )
+
+    assert result.handled is True
+    assert "Next (partial; first 24 tasks only):" in result.response
+    assert "Ready child" in result.response
+    assert " Next:" not in result.response
 
 
 def test_missing_board_is_unavailable_without_creating_files(kanban_home):
