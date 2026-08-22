@@ -501,12 +501,20 @@ def test_strict_progress_grammar_rejects_any_appended_action_clause(action_claus
     assert is_progress_query(f"How did the burndown go? Please {action_clause}.") is False
 
 
-def test_status_template_parser_defers_unknown_topic_terms_to_graph_authority():
-    from gateway.progress_queries import is_progress_query
+def test_raw_topic_action_tail_cannot_collapse_to_a_graph_match(kanban_home):
+    from gateway.progress_queries import is_progress_query, resolve_progress_query
 
-    assert is_progress_query(
-        "Give me an update on the burndown and frobnicate the remaining failures"
-    ) is True
+    request = "Give me an update on the nebula burndown and do the work"
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Nebula Burndown", status="done")
+        _sub(conn, root)
+
+    assert is_progress_query(request) is False
+    result = resolve_progress_query(request, source=_source(), board=BOARD)
+
+    assert result.handled is False
+    assert result.reason == "irrelevant"
+    assert result.response == ""
 
 
 @pytest.mark.parametrize(
@@ -516,18 +524,40 @@ def test_status_template_parser_defers_unknown_topic_terms_to_graph_authority():
         "Give me an update on the burndown while we continue the remaining work",
         "Give me an update on the burndown to resolve the remaining failures",
         "Give me an update on the burndown then proceed with the patches",
-        "Give me an update on the burndown please continue",
         "Give me an update on the burndown so we can finish",
+        "Give me an update on the burndown I'd like you to fix",
+        "What remains to address?",
+    ],
+)
+def test_status_shaped_structural_topic_tails_are_not_progress_queries(
+    kanban_home, request_text
+):
+    from gateway.progress_queries import is_progress_query, resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+
+    assert is_progress_query(request_text) is False
+    result = resolve_progress_query(request_text, source=_source(), board=BOARD)
+
+    assert result.handled is False
+    assert result.reason == "irrelevant"
+    assert result.response == ""
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "Give me an update on the burndown please continue",
         "Give me an update on the burndown after you review the failures",
         "Give me an update on the burndown before we continue",
         "Give me an update on the burndown until I fix the failures",
         "Give me an update on the burndown also continue",
-        "Give me an update on the burndown I'd like you to fix",
         "Give me an update on the burndown you should fix next",
-        "What remains to address?",
     ],
 )
-def test_status_shaped_structural_topic_tails_fall_through_without_graph_authority(
+def test_other_unbound_topic_tails_still_defer_to_graph_authority(
     kanban_home, request_text
 ):
     from gateway.progress_queries import is_progress_query, resolve_progress_query
@@ -680,6 +710,69 @@ def test_progress_forces_authoritative_redaction_then_applies_local_egress_defen
     for probe in probes.values():
         assert probe not in result.response
     assert "Acceptance evidence remains visible." in result.response
+
+
+def test_local_egress_defense_redacts_standalone_github_token(monkeypatch):
+    import agent.redact as authoritative_redaction
+    from gateway.progress_queries import _safe_text
+
+    token = "ghp_abcdefghijk123456789"
+    monkeypatch.setattr(authoritative_redaction, "redact_sensitive_text", lambda text, **_: text)
+
+    result = _safe_text(f"GitHub receipt {token} completed.")
+
+    assert token not in result
+    assert "completed." in result
+
+
+def test_local_egress_defense_redacts_private_key_material(monkeypatch):
+    import agent.redact as authoritative_redaction
+    from gateway.progress_queries import _safe_text
+
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "cHJpdmF0ZS1rZXktbWF0ZXJpYWw=\n"
+        "-----END PRIVATE KEY-----"
+    )
+    monkeypatch.setattr(authoritative_redaction, "redact_sensitive_text", lambda text, **_: text)
+
+    result = _safe_text(f"Receipt:\n{private_key}\nValidation complete.")
+
+    assert "cHJpdmF0ZS1rZXktbWF0ZXJpYWw" not in result
+    assert "BEGIN PRIVATE KEY" not in result
+    assert "Validation complete." in result
+
+
+def test_structured_branch_rejects_redacted_or_locally_secret_shaped_values(monkeypatch):
+    import agent.redact as authoritative_redaction
+    from gateway.progress_queries import _safe_branch
+
+    token = "ghp_abcdefghijk123456789"
+    assert _safe_branch(f"codex/{token}") is None
+
+    monkeypatch.setattr(
+        authoritative_redaction,
+        "redact_sensitive_text",
+        lambda text, **_: text.replace("safe-branch", "[redacted]"),
+    )
+    assert _safe_branch("codex/safe-branch") is None
+
+    monkeypatch.setattr(authoritative_redaction, "redact_sensitive_text", lambda text, **_: text)
+    assert _safe_branch(token) is None
+
+
+def test_redactor_error_fails_closed_for_text_and_structured_identifiers(monkeypatch):
+    import agent.redact as authoritative_redaction
+    from gateway.progress_queries import _safe_branch, _safe_commit, _safe_text
+
+    def raise_redactor_error(*args, **kwargs):
+        raise RuntimeError("redactor unavailable")
+
+    monkeypatch.setattr(authoritative_redaction, "redact_sensitive_text", raise_redactor_error)
+
+    assert _safe_text("ordinary receipt") == "[redacted]"
+    assert _safe_branch("codex/safe-branch") is None
+    assert _safe_commit("deadbeef") is None
 
 
 def test_progress_redacts_complete_multiline_secret_values_but_keeps_other_prose(kanban_home):

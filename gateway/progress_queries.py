@@ -48,6 +48,11 @@ _BARE_BEARER_RE = re.compile(r"(?i)\bbearer(?:\s+[^\s,;]+)?")
 _URI_USERINFO_RE = re.compile(
     r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"
 )
+_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{8,}\b")
+_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----",
+    re.IGNORECASE,
+)
 _PATH_RE = re.compile(
     r"(?:(?:[A-Za-z]:)?[\\/](?:Users|home|private|tmp|var|etc|root|opt)[^\s,;]*)"
 )
@@ -63,6 +68,7 @@ _STOP_WORDS = frozenset(
 )
 _TOPIC_WORD = r"[a-z0-9][a-z0-9_'./:-]*"
 _TOPIC = rf"{_TOPIC_WORD}(?:\s+{_TOPIC_WORD})*"
+_STRUCTURAL_TOPIC_TAIL_RE = re.compile(r"(?:^|\s)(?:and|while|then|so|to)(?:\s|$)")
 _READ_ONLY_PROGRESS_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -127,7 +133,10 @@ def _parse_progress_query(request: object) -> Optional[_ParsedProgressQuery]:
     for pattern in _READ_ONLY_PROGRESS_PATTERNS:
         match = pattern.fullmatch(normalized)
         if match:
-            return _ParsedProgressQuery(normalized, match.group("topic"))
+            topic = match.group("topic")
+            if _STRUCTURAL_TOPIC_TAIL_RE.search(topic):
+                return None
+            return _ParsedProgressQuery(normalized, topic)
     return None
 
 
@@ -141,15 +150,17 @@ def _safe_text(value: object, *, limit: int = _MAX_RECEIPT_CHARS) -> str:
     try:
         from agent.redact import redact_sensitive_text
 
-        raw = redact_sensitive_text(
+        canonical = redact_sensitive_text(
             raw,
             force=True,
             redact_url_credentials=True,
         )
     except Exception:
-        # The local pass below remains mandatory even when the shared
-        # redactor cannot be imported or executed at this gateway edge.
-        pass
+        return "[redacted]"
+    if not isinstance(canonical, str):
+        return "[redacted]"
+    raw = _GITHUB_TOKEN_RE.sub("[redacted]", canonical)
+    raw = _PRIVATE_KEY_BLOCK_RE.sub("[redacted]", raw)
     redacted_lines = []
     for line in raw.splitlines() or [raw]:
         line = _SECRET_LINE_RE.sub(lambda match: match.group(1) + "[redacted]", line)
@@ -165,13 +176,38 @@ def _safe_text(value: object, *, limit: int = _MAX_RECEIPT_CHARS) -> str:
     return text[:limit].rstrip()
 
 
-def _safe_commit(value: object) -> Optional[str]:
+def _safe_structured_identifier(value: object) -> Optional[str]:
     candidate = str(value or "").strip()
+    if (
+        not candidate
+        or _GITHUB_TOKEN_RE.search(candidate)
+        or _PRIVATE_KEY_BLOCK_RE.search(candidate)
+    ):
+        return None
+    try:
+        from agent.redact import redact_sensitive_text
+
+        canonical = redact_sensitive_text(
+            candidate,
+            force=True,
+            redact_url_credentials=True,
+        )
+    except Exception:
+        return None
+    return candidate if canonical == candidate else None
+
+
+def _safe_commit(value: object) -> Optional[str]:
+    candidate = _safe_structured_identifier(value)
+    if candidate is None:
+        return None
     return candidate if _COMMIT_RE.fullmatch(candidate) else None
 
 
 def _safe_branch(value: object) -> Optional[str]:
-    candidate = str(value or "").strip()
+    candidate = _safe_structured_identifier(value)
+    if candidate is None:
+        return None
     if not _BRANCH_RE.fullmatch(candidate) or ".." in candidate or candidate.startswith("/"):
         return None
     return candidate
