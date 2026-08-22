@@ -465,6 +465,46 @@ def test_strict_progress_grammar_rejects_embedded_unknown_imperative():
 @pytest.mark.parametrize(
     "request_text",
     [
+        "Give me an update on the burndown while you fix the remaining failures",
+        "Give me an update on the burndown while we continue the remaining work",
+        "Give me an update on the burndown to resolve the remaining failures",
+        "Give me an update on the burndown then proceed with the patches",
+        "Give me an update on the burndown please continue",
+        "Give me an update on the burndown so we can finish",
+        "Give me an update on the burndown after you review the failures",
+        "Give me an update on the burndown before we continue",
+        "Give me an update on the burndown until I fix the failures",
+        "Give me an update on the burndown also continue",
+        "Give me an update on the burndown I'd like you to fix",
+        "Give me an update on the burndown you should fix next",
+        "What remains to address?",
+    ],
+)
+def test_strict_progress_grammar_rejects_structural_topic_tails(request_text):
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query(request_text) is False
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "Give me an update on the TradingBot Phase 12 burndown",
+        "How did TradingBot Phase 12 go?",
+        "Status of TradingBot PATCH-67-7?",
+        "Progress on TradingBot card t_ab12cd?",
+        "Could you update me on the TradingBot adaptive-admission card t_ab12cd status?",
+    ],
+)
+def test_strict_progress_grammar_accepts_noun_like_tradingbot_topics(request_text):
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query(request_text) is True
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
         "How did the burndown go",
         "How did the burndown go and what else do I need to do?",
         "Could you update me about the burndown progress?",
@@ -512,7 +552,6 @@ def test_update_or_fix_code_requests_remain_actionable(request_text):
 @pytest.mark.parametrize(
     "request_text",
     [
-        "What remains to address?",
         "Is the remediation complete?",
     ],
 )

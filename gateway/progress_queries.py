@@ -55,7 +55,27 @@ _STOP_WORDS = frozenset(
         "what", "when", "where", "with", "work", "would", "your",
     }
 )
-_TOPIC_WORD = r"(?!(?:and|then|please)\b)[a-z0-9][a-z0-9_'./:-]*"
+_TOPIC_CLAUSE_WORDS = frozenset(
+    "after also and before but if once or please since so than then though to until "
+    "when whenever where whether while".split()
+)
+_TOPIC_PRONOUNS = frozenset(
+    "he her hers him his i it its me mine my our ours she their theirs them they us we "
+    "who whom whose you your yours".split()
+)
+_TOPIC_MODALS_AND_AUXILIARIES = frozenset(
+    "am are be been being can could did do does had has have is may might must shall "
+    "should was were will would".split()
+)
+# Topic admission is structural: reject clause syntax and speaker/actor language
+# rather than trying to enumerate every action verb a user might append.
+_TOPIC_FORBIDDEN_WORDS = "|".join(
+    re.escape(word)
+    for word in sorted(
+        _TOPIC_CLAUSE_WORDS | _TOPIC_PRONOUNS | _TOPIC_MODALS_AND_AUXILIARIES
+    )
+)
+_TOPIC_WORD = rf"(?!(?:{_TOPIC_FORBIDDEN_WORDS})\b)[a-z0-9][a-z0-9_'./:-]*"
 _TOPIC = rf"{_TOPIC_WORD}(?:\s+{_TOPIC_WORD})*"
 _READ_ONLY_PROGRESS_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
