@@ -33,7 +33,10 @@ _SNAPSHOT_ATTEMPTS = 3
 _BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TASK_ID_RE = re.compile(r"\bt_[a-z0-9]+\b", re.IGNORECASE)
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
-_SECRET_KEY_PATTERN = r"[a-z0-9_-]*(?:token|secret|password|authorization|api[_-]?key)"
+_SECRET_KEY_PATTERN = (
+    r"[a-z0-9_-]*(?:(?:access|private)[_-]?key|secret|token|password|credential|"
+    r"api[_-]?key|database[_-]?url|connection[_-]?string|authorization)[a-z0-9_-]*"
+)
 _SECRET_LINE_RE = re.compile(
     rf"(?i)^(\s*(?:{_SECRET_KEY_PATTERN})\s*(?:=|:)\s*).*$"
 )
@@ -52,43 +55,24 @@ _STOP_WORDS = frozenset(
         "what", "when", "where", "with", "work", "would", "your",
     }
 )
-_QUESTION_MARKERS = (
-    "how did ",
-    "how is ",
-    "how's ",
-    "what remains",
-    "what is left",
-    "what's left",
-    "where are we",
-    "give me an update",
-    "status of ",
-    "progress on ",
+_TOPIC_WORD = r"(?!(?:and|then|please)\b)[a-z0-9][a-z0-9_'./:-]*"
+_TOPIC = rf"{_TOPIC_WORD}(?:\s+{_TOPIC_WORD})*"
+_READ_ONLY_PROGRESS_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        rf"how did {_TOPIC} go(?: and what else do we need to do)?\?",
+        rf"(?:can|could|would) you update me on {_TOPIC} (?:progress|status)\?",
+        rf"give me an update on {_TOPIC}",
+        rf"what remains {_TOPIC}\?",
+        rf"what's left {_TOPIC}\?",
+        rf"where are we {_TOPIC}\?",
+        rf"status of {_TOPIC}\?",
+        rf"progress on {_TOPIC}\?",
+        rf"is {_TOPIC} complete\?",
+    )
 )
-_PROGRESS_TERMS = ("burndown", "status", "progress", "remaining", "left", "next", "complete")
-_ACTION_VERBS = (
-    r"start|fix|patch|audit|implement|create|run|investigate|change|finish|complete|"
-    r"delegate|resolve|remediate|address|repair|review|validate|verify|test|debug|deploy|update"
-)
-_ACTION_REQUEST_RE = re.compile(
-    rf"(?:"
-    rf"^(?:(?:can|could|would)\s+you\s+|please\s+)?(?:{_ACTION_VERBS})\b"
-    rf"|\b(?:and|then|also)\s+(?:(?:then|please)\s+)?(?:{_ACTION_VERBS})\b"
-    rf"|\b(?:can|could|would|will|should)\s+(?:you|we)\s+(?:{_ACTION_VERBS})\b"
-    rf"|[;,.!?]\s*(?:please\s+)?(?:{_ACTION_VERBS})\b"
-    rf"|\b(?:ask|tell|have)\s+(?:the\s+)?(?:bot|agent|hermes|it|them)\s+"
-    rf"(?:to\s+)?(?:{_ACTION_VERBS})\b"
-    rf"|\b(?:ask|tell|have|get|let)\s+(?:the\s+)?(?:[a-z0-9_-]+\s+){{0,4}}"
-    rf"(?:to\s+)?(?:{_ACTION_VERBS})\b"
-    rf"|\b(?:i\s+)?(?:want|need)\s+(?:you|it|them|the\s+bot|hermes)\s+to\s+"
-    rf"(?:{_ACTION_VERBS})\b"
-    rf"|\b(?:(?:i|we)\s+would|(?:i|we)['’]d)\s+like\s+"
-    rf"(?:(?:you|it|them|the\s+bot|hermes)\s+)?to\s+(?:{_ACTION_VERBS})\b"
-    rf")",
-    re.IGNORECASE,
-)
-_READ_ONLY_UPDATE_RE = re.compile(r"\bupdate\s+me\s+(?:on|about)\b", re.IGNORECASE)
 _GENERIC_PROGRESS_RE = re.compile(r"^how did it go\?$", re.IGNORECASE)
-_NONTERMINAL_STATUSES = frozenset({"triage", "todo", "ready", "review"})
+_NONTERMINAL_STATUSES = frozenset({"triage", "scheduled", "todo", "ready", "review"})
 _FAILED_STATUSES = frozenset({"failed", "timed_out", "crashed"})
 
 
@@ -116,20 +100,15 @@ class _SnapshotChangedError(OSError):
 
 
 def is_progress_query(request: object) -> bool:
-    """Recognize only ordinary, bounded project-status questions."""
+    """Recognize only complete, read-only project-status utterances."""
     if not isinstance(request, str):
         return False
-    normalized = " ".join(request.casefold().split())
+    normalized = " ".join(request.casefold().replace("’", "'").split())
     if not normalized or len(normalized) > 4_000:
         return False
-    action_candidate = _READ_ONLY_UPDATE_RE.sub("status on", normalized)
-    if _ACTION_REQUEST_RE.search(action_candidate):
-        return False
-    has_marker = any(marker in normalized for marker in _QUESTION_MARKERS) or bool(
-        _READ_ONLY_UPDATE_RE.search(normalized)
+    return bool(_GENERIC_PROGRESS_RE.fullmatch(normalized)) or any(
+        pattern.fullmatch(normalized) for pattern in _READ_ONLY_PROGRESS_PATTERNS
     )
-    has_status_term = any(term in normalized for term in _PROGRESS_TERMS)
-    return has_marker or ("?" in normalized and has_status_term)
 
 
 def _safe_text(value: object, *, limit: int = _MAX_RECEIPT_CHARS) -> str:
@@ -464,12 +443,11 @@ def _format_progress(conn, root) -> str:
     graph_ids, truncated = _graph_task_ids(conn, root.id)
     tasks = [kb.get_task(conn, task_id) for task_id in graph_ids]
     tasks = [task for task in tasks if task is not None]
-    children = [task for task in tasks if task.id != root.id]
     completed = sum(task.status == "done" for task in tasks)
     failed = sum(task.status in _FAILED_STATUSES for task in tasks)
     blocked = sum(task.status == "blocked" for task in tasks)
     running = sum(task.status == "running" for task in tasks)
-    next_tasks = [task for task in children if task.status in _NONTERMINAL_STATUSES]
+    next_tasks = [task for task in tasks if task.status in _NONTERMINAL_STATUSES]
     next_tasks.sort(key=lambda task: (task.priority * -1, task.created_at, task.id))
 
     lines = [

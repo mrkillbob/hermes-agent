@@ -413,6 +413,77 @@ def test_patch_completion_question_remains_a_progress_query(kanban_home):
 @pytest.mark.parametrize(
     "request_text",
     [
+        "How did the burndown go?",
+        "How did the burndown go and what else do we need to do?",
+        "Could you update me on the burndown progress?",
+        "Can you update me on the burndown status?",
+        "Would you update me on the exception burndown progress?",
+        "Give me an update on the burndown",
+        "What remains on the exception burndown?",
+        "What's left on the exception burndown?",
+        "Where are we on the exception burndown?",
+        "Status of the exception burndown?",
+        "Progress on the exception burndown?",
+        "Is the patch complete?",
+        "How did it go?",
+    ],
+)
+def test_strict_progress_grammar_accepts_complete_read_only_questions(request_text):
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query(request_text) is True
+
+
+@pytest.mark.parametrize(
+    "action_clause",
+    [
+        "fix the remaining failures",
+        "delegate the remaining failures",
+        "resolve the remaining failures",
+        "continue with the remaining failures",
+        "resume the remaining work",
+        "handle the remaining failures",
+        "proceed with the patches",
+        "keep working on the failures",
+        "frobnicate the remaining failures",
+    ],
+)
+def test_strict_progress_grammar_rejects_any_appended_action_clause(action_clause):
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query(f"How did the burndown go? Please {action_clause}.") is False
+
+
+def test_strict_progress_grammar_rejects_embedded_unknown_imperative():
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query(
+        "Give me an update on the burndown and frobnicate the remaining failures"
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "How did the burndown go",
+        "How did the burndown go and what else do I need to do?",
+        "Could you update me about the burndown progress?",
+        "Can you update me on the burndown?",
+        "Give me an update about the burndown",
+        "What is left on the exception burndown?",
+        "How is the delegate migration progressing?",
+        "Is the patch complete",
+    ],
+)
+def test_strict_progress_grammar_rejects_unlisted_near_misses(request_text):
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query(request_text) is False
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
         "Could you update me on the burndown progress?",
         "Give me an update on the burndown",
     ],
@@ -442,7 +513,6 @@ def test_update_or_fix_code_requests_remain_actionable(request_text):
     "request_text",
     [
         "What remains to address?",
-        "How is the delegate migration progressing?",
         "Is the remediation complete?",
     ],
 )
@@ -540,6 +610,42 @@ def test_progress_redacts_inline_multiword_secret_values_and_preserves_prefix_pr
     assert "header-sentinel" not in result.response
     assert "trailing-secret" not in result.response
     assert "database sentinel trailing secret" not in result.response
+
+
+def test_progress_redacts_aws_private_key_and_database_url_credentials(kanban_home):
+    from gateway.progress_queries import resolve_progress_query
+
+    secret_values = (
+        "aws-secret-sentinel trailing words",
+        "aws-access-sentinel",
+        "private-key-sentinel trailing words",
+        "postgres://operator:db-password-sentinel@localhost/trading",
+        "connection-sentinel trailing words",
+    )
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+        _run(
+            conn,
+            root,
+            status="done",
+            outcome="completed",
+            summary=(
+                "AWS_SECRET_ACCESS_KEY=aws-secret-sentinel trailing words\n"
+                "Worker note: AWS_ACCESS_KEY_ID: aws-access-sentinel\n"
+                "Deploy note: PRIVATE_KEY=private-key-sentinel trailing words\n"
+                "DATABASE_URL=postgres://operator:db-password-sentinel@localhost/trading\n"
+                "Worker note: CONNECTION_STRING=connection-sentinel trailing words\n"
+                "Unrelated acceptance evidence remains visible."
+            ),
+        )
+
+    result = resolve_progress_query("How did the burndown go?", source=_source(), board=BOARD)
+
+    assert result.handled is True
+    for secret in secret_values:
+        assert secret not in result.response
+    assert "Unrelated acceptance evidence remains visible." in result.response
 
 
 def test_progress_reads_existing_board_without_using_mutating_connection(kanban_home, monkeypatch):
@@ -693,6 +799,23 @@ def test_progress_counts_root_and_separates_blocked_from_failed(kanban_home):
     )
 
     assert "1 completed, 1 failed, 1 blocked, 1 running" in result.response
+
+
+@pytest.mark.parametrize("status", ["triage", "scheduled"])
+def test_progress_includes_root_only_remaining_work_in_next(kanban_home, status):
+    from gateway.progress_queries import resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status=status)
+        _sub(conn, root)
+
+    result = resolve_progress_query(
+        "How did the burndown go?", source=_source(), board=BOARD
+    )
+
+    assert result.handled is True
+    assert f"`{root}` Exception Burndown ({status})" in result.response
+    assert "Next:" in result.response
 
 
 def test_progress_uses_newest_receipt_across_entire_graph(kanban_home):
