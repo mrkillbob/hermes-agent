@@ -738,11 +738,17 @@ def is_project_root_trusted(root: Path) -> bool:
             return False
         resolved_workspace = Path(workspace).resolve()
         resolved_workspaces_root = Path(workspaces_root).resolve()
-        return (
+        board_owned_workspace = (
             resolved_root == resolved_workspace
             and resolved_root.parent == resolved_workspaces_root
             and resolved_workspaces_root.parent in trusted_roots
         )
+        migrated_trusted_worktree = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent.name == ".worktrees"
+            and resolved_root.parent.parent in trusted_roots
+        )
+        return board_owned_workspace or migrated_trusted_worktree
     except OSError:
         return False
 
