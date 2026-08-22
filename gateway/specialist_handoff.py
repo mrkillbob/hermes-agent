@@ -10,6 +10,14 @@ from gateway.specialist_routing import SpecialistRouteDecision
 
 
 _ORCHESTRATION_GOAL_MAX_TURNS = 12
+_TRADINGBOT_NAVIGATION_SKILL = "tradingbot-worktree-navigation"
+
+
+def _required_skills(board: Optional[str]) -> Optional[list[str]]:
+    """Pin the project navigation contract on TradingBot task graphs."""
+    if board == "tradingbot-burndown":
+        return [_TRADINGBOT_NAVIGATION_SKILL]
+    return None
 
 
 @dataclass(frozen=True)
@@ -98,6 +106,7 @@ def create_specialist_handoff(*, decision: SpecialistRouteDecision, source: Hand
                     triage=True,
                     goal_mode=True,
                     goal_max_turns=_ORCHESTRATION_GOAL_MAX_TURNS,
+                    skills=_required_skills(board),
                 )
                 kb.add_notify_sub(
                     conn, task_id=task_id, platform=source.platform, chat_id=source.chat_id,

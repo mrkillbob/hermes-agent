@@ -7370,7 +7370,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path, goal_mode, goal_max_turns "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, goal_mode, goal_max_turns, skills "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -7391,6 +7391,7 @@ def decompose_triage_task(
         # coordinator receives premature worker exits instead of handoffs.
         root_goal_mode = 1 if root_row["goal_mode"] else 0
         root_goal_max_turns = root_row["goal_max_turns"]
+        root_skills = root_row["skills"]
 
         # Create children. Status is 'todo' regardless of parents — we
         # link them under the root AFTER creation so the dispatcher
@@ -7425,8 +7426,8 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by, goal_mode, goal_max_turns) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by, goal_mode, goal_max_turns, skills) "
+                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -7439,6 +7440,7 @@ def decompose_triage_task(
                     (author or "decomposer"),
                     root_goal_mode,
                     root_goal_max_turns,
+                    root_skills,
                 ),
             )
             _append_event(

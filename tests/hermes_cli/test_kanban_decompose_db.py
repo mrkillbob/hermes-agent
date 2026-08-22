@@ -117,4 +117,26 @@ def test_decompose_inherits_goal_lifecycle_to_children(kanban_home):
     assert [child.goal_max_turns for child in children] == [12, 12]
 
 
+def test_decompose_inherits_forced_skills_to_children(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="navigation-bound root",
+            triage=True,
+            skills=["tradingbot-worktree-navigation"],
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[{"title": "first slice", "assignee": "researcher"}],
+        )
+    assert child_ids is not None
+
+    with kb.connect() as conn:
+        child = kb.get_task(conn, child_ids[0])
+
+    assert child is not None
+    assert child.skills == ["tradingbot-worktree-navigation"]
+
 

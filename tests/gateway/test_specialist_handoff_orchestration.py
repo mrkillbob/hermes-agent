@@ -45,16 +45,18 @@ def test_specialist_handoff_creates_goal_mode_triage_root(kanban_home):
         decision=decision,
         source=source,
         request="Audit exception burndown and patch confirmed failures.",
+        board="tradingbot-burndown",
     )
 
     assert result.ok, result.reason
     assert result.task_id
-    with kb.connect() as conn:
+    with kb.connect(board="tradingbot-burndown") as conn:
         task = kb.get_task(conn, result.task_id)
     assert task is not None
     assert task.status == "triage"
     assert task.goal_mode is True
     assert task.goal_max_turns == 12
+    assert task.skills == ["tradingbot-worktree-navigation"]
 
 
 def test_router_accepts_task_orchestrator_for_broad_actionable_work():
