@@ -86,6 +86,7 @@ _ACTION_REQUEST_RE = re.compile(
     rf")",
     re.IGNORECASE,
 )
+_READ_ONLY_UPDATE_RE = re.compile(r"\bupdate\s+me\s+(?:on|about)\b", re.IGNORECASE)
 _GENERIC_PROGRESS_RE = re.compile(r"^how did it go\?$", re.IGNORECASE)
 _NONTERMINAL_STATUSES = frozenset({"triage", "todo", "ready", "review"})
 _FAILED_STATUSES = frozenset({"failed", "timed_out", "crashed"})
@@ -121,9 +122,12 @@ def is_progress_query(request: object) -> bool:
     normalized = " ".join(request.casefold().split())
     if not normalized or len(normalized) > 4_000:
         return False
-    if _ACTION_REQUEST_RE.search(normalized):
+    action_candidate = _READ_ONLY_UPDATE_RE.sub("status on", normalized)
+    if _ACTION_REQUEST_RE.search(action_candidate):
         return False
-    has_marker = any(marker in normalized for marker in _QUESTION_MARKERS)
+    has_marker = any(marker in normalized for marker in _QUESTION_MARKERS) or bool(
+        _READ_ONLY_UPDATE_RE.search(normalized)
+    )
     has_status_term = any(term in normalized for term in _PROGRESS_TERMS)
     return has_marker or ("?" in normalized and has_status_term)
 

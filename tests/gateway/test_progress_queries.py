@@ -413,6 +413,34 @@ def test_patch_completion_question_remains_a_progress_query(kanban_home):
 @pytest.mark.parametrize(
     "request_text",
     [
+        "Could you update me on the burndown progress?",
+        "Give me an update on the burndown",
+    ],
+)
+def test_status_update_phrasing_remains_a_read_only_progress_query(request_text):
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query(request_text) is True
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "Please update the burndown code.",
+        "Please update the burndown implementation.",
+        "How did it go? Please update the code.",
+        "How did it go? Please fix the code.",
+    ],
+)
+def test_update_or_fix_code_requests_remain_actionable(request_text):
+    from gateway.progress_queries import is_progress_query
+
+    assert is_progress_query(request_text) is False
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
         "What remains to address?",
         "How is the delegate migration progressing?",
         "Is the remediation complete?",
