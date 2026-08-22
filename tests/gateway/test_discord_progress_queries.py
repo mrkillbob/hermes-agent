@@ -76,12 +76,15 @@ def test_progress_pre_router_answers_before_model_specialist_classifier(adapter,
     )
 
 
-def test_unavailable_progress_lookup_falls_through_without_send_or_model(adapter, monkeypatch):
+@pytest.mark.parametrize("reason", ["unavailable", "no_match"])
+def test_unhandled_progress_lookup_falls_through_without_send_or_model(
+    adapter, monkeypatch, reason
+):
     from gateway.progress_queries import ProgressQueryResult
 
     monkeypatch.setattr(
         "gateway.progress_queries.resolve_progress_query",
-        lambda *args, **kwargs: ProgressQueryResult(False, "", "unavailable"),
+        lambda *args, **kwargs: ProgressQueryResult(False, "", reason),
     )
 
     handled = asyncio.run(adapter._maybe_answer_progress_event(_event()))

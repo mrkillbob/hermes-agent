@@ -44,7 +44,13 @@ _SECRET_RE = re.compile(
     rf"(?i)\b(?:{_SECRET_KEY_PATTERN})"
     r"\s*(?:=|:)\s*(?:bearer\s+)?[^\n]*"
 )
-_PATH_RE = re.compile(r"(?:(?:[A-Za-z]:)?[\\/](?:Users|home|private|tmp|var|etc)[^\s,;]*)")
+_BARE_BEARER_RE = re.compile(r"(?i)\bbearer(?:\s+[^\s,;]+)?")
+_URI_USERINFO_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"
+)
+_PATH_RE = re.compile(
+    r"(?:(?:[A-Za-z]:)?[\\/](?:Users|home|private|tmp|var|etc|root|opt)[^\s,;]*)"
+)
 _PROSE_COMMIT_RE = re.compile(r"\b[0-9a-f]{7,64}\b", re.IGNORECASE)
 _COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
@@ -55,45 +61,27 @@ _STOP_WORDS = frozenset(
         "what", "when", "where", "with", "work", "would", "your",
     }
 )
-_TOPIC_CLAUSE_WORDS = frozenset(
-    "after also and before but if once or please since so than then though to until "
-    "when whenever where whether while".split()
-)
-_TOPIC_PRONOUNS = frozenset(
-    "he her hers him his i it its me mine my our ours she their theirs them they us we "
-    "who whom whose you your yours".split()
-)
-_TOPIC_MODALS_AND_AUXILIARIES = frozenset(
-    "am are be been being can could did do does had has have is may might must shall "
-    "should was were will would".split()
-)
-# Topic admission is structural: reject clause syntax and speaker/actor language
-# rather than trying to enumerate every action verb a user might append.
-_TOPIC_FORBIDDEN_WORDS = "|".join(
-    re.escape(word)
-    for word in sorted(
-        _TOPIC_CLAUSE_WORDS | _TOPIC_PRONOUNS | _TOPIC_MODALS_AND_AUXILIARIES
-    )
-)
-_TOPIC_WORD = rf"(?!(?:{_TOPIC_FORBIDDEN_WORDS})\b)[a-z0-9][a-z0-9_'./:-]*"
+_TOPIC_WORD = r"[a-z0-9][a-z0-9_'./:-]*"
 _TOPIC = rf"{_TOPIC_WORD}(?:\s+{_TOPIC_WORD})*"
 _READ_ONLY_PROGRESS_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        rf"how did {_TOPIC} go(?: and what else do we need to do)?\?",
-        rf"(?:can|could|would) you update me on {_TOPIC} (?:progress|status)\?",
-        rf"give me an update on {_TOPIC}",
-        rf"what remains {_TOPIC}\?",
-        rf"what's left {_TOPIC}\?",
-        rf"where are we {_TOPIC}\?",
-        rf"status of {_TOPIC}\?",
-        rf"progress on {_TOPIC}\?",
-        rf"is {_TOPIC} complete\?",
+        rf"how did (?P<topic>{_TOPIC}) go(?: and what else do we need to do)?\?",
+        rf"(?:can|could|would) you update me on (?P<topic>{_TOPIC}) (?:progress|status)\?",
+        rf"give me an update on (?P<topic>{_TOPIC})",
+        rf"what remains (?P<topic>{_TOPIC})\?",
+        rf"what's left (?P<topic>{_TOPIC})\?",
+        rf"where are we (?P<topic>{_TOPIC})\?",
+        rf"status of (?P<topic>{_TOPIC})\?",
+        rf"progress on (?P<topic>{_TOPIC})\?",
+        rf"is (?P<topic>{_TOPIC}) complete\?",
     )
 )
 _GENERIC_PROGRESS_RE = re.compile(r"^how did it go\?$", re.IGNORECASE)
 _NONTERMINAL_STATUSES = frozenset({"triage", "scheduled", "todo", "ready", "review"})
-_FAILED_STATUSES = frozenset({"failed", "timed_out", "crashed"})
+_FAILED_RUN_STATES = frozenset(
+    {"spawn_failed", "gave_up", "failed", "timed_out", "crashed"}
+)
 
 
 @dataclass(frozen=True)
@@ -115,28 +103,60 @@ class ProgressQueryResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class _ParsedProgressQuery:
+    """A recognized status template and its untrusted topic text."""
+
+    normalized: str
+    topic: Optional[str]
+
+
 class _SnapshotChangedError(OSError):
     """The captured source identity or byte extent changed during copy."""
 
 
-def is_progress_query(request: object) -> bool:
-    """Recognize only complete, read-only project-status utterances."""
+def _parse_progress_query(request: object) -> Optional[_ParsedProgressQuery]:
+    """Parse a complete status template without deciding topic authority."""
     if not isinstance(request, str):
-        return False
+        return None
     normalized = " ".join(request.casefold().replace("’", "'").split())
     if not normalized or len(normalized) > 4_000:
-        return False
-    return bool(_GENERIC_PROGRESS_RE.fullmatch(normalized)) or any(
-        pattern.fullmatch(normalized) for pattern in _READ_ONLY_PROGRESS_PATTERNS
-    )
+        return None
+    if _GENERIC_PROGRESS_RE.fullmatch(normalized):
+        return _ParsedProgressQuery(normalized, None)
+    for pattern in _READ_ONLY_PROGRESS_PATTERNS:
+        match = pattern.fullmatch(normalized)
+        if match:
+            return _ParsedProgressQuery(normalized, match.group("topic"))
+    return None
+
+
+def is_progress_query(request: object) -> bool:
+    """Recognize complete project-status templates, independent of authority."""
+    return _parse_progress_query(request) is not None
 
 
 def _safe_text(value: object, *, limit: int = _MAX_RECEIPT_CHARS) -> str:
     raw = str(value or "").replace("\x00", " ")
+    try:
+        from agent.redact import redact_sensitive_text
+
+        raw = redact_sensitive_text(
+            raw,
+            force=True,
+            redact_url_credentials=True,
+        )
+    except Exception:
+        # The local pass below remains mandatory even when the shared
+        # redactor cannot be imported or executed at this gateway edge.
+        pass
     redacted_lines = []
     for line in raw.splitlines() or [raw]:
         line = _SECRET_LINE_RE.sub(lambda match: match.group(1) + "[redacted]", line)
-        redacted_lines.append(_SECRET_RE.sub("[redacted]", line))
+        line = _SECRET_RE.sub("[redacted]", line)
+        line = _BARE_BEARER_RE.sub("[redacted]", line)
+        line = _URI_USERINFO_RE.sub(r"\1[userinfo redacted]@", line)
+        redacted_lines.append(line)
     text = " ".join("\n".join(redacted_lines).split())
     text = _PATH_RE.sub("[path redacted]", text)
     # A hash mentioned in a free-form worker receipt is not provenance. Only
@@ -325,9 +345,10 @@ def _graph_task_ids(conn, root_id: str) -> tuple[list[str], bool]:
 
 
 def _query_terms(request: str) -> set[str]:
+    without_card_ids = _TASK_ID_RE.sub(" ", request.casefold())
     return {
-        word for word in _WORD_RE.findall(request.casefold())
-        if word not in _STOP_WORDS and not word.startswith("t_")
+        word for word in _WORD_RE.findall(without_card_ids)
+        if word not in _STOP_WORDS
     }
 
 
@@ -372,35 +393,40 @@ def _root_has_trusted_linkage(
 def _select_root(
     conn,
     root_ids: list[str],
-    request: str,
+    query: _ParsedProgressQuery,
     *,
     source: ProgressSource,
     subscription_rows: list[sqlite3.Row],
 ):
-    """Return one root, or a bounded ambiguity result.  Never guess ties."""
+    """Return one fully topic-bound root, or ambiguity. Never guess ties."""
     from hermes_cli import kanban_db as kb
 
-    explicit_ids = {match.casefold() for match in _TASK_ID_RE.findall(request)}
-    terms = _query_terms(request)
+    topic = query.topic or ""
+    explicit_ids = {match.casefold() for match in _TASK_ID_RE.findall(topic)}
+    terms = _query_terms(topic)
     ranked = []
     for root_id in root_ids:
         graph_ids, _truncated = _graph_task_ids(conn, root_id)
         tasks = [kb.get_task(conn, task_id) for task_id in graph_ids]
         tasks = [task for task in tasks if task is not None]
         graph_id_set = {task.id.casefold() for task in tasks}
-        if explicit_ids:
-            score = 100 if graph_id_set & explicit_ids else 0
-        else:
-            title_words = set().union(*(_query_terms(task.title) for task in tasks)) if tasks else set()
-            score = len(terms & title_words)
+        title_words = (
+            set().union(*(_query_terms(task.title) for task in tasks))
+            if tasks
+            else set()
+        )
+        ids_explained = explicit_ids <= graph_id_set
+        terms_explained = terms <= title_words
+        score = len(terms) + (100 * len(explicit_ids))
+        if not (score and ids_explained and terms_explained):
+            score = 0
         if score:
             root = kb.get_task(conn, root_id)
             if root is not None:
                 ranked.append((score, root.created_at, root))
 
     if not ranked:
-        normalized = " ".join(request.casefold().split())
-        if _GENERIC_PROGRESS_RE.fullmatch(normalized):
+        if query.topic is None:
             linked = [
                 kb.get_task(conn, root_id)
                 for root_id in root_ids
@@ -457,6 +483,24 @@ def _bounded(response: str) -> str:
     return response if len(response) <= MAX_PROGRESS_RESPONSE_CHARS else response[:MAX_PROGRESS_RESPONSE_CHARS].rstrip()
 
 
+def _failed_run_attempt_count(conn, tasks: Iterable[object]) -> int:
+    """Count failed execution attempts once per run row, including retries.
+
+    ``task_runs.outcome`` is the semantic authority when present; ``status``
+    is its legacy fallback. A row whose outcome and status both name failure
+    still contributes one attempt, while separate retry rows each contribute
+    their own attempt.
+    """
+    from hermes_cli import kanban_db as kb
+
+    failed = 0
+    for task in tasks:
+        for run in kb.list_runs(conn, task.id):
+            state = str(run.outcome or run.status or "").casefold()
+            failed += state in _FAILED_RUN_STATES
+    return failed
+
+
 def _format_progress(conn, root) -> str:
     from hermes_cli import kanban_db as kb
 
@@ -464,15 +508,17 @@ def _format_progress(conn, root) -> str:
     tasks = [kb.get_task(conn, task_id) for task_id in graph_ids]
     tasks = [task for task in tasks if task is not None]
     completed = sum(task.status == "done" for task in tasks)
-    failed = sum(task.status in _FAILED_STATUSES for task in tasks)
+    failed_attempts = _failed_run_attempt_count(conn, tasks)
     blocked = sum(task.status == "blocked" for task in tasks)
     running = sum(task.status == "running" for task in tasks)
     next_tasks = [task for task in tasks if task.status in _NONTERMINAL_STATUSES]
     next_tasks.sort(key=lambda task: (task.priority * -1, task.created_at, task.id))
 
+    failure_label = "failed attempt" if failed_attempts == 1 else "failed attempts"
     lines = [
         f"Progress for `{root.id}` — {_safe_text(root.title, limit=160)}: "
-        f"{completed} completed, {failed} failed, {blocked} blocked, {running} running."
+        f"{completed} completed, {failed_attempts} {failure_label}, "
+        f"{blocked} blocked, {running} running."
     ]
     if truncated:
         lines.append(
@@ -539,7 +585,8 @@ def resolve_progress_query(
     Only a valid configured board and exact trusted source subscription enter the
     lookup path. Database failures deliberately preserve ordinary chat.
     """
-    if not is_progress_query(request):
+    parsed = _parse_progress_query(request)
+    if parsed is None:
         return ProgressQueryResult(False, "", "irrelevant")
     if (
         not isinstance(board, str)
@@ -554,24 +601,16 @@ def resolve_progress_query(
             subscribed_ids = [str(row["task_id"]) for row in subscription_rows]
             root_ids = _roots_for_tasks(conn, subscribed_ids)
             if not root_ids:
-                return ProgressQueryResult(
-                    True,
-                    "I couldn't find a subscribed project in this Discord conversation for that progress question.",
-                    "no_match",
-                )
+                return ProgressQueryResult(False, "", "no_match")
             selection, value = _select_root(
                 conn,
                 root_ids,
-                str(request),
+                parsed,
                 source=source,
                 subscription_rows=subscription_rows,
             )
             if selection == "no_match":
-                return ProgressQueryResult(
-                    True,
-                    "I couldn't find a subscribed project matching that progress question in this Discord conversation.",
-                    "no_match",
-                )
+                return ProgressQueryResult(False, "", "no_match")
             if selection == "ambiguous":
                 choices = "; ".join(
                     f"`{task.id}` {_safe_text(task.title, limit=100)}"

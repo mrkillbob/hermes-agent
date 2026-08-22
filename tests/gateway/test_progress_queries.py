@@ -119,7 +119,7 @@ def test_burndown_question_summarizes_graph_receipts_and_remaining_work(kanban_h
     with kb.connect(board=BOARD) as conn:
         root = _task(conn, "Exception Burndown")
         done = _task(conn, "Narrow credential exception", parents=[root], status="done")
-        failed = _task(conn, "Repair provider exception", parents=[root], status="failed")
+        failed = _task(conn, "Repair provider exception", parents=[root], status="blocked")
         running = _task(conn, "Validate exception evidence", parents=[root], status="running")
         next_task = _task(conn, "Publish acceptance receipt", parents=[root], status="ready")
         _sub(conn, root)
@@ -145,7 +145,8 @@ def test_burndown_question_summarizes_graph_receipts_and_remaining_work(kanban_h
     assert result.reason == "resolved"
     assert "Exception Burndown" in result.response
     assert "1 completed" in result.response
-    assert "1 failed" in result.response
+    assert "1 failed attempt" in result.response
+    assert "1 blocked" in result.response
     assert "1 running" in result.response
     assert "Publish acceptance receipt" in result.response
     assert "a1b2c3d4" in result.response
@@ -164,9 +165,9 @@ def test_progress_query_isolated_to_trusted_source_subscription(kanban_home):
         "How did the burndown go?", source=_source(chat_id="trading-bot"), board=BOARD
     )
 
-    assert result.handled is True
+    assert result.handled is False
     assert result.reason == "no_match"
-    assert "couldn't find a subscribed project" in result.response
+    assert result.response == ""
     assert "Exception Burndown" not in result.response
 
 
@@ -181,8 +182,9 @@ def test_progress_query_uses_explicit_board_not_current_or_other_board(kanban_ho
         "How did the burndown go?", source=_source(), board=BOARD
     )
 
-    assert result.handled is True
+    assert result.handled is False
     assert result.reason == "no_match"
+    assert result.response == ""
     assert "Exception Burndown" not in result.response
 
 
@@ -216,8 +218,9 @@ def test_single_subscribed_root_does_not_override_zero_topic_score(kanban_home):
         "How did the release go?", source=_source(), board=BOARD
     )
 
-    assert result.handled is True
+    assert result.handled is False
     assert result.reason == "no_match"
+    assert result.response == ""
     assert "Exception Burndown" not in result.response
 
 
@@ -230,8 +233,52 @@ def test_generic_how_did_it_go_requires_trusted_linkage(kanban_home):
 
     result = resolve_progress_query("How did it go?", source=_source(), board=BOARD)
 
-    assert result.handled is True
+    assert result.handled is False
     assert result.reason == "no_match"
+    assert result.response == ""
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "Give me an update on the burndown fix remaining failures",
+        "Give me an update on the burndown frobnicate remaining failures",
+        "Status of TradingBot deploy production?",
+        "Progress on TradingBot delete credentials?",
+    ],
+)
+def test_status_topic_requires_every_term_to_be_bound_to_the_subscribed_graph(
+    kanban_home, request_text
+):
+    from gateway.progress_queries import is_progress_query, resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "TradingBot Burndown", status="done")
+        _task(conn, "Repair remaining failures", parents=[root], status="done")
+        _sub(conn, root)
+
+    assert is_progress_query(request_text) is True
+    result = resolve_progress_query(request_text, source=_source(), board=BOARD)
+
+    assert result.handled is False
+    assert result.reason == "no_match"
+    assert result.response == ""
+
+
+def test_fully_graph_bound_burndown_topic_is_handled(kanban_home):
+    from gateway.progress_queries import resolve_progress_query
+
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "TradingBot Burndown", status="done")
+        _sub(conn, root)
+
+    result = resolve_progress_query(
+        "How did the burndown go?", source=_source(), board=BOARD
+    )
+
+    assert result.handled is True
+    assert result.reason == "resolved"
+    assert root in result.response
 
 
 def test_generic_how_did_it_go_resolves_one_trusted_reply_linked_root(kanban_home):
@@ -454,12 +501,12 @@ def test_strict_progress_grammar_rejects_any_appended_action_clause(action_claus
     assert is_progress_query(f"How did the burndown go? Please {action_clause}.") is False
 
 
-def test_strict_progress_grammar_rejects_embedded_unknown_imperative():
+def test_status_template_parser_defers_unknown_topic_terms_to_graph_authority():
     from gateway.progress_queries import is_progress_query
 
     assert is_progress_query(
         "Give me an update on the burndown and frobnicate the remaining failures"
-    ) is False
+    ) is True
 
 
 @pytest.mark.parametrize(
@@ -480,10 +527,21 @@ def test_strict_progress_grammar_rejects_embedded_unknown_imperative():
         "What remains to address?",
     ],
 )
-def test_strict_progress_grammar_rejects_structural_topic_tails(request_text):
-    from gateway.progress_queries import is_progress_query
+def test_status_shaped_structural_topic_tails_fall_through_without_graph_authority(
+    kanban_home, request_text
+):
+    from gateway.progress_queries import is_progress_query, resolve_progress_query
 
-    assert is_progress_query(request_text) is False
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+
+    assert is_progress_query(request_text) is True
+    result = resolve_progress_query(request_text, source=_source(), board=BOARD)
+
+    assert result.handled is False
+    assert result.reason == "no_match"
+    assert result.response == ""
 
 
 @pytest.mark.parametrize(
@@ -586,6 +644,42 @@ def test_progress_output_is_bounded_and_redacts_secret_and_path_content(kanban_h
     assert secret not in result.response
     assert path not in result.response
     assert "f00ba412" in result.response
+
+
+def test_progress_forces_authoritative_redaction_then_applies_local_egress_defense(
+    kanban_home, monkeypatch
+):
+    import agent.redact as authoritative_redaction
+    from gateway.progress_queries import resolve_progress_query
+
+    monkeypatch.setattr(authoritative_redaction, "_REDACT_ENABLED", False)
+    probes = {
+        "vendor": "ghp_abcdefghijk123456789",
+        "bearer": "bare-bearer-secret",
+        "userinfo": "uri-password-secret",
+        "root_path": "/root/.ssh/id_rsa",
+        "opt_path": "/opt/hermes/credentials.json",
+    }
+    summary = (
+        f"GitHub receipt {probes['vendor']}\n"
+        f"Bearer {probes['bearer']}\n"
+        f"Fetched https://operator:{probes['userinfo']}@example.test/report\n"
+        f"Inspected {probes['root_path']} and {probes['opt_path']}\n"
+        "Acceptance evidence remains visible."
+    )
+    with kb.connect(board=BOARD) as conn:
+        root = _task(conn, "Exception Burndown", status="done")
+        _sub(conn, root)
+        _run(conn, root, status="done", outcome="completed", summary=summary)
+
+    result = resolve_progress_query(
+        "How did the burndown go?", source=_source(), board=BOARD
+    )
+
+    assert result.handled is True
+    for probe in probes.values():
+        assert probe not in result.response
+    assert "Acceptance evidence remains visible." in result.response
 
 
 def test_progress_redacts_complete_multiline_secret_values_but_keeps_other_prose(kanban_home):
@@ -823,21 +917,49 @@ def test_progress_explicit_board_ignores_database_environment_override(
     assert root in result.response
 
 
-def test_progress_counts_root_and_separates_blocked_from_failed(kanban_home):
+def test_progress_counts_each_canonical_failed_run_once_and_labels_attempts(kanban_home):
     from gateway.progress_queries import resolve_progress_query
 
     with kb.connect(board=BOARD) as conn:
         root = _task(conn, "Exception Burndown", status="done")
-        _task(conn, "Failed patch", parents=[root], status="failed")
-        _task(conn, "Blocked acceptance", parents=[root], status="blocked")
+        retrying = _task(conn, "Retry failed patch", parents=[root], status="ready")
         _task(conn, "Running audit", parents=[root], status="running")
         _sub(conn, root)
+        for outcome in ("spawn_failed", "failed", "timed_out", "crashed"):
+            assert kb.claim_task(conn, retrying, claimer=f"worker:{outcome}") is not None
+            assert kb._record_task_failure(
+                conn,
+                retrying,
+                f"{outcome} receipt",
+                outcome=outcome,
+                failure_limit=99,
+                release_claim=True,
+                end_run=True,
+            ) is False
+        assert kb.claim_task(conn, retrying, claimer="worker:gave-up") is not None
+        assert kb._record_task_failure(
+            conn,
+            retrying,
+            "gave up receipt",
+            outcome="crashed",
+            failure_limit=99,
+            force_trip=True,
+            release_claim=True,
+            end_run=True,
+        ) is True
+        assert [run.outcome for run in kb.list_runs(conn, retrying)] == [
+            "spawn_failed",
+            "failed",
+            "timed_out",
+            "crashed",
+            "gave_up",
+        ]
 
     result = resolve_progress_query(
         "How did the burndown go?", source=_source(), board=BOARD
     )
 
-    assert "1 completed, 1 failed, 1 blocked, 1 running" in result.response
+    assert "1 completed, 5 failed attempts, 1 blocked, 1 running" in result.response
 
 
 @pytest.mark.parametrize("status", ["triage", "scheduled"])
