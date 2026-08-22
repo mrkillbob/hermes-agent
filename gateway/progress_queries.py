@@ -8,7 +8,10 @@ work, following paths, or interpreting prose as authority.
 
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
+import stat
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -21,8 +24,12 @@ _MAX_RECEIPT_CHARS = 280
 _BOARD_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TASK_ID_RE = re.compile(r"\bt_[a-z0-9]+\b", re.IGNORECASE)
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
+_SECRET_KEY_PATTERN = r"[a-z0-9_-]*(?:token|secret|password|authorization|api[_-]?key)"
+_SECRET_LINE_RE = re.compile(
+    rf"(?i)^(\s*(?:{_SECRET_KEY_PATTERN})\s*(?:=|:)\s*).*$"
+)
 _SECRET_RE = re.compile(
-    r"(?i)\b(?:[a-z0-9_]*(?:token|secret|password|api[_-]?key)|authorization)"
+    rf"(?i)\b(?:{_SECRET_KEY_PATTERN})"
     r"\s*(?:=|:)\s*(?:bearer\s+)?(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s;,]+)"
 )
 _PATH_RE = re.compile(r"(?:(?:[A-Za-z]:)?[\\/](?:Users|home|private|tmp|var|etc)[^\s,;]*)")
@@ -31,7 +38,7 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
 _STOP_WORDS = frozenset(
     {
-        "about", "also", "and", "burndown", "could", "did", "does", "else", "from",
+        "about", "also", "and", "could", "did", "does", "else", "from",
         "have", "how", "need", "progress", "project", "status", "that", "the", "this",
         "what", "when", "where", "with", "work", "would", "your",
     }
@@ -41,11 +48,17 @@ _QUESTION_MARKERS = (
     "what's left", "where are we", "give me an update", "status of ", "progress on ",
 )
 _PROGRESS_TERMS = ("burndown", "status", "progress", "remaining", "left", "next", "complete")
+_ACTION_VERBS = r"start|fix|patch|audit|implement|create|run|investigate|change|finish|complete"
 _ACTION_REQUEST_RE = re.compile(
-    r"^(?:(?:can|could|would)\s+you\s+|please\s+)?"
-    r"(?:start|fix|patch|audit|implement|create|run|investigate|change)\b",
+    rf"(?:"
+    rf"^(?:(?:can|could|would)\s+you\s+|please\s+)?(?:{_ACTION_VERBS})\b"
+    rf"|\b(?:and|then|also)\s+(?:(?:then|please)\s+)?(?:{_ACTION_VERBS})\b"
+    rf"|\b(?:can|could|would|will|should)\s+(?:you|we)\s+(?:{_ACTION_VERBS})\b"
+    rf"|[;,.!?]\s*(?:please\s+)?(?:{_ACTION_VERBS})\b"
+    rf")",
     re.IGNORECASE,
 )
+_GENERIC_PROGRESS_RE = re.compile(r"^how did it go\?$", re.IGNORECASE)
 _NONTERMINAL_STATUSES = frozenset({"triage", "todo", "ready", "review"})
 _FAILED_STATUSES = frozenset({"failed", "blocked", "timed_out", "crashed"})
 
@@ -57,6 +70,8 @@ class ProgressSource:
     platform: str
     chat_id: str
     thread_id: Optional[str] = None
+    reply_to_message_id: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -75,7 +90,7 @@ def is_progress_query(request: object) -> bool:
     normalized = " ".join(request.casefold().split())
     if not normalized or len(normalized) > 4_000:
         return False
-    if _ACTION_REQUEST_RE.match(normalized):
+    if _ACTION_REQUEST_RE.search(normalized):
         return False
     has_marker = any(marker in normalized for marker in _QUESTION_MARKERS)
     has_status_term = any(term in normalized for term in _PROGRESS_TERMS)
@@ -83,7 +98,13 @@ def is_progress_query(request: object) -> bool:
 
 
 def _safe_text(value: object, *, limit: int = _MAX_RECEIPT_CHARS) -> str:
-    text = " ".join(str(value or "").replace("\x00", " ").split())
+    raw = str(value or "").replace("\x00", " ")
+    redacted_lines = []
+    for line in raw.splitlines() or [raw]:
+        redacted_lines.append(
+            _SECRET_LINE_RE.sub(lambda match: match.group(1) + "[redacted]", line)
+        )
+    text = " ".join("\n".join(redacted_lines).split())
     text = _SECRET_RE.sub("[redacted]", text)
     text = _PATH_RE.sub("[path redacted]", text)
     # A hash mentioned in a free-form worker receipt is not provenance. Only
@@ -104,16 +125,30 @@ def _safe_branch(value: object) -> Optional[str]:
     return candidate
 
 
-def _source_subscription_task_ids(conn, source: ProgressSource) -> list[str]:
+def _source_subscription_rows(conn, source: ProgressSource) -> list[sqlite3.Row]:
     rows = conn.execute(
         """
-        SELECT task_id FROM kanban_notify_subs
+        SELECT task_id, delivery_metadata FROM kanban_notify_subs
          WHERE platform = ? AND chat_id = ? AND thread_id = ?
          ORDER BY task_id ASC
         """,
         (source.platform, source.chat_id, source.thread_id or ""),
     ).fetchall()
-    return [str(row["task_id"]) for row in rows]
+    return list(rows)
+
+
+def _open_existing_board_readonly(board: str) -> sqlite3.Connection:
+    """Open one existing regular board DB without init, migration, or writes."""
+    from hermes_cli import kanban_db as kb
+
+    path = kb.kanban_db_path(board=board).expanduser()
+    file_stat = path.lstat()
+    if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+        raise OSError("Kanban board database must be a regular non-symlink file")
+    resolved = path.resolve(strict=True)
+    conn = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def _roots_for_tasks(conn, task_ids: Iterable[str]) -> list[str]:
@@ -163,7 +198,58 @@ def _query_terms(request: str) -> set[str]:
     }
 
 
-def _select_root(conn, root_ids: list[str], request: str):
+def _root_has_trusted_linkage(
+    conn,
+    root_id: str,
+    source: ProgressSource,
+    subscription_rows: list[sqlite3.Row],
+) -> bool:
+    """Bind a generic follow-up to structured reply/session provenance only."""
+    from hermes_cli import kanban_db as kb
+
+    graph_ids = set(_graph_task_ids(conn, root_id))
+    if source.session_id:
+        for task_id in graph_ids:
+            task = kb.get_task(conn, task_id)
+            if task is not None and task.session_id == source.session_id:
+                return True
+
+    reply_id = str(source.reply_to_message_id or "")
+    if not reply_id:
+        return False
+    for row in subscription_rows:
+        if str(row["task_id"]) not in graph_ids:
+            continue
+        try:
+            metadata = json.loads(row["delivery_metadata"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+        if isinstance(metadata, dict) and any(
+            str(metadata.get(key) or "") == reply_id
+            for key in ("origin_message_id", "message_id", "reply_to_message_id", "prompt_message_id")
+        ):
+            return True
+    for task_id in graph_ids:
+        task = kb.get_task(conn, task_id)
+        key = str(task.idempotency_key or "") if task is not None else ""
+        if (
+            task is not None
+            and task.created_by == "specialist-routing"
+            and key.startswith("specialist-routing:")
+            and key.rsplit(":", 1)[-1] == reply_id
+        ):
+            return True
+    return False
+
+
+def _select_root(
+    conn,
+    root_ids: list[str],
+    request: str,
+    *,
+    source: ProgressSource,
+    subscription_rows: list[sqlite3.Row],
+):
     """Return one root, or a bounded ambiguity result.  Never guess ties."""
     from hermes_cli import kanban_db as kb
 
@@ -186,9 +272,20 @@ def _select_root(conn, root_ids: list[str], request: str):
                 ranked.append((score, root.created_at, root))
 
     if not ranked:
-        if len(root_ids) == 1:
-            root = kb.get_task(conn, root_ids[0])
-            return ("resolved", root) if root is not None else ("no_match", None)
+        normalized = " ".join(request.casefold().split())
+        if _GENERIC_PROGRESS_RE.fullmatch(normalized):
+            linked = [
+                kb.get_task(conn, root_id)
+                for root_id in root_ids
+                if _root_has_trusted_linkage(
+                    conn, root_id, source, subscription_rows
+                )
+            ]
+            linked = [task for task in linked if task is not None]
+            if len(linked) == 1:
+                return "resolved", linked[0]
+            if len(linked) > 1:
+                return "ambiguous", linked
         return "no_match", None
     top_score = max(item[0] for item in ranked)
     top = [item for item in ranked if item[0] == top_score]
@@ -292,10 +389,10 @@ def resolve_progress_query(
     ):
         return ProgressQueryResult(False, "", "unavailable")
     try:
-        from hermes_cli import kanban_db as kb
-
-        with kb.connect(board=board) as conn:
-            subscribed_ids = _source_subscription_task_ids(conn, source)
+        conn = _open_existing_board_readonly(board)
+        try:
+            subscription_rows = _source_subscription_rows(conn, source)
+            subscribed_ids = [str(row["task_id"]) for row in subscription_rows]
             root_ids = _roots_for_tasks(conn, subscribed_ids)
             if not root_ids:
                 return ProgressQueryResult(
@@ -303,7 +400,13 @@ def resolve_progress_query(
                     "I couldn't find a subscribed project in this Discord conversation for that progress question.",
                     "no_match",
                 )
-            selection, value = _select_root(conn, root_ids, str(request))
+            selection, value = _select_root(
+                conn,
+                root_ids,
+                str(request),
+                source=source,
+                subscription_rows=subscription_rows,
+            )
             if selection == "no_match":
                 return ProgressQueryResult(
                     True,
@@ -321,5 +424,7 @@ def resolve_progress_query(
                     "ambiguous",
                 )
             return ProgressQueryResult(True, _format_progress(conn, value), "resolved")
+        finally:
+            conn.close()
     except Exception:
         return ProgressQueryResult(False, "", "unavailable")

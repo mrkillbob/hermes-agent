@@ -7067,6 +7067,12 @@ class DiscordAdapter(BasePlatformAdapter):
                 platform=str(platform),
                 chat_id=str(event.source.chat_id),
                 thread_id=(str(event.source.thread_id) if event.source.thread_id else None),
+                reply_to_message_id=(
+                    str(event.reply_to_message_id) if event.reply_to_message_id else None
+                ),
+                session_id=(
+                    str(getattr(event.source, "session_id", "") or "") or None
+                ),
             )
             result = await asyncio.to_thread(
                 resolve_progress_query,
