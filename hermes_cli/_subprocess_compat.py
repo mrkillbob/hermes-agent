@@ -426,7 +426,7 @@ def kill_process_tree(proc: "subprocess.Popen") -> None:
             pass
     try:
         proc.kill()
-    except OSError:
+    except Exception:
         pass
     if IS_WINDOWS:
         try:
