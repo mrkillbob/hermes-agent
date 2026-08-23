@@ -114,6 +114,22 @@ def _finalize(
     )
 
 
+def test_blank_response_at_iteration_limit_requests_summary(monkeypatch):
+    """A tool-only tail may leave ``final_response`` blank instead of None."""
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent()
+
+    result = _finalize(
+        agent,
+        final_response="",
+        exit_reason="unknown",
+    )
+
+    assert result["final_response"] == "summary from extra call"
+    assert result["turn_exit_reason"] == "max_iterations_reached(60/60)"
+    assert agent._handle_max_iterations_called is True
+
+
 
 
 
