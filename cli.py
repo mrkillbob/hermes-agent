@@ -8663,6 +8663,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
     def _apply_conversation_worktree_binding(self, binding) -> None:
         """Retarget CLI-owned tools and prompt context to a certified binding."""
+        managed_path = str(binding.path)
+        try:
+            os.chdir(managed_path)
+        except OSError as exc:
+            from agent.conversation_worktree import ConversationWorktreeError
+
+            raise ConversationWorktreeError(
+                f"could not enter managed conversation worktree {managed_path}: {exc}",
+                phase="cwd",
+            ) from exc
+
         prior_note = getattr(self, "_conversation_worktree_prompt_note", "")
         if prior_note:
             rendered_prior = f"\n\n[System note: {prior_note}]"
@@ -8671,7 +8682,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         note = _cli_conversation_worktree_prompt_fragment(binding)
         self._conversation_worktree_binding = binding
         self._conversation_worktree_prompt_note = note
-        self.working_directory = str(binding.path)
+        self.working_directory = managed_path
         os.environ["TERMINAL_CWD"] = self.working_directory
         self.system_prompt = (self.system_prompt or "") + f"\n\n[System note: {note}]"
 

@@ -22,8 +22,14 @@ class _Binding:
 
 
 class _SessionDB:
-    def __init__(self, *, roots: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        roots: dict[str, str] | None = None,
+        session_cwds: dict[str, str] | None = None,
+    ) -> None:
         self.roots = roots or {}
+        self.session_cwds = session_cwds or {}
         self.ended: list[str] = []
 
     def get_conversation_root(self, session_id: str) -> str:
@@ -38,19 +44,28 @@ class _SessionDB:
     def create_session(self, **_kwargs) -> None:
         return None
 
+    def get_session(self, session_id: str) -> dict:
+        return {"id": session_id, "cwd": self.session_cwds.get(session_id, "")}
+
+    def close(self) -> None:
+        return None
+
 
 class _Manager:
-    def __init__(self) -> None:
+    def __init__(self, worktree_root: Path) -> None:
+        self.worktree_root = worktree_root
+        self.worktree_root.mkdir(parents=True)
         self.bound_roots: list[str] = []
         self.resolved_roots: list[str] = []
         self.events: list[str] = []
         self.fail_next = False
 
-    @staticmethod
-    def _binding(root_session_id: str) -> _Binding:
+    def _binding(self, root_session_id: str) -> _Binding:
+        path = self.worktree_root / root_session_id
+        path.mkdir(parents=True, exist_ok=True)
         return _Binding(
             root_session_id=root_session_id,
-            path=Path("/repo/.worktrees") / root_session_id,
+            path=path,
             branch=f"hermes/session/{root_session_id}",
             base_commit="a" * 40,
         )
@@ -67,6 +82,18 @@ class _Manager:
         self.events.append("resolve")
         self.resolved_roots.append(root_session_id)
         return self._binding(root_session_id)
+
+
+@pytest.fixture
+def manager(tmp_path) -> _Manager:
+    return _Manager(tmp_path / "worktrees")
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_cwd():
+    original = cli_module.os.getcwd()
+    yield
+    cli_module.os.chdir(original)
 
 
 def _enabled_config() -> dict:
@@ -96,39 +123,34 @@ def _build_cli(monkeypatch, manager: _Manager, db: _SessionDB | None = None, **k
     return cli_module.HermesCLI(compact=True, **kwargs), db
 
 
-def test_enabled_conversation_policy_binds_initial_cli_root(monkeypatch):
-    manager = _Manager()
-
+def test_enabled_conversation_policy_binds_initial_cli_root(monkeypatch, manager):
     cli, _db = _build_cli(monkeypatch, manager)
 
-    assert cli.working_directory == f"/repo/.worktrees/{cli.session_id}"
+    assert cli.working_directory == str(manager.worktree_root / cli.session_id)
     assert manager.bound_roots == [cli.session_id]
     assert cli.agent is None
     assert "certified Git worktree" in cli.system_prompt
 
 
-def test_cli_resume_reuses_durable_root_binding(monkeypatch):
-    manager = _Manager()
+def test_cli_resume_reuses_durable_root_binding(monkeypatch, manager):
     db = _SessionDB(roots={"compressed-tip": "durable-root"})
 
     cli, _db = _build_cli(monkeypatch, manager, db, resume="compressed-tip")
 
     assert manager.bound_roots == []
     assert manager.resolved_roots == ["durable-root"]
-    assert cli.working_directory == "/repo/.worktrees/durable-root"
+    assert cli.working_directory == str(manager.worktree_root / "durable-root")
     assert cli.session_id == "compressed-tip"
 
 
-def test_cli_resume_fails_closed_when_durable_binding_is_missing(monkeypatch):
-    manager = _Manager()
+def test_cli_resume_fails_closed_when_durable_binding_is_missing(monkeypatch, manager):
     manager.resolve_existing_session = MagicMock(return_value=None)
 
     with pytest.raises(RuntimeError, match="no ready conversation worktree"):
         _build_cli(monkeypatch, manager, _SessionDB(), resume="missing")
 
 
-def test_managed_resume_cannot_restore_the_stable_source_cwd(monkeypatch):
-    manager = _Manager()
+def test_managed_resume_cannot_restore_the_stable_source_cwd(monkeypatch, manager):
     cli, _db = _build_cli(monkeypatch, manager)
     managed = cli.working_directory
 
@@ -138,8 +160,7 @@ def test_managed_resume_cannot_restore_the_stable_source_cwd(monkeypatch):
     assert cli_module.os.environ["TERMINAL_CWD"] == managed
 
 
-def test_managed_resume_retargets_to_the_selected_root_binding(monkeypatch):
-    manager = _Manager()
+def test_managed_resume_retargets_to_the_selected_root_binding(monkeypatch, manager):
     db = _SessionDB(roots={"selected-tip": "selected-root"})
     cli, _db = _build_cli(monkeypatch, manager, db)
     cli.session_id = "selected-tip"
@@ -147,12 +168,146 @@ def test_managed_resume_retargets_to_the_selected_root_binding(monkeypatch):
     cli._restore_session_cwd({"cwd": "/repo/stable"}, quiet=True)
 
     assert manager.resolved_roots == ["selected-root"]
-    assert cli.working_directory == "/repo/.worktrees/selected-root"
+    assert cli.working_directory == str(manager.worktree_root / "selected-root")
 
 
-def test_list_only_cli_does_not_allocate_a_conversation_root(monkeypatch):
-    manager = _Manager()
+def test_cmd_chat_resume_replaces_persisted_stable_cwd_end_to_end(
+    monkeypatch, tmp_path, manager
+):
+    from argparse import Namespace
 
+    from agent.runtime_cwd import clear_session_cwd, resolve_agent_cwd
+    import hermes_cli.main as main_module
+    from tools.file_tools import _resolve_base_dir
+
+    stable = tmp_path / "stable"
+    managed = tmp_path / "managed"
+    launch = tmp_path / "launch"
+    stable.mkdir()
+    managed.mkdir()
+    launch.mkdir()
+    session_id = "resume-root"
+    db = _SessionDB(
+        roots={session_id: session_id},
+        session_cwds={session_id: str(stable)},
+    )
+    manager.resolve_existing_session = lambda root_session_id: _Binding(
+        root_session_id=root_session_id,
+        path=managed,
+        branch=f"hermes/session/{root_session_id}",
+        base_commit="b" * 40,
+    )
+    captured: dict[str, str] = {}
+    original_cwd = cli_module.os.getcwd()
+
+    def run_classic_cli(**kwargs):
+        app = cli_module.HermesCLI(compact=True, resume=kwargs["resume"])
+        captured.update(
+            process_cwd=cli_module.os.getcwd(),
+            terminal_cwd=cli_module.os.environ["TERMINAL_CWD"],
+            agent_cwd=str(resolve_agent_cwd()),
+            tool_cwd=str(_resolve_base_dir()),
+            working_directory=app.working_directory,
+            system_prompt=app.system_prompt,
+        )
+
+    args = Namespace(
+        accept_hooks=False,
+        checkpoints=False,
+        cli=True,
+        compact=True,
+        continue_last=None,
+        ignore_rules=False,
+        ignore_user_config=False,
+        image=None,
+        in_dir=None,
+        max_turns=None,
+        model=None,
+        no_restore_cwd=False,
+        pass_session_id=False,
+        provider=None,
+        query=None,
+        query_file=None,
+        quiet=False,
+        reasoning=None,
+        resume=session_id,
+        run_budget=None,
+        safe_mode=False,
+        skills=None,
+        source=None,
+        toolsets=None,
+        tui=False,
+        tui_dev=False,
+        verbose=None,
+        worktree=False,
+        yolo=False,
+    )
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "cli")
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr(cli_module, "CLI_CONFIG", _enabled_config())
+    monkeypatch.setattr(hermes_state, "SessionDB", lambda: db)
+    monkeypatch.setattr(cli_module, "_run_state_db_auto_maintenance", lambda _db: None)
+    monkeypatch.setattr(cli_module, "_run_checkpoint_auto_maintenance", lambda: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_cli_conversation_worktree_manager",
+        lambda _config, _db: manager,
+    )
+    monkeypatch.setattr(main_module, "_has_any_provider_configured", lambda: True)
+    monkeypatch.setattr(main_module, "_resolve_session_by_name_or_id", lambda value: value)
+    monkeypatch.setattr(main_module, "_sync_bundled_skills_for_startup", lambda: False)
+    monkeypatch.setattr(main_module, "_pin_kanban_board_env", lambda: None)
+    monkeypatch.setattr(main_module, "_confirm_startup_expensive_model_override", lambda _args: None)
+    monkeypatch.setattr(cli_module, "main", run_classic_cli)
+    clear_session_cwd()
+
+    try:
+        cli_module.os.chdir(launch)
+        main_module.cmd_chat(args)
+    finally:
+        cli_module.os.chdir(original_cwd)
+        clear_session_cwd()
+
+    expected = str(managed)
+    assert captured["process_cwd"] == expected
+    assert captured["terminal_cwd"] == expected
+    assert captured["agent_cwd"] == expected
+    assert captured["tool_cwd"] == expected
+    assert captured["working_directory"] == expected
+    assert expected in captured["system_prompt"]
+    assert "certified Git worktree" in captured["system_prompt"]
+
+
+def test_chdir_failure_aborts_managed_binding_without_exporting_source_fallback(
+    monkeypatch, tmp_path, manager
+):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    manager._binding = lambda root_session_id: _Binding(
+        root_session_id=root_session_id,
+        path=managed,
+        branch=f"hermes/session/{root_session_id}",
+        base_commit="c" * 40,
+    )
+    source = cli_module.os.getcwd()
+    monkeypatch.setenv("TERMINAL_CWD", source)
+    real_chdir = cli_module.os.chdir
+
+    def fail_managed_chdir(path):
+        if Path(path) == managed:
+            raise OSError("permission denied")
+        return real_chdir(path)
+
+    monkeypatch.setattr(cli_module.os, "chdir", fail_managed_chdir)
+
+    with pytest.raises(RuntimeError, match="could not enter managed conversation worktree"):
+        _build_cli(monkeypatch, manager)
+
+    assert cli_module.os.getcwd() == source
+    assert cli_module.os.environ["TERMINAL_CWD"] == source
+
+
+def test_list_only_cli_does_not_allocate_a_conversation_root(monkeypatch, manager):
     cli, _db = _build_cli(
         monkeypatch,
         manager,
@@ -163,8 +318,7 @@ def test_list_only_cli_does_not_allocate_a_conversation_root(monkeypatch):
     assert cli._conversation_worktree_manager is None
 
 
-def test_cli_new_allocates_another_worktree_before_agent_reset(monkeypatch):
-    manager = _Manager()
+def test_cli_new_allocates_another_worktree_before_agent_reset(monkeypatch, manager):
     cli, _db = _build_cli(monkeypatch, manager)
     old = cli.working_directory
     manager.events.clear()
@@ -179,8 +333,7 @@ def test_cli_new_allocates_another_worktree_before_agent_reset(monkeypatch):
     assert manager.events.index("bind") < manager.events.index("reset")
 
 
-def test_cli_new_binding_failure_leaves_old_session_usable(monkeypatch):
-    manager = _Manager()
+def test_cli_new_binding_failure_leaves_old_session_usable(monkeypatch, manager):
     cli, db = _build_cli(monkeypatch, manager)
     old_id = cli.session_id
     old_working_directory = cli.working_directory
