@@ -2689,6 +2689,7 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
     import re
     import subprocess
     import time
+    from agent.conversation_worktree import conversation_worktree_is_manager_owned
 
     worktrees_dir = Path(repo_root) / ".worktrees"
     if not worktrees_dir.exists():
@@ -2750,6 +2751,8 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
 
     def _classify(item):
         entry, mtime, force = item
+        if conversation_worktree_is_manager_owned(entry):
+            return (entry, mtime, force, "conversation-owned", None)
         # Never delete real work, regardless of age or tier. Uncommitted
         # changes and unpushed commits may be a crashed session's in-flight
         # work; only clean, fully-merged/pushed trees (the scratch trees that
@@ -2819,6 +2822,9 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
             continue
         if verdict == "locked-live":
             logger.debug("Skipping live-locked worktree: %s", entry.name)
+            continue
+        if verdict == "conversation-owned":
+            logger.debug("Skipping manager-owned conversation worktree: %s", entry.name)
             continue
 
         if lock_state == "dead":
@@ -5494,6 +5500,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         )
         self._conversation_worktree_binding = None
         self._conversation_worktree_prompt_note = ""
+        self._conversation_root_lease = None
         if self._conversation_worktree_manager is not None:
             if resume:
                 try:
@@ -5527,6 +5534,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         phase="create",
                     )
             self._apply_conversation_worktree_binding(binding)
+            self._conversation_root_lease = self._acquire_conversation_root_lease(
+                binding, surface="cli"
+            )
+            atexit.register(self._release_active_session)
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
         
         # History file for persistent input recall across sessions
@@ -5714,14 +5725,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
     def _release_active_session(self) -> None:
         lease = getattr(self, "_active_session_lease", None)
-        if lease is None:
-            return
-        try:
-            lease.release()
-        except Exception:
-            logger.debug("Failed to release active session slot", exc_info=True)
-        finally:
-            self._active_session_lease = None
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception:
+                logger.debug("Failed to release active session slot", exc_info=True)
+            finally:
+                self._active_session_lease = None
+        root_lease = getattr(self, "_conversation_root_lease", None)
+        if root_lease is not None:
+            try:
+                root_lease.release()
+            except Exception:
+                logger.debug("Failed to release conversation root lease", exc_info=True)
+            finally:
+                self._conversation_root_lease = None
 
     def _mark_terminal_io_broken(self, reason: str = "") -> None:
         """Stop UI paints after the PTY/stdout becomes unusable (#81521)."""
@@ -8686,6 +8704,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         os.environ["TERMINAL_CWD"] = self.working_directory
         self.system_prompt = (self.system_prompt or "") + f"\n\n[System note: {note}]"
 
+    @staticmethod
+    def _acquire_conversation_root_lease(binding, *, surface: str):
+        from agent.conversation_worktree import acquire_conversation_root_lease
+
+        return acquire_conversation_root_lease(
+            root_session_id=str(binding.root_session_id),
+            worktree_path=Path(binding.path),
+            repo_common_dir=Path(binding.repo_common_dir),
+            surface=surface,
+        )
+
     def _restore_session_cwd(self, session_meta: dict, *, quiet: bool = False) -> None:
         """Relaunch a resumed session in the directory it was started from.
 
@@ -8728,7 +8757,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     f"no ready conversation worktree for CLI root {root_session_id}",
                     phase="recovery",
                 )
-            self._apply_conversation_worktree_binding(managed_binding)
+            next_root_lease = self._acquire_conversation_root_lease(
+                managed_binding, surface="cli"
+            )
+            try:
+                self._apply_conversation_worktree_binding(managed_binding)
+            except Exception:
+                next_root_lease.release()
+                raise
+            prior_root_lease = getattr(self, "_conversation_root_lease", None)
+            self._conversation_root_lease = next_root_lease
+            if prior_root_lease is not None:
+                try:
+                    prior_root_lease.release()
+                except Exception:
+                    logger.debug("Failed to release prior root lease", exc_info=True)
             return
 
         recorded = (session_meta or {}).get("cwd")
@@ -9963,7 +10006,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 )
                 if new_worktree_binding is None:
                     raise RuntimeError("manager returned no conversation worktree binding")
-                self._apply_conversation_worktree_binding(new_worktree_binding)
+                new_root_lease = self._acquire_conversation_root_lease(
+                    new_worktree_binding, surface="cli"
+                )
+                try:
+                    self._apply_conversation_worktree_binding(new_worktree_binding)
+                except Exception:
+                    new_root_lease.release()
+                    raise
+                prior_root_lease = getattr(self, "_conversation_root_lease", None)
+                self._conversation_root_lease = new_root_lease
+                if prior_root_lease is not None:
+                    try:
+                        prior_root_lease.release()
+                    except Exception:
+                        logger.debug("Failed to release prior root lease", exc_info=True)
             except Exception as exc:
                 _cprint(
                     f"  Cannot start new session {new_session_id}: "

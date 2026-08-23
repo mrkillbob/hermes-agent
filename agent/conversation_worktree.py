@@ -5,13 +5,16 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import threading
 import time
 from typing import Iterator
+import uuid
 
 from agent.conversation_worktree_policy import ConversationWorktreePolicy
 from hermes_cli._subprocess_compat import (
@@ -27,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 _REPOSITORY_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _REPOSITORY_THREAD_LOCKS_GUARD = threading.Lock()
+_OWNER_MARKER = "hermes-conversation-owner-v1"
+_LEASE_MESSAGE_LIMIT = 300
 
 
 class ConversationWorktreeError(RuntimeError):
@@ -62,6 +67,256 @@ class CleanupResult:
 
     removed: bool
     verdict: CleanupVerdict
+    failure_phase: str | None = None
+    failure_message: str | None = None
+
+
+@dataclass
+class ConversationRootLease:
+    """Mandatory cross-process ownership lease for one conversation root."""
+
+    lease_id: str
+    root_session_id: str
+    state_path: Path
+    lock_path: Path
+    released: bool = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        try:
+            with _lease_file_lock(self.lock_path, timeout=3.0):
+                entries, valid = _read_root_leases(self.state_path)
+                if not valid:
+                    raise ConversationWorktreeError(
+                        "conversation root lease registry is unavailable",
+                        phase="lease",
+                    )
+                _write_root_leases(
+                    self.state_path,
+                    [e for e in entries if e.get("lease_id") != self.lease_id],
+                )
+        except ConversationWorktreeError:
+            raise
+        except Exception as exc:
+            raise ConversationWorktreeError(
+                "conversation root lease registry is unavailable", phase="lease"
+            ) from exc
+        self.released = True
+
+
+def _root_lease_paths(repo_common_dir: Path, root_session_id: str) -> tuple[Path, Path]:
+    digest = hashlib.sha256(root_session_id.encode("utf-8")).hexdigest()[:24]
+    return (
+        repo_common_dir / f"hermes-conversation-root-{digest}.leases.json",
+        repo_common_dir / f"hermes-conversation-root-{digest}.leases.lock",
+    )
+
+
+@contextmanager
+def _lease_file_lock(path: Path, *, timeout: float) -> Iterator[None]:
+    deadline = time.monotonic() + timeout
+    handle = None
+    locked = False
+    thread_lock = ConversationWorktreeManager._thread_lock(path)
+    if not thread_lock.acquire(timeout=timeout):
+        raise OSError("conversation root lease lock timed out")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+b")
+        handle.seek(0)
+        handle.write(b"0")
+        handle.flush()
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise OSError("conversation root lease lock timed out")
+                time.sleep(0.05)
+        yield
+    finally:
+        if handle is not None:
+            if locked:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    logger.warning("conversation_worktree.lease_lock_release_failed")
+            handle.close()
+        thread_lock.release()
+
+
+def _read_root_leases(path: Path) -> tuple[list[dict[str, object]], bool]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], True
+    except Exception:
+        return [], False
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        return [], False
+    return list(entries), True
+
+
+def _write_root_leases(path: Path, entries: list[dict[str, object]]) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump({"entries": entries}, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def _process_liveness(entry: dict[str, object]) -> str:
+    try:
+        pid = int(entry.get("pid") or 0)
+    except (TypeError, ValueError):
+        return "unknown"
+    if pid <= 0:
+        return "unknown"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        return "active"
+    except OSError:
+        return "unknown"
+    expected = entry.get("process_start_time")
+    if expected is None:
+        return "active"
+    try:
+        from hermes_cli.active_sessions import _process_start_time
+
+        current = _process_start_time(pid)
+        if current is None:
+            return "unknown"
+        return "active" if abs(float(expected) - current) < 0.001 else "dead"
+    except Exception:
+        return "unknown"
+
+
+def acquire_conversation_root_lease(
+    *,
+    root_session_id: str,
+    worktree_path: Path,
+    repo_common_dir: Path,
+    surface: str,
+) -> ConversationRootLease:
+    """Acquire mandatory root liveness independent of concurrency limits."""
+    state_path, lock_path = _root_lease_paths(repo_common_dir, root_session_id)
+    lease_id = uuid.uuid4().hex
+    try:
+        with _lease_file_lock(lock_path, timeout=3.0):
+            entries, valid = _read_root_leases(state_path)
+            if not valid:
+                raise ConversationWorktreeError(
+                    "conversation root lease registry is unavailable", phase="lease"
+                )
+            kept = [e for e in entries if _process_liveness(e) != "dead"]
+            kept.append(
+                {
+                    "lease_id": lease_id,
+                    "root_session_id": root_session_id,
+                    "worktree_path": str(worktree_path.resolve()),
+                    "repo_common_dir": str(repo_common_dir.resolve()),
+                    "surface": str(surface),
+                    "pid": os.getpid(),
+                    "process_start_time": __import__(
+                        "hermes_cli.active_sessions", fromlist=["_process_start_time"]
+                    )._process_start_time(os.getpid()),
+                    "started_at": time.time(),
+                }
+            )
+            _write_root_leases(state_path, kept)
+    except ConversationWorktreeError:
+        raise
+    except Exception as exc:
+        raise ConversationWorktreeError(
+            "conversation root lease registry is unavailable", phase="lease"
+        ) from exc
+    return ConversationRootLease(
+        lease_id=lease_id,
+        root_session_id=root_session_id,
+        state_path=state_path,
+        lock_path=lock_path,
+    )
+
+
+def conversation_worktree_is_manager_owned(path: Path) -> bool:
+    """Recognize the manager's durable Git-admin ownership marker."""
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--git-path", _OWNER_MARKER],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    marker = Path(result.stdout.strip())
+    if not marker.is_absolute():
+        marker = path / marker
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return isinstance(data, dict) and data.get("owner") == "conversation-worktree-manager"
+
+
+@contextmanager
+def conversation_worktree_reclaim_guard(
+    repo_root: Path, path: Path
+) -> Iterator[bool | None]:
+    """Hold the manager repository lock while rechecking durable ownership."""
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            yield None
+            return
+        common_dir = Path(result.stdout.strip()).resolve()
+        with _lease_file_lock(
+            common_dir / "hermes-conversation-worktree.lock", timeout=5.0
+        ):
+            yield conversation_worktree_is_manager_owned(path)
+    except Exception:
+        yield None
 
 
 class ConversationWorktreeManager:
@@ -180,10 +435,15 @@ class ConversationWorktreeManager:
         record = self._db.get_conversation_worktree(root_session_id)
         if record is None:
             return CleanupVerdict(False, ("unknown",))
-        return self._inspect_cleanup_record(
-            record,
-            active_session_bound=active_session_bound,
-        )
+        try:
+            with self._root_lease_liveness(record) as root_liveness:
+                return self._inspect_cleanup_record(
+                    record,
+                    active_session_bound=active_session_bound,
+                    root_liveness=root_liveness,
+                )
+        except Exception:
+            return CleanupVerdict(False, ("unknown",))
 
     def remove_after_explicit_request(
         self,
@@ -205,32 +465,54 @@ class ConversationWorktreeManager:
                     if current is None:
                         verdict = CleanupVerdict(False, ("unknown",))
                         return CleanupResult(False, verdict)
-                    verdict = self._inspect_cleanup_record(
-                        current,
-                        active_session_bound=active_session_bound,
-                        source_identity=(source, source_common_dir),
-                    )
-                    if not verdict.allowed:
-                        return CleanupResult(False, verdict)
+                    with self._root_lease_liveness(current) as root_liveness:
+                        verdict = self._inspect_cleanup_record(
+                            current,
+                            active_session_bound=active_session_bound,
+                            root_liveness=root_liveness,
+                            source_identity=(source, source_common_dir),
+                        )
+                        if not verdict.allowed:
+                            return CleanupResult(False, verdict)
 
-                    path = Path(current.worktree_path).resolve()
-                    removed = self._run_git(
-                        source,
-                        ["worktree", "remove", str(path)],
-                        self._policy.create_timeout,
-                        "cleanup",
-                    )
-                    if removed.returncode != 0:
-                        return CleanupResult(False, CleanupVerdict(False, ("unknown",)))
-                    if path.exists() or self._listed_worktree(source, path) is not None:
-                        return CleanupResult(False, CleanupVerdict(False, ("unknown",)))
+                        path = Path(current.worktree_path).resolve()
+                        removed = self._run_git(
+                            source,
+                            ["worktree", "remove", str(path)],
+                            self._policy.create_timeout,
+                            "cleanup",
+                        )
+                        if removed.returncode != 0:
+                            message = self._sanitize_remove_failure(removed.stderr)
+                            logger.warning(
+                                "conversation_worktree.remove_failed phase=remove message=%s",
+                                message,
+                            )
+                            return CleanupResult(
+                                False,
+                                CleanupVerdict(False, ("remove_failed",)),
+                                failure_phase="remove",
+                                failure_message=message,
+                            )
+                        if path.exists() or self._listed_worktree(source, path) is not None:
+                            message = "worktree remained after git removal"
+                            logger.warning(
+                                "conversation_worktree.remove_failed phase=verify message=%s",
+                                message,
+                            )
+                            return CleanupResult(
+                                False,
+                                CleanupVerdict(False, ("remove_failed",)),
+                                failure_phase="verify",
+                                failure_message=message,
+                            )
 
-                    self._db.mark_conversation_worktree_removed(root_session_id)
-                    self._event(
-                        "conversation_worktree.removed",
-                        root_session_id=root_session_id,
-                    )
-                    return CleanupResult(True, verdict)
+                        self._db.mark_conversation_worktree_removed(root_session_id)
+                        self._event(
+                            "conversation_worktree.removed",
+                            root_session_id=root_session_id,
+                        )
+                        return CleanupResult(True, verdict)
         except ConversationWorktreeError:
             return CleanupResult(False, CleanupVerdict(False, ("unknown",)))
         except Exception:
@@ -242,6 +524,7 @@ class ConversationWorktreeManager:
         record: ConversationWorktreeRecord,
         *,
         active_session_bound: bool,
+        root_liveness: str = "inactive",
         source_identity: tuple[Path, Path] | None = None,
     ) -> CleanupVerdict:
         reasons: list[str] = []
@@ -291,6 +574,10 @@ class ConversationWorktreeManager:
 
             if active_session_bound:
                 block("active")
+            if root_liveness == "active":
+                block("active")
+            elif root_liveness != "inactive":
+                block("unknown")
 
             status = self._run_git(
                 expected_path,
@@ -386,7 +673,13 @@ class ConversationWorktreeManager:
             "rebase-apply",
             "rebase-merge",
             "sequencer",
+            "index.lock",
+            "HEAD.lock",
+            "packed-refs.lock",
         )
+        branch = self._git_stdout(path, ["branch", "--show-current"], "cleanup")
+        if branch:
+            markers = (*markers, f"refs/heads/{branch}.lock")
         for marker in markers:
             marker_path = Path(
                 self._git_stdout(path, ["rev-parse", "--git-path", marker], "cleanup")
@@ -396,6 +689,59 @@ class ConversationWorktreeManager:
             if marker_path.exists():
                 return True
         return False
+
+    @contextmanager
+    def _root_lease_liveness(
+        self, record: ConversationWorktreeRecord
+    ) -> Iterator[str]:
+        state_path, lock_path = _root_lease_paths(
+            Path(record.repo_common_dir), record.root_session_id
+        )
+        try:
+            with _lease_file_lock(lock_path, timeout=self._policy.create_timeout):
+                entries, valid = _read_root_leases(state_path)
+                if not valid:
+                    yield "unknown"
+                    return
+                relevant: list[dict[str, object]] = []
+                uncertain = False
+                for entry in entries:
+                    if (
+                        entry.get("root_session_id") != record.root_session_id
+                        or Path(str(entry.get("worktree_path") or "")).resolve()
+                        != Path(record.worktree_path).resolve()
+                        or Path(str(entry.get("repo_common_dir") or "")).resolve()
+                        != Path(record.repo_common_dir).resolve()
+                    ):
+                        uncertain = True
+                        continue
+                    state = _process_liveness(entry)
+                    if state == "active":
+                        relevant.append(entry)
+                    elif state == "unknown":
+                        uncertain = True
+                if len(relevant) != len(entries):
+                    live_or_unknown = [
+                        entry
+                        for entry in entries
+                        if _process_liveness(entry) != "dead"
+                    ]
+                    if len(live_or_unknown) != len(entries):
+                        _write_root_leases(state_path, live_or_unknown)
+                yield "unknown" if uncertain else ("active" if relevant else "inactive")
+        except Exception:
+            yield "unknown"
+
+    @staticmethod
+    def _sanitize_remove_failure(stderr: str) -> str:
+        text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(stderr or ""))
+        text = re.sub(
+            r"(?i)\b(token|password|secret|authorization)\s*=\s*\S+",
+            r"\1=<redacted>",
+            text,
+        )
+        text = " ".join(text.split()) or "git worktree remove failed"
+        return text[:_LEASE_MESSAGE_LIMIT]
 
     def _source_repository_identity(self) -> tuple[Path, Path]:
         source = self._policy.source_worktree
@@ -512,6 +858,7 @@ class ConversationWorktreeManager:
                         phase="create",
                     ) from exc
                 raise
+            self._ensure_owner_marker(record)
             self._event("conversation_worktree.reuse", root_session_id=record.root_session_id)
         elif record.state == "creation_failed":
             raise ConversationWorktreeError(
@@ -640,6 +987,7 @@ class ConversationWorktreeManager:
             "create",
         )
         self._validate_new_worktree(record)
+        self._ensure_owner_marker(record)
 
     def _validate_new_worktree(self, record: ConversationWorktreeRecord) -> None:
         path = Path(record.worktree_path)
@@ -708,8 +1056,36 @@ class ConversationWorktreeManager:
                 "ready conversation worktree no longer descends from its base commit",
                 phase="recovery",
             )
+        self._ensure_owner_marker(record)
         self._event("conversation_worktree.reuse", root_session_id=record.root_session_id)
         return self._binding_from_record(record)
+
+    def _ensure_owner_marker(self, record: ConversationWorktreeRecord) -> None:
+        path = Path(record.worktree_path)
+        marker_text = self._git_stdout(
+            path, ["rev-parse", "--git-path", _OWNER_MARKER], "validate"
+        )
+        marker = Path(marker_text)
+        if not marker.is_absolute():
+            marker = path / marker
+        payload = {
+            "owner": "conversation-worktree-manager",
+            "root_session_id": record.root_session_id,
+            "worktree_path": str(path.resolve()),
+            "repo_common_dir": str(Path(record.repo_common_dir).resolve()),
+        }
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            tmp = marker.with_name(f"{marker.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            with tmp.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, marker)
+        except OSError as exc:
+            raise ConversationWorktreeError(
+                "conversation worktree ownership marker is unavailable", phase="create"
+            ) from exc
 
     def _run_bootstrap(self, record: ConversationWorktreeRecord) -> None:
         if not self._policy.bootstrap:

@@ -902,6 +902,55 @@ class TestWorktreeLockReaping:
         cli._prune_stale_worktrees(str(git_repo))
         assert not wt.exists(), "clean unlocked stale worktree should be reaped"
 
+    def test_aged_manager_owned_conversation_tree_survives(self, git_repo, tmp_path):
+        import cli
+        from agent.conversation_worktree import ConversationWorktreeManager
+        from agent.conversation_worktree_policy import ConversationWorktreePolicy
+        from hermes_state import SessionDB
+
+        stable_source = tmp_path / "managed-stable-source"
+        subprocess.run(
+            [
+                "git",
+                "worktree",
+                "add",
+                str(stable_source),
+                "-b",
+                "stable/managed-pruner-test",
+                "HEAD",
+            ],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+        db = SessionDB(tmp_path / "managed-state.db")
+        manager = ConversationWorktreeManager(
+            ConversationWorktreePolicy(
+                enabled=True,
+                source_worktree=stable_source,
+                worktree_root=git_repo / ".worktrees",
+                branch_prefix="hermes/session",
+                bootstrap=False,
+                bootstrap_command=(),
+                bootstrap_timeout=1.0,
+                create_timeout=3.0,
+                retain_until_explicit_cleanup=True,
+            ),
+            db,
+        )
+        binding = manager.bind_new_root_session(
+            "startup-pruner-owned-root", conversation_kind="interactive"
+        )
+        assert binding is not None
+        self._age(binding.path, 24 * 365)
+        try:
+            cli._prune_stale_worktrees(str(git_repo))
+            assert binding.path.exists(), (
+                "startup pruner must never remove a manager-owned conversation worktree"
+            )
+        finally:
+            db.close()
+
     def test_dirty_survives_over_72h(self, git_repo):
         import cli
         wt = self._mk(cli, git_repo, "hermes-dirty72", pid=None, dirty=True, age_h=100)

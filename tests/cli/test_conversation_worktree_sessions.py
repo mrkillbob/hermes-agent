@@ -19,6 +19,7 @@ class _Binding:
     path: Path
     branch: str
     base_commit: str
+    repo_common_dir: Path
 
 
 class _SessionDB:
@@ -69,6 +70,7 @@ class _Manager:
             path=path,
             branch=f"hermes/session/{root_session_id}",
             base_commit="a" * 40,
+            repo_common_dir=self.worktree_root,
         )
 
     def bind_new_root_session(self, root_session_id: str, *, conversation_kind: str):
@@ -203,6 +205,7 @@ def test_cmd_chat_resume_replaces_persisted_stable_cwd_end_to_end(
         path=managed,
         branch=f"hermes/session/{root_session_id}",
         base_commit="b" * 40,
+        repo_common_dir=manager.worktree_root,
     )
     captured: dict[str, str] = {}
     original_cwd = cli_module.os.getcwd()
@@ -295,6 +298,7 @@ def test_chdir_failure_aborts_managed_binding_without_exporting_source_fallback(
         path=managed,
         branch=f"hermes/session/{root_session_id}",
         base_commit="c" * 40,
+        repo_common_dir=manager.worktree_root,
     )
     source = cli_module.os.getcwd()
     monkeypatch.setenv("TERMINAL_CWD", source)
@@ -364,6 +368,15 @@ def test_cli_new_candidate_chdir_failure_preserves_complete_old_boundary(
     old_ended = list(db.ended)
     old_created = list(db.created)
     real_chdir = cli_module.os.chdir
+    candidate_lease = MagicMock()
+    original_acquire = cli._acquire_conversation_root_lease
+
+    def acquire(binding, *, surface):
+        if binding.root_session_id != old_session_id:
+            return candidate_lease
+        return original_acquire(binding, surface=surface)
+
+    monkeypatch.setattr(cli, "_acquire_conversation_root_lease", acquire)
 
     def fail_candidate_chdir(path):
         candidate = Path(path)
@@ -383,6 +396,7 @@ def test_cli_new_candidate_chdir_failure_preserves_complete_old_boundary(
     assert cli.conversation_history == old_transcript
     assert db.ended == old_ended
     assert db.created == old_created
+    candidate_lease.release.assert_called_once_with()
 
 
 def test_cli_new_binding_failure_leaves_old_session_usable(monkeypatch, manager):

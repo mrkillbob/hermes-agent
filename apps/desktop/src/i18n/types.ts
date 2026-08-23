@@ -1892,6 +1892,7 @@ export interface Translations {
         'in-progress': string
         'mismatched identity': string
         'missing remote evidence': string
+        remove_failed: string
         unintegrated: string
         unknown: string
         unpushed: string

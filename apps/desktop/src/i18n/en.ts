@@ -2224,6 +2224,7 @@ export const en: Translations = {
         'in-progress': 'Git has a merge, rebase, cherry-pick, revert, bisect, or sequencer operation in progress.',
         'mismatched identity': 'The worktree no longer matches its durable repository, path, or branch identity.',
         'missing remote evidence': 'No configured Git remote is available to prove the commits were pushed.',
+        remove_failed: 'Git could not remove the worktree. No cleanup state was changed.',
         unintegrated: 'The worktree head is not integrated into the configured stable source.',
         unknown: 'Hermes could not prove cleanup is safe.',
         unpushed: 'No remote-tracking ref contains the worktree head.'

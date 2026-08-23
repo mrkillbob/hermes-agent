@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,6 +18,7 @@ class _Binding:
     path: Path
     branch: str
     base_commit: str
+    repo_common_dir: Path
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +32,11 @@ def _clean_sessions(monkeypatch):
     monkeypatch.setattr(server, "_project_info_for_cwd", lambda cwd: {})
     monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
     monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "compact")
+    monkeypatch.setattr(
+        server,
+        "_acquire_conversation_root_lease",
+        lambda _binding, *, surface: MagicMock(surface=surface),
+    )
     yield
     with server._sessions_lock:
         server._sessions.clear()
@@ -41,6 +48,7 @@ def _binding(root: str) -> _Binding:
         path=Path("/repo/.worktrees") / root,
         branch=f"hermes/session/{root}",
         base_commit="a" * 40,
+        repo_common_dir=Path("/repo/.git"),
     )
 
 
@@ -73,6 +81,34 @@ def test_session_create_binds_before_deferred_agent_build(monkeypatch):
     assert record["cwd"] == f"/repo/.worktrees/{root}"
     assert record["explicit_cwd"] is True
     assert record["conversation_worktree"]["root_session_id"] == root
+
+
+def test_desktop_root_lease_lives_until_session_finalize(monkeypatch):
+    lease = MagicMock()
+    monkeypatch.setattr(
+        server,
+        "_acquire_conversation_root_lease",
+        lambda _binding, *, surface: lease,
+    )
+    monkeypatch.setattr(
+        server,
+        "_bind_new_interactive_conversation_worktree",
+        lambda root_session_id, **_kwargs: _binding(root_session_id),
+    )
+    monkeypatch.setattr(server, "_schedule_agent_build", lambda _sid: None)
+
+    response = server._methods["session.create"](
+        "create-lease", {"source": "desktop", "cwd": "/stable"}
+    )
+    sid = response["result"]["session_id"]
+    session = server._sessions[sid]
+
+    assert session["conversation_root_lease"] is lease
+    lease.release.assert_not_called()
+
+    server._finalize_session(session)
+
+    lease.release.assert_called_once_with()
 
 
 def test_session_create_fails_closed_without_scheduling_agent(monkeypatch):

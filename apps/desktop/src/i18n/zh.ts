@@ -2405,6 +2405,7 @@ export const zh: Translations = {
         'in-progress': 'Git 正在执行合并、变基、拣选、还原、二分查找或序列操作。',
         'mismatched identity': '工作树与其持久化仓库、路径或分支身份不匹配。',
         'missing remote evidence': '没有可用于证明提交已推送的 Git 远程仓库。',
+        remove_failed: 'Git 无法移除工作树。清理状态未发生更改。',
         unintegrated: '工作树头提交尚未合并到配置的稳定源。',
         unknown: 'Hermes 无法证明清理操作安全。',
         unpushed: '没有远程跟踪引用包含工作树头提交。'

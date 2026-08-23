@@ -131,6 +131,99 @@ def test_ordinary_gateway_reconnect_reuses_durable_worktree(store, manager, sour
     assert second.cwd == first.cwd
     assert manager.bound_roots == [first.session_id]
     assert manager.resolved_roots == [first.session_id]
+    assert list(store._conversation_root_leases) == [first.session_id]
+
+
+def test_gateway_releases_mandatory_root_lease_only_at_store_teardown(
+    store, manager, source
+):
+    entry = store.get_or_create_session(source)
+    lease = store._conversation_root_leases[entry.session_id]
+
+    assert lease.released is False
+
+    store.close_all_db_handles()
+
+    assert lease.released is True
+    assert store._conversation_root_leases == {}
+
+
+def test_gateway_releases_root_lease_when_route_ownership_tears_down(
+    store, manager, source
+):
+    old_entry = store.get_or_create_session(source)
+    lease = store._conversation_root_leases[old_entry.session_id]
+    new_entry = store.reset_session(old_entry.session_key)
+
+    assert new_entry is not None
+    assert store.release_conversation_root_lease(old_entry.session_id) is True
+
+    assert lease.released is True
+    assert old_entry.session_id not in store._conversation_root_leases
+
+
+def test_gateway_keeps_root_lease_while_any_route_still_references_it(
+    store, manager, source
+):
+    entry = store.get_or_create_session(source)
+    lease = store._conversation_root_leases[entry.session_id]
+
+    assert store.release_conversation_root_lease(entry.session_id) is False
+    assert lease.released is False
+
+
+def test_gateway_resume_reacquires_target_root_lease_and_workspace(
+    store, manager, source
+):
+    first = store.get_or_create_session(source)
+    second = store.reset_session(first.session_key)
+    assert second is not None
+    assert store.release_conversation_root_lease(first.session_id) is True
+
+    resumed = store.switch_session(first.session_key, first.session_id)
+
+    assert resumed is not None
+    assert resumed.cwd == first.cwd
+    assert resumed.conversation_worktree == first.conversation_worktree
+    assert first.session_id in store._conversation_root_leases
+
+
+def test_failed_gateway_switch_releases_only_new_target_candidate(
+    store, manager, source, monkeypatch
+):
+    first = store.get_or_create_session(source)
+    old_lease = store._conversation_root_leases[first.session_id]
+    target = "resume-target"
+    (manager.root / target).mkdir(parents=True)
+    monkeypatch.setattr(store, "_save", lambda: (_ for _ in ()).throw(OSError("denied")))
+
+    with pytest.raises(OSError, match="denied"):
+        store.switch_session(first.session_key, target)
+
+    assert store.lookup_by_session_key(first.session_key) is first
+    assert old_lease.released is False
+    assert target not in store._conversation_root_leases
+
+
+def test_concurrent_gateway_switch_releases_discarded_target_candidate(
+    store, manager, source, monkeypatch
+):
+    first = store.get_or_create_session(source)
+    target = "resume-target"
+    (manager.root / target).mkdir(parents=True)
+    winner = SimpleNamespace(session_id="winner", conversation_worktree={})
+    original_resolve = manager.resolve_existing_session
+
+    def resolve_then_publish_winner(root_session_id):
+        binding = original_resolve(root_session_id)
+        with store._lock:
+            store._entries[first.session_key] = winner
+        return binding
+
+    monkeypatch.setattr(manager, "resolve_existing_session", resolve_then_publish_winner)
+
+    assert store.switch_session(first.session_key, target) is winner
+    assert target not in store._conversation_root_leases
 
 
 def test_new_binds_distinct_root_before_replacing_old_session(store, manager, source):
@@ -363,6 +456,7 @@ async def test_first_cli_handoff_reuses_verified_workspace_without_binding_claim
     assert entry.session_id == "cli-session"
     assert entry.cwd == str(cli_workspace)
     assert observed["cwd"] == str(cli_workspace)
+    assert list(store._conversation_root_leases) == ["cli-session"]
 
 
 @pytest.mark.asyncio

@@ -74,6 +74,38 @@ def _verdict(records, name):
     return match[0]
 
 
+def _add_managed_conversation_worktree(repo_path, tmp_path, root_id="aged-root"):
+    from agent.conversation_worktree import ConversationWorktreeManager
+    from agent.conversation_worktree_policy import ConversationWorktreePolicy
+    from hermes_state import SessionDB
+
+    stable_source = tmp_path / f"{root_id}-stable-source"
+    _git(
+        ["worktree", "add", str(stable_source), "-b", f"stable/{root_id}", "HEAD"],
+        repo_path,
+    )
+    db = SessionDB(tmp_path / f"{root_id}-state.db")
+    manager = ConversationWorktreeManager(
+        ConversationWorktreePolicy(
+            enabled=True,
+            source_worktree=stable_source,
+            worktree_root=repo_path / ".worktrees",
+            branch_prefix="hermes/session",
+            bootstrap=False,
+            bootstrap_command=(),
+            bootstrap_timeout=1.0,
+            create_timeout=3.0,
+            retain_until_explicit_cleanup=True,
+        ),
+        db,
+    )
+    binding = manager.bind_new_root_session(root_id, conversation_kind="interactive")
+    assert binding is not None
+    old = __import__("time").time() - (365 * 86400)
+    os.utime(binding.path, (old, old))
+    return db, binding
+
+
 class TestAuditVerdicts:
     def test_clean_merged_tree_reaps(self, repo):
         _add_worktree(repo, "hermes-clean")
@@ -139,6 +171,17 @@ class TestAuditVerdicts:
         assert record.verdict == "keep"
         assert "kanban" in record.reason
 
+    def test_aged_manager_owned_conversation_tree_is_always_kept(self, repo, tmp_path):
+        db, binding = _add_managed_conversation_worktree(repo, tmp_path)
+        try:
+            records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
+            record = _verdict(records, binding.path.name)
+            assert record.verdict == "keep"
+            assert record.reason == "manager-owned conversation worktree"
+            assert binding.path.exists()
+        finally:
+            db.close()
+
 
 class TestReclaim:
     def test_reap_removes_tree_and_branch(self, repo):
@@ -181,6 +224,27 @@ class TestReclaim:
         late_tree, _ = _add_worktree(repo, "hermes-late")
         worktree_gc.reclaim_worktrees(str(repo), records=records)
         assert late_tree.exists(), "tree created after the audit must survive"
+
+    def test_frozen_reap_record_rechecks_conversation_ownership_before_remove(
+        self, repo
+    ):
+        tree, _ = _add_worktree(repo, "hermes-raced-owner")
+        records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
+        assert _verdict(records, "hermes-raced-owner").verdict == "reap"
+        marker = Path(
+            _git(
+                ["-C", str(tree), "rev-parse", "--git-path", "hermes-conversation-owner-v1"],
+                repo,
+            )
+        )
+        marker.write_text(
+            '{"owner": "conversation-worktree-manager"}', encoding="utf-8"
+        )
+
+        actions = worktree_gc.reclaim_worktrees(str(repo), records=records)
+
+        assert tree.exists()
+        assert actions == ["kept hermes-raced-owner (manager-owned conversation worktree)"]
 
     def test_dead_locked_tree_is_unlocked_and_reaped(self, repo):
         tree, _ = _add_worktree(repo, "hermes-zombie")

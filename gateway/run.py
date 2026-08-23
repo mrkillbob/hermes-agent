@@ -13814,7 +13814,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Make sure there's a task-owned destination entry for this key. If
         # the home channel has never been used, this creates routing state but
         # deliberately bypasses interactive conversation allocation.
-        await self.async_session_store.get_or_create_session(
+        prior_entry = await self.async_session_store.get_or_create_session(
             dest_source, conversation_kind="task"
         )
 
@@ -13829,6 +13829,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             conversation_worktree=handoff_binding,
         )
         if switched is None:
+            handoff_root = str(handoff_binding.get("root_session_id", ""))
+            if handoff_root:
+                await self.async_session_store.release_conversation_root_lease(
+                    handoff_root
+                )
             raise RuntimeError(
                 f"could not switch session key {session_key} → {cli_session_id}"
             )
@@ -13840,6 +13845,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Cancel any in-flight running-agent state for the destination key
         # so the synthetic turn isn't queued behind a stale running flag.
         self._release_running_agent_state(session_key)
+        prior_root = str(
+            (getattr(prior_entry, "conversation_worktree", None) or {}).get(
+                "root_session_id", ""
+            )
+        )
+        current_root = str(handoff_binding.get("root_session_id", ""))
+        if prior_root and prior_root != current_root:
+            await self.async_session_store.release_conversation_root_lease(prior_root)
 
         synthetic_text = (
             f"[Session was just handed off from CLI (\"{cli_title}\") to this "

@@ -138,6 +138,8 @@ interface ConversationWorktreeCleanupStatus {
   branch: string
   base_commit?: string
   state?: string
+  failure_phase?: string
+  failure_message?: string
 }
 
 // The color picker inside the session menu's Appearance submenu. Its own

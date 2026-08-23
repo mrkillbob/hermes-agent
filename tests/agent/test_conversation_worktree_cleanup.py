@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import multiprocessing
 import subprocess
 
 import pytest
@@ -10,9 +11,24 @@ import pytest
 from agent.conversation_worktree import (
     ConversationWorktreeError,
     ConversationWorktreeManager,
+    acquire_conversation_root_lease,
 )
 from agent.conversation_worktree_policy import ConversationWorktreePolicy
 from hermes_state import SessionDB
+
+
+def _hold_root_lease(binding_data: dict[str, str], ready, release) -> None:
+    from agent import conversation_worktree as worktrees
+
+    lease = worktrees.acquire_conversation_root_lease(
+        root_session_id=binding_data["root_session_id"],
+        worktree_path=Path(binding_data["worktree_path"]),
+        repo_common_dir=Path(binding_data["repo_common_dir"]),
+        surface="cleanup-test-child",
+    )
+    ready.set()
+    release.wait(timeout=15)
+    lease.release()
 
 
 def git(path: Path, *args: str) -> str:
@@ -127,6 +143,125 @@ def test_cleanup_refuses_in_progress_git_state(prepared_binding):
     assert binding.path.exists()
 
 
+@pytest.mark.parametrize(
+    "marker",
+    ("index.lock", "HEAD.lock", "packed-refs.lock", "branch-ref.lock"),
+)
+def test_cleanup_refuses_real_git_lock_files(prepared_binding, marker):
+    manager, _db, source, _remote, binding, _sibling = prepared_binding
+    certify_safe(source, binding)
+    if marker == "branch-ref.lock":
+        lock_path = Path(
+            git(
+                binding.path,
+                "rev-parse",
+                "--git-path",
+                f"refs/heads/{binding.branch}.lock",
+            )
+        )
+    else:
+        lock_path = Path(git(binding.path, "rev-parse", "--git-path", marker))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("held\n", encoding="utf-8")
+
+    verdict = manager.inspect_cleanup(binding.root_session_id)
+
+    assert "in-progress" in verdict.reasons
+    assert binding.path.exists()
+
+
+def test_cleanup_refuses_root_lease_held_by_another_process(prepared_binding):
+    manager, _db, source, _remote, binding, _sibling = prepared_binding
+    certify_safe(source, binding)
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_root_lease,
+        args=(
+            {
+                "root_session_id": binding.root_session_id,
+                "worktree_path": str(binding.path),
+                "repo_common_dir": str(binding.repo_common_dir),
+            },
+            ready,
+            release,
+        ),
+    )
+    process.start()
+    try:
+        assert ready.wait(timeout=10), "child did not acquire root lease"
+
+        verdict = manager.inspect_cleanup(binding.root_session_id)
+
+        assert verdict.allowed is False
+        assert verdict.reasons == ("active",)
+        assert binding.path.exists()
+    finally:
+        release.set()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+    assert process.exitcode == 0
+
+
+def test_cleanup_refuses_corrupt_root_lease_registry_as_unknown(prepared_binding):
+    manager, _db, source, _remote, binding, _sibling = prepared_binding
+    certify_safe(source, binding)
+    from agent.conversation_worktree import _root_lease_paths
+
+    state_path, _lock_path = _root_lease_paths(
+        binding.repo_common_dir, binding.root_session_id
+    )
+    state_path.write_text("not-json", encoding="utf-8")
+
+    verdict = manager.inspect_cleanup(binding.root_session_id)
+
+    assert verdict.allowed is False
+    assert verdict.reasons == ("unknown",)
+
+
+def test_root_lease_lock_failure_is_controlled(monkeypatch, prepared_binding):
+    _manager, _db, _source, _remote, binding, _sibling = prepared_binding
+    from agent import conversation_worktree as worktrees
+
+    @worktrees.contextmanager
+    def unavailable(_path, *, timeout):
+        raise OSError("denied")
+        yield
+
+    monkeypatch.setattr(worktrees, "_lease_file_lock", unavailable)
+
+    with pytest.raises(ConversationWorktreeError) as exc_info:
+        acquire_conversation_root_lease(
+            root_session_id=binding.root_session_id,
+            worktree_path=binding.path,
+            repo_common_dir=binding.repo_common_dir,
+            surface="test",
+        )
+
+    assert exc_info.value.phase == "lease"
+    assert str(exc_info.value) == "conversation root lease registry is unavailable"
+
+
+def test_root_lease_release_fails_closed_when_registry_is_uncertain(prepared_binding):
+    _manager, _db, _source, _remote, binding, _sibling = prepared_binding
+    lease = acquire_conversation_root_lease(
+        root_session_id=binding.root_session_id,
+        worktree_path=binding.path,
+        repo_common_dir=binding.repo_common_dir,
+        surface="test",
+    )
+    lease.state_path.write_text("{corrupt", encoding="utf-8")
+
+    with pytest.raises(ConversationWorktreeError) as exc_info:
+        lease.release()
+
+    assert exc_info.value.phase == "lease"
+    assert lease.released is False
+
+
 def test_cleanup_distinguishes_unintegrated_from_unpushed(prepared_binding):
     manager, _db, source, _remote, binding, _sibling = prepared_binding
     commit_binding(binding)
@@ -221,6 +356,41 @@ def test_blocked_cleanup_never_removes_or_marks_binding(prepared_binding):
 
     assert result.removed is False
     assert "dirty" in result.verdict.reasons
+    assert binding.path.exists()
+    assert sibling.exists()
+    record = db.get_conversation_worktree(binding.root_session_id)
+    assert record is not None
+    assert record.state == "ready"
+
+
+def test_remove_failure_returns_bounded_sanitized_evidence_and_keeps_ledger(
+    prepared_binding, monkeypatch
+):
+    manager, db, source, _remote, binding, sibling = prepared_binding
+    certify_safe(source, binding)
+    original = manager._run_git
+
+    def fail_remove(cwd, args, timeout, phase):
+        if args[:2] == ["worktree", "remove"]:
+            return subprocess.CompletedProcess(
+                ["git", *args],
+                1,
+                stdout="",
+                stderr="token=super-secret\x00\n" + ("remove denied " * 100),
+            )
+        return original(cwd, args, timeout, phase)
+
+    monkeypatch.setattr(manager, "_run_git", fail_remove)
+
+    result = manager.remove_after_explicit_request(binding.root_session_id)
+
+    assert result.removed is False
+    assert result.verdict.reasons == ("remove_failed",)
+    assert result.failure_phase == "remove"
+    assert result.failure_message is not None
+    assert "super-secret" not in result.failure_message
+    assert "\x00" not in result.failure_message
+    assert len(result.failure_message) <= 300
     assert binding.path.exists()
     assert sibling.exists()
     record = db.get_conversation_worktree(binding.root_session_id)

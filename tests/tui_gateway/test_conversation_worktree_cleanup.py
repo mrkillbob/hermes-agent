@@ -39,8 +39,9 @@ class _DB:
 
 
 class _Manager:
-    def __init__(self, verdict: CleanupVerdict):
+    def __init__(self, verdict: CleanupVerdict, result: CleanupResult | None = None):
         self.verdict = verdict
+        self.result = result
         self.inspect_calls: list[tuple[str, bool]] = []
         self.remove_calls: list[tuple[str, bool]] = []
 
@@ -50,7 +51,9 @@ class _Manager:
 
     def remove_after_explicit_request(self, root_session_id, *, active_session_bound=False):
         self.remove_calls.append((root_session_id, active_session_bound))
-        return CleanupResult(removed=self.verdict.allowed, verdict=self.verdict)
+        return self.result or CleanupResult(
+            removed=self.verdict.allowed, verdict=self.verdict
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -132,6 +135,28 @@ def test_remove_requires_explicit_action_and_returns_verified_result(monkeypatch
     assert removed["result"]["removed"] is True
     assert manager.inspect_calls == [("root", False)]
     assert manager.remove_calls == [("root", False)]
+
+
+def test_remove_failure_returns_stable_reason_phase_and_safe_message(monkeypatch):
+    verdict = CleanupVerdict(allowed=False, reasons=("remove_failed",))
+    manager = _Manager(
+        verdict,
+        CleanupResult(
+            removed=False,
+            verdict=verdict,
+            failure_phase="remove",
+            failure_message="permission denied",
+        ),
+    )
+    db = _DB()
+    install(monkeypatch, manager, db)
+
+    response = call({"session_id": "root", "action": "remove"})
+
+    assert response["result"]["removed"] is False
+    assert response["result"]["reasons"] == ["remove_failed"]
+    assert response["result"]["failure_phase"] == "remove"
+    assert response["result"]["failure_message"] == "permission denied"
 
 
 def test_unknown_cleanup_action_fails_without_inspection_or_removal(monkeypatch):

@@ -753,6 +753,12 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         session["resume_history_error"] = "session resume cancelled"
         history_ready.set()
     _release_active_session_slot(session)
+    root_lease = session.pop("conversation_root_lease", None)
+    if root_lease is not None:
+        try:
+            root_lease.release()
+        except Exception:
+            logger.debug("Failed to release conversation root lease", exc_info=True)
     stop_event = session.get("_notif_stop")
     if stop_event is not None:
         stop_event.set()
@@ -1431,6 +1437,17 @@ def _conversation_worktree_metadata(binding) -> dict:
         "branch": str(binding.branch),
         "base_commit": str(binding.base_commit),
     }
+
+
+def _acquire_conversation_root_lease(binding, *, surface: str):
+    from agent.conversation_worktree import acquire_conversation_root_lease
+
+    return acquire_conversation_root_lease(
+        root_session_id=str(binding.root_session_id),
+        worktree_path=Path(binding.path),
+        repo_common_dir=Path(binding.repo_common_dir),
+        surface=surface,
+    )
 
 
 def _conversation_worktree_manager(*, profile_home=None, db=None):
@@ -7382,6 +7399,7 @@ def _init_session(
     source: str | None = None,
     profile_home: str | None = None,
     conversation_worktree: dict | None = None,
+    conversation_root_lease=None,
 ):
     now = time.time()
     with _sessions_lock:
@@ -7400,6 +7418,7 @@ def _init_session(
             "cwd": cwd or _completion_cwd(),
             "explicit_cwd": bool(conversation_worktree),
             "conversation_worktree": dict(conversation_worktree or {}),
+            "conversation_root_lease": conversation_root_lease,
             "cols": cols,
             "slash_worker": None,
             "show_reasoning": _load_show_reasoning(),
@@ -8786,6 +8805,7 @@ def _deferred_session_record(
     model_override=None,
     resume_runtime_overrides: dict | None = None,
     conversation_worktree: dict | None = None,
+    conversation_root_lease=None,
 ) -> dict:
     """A live-session record whose AIAgent is built later (lazy watch / cold
     resume) — _init_session's shape minus the agent."""
@@ -8800,6 +8820,7 @@ def _deferred_session_record(
         "cols": cols,
         "created_at": now,
         "conversation_worktree": dict(conversation_worktree or {}),
+        "conversation_root_lease": conversation_root_lease,
         "cwd": cwd,
         "display_history_prefix": display_history_prefix or [],
         "edit_snapshots": {},
@@ -8838,6 +8859,9 @@ def _claim_or_reuse_live(
         if live is not None:
             if lease is not None:
                 lease.release()
+            root_lease = record.get("conversation_root_lease")
+            if root_lease is not None:
+                root_lease.release()
             return live
         with _sessions_lock:
             _sessions[sid] = record
@@ -8918,6 +8942,9 @@ def _schedule_resume_hydration(
             lease = (discarded or {}).get("active_session_lease")
             if lease is not None:
                 lease.release()
+            root_lease = (discarded or {}).get("conversation_root_lease")
+            if root_lease is not None:
+                root_lease.release()
         finally:
             if close_db and hasattr(db, "close"):
                 try:

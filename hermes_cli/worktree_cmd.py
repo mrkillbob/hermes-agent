@@ -14,9 +14,16 @@ from __future__ import annotations
 from typing import Optional
 
 
-def conversation_cleanup_status(verdict, record, *, removed: bool = False) -> dict:
+def conversation_cleanup_status(
+    verdict,
+    record,
+    *,
+    removed: bool = False,
+    failure_phase: str | None = None,
+    failure_message: str | None = None,
+) -> dict:
     """Return the complete UI-safe cleanup status without dropping blockers."""
-    return {
+    status = {
         "allowed": bool(verdict.allowed),
         "reasons": [str(reason) for reason in verdict.reasons],
         "removed": bool(removed),
@@ -26,6 +33,11 @@ def conversation_cleanup_status(verdict, record, *, removed: bool = False) -> di
         "base_commit": str(record.base_commit),
         "state": str(record.state),
     }
+    if failure_phase is not None:
+        status["failure_phase"] = str(failure_phase)
+    if failure_message is not None:
+        status["failure_message"] = str(failure_message)
+    return status
 
 
 def _repo_root() -> Optional[str]:

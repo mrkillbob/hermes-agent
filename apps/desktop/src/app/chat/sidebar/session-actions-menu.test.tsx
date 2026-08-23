@@ -74,6 +74,7 @@ vi.mock('@/i18n', () => ({
             'in-progress': 'Git has an operation in progress.',
             'mismatched identity': 'The worktree identity does not match its binding.',
             'missing remote evidence': 'No remote evidence is available.',
+            remove_failed: 'Git could not remove the worktree.',
             unintegrated: 'The worktree commits are not integrated.',
             unknown: 'Cleanup safety could not be determined.',
             unpushed: 'The worktree commits are not pushed.'
@@ -376,5 +377,35 @@ describe('SessionActionsMenu', () => {
       profile: undefined,
       session_id: 's1'
     })
+  })
+
+  it('shows the stable remove failure reason returned by the cleanup RPC', async () => {
+    request
+      .mockResolvedValueOnce({
+        allowed: true,
+        reasons: [],
+        removed: false,
+        root_session_id: 's1',
+        path: '/repo/worktrees/s1',
+        branch: 'hermes/session/s1',
+        state: 'ready'
+      })
+      .mockResolvedValueOnce({
+        allowed: false,
+        reasons: ['remove_failed'],
+        removed: false,
+        failure_phase: 'remove',
+        failure_message: 'permission denied'
+      })
+    renderMenu()
+
+    const trigger = screen.getByRole('button', { name: 'Session actions' })
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
+    fireEvent.pointerUp(trigger, { button: 0, pointerType: 'mouse' })
+    fireEvent.click(trigger)
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Clean up worktree' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove worktree' }))
+
+    expect(await screen.findByText('Git could not remove the worktree.')).toBeTruthy()
   })
 })
