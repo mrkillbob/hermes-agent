@@ -858,6 +858,7 @@ def _get_or_create_env(task_id: str):
                 "docker_volumes": config.get("docker_volumes", []),
                 "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
                 "docker_network": config.get("docker_network", True),
+                "docker_isolate_host_data": config.get("docker_isolate_host_data", False),
             }
 
         ssh_config = None

@@ -11934,6 +11934,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "send", "sessions", "setup",
         "skin", "skills", "slack", "status", "sync", "tools", "uninstall", "update",
         "webhook", "whatsapp", "whatsapp-cloud", "worktree", "chat", "secrets", "security",
+        "secure-worker",
         "verify",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
@@ -12878,6 +12879,22 @@ def main():
         return args.func(args)
 
     secrets_parser.set_defaults(func=_dispatch_secrets)
+
+    # =========================================================================
+    # secure-worker command — sanitized remote-model workspace boundary
+    # =========================================================================
+    secure_worker_parser = subparsers.add_parser(
+        "secure-worker",
+        help="Build and audit fail-closed sanitized remote-model workspaces",
+        description=(
+            "Create manifest-bound context packs, render secure local/remote profiles, "
+            "verify proposal diffs, and destroy disposable packs. This command never "
+            "falls back from Docker to the host."
+        ),
+    )
+    from hermes_cli import secure_worker_cli as _secure_worker_cli
+
+    _secure_worker_cli.register_cli(secure_worker_parser)
 
     # =========================================================================
     # egress command — iron-proxy outbound credential-injection firewall

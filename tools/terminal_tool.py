@@ -1741,6 +1741,9 @@ def _get_env_config() -> Dict[str, Any]:
         "docker_env": docker_env,
         "docker_run_as_host_user": os.getenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false").lower() in {"true", "1", "yes"},
         "docker_network": os.getenv("TERMINAL_DOCKER_NETWORK", "true").lower() in {"true", "1", "yes"},
+        "docker_isolate_host_data": os.getenv(
+            "TERMINAL_DOCKER_ISOLATE_HOST_DATA", "false"
+        ).lower() in {"true", "1", "yes"},
         "docker_extra_args": docker_extra_args,
         "docker_shm_size": docker_shm_size,
         # Cross-process container reuse (issue #20561).  The docs claim
@@ -1808,6 +1811,7 @@ def _container_config_from_config(config: Dict[str, Any]) -> dict:
         "docker_extra_args": config.get("docker_extra_args", []),
         "docker_shm_size": config.get("docker_shm_size", "1g"),
         "docker_network": config.get("docker_network", True),
+        "docker_isolate_host_data": config.get("docker_isolate_host_data", False),
         "docker_persist_across_processes": config.get("docker_persist_across_processes", True),
         "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
     }
@@ -1845,6 +1849,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     docker_env = cc.get("docker_env", {})
     docker_extra_args = cc.get("docker_extra_args", [])
     docker_network = cc.get("docker_network", True)
+    docker_isolate_host_data = cc.get("docker_isolate_host_data", False)
 
     if env_type == "local":
         return _LocalEnvironment(cwd=cwd, timeout=timeout)
@@ -1879,6 +1884,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             env=docker_env,
             run_as_host_user=cc.get("docker_run_as_host_user", False),
             network=docker_network,
+            isolate_host_data=docker_isolate_host_data,
             extra_args=docker_extra_args,
             persist_across_processes=(
                 False if session_scoped
