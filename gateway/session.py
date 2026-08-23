@@ -1454,6 +1454,30 @@ class SessionStore:
                 self._conversation_root_leases.pop(root_session_id, None)
         return True
 
+    def reconcile_conversation_root_transition(
+        self,
+        displaced_entry: Any,
+        retained_entry: Any,
+    ) -> bool:
+        """Release only a displaced root that no published route still owns."""
+        displaced_metadata = (
+            displaced_entry
+            if isinstance(displaced_entry, dict)
+            else getattr(displaced_entry, "conversation_worktree", None)
+        ) or {}
+        retained_metadata = (
+            retained_entry
+            if isinstance(retained_entry, dict)
+            else getattr(retained_entry, "conversation_worktree", None)
+        ) or {}
+        displaced_root = str(
+            displaced_metadata.get("root_session_id", "")
+        )
+        retained_root = str(retained_metadata.get("root_session_id", ""))
+        if not displaced_root or displaced_root == retained_root:
+            return False
+        return self.release_conversation_root_lease(displaced_root)
+
     def resolve_task_owned_workspace(
         self, target_session_id: str, persisted_cwd: str
     ) -> tuple[str, Dict[str, str]]:
@@ -3640,40 +3664,47 @@ class SessionStore:
             candidate, conversation_kind=conversation_kind
         )
 
+        lost_race = False
+        winner = None
         with self._lock:
             self._ensure_loaded_locked()
             if self._entries.get(session_key) is not old_entry:
                 # Another reset won while this candidate was being prepared.
                 # Its entry remains authoritative; never overwrite it.
-                return self._entries.get(session_key)
+                lost_race = True
+                winner = self._entries.get(session_key)
+            else:
+                db_end_session_id = old_entry.session_id
+                new_entry = candidate
 
-            db_end_session_id = old_entry.session_id
-            new_entry = candidate
+                self._entries[session_key] = new_entry
+                self._save()
+                _reset_origin_json = None
+                if old_entry.origin is not None:
+                    try:
+                        _reset_origin_json = json.dumps(old_entry.origin.to_dict())
+                    except Exception:
+                        _reset_origin_json = None
+                db_create_kwargs = {
+                    "session_id": session_id,
+                    "source": old_entry.platform.value if old_entry.platform else "unknown",
+                    "user_id": old_entry.origin.user_id if old_entry.origin else None,
+                    "session_key": session_key,
+                    "chat_id": old_entry.origin.chat_id if old_entry.origin else None,
+                    "chat_type": old_entry.origin.chat_type if old_entry.origin else None,
+                    "thread_id": old_entry.origin.thread_id if old_entry.origin else None,
+                    "profile_name": old_entry.origin.profile if old_entry.origin else None,
+                    # Identity + lineage land atomically in the INSERT (#82616,
+                    # #12857) — see the get_or_create twin path.
+                    "origin_json": _reset_origin_json,
+                    "display_name": old_entry.display_name,
+                    "parent_session_id": db_end_session_id,
+                    "model_config": {"_reset_from": db_end_session_id},
+                }
 
-            self._entries[session_key] = new_entry
-            self._save()
-            _reset_origin_json = None
-            if old_entry.origin is not None:
-                try:
-                    _reset_origin_json = json.dumps(old_entry.origin.to_dict())
-                except Exception:
-                    _reset_origin_json = None
-            db_create_kwargs = {
-                "session_id": session_id,
-                "source": old_entry.platform.value if old_entry.platform else "unknown",
-                "user_id": old_entry.origin.user_id if old_entry.origin else None,
-                "session_key": session_key,
-                "chat_id": old_entry.origin.chat_id if old_entry.origin else None,
-                "chat_type": old_entry.origin.chat_type if old_entry.origin else None,
-                "thread_id": old_entry.origin.thread_id if old_entry.origin else None,
-                "profile_name": old_entry.origin.profile if old_entry.origin else None,
-                # Identity + lineage land atomically in the INSERT (#82616,
-                # #12857) — see the get_or_create twin path.
-                "origin_json": _reset_origin_json,
-                "display_name": old_entry.display_name,
-                "parent_session_id": db_end_session_id,
-                "model_config": {"_reset_from": db_end_session_id},
-            }
+        if lost_race:
+            self.reconcile_conversation_root_transition(candidate, winner)
+            return winner
 
         if self._db and db_end_session_id:
             try:
@@ -3853,12 +3884,14 @@ class SessionStore:
                         raise
         except Exception:
             if candidate_lease_acquired and candidate_root_session_id:
-                self.release_conversation_root_lease(candidate_root_session_id)
+                self.reconcile_conversation_root_transition(new_entry, old_entry)
             raise
 
         if lost_race:
             if candidate_lease_acquired and candidate_root_session_id:
-                self.release_conversation_root_lease(candidate_root_session_id)
+                self.reconcile_conversation_root_transition(
+                    new_entry, concurrent_entry
+                )
             return concurrent_entry
 
         if self._db and db_end_session_id:

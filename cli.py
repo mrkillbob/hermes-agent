@@ -2689,7 +2689,10 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
     import re
     import subprocess
     import time
-    from agent.conversation_worktree import conversation_worktree_is_manager_owned
+    from agent.conversation_worktree import (
+        conversation_worktree_is_manager_owned,
+        conversation_worktree_reclaim_guard,
+    )
 
     worktrees_dir = Path(repo_root) / ".worktrees"
     if not worktrees_dir.exists():
@@ -2827,41 +2830,81 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
             logger.debug("Skipping manager-owned conversation worktree: %s", entry.name)
             continue
 
-        if lock_state == "dead":
-            try:
-                subprocess.run(
-                    ["git", "worktree", "unlock", str(entry)],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-                )
-            except Exception as e:
-                logger.debug("Failed to unlock dead worktree %s: %s", entry.name, e)
-
-        # Safe to remove
         try:
-            branch_result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, cwd=str(entry),
-            )
-            branch = branch_result.stdout.strip()
+            with conversation_worktree_reclaim_guard(
+                Path(repo_root), entry
+            ) as manager_owned:
+                if manager_owned is True:
+                    logger.debug(
+                        "Skipping newly manager-owned conversation worktree: %s",
+                        entry.name,
+                    )
+                    continue
+                if manager_owned is None:
+                    logger.debug(
+                        "Skipping worktree with uncertain conversation ownership: %s",
+                        entry.name,
+                    )
+                    continue
 
-            remove_result = subprocess.run(
-                ["git", "worktree", "remove", str(entry), "--force"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, cwd=repo_root,
-            )
-            if remove_result.returncode != 0:
-                # Removal failed — keep the branch so any commits stay
-                # reachable rather than orphaning it.
+                if lock_state == "dead":
+                    try:
+                        subprocess.run(
+                            ["git", "worktree", "unlock", str(entry)],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=10,
+                            cwd=repo_root,
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to unlock dead worktree %s: %s", entry.name, e
+                        )
+
+                branch_result = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5,
+                    cwd=str(entry),
+                )
+                branch = branch_result.stdout.strip()
+
+                remove_result = subprocess.run(
+                    ["git", "worktree", "remove", str(entry), "--force"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                    cwd=repo_root,
+                )
+                if remove_result.returncode != 0:
+                    # Removal failed — keep the branch so any commits stay
+                    # reachable rather than orphaning it.
+                    logger.debug(
+                        "Failed to remove worktree %s: %s",
+                        entry.name,
+                        remove_result.stderr.strip(),
+                    )
+                    continue
+                if branch:
+                    subprocess.run(
+                        ["git", "branch", "-D", branch],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=10,
+                        cwd=repo_root,
+                    )
                 logger.debug(
-                    "Failed to remove worktree %s: %s",
-                    entry.name, remove_result.stderr.strip(),
+                    "Pruned stale worktree: %s (force=%s)", entry.name, force
                 )
-                continue
-            if branch:
-                subprocess.run(
-                    ["git", "branch", "-D", branch],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-                )
-            logger.debug("Pruned stale worktree: %s (force=%s)", entry.name, force)
         except Exception as e:
             logger.debug("Failed to prune worktree %s: %s", entry.name, e)
 

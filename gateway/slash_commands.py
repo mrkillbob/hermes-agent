@@ -216,18 +216,9 @@ class GatewaySlashCommandsMixin:
                     )
         self._evict_cached_agent(session_key)
         if old_entry is not None:
-            old_root = str(
-                (getattr(old_entry, "conversation_worktree", None) or {}).get(
-                    "root_session_id", ""
-                )
+            await self.async_session_store.reconcile_conversation_root_transition(
+                old_entry, new_entry
             )
-            new_root = str(
-                (getattr(new_entry, "conversation_worktree", None) or {}).get(
-                    "root_session_id", ""
-                )
-            )
-            if old_root and old_root != new_root:
-                await self.async_session_store.release_conversation_root_lease(old_root)
 
         # Conversation boundary: clear ALL conversation-scoped per-session
         # state (model/reasoning overrides, one-turn restores, model notes,
@@ -4934,18 +4925,9 @@ class GatewaySlashCommandsMixin:
         # memory provider, which cached `_session_id` during initialize())
         # keeps writing into the wrong session's record. See #6672.
         self._evict_cached_agent(session_key)
-        old_root = str(
-            (getattr(current_entry, "conversation_worktree", None) or {}).get(
-                "root_session_id", ""
-            )
+        await self.async_session_store.reconcile_conversation_root_transition(
+            current_entry, new_entry
         )
-        new_root = str(
-            (getattr(new_entry, "conversation_worktree", None) or {}).get(
-                "root_session_id", ""
-            )
-        )
-        if old_root and old_root != new_root:
-            await self.async_session_store.release_conversation_root_lease(old_root)
 
         # Get the title for confirmation
         title = await self._session_db.get_session_title(target_id) or name
@@ -5184,18 +5166,9 @@ class GatewaySlashCommandsMixin:
 
         # Evict any cached agent for this session
         self._evict_cached_agent(session_key)
-        previous_root = str(
-            (getattr(current_entry, "conversation_worktree", None) or {}).get(
-                "root_session_id", ""
-            )
+        await self.async_session_store.reconcile_conversation_root_transition(
+            current_entry, new_entry
         )
-        branch_root = str(
-            (getattr(new_entry, "conversation_worktree", None) or {}).get(
-                "root_session_id", ""
-            )
-        )
-        if previous_root and previous_root != branch_root:
-            await self.async_session_store.release_conversation_root_lease(previous_root)
 
         msg_count = len([m for m in history if m.get("role") == "user"])
         key = "gateway.branch.branched_one" if msg_count == 1 else "gateway.branch.branched_many"

@@ -237,6 +237,28 @@ def test_new_binds_distinct_root_before_replacing_old_session(store, manager, so
     assert manager.bound_roots == [first.session_id, second.session_id]
 
 
+def test_concurrent_reset_loser_releases_unpublished_candidate(
+    store, manager, source, monkeypatch
+):
+    first = store.get_or_create_session(source)
+    winner = SimpleNamespace(
+        session_id="winner",
+        conversation_worktree=dict(first.conversation_worktree),
+    )
+    original_bind = manager.bind_new_root_session
+
+    def bind_then_publish_winner(root_session_id, *, conversation_kind):
+        binding = original_bind(root_session_id, conversation_kind=conversation_kind)
+        with store._lock:
+            store._entries[first.session_key] = winner
+        return binding
+
+    monkeypatch.setattr(manager, "bind_new_root_session", bind_then_publish_winner)
+
+    assert store.reset_session(first.session_key) is winner
+    assert list(store._conversation_root_leases) == [first.session_id]
+
+
 def test_failed_new_preserves_old_gateway_boundary(store, manager, source):
     """Publishing reset state before binding would destroy the assertions below."""
     first = store.get_or_create_session(source)

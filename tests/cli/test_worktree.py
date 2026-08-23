@@ -951,6 +951,31 @@ class TestWorktreeLockReaping:
         finally:
             db.close()
 
+    def test_manager_ownership_appearing_after_classification_blocks_mutation(
+        self, git_repo, monkeypatch
+    ):
+        import cli
+        from agent import conversation_worktree as worktrees
+
+        wt = self._mk(cli, git_repo, "hermes-owned-race", age_h=100)
+        inspections = 0
+
+        def ownership_appears(_path):
+            nonlocal inspections
+            inspections += 1
+            return inspections >= 2
+
+        monkeypatch.setattr(
+            worktrees, "conversation_worktree_is_manager_owned", ownership_appears
+        )
+
+        cli._prune_stale_worktrees(str(git_repo))
+
+        assert inspections >= 2
+        assert wt.exists(), (
+            "startup mutation must re-inspect under the conversation manager lock"
+        )
+
     def test_dirty_survives_over_72h(self, git_repo):
         import cli
         wt = self._mk(cli, git_repo, "hermes-dirty72", pid=None, dirty=True, age_h=100)

@@ -13829,11 +13829,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             conversation_worktree=handoff_binding,
         )
         if switched is None:
-            handoff_root = str(handoff_binding.get("root_session_id", ""))
-            if handoff_root:
-                await self.async_session_store.release_conversation_root_lease(
-                    handoff_root
-                )
+            await self.async_session_store.reconcile_conversation_root_transition(
+                handoff_binding, None
+            )
             raise RuntimeError(
                 f"could not switch session key {session_key} → {cli_session_id}"
             )
@@ -13845,14 +13843,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Cancel any in-flight running-agent state for the destination key
         # so the synthetic turn isn't queued behind a stale running flag.
         self._release_running_agent_state(session_key)
-        prior_root = str(
-            (getattr(prior_entry, "conversation_worktree", None) or {}).get(
-                "root_session_id", ""
-            )
+        await self.async_session_store.reconcile_conversation_root_transition(
+            prior_entry, switched
         )
-        current_root = str(handoff_binding.get("root_session_id", ""))
-        if prior_root and prior_root != current_root:
-            await self.async_session_store.release_conversation_root_lease(prior_root)
 
         synthetic_text = (
             f"[Session was just handed off from CLI (\"{cli_title}\") to this "
@@ -16432,6 +16425,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 target_session_id,
             )
             return None
+
+        await self.async_session_store.reconcile_conversation_root_transition(
+            session_entry, switched
+        )
 
         logger.info(
             "Pinned async-delegation completion to owning session %s "
@@ -20834,6 +20831,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 new_entry = await self.async_session_store.reset_session(session_key)
                 self._evict_cached_agent(session_key)
+                await self.async_session_store.reconcile_conversation_root_transition(
+                    session_entry, new_entry
+                )
                 # Conversation boundary: one funnel call clears every
                 # conversation-scoped per-session dict (#58403 and siblings).
                 # See _CONVERSATION_SCOPED_STATE.
