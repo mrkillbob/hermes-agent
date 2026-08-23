@@ -1,6 +1,7 @@
 """Tests for project-local skill discovery (skills.trusted_project_dirs)."""
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,48 @@ class TestTrustGate:
         monkeypatch.chdir(repo)
         su._external_dirs_cache_clear()
         assert su.get_untrusted_project_skills_root() is None
+
+    def test_trust_inherits_to_linked_worktree_of_same_repository(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / ".hermes"
+        (home / "skills").mkdir(parents=True)
+        config = home / "config.yaml"
+        primary = tmp_path / "primary"
+        primary.mkdir()
+        subprocess.run(["git", "init", "-q", str(primary)], check=True)
+        skill = primary / ".agents" / "skills" / "repo-skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: repo-skill\ndescription: from repo\n---\nbody\n"
+        )
+        subprocess.run(["git", "-C", str(primary), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(primary),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+        linked = tmp_path / "linked"
+        subprocess.run(
+            ["git", "-C", str(primary), "worktree", "add", "-q", str(linked)],
+            check=True,
+        )
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.chdir(linked)
+        _trust(config, primary)
+
+        assert su.is_project_root_trusted(linked) is True
+        assert (linked / ".agents" / "skills").resolve() in su.get_project_skills_dirs()
 
 
 class TestPrecedence:

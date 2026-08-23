@@ -721,10 +721,42 @@ def _project_trusted_dirs_from_config() -> Set[Path]:
     return result
 
 
-def is_project_root_trusted(root: Path) -> bool:
-    """True when *root* is listed in ``skills.trusted_project_dirs``."""
+def _git_common_dir(root: Path) -> Optional[Path]:
+    """Resolve the common Git directory shared by a checkout and its worktrees."""
+    marker = Path(root) / ".git"
     try:
-        return Path(root).resolve() in _project_trusted_dirs_from_config()
+        if marker.is_dir():
+            return marker.resolve()
+        if not marker.is_file():
+            return None
+        prefix = "gitdir:"
+        line = marker.read_text(encoding="utf-8").strip()
+        if not line.casefold().startswith(prefix):
+            return None
+        git_dir = Path(line[len(prefix) :].strip())
+        if not git_dir.is_absolute():
+            git_dir = marker.parent / git_dir
+        git_dir = git_dir.resolve()
+        common_marker = git_dir / "commondir"
+        if not common_marker.is_file():
+            return git_dir
+        common = Path(common_marker.read_text(encoding="utf-8").strip())
+        return (common if common.is_absolute() else git_dir / common).resolve()
+    except (OSError, UnicodeError):
+        return None
+
+
+def is_project_root_trusted(root: Path) -> bool:
+    """True when *root* or its linked Git repository is explicitly trusted."""
+    try:
+        resolved = Path(root).resolve()
+        trusted = _project_trusted_dirs_from_config()
+        if resolved in trusted:
+            return True
+        common_dir = _git_common_dir(resolved)
+        return common_dir is not None and any(
+            _git_common_dir(candidate) == common_dir for candidate in trusted
+        )
     except OSError:
         return False
 

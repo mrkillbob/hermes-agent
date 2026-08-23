@@ -425,6 +425,7 @@ def _graph_task_ids(conn, root_id: str) -> tuple[list[str], bool]:
 
 def _query_terms(request: str) -> set[str]:
     without_card_ids = _TASK_ID_RE.sub(" ", request.casefold())
+    without_card_ids = re.sub(r"\bburn\s+down(s?)\b", r"burndown\1", without_card_ids)
     return {
         word for word in _WORD_RE.findall(without_card_ids) if word not in _STOP_WORDS
     }
@@ -729,7 +730,10 @@ def resolve_progress_query(
                 return ProgressQueryResult(
                     True,
                     append_vault_context(
-                        load_live_config(), response, board=board, root_task_ids=value
+                        load_live_config(),
+                        response,
+                        board=board,
+                        root_task_ids=[task.id for task in value],
                     ),
                     "resolved_multiple",
                 )
