@@ -48,6 +48,22 @@ class ConversationWorktreeBinding:
     repo_common_dir: Path
 
 
+@dataclass(frozen=True)
+class CleanupVerdict:
+    """Complete fail-closed status for one explicit cleanup request."""
+
+    allowed: bool
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CleanupResult:
+    """Result of an explicit cleanup attempt and the verdict that governed it."""
+
+    removed: bool
+    verdict: CleanupVerdict
+
+
 class ConversationWorktreeManager:
     """Own the Git lifecycle for interactive root-session worktrees only."""
 
@@ -153,6 +169,233 @@ class ConversationWorktreeManager:
         """Resolve only an already-ready root binding; never create a new one."""
         record = self._db.get_conversation_worktree(root_session_id)
         return self._validated_ready_binding(record) if record is not None else None
+
+    def inspect_cleanup(
+        self,
+        root_session_id: str,
+        *,
+        active_session_bound: bool = False,
+    ) -> CleanupVerdict:
+        """Inspect one exact owned binding without changing Git or ledger state."""
+        record = self._db.get_conversation_worktree(root_session_id)
+        if record is None:
+            return CleanupVerdict(False, ("unknown",))
+        return self._inspect_cleanup_record(
+            record,
+            active_session_bound=active_session_bound,
+        )
+
+    def remove_after_explicit_request(
+        self,
+        root_session_id: str,
+        *,
+        active_session_bound: bool = False,
+    ) -> CleanupResult:
+        """Remove only a re-inspected safe binding after an explicit request."""
+        record = self._db.get_conversation_worktree(root_session_id)
+        if record is None:
+            verdict = CleanupVerdict(False, ("unknown",))
+            return CleanupResult(False, verdict)
+
+        try:
+            source, source_common_dir = self._source_repository_identity()
+            with self._repository_lock(source_common_dir):
+                with self._root_lock(source_common_dir, root_session_id):
+                    current = self._db.get_conversation_worktree(root_session_id)
+                    if current is None:
+                        verdict = CleanupVerdict(False, ("unknown",))
+                        return CleanupResult(False, verdict)
+                    verdict = self._inspect_cleanup_record(
+                        current,
+                        active_session_bound=active_session_bound,
+                        source_identity=(source, source_common_dir),
+                    )
+                    if not verdict.allowed:
+                        return CleanupResult(False, verdict)
+
+                    path = Path(current.worktree_path).resolve()
+                    removed = self._run_git(
+                        source,
+                        ["worktree", "remove", str(path)],
+                        self._policy.create_timeout,
+                        "cleanup",
+                    )
+                    if removed.returncode != 0:
+                        return CleanupResult(False, CleanupVerdict(False, ("unknown",)))
+                    if path.exists() or self._listed_worktree(source, path) is not None:
+                        return CleanupResult(False, CleanupVerdict(False, ("unknown",)))
+
+                    self._db.mark_conversation_worktree_removed(root_session_id)
+                    self._event(
+                        "conversation_worktree.removed",
+                        root_session_id=root_session_id,
+                    )
+                    return CleanupResult(True, verdict)
+        except ConversationWorktreeError:
+            return CleanupResult(False, CleanupVerdict(False, ("unknown",)))
+        except Exception:
+            logger.exception("conversation_worktree.cleanup_failed")
+            return CleanupResult(False, CleanupVerdict(False, ("unknown",)))
+
+    def _inspect_cleanup_record(
+        self,
+        record: ConversationWorktreeRecord,
+        *,
+        active_session_bound: bool,
+        source_identity: tuple[Path, Path] | None = None,
+    ) -> CleanupVerdict:
+        reasons: list[str] = []
+
+        def block(reason: str) -> None:
+            if reason not in reasons:
+                reasons.append(reason)
+
+        try:
+            source, source_common_dir = source_identity or self._source_repository_identity()
+            expected_path, expected_branch = self._expected_identity(record.root_session_id)
+            if (
+                record.state not in {"ready", "retained"}
+                or Path(record.worktree_path).resolve() != expected_path.resolve()
+                or record.branch != expected_branch
+                or Path(record.repo_common_dir).resolve() != source_common_dir.resolve()
+                or not expected_path.is_dir()
+            ):
+                return CleanupVerdict(False, ("mismatched identity",))
+
+            listed = self._listed_worktree(source, expected_path)
+            if listed != f"refs/heads/{record.branch}":
+                return CleanupVerdict(False, ("mismatched identity",))
+
+            actual_branch = self._git_stdout(
+                expected_path, ["branch", "--show-current"], "cleanup"
+            )
+            actual_common = Path(
+                self._git_stdout(
+                    expected_path,
+                    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                    "cleanup",
+                )
+            ).resolve()
+            base_ancestor = self._run_git(
+                expected_path,
+                ["merge-base", "--is-ancestor", record.base_commit, "HEAD"],
+                self._policy.create_timeout,
+                "cleanup",
+            )
+            if (
+                actual_branch != record.branch
+                or actual_common != source_common_dir.resolve()
+                or base_ancestor.returncode != 0
+            ):
+                return CleanupVerdict(False, ("mismatched identity",))
+
+            if active_session_bound:
+                block("active")
+
+            status = self._run_git(
+                expected_path,
+                ["status", "--porcelain", "--untracked-files=all"],
+                self._policy.create_timeout,
+                "cleanup",
+            )
+            if status.returncode != 0:
+                block("unknown")
+            elif status.stdout.strip():
+                block("dirty")
+
+            if self._git_operation_in_progress(expected_path):
+                block("in-progress")
+
+            head = self._git_stdout(expected_path, ["rev-parse", "HEAD"], "cleanup")
+            integration_head = self._git_stdout(source, ["rev-parse", "HEAD"], "cleanup")
+            integrated = self._run_git(
+                source,
+                ["merge-base", "--is-ancestor", head, integration_head],
+                self._policy.create_timeout,
+                "cleanup",
+            )
+            if integrated.returncode == 1:
+                block("unintegrated")
+            elif integrated.returncode != 0:
+                block("unknown")
+
+            remotes = self._run_git(
+                expected_path,
+                ["remote"],
+                self._policy.create_timeout,
+                "cleanup",
+            )
+            if remotes.returncode != 0:
+                block("unknown")
+            elif not remotes.stdout.strip():
+                block("missing remote evidence")
+            else:
+                remote_refs = self._run_git(
+                    expected_path,
+                    [
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        "--contains",
+                        head,
+                        "refs/remotes",
+                    ],
+                    self._policy.create_timeout,
+                    "cleanup",
+                )
+                if remote_refs.returncode != 0:
+                    block("unknown")
+                elif not remote_refs.stdout.strip():
+                    block("unpushed")
+        except Exception:
+            block("unknown")
+
+        return CleanupVerdict(not reasons, tuple(reasons))
+
+    def _listed_worktree(self, source: Path, expected_path: Path) -> str | None:
+        result = self._run_git(
+            source,
+            ["worktree", "list", "--porcelain"],
+            self._policy.create_timeout,
+            "cleanup",
+        )
+        if result.returncode != 0:
+            raise ConversationWorktreeError(
+                "git worktree inspection failed", phase="cleanup"
+            )
+        path: Path | None = None
+        branch: str | None = None
+        for line in [*result.stdout.splitlines(), ""]:
+            if line.startswith("worktree "):
+                path = Path(line.removeprefix("worktree ")).resolve()
+                branch = None
+            elif line.startswith("branch "):
+                branch = line.removeprefix("branch ").strip()
+            elif not line and path is not None:
+                if path == expected_path.resolve():
+                    return branch
+                path = None
+                branch = None
+        return None
+
+    def _git_operation_in_progress(self, path: Path) -> bool:
+        markers = (
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "BISECT_LOG",
+            "rebase-apply",
+            "rebase-merge",
+            "sequencer",
+        )
+        for marker in markers:
+            marker_path = Path(
+                self._git_stdout(path, ["rev-parse", "--git-path", marker], "cleanup")
+            )
+            if not marker_path.is_absolute():
+                marker_path = path / marker_path
+            if marker_path.exists():
+                return True
+        return False
 
     def _source_repository_identity(self) -> tuple[Path, Path]:
         source = self._policy.source_worktree

@@ -14,6 +14,20 @@ from __future__ import annotations
 from typing import Optional
 
 
+def conversation_cleanup_status(verdict, record, *, removed: bool = False) -> dict:
+    """Return the complete UI-safe cleanup status without dropping blockers."""
+    return {
+        "allowed": bool(verdict.allowed),
+        "reasons": [str(reason) for reason in verdict.reasons],
+        "removed": bool(removed),
+        "root_session_id": str(record.root_session_id),
+        "path": str(record.worktree_path),
+        "branch": str(record.branch),
+        "base_commit": str(record.base_commit),
+        "state": str(record.state),
+    }
+
+
 def _repo_root() -> Optional[str]:
     import cli as _cli
 
