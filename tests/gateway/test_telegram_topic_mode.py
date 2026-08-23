@@ -386,7 +386,9 @@ async def test_group_new_keeps_existing_reset_semantics_when_dm_topic_mode_enabl
 
     assert "Started a new Hermes session in this topic" not in result
     assert "parallel work" not in result
-    runner.session_store.reset_session.assert_called_once_with(group_key)
+    runner.session_store.reset_session.assert_called_once_with(
+        group_key, conversation_kind="interactive"
+    )
 
 
 @pytest.mark.asyncio
