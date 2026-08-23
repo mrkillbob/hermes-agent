@@ -4,6 +4,7 @@ import type { NavigateFunction } from 'react-router'
 
 import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
+import { setWorkspaceScope } from '@/components/pane-shell/workspace-scope'
 import { deleteSession, getAllSessionMessages, getLatestSessionMessages, setSessionArchived } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { type ChatMessage, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
@@ -23,6 +24,7 @@ import {
   $newChatProfile,
   $newChatRoute,
   $showAllProfiles,
+  type AgentProfileRoute,
   ensureGatewayAgent,
   ensureGatewayProfile,
   normalizeProfileKey
@@ -72,7 +74,11 @@ import {
   setWorkspaceCwdOwner,
   setYoloActive
 } from '@/store/session'
-import { requestForSessionProfile, type SessionOwnerScope, type SessionProfileRoute } from '@/store/session-request-router'
+import {
+  requestForSessionProfile,
+  type SessionOwnerScope,
+  type SessionProfileRoute
+} from '@/store/session-request-router'
 import {
   $sessionTiles,
   closeSessionTile,
@@ -80,6 +86,7 @@ import {
   openSessionTile,
   patchSessionTile,
   publishSessionState,
+  type SessionTileWorkspaceScope,
   type TileDock
 } from '@/store/session-states'
 import { broadcastSessionsChanged } from '@/store/session-sync'
@@ -567,6 +574,7 @@ export function useSessionActions({
   const selectSidebarItem = useCallback(
     (item: SidebarNavItem) => {
       if (item.action === 'new-session') {
+        setWorkspaceScope('sessions')
         startFreshSessionDraft()
 
         return
@@ -590,15 +598,28 @@ export function useSessionActions({
    *  list (Cursor-style draft tab); it surfaces on the next refresh once the
    *  first message persists a turn. "Open in split" keeps the listed behavior. */
   const openNewSessionTile = useCallback(
-    async (dir: TileDock = 'right', options?: { cwd?: null | string; listed?: boolean }) => {
+    async (
+      dir: TileDock = 'right',
+      options?: {
+        cwd?: null | string
+        listed?: boolean
+        route?: AgentProfileRoute | null
+        workspaceScope?: SessionTileWorkspaceScope
+      }
+    ) => {
       const listed = options?.listed ?? true
 
       try {
         // Fresh tile → the caller's workspace when one was named (the sidebar
         // "+" on a project/worktree lane), else the resolved new-session cwd
         // (project scope → configured default).
-        const capturedRoute = $newChatRoute.get()
-        const params = await desktopSessionCreateParams((options?.cwd || resolveNewSessionCwd()).trim(), capturedRoute)
+        const capturedRoute = options?.route === undefined ? $newChatRoute.get() : options.route
+        const workspaceScope = options?.workspaceScope ?? { workspaceMode: 'sessions' }
+
+        const params = {
+          ...(await desktopSessionCreateParams((options?.cwd || resolveNewSessionCwd()).trim(), capturedRoute)),
+          ...(workspaceScope.workspaceMode === 'bots' ? { hidden: true } : {})
+        }
 
         const created = capturedRoute
           ? await requestGatewayForAgent<SessionCreateResponse>(
@@ -612,7 +633,13 @@ export function useSessionActions({
         const stored = created.stored_session_id
 
         if (!stored) {
-          await requestGateway('session.close', { session_id: created.session_id }).catch(() => undefined)
+          const closeCreated = capturedRoute
+            ? requestGatewayForAgent(capturedRoute.connectionId, capturedRoute.profile, 'session.close', {
+                session_id: created.session_id
+              })
+            : requestGateway('session.close', { session_id: created.session_id })
+
+          await closeCreated.catch(() => undefined)
           notify({ kind: 'error', title: copy.sessionUnavailable, message: copy.createSessionFailed })
 
           return
@@ -637,7 +664,7 @@ export function useSessionActions({
         const runtimeInfo = applyRuntimeInfo(created.info, { foreground: false })
         updateSessionState(created.session_id, state => (runtimeInfo ? { ...state, ...runtimeInfo } : state), stored)
 
-        openSessionTile(stored, dir)
+        openSessionTile(stored, dir, undefined, undefined, workspaceScope)
         patchSessionTile(stored, { runtimeId: created.session_id })
 
         if (dir === 'center' && runtimeInfo?.cwd) {
@@ -774,7 +801,8 @@ export function useSessionActions({
       // A row spliced from a CONNECTED registry gateway (#88880) carries its
       // owning connection — activate THAT gateway, not a same-named local
       // profile. Rows without the tag keep the legacy profile path.
-      const sessionOwner: SessionOwnerScope = ownerRoute ||
+      const sessionOwner: SessionOwnerScope =
+        ownerRoute ||
         (storedForProfile?.connection_id
           ? {
               connectionId: storedForProfile.connection_id,
@@ -1821,12 +1849,9 @@ export function useSessionActions({
 
       try {
         if (closingRuntimeId) {
-          await requestForSessionProfile(
-            removedOwner,
-            requestGateway,
-            'session.close',
-            { session_id: closingRuntimeId }
-          ).catch(() => undefined)
+          await requestForSessionProfile(removedOwner, requestGateway, 'session.close', {
+            session_id: closingRuntimeId
+          }).catch(() => undefined)
         }
 
         await deleteSession(storedSessionId, removedOwner)

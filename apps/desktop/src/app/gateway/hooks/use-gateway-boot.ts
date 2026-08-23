@@ -1,6 +1,7 @@
 import { isGatewayReauthRequired, resolveGatewayWsUrl } from '@hermes/shared'
 import { useEffect, useRef } from 'react'
 
+import { shouldApplyPostBootProgressError } from '@/components/boot-failure-reauth'
 import type { HermesConnection } from '@/global'
 import { HermesGateway } from '@/hermes'
 import { translateNow } from '@/i18n'
@@ -61,16 +62,17 @@ import type { RpcEvent } from '@/types/hermes'
 
 import { stashGatewaySurvivor, survivorIsStale, takeGatewaySurvivor } from './gateway-hmr-survivor'
 
-// After the reconnect loop has been failing for this long, raise a recoverable
-// boot error. Otherwise a dropped remote gateway loops the backoff forever
-// behind the fullscreen CONNECTING overlay with no way to reach Settings /
-// sign in / switch to local — the "lost connection breaks the app" dead end.
-// The next successful reconnect clears it. Time-based (not attempt-count)
-// because the full-jitter backoff makes attempt counts a meaningless clock:
-// six jittered attempts can elapse in ~9s, while the old deterministic
-// 1→15s ladder took ~45s to reach six failures — this threshold keeps that
-// original ~45s calibration.
-const RECONNECT_ESCALATE_AFTER_MS = 45_000
+// After the reconnect loop has been failing for this long, raise a NON-blocking
+// warning toast. Full-screen BootFailureOverlay used to lock the user out of
+// reading/drafting for the whole blip even though the transcript is still on
+// screen underneath. Confirmed reauth still escalates to the overlay (Sign in
+// is required). Time-based (not attempt-count) because full-jitter backoff
+// makes attempt counts a meaningless clock.
+//
+// 5 minutes (not the historical ~45s) so brief transport weather — ticket mint
+// flaps, sleep/wake, Wi‑Fi blips that self-heal in 1–3 minutes — never even
+// toast. Chat stays readable/draftable the whole time either way.
+const RECONNECT_ESCALATE_AFTER_MS = 300_000
 
 // Bounded self-heal for a failed REMOTE boot (#82679): when the primary boot
 // fails on a transient remote fault (dropped SSH/HTTP registered connection,
@@ -160,9 +162,8 @@ export function useGatewayBoot({
     // identical error toasts (and their haptics). Reset on the next clean open.
     let reauthNotified = false
     // Raised once the reconnect loop has been failing for
-    // RECONNECT_ESCALATE_AFTER_MS so the recovery overlay replaces the
-    // dead-end CONNECTING screen. Reset on a clean open or a manual/
-    // wake-driven reconnect.
+    // RECONNECT_ESCALATE_AFTER_MS so we fire a single non-blocking toast.
+    // Reset on a clean open or a manual/wake-driven reconnect.
     let escalated = false
     // Bounded automatic boot retry for transient REMOTE failures (#82679).
     let bootRetryAttempt = 0
@@ -264,11 +265,14 @@ export function useGatewayBoot({
         await callbacksRef.current.refreshSessions().catch(() => undefined)
       } catch (err) {
         // OAuth session expired mid-reconnect: surface the actionable "sign in
-        // again" message once instead of silently looping the backoff against a
-        // ticket that can never succeed. Transport failures fall through to the
-        // backoff in the finally block below.
+        // again" recovery overlay once instead of silently looping the backoff
+        // against a ticket that can never succeed. Transport failures fall
+        // through to the backoff in the finally block below — they must NOT
+        // take the full-screen "couldn't start" path (locks reading/drafting).
         if (!cancelled && isGatewayReauthRequired(err) && !reauthNotified) {
           reauthNotified = true
+          const message = err instanceof Error ? err.message : String(err)
+          failDesktopBoot(message)
           notifyError(err, translateNow('boot.errors.gatewaySignInRequired'))
         }
       } finally {
@@ -281,7 +285,14 @@ export function useGatewayBoot({
 
           if (Date.now() - reconnectFailingSince >= RECONNECT_ESCALATE_AFTER_MS && !escalated) {
             escalated = true
-            failDesktopBoot(translateNow('boot.errors.gatewayConnectionLost'))
+            // Non-blocking: chat stays readable/draftable while we keep retrying.
+            // Settings / Gateway menu remain reachable without a modal lockout.
+            notify({
+              kind: 'warning',
+              title: translateNow('boot.errors.gatewayConnectionLost'),
+              message: translateNow('boot.errors.gatewayConnectionLostDetail'),
+              durationMs: 0
+            })
           }
 
           scheduleReconnect()
@@ -428,9 +439,12 @@ export function useGatewayBoot({
 
     const offBootProgress = desktop.onBootProgress(payload => {
       // Soft switch / post-boot startHermes re-emits progress — ignore so the
-      // cold-boot CONNECTING overlay stays down. Errors still surface.
+      // cold-boot CONNECTING overlay stays down. Post-boot errors are gated:
+      // only confirmed reauth takes the full-screen recovery surface. Transient
+      // ticket-mint / host-unreachable failures must stay in the reconnect loop
+      // (otherwise a 1–3 min blip bricks reading/drafting behind "couldn't start").
       if ($gatewaySwitching.get() || bootCompleted) {
-        if (payload.error) {
+        if (payload.error && shouldApplyPostBootProgressError(payload.error)) {
           applyDesktopBootProgress(payload)
         }
 

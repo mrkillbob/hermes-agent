@@ -22,6 +22,7 @@ import os
 import random
 import re
 import ssl
+import sys
 import time
 from typing import Any, Dict, List, Optional
 
@@ -270,6 +271,39 @@ _LOCAL_PROCESSING_MODULES = frozenset({
 _API_CALL_MODULES = frozenset({
     "chat_completion_helpers",
 })
+
+# Maximum total outer-loop exceptions tolerated within one user turn before
+# the loop gives up (#92450). The turn budget is unlimited by default
+# (``max_iterations = sys.maxsize``), so the historical "near the limit"
+# guard no longer stops a turn whose outer loop keeps raising: permanent
+# failures spun at ~64 retries/s, pegged a core, and overwrote the rotated
+# agent.log history (days of diagnostic context) within minutes. The inner
+# retry/fallback machinery owns transient API recovery and terminates on its
+# own; only exceptions that ESCAPE it reach this bound, so the cap can be
+# small. Still scaled down by a tiny explicit ``max_iterations`` so a
+# manually bounded budget keeps governing.
+_MAX_OUTER_LOOP_ERRORS = 8
+
+
+def _is_interpreter_shutdown_error(exc: Exception) -> bool:
+    """Check if *exc* is a fatal interpreter-shutdown failure.
+
+    During teardown, ``concurrent.futures`` refuses new work with
+    ``RuntimeError: cannot schedule new futures after interpreter shutdown``
+    (or the shorter ``... after shutdown`` variant from a plain
+    ThreadPoolExecutor).  Both are documented in #58720.
+
+    Delegates to the shared predicate in ``tools.interpreter_shutdown``
+    (same home as cron delivery and concurrent tool submission) so the
+    shutdown-race bug class has one text-matching site. Keeps the
+    RuntimeError type gate from the original (#93269): unlike the raw
+    predicate, a ValueError carrying similar text must not match here.
+    """
+    if isinstance(exc, RuntimeError):
+        from tools.interpreter_shutdown import interpreter_shutting_down
+
+        return interpreter_shutting_down(exc)
+    return False
 
 
 def _moa_client_consumes_prepared_request(client: Any) -> bool:
@@ -1896,6 +1930,8 @@ def run_conversation(
     failed = False
     codex_ack_continuations = 0
     length_continue_retries = 0
+    # Total outer-loop exceptions this turn (#92450) — see _MAX_OUTER_LOOP_ERRORS.
+    _outer_error_count = 0
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
@@ -4655,6 +4691,39 @@ def run_conversation(
 
                 status_code = getattr(api_error, "status_code", None)
                 error_context = agent._extract_api_error_context(api_error)
+
+                # ── Interpreter finalization: abandon immediately ──
+                # The process is exiting (TUI quit, SIGTERM, one-shot done)
+                # while this turn — typically the post-turn review fork's
+                # daemon thread — is mid-flight. Retries, credential
+                # rotation, and fallbacks are all futile ("cannot schedule
+                # new futures..."), and the buffered ⚠️/❌ retry trace spams
+                # the shell after the TUI already exited. End the turn with
+                # a single log line: no print, no traceback, no debug dump,
+                # no retry. Same class as cron delivery (#55924/#58720) and
+                # concurrent tool submission — shared predicate.
+                from tools.interpreter_shutdown import interpreter_shutting_down
+
+                if interpreter_shutting_down(api_error):
+                    logger.warning(
+                        "%sInterpreter is shutting down — abandoning turn "
+                        "during API call #%d (%s)",
+                        agent.log_prefix, api_call_count, api_error,
+                    )
+                    _shutdown_summary = (
+                        "Turn abandoned: the process was shutting down "
+                        "before the model call could complete."
+                    )
+                    return {
+                        "final_response": _shutdown_summary,
+                        "messages": messages,
+                        "api_calls": api_call_count,
+                        "completed": False,
+                        "failed": True,
+                        "error": _shutdown_summary,
+                        "failure_reason": "interpreter_shutdown",
+                        "failure_retryable": False,
+                    }
 
                 # ── Classify the error for structured recovery decisions ──
                 _compressor = getattr(agent, "context_compressor", None)
@@ -8298,6 +8367,11 @@ def run_conversation(
                 break
             
         except Exception as e:
+            # Count every escaped exception against the per-turn bound before
+            # classification — permanent failures must terminate even when the
+            # turn budget is unlimited (#92450).
+            _outer_error_count += 1
+
             # Phase-aware error classification. The huge outer try/except spans
             # both the actual API request and all local post-processing of the
             # returned assistant message. Deterministic local bugs (e.g.
@@ -8309,6 +8383,43 @@ def run_conversation(
             # local post-processing helpers and never entered the interruptible
             # API-call helpers, it is almost certainly a local processing bug.
             # (#66267)
+            #
+            # Interpreter shutdown: if the process is tearing down, every
+            # executor-backed operation (API call, tool dispatch, memory sync)
+            # raises ``RuntimeError: cannot schedule new futures after
+            # interpreter shutdown``. Retrying is pointless — the executor is
+            # gone for good — and each retry just spams another traceback.
+            # Break immediately so the turn exits cleanly. (#93217)
+            if sys.is_finalizing() or _is_interpreter_shutdown_error(e):
+                error_msg = (
+                    f"Interpreter is shutting down — cannot continue "
+                    f"(API call #{api_call_count}): {e}"
+                )
+                try:
+                    agent._safe_print(f"❌ {error_msg}")
+                except (OSError, ValueError):
+                    pass
+                logger.warning(error_msg)
+                # Best-effort persist — the executor is dying, so this may
+                # raise the same RuntimeError.  Don't let that mask the
+                # shutdown exit.  finalize_turn will retry the persist.
+                try:
+                    agent._persist_session(messages, conversation_history)
+                except Exception:
+                    pass
+                _turn_exit_reason = "interpreter_shutdown"
+                final_response = (
+                    "Session is shutting down. Your conversation can be "
+                    "resumed with: hermes --resume <session-id>"
+                )
+                # Don't append the assistant message here — a thinking-prefill
+                # or interim assistant may already be the tail, and appending
+                # would create assistant→assistant.  finalize_turn handles
+                # this case safely (lines 341-353: appends only when
+                # _tail_role != "assistant"), matching the pattern at other
+                # break sites that set final_response without appending.
+                break
+
             tb_module_names: set[str] = set()
             _tb = e.__traceback__
             while _tb is not None:
@@ -8328,10 +8439,20 @@ def run_conversation(
                 )
             else:
                 error_msg = f"Error during OpenAI-compatible API call #{api_call_count}: {str(e)}"
-            try:
-                print(f"❌ {error_msg}")
-            except (OSError, ValueError):
+            # The background-review fork sets suppress_status_output=True so
+            # lifecycle noise never reaches the user's terminal — but this
+            # bare print() bypassed it, leaking ❌ lines onto the shell after
+            # the TUI exited. Honor the same contract _vprint enforces
+            # (quiet_mode -q still shows hard failures, matching force=True
+            # semantics; suppress_status_output silences them). The
+            # logger.exception below still captures the full traceback.
+            if getattr(agent, "suppress_status_output", False):
                 logger.error(error_msg)
+            else:
+                try:
+                    print(f"❌ {error_msg}")
+                except (OSError, ValueError):
+                    logger.error(error_msg)
 
             # Emit the full traceback at ERROR level so it lands in both
             # agent.log AND errors.log.  Previously this was logged at DEBUG,
@@ -8376,20 +8497,33 @@ def run_conversation(
 
             # If we're near the limit, break to avoid infinite loops.
             # Local processing errors are deterministic — stop immediately
-            # rather than retrying until the budget is exhausted.
+            # rather than retrying until the budget is exhausted. Repeated
+            # outer-loop errors stop after a small per-turn cap: with
+            # max_iterations now unlimited by default, a permanent failure
+            # would otherwise spin forever and overwrite the rotated log
+            # history within minutes (#92450).
+            _outer_error_cap = min(_MAX_OUTER_LOOP_ERRORS, max(1, agent.max_iterations))
             if (
                 _is_local_processing_error
                 or api_call_count >= agent.max_iterations - 1
+                or _outer_error_count >= _outer_error_cap
             ):
                 if _is_local_processing_error:
                     _turn_exit_reason = f"local_processing_error({error_msg[:80]})"
                     final_response = f"I apologize, but I encountered an error while processing the model response: {error_msg}"
+                elif _outer_error_count >= _outer_error_cap:
+                    failed = True
+                    _turn_exit_reason = f"repeated_outer_errors({error_msg[:80]})"
+                    final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
                 else:
                     _turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
                     final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
-                # Append as assistant so the history stays valid for
-                # session resume (avoids consecutive user messages).
-                append_message(messages, {"role": "assistant", "content": final_response})
+                # Don't append the assistant message here — a thinking-prefill
+                # or interim assistant may already be the tail, and appending
+                # would create assistant→assistant.  finalize_turn handles
+                # this case safely (lines 341-353: appends only when
+                # _tail_role != "assistant"), matching the pattern at other
+                # break sites that set final_response without appending.
                 break
     
     # Post-loop turn finalization extracted to agent/turn_finalizer.finalize_turn

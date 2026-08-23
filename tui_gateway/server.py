@@ -275,6 +275,14 @@ _LONG_HANDLERS = frozenset(
         "profiles.get_asset",
         "profiles.list",
         "profiles.set_asset",
+        # Bot-relay RPCs: roster.sync/outbox.drain/reply are cheap file I/O,
+        # but bot_relay.deliver runs a FULL one-turn agent conversation
+        # (subprocess, up to 600s) — all four stay off the WS reader thread
+        # so a slow relay delivery can never block prompt.submit.
+        "bot_relay.roster.sync",
+        "bot_relay.outbox.drain",
+        "bot_relay.deliver",
+        "bot_relay.reply",
         # image.generate is a multi-second remote API round-trip.
         "image.generate",
         "projects.discover_repos",
@@ -2088,10 +2096,14 @@ def _approval_request_payload(data: dict | None) -> dict:
     if "choices" not in payload:
         if payload.get("smart_denied"):
             payload["choices"] = ["once", "deny"]
-        elif payload.get("allow_permanent") is False:
-            payload["choices"] = ["once", "session", "deny"]
-        elif "allow_permanent" in payload:
-            payload["choices"] = ["once", "session", "always", "deny"]
+        else:
+            choices = ["once"]
+            if payload.get("allow_session") is not False:
+                choices.append("session")
+                if payload.get("allow_permanent") is not False:
+                    choices.append("always")
+            choices.append("deny")
+            payload["choices"] = choices
     if "command" in payload:
         from gateway.run import _redact_approval_command
 
@@ -4073,6 +4085,42 @@ def _pairing_sig():
     return sig
 
 
+# Newest outbox-envelope mtime the watcher has EVER seen (monotone). A drain
+# empties the outbox (rename → claimed/), and letting the signature fall back
+# to None on empty would fire a spurious pending event right after every
+# drain — so the signature only moves forward, on genuinely new envelopes.
+_bot_relay_outbox_seen = 0
+
+
+def _bot_relay_outbox_sig():
+    """Newest mtime across pending bot-relay outbox envelopes (monotone).
+
+    Envelopes are written by the AGENT process (``message_agent`` →
+    ``tools.bot_relay.enqueue_envelope``) — a different process that never
+    touches this gateway's transports — so the files are the only shared
+    signal, exactly like the pairing store. The Desktop reacts to
+    ``bot_relay.outbox.pending`` with an immediate (debounced) drain instead
+    of waiting out its poll interval (#93091, motivated by #92760).
+    """
+    global _bot_relay_outbox_seen
+    home = _watcher_home()
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    newest = 0
+    try:
+        for entry in (root / "bot_relay" / "outbox").iterdir():
+            if not entry.name.endswith(".json"):
+                continue
+            try:
+                newest = max(newest, entry.stat().st_mtime_ns)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    if newest > _bot_relay_outbox_seen:
+        _bot_relay_outbox_seen = newest
+    return _bot_relay_outbox_seen or None
+
+
 # Watched change signals: event → (check interval, signature fn, payload fn).
 # Signatures are stat/dict-lookup cheap, same bar as the skin watcher; the
 # check interval keeps the pricier probes (pet resolves the active sheet off
@@ -4083,6 +4131,9 @@ _CHANGE_WATCHES: dict[str, tuple[float, Any, Any]] = {
     "sessions.changed": (0.5, _sessions_sig, lambda: {}),
     "platforms.changed": (2.0, _platforms_sig, lambda: {}),
     "pairing.changed": (2.0, _pairing_sig, lambda: {}),
+    # Cross-connection DM latency: 1s check so a queued envelope reaches the
+    # Desktop's push-triggered drain fast; the Desktop's poll stays backstop.
+    "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, lambda: {}),
 }
 
 # state.db moves on every message append during a streaming turn, and the
@@ -15874,6 +15925,7 @@ def _mcp_summarize_server(name, cfg):  # noqa: E402
 # over already exists; register() rebinds them onto this namespace.
 from . import (  # noqa: E402
     methods_browser_control as _methods_browser_control,
+    methods_bot_relay as _methods_bot_relay,
     methods_complete as _methods_complete,
     methods_config as _methods_config,
     methods_images as _methods_images,
@@ -15892,6 +15944,7 @@ for _m in (
     _methods_tools,
     _methods_profiles,
     _methods_images,
+    _methods_bot_relay,
 ):
     _m.register(sys.modules[__name__])
 del _m
