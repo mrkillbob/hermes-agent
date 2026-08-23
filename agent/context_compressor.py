@@ -30,7 +30,6 @@ from agent.auxiliary_client import (
     _is_connection_error,
     aux_interrupt_protection,
     call_llm,
-    resolve_compression_fast_lane,
 )
 from agent.context_engine import ContextEngine, sanitize_memory_context
 from agent.error_classifier import FailoverReason, classify_api_error
@@ -4890,7 +4889,6 @@ FOCUS TOPIC: "{focus_topic}"
 This compaction should PRIORITISE preserving all information related to the focus topic above. For content related to "{focus_topic}", include full detail — exact values, file paths, command outputs, error messages, and decisions. For content NOT related to the focus topic, summarise more aggressively (brief one-liners or omit if truly irrelevant). The focus topic sections should receive roughly 60-70% of the summary token budget. Even for the focus topic, NEVER preserve API keys, tokens, passwords, or credentials — use [REDACTED]."""
 
         try:
-            fast_lane = resolve_compression_fast_lane()
             call_kwargs = {
                 "task": "compression",
                 "main_runtime": {
@@ -4912,26 +4910,13 @@ This compaction should PRIORITISE preserving all information related to the focu
                 # fall back to the model's native output ceiling.
                 # timeout resolved from auxiliary.compression.timeout config by call_llm
             }
-            if fast_lane.max_tokens is not None:
-                call_kwargs["max_tokens"] = fast_lane.max_tokens
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
-            _aux_provider = ""
-            _aux_model = self.summary_model or ""
-            _aux_context = None
-            try:
-                from agent.auxiliary_client import _resolve_task_provider_model
-
-                _resolved_provider, _resolved_model, _, _, _ = _resolve_task_provider_model(
-                    "compression",
-                    model=(self.summary_model or ""),
-                )
-                _aux_provider = _resolved_provider or ""
-                _aux_model = _resolved_model or _aux_model or self.model or ""
-                if _aux_model == self.model:
-                    _aux_context = self.context_length
-            except Exception:
-                pass
+            # ``call_llm`` writes the one concrete route it actually selected;
+            # do not independently pre-resolve a second, potentially stale
+            # provider/model pair for telemetry or fast-lane certification.
+            _aux_route: Dict[str, str] = {}
+            call_kwargs["route_info"] = _aux_route
             # Compression is atomic: protect the in-flight summary call from a
             # mid-turn gateway interrupt. Without this, an incoming user message
             # aborts the summary and compression falls back to a degraded static
@@ -4946,6 +4931,11 @@ This compaction should PRIORITISE preserving all information related to the focu
                 with aux_interrupt_protection():
                     response = call_llm(**call_kwargs)
             finally:
+                _aux_provider = _aux_route.get("provider") or self.provider or ""
+                _aux_model = (
+                    _aux_route.get("model") or self.summary_model or self.model or ""
+                )
+                _aux_context = self.context_length if _aux_model == self.model else None
                 self._record_aux_compression_call(
                     prompt_messages=call_kwargs["messages"],
                     # Current main intentionally omits max_tokens from the aux
