@@ -14,7 +14,12 @@ import time
 from typing import Iterator
 
 from agent.conversation_worktree_policy import ConversationWorktreePolicy
-from hermes_cli._subprocess_compat import noninteractive_git_env
+from hermes_cli._subprocess_compat import (
+    IS_WINDOWS,
+    kill_process_tree,
+    noninteractive_git_env,
+    windows_hide_flags,
+)
 from hermes_state import ConversationWorktreeRecord, SessionDB
 
 
@@ -84,6 +89,7 @@ class ConversationWorktreeManager:
                 "worktree_root must not create conversation worktrees inside source_worktree",
                 phase="policy",
             )
+        self._validate_worktree_root_ownership(source_common_dir)
 
         if existing is None:
             base_commit = self._git_stdout(source, ["rev-parse", "HEAD"], "identity")
@@ -108,35 +114,25 @@ class ConversationWorktreeManager:
                 )
                 if record.state == "ready":
                     return self._validated_ready_binding(record)
-                if record.state == "removed":
-                    raise ConversationWorktreeError(
-                        "conversation worktree was explicitly removed", phase="recovery"
-                    )
-                if record.state not in {"creating", "creation_failed"}:
-                    raise ConversationWorktreeError(
-                        f"conversation worktree is not recoverable from state {record.state!r}",
-                        phase="recovery",
-                    )
+                self._prepare_worktree(source, record)
 
-                if path.exists():
-                    try:
-                        self._validate_new_worktree(record)
-                    except ConversationWorktreeError as exc:
-                        if record.state == "creating":
-                            raise ConversationWorktreeError(
-                                "conversation worktree path already exists and is not a matching worktree",
-                                phase="create",
-                            ) from exc
-                        raise
-                    self._event("conversation_worktree.reuse", root_session_id=root_session_id)
-                elif record.state == "creation_failed":
-                    raise ConversationWorktreeError(
-                        "failed conversation worktree is missing; retained state requires manual recovery",
-                        phase="recovery",
-                    )
-                else:
-                    self._create_worktree(source, record)
-
+            # Bootstrap may be slow, network-bound, or intentionally interactive
+            # at the project level. It must never monopolize the repository-wide
+            # Git metadata lock: that lock protects only claim/create/validation.
+            # A root-specific lock serializes bootstrap/readiness for retries of
+            # this one root without blocking different conversation roots.
+            with self._root_lock(source_common_dir, root_session_id):
+                record = self._db.get_conversation_worktree(root_session_id) or record
+                if record.state == "ready":
+                    return self._validated_ready_binding(record)
+                self._validate_record_identity(
+                    record,
+                    path=path,
+                    branch=branch,
+                    repo_common_dir=source_common_dir,
+                )
+                self._require_recoverable_record(record)
+                self._validate_new_worktree(record)
                 self._run_bootstrap(record)
                 ready = self._db.mark_conversation_worktree_ready(root_session_id)
                 binding = self._binding_from_record(ready)
@@ -180,6 +176,37 @@ class ConversationWorktreeManager:
             )
         return source, common_dir
 
+    def _validate_worktree_root_ownership(self, source_common_dir: Path) -> None:
+        """Refuse a configured output root owned by a different repository.
+
+        A worktree directory may sit under a parent repository even when the
+        configured path itself has not been created yet. Resolve the nearest
+        existing ancestor and let Git discover its common directory from there;
+        only a same-common-dir owner is compatible with the configured source.
+        """
+        root = self._policy.worktree_root
+        assert root is not None  # policy was validated by _expected_identity
+        nearest = root.resolve()
+        while not nearest.exists() and nearest != nearest.parent:
+            nearest = nearest.parent
+        if not nearest.exists():
+            raise ConversationWorktreeError(
+                "worktree_root has no existing ancestor", phase="policy"
+            )
+        result = self._run_git(
+            nearest,
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            self._policy.create_timeout,
+            "policy",
+        )
+        if result.returncode != 0:
+            return
+        owner_common_dir = Path(result.stdout.strip()).resolve()
+        if owner_common_dir != source_common_dir.resolve():
+            raise ConversationWorktreeError(
+                "worktree_root is inside an unrelated repository", phase="policy"
+            )
+
     def _expected_identity(self, root_session_id: str) -> tuple[Path, str]:
         worktree_root = self._policy.worktree_root
         if worktree_root is None:
@@ -216,24 +243,76 @@ class ConversationWorktreeManager:
                 phase="identity",
             )
 
+    @staticmethod
+    def _require_recoverable_record(record: ConversationWorktreeRecord) -> None:
+        if record.state == "removed":
+            raise ConversationWorktreeError(
+                "conversation worktree was explicitly removed", phase="recovery"
+            )
+        if record.state not in {"creating", "creation_failed"}:
+            raise ConversationWorktreeError(
+                f"conversation worktree is not recoverable from state {record.state!r}",
+                phase="recovery",
+            )
+
+    def _prepare_worktree(self, source: Path, record: ConversationWorktreeRecord) -> None:
+        """Create or identity-validate the tree while holding the Git lock."""
+        self._require_recoverable_record(record)
+        path = Path(record.worktree_path)
+        if path.exists():
+            try:
+                self._validate_new_worktree(record)
+            except ConversationWorktreeError as exc:
+                if record.state == "creating":
+                    raise ConversationWorktreeError(
+                        "conversation worktree path already exists and is not a matching worktree",
+                        phase="create",
+                    ) from exc
+                raise
+            self._event("conversation_worktree.reuse", root_session_id=record.root_session_id)
+        elif record.state == "creation_failed":
+            raise ConversationWorktreeError(
+                "failed conversation worktree is missing; retained state requires manual recovery",
+                phase="recovery",
+            )
+        else:
+            self._create_worktree(source, record)
+
     @contextmanager
     def _repository_lock(self, common_dir: Path) -> Iterator[None]:
         """Bound one repository's metadata mutation across Hermes processes."""
-        lock_path = common_dir / "hermes-conversation-worktree.lock"
+        with self._lock_path(common_dir / "hermes-conversation-worktree.lock"):
+            yield
+
+    @contextmanager
+    def _root_lock(self, common_dir: Path, root_session_id: str) -> Iterator[None]:
+        """Serialize bootstrap/readiness only for one durable conversation root."""
+        digest = hashlib.sha256(root_session_id.encode("utf-8")).hexdigest()[:24]
+        with self._lock_path(common_dir / f"hermes-conversation-root-{digest}.lock"):
+            yield
+
+    @contextmanager
+    def _lock_path(self, lock_path: Path) -> Iterator[None]:
+        """Take a bounded process + thread lock and normalize setup failures."""
         deadline = time.monotonic() + self._policy.create_timeout
         handle = None
         locked = False
-        thread_lock = self._thread_lock(common_dir)
+        thread_lock = self._thread_lock(lock_path)
         if not thread_lock.acquire(timeout=self._policy.create_timeout):
             raise ConversationWorktreeError(
                 "repository worktree lock timed out", phase="create"
             )
         try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            handle = open(lock_path, "a+b")
-            handle.seek(0)
-            handle.write(b"0")
-            handle.flush()
+            try:
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                handle = self._open_lock_file(lock_path)
+                handle.seek(0)
+                handle.write(b"0")
+                handle.flush()
+            except OSError as exc:
+                raise ConversationWorktreeError(
+                    "conversation worktree lock is unavailable", phase="create"
+                ) from exc
             while True:
                 try:
                     if os.name == "nt":
@@ -269,13 +348,20 @@ class ConversationWorktreeManager:
                             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                     except OSError:
                         logger.warning("conversation_worktree.lock_release_failed")
-                handle.close()
+                try:
+                    handle.close()
+                except OSError:
+                    logger.warning("conversation_worktree.lock_close_failed")
             thread_lock.release()
 
     @staticmethod
-    def _thread_lock(common_dir: Path) -> threading.Lock:
+    def _open_lock_file(lock_path: Path):
+        return lock_path.open("a+b")
+
+    @staticmethod
+    def _thread_lock(lock_path: Path) -> threading.Lock:
         """Return the in-process companion to the cross-process file lock."""
-        key = str(common_dir.resolve())
+        key = str(lock_path.resolve())
         with _REPOSITORY_THREAD_LOCKS_GUARD:
             lock = _REPOSITORY_THREAD_LOCKS.get(key)
             if lock is None:
@@ -386,8 +472,13 @@ class ConversationWorktreeManager:
         if not self._policy.bootstrap:
             return
         self._event("conversation_worktree.bootstrap", root_session_id=record.root_session_id)
+        popen_kwargs = (
+            {"creationflags": windows_hide_flags()}
+            if IS_WINDOWS
+            else {"process_group": 0}
+        )
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 list(self._policy.bootstrap_command),
                 cwd=record.worktree_path,
                 stdin=subprocess.DEVNULL,
@@ -396,21 +487,41 @@ class ConversationWorktreeManager:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=self._policy.bootstrap_timeout,
-                check=False,
+                **popen_kwargs,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise ConversationWorktreeError(
-                f"bootstrap timed out after {self._policy.bootstrap_timeout:g} seconds",
-                phase="bootstrap",
-            ) from exc
         except OSError as exc:
             raise ConversationWorktreeError(
                 "bootstrap command could not start", phase="bootstrap"
             ) from exc
-        if result.returncode != 0:
+        try:
+            _stdout, _stderr = process.communicate(timeout=self._policy.bootstrap_timeout)
+        except subprocess.TimeoutExpired as exc:
+            # A bootstrap can spawn compilers/package managers and descendants.
+            # Killing only its direct shell leaves those descendants running in
+            # the conversation worktree after the failure was recorded. The
+            # compatibility helper owns POSIX group termination and Windows
+            # taskkill /T /F cleanup; the bounded drain avoids a hung pipe.
+            kill_process_tree(process)
+            try:
+                process.communicate(timeout=1)
+            except Exception:
+                pass
             raise ConversationWorktreeError(
-                f"bootstrap command exited with status {result.returncode}",
+                f"bootstrap timed out after {self._policy.bootstrap_timeout:g} seconds",
+                phase="bootstrap",
+            ) from exc
+        except Exception as exc:
+            kill_process_tree(process)
+            try:
+                process.communicate(timeout=1)
+            except Exception:
+                pass
+            raise ConversationWorktreeError(
+                "bootstrap process communication failed", phase="bootstrap"
+            ) from exc
+        if process.returncode != 0:
+            raise ConversationWorktreeError(
+                f"bootstrap command exited with status {process.returncode}",
                 phase="bootstrap",
             )
 

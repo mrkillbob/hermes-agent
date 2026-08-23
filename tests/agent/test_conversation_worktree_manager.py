@@ -5,7 +5,9 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
+from multiprocessing import get_context
 
 import pytest
 
@@ -68,6 +70,43 @@ def policy(repo: Path, tmp_path: Path, **overrides) -> ConversationWorktreePolic
 
 def manager(repo: Path, db: SessionDB, tmp_path: Path, **overrides):
     return ConversationWorktreeManager(policy(repo, tmp_path, **overrides), db)
+
+
+def _process_bind(
+    repo_path: str,
+    db_path: str,
+    worktree_root: str,
+    root_session_id: str,
+    start,
+    results,
+):
+    """Spawn-safe child used to exercise real process-level repository locks."""
+    start.wait(10)
+    session_db = SessionDB(Path(db_path))
+    try:
+        worktree_manager = ConversationWorktreeManager(
+            ConversationWorktreePolicy(
+                enabled=True,
+                source_worktree=Path(repo_path),
+                worktree_root=Path(worktree_root),
+                branch_prefix="hermes/session",
+                bootstrap=False,
+                bootstrap_command=(),
+                bootstrap_timeout=1.0,
+                create_timeout=5.0,
+                retain_until_explicit_cleanup=True,
+            ),
+            session_db,
+        )
+        binding = worktree_manager.bind_new_root_session(
+            root_session_id, conversation_kind="interactive"
+        )
+        assert binding is not None
+        results.put(("ok", str(binding.path), binding.branch))
+    except BaseException as exc:
+        results.put(("error", type(exc).__name__, str(exc)))
+    finally:
+        session_db.close()
 
 
 def test_binding_pins_committed_head_without_copying_dirty_stable_files(repo, db, tmp_path):
@@ -242,3 +281,165 @@ def test_bootstrap_runs_inside_worktree(repo, db, tmp_path):
 
     assert binding is not None
     assert marker.read_text(encoding="utf-8") == str(binding.path)
+
+
+def test_worktree_root_in_unrelated_repository_is_rejected_before_claim(repo, db, tmp_path):
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    git(unrelated, "init")
+    git(unrelated, "config", "user.email", "test@example.invalid")
+    git(unrelated, "config", "user.name", "Hermes Test")
+    (unrelated / "tracked.txt").write_text("other\n", encoding="utf-8")
+    git(unrelated, "add", "tracked.txt")
+    git(unrelated, "commit", "-m", "initial")
+
+    with pytest.raises(ConversationWorktreeError, match="unrelated repository"):
+        manager(
+            repo, db, tmp_path, worktree_root=unrelated / "conversation-worktrees"
+        ).bind_new_root_session("root", conversation_kind="interactive")
+
+    assert db.get_conversation_worktree("root") is None
+    assert git(unrelated, "status", "--porcelain") == ""
+
+
+def test_bootstrap_timeout_kills_its_process_tree_with_explicit_child_bypass(
+    repo, db, tmp_path, monkeypatch
+):
+    leaked = tmp_path / "leaked-grandchild.txt"
+    child = (
+        "from pathlib import Path; import time; "
+        "time.sleep(0.4); "
+        f"Path({str(leaked)!r}).write_text('leaked', encoding='utf-8')"
+    )
+    parent = (
+        "import os, subprocess, sys, time; "
+        "assert os.environ['HERMES_STATE_DB_GUARD_BYPASS'] == '1'; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        "time.sleep(60)"
+    )
+    monkeypatch.setenv("HERMES_STATE_DB_GUARD_BYPASS", "1")
+    worktree_manager = manager(
+        repo,
+        db,
+        tmp_path,
+        bootstrap=True,
+        bootstrap_command=(sys.executable, "-c", parent),
+        bootstrap_timeout=0.05,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(ConversationWorktreeError, match="bootstrap timed out"):
+        worktree_manager.bind_new_root_session("root", conversation_kind="interactive")
+    assert time.monotonic() - started < 2.0
+    time.sleep(0.7)
+    assert not leaked.exists()
+
+
+def test_blocked_bootstrap_does_not_hold_repository_create_lock(repo, db, tmp_path):
+    started = tmp_path / "blocked-bootstrap-started"
+    blocker_name, _ = manager(repo, db, tmp_path)._expected_identity("blocked")
+    script = (
+        "from pathlib import Path; import os, time; "
+        f"blocked = {blocker_name.name!r}; "
+        f"marker = Path({str(started)!r}); "
+        "marker.write_text('started', encoding='utf-8') if os.path.basename(os.getcwd()) == blocked else None; "
+        "time.sleep(1.0) if os.path.basename(os.getcwd()) == blocked else None"
+    )
+    worktree_manager = manager(
+        repo,
+        db,
+        tmp_path,
+        bootstrap=True,
+        bootstrap_command=(sys.executable, "-c", script),
+        bootstrap_timeout=3.0,
+    )
+    failures = []
+
+    def bind_blocked():
+        try:
+            worktree_manager.bind_new_root_session("blocked", conversation_kind="interactive")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=bind_blocked)
+    thread.start()
+    assert _wait_for_path(started)
+    try:
+        began = time.monotonic()
+        fast = worktree_manager.bind_new_root_session("fast", conversation_kind="interactive")
+        assert fast is not None
+        assert time.monotonic() - began < 0.5
+    finally:
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert failures == []
+
+
+def test_lock_setup_failure_is_recorded_as_controlled_create_failure(
+    repo, db, tmp_path, monkeypatch
+):
+    worktree_manager = manager(repo, db, tmp_path)
+
+    def fail_open(_path):
+        raise OSError("fd exhausted")
+
+    monkeypatch.setattr(worktree_manager, "_open_lock_file", fail_open)
+    with pytest.raises(ConversationWorktreeError, match="lock.*unavailable"):
+        worktree_manager.bind_new_root_session("root", conversation_kind="interactive")
+
+    record = db.get_conversation_worktree("root")
+    assert record is not None
+    assert record.state == "creation_failed"
+    assert record.failure_phase == "create"
+    assert record.failure_message is not None
+    assert len(record.failure_message) <= 500
+
+
+def test_same_root_is_idempotent_across_real_processes(repo, tmp_path):
+    context = get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    args = (str(repo), str(tmp_path / "state.db"), str(tmp_path / "worktrees"), "root", start, results)
+    first = context.Process(target=_process_bind, args=args)
+    second = context.Process(target=_process_bind, args=args)
+    first.start()
+    second.start()
+    start.set()
+    first.join(timeout=20)
+    second.join(timeout=20)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    observed = [results.get(timeout=3), results.get(timeout=3)]
+    assert all(result[0] == "ok" for result in observed)
+    assert observed[0] == observed[1]
+
+
+def test_different_roots_create_unique_worktrees_across_real_processes(repo, tmp_path):
+    context = get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    common = (str(repo), str(tmp_path / "state.db"), str(tmp_path / "worktrees"))
+    first = context.Process(target=_process_bind, args=(*common, "root-a", start, results))
+    second = context.Process(target=_process_bind, args=(*common, "root-b", start, results))
+    first.start()
+    second.start()
+    start.set()
+    first.join(timeout=20)
+    second.join(timeout=20)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    observed = [results.get(timeout=3), results.get(timeout=3)]
+    assert all(result[0] == "ok" for result in observed)
+    assert observed[0][1] != observed[1][1]
+    assert observed[0][2] != observed[1][2]
+
+
+def _wait_for_path(path: Path, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.01)
+    return path.exists()
