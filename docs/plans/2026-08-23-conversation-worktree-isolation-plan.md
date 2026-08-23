@@ -550,7 +550,47 @@ git add agent/conversation_worktree.py tui_gateway/methods_session.py hermes_cli
 git commit -m "feat(worktree): guard explicit conversation cleanup"
 ```
 
-### Task 8: Migrate Local Configuration, Document, and Certify
+### Task 8: Add a Guarded Fast Compression Lane
+
+**Files:**
+- Modify: `agent/auxiliary_client.py`
+- Modify: `agent/context_compressor.py`
+- Modify: `agent/conversation_compression.py`
+- Modify: `hermes_cli/config_defaults.py`
+- Modify: `apps/desktop/src/app/session/hooks/use-message-stream/gateway-event/status.ts`
+- Modify: `apps/desktop/src/store/compaction.ts`
+- Test: `tests/agent/test_fast_compression_lane.py`
+- Test: `tests/agent/test_compression_attempt_telemetry.py`
+- Test: `apps/desktop/src/app/session/hooks/use-message-stream/compaction-event.test.tsx`
+
+**Interfaces:**
+- Consumes: explicit `auxiliary.compression` route configuration and the existing structured compression template.
+- Produces: opt-in non-reasoning compression requests, bounded output only for explicitly certified routes, content-free phase timings, and reconnect-safe compacting-state reconciliation.
+
+- [ ] **Step 1: Write failing fast-lane and telemetry tests**
+
+Cover an explicit compression-only provider/model with `reasoning_effort: none`, an optional output cap that is rejected for inherited or unknown/reasoning routes, queue-wait and first-progress timings, iterative prompt bounds, preservation of active task/constraints/modified-file anchors, and a reconnect lifecycle that clears stale UI state only from trusted terminal/resumed server evidence.
+
+- [ ] **Step 2: Run and verify RED**
+
+Run the focused compressor, auxiliary-client, telemetry, and desktop compaction tests. Expected: missing fast-lane budget/timing and reconnect reconciliation contracts.
+
+- [ ] **Step 3: Implement the guarded lane**
+
+Keep default model inheritance unchanged. Apply `reasoning_effort: none` and `max_output_tokens` only when explicitly configured under `auxiliary.compression`; never change the main chat route or natural-language router. Emit content-free `queue_wait_ms`, `prompt_build_ms`, `time_to_first_progress_ms`, `summary_generation_ms`, and `commit_ms`. Do not log prompt or summary content. Preserve the structured checkpoint template, redaction, tail, durable archive, fallback, cooldown, and logical-root worktree reuse.
+
+- [ ] **Step 4: Run compression and continuation compatibility**
+
+Run focused context-compressor, progress-timeout, worker-isolation, continuity, fallback-budget, telemetry, TUI status, desktop compaction, and conversation-worktree lineage tests. Expected: all pass.
+
+- [ ] **Step 5: Commit the performance lane**
+
+```bash
+git add agent/auxiliary_client.py agent/context_compressor.py agent/conversation_compression.py hermes_cli/config_defaults.py tests/agent/test_fast_compression_lane.py tests/agent/test_compression_attempt_telemetry.py apps/desktop/src/app/session/hooks/use-message-stream/gateway-event/status.ts apps/desktop/src/store/compaction.ts apps/desktop/src/app/session/hooks/use-message-stream/compaction-event.test.tsx
+git commit -m "perf(compression): add guarded fast summary lane"
+```
+
+### Task 9: Migrate Local Configuration, Document, and Certify
 
 **Files:**
 - Modify: `hermes_cli/config_migrations.py`
