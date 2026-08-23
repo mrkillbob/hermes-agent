@@ -37,17 +37,13 @@ _SECRET_KEY_PATTERN = (
     r"[a-z0-9_-]*(?:(?:access|private)[_-]?key|secret|token|password|credential|"
     r"api[_-]?key|database[_-]?url|connection[_-]?string|authorization)[a-z0-9_-]*"
 )
-_SECRET_LINE_RE = re.compile(
-    rf"(?i)^(\s*(?:{_SECRET_KEY_PATTERN})\s*(?:=|:)\s*).*$"
-)
+_SECRET_LINE_RE = re.compile(rf"(?i)^(\s*(?:{_SECRET_KEY_PATTERN})\s*(?:=|:)\s*).*$")
 _SECRET_RE = re.compile(
     rf"(?i)\b(?:{_SECRET_KEY_PATTERN})"
     r"\s*(?:=|:)\s*(?:bearer\s+)?[^\n]*"
 )
 _BARE_BEARER_RE = re.compile(r"(?i)\bbearer(?:\s+[^\s,;]+)?")
-_URI_USERINFO_RE = re.compile(
-    r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"
-)
+_URI_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@")
 _GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{8,}\b")
 _PRIVATE_KEY_BLOCK_RE = re.compile(
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----",
@@ -59,13 +55,32 @@ _PATH_RE = re.compile(
 _PROSE_COMMIT_RE = re.compile(r"\b[0-9a-f]{7,64}\b", re.IGNORECASE)
 _COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
-_STOP_WORDS = frozenset(
-    {
-        "about", "also", "and", "could", "did", "does", "else", "from",
-        "have", "how", "need", "progress", "project", "status", "that", "the", "this",
-        "what", "when", "where", "with", "work", "would", "your",
-    }
-)
+_STOP_WORDS = frozenset({
+    "about",
+    "also",
+    "and",
+    "could",
+    "did",
+    "does",
+    "else",
+    "from",
+    "have",
+    "how",
+    "need",
+    "progress",
+    "project",
+    "status",
+    "that",
+    "the",
+    "this",
+    "what",
+    "when",
+    "where",
+    "with",
+    "work",
+    "would",
+    "your",
+})
 _TOPIC_WORD = r"[a-z0-9][a-z0-9_'./:-]*"
 _TOPIC = rf"{_TOPIC_WORD}(?:\s+{_TOPIC_WORD})*"
 _STRUCTURAL_TOPIC_TAIL_RE = re.compile(r"(?:^|\s)(?:and|while|then|so|to)(?:\s|$)")
@@ -88,9 +103,13 @@ _READ_ONLY_PROGRESS_PATTERNS = tuple(
 )
 _GENERIC_PROGRESS_RE = re.compile(r"^how did it go\?$", re.IGNORECASE)
 _NONTERMINAL_STATUSES = frozenset({"triage", "scheduled", "todo", "ready", "review"})
-_FAILED_RUN_STATES = frozenset(
-    {"spawn_failed", "gave_up", "failed", "timed_out", "crashed"}
-)
+_FAILED_RUN_STATES = frozenset({
+    "spawn_failed",
+    "gave_up",
+    "failed",
+    "timed_out",
+    "crashed",
+})
 
 
 @dataclass(frozen=True)
@@ -211,7 +230,11 @@ def _safe_branch(value: object) -> Optional[str]:
     candidate = _safe_structured_identifier(value)
     if candidate is None:
         return None
-    if not _BRANCH_RE.fullmatch(candidate) or ".." in candidate or candidate.startswith("/"):
+    if (
+        not _BRANCH_RE.fullmatch(candidate)
+        or ".." in candidate
+        or candidate.startswith("/")
+    ):
         return None
     return candidate
 
@@ -232,7 +255,12 @@ def _regular_file_signature(path: Path) -> tuple[int, int, int, int]:
     file_stat = path.lstat()
     if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
         raise OSError("Kanban snapshot source must be a regular non-symlink file")
-    return (file_stat.st_dev, file_stat.st_ino, file_stat.st_size, file_stat.st_mtime_ns)
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+    )
 
 
 def _optional_file_signature(path: Path) -> Optional[tuple[int, int, int, int]]:
@@ -245,7 +273,9 @@ def _optional_file_signature(path: Path) -> Optional[tuple[int, int, int, int]]:
 def _snapshot_source_state(
     source: Path,
 ) -> tuple[tuple[int, int, int, int], Optional[tuple[int, int, int, int]]]:
-    return _regular_file_signature(source), _optional_file_signature(Path(str(source) + "-wal"))
+    return _regular_file_signature(source), _optional_file_signature(
+        Path(str(source) + "-wal")
+    )
 
 
 def _copy_snapshot_file(
@@ -259,7 +289,9 @@ def _copy_snapshot_file(
     try:
         descriptor = os.open(source, flags)
     except OSError as exc:
-        raise _SnapshotChangedError("Kanban snapshot source changed before copy") from exc
+        raise _SnapshotChangedError(
+            "Kanban snapshot source changed before copy"
+        ) from exc
     try:
         opened_stat = os.fstat(descriptor)
         opened_signature = (
@@ -282,7 +314,9 @@ def _copy_snapshot_file(
                     raise OSError("Kanban snapshot destination write was incomplete")
                 remaining -= len(chunk)
             if os.read(descriptor, 1):
-                raise _SnapshotChangedError("Kanban snapshot source changed during copy")
+                raise _SnapshotChangedError(
+                    "Kanban snapshot source changed during copy"
+                )
 
         closed_stat = os.fstat(descriptor)
         closed_signature = (
@@ -294,7 +328,9 @@ def _copy_snapshot_file(
         try:
             path_signature = _regular_file_signature(source)
         except OSError as exc:
-            raise _SnapshotChangedError("Kanban snapshot source changed after copy") from exc
+            raise _SnapshotChangedError(
+                "Kanban snapshot source changed after copy"
+            ) from exc
         if closed_signature != expected or path_signature != expected:
             raise _SnapshotChangedError("Kanban snapshot source changed after copy")
     finally:
@@ -320,7 +356,9 @@ def _open_existing_board_readonly(board: str):
                 snapshot = Path(temp_dir) / "kanban.db"
                 _copy_snapshot_file(source, snapshot, before[0])
                 if before[1] is not None:
-                    _copy_snapshot_file(wal_source, Path(str(snapshot) + "-wal"), before[1])
+                    _copy_snapshot_file(
+                        wal_source, Path(str(snapshot) + "-wal"), before[1]
+                    )
                 if _snapshot_source_state(source) != before:
                     raise _SnapshotChangedError(
                         "Kanban board changed during snapshot copy"
@@ -334,7 +372,9 @@ def _open_existing_board_readonly(board: str):
                 conn.row_factory = sqlite3.Row
                 checks = conn.execute("PRAGMA quick_check").fetchall()
                 if not checks or any(str(row[0]).casefold() != "ok" for row in checks):
-                    raise sqlite3.DatabaseError("Kanban snapshot integrity check failed")
+                    raise sqlite3.DatabaseError(
+                        "Kanban snapshot integrity check failed"
+                    )
                 yield conn
                 return
             finally:
@@ -386,8 +426,7 @@ def _graph_task_ids(conn, root_id: str) -> tuple[list[str], bool]:
 def _query_terms(request: str) -> set[str]:
     without_card_ids = _TASK_ID_RE.sub(" ", request.casefold())
     return {
-        word for word in _WORD_RE.findall(without_card_ids)
-        if word not in _STOP_WORDS
+        word for word in _WORD_RE.findall(without_card_ids) if word not in _STOP_WORDS
     }
 
 
@@ -413,7 +452,12 @@ def _root_has_trusted_linkage(
             metadata = {}
         if isinstance(metadata, dict) and any(
             str(metadata.get(key) or "") == reply_id
-            for key in ("origin_message_id", "message_id", "reply_to_message_id", "prompt_message_id")
+            for key in (
+                "origin_message_id",
+                "message_id",
+                "reply_to_message_id",
+                "prompt_message_id",
+            )
         ):
             return True
     for task_id in graph_ids:
@@ -469,9 +513,7 @@ def _select_root(
             linked = [
                 kb.get_task(conn, root_id)
                 for root_id in root_ids
-                if _root_has_trusted_linkage(
-                    conn, root_id, source, subscription_rows
-                )
+                if _root_has_trusted_linkage(conn, root_id, source, subscription_rows)
             ]
             linked = [task for task in linked if task is not None]
             if len(linked) == 1:
@@ -482,7 +524,9 @@ def _select_root(
     top_score = max(item[0] for item in ranked)
     top = [item for item in ranked if item[0] == top_score]
     if len(top) != 1:
-        return "ambiguous", [item[2] for item in sorted(top, key=lambda item: (-item[1], item[2].id))]
+        return "ambiguous", [
+            item[2] for item in sorted(top, key=lambda item: (-item[1], item[2].id))
+        ]
     return "resolved", top[0][2]
 
 
@@ -519,7 +563,11 @@ def _task_receipt(
 
 
 def _bounded(response: str) -> str:
-    return response if len(response) <= MAX_PROGRESS_RESPONSE_CHARS else response[:MAX_PROGRESS_RESPONSE_CHARS].rstrip()
+    return (
+        response
+        if len(response) <= MAX_PROGRESS_RESPONSE_CHARS
+        else response[:MAX_PROGRESS_RESPONSE_CHARS].rstrip()
+    )
 
 
 def _format_multiple_progress(conn, roots: Iterable[object]) -> str:
@@ -607,7 +655,10 @@ def _format_progress(conn, root) -> str:
         identifiers.extend(task_identifiers)
         for comment in kb.list_comments(conn, task.id):
             candidate_key = (comment.created_at, comment.id)
-            if latest_comment is None or candidate_key > (latest_comment.created_at, latest_comment.id):
+            if latest_comment is None or candidate_key > (
+                latest_comment.created_at,
+                latest_comment.id,
+            ):
                 latest_comment = comment
     if receipt and receipt_task_id:
         if truncated:
@@ -618,7 +669,9 @@ def _format_progress(conn, root) -> str:
         else:
             lines.append(f"Latest receipt for `{receipt_task_id}`: {receipt}")
     if identifiers:
-        lines.append("Structured metadata: " + ", ".join(dict.fromkeys(identifiers)) + ".")
+        lines.append(
+            "Structured metadata: " + ", ".join(dict.fromkeys(identifiers)) + "."
+        )
     if latest_comment is not None:
         if truncated:
             lines.append(
@@ -670,11 +723,25 @@ def resolve_progress_query(
             if selection == "no_match":
                 return ProgressQueryResult(False, "", "no_match")
             if selection == "ambiguous":
+                response = _format_multiple_progress(conn, value)
+                from gateway.vault_reports import append_vault_context, load_live_config
+
                 return ProgressQueryResult(
                     True,
-                    _format_multiple_progress(conn, value),
+                    append_vault_context(
+                        load_live_config(), response, board=board, root_task_ids=value
+                    ),
                     "resolved_multiple",
                 )
-            return ProgressQueryResult(True, _format_progress(conn, value), "resolved")
+            response = _format_progress(conn, value)
+            from gateway.vault_reports import append_vault_context, load_live_config
+
+            return ProgressQueryResult(
+                True,
+                append_vault_context(
+                    load_live_config(), response, board=board, root_task_ids=[value]
+                ),
+                "resolved",
+            )
     except Exception:
         return ProgressQueryResult(False, "", "unavailable")
