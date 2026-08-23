@@ -165,6 +165,21 @@ def test_branch_prefix_rejects_invalid_ref_component(tmp_path):
         )
 
 
+@pytest.mark.parametrize("control_character", ["\x01", "\x7f"])
+def test_branch_prefix_rejects_ascii_control_characters(tmp_path, control_character):
+    with pytest.raises(ConversationWorktreePolicyError, match="branch_prefix"):
+        resolve_conversation_worktree_policy(
+            {
+                "conversation_worktree": {
+                    "enabled": True,
+                    "source_worktree": str(tmp_path / "stable"),
+                    "worktree_root": str(tmp_path / "worktrees"),
+                    "branch_prefix": f"hermes/{control_character}session",
+                }
+            }
+        )
+
+
 @pytest.mark.parametrize("field, value", [("bootstrap_timeout", 0), ("create_timeout", float("inf"))])
 def test_policy_rejects_non_positive_or_non_finite_timeouts(tmp_path, field, value):
     with pytest.raises(ConversationWorktreePolicyError, match=field):

@@ -99,6 +99,7 @@ def _branch_prefix(section: Mapping[str, object]) -> str:
         or prefix.endswith(".lock")
         or prefix == "@"
         or any(component.startswith(".") or component.endswith(".lock") for component in components)
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in prefix)
         or any(char in _BRANCH_FORBIDDEN or char.isspace() for char in prefix)
     ):
         raise ConversationWorktreePolicyError("branch_prefix must be a non-empty safe branch prefix")
