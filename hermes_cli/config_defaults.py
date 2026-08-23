@@ -1176,6 +1176,17 @@ DEFAULT_CONFIG = {
             "extra_body": {},
             "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
         },
+        # Short, tool-free classifier used by explicitly opted-in specialist
+        # task routing. Invalid/unavailable results always fall back to chat.
+        "specialist_router": {
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 12,
+            "extra_body": {},
+            "reasoning_effort": "none",
+        },
         # Kanban decomposer — decomposes a triage task into a graph of
         # child tasks routed to specialist profiles by description.
         # Invoked by ``hermes kanban decompose`` and the kanban
@@ -2271,6 +2282,14 @@ DEFAULT_CONFIG = {
         "bots_require_inline_mention": False,  # Multi-bot rooms: if True, another bot must type @thisbot in its message to trigger a reply; a Discord reply/quote alone won't. Prevents two bots auto-replying to each other forever. Does not affect humans.
         "history_backfill": True,         # If True, prepend recent channel scrollback when bot is triggered (recovers messages missed while require_mention gated them out)
         "history_backfill_limit": 50,     # Max number of recent messages to scan when assembling the backfill block
+        # Disabled by default. When enabled, only high-confidence bounded
+        # task requests create a subscribed Kanban card; all other messages
+        # retain the ordinary chat path.
+        "specialist_routing": {
+            "enabled": False,
+            "confidence_threshold": 0.80,
+            "timeout_seconds": 12,
+        },
         "missed_message_backfill": {
             "enabled": False,             # Replay missed Discord messages after reconnect/startup
             "channels": "",               # Comma-separated channel IDs; empty uses free_response_channels

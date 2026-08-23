@@ -63,34 +63,26 @@ def _record_kanban_budget_exhausted(
     max_iterations: int,
     logger: logging.Logger,
 ) -> None:
-    """Record a terminal ``timed_out`` outcome for a kanban worker that
-    exhausted its iteration budget.
+    """Park a Kanban task when its worker exhausts its iteration budget.
 
-    This is a bounded fallback (#87096): the CAS invariant in ``_end_run``
-    (``WHERE ended_at IS NULL``) guarantees idempotence — if another path
-    already closed the run this is a no-op — so it is safe to call from
-    multiple exit paths.
+    An iteration budget is not a process-spawn failure or a transient runtime
+    timeout: blindly re-queuing the same task just starts the same exploration
+    again with a fresh context.  Use a sticky ``needs_input`` block so an
+    operator can provide narrower evidence or scope before resuming.
     """
     try:
         from hermes_cli import kanban_db as _kb
         _conn = _kb.connect()
         try:
-            _kb._record_task_failure(
+            _kb.block_task(
                 _conn,
                 kanban_task,
-                error=(
+                reason=(
                     f"Iteration budget exhausted "
                     f"({api_call_count}/{max_iterations}) — "
-                    "task could not complete within the allowed "
-                    "iterations"
+                    "provide narrower evidence or scope before resuming"
                 ),
-                outcome="timed_out",
-                release_claim=True,
-                end_run=True,
-                event_payload_extra={
-                    "budget_used": api_call_count,
-                    "budget_max": max_iterations,
-                },
+                kind="needs_input",
             )
         finally:
             try:
