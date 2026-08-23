@@ -147,17 +147,26 @@ class GatewaySlashCommandsMixin:
         
         # Get existing session key
         session_key = self._session_key_for_source(source)
-        self._invalidate_session_run_generation(session_key, reason="session_reset")
-        # Evict the running-agent slot now that the generation is bumped. The
-        # in-flight run's own guarded release (run_generation=old) will return
-        # False and leave its dead agent behind; clearing here keeps the slot
-        # from becoming a zombie that silently drops all later messages (#28686).
-        # Idempotent, so the run's finally calling it again is harmless.
-        self._release_running_agent_state(session_key)
-
-        # Snapshot the old entry so on_session_finalize can report the
-        # expiring session id before reset_session() rotates it.
+        # Snapshot the old entry before asking SessionStore to prepare the new
+        # root. Its worktree bind happens before any route/cache/delegation
+        # mutation, so a setup failure leaves this old boundary usable.
         old_entry = self.session_store._entries.get(session_key)
+        try:
+            new_entry = await self.async_session_store.reset_session(
+                session_key, conversation_kind="interactive"
+            )
+        except Exception as exc:
+            logger.warning(
+                "Refusing /new for %s because conversation worktree setup failed: %s",
+                session_key,
+                exc,
+            )
+            return EphemeralReply(f"Cannot start a new session: conversation worktree setup failed: {exc}")
+
+        # The rotation has been certified. It is now safe to end the old
+        # generation and release resources that were scoped to it.
+        self._invalidate_session_run_generation(session_key, reason="session_reset")
+        self._release_running_agent_state(session_key)
 
         # Close tool resources on the old agent (terminal sandboxes, browser
         # daemons, background processes) before evicting from cache.
@@ -238,12 +247,6 @@ class GatewaySlashCommandsMixin:
         except Exception:
             pass
 
-        # Reset the session
-        new_entry = await self.async_session_store.reset_session(session_key)
-
-        # (Conversation-scoped overrides + security state were already
-        # cleared via _clear_conversation_scope above.)
-
         _old_sid = old_entry.session_id if old_entry else None
 
         # Fire plugin on_session_finalize hook (session boundary).
@@ -289,7 +292,19 @@ class GatewaySlashCommandsMixin:
             header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_default")
         else:
             # No existing session, just create one
-            new_entry = await self.async_session_store.get_or_create_session(source, force_new=True)
+            try:
+                new_entry = await self.async_session_store.get_or_create_session(
+                    source, force_new=True, conversation_kind="interactive"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Refusing first /new for %s because conversation worktree setup failed: %s",
+                    session_key,
+                    exc,
+                )
+                return EphemeralReply(
+                    f"Cannot start a new session: conversation worktree setup failed: {exc}"
+                )
             header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_new")
 
         # Set session title if provided with /new <title>

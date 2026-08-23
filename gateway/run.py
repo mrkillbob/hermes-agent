@@ -19111,6 +19111,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             session_entry = await self.async_session_store.get_or_create_session(
                 source,
                 touch_activity=not bool(getattr(event, "internal", False)),
+                # Cron, Kanban, plugin, and delegated completion events may
+                # target a chat before its user root exists. They retain their
+                # task-owned cwd and must never allocate a conversation tree.
+                conversation_kind=(
+                    "task" if bool(getattr(event, "internal", False)) else "interactive"
+                ),
             )
         session_key = session_entry.session_key
         if not strict_session and pinned_session_id:
@@ -24778,6 +24784,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             session_key=context.session_key,
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
+            cwd=context.cwd,
             async_delivery=_async_delivery,
             cron_session="",
         )

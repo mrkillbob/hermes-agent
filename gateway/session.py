@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Any
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +333,7 @@ class SessionContext:
     session_id: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    cwd: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -346,6 +347,7 @@ class SessionContext:
             "session_id": self.session_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "cwd": self.cwd,
         }
 
 
@@ -793,6 +795,13 @@ class SessionEntry:
     platform: Optional[Platform] = None
     chat_type: str = "dm"
 
+    # An interactive Discord or Photon/iMessage root may be bound to a
+    # certified conversation worktree. Keep this on the routing entry (rather
+    # than a process-global cwd) so concurrent gateway conversations cannot
+    # leak their workspace into one another.
+    cwd: Optional[str] = None
+    conversation_worktree: Dict[str, str] = field(default_factory=dict)
+
     # Lightweight persisted key/value state scoped to this session entry
     # (e.g. Slack thread-context watermarks). Survives gateway restarts via
     # the routing index; must stay small and JSON-serializable.
@@ -880,6 +889,8 @@ class SessionEntry:
             "display_name": self.display_name,
             "platform": self.platform.value if self.platform else None,
             "chat_type": self.chat_type,
+            "cwd": self.cwd,
+            "conversation_worktree": self.conversation_worktree,
             "metadata": self.metadata,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -981,6 +992,14 @@ class SessionEntry:
             display_name=data.get("display_name"),
             platform=platform,
             chat_type=data.get("chat_type", "dm"),
+            cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else None,
+            conversation_worktree={
+                str(key): str(value)
+                for key, value in (data.get("conversation_worktree") or {}).items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            if isinstance(data.get("conversation_worktree"), dict)
+            else {},
             metadata=dict(data.get("metadata") or {}),
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
@@ -1252,6 +1271,17 @@ class AsyncSessionStore:
 _DB_UNPINNED = object()
 
 
+def _default_conversation_worktree_manager_factory(db):
+    """Build a manager in the active profile scope, or no-op on JSONL."""
+    if db is None:
+        return None
+    from agent.conversation_worktree import ConversationWorktreeManager
+    from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+    from hermes_cli.config import load_config
+
+    return ConversationWorktreeManager(resolve_conversation_worktree_policy(load_config()), db)
+
+
 class SessionStore:
     """
     Manages session storage and retrieval.
@@ -1260,8 +1290,13 @@ class SessionStore:
     Falls back to legacy JSONL files if SQLite is unavailable.
     """
     
-    def __init__(self, sessions_dir: Path, config: GatewayConfig,
-                 has_active_processes_fn=None):
+    def __init__(
+        self,
+        sessions_dir: Path,
+        config: GatewayConfig,
+        has_active_processes_fn=None,
+        conversation_worktree_manager_factory: Optional[Callable[[Any], Any]] = None,
+    ):
         self.sessions_dir = sessions_dir
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
@@ -1295,6 +1330,11 @@ class SessionStore:
         self._transcript_append_failures: Dict[str, int] = {}
         self._fts_rebuild_attempted = False
         self._has_active_processes_fn = has_active_processes_fn
+        self._conversation_worktree_manager_factory = (
+            conversation_worktree_manager_factory
+            if conversation_worktree_manager_factory is not None
+            else _default_conversation_worktree_manager_factory
+        )
         # Whether to keep writing the legacy sessions.json mirror alongside
         # the primary gateway_routing table in state.db. Default True for
         # backward compatibility; disable via gateway.write_sessions_json.
@@ -1326,6 +1366,75 @@ class SessionStore:
         self._db_handles: Dict[Path, Any] = {}
         self._db_handles_lock = threading.Lock()
         self._open_session_db_for_active_scope()
+
+    @staticmethod
+    def _supports_conversation_worktree(source: Optional[SessionSource]) -> bool:
+        """Only user-facing Discord and Photon/iMessage roots are in Task 6."""
+        platform = getattr(getattr(source, "platform", None), "value", "")
+        return str(platform).lower() in {"discord", "photon"}
+
+    def _conversation_worktree_manager(self):
+        factory = self._conversation_worktree_manager_factory
+        return factory(self._db) if factory is not None else None
+
+    @staticmethod
+    def _apply_conversation_worktree_binding(entry: SessionEntry, binding) -> None:
+        entry.cwd = str(binding.path)
+        entry.conversation_worktree = {
+            "root_session_id": str(binding.root_session_id),
+            "path": str(binding.path),
+            "branch": str(binding.branch),
+            "base_commit": str(binding.base_commit),
+            "repo_common_dir": str(binding.repo_common_dir),
+        }
+
+    def _bind_conversation_worktree_for_new_entry(
+        self,
+        entry: SessionEntry,
+        *,
+        conversation_kind: str,
+    ) -> None:
+        if conversation_kind not in {"interactive", "task"}:
+            raise ValueError("conversation_kind must be 'interactive' or 'task'")
+        if conversation_kind == "task" or not self._supports_conversation_worktree(entry.origin):
+            return
+        manager = self._conversation_worktree_manager()
+        if manager is None:
+            return
+        binding = manager.bind_new_root_session(
+            entry.session_id, conversation_kind="interactive"
+        )
+        if binding is not None:
+            self._apply_conversation_worktree_binding(entry, binding)
+
+    def _resolve_conversation_worktree_for_existing_entry(
+        self,
+        entry: SessionEntry,
+        *,
+        conversation_kind: str,
+    ) -> bool:
+        """Revalidate a stored binding without ever allocating a new root."""
+        if conversation_kind not in {"interactive", "task"}:
+            raise ValueError("conversation_kind must be 'interactive' or 'task'")
+        if conversation_kind == "task" or not self._supports_conversation_worktree(entry.origin):
+            return False
+        manager = self._conversation_worktree_manager()
+        if manager is None:
+            return False
+        root_session_id = entry.conversation_worktree.get("root_session_id") or entry.session_id
+        binding = manager.resolve_existing_session(root_session_id)
+        if binding is None:
+            if entry.conversation_worktree:
+                from agent.conversation_worktree import ConversationWorktreeError
+
+                raise ConversationWorktreeError(
+                    "saved conversation worktree is no longer ready; refusing source checkout fallback",
+                    phase="recovery",
+                )
+            return False
+        previous = (entry.cwd, dict(entry.conversation_worktree))
+        self._apply_conversation_worktree_binding(entry, binding)
+        return previous != (entry.cwd, entry.conversation_worktree)
 
     def _open_session_db_for_active_scope(self):
         """Return the SessionDB for the profile scope active on this task.
@@ -2559,6 +2668,7 @@ class SessionStore:
         source: SessionSource,
         force_new: bool = False,
         touch_activity: bool = True,
+        conversation_kind: str = "interactive",
     ) -> SessionEntry:
         """Single-flight session lookup/create per routing key.
 
@@ -2598,6 +2708,7 @@ class SessionStore:
                 source,
                 force_new=force_new,
                 touch_activity=touch_activity,
+                conversation_kind=conversation_kind,
             )
             slot.result = result
             return result
@@ -2614,6 +2725,7 @@ class SessionStore:
         source: SessionSource,
         force_new: bool = False,
         touch_activity: bool = True,
+        conversation_kind: str = "interactive",
     ) -> SessionEntry:
         """Perform one session routing transition for the single-flight owner.
 
@@ -2741,6 +2853,7 @@ class SessionStore:
         _metadata_only_save = False
         _needs_recover = False
         entry: Optional[SessionEntry] = None
+        candidate: Optional[SessionEntry] = None
         was_auto_reset = False
         auto_reset_reason = None
         reset_had_activity = False
@@ -2865,6 +2978,12 @@ class SessionStore:
                 reset_had_activity=reset_had_activity,
                 prev_session_id=prev_session_id,
             )
+            # The manager claim/bootstrap is intentionally before publishing
+            # this routing entry or creating its state.db row. A failure must
+            # leave the caller without an agent-visible source-checkout entry.
+            self._bind_conversation_worktree_for_new_entry(
+                candidate, conversation_kind=conversation_kind
+            )
             with self._lock:
                 current = self._entries.get(session_key)
                 may_publish = current is None or (
@@ -2904,6 +3023,14 @@ class SessionStore:
                         else None
                     ),
                 }
+
+        if entry is not None and entry is not candidate:
+            _needs_save = (
+                self._resolve_conversation_worktree_for_existing_entry(
+                    entry, conversation_kind=conversation_kind
+                )
+                or _needs_save
+            )
 
         if _needs_save:
             if _metadata_only_save:
@@ -3357,8 +3484,13 @@ class SessionStore:
                 self._save()
         return count
 
-    def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
-        """Force reset a session, creating a new session ID."""
+    def reset_session(
+        self,
+        session_key: str,
+        display_name: Optional[str] = None,
+        conversation_kind: str = "interactive",
+    ) -> Optional[SessionEntry]:
+        """Force reset a session, certifying a new root before rotation."""
         db_end_session_id = None
         db_create_kwargs = None
         new_entry = None
@@ -3370,12 +3502,9 @@ class SessionStore:
                 return None
 
             old_entry = self._entries[session_key]
-            db_end_session_id = old_entry.session_id
-
             now = _now()
             session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-
-            new_entry = SessionEntry(
+            candidate = SessionEntry(
                 session_key=session_key,
                 session_id=session_id,
                 created_at=now,
@@ -3386,6 +3515,23 @@ class SessionStore:
                 chat_type=old_entry.chat_type,
                 is_fresh_reset=True,
             )
+
+        # Do not invalidate the old session boundary until the new worktree is
+        # ready. This can block for bootstrap, so it deliberately runs outside
+        # the routing lock.
+        self._bind_conversation_worktree_for_new_entry(
+            candidate, conversation_kind=conversation_kind
+        )
+
+        with self._lock:
+            self._ensure_loaded_locked()
+            if self._entries.get(session_key) is not old_entry:
+                # Another reset won while this candidate was being prepared.
+                # Its entry remains authoritative; never overwrite it.
+                return self._entries.get(session_key)
+
+            db_end_session_id = old_entry.session_id
+            new_entry = candidate
 
             self._entries[session_key] = new_entry
             self._save()
@@ -4127,5 +4273,6 @@ def build_session_context(
         context.session_id = session_entry.session_id
         context.created_at = session_entry.created_at
         context.updated_at = session_entry.updated_at
+        context.cwd = session_entry.cwd or ""
     
     return context
