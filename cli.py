@@ -943,6 +943,51 @@ def _sync_process_session_id(session_id: str) -> None:
 
     set_current_session_id(session_id)
 
+
+def _interactive_cli_conversation_worktree_applies() -> bool:
+    """Return whether this process owns a user-started CLI conversation root."""
+    source = os.environ.get("HERMES_SESSION_SOURCE", "cli").strip().lower() or "cli"
+    return source == "cli" and not os.environ.get("HERMES_KANBAN_TASK", "").strip()
+
+
+def _build_cli_conversation_worktree_manager(config, db):
+    """Build the shared manager only for policy-owned interactive CLI roots."""
+    from agent.conversation_worktree import (
+        ConversationWorktreeError,
+        ConversationWorktreeManager,
+    )
+    from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+
+    policy = resolve_conversation_worktree_policy(config)
+    if not policy.enabled or not _interactive_cli_conversation_worktree_applies():
+        return None
+    if db is None:
+        raise ConversationWorktreeError("state.db is unavailable", phase="state")
+    return ConversationWorktreeManager(policy, db)
+
+
+def _should_use_legacy_worktree(*, worktree: bool, shorthand: bool, config) -> bool:
+    """Keep manual ``-w`` ownership separate from managed conversation roots."""
+    requested = bool(worktree or shorthand or config.get("worktree", False))
+    if not requested:
+        return False
+
+    from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+
+    policy = resolve_conversation_worktree_policy(config)
+    managed_root = policy.enabled and _interactive_cli_conversation_worktree_applies()
+    return not managed_root
+
+
+def _cli_conversation_worktree_prompt_fragment(binding) -> str:
+    """Match the desktop's certified-worktree instruction for CLI roots."""
+    return (
+        "This interactive conversation is isolated in a certified Git worktree. "
+        f"Use {binding.path} as its workspace (branch {binding.branch or 'unknown'}, "
+        f"base {binding.base_commit or 'unknown'}). "
+        "Do not switch to the stable source checkout."
+    )
+
 # Cron job system for scheduled tasks (execution is handled by the gateway)
 def get_job(*args, **kwargs):
     from cron import get_job as _get_job
@@ -4991,6 +5036,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         checkpoints: bool = False,
         pass_session_id: bool = False,
         ignore_rules: bool = False,
+        manage_conversation_worktree: bool = True,
     ):
         """
         Initialize the Hermes CLI.
@@ -5436,6 +5482,51 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
+
+        # Conversation worktrees are bound after the durable root identity is
+        # known but before any agent or tool can be constructed. Resume only
+        # resolves an existing root binding; it must never create a replacement
+        # or fall back to the stable source checkout.
+        self._conversation_worktree_manager = (
+            _build_cli_conversation_worktree_manager(CLI_CONFIG, self._session_db)
+            if manage_conversation_worktree
+            else None
+        )
+        self._conversation_worktree_binding = None
+        self._conversation_worktree_prompt_note = ""
+        if self._conversation_worktree_manager is not None:
+            if resume:
+                try:
+                    root_session_id = self._session_db.get_conversation_root(self.session_id)
+                except Exception as exc:
+                    from agent.conversation_worktree import ConversationWorktreeError
+
+                    raise ConversationWorktreeError(
+                        "could not resolve the durable CLI conversation root",
+                        phase="state",
+                    ) from exc
+                binding = self._conversation_worktree_manager.resolve_existing_session(
+                    root_session_id
+                )
+                if binding is None:
+                    from agent.conversation_worktree import ConversationWorktreeError
+
+                    raise ConversationWorktreeError(
+                        f"no ready conversation worktree for CLI root {root_session_id}",
+                        phase="recovery",
+                    )
+            else:
+                binding = self._conversation_worktree_manager.bind_new_root_session(
+                    self.session_id, conversation_kind="interactive"
+                )
+                if binding is None:
+                    from agent.conversation_worktree import ConversationWorktreeError
+
+                    raise ConversationWorktreeError(
+                        f"conversation worktree policy did not bind CLI root {self.session_id}",
+                        phase="create",
+                    )
+            self._apply_conversation_worktree_binding(binding)
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
         
         # History file for persistent input recall across sessions
@@ -8570,6 +8661,20 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         self._console_print()
 
+    def _apply_conversation_worktree_binding(self, binding) -> None:
+        """Retarget CLI-owned tools and prompt context to a certified binding."""
+        prior_note = getattr(self, "_conversation_worktree_prompt_note", "")
+        if prior_note:
+            rendered_prior = f"\n\n[System note: {prior_note}]"
+            self.system_prompt = (self.system_prompt or "").replace(rendered_prior, "")
+
+        note = _cli_conversation_worktree_prompt_fragment(binding)
+        self._conversation_worktree_binding = binding
+        self._conversation_worktree_prompt_note = note
+        self.working_directory = str(binding.path)
+        os.environ["TERMINAL_CWD"] = self.working_directory
+        self.system_prompt = (self.system_prompt or "") + f"\n\n[System note: {note}]"
+
     def _restore_session_cwd(self, session_meta: dict, *, quiet: bool = False) -> None:
         """Relaunch a resumed session in the directory it was started from.
 
@@ -8585,6 +8690,36 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         A missing directory degrades to a single dim warning rather than a
         crash — repos get moved and deleted.
         """
+        managed_binding = getattr(self, "_conversation_worktree_binding", None)
+        if managed_binding is not None:
+            # Persisted cwd from an older session row is subordinate to the
+            # durable manager binding. Resolve from the current session id so
+            # an in-process /resume targets the selected conversation's root,
+            # not the binding from the session that was just left.
+            try:
+                root_session_id = self._session_db.get_conversation_root(self.session_id)
+                managed_binding = (
+                    self._conversation_worktree_manager.resolve_existing_session(
+                        root_session_id
+                    )
+                )
+            except Exception as exc:
+                from agent.conversation_worktree import ConversationWorktreeError
+
+                raise ConversationWorktreeError(
+                    "could not resolve the resumed CLI conversation worktree",
+                    phase="state",
+                ) from exc
+            if managed_binding is None:
+                from agent.conversation_worktree import ConversationWorktreeError
+
+                raise ConversationWorktreeError(
+                    f"no ready conversation worktree for CLI root {root_session_id}",
+                    phase="recovery",
+                )
+            self._apply_conversation_worktree_binding(managed_binding)
+            return
+
         recorded = (session_meta or {}).get("cwd")
         if not recorded:
             return
@@ -9798,6 +9933,31 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
     def new_session(self, silent=False, title=None):
         """Start a fresh session with a new session ID and cleared agent state."""
         old_session_id = self.session_id
+        new_session_start = datetime.now()
+        timestamp_str = new_session_start.strftime("%Y%m%d_%H%M%S")
+        short_uuid = uuid.uuid4().hex[:6]
+        new_session_id = f"{timestamp_str}_{short_uuid}"
+        new_worktree_binding = None
+
+        # Claim and prepare the new root before finalizing, flushing, or
+        # resetting the current conversation. A failed create leaves every
+        # old-session identity and in-memory state untouched and usable.
+        if self._conversation_worktree_manager is not None:
+            try:
+                new_worktree_binding = (
+                    self._conversation_worktree_manager.bind_new_root_session(
+                        new_session_id, conversation_kind="interactive"
+                    )
+                )
+                if new_worktree_binding is None:
+                    raise RuntimeError("manager returned no conversation worktree binding")
+            except Exception as exc:
+                _cprint(
+                    f"  Cannot start new session {new_session_id}: "
+                    f"conversation worktree setup failed: {exc}"
+                )
+                return False
+
         _boundary_snapshot = None
         if self.agent and self.conversation_history:
             # Deliver the context-engine boundary synchronously and get back
@@ -9835,10 +9995,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # /resume and `hermes sessions list` (gemini-cli#27770 port).
             self._discard_session_if_empty(old_session_id)
 
-        self.session_start = datetime.now()
-        timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
-        short_uuid = uuid.uuid4().hex[:6]
-        self.session_id = f"{timestamp_str}_{short_uuid}"
+        self.session_start = new_session_start
+        self.session_id = new_session_id
+        if new_worktree_binding is not None:
+            self._apply_conversation_worktree_binding(new_worktree_binding)
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
         self.conversation_history = []
         self._pending_title = None
@@ -10002,6 +10162,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 print(f"(^_^)v New session started: {title}")
             else:
                 print("(^_^)v New session started!")
+        return True
 
 
     def _consume_pending_resume_selection(self, text: str) -> bool:
@@ -20929,7 +21090,16 @@ def main(
         # ── Git worktree isolation (#652) ──
         # Create an isolated worktree so this agent instance doesn't collide
         # with other agents working on the same repo.
-        use_worktree = worktree or w or CLI_CONFIG.get("worktree", False)
+        # Managed interactive roots and the legacy ephemeral ``-w`` path are
+        # mutually exclusive. Policy resolution happens before legacy setup so
+        # an invalid managed policy fails closed instead of quietly creating a
+        # remote-tip worktree that is deleted at process exit. Task/tool-owned
+        # invocations remain on the explicit legacy contract.
+        use_worktree = _should_use_legacy_worktree(
+            worktree=worktree,
+            shorthand=w,
+            config=CLI_CONFIG,
+        )
         wt_info = None
         if use_worktree:
             # Overlap tool discovery with the network/subprocess-bound
@@ -21056,6 +21226,7 @@ def main(
         checkpoints=checkpoints,
         pass_session_id=pass_session_id,
         ignore_rules=ignore_rules,
+        manage_conversation_worktree=not list_tools and not list_toolsets,
     )
 
     if parsed_skills:

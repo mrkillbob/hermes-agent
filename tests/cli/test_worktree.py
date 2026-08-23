@@ -637,6 +637,41 @@ class TestCLIFlagLogic:
         use_worktree = worktree or w or config_worktree
         assert not use_worktree
 
+    def test_top_level_worktree_setting_preserved_when_policy_disabled(self, monkeypatch):
+        import cli
+
+        monkeypatch.setenv("HERMES_SESSION_SOURCE", "cli")
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        config = {"worktree": True, "conversation_worktree": {"enabled": False}}
+
+        assert cli._should_use_legacy_worktree(
+            worktree=False,
+            shorthand=False,
+            config=config,
+        ) is True
+
+    def test_top_level_worktree_setting_does_not_double_create_managed_root(
+        self, monkeypatch
+    ):
+        import cli
+
+        monkeypatch.setenv("HERMES_SESSION_SOURCE", "cli")
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        config = {
+            "worktree": True,
+            "conversation_worktree": {
+                "enabled": True,
+                "source_worktree": "/repo/stable",
+                "worktree_root": "/repo/.worktrees",
+            },
+        }
+
+        assert cli._should_use_legacy_worktree(
+            worktree=False,
+            shorthand=False,
+            config=config,
+        ) is False
+
 
 class TestTerminalCWDIntegration:
     """Test that TERMINAL_CWD is correctly set to the worktree path."""
