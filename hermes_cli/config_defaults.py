@@ -33,6 +33,19 @@ DEFAULT_CONFIG = {
     # sessions (no live client) so accumulated agents don't pile up under memory
     # pressure. Reopening one re-resumes it from disk. 0/null disables.
     "max_live_sessions": 16,
+    # Per-root-conversation Git worktree isolation. Disabled by default until
+    # an operator explicitly supplies a stable source and worktree root.
+    "conversation_worktree": {
+        "enabled": False,
+        "source_worktree": None,
+        "worktree_root": None,
+        "branch_prefix": "hermes/session",
+        "bootstrap": False,
+        "bootstrap_command": [],
+        "bootstrap_timeout": 300.0,
+        "create_timeout": 60.0,
+        "retain_until_explicit_cleanup": True,
+    },
     "session": {
         # Per-terminal `hermes -c`: each CLI session drops a breadcrumb file
         # under $HERMES_HOME/terminal-sessions/<terminal-id>, and a bare
