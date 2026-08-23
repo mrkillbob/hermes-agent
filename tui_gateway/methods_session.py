@@ -41,6 +41,20 @@ def _(rid, params: dict) -> dict:
     # and each turn re-bind HERMES_HOME. None/own profile → launch (unchanged).
     profile = (params.get("profile") or "").strip() or None
     profile_home = _profile_home(profile)
+    conversation_worktree = {}
+    if source in {"desktop", "tui"}:
+        try:
+            binding = _bind_conversation_worktree_for_new_root(
+                key, profile_home=profile_home
+            )
+        except Exception as exc:
+            return _err(rid, 5000, f"conversation worktree setup failed: {exc}")
+        if binding is not None:
+            conversation_worktree = _conversation_worktree_metadata(binding)
+            resolved_cwd = conversation_worktree["path"]
+            # A manager-bound workspace is as explicit as a user-selected one:
+            # terminal settlement must never move it back to the stable source.
+            explicit_cwd = True
 
     # The desktop composer owns its model/effort/fast as plain UI state and ships
     # it on every session.create. Honor each as a PER-SESSION override (built into
@@ -83,6 +97,7 @@ def _(rid, params: dict) -> dict:
             "close_on_disconnect": is_truthy_value(params.get("close_on_disconnect", False)),
             "active_session_lease": lease,
             "cols": cols,
+            "conversation_worktree": conversation_worktree,
             "created_at": now,
             "edit_snapshots": {},
             "explicit_cwd": explicit_cwd,
@@ -155,6 +170,11 @@ def _(rid, params: dict) -> dict:
                 "lazy": True,
                 "desktop_contract": DESKTOP_BACKEND_CONTRACT,
                 "profile_name": _response_profile_name(profile),
+                **(
+                    {"conversation_worktree": conversation_worktree}
+                    if conversation_worktree
+                    else {}
+                ),
             },
         },
     )
@@ -463,6 +483,25 @@ def _(rid, params: dict) -> dict:
         profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
             profile_home
         )
+        resume_conversation_worktree = {}
+        stored_source = str(found.get("source") or "").strip()
+        # A normal desktop/TUI resume may target a compression continuation.
+        # Resolve only a ready binding (never create here) and deliberately
+        # leave lazy tool-watch sessions alone so delegated work retains its
+        # own task-owned worktree.
+        if (
+            stored_source in {"desktop", "tui"}
+            and not is_truthy_value(params.get("lazy", False))
+        ):
+            try:
+                binding = _resolve_conversation_worktree_for_resume(
+                    target, profile_home=profile_home, db=db
+                )
+            except Exception as exc:
+                return _err(rid, 5000, f"conversation worktree resume failed: {exc}")
+            if binding is not None:
+                resume_conversation_worktree = _conversation_worktree_metadata(binding)
+                profile_resume_cwd = resume_conversation_worktree["path"]
 
         def _reuse_live_payload(sid: str, session: dict) -> dict:
             payload = _live_session_payload(
@@ -599,6 +638,7 @@ def _(rid, params: dict) -> dict:
                 profile_home=profile_home,
                 model_override=overrides.get("model_override"),
                 resume_runtime_overrides=overrides or None,
+                conversation_worktree=resume_conversation_worktree,
             )
             record["resume_history_ready"] = threading.Event()
             record["resume_hydrating"] = True
@@ -625,6 +665,7 @@ def _(rid, params: dict) -> dict:
                         model=model_override.get("model") or "",
                         provider=overrides.get("provider_override") or "",
                         profile=profile,
+                        conversation_worktree=resume_conversation_worktree,
                     ),
                     "inflight": None,
                     "running": False,
@@ -695,6 +736,7 @@ def _(rid, params: dict) -> dict:
                 profile_home=profile_home,
                 model_override=overrides.get("model_override"),
                 resume_runtime_overrides=overrides or None,
+                conversation_worktree=resume_conversation_worktree,
             )
             if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
                 return _ok(rid, _reuse_live_payload(*live))
@@ -715,6 +757,7 @@ def _(rid, params: dict) -> dict:
                     model=model_override.get("model") or "",
                     provider=overrides.get("provider_override") or "",
                     profile=profile,
+                    conversation_worktree=resume_conversation_worktree,
                 ),
                 "inflight": None,
                 "running": False,
@@ -780,6 +823,7 @@ def _(rid, params: dict) -> dict:
                     session_id=target,
                     session_db=db,
                     platform_override=source,
+                    conversation_worktree=resume_conversation_worktree or None,
                     **stored_runtime_overrides,
                 )
             finally:
@@ -839,6 +883,7 @@ def _(rid, params: dict) -> dict:
                         cwd=profile_resume_cwd,
                         session_db=db,
                         source=source,
+                        conversation_worktree=resume_conversation_worktree or None,
                     )
                     # Ownership TRANSFER — the registered session's agent now
                     # holds this handle for its whole life, and _init_session
@@ -3015,6 +3060,18 @@ def _(rid, params: dict) -> dict:
         new_key = _new_session_key()
         new_sid = uuid.uuid4().hex[:8]
         source = _session_source(session)
+        conversation_worktree = {}
+        branch_cwd = _session_cwd(session)
+        if source in {"desktop", "tui"}:
+            try:
+                binding = _bind_conversation_worktree_for_new_root(
+                    new_key, profile_home=session.get("profile_home"), db=db
+                )
+            except Exception as exc:
+                return _err(rid, 5008, f"conversation worktree setup failed: {exc}")
+            if binding is not None:
+                conversation_worktree = _conversation_worktree_metadata(binding)
+                branch_cwd = conversation_worktree["path"]
         lease = None  # claimed lazily on the first turn (_ensure_active_session_slot)
         branch_name = params.get("name", "")
         try:
@@ -3038,7 +3095,7 @@ def _(rid, params: dict) -> dict:
                 # thing that surfaces TUI branches. See issue #20856.
                 model_config={"_branched_from": old_key},
                 parent_session_id=old_key,
-                cwd=_session_cwd(session),
+                cwd=branch_cwd,
                 # The branch stays on its parent's profile. Explicit stamp (not
                 # just the parent-backfill) so it holds even when the parent row
                 # predates the profile_name column.
@@ -3125,6 +3182,7 @@ def _(rid, params: dict) -> dict:
                     session_id=new_key,
                     session_db=branch_db,
                     platform_override=source,
+                    conversation_worktree=conversation_worktree or None,
                 )
             finally:
                 _clear_session_context(tokens)
@@ -3134,10 +3192,11 @@ def _(rid, params: dict) -> dict:
                 agent,
                 list(history),
                 cols=session.get("cols", 80),
-                cwd=_session_cwd(session),
+                cwd=branch_cwd,
                 session_db=branch_db,
                 source=source,
                 profile_home=parent_home,
+                conversation_worktree=conversation_worktree or None,
             )
             # Ownership TRANSFER — the branched session's agent holds this
             # handle for its whole life and closes it on teardown. Drop is

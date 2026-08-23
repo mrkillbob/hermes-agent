@@ -1423,6 +1423,132 @@ def _get_db():
     return _db
 
 
+def _conversation_worktree_metadata(binding) -> dict:
+    """Return the UI/prompt-safe projection of a certified binding."""
+    return {
+        "root_session_id": str(binding.root_session_id),
+        "path": str(binding.path),
+        "branch": str(binding.branch),
+        "base_commit": str(binding.base_commit),
+    }
+
+
+def _conversation_worktree_manager(*, profile_home=None, db=None):
+    """Construct the policy-governed manager against the owning profile DB."""
+    owns_db = False
+    home_token = None
+    if profile_home:
+        home_token = set_hermes_home_override(str(profile_home))
+    try:
+        from agent.conversation_worktree import ConversationWorktreeManager
+        from agent.conversation_worktree import ConversationWorktreeError
+        from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+
+        policy = resolve_conversation_worktree_policy(_load_cfg())
+        if not policy.enabled:
+            return None, db, owns_db
+        if db is None:
+            if profile_home:
+                from hermes_state import SessionDB
+
+                db = SessionDB(db_path=Path(profile_home) / "state.db")
+                owns_db = True
+            else:
+                db = _get_db()
+        if db is None:
+            raise ConversationWorktreeError("state.db is unavailable", phase="state")
+        return ConversationWorktreeManager(policy, db), db, owns_db
+    except Exception:
+        if owns_db and db is not None:
+            with contextlib.suppress(Exception):
+                db.close()
+        raise
+    finally:
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
+def _bind_new_interactive_conversation_worktree(
+    root_session_id: str, *, profile_home=None, db=None
+):
+    """Create/recover one worktree for a brand-new interactive root only."""
+    manager = None
+    owned_db = None
+    owns_db = False
+    try:
+        manager, owned_db, owns_db = _conversation_worktree_manager(
+            profile_home=profile_home, db=db
+        )
+        if manager is None:
+            return None
+        return manager.bind_new_root_session(root_session_id, conversation_kind="interactive")
+    finally:
+        if owns_db and owned_db is not None:
+            with contextlib.suppress(Exception):
+                owned_db.close()
+
+
+def _resolve_existing_conversation_worktree(
+    root_session_id: str, *, profile_home=None, db=None
+):
+    """Resolve a ready binding without ever creating a worktree on resume."""
+    manager = None
+    owned_db = None
+    owns_db = False
+    try:
+        manager, owned_db, owns_db = _conversation_worktree_manager(
+            profile_home=profile_home, db=db
+        )
+        if manager is None:
+            return None
+        return manager.resolve_existing_session(root_session_id)
+    finally:
+        if owns_db and owned_db is not None:
+            with contextlib.suppress(Exception):
+                owned_db.close()
+
+
+def _bind_conversation_worktree_for_new_root(root_session_id: str, *, profile_home=None, db=None):
+    """Named seam for root boundaries; kept distinct from continuation lookup."""
+    return _bind_new_interactive_conversation_worktree(
+        root_session_id, profile_home=profile_home, db=db
+    )
+
+
+def _resolve_conversation_worktree_for_resume(
+    session_id: str, *, profile_home=None, db=None
+):
+    """Find the existing root binding for a compression continuation only."""
+    current = str(session_id or "").strip()
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        binding = _resolve_existing_conversation_worktree(
+            current, profile_home=profile_home, db=db
+        )
+        if binding is not None:
+            return binding
+        if db is None or not hasattr(db, "get_session"):
+            return None
+        row = db.get_session(current) or {}
+        parent = str(row.get("parent_session_id") or "").strip()
+        if not parent:
+            return None
+        current = parent
+    return None
+
+
+def _conversation_worktree_prompt_fragment(metadata: dict | None) -> str:
+    if not isinstance(metadata, dict) or not metadata.get("path"):
+        return ""
+    return (
+        "This interactive conversation is isolated in a certified Git worktree. "
+        f"Use {metadata['path']} as its workspace (branch {metadata.get('branch') or 'unknown'}, "
+        f"base {metadata.get('base_commit') or 'unknown'}). "
+        "Do not switch to the stable source checkout."
+    )
+
+
 def _db_for_profile(profile: str | None = None):
     """Return SessionDB for ``params.profile`` when it differs from launch.
 
@@ -2381,6 +2507,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 # id — pass it through so the upgrade continues that session
                 # instead of starting a fresh one under the same key.
                 kw = {"session_db": session_db}
+                if conversation_worktree := current.get("conversation_worktree"):
+                    kw["conversation_worktree"] = conversation_worktree
                 if resume_sid := current.get("resume_session_id"):
                     kw["session_id"] = resume_sid
                 kw["platform_override"] = _session_source(current)
@@ -5791,6 +5919,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
         if isinstance(session, dict) and session.get("profile_home")
         else _current_profile_name(),
     }
+    if isinstance(session, dict) and session.get("conversation_worktree"):
+        info["conversation_worktree"] = dict(session["conversation_worktree"])
     try:
         from hermes_cli import __version__, __release_date__
 
@@ -7057,6 +7187,7 @@ def _make_agent(
     reasoning_config_override: dict | None = None,
     service_tier_override: str | None = None,
     platform_override: str | None = None,
+    conversation_worktree: dict | None = None,
 ):
     # AC-4 test seam: dead unless explicitly armed by the isolated certify
     # harness. Both inline and compute-host paths construct through _make_agent,
@@ -7092,6 +7223,11 @@ def _make_agent(
     from hermes_cli.config import resolve_ephemeral_system_prompt_from_config
 
     system_prompt = resolve_ephemeral_system_prompt_from_config(cfg)
+    worktree_prompt = _conversation_worktree_prompt_fragment(conversation_worktree)
+    if worktree_prompt:
+        system_prompt = "\n\n".join(
+            part for part in (system_prompt, worktree_prompt) if part
+        ).strip()
     startup_skills = _parse_tui_skills_env()
     if startup_skills:
         from agent.skill_commands import build_preloaded_skills_prompt
@@ -7245,6 +7381,7 @@ def _init_session(
     session_db=None,
     source: str | None = None,
     profile_home: str | None = None,
+    conversation_worktree: dict | None = None,
 ):
     now = time.time()
     with _sessions_lock:
@@ -7261,6 +7398,8 @@ def _init_session(
             "attached_images": [],
             "image_counter": 0,
             "cwd": cwd or _completion_cwd(),
+            "explicit_cwd": bool(conversation_worktree),
+            "conversation_worktree": dict(conversation_worktree or {}),
             "cols": cols,
             "slash_worker": None,
             "show_reasoning": _load_show_reasoning(),
@@ -7296,7 +7435,7 @@ def _init_session(
     try:
         if db is not None:
             row = db.get_session(key) if hasattr(db, "get_session") else None
-            if row and row.get("cwd"):
+            if row and row.get("cwd") and not conversation_worktree:
                 with _sessions_lock:
                     if sid in _sessions:
                         _sessions[sid]["cwd"] = row["cwd"]
@@ -8610,6 +8749,7 @@ def _lazy_resume_info(
     model: str = "",
     provider: str = "",
     profile: str | None = None,
+    conversation_worktree: dict | None = None,
 ) -> dict:
     """session.info for a not-yet-built session (the shape session.create
     returns). tools/skills land later when the deferred build emits session.info."""
@@ -8626,6 +8766,8 @@ def _lazy_resume_info(
     }
     if provider:
         info["provider"] = provider
+    if conversation_worktree:
+        info["conversation_worktree"] = dict(conversation_worktree)
     return info
 
 
@@ -8643,6 +8785,7 @@ def _deferred_session_record(
     lazy: bool = False,
     model_override=None,
     resume_runtime_overrides: dict | None = None,
+    conversation_worktree: dict | None = None,
 ) -> dict:
     """A live-session record whose AIAgent is built later (lazy watch / cold
     resume) — _init_session's shape minus the agent."""
@@ -8656,10 +8799,11 @@ def _deferred_session_record(
         "active_session_lease": lease,
         "cols": cols,
         "created_at": now,
+        "conversation_worktree": dict(conversation_worktree or {}),
         "cwd": cwd,
         "display_history_prefix": display_history_prefix or [],
         "edit_snapshots": {},
-        "explicit_cwd": False,
+        "explicit_cwd": bool(conversation_worktree),
         "history": history,
         "history_lock": threading.Lock(),
         "history_version": 0,
