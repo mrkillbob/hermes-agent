@@ -31,6 +31,7 @@ class _SessionDB:
         self.roots = roots or {}
         self.session_cwds = session_cwds or {}
         self.ended: list[str] = []
+        self.created: list[str] = []
 
     def get_conversation_root(self, session_id: str) -> str:
         return self.roots.get(session_id, session_id)
@@ -41,8 +42,8 @@ class _SessionDB:
     def delete_session_if_empty(self, _session_id: str) -> bool:
         return False
 
-    def create_session(self, **_kwargs) -> None:
-        return None
+    def create_session(self, **kwargs) -> None:
+        self.created.append(kwargs["session_id"])
 
     def get_session(self, session_id: str) -> dict:
         return {"id": session_id, "cwd": self.session_cwds.get(session_id, "")}
@@ -91,9 +92,15 @@ def manager(tmp_path) -> _Manager:
 
 @pytest.fixture(autouse=True)
 def _restore_process_cwd():
+    from agent.runtime_cwd import clear_session_cwd
+
     original = cli_module.os.getcwd()
-    yield
-    cli_module.os.chdir(original)
+    clear_session_cwd()
+    try:
+        yield
+    finally:
+        cli_module.os.chdir(original)
+        clear_session_cwd()
 
 
 def _enabled_config() -> dict:
@@ -319,18 +326,63 @@ def test_list_only_cli_does_not_allocate_a_conversation_root(monkeypatch, manage
 
 
 def test_cli_new_allocates_another_worktree_before_agent_reset(monkeypatch, manager):
+    from agent.runtime_cwd import resolve_agent_cwd
+    from tools.file_tools import _resolve_base_dir
+
     cli, _db = _build_cli(monkeypatch, manager)
     old = cli.working_directory
+    old_session_id = cli.session_id
     manager.events.clear()
     cli.agent = MagicMock()
     cli.agent._memory_manager = None
     cli.agent.reset_session_state.side_effect = lambda: manager.events.append("reset")
-
     assert cli.new_session(silent=True) is True
 
     assert cli.working_directory != old
     assert manager.bound_roots == [manager.bound_roots[0], cli.session_id]
     assert manager.events.index("bind") < manager.events.index("reset")
+    assert cli_module.os.getcwd() == cli.working_directory
+    assert cli_module.os.environ["TERMINAL_CWD"] == cli.working_directory
+    assert str(resolve_agent_cwd()) == cli.working_directory
+    assert str(_resolve_base_dir()) == cli.working_directory
+    assert cli._conversation_worktree_binding.root_session_id == cli.session_id
+    assert cli.system_prompt.count("certified Git worktree") == 1
+    assert old_session_id not in cli.system_prompt
+
+
+def test_cli_new_candidate_chdir_failure_preserves_complete_old_boundary(
+    monkeypatch, manager
+):
+    cli, db = _build_cli(monkeypatch, manager)
+    cli.conversation_history = [{"role": "user", "content": "keep this turn"}]
+    old_session_id = cli.session_id
+    old_process_cwd = cli_module.os.getcwd()
+    old_terminal_cwd = cli_module.os.environ["TERMINAL_CWD"]
+    old_binding = cli._conversation_worktree_binding
+    old_system_prompt = cli.system_prompt
+    old_transcript = list(cli.conversation_history)
+    old_ended = list(db.ended)
+    old_created = list(db.created)
+    real_chdir = cli_module.os.chdir
+
+    def fail_candidate_chdir(path):
+        candidate = Path(path)
+        if candidate.parent == manager.worktree_root and str(candidate) != old_process_cwd:
+            raise OSError("candidate transition denied")
+        return real_chdir(path)
+
+    monkeypatch.setattr(cli_module.os, "chdir", fail_candidate_chdir)
+
+    assert cli.new_session(silent=True) is False
+
+    assert cli.session_id == old_session_id
+    assert cli_module.os.getcwd() == old_process_cwd
+    assert cli_module.os.environ["TERMINAL_CWD"] == old_terminal_cwd
+    assert cli._conversation_worktree_binding is old_binding
+    assert cli.system_prompt == old_system_prompt
+    assert cli.conversation_history == old_transcript
+    assert db.ended == old_ended
+    assert db.created == old_created
 
 
 def test_cli_new_binding_failure_leaves_old_session_usable(monkeypatch, manager):

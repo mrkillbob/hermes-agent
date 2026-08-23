@@ -9950,9 +9950,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         new_session_id = f"{timestamp_str}_{short_uuid}"
         new_worktree_binding = None
 
-        # Claim and prepare the new root before finalizing, flushing, or
-        # resetting the current conversation. A failed create leaves every
-        # old-session identity and in-memory state untouched and usable.
+        # Claim, certify, and enter the new root before finalizing, flushing,
+        # or resetting the current conversation. A failed create or cwd
+        # transition leaves every old-session identity and in-memory state
+        # untouched and usable.
         if self._conversation_worktree_manager is not None:
             try:
                 new_worktree_binding = (
@@ -9962,6 +9963,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 )
                 if new_worktree_binding is None:
                     raise RuntimeError("manager returned no conversation worktree binding")
+                self._apply_conversation_worktree_binding(new_worktree_binding)
             except Exception as exc:
                 _cprint(
                     f"  Cannot start new session {new_session_id}: "
@@ -10008,8 +10010,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         self.session_start = new_session_start
         self.session_id = new_session_id
-        if new_worktree_binding is not None:
-            self._apply_conversation_worktree_binding(new_worktree_binding)
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
         self.conversation_history = []
         self._pending_title = None
