@@ -10040,10 +10040,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # or resetting the current conversation. A failed create or cwd
         # transition leaves every old-session identity and in-memory state
         # untouched and usable.
-        if self._conversation_worktree_manager is not None:
+        conversation_worktree_manager = getattr(
+            self, "_conversation_worktree_manager", None
+        )
+        if conversation_worktree_manager is not None:
             try:
                 new_worktree_binding = (
-                    self._conversation_worktree_manager.bind_new_root_session(
+                    conversation_worktree_manager.bind_new_root_session(
                         new_session_id, conversation_kind="interactive"
                     )
                 )

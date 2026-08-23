@@ -194,12 +194,11 @@ def _process_liveness(entry: dict[str, object]) -> str:
     if pid <= 0:
         return "unknown"
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return "dead"
-    except PermissionError:
-        return "active"
-    except OSError:
+        import psutil
+
+        if not psutil.pid_exists(pid):
+            return "dead"
+    except Exception:
         return "unknown"
     expected = entry.get("process_start_time")
     if expected is None:
