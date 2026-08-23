@@ -152,9 +152,14 @@ class GatewaySlashCommandsMixin:
         # mutation, so a setup failure leaves this old boundary usable.
         old_entry = self.session_store._entries.get(session_key)
         try:
-            new_entry = await self.async_session_store.reset_session(
-                session_key, conversation_kind="interactive"
-            )
+            if old_entry is None:
+                new_entry = await self.async_session_store.get_or_create_session(
+                    source, force_new=True, conversation_kind="interactive"
+                )
+            else:
+                new_entry = await self.async_session_store.reset_session(
+                    session_key, conversation_kind="interactive"
+                )
         except Exception as exc:
             logger.warning(
                 "Refusing /new for %s because conversation worktree setup failed: %s",
@@ -288,23 +293,9 @@ class GatewaySlashCommandsMixin:
         except Exception:
             session_info = ""
 
-        if new_entry:
+        if old_entry is not None:
             header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_default")
         else:
-            # No existing session, just create one
-            try:
-                new_entry = await self.async_session_store.get_or_create_session(
-                    source, force_new=True, conversation_kind="interactive"
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Refusing first /new for %s because conversation worktree setup failed: %s",
-                    session_key,
-                    exc,
-                )
-                return EphemeralReply(
-                    f"Cannot start a new session: conversation worktree setup failed: {exc}"
-                )
             header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_new")
 
         # Set session title if provided with /new <title>

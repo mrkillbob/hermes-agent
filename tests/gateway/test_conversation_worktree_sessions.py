@@ -11,13 +11,20 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from agent.conversation_worktree import ConversationWorktreeBinding, ConversationWorktreeError
-from gateway.config import GatewayConfig, Platform
+from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource, SessionStore, build_session_context
+from gateway.session import (
+    AsyncSessionStore,
+    SessionSource,
+    SessionStore,
+    build_session_context,
+    build_session_key,
+)
 from gateway.slash_commands import GatewaySlashCommandsMixin
 
 
@@ -157,6 +164,205 @@ def test_task_gateway_source_never_allocates_conversation_worktree(store, manage
     assert entry.cwd is None
     assert entry.conversation_worktree == {}
     assert manager.bound_roots == []
+
+
+def _enable_production_policy(monkeypatch, tmp_path) -> None:
+    source_root = tmp_path / "stable"
+    worktree_root = tmp_path / "worktrees"
+    source_root.mkdir(exist_ok=True)
+    worktree_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "conversation_worktree": {
+                "enabled": True,
+                "source_worktree": str(source_root),
+                "worktree_root": str(worktree_root),
+                "retain_until_explicit_cleanup": True,
+            }
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_production_factory_first_contact_fails_before_gateway_state_mutation(
+    tmp_path, monkeypatch
+):
+    """Returning None for an enabled policy would publish a source-cwd route."""
+    import agent.runtime_cwd as runtime_cwd
+    from agent.runtime_cwd import resolve_agent_cwd, set_session_cwd
+    from gateway.run import GatewayRunner
+
+    _enable_production_policy(monkeypatch, tmp_path)
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="first-contact",
+        chat_type="dm",
+        user_id="operator-1",
+    )
+    session_key = build_session_key(source)
+    store = SessionStore(tmp_path / "sessions", GatewayConfig())
+    store._db = None
+    sentinel_cwd = tmp_path / "existing-task-worktree"
+    sentinel_cwd.mkdir()
+
+    runner = object.__new__(GatewayRunner)
+    runner.session_store = store
+    runner._async_session_store = AsyncSessionStore(store)
+    unrelated_agent = object()
+    runner._agent_cache = {"unrelated": unrelated_agent}
+    runner._session_context_prompts = {"unrelated": "context"}
+    runner._session_run_generation = {"unrelated": 9}
+
+    token = set_session_cwd(str(sentinel_cwd))
+    try:
+        with pytest.raises(ConversationWorktreeError, match="SessionDB is unavailable"):
+            await runner.async_session_store.get_or_create_session(
+                source, conversation_kind="interactive"
+            )
+        assert resolve_agent_cwd() == sentinel_cwd
+    finally:
+        runtime_cwd._SESSION_CWD.reset(token)
+
+    assert store.lookup_by_session_key(session_key) is None
+    assert runner._agent_cache == {"unrelated": unrelated_agent}
+    assert runner._session_context_prompts == {"unrelated": "context"}
+    assert runner._session_run_generation == {"unrelated": 9}
+
+
+@pytest.mark.asyncio
+async def test_production_factory_new_failure_preserves_all_old_gateway_state(
+    tmp_path, monkeypatch, manager
+):
+    """A disabled manager fallback during /new must not rotate any state."""
+    import agent.runtime_cwd as runtime_cwd
+    from agent.runtime_cwd import resolve_agent_cwd, set_session_cwd
+    from gateway.session import _default_conversation_worktree_manager_factory
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="existing-chat",
+        chat_type="dm",
+        user_id="operator-1",
+    )
+    store = SessionStore(
+        tmp_path / "sessions",
+        GatewayConfig(),
+        conversation_worktree_manager_factory=lambda _db: manager,
+    )
+    store._db = None
+    old_entry = store.get_or_create_session(source)
+    store._conversation_worktree_manager_factory = (
+        _default_conversation_worktree_manager_factory
+    )
+    _enable_production_policy(monkeypatch, tmp_path)
+    session_key = old_entry.session_key
+    cached_agent = object()
+    sentinel_cwd = Path(old_entry.cwd)
+
+    class _Runner(GatewaySlashCommandsMixin):
+        def __init__(self):
+            self.session_store = store
+            self._async_session_store = AsyncSessionStore(store)
+            self._agent_cache = {session_key: cached_agent}
+            self._session_context_prompts = {session_key: "old-context"}
+            self._session_run_generation = {session_key: 4}
+
+        @property
+        def async_session_store(self):
+            return self._async_session_store
+
+        def _session_key_for_source(self, _source):
+            return session_key
+
+        def _invalidate_session_run_generation(self, *_args, **_kwargs):
+            raise AssertionError("generation changed before replacement root was ready")
+
+        def _release_running_agent_state(self, _key):
+            raise AssertionError("running state changed before replacement root was ready")
+
+    runner = _Runner()
+    token = set_session_cwd(str(sentinel_cwd))
+    try:
+        reply = await runner._handle_reset_command(
+            MessageEvent(text="/new", source=source, timestamp=datetime.now())
+        )
+        assert resolve_agent_cwd() == sentinel_cwd
+    finally:
+        runtime_cwd._SESSION_CWD.reset(token)
+
+    assert "conversation worktree setup failed" in str(reply)
+    assert store.lookup_by_session_key(session_key) is old_entry
+    assert runner._agent_cache[session_key] is cached_agent
+    assert runner._session_context_prompts == {session_key: "old-context"}
+    assert runner._session_run_generation == {session_key: 4}
+
+
+@pytest.mark.asyncio
+async def test_first_cli_handoff_reuses_verified_workspace_without_binding_claim(
+    tmp_path, manager
+):
+    """Default interactive creation would claim a second root and lose CLI cwd."""
+    from gateway.run import GatewayRunner
+
+    cli_workspace = manager.root / "cli-session"
+    cli_workspace.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={Platform.DISCORD: PlatformConfig(enabled=True, token="test")}
+    )
+    config.platforms[Platform.DISCORD].home_channel = HomeChannel(
+        platform=Platform.DISCORD,
+        chat_id="home-channel",
+        name="Trading Bot",
+    )
+    store = SessionStore(
+        tmp_path / "sessions",
+        config,
+        conversation_worktree_manager_factory=lambda _db: manager,
+    )
+    store._db = SimpleNamespace(get_conversation_root=lambda session_id: session_id)
+    adapter = MagicMock()
+    adapter.create_handoff_thread = AsyncMock(return_value=None)
+    adapter.send = AsyncMock(return_value=SimpleNamespace(success=True))
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = config
+    runner.adapters = {Platform.DISCORD: adapter}
+    runner.session_store = store
+    runner._async_session_store = AsyncSessionStore(store)
+    runner._evict_cached_agent = lambda _key: None
+    runner._release_running_agent_state = lambda _key: None
+    observed: dict[str, str] = {}
+
+    async def capture_handoff(event):
+        entry = store.lookup_by_session_key(build_session_key(event.source))
+        observed["cwd"] = build_session_context(event.source, config, entry).cwd
+        return "handoff ready"
+
+    runner._handle_message = capture_handoff
+
+    await runner._process_handoff(
+        {
+            "id": "cli-session",
+            "title": "CLI work",
+            "handoff_platform": "discord",
+            "cwd": str(cli_workspace),
+        }
+    )
+
+    destination = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="home-channel",
+        chat_name="Trading Bot",
+        chat_type="dm",
+        user_id="system:handoff",
+        user_name="Handoff",
+    )
+    entry = store.lookup_by_session_key(build_session_key(destination))
+    assert manager.bound_roots == []
+    assert entry.session_id == "cli-session"
+    assert entry.cwd == str(cli_workspace)
+    assert observed["cwd"] == str(cli_workspace)
 
 
 @pytest.mark.asyncio

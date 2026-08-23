@@ -13802,16 +13802,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
         )
 
-        # Make sure there's an entry in the session_store for this key. If
-        # the home channel has never been used, get_or_create_session
-        # creates one; switch_session then re-points it.
-        await self.async_session_store.get_or_create_session(dest_source)
+        # Verify the CLI-owned workspace before publishing any destination
+        # route. This is an ownership transfer, not a new interactive root:
+        # it must never claim a second conversation worktree for the channel.
+        handoff_cwd, handoff_binding = (
+            await self.async_session_store.resolve_task_owned_workspace(
+                cli_session_id, str(row.get("cwd") or "")
+            )
+        )
+
+        # Make sure there's a task-owned destination entry for this key. If
+        # the home channel has never been used, this creates routing state but
+        # deliberately bypasses interactive conversation allocation.
+        await self.async_session_store.get_or_create_session(
+            dest_source, conversation_kind="task"
+        )
 
         # Re-bind the destination key to the CLI session_id. switch_session
         # ends the prior session in SQLite and reopens the CLI session under
         # the new key. The CLI's transcript becomes the active one for the
         # gateway from this moment on.
-        switched = await self.async_session_store.switch_session(session_key, cli_session_id)
+        switched = await self.async_session_store.switch_session(
+            session_key,
+            cli_session_id,
+            task_owned_cwd=handoff_cwd,
+            conversation_worktree=handoff_binding,
+        )
         if switched is None:
             raise RuntimeError(
                 f"could not switch session key {session_key} → {cli_session_id}"
@@ -18210,6 +18226,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "please resend shortly."
             )
 
+        # Discord and Photon interactive roots must be certified before the
+        # active-turn lease/generation is claimed. A missing SessionDB or
+        # manager is therefore a user-visible refusal with no agent, context,
+        # cache, or generation mutation and no process-cwd fallback.
+        if (
+            not is_internal
+            and SessionStore._supports_conversation_worktree(source)
+        ):
+            from agent.conversation_worktree import ConversationWorktreeError
+
+            try:
+                prepared_entry = await self.async_session_store.get_or_create_session(
+                    source, conversation_kind="interactive"
+                )
+            except ConversationWorktreeError as exc:
+                logger.warning(
+                    "Refusing interactive message because conversation worktree "
+                    "setup failed: %s",
+                    exc,
+                )
+                return (
+                    "Cannot start this conversation: conversation worktree "
+                    f"setup failed: {exc}"
+                )
+            setattr(event, "_gateway_prepared_session_entry", prepared_entry)
+
         # ── Claim this session before any await ───────────────────────
         # Between here and _run_agent registering the real AIAgent, there
         # are numerous await points (hooks, vision enrichment, STT,
@@ -19104,20 +19146,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 return
         else:
-            # Internal wakes must observe reset policy without becoming user
-            # activity themselves. Otherwise periodic Kanban/process
-            # notifications keep the stable routing key alive across every
-            # daily/idle boundary.
-            session_entry = await self.async_session_store.get_or_create_session(
-                source,
-                touch_activity=not bool(getattr(event, "internal", False)),
-                # Cron, Kanban, plugin, and delegated completion events may
-                # target a chat before its user root exists. They retain their
-                # task-owned cwd and must never allocate a conversation tree.
-                conversation_kind=(
-                    "task" if bool(getattr(event, "internal", False)) else "interactive"
-                ),
-            )
+            prepared_entry = getattr(event, "_gateway_prepared_session_entry", None)
+            if prepared_entry is not None:
+                session_entry = prepared_entry
+            else:
+                # Internal wakes must observe reset policy without becoming user
+                # activity themselves. Otherwise periodic Kanban/process
+                # notifications keep the stable routing key alive across every
+                # daily/idle boundary.
+                session_entry = await self.async_session_store.get_or_create_session(
+                    source,
+                    touch_activity=not bool(getattr(event, "internal", False)),
+                    # Cron, Kanban, plugin, and delegated completion events may
+                    # target a chat before its user root exists. They retain their
+                    # task-owned cwd and must never allocate a conversation tree.
+                    conversation_kind=(
+                        "task"
+                        if bool(getattr(event, "internal", False))
+                        else "interactive"
+                    ),
+                )
         session_key = session_entry.session_key
         if not strict_session and pinned_session_id:
             resolved_entry = await self._resolve_async_delegation_session(

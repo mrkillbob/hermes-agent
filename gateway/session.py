@@ -1272,14 +1272,35 @@ _DB_UNPINNED = object()
 
 
 def _default_conversation_worktree_manager_factory(db):
-    """Build a manager in the active profile scope, or no-op on JSONL."""
-    if db is None:
-        return None
-    from agent.conversation_worktree import ConversationWorktreeManager
+    """Build the enabled manager or fail before an interactive route exists."""
+    from agent.conversation_worktree import (
+        ConversationWorktreeError,
+        ConversationWorktreeManager,
+    )
     from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
     from hermes_cli.config import load_config
 
-    return ConversationWorktreeManager(resolve_conversation_worktree_policy(load_config()), db)
+    try:
+        policy = resolve_conversation_worktree_policy(load_config())
+    except Exception as exc:
+        raise ConversationWorktreeError(
+            f"conversation worktree policy could not be resolved: {exc}",
+            phase="policy",
+        ) from exc
+    if not policy.enabled:
+        return None
+    if db is None:
+        raise ConversationWorktreeError(
+            "conversation worktree policy is enabled but SessionDB is unavailable",
+            phase="state",
+        )
+    try:
+        return ConversationWorktreeManager(policy, db)
+    except Exception as exc:
+        raise ConversationWorktreeError(
+            f"conversation worktree manager is unavailable: {exc}",
+            phase="state",
+        ) from exc
 
 
 class SessionStore:
@@ -1378,15 +1399,60 @@ class SessionStore:
         return factory(self._db) if factory is not None else None
 
     @staticmethod
-    def _apply_conversation_worktree_binding(entry: SessionEntry, binding) -> None:
-        entry.cwd = str(binding.path)
-        entry.conversation_worktree = {
+    def _binding_metadata(binding) -> Dict[str, str]:
+        return {
             "root_session_id": str(binding.root_session_id),
             "path": str(binding.path),
             "branch": str(binding.branch),
             "base_commit": str(binding.base_commit),
             "repo_common_dir": str(binding.repo_common_dir),
         }
+
+    @staticmethod
+    def _apply_conversation_worktree_binding(entry: SessionEntry, binding) -> None:
+        entry.cwd = str(binding.path)
+        entry.conversation_worktree = SessionStore._binding_metadata(binding)
+
+    def resolve_task_owned_workspace(
+        self, target_session_id: str, persisted_cwd: str
+    ) -> tuple[str, Dict[str, str]]:
+        """Verify a CLI handoff workspace without claiming a conversation root."""
+        from agent.conversation_worktree import ConversationWorktreeError
+
+        raw_cwd = str(persisted_cwd or "").strip()
+        path = Path(raw_cwd).expanduser()
+        if not raw_cwd or not path.is_absolute() or not path.is_dir():
+            raise ConversationWorktreeError(
+                "CLI handoff has no usable verified workspace",
+                phase="cwd",
+            )
+        path = path.resolve()
+
+        manager = self._conversation_worktree_manager()
+        if manager is None:
+            return str(path), {}
+        db = self._db
+        if db is None:
+            raise ConversationWorktreeError(
+                "conversation worktree policy is enabled but SessionDB is unavailable",
+                phase="state",
+            )
+        try:
+            root_session_id = db.get_conversation_root(target_session_id)
+            binding = manager.resolve_existing_session(root_session_id)
+        except ConversationWorktreeError:
+            raise
+        except Exception as exc:
+            raise ConversationWorktreeError(
+                f"could not verify CLI handoff workspace: {exc}",
+                phase="state",
+            ) from exc
+        if binding is None or Path(binding.path).resolve() != path:
+            raise ConversationWorktreeError(
+                "CLI handoff workspace does not match its ready conversation binding",
+                phase="recovery",
+            )
+        return str(path), self._binding_metadata(binding)
 
     def _bind_conversation_worktree_for_new_entry(
         self,
@@ -3636,7 +3702,14 @@ class SessionStore:
             self._save()
             return entry
 
-    def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
+    def switch_session(
+        self,
+        session_key: str,
+        target_session_id: str,
+        *,
+        task_owned_cwd: Optional[str] = None,
+        conversation_worktree: Optional[Dict[str, str]] = None,
+    ) -> Optional[SessionEntry]:
         """Switch a session key to point at an existing session ID.
 
         Used by ``/resume`` to restore a previously-named session.
@@ -3672,6 +3745,8 @@ class SessionStore:
                 display_name=old_entry.display_name,
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
+                cwd=task_owned_cwd,
+                conversation_worktree=dict(conversation_worktree or {}),
             )
 
             self._entries[session_key] = new_entry
