@@ -20,6 +20,7 @@ from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import (
     AsyncSessionStore,
+    SessionEntry,
     SessionSource,
     SessionStore,
     build_session_context,
@@ -188,6 +189,64 @@ def test_gateway_resume_reacquires_target_root_lease_and_workspace(
     assert first.session_id in store._conversation_root_leases
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [Platform.DISCORD, Platform("photon")])
+async def test_gateway_branch_allocates_and_switches_to_a_distinct_worktree(
+    tmp_path, monkeypatch, manager, platform
+):
+    """Resolving the branch through its parent lineage would reuse the old root."""
+    import hermes_state
+    from gateway.run import GatewayRunner
+    from hermes_state import AsyncSessionDB
+
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+    branch_store = SessionStore(
+        sessions_dir=tmp_path / "sessions",
+        config=GatewayConfig(),
+        conversation_worktree_manager_factory=lambda _db: manager,
+    )
+    branch_source = SessionSource(
+        platform=platform,
+        chat_id="branch-chat",
+        chat_type="dm",
+        user_id="operator-1",
+    )
+    parent = branch_store.get_or_create_session(branch_source)
+    branch_store._db.append_message(parent.session_id, role="user", content="investigate")
+
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {}
+    runner.config = {}
+    runner._background_tasks = set()
+    runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._busy_ack_ts = {}
+    runner._pending_approvals = {}
+    runner._update_prompt_pending = {}
+    runner._agent_cache_lock = None
+    runner.session_store = branch_store
+    runner._session_db = AsyncSessionDB(branch_store._db)
+    runner._pending_skills_reload_notes = {}
+
+    await runner._handle_branch_command(
+        MessageEvent(text="/branch isolated approach", source=branch_source)
+    )
+
+    child = branch_store.lookup_by_session_key(parent.session_key)
+    assert child is not None
+    assert child.session_id != parent.session_id
+    assert manager.bound_roots == [parent.session_id, child.session_id]
+    assert child.cwd == str(manager.root / child.session_id)
+    assert child.cwd != parent.cwd
+    assert child.conversation_worktree["root_session_id"] == child.session_id
+
+    assert branch_store.switch_session(parent.session_key, parent.session_id) is not None
+    resumed_child = branch_store.switch_session(parent.session_key, child.session_id)
+    assert resumed_child is not None
+    assert resumed_child.cwd == str(manager.root / child.session_id)
+    assert manager.resolved_roots[-1] == child.session_id
+
+
 def test_failed_gateway_switch_releases_only_new_target_candidate(
     store, manager, source, monkeypatch
 ):
@@ -257,6 +316,42 @@ def test_concurrent_reset_loser_releases_unpublished_candidate(
 
     assert store.reset_session(first.session_key) is winner
     assert list(store._conversation_root_leases) == [first.session_id]
+
+
+def test_concurrent_create_loser_releases_only_unpublished_candidate(
+    store, manager, source, monkeypatch
+):
+    """A losing first-contact bind must not retain an unrouteable root lease."""
+    session_key = build_session_key(source)
+    winner_root = "winner-root"
+    winner_binding = manager.bind_new_root_session(
+        winner_root, conversation_kind="interactive"
+    )
+    winner = SessionEntry(
+        session_key=session_key,
+        session_id=winner_root,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=source.platform,
+        chat_type=source.chat_type,
+    )
+    store._apply_conversation_worktree_binding(winner, winner_binding)
+    winner_lease = store._conversation_root_leases[winner_root]
+    original_bind = manager.bind_new_root_session
+
+    def bind_then_publish_winner(root_session_id, *, conversation_kind):
+        binding = original_bind(root_session_id, conversation_kind=conversation_kind)
+        if root_session_id != winner_root:
+            with store._lock:
+                store._entries[session_key] = winner
+        return binding
+
+    monkeypatch.setattr(manager, "bind_new_root_session", bind_then_publish_winner)
+
+    assert store.get_or_create_session(source) is winner
+    assert winner_lease.released is False
+    assert list(store._conversation_root_leases) == [winner_root]
 
 
 def test_failed_new_preserves_old_gateway_boundary(store, manager, source):

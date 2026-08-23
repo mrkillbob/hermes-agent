@@ -152,6 +152,21 @@ def test_cli_resume_reuses_durable_root_binding(monkeypatch, manager):
     assert cli.session_id == "compressed-tip"
 
 
+def test_cli_branch_allocates_and_enters_a_distinct_worktree(monkeypatch, manager):
+    """Falling back to lineage-root resolution would keep /branch in the parent tree."""
+    cli, _db = _build_cli(monkeypatch, manager)
+    parent_session_id = cli.session_id
+    parent_cwd = cli.working_directory
+    cli.conversation_history = [{"role": "user", "content": "investigate this"}]
+
+    cli._handle_branch_command("/branch isolated approach")
+
+    assert cli.session_id != parent_session_id
+    assert manager.bound_roots == [parent_session_id, cli.session_id]
+    assert cli.working_directory == str(manager.worktree_root / cli.session_id)
+    assert cli.working_directory != parent_cwd
+
+
 def test_cli_resume_fails_closed_when_durable_binding_is_missing(monkeypatch, manager):
     manager.resolve_existing_session = MagicMock(return_value=None)
 

@@ -327,6 +327,10 @@ def test_cleanup_maps_git_inspection_failure_to_unknown(prepared_binding, monkey
 def test_explicit_cleanup_removes_only_exact_safe_worktree(prepared_binding):
     manager, db, source, _remote, binding, sibling = prepared_binding
     certify_safe(source, binding)
+    from agent.conversation_worktree import _common_owner_claim_path
+
+    common_claim = _common_owner_claim_path(binding.repo_common_dir, binding.path)
+    assert common_claim.exists()
     claimed = db.get_conversation_worktree(binding.root_session_id)
     assert claimed is not None
 
@@ -346,6 +350,7 @@ def test_explicit_cleanup_removes_only_exact_safe_worktree(prepared_binding):
     worktrees = git(source, "worktree", "list", "--porcelain")
     assert str(binding.path) not in worktrees
     assert str(sibling) in worktrees
+    assert not common_claim.exists()
 
 
 def test_blocked_cleanup_never_removes_or_marks_binding(prepared_binding):

@@ -15,6 +15,7 @@ the entire value of these tests is exercising actual git verdicts):
 - reclaim operates ONLY on the frozen audit list (concurrent-session trap)
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -104,6 +105,80 @@ def _add_managed_conversation_worktree(repo_path, tmp_path, root_id="aged-root")
     old = __import__("time").time() - (365 * 86400)
     os.utime(binding.path, (old, old))
     return db, binding
+
+
+def test_marker_write_failure_after_worktree_add_keeps_durable_manager_claim(
+    repo, tmp_path, monkeypatch
+):
+    """A retained failed creation must never become generic-GC fodder.
+
+    Removing the durable common-repository claim would make this fail: the
+    worktree has no per-worktree owner marker, is clean and merged, and the
+    generic reclaimer would otherwise force-remove it.
+    """
+    from agent.conversation_worktree import (
+        ConversationWorktreeError,
+        ConversationWorktreeManager,
+    )
+    from agent.conversation_worktree_policy import ConversationWorktreePolicy
+    from hermes_state import SessionDB
+
+    stable_source = tmp_path / "failed-marker-stable-source"
+    _git(
+        ["worktree", "add", str(stable_source), "-b", "stable/failed-marker", "HEAD"],
+        repo,
+    )
+    db = SessionDB(tmp_path / "failed-marker-state.db")
+    worktree_manager = ConversationWorktreeManager(
+        ConversationWorktreePolicy(
+            enabled=True,
+            source_worktree=stable_source,
+            worktree_root=repo / ".worktrees",
+            branch_prefix="hermes/session",
+            bootstrap=False,
+            bootstrap_command=(),
+            bootstrap_timeout=1.0,
+            create_timeout=3.0,
+            retain_until_explicit_cleanup=True,
+        ),
+        db,
+    )
+
+    def fail_marker(_record):
+        raise ConversationWorktreeError("marker unavailable", phase="create")
+
+    original_common_claim = worktree_manager._ensure_common_owner_claim
+
+    def claim_before_worktree_creation(record):
+        assert not Path(record.worktree_path).exists()
+        original_common_claim(record)
+
+    monkeypatch.setattr(
+        worktree_manager, "_ensure_common_owner_claim", claim_before_worktree_creation
+    )
+    monkeypatch.setattr(worktree_manager, "_ensure_owner_marker", fail_marker)
+    try:
+        with pytest.raises(ConversationWorktreeError, match="marker unavailable"):
+            worktree_manager.bind_new_root_session(
+                "failed-marker", conversation_kind="interactive"
+            )
+
+        failed = db.get_conversation_worktree("failed-marker")
+        assert failed is not None
+        assert failed.state == "creation_failed"
+        failed_path = Path(failed.worktree_path)
+        assert failed_path.is_dir()
+
+        records = worktree_gc.audit_worktrees(str(repo), with_sizes=False)
+        record = _verdict(records, failed_path.name)
+        assert record.verdict == "keep"
+        assert record.reason == "manager-owned conversation worktree"
+
+        actions = worktree_gc.reclaim_worktrees(str(repo), records=records)
+        assert failed_path.is_dir()
+        assert actions == []
+    finally:
+        db.close()
 
 
 class TestAuditVerdicts:
@@ -238,7 +313,24 @@ class TestReclaim:
             )
         )
         marker.write_text(
-            '{"owner": "conversation-worktree-manager"}', encoding="utf-8"
+            json.dumps(
+                {
+                    "owner": "conversation-worktree-manager",
+                    "root_session_id": "raced-owner",
+                    "worktree_path": str(tree.resolve()),
+                    "repo_common_dir": _git(
+                        [
+                            "-C",
+                            str(tree),
+                            "rev-parse",
+                            "--path-format=absolute",
+                            "--git-common-dir",
+                        ],
+                        repo,
+                    ),
+                }
+            ),
+            encoding="utf-8",
         )
 
         actions = worktree_gc.reclaim_worktrees(str(repo), records=records)

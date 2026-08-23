@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 _REPOSITORY_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _REPOSITORY_THREAD_LOCKS_GUARD = threading.Lock()
 _OWNER_MARKER = "hermes-conversation-owner-v1"
+_COMMON_OWNER_CLAIMS_DIR = "hermes-conversation-owner-claims-v1"
 _LEASE_MESSAGE_LIMIT = 300
 
 
@@ -261,27 +262,120 @@ def acquire_conversation_root_lease(
     )
 
 
-def conversation_worktree_is_manager_owned(path: Path) -> bool:
-    """Recognize the manager's durable Git-admin ownership marker."""
-    result = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--git-path", _OWNER_MARKER],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=5,
-        check=False,
+def _common_owner_claim_path(repo_common_dir: Path, worktree_path: Path) -> Path:
+    """Return the source-Git durable claim location for one exact worktree path."""
+    digest = hashlib.sha256(str(worktree_path.resolve()).encode("utf-8")).hexdigest()
+    return repo_common_dir / _COMMON_OWNER_CLAIMS_DIR / f"{digest}.json"
+
+
+def _owner_claim_matches(
+    data: object, *, worktree_path: Path, repo_common_dir: Path
+) -> bool:
+    return (
+        isinstance(data, dict)
+        and data.get("owner") == "conversation-worktree-manager"
+        and data.get("worktree_path") == str(worktree_path.resolve())
+        and data.get("repo_common_dir") == str(repo_common_dir.resolve())
+        and isinstance(data.get("root_session_id"), str)
+        and bool(data["root_session_id"])
     )
+
+
+def conversation_worktree_ownership_verdict(path: Path) -> bool | None:
+    """Return manager ownership, absence, or an unverified ownership state.
+
+    The common-repository claim is written before ``git worktree add``.  It
+    closes the crash window where Git has created the worktree but the
+    worktree-local marker cannot yet be persisted.  Any malformed or
+    unreadable ownership evidence is deliberately ``None`` so every GC caller
+    keeps the tree rather than guessing that it is safe to remove.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(path),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     if result.returncode != 0 or not result.stdout.strip():
-        return False
-    marker = Path(result.stdout.strip())
+        return None
+    repo_common_dir = Path(result.stdout.strip()).resolve()
+
+    try:
+        marker_result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-path", _OWNER_MARKER],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if marker_result.returncode != 0 or not marker_result.stdout.strip():
+        return None
+    marker = Path(marker_result.stdout.strip())
     if not marker.is_absolute():
         marker = path / marker
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except Exception:
+    if marker.exists():
+        try:
+            if _owner_claim_matches(
+                json.loads(marker.read_text(encoding="utf-8")),
+                worktree_path=path,
+                repo_common_dir=repo_common_dir,
+            ):
+                return True
+            return None
+        except Exception:
+            return None
+
+    common_claim = _common_owner_claim_path(repo_common_dir, path)
+    if not common_claim.exists():
         return False
-    return isinstance(data, dict) and data.get("owner") == "conversation-worktree-manager"
+    try:
+        if _owner_claim_matches(
+            json.loads(common_claim.read_text(encoding="utf-8")),
+            worktree_path=path,
+            repo_common_dir=repo_common_dir,
+        ):
+            return True
+    except Exception:
+        pass
+    return None
+
+
+def conversation_worktree_is_manager_owned(path: Path) -> bool | None:
+    """Return ownership status; ``None`` means ownership cannot be verified."""
+    return conversation_worktree_ownership_verdict(path)
+
+
+def _write_owner_claim(path: Path, payload: dict[str, str]) -> None:
+    """Atomically write ownership evidence without platform-specific renames."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise ConversationWorktreeError(
+            "conversation worktree ownership claim is unavailable", phase="create"
+        ) from exc
 
 
 @contextmanager
@@ -507,6 +601,7 @@ class ConversationWorktreeManager:
                             )
 
                         self._db.mark_conversation_worktree_removed(root_session_id)
+                        self._remove_common_owner_claim(current)
                         self._event(
                             "conversation_worktree.removed",
                             root_session_id=root_session_id,
@@ -857,6 +952,7 @@ class ConversationWorktreeManager:
                         phase="create",
                     ) from exc
                 raise
+            self._ensure_common_owner_claim(record)
             self._ensure_owner_marker(record)
             self._event("conversation_worktree.reuse", root_session_id=record.root_session_id)
         elif record.state == "creation_failed":
@@ -972,6 +1068,10 @@ class ConversationWorktreeManager:
             ) from exc
 
         self._event("conversation_worktree.create", root_session_id=record.root_session_id)
+        # This common-repository claim is intentionally written *before* Git
+        # creates the worktree.  A crash or failed per-worktree marker write
+        # after `git worktree add` must still be visible to every generic GC.
+        self._ensure_common_owner_claim(record)
         self._git_stdout(
             source,
             [
@@ -1055,6 +1155,7 @@ class ConversationWorktreeManager:
                 "ready conversation worktree no longer descends from its base commit",
                 phase="recovery",
             )
+        self._ensure_common_owner_claim(record)
         self._ensure_owner_marker(record)
         self._event("conversation_worktree.reuse", root_session_id=record.root_session_id)
         return self._binding_from_record(record)
@@ -1067,24 +1168,38 @@ class ConversationWorktreeManager:
         marker = Path(marker_text)
         if not marker.is_absolute():
             marker = path / marker
-        payload = {
+        _write_owner_claim(marker, self._owner_payload(record))
+
+    @staticmethod
+    def _owner_payload(record: ConversationWorktreeRecord) -> dict[str, str]:
+        return {
             "owner": "conversation-worktree-manager",
             "root_session_id": record.root_session_id,
-            "worktree_path": str(path.resolve()),
+            "worktree_path": str(Path(record.worktree_path).resolve()),
             "repo_common_dir": str(Path(record.repo_common_dir).resolve()),
         }
+
+    def _ensure_common_owner_claim(self, record: ConversationWorktreeRecord) -> None:
+        _write_owner_claim(
+            _common_owner_claim_path(
+                Path(record.repo_common_dir).resolve(), Path(record.worktree_path)
+            ),
+            self._owner_payload(record),
+        )
+
+    @staticmethod
+    def _remove_common_owner_claim(record: ConversationWorktreeRecord) -> None:
+        """Drop only the exact durable claim after verified explicit removal."""
+        claim = _common_owner_claim_path(
+            Path(record.repo_common_dir).resolve(), Path(record.worktree_path)
+        )
         try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            tmp = marker.with_name(f"{marker.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-            with tmp.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, marker)
-        except OSError as exc:
-            raise ConversationWorktreeError(
-                "conversation worktree ownership marker is unavailable", phase="create"
-            ) from exc
+            claim.unlink(missing_ok=True)
+        except OSError:
+            # Git removal and the durable ledger transition have already
+            # succeeded.  Retaining a stale claim is safe; deleting it later
+            # is housekeeping, never a reason to misreport cleanup failure.
+            logger.warning("conversation_worktree.common_claim_remove_failed")
 
     def _run_bootstrap(self, record: ConversationWorktreeRecord) -> None:
         if not self._policy.bootstrap:

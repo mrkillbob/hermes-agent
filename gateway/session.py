@@ -3164,6 +3164,12 @@ class SessionStore:
                         else None
                     ),
                 }
+            else:
+                # The unpublished candidate may have acquired the mandatory
+                # gateway root lease during its pre-publication bind. Keep the
+                # route that won this key intact, but release a distinct loser
+                # root once no published entry can reference it.
+                self.reconcile_conversation_root_transition(candidate, entry)
 
         if entry is not None and entry is not candidate:
             _needs_save = (
@@ -3791,6 +3797,7 @@ class SessionStore:
         *,
         task_owned_cwd: Optional[str] = None,
         conversation_worktree: Optional[Dict[str, str]] = None,
+        new_interactive_root: bool = False,
     ) -> Optional[SessionEntry]:
         """Switch a session key to point at an existing session ID.
 
@@ -3833,22 +3840,39 @@ class SessionStore:
 
         # A plain /resume carries only a persisted session id. Resolve its
         # immutable root binding before publishing the replacement route so
-        # tools never fall back to the stable source checkout. Explicit CLI
-        # handoffs are revalidated against the same durable manager identity.
+        # tools never fall back to the stable source checkout. A copied branch
+        # is deliberately different: it is a new interactive root, even
+        # though its transcript row has a parent_session_id for history.
         try:
             if self._supports_conversation_worktree(new_entry.origin):
                 manager = self._conversation_worktree_manager()
                 if manager is not None:
                     requested = dict(new_entry.conversation_worktree)
-                    root_session_id = str(requested.get("root_session_id") or "")
-                    if not root_session_id:
-                        db = self._db
-                        root_session_id = (
-                            db.get_conversation_root(target_session_id)
-                            if db is not None
-                            else target_session_id
+                    if new_interactive_root:
+                        if requested:
+                            raise ValueError(
+                                "new interactive roots cannot supply an existing worktree binding"
+                            )
+                        binding = manager.bind_new_root_session(
+                            target_session_id, conversation_kind="interactive"
                         )
-                    binding = manager.resolve_existing_session(root_session_id)
+                        if binding is None:
+                            from agent.conversation_worktree import ConversationWorktreeError
+
+                            raise ConversationWorktreeError(
+                                "new interactive conversation worktree did not bind",
+                                phase="create",
+                            )
+                    else:
+                        root_session_id = str(requested.get("root_session_id") or "")
+                        if not root_session_id:
+                            db = self._db
+                            root_session_id = (
+                                db.get_conversation_root(target_session_id)
+                                if db is not None
+                                else target_session_id
+                            )
+                        binding = manager.resolve_existing_session(root_session_id)
                     if requested and (
                         binding is None
                         or Path(str(requested.get("path") or "")).resolve()

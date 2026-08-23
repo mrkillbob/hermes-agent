@@ -211,8 +211,12 @@ def audit_worktrees(repo_root: str, *, with_sizes: bool = True) -> List[TreeReco
             rec("keep", "kanban task tree (owned by kanban gc)")
             continue
 
-        if conversation_worktree_is_manager_owned(entry):
+        ownership = conversation_worktree_is_manager_owned(entry)
+        if ownership is True:
             rec("keep", "manager-owned conversation worktree")
+            continue
+        if ownership is None:
+            rec("keep", "conversation ownership could not be verified")
             continue
 
         lock_state = _cli._worktree_lock_is_live(repo_root, str(entry), timeout=5)

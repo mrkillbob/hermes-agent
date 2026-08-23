@@ -5159,7 +5159,12 @@ class GatewaySlashCommandsMixin:
             pass
 
         # Switch the session store entry to the new session
-        new_entry = await self.async_session_store.switch_session(session_key, new_session_id)
+        switch_kwargs = {}
+        if self.session_store._supports_conversation_worktree(source):
+            switch_kwargs["new_interactive_root"] = True
+        new_entry = await self.async_session_store.switch_session(
+            session_key, new_session_id, **switch_kwargs
+        )
         if not new_entry:
             return t("gateway.branch.switch_failed")
         self._clear_session_boundary_security_state(session_key)

@@ -11680,12 +11680,16 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         The root is the stable "conversation id": context compression
         rotates ``session_id`` to a new segment linked via
         ``parent_session_id``, and delegate subagents hang off their
-        parent the same way. Walking to the root gives every segment of
-        one user-facing conversation (and its delegation tree) a single
-        identifier — used for Nous Portal ``conversation=`` usage tagging.
-        Returns *session_id* unchanged when it has no recorded parent.
+        parent the same way. An explicit copied ``/branch`` is the exception:
+        it carries a parent link for transcript history but starts its own
+        workspace-owning conversation root. Its compression/delegate children
+        inherit that branch root. Returns *session_id* unchanged when it has
+        no recorded parent.
         """
         chain = self._session_lineage_root_to_tip(session_id)
+        for lineage_session_id in reversed(chain):
+            if self._is_explicit_branch_session(lineage_session_id):
+                return lineage_session_id
         return (chain[0] if chain and chain[0] else session_id)
 
     def _session_lineage_root_to_tip(self, session_id: str) -> List[str]:

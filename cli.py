@@ -2795,8 +2795,11 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
 
     def _classify(item):
         entry, mtime, force = item
-        if conversation_worktree_is_manager_owned(entry):
+        ownership = conversation_worktree_is_manager_owned(entry)
+        if ownership is True:
             return (entry, mtime, force, "conversation-owned", None)
+        if ownership is None:
+            return (entry, mtime, force, "conversation-unknown", None)
         # Never delete real work, regardless of age or tier. Uncommitted
         # changes and unpushed commits may be a crashed session's in-flight
         # work; only clean, fully-merged/pushed trees (the scratch trees that
@@ -2869,6 +2872,11 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
             continue
         if verdict == "conversation-owned":
             logger.debug("Skipping manager-owned conversation worktree: %s", entry.name)
+            continue
+        if verdict == "conversation-unknown":
+            logger.debug(
+                "Skipping worktree with uncertain conversation ownership: %s", entry.name
+            )
             continue
 
         try:
