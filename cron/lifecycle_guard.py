@@ -31,6 +31,11 @@ stop|restart`` separately refuse to self-target from inside the gateway.
 Blocking cron specs at creation time as well means the agent gets an immediate,
 informative rejection instead of scheduling a job that will only fail
 (silently) when it fires.
+
+The profile-flag form (``hermes -p <profile> gateway restart|stop``, #78028)
+is handled profile-aware: it is blocked only when the named profile is the
+profile running the guard. Sibling-profile restarts are legitimate fleet
+operations and stay allowed.
 """
 
 from __future__ import annotations
@@ -59,7 +64,7 @@ _GATEWAY_LIFECYCLE_PATTERN = re.compile(
     # `start` is intentionally excluded: starting a gateway from inside a
     # gateway is benign (a no-op or "already running" error), and a
     # legitimate cron job might start a sibling profile's gateway.
-    r"(?:hermes\s+gateway\s+(?:restart|stop))"
+    r"(?:hermes\s+gateway\s+(?:restart|stop)\b)"
     # Branch B: launchctl ops on a hermes-gateway label. macOS launchd
     # labels look like `ai.hermes.gateway` / `hermes-gateway`. Requiring the
     # gateway identifier prevents blocking unrelated hermes services (e.g.
@@ -72,13 +77,22 @@ _GATEWAY_LIFECYCLE_PATTERN = re.compile(
     # loop instead (#62891) — same foot-gun, indirect shape. Neutral-label
     # submissions that dodge this text anchor are caught separately by
     # `contains_launchctl_submit_command` (execution-aware, label-independent).
-    r"|(?:launchctl\s+(?:kickstart|unload|load|stop|restart|submit|bootstrap)\b[^\n]*\bhermes[.\-]?gateway)"
+    # `bootout`/`remove`/`disable` sit alongside `unload`: Apple deprecated
+    # load/unload in favour of bootstrap/bootout, so `bootout` is the modern
+    # spelling of an already-listed verb, `remove` is its legacy sibling, and
+    # `disable` is what makes an unload durable across boots. Omitting them
+    # left the bypassable approval layer (tools/approval.py, skipped on
+    # force=True) as the only cover, while this hard block — documented as
+    # "force=True cannot help here" — let them through (#80260).
+    r"|(?:launchctl\s+(?:kickstart|unload|load|stop|restart|submit|bootstrap|bootout|remove|disable)\b[^\n]*\bhermes[.\-]?gateway)"
     # Branch C: systemctl ops on a hermes-gateway unit.
     r"|(?:systemctl\s+(?:-\S+\s+)*(?:restart|stop|start)\b[^\n]*\bhermes[.\-]?gateway)"
     # Branch D: pkill / kill targeting the hermes gateway process. Both
     # token orders because real reproductions show both.
-    r"|(?:p?kill\b[^\n]*\bhermes\b[^\n]*\bgateway)"
-    r"|(?:p?kill\b[^\n]*\bgateway\b[^\n]*\bhermes)"
+    # Leading \b ensures we match "pkill" or "kill" as whole words, not as
+    # suffixes of other words (e.g. "skill" -> "kill").
+    r"|(?:\bp?kill\b[^\n]*\bhermes\b[^\n]*\bgateway)"
+    r"|(?:\bp?kill\b[^\n]*\bgateway\b[^\n]*\bhermes)"
 )
 
 
@@ -95,12 +109,114 @@ _GATEWAY_LIFECYCLE_PATTERN = re.compile(
 _SHELL_LINE_CONTINUATION = re.compile(r"\\\r?\n[ \t]*")
 
 
+# Branch A2 (#78028): the same foot-gun written with an explicit profile
+# selector — `hermes -p <profile> gateway restart|stop` / `--profile <name>`
+# / `--profile=<name>`. The selector token between `hermes` and `gateway`
+# breaks Branch A's literal adjacency. Unlike Branch A this form is NOT
+# unconditionally self-targeting: issued from inside gateway `zeus`,
+# `hermes -p venus gateway restart` operates on a sibling profile's gateway
+# and is a legitimate fleet operation. The pattern captures the named
+# profile so `contains_gateway_lifecycle_command` can block only the
+# self-targeting shape (named profile == the profile running the guard).
+# `start` stays excluded for the same reason as Branch A.
+_PROFILE_FLAG_LIFECYCLE_PATTERN = re.compile(
+    r"(?i)"
+    r"hermes\s+"
+    # Any global flags before the profile selector (each may carry a value).
+    r"(?:-{1,2}\S+(?:\s+\S+)?\s+)*"
+    # The selector itself: `--profile=<name>` or the space-separated
+    # `-p <name>` / `--profile <name>` — exactly the shapes the CLI's
+    # `_apply_profile_override` accepts.
+    r"(?:--profile=([^\s]+)|(?:-p|--profile)\s+([^\s]+))"
+    # Any global flags between the selector and the subcommand.
+    r"(?:\s+-{1,2}\S+(?:\s+\S+)?)*"
+    r"\s+gateway\s+(?:restart|stop)"
+)
+
+
+def _current_profile_name() -> Optional[str]:
+    """Return the name of the profile running the guard, if determinable.
+
+    Prefers the explicit ``HERMES_PROFILE_NAME`` / ``HERMES_PROFILE`` env
+    (set by the profile launcher and kanban worker spawns), falling back to
+    ``hermes_cli.profiles.get_active_profile_name`` (derived from
+    ``HERMES_HOME``, which the gateway process inherits from its launch
+    profile). Returns ``None`` when neither source yields a name.
+    """
+    for env_name in ("HERMES_PROFILE_NAME", "HERMES_PROFILE"):
+        value = os.environ.get(env_name)
+        if value and value.strip():
+            return value.strip()
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        return get_active_profile_name() or None
+    except Exception:
+        return None
+
+
+def _named_profile_is_current(named: str) -> bool:
+    """True when *named* is the profile executing the guard (self-targeting)."""
+    current = _current_profile_name()
+    if not current:
+        # No profile identity available: cannot prove self-targeting, so do
+        # not block — sibling restarts must stay allowed (#78028).
+        return False
+    return named.strip().casefold() == current.strip().casefold()
+
+
 def contains_gateway_lifecycle_command(text: str) -> bool:
-    """Return True if *text* contains a gateway lifecycle command pattern."""
+    """Return True if *text* contains a gateway lifecycle command pattern.
+
+    Matches in two passes. The first is the raw-text regex above — cheap,
+    and the only pass that can fire on non-shell inputs shlex can't
+    tokenize (e.g. a Python source string). The second re-runs the same
+    pattern against each command segment after shell tokenization, where
+    quotes and backslash escapes have already been resolved.
+
+    That second pass exists because a real shell resolves quote-splicing
+    (``kick"start"``) and backslash-escaping (``kick\\start``) into one
+    literal word — ``kickstart`` — before the command ever runs. The raw
+    text still has the quote or backslash sitting between the verb's two
+    halves, so the first pass alone lets a spliced verb reach
+    ``launchctl``/``systemctl`` untouched while still executing as the
+    blocked lifecycle command (#80269, reported against #80260's bootout
+    parity fix). Tokenizing closes that gap while keeping the same
+    gateway-label anchoring (``_GATEWAY_LIFECYCLE_PATTERN`` still requires
+    a ``hermes``/``gateway`` token) — this function is the single choke
+    point ``_contains_unsafe_gateway_action`` calls at every recursion
+    level, so referenced-script and ``sh -c`` payload scanning inherit the
+    fix automatically.
+    """
     if not text:
         return False
     normalized = _SHELL_LINE_CONTINUATION.sub(" ", text)
-    return bool(_GATEWAY_LIFECYCLE_PATTERN.search(normalized))
+    if _GATEWAY_LIFECYCLE_PATTERN.search(normalized):
+        return True
+    # Profile-flag form (#78028): `hermes -p <profile> gateway restart|stop`
+    # bypasses Branch A because the selector sits between `hermes` and
+    # `gateway`. It is only the same foot-gun when the named profile IS the
+    # profile running the guard — sibling-profile restarts are legitimate
+    # fleet operations and stay allowed.
+    profile_match = _PROFILE_FLAG_LIFECYCLE_PATTERN.search(normalized)
+    if profile_match:
+        named = profile_match.group(1) or profile_match.group(2)
+        if named:
+            # Profile ids cannot contain quotes (hermes_cli.profiles
+            # enforces `^[a-z0-9][a-z0-9_-]{0,63}$`), so a shell-quoted
+            # `-p 'zeus'` compares equal to the bare name.
+            named = named.strip().strip("\"'")
+            if _named_profile_is_current(named):
+                return True
+    # Token-aware second pass (#80269): re-run the pattern on shell-tokenized
+    # segments where quotes/escapes are resolved, closing splice bypasses
+    # like `kick"start"`. Runs after the profile-flag check so both passes
+    # apply independently.
+    for segment in _iter_command_segments(normalized):
+        joined = " ".join(segment)
+        if joined and _GATEWAY_LIFECYCLE_PATTERN.search(joined):
+            return True
+    return False
 
 
 _SHELL_EXECUTABLES = frozenset({"sh", "bash", "dash", "ksh", "zsh"})
@@ -177,10 +293,60 @@ _BINARY_SNIFF_BYTES = 4096
 _ReadRemoteScriptFn = Callable[[str], Optional[str]]
 
 
+def _split_logical_lines(text: str) -> list[str]:
+    """Split text on newlines that are not inside quotes.
+
+    A newline inside a quoted string (single or double quotes) is data,
+    not a command separator. Handles escaped quotes within strings.
+    """
+    lines = []
+    current = []
+    in_single = False
+    in_double = False
+    escape = False
+
+    for ch in text:
+        if escape:
+            current.append(ch)
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            current.append(ch)
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            current.append(ch)
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            current.append(ch)
+            continue
+        if ch == "\n" and not in_single and not in_double:
+            lines.append("".join(current))
+            current = []
+            continue
+        current.append(ch)
+
+    if current:
+        lines.append("".join(current))
+    return lines
+
+
 def _iter_command_segments(command: str) -> Iterator[list[str]]:
-    """Yield shell-tokenized command segments, honoring quotes and comments."""
+    """Yield shell-tokenized command segments, honoring quotes and comments.
+
+    A newline inside a quoted token is data, not a command separator.
+    First split on logical lines (newlines outside quotes), then tokenize
+    each logical line with shlex. If a logical line cannot be tokenized
+    (unbalanced quotes), fall back to per-physical-line tokenization for
+    that logical line.
+    """
     normalized = command.replace("\\\n", "")
-    for line in normalized.splitlines() or [normalized]:
+    logical_lines = _split_logical_lines(normalized)
+
+    for line in logical_lines:
+        # Try to tokenize the logical line as a whole.
         try:
             lexer = shlex.shlex(
                 line,
@@ -191,6 +357,31 @@ def _iter_command_segments(command: str) -> Iterator[list[str]]:
             lexer.commenters = "#"
             tokens = list(lexer)
         except ValueError:
+            # Fall back to per-physical-line tokenization for this logical line.
+            # This handles cases where quotes are unbalanced across lines.
+            for physical_line in line.splitlines():
+                try:
+                    lexer = shlex.shlex(
+                        physical_line,
+                        posix=True,
+                        punctuation_chars=";&|()",
+                    )
+                    lexer.whitespace_split = True
+                    lexer.commenters = "#"
+                    tokens = list(lexer)
+                except ValueError:
+                    continue
+
+                segment: list[str] = []
+                for token in tokens:
+                    if token and set(token) <= _CONTROL_CHARS:
+                        if segment:
+                            yield segment
+                            segment = []
+                        continue
+                    segment.append(token)
+                if segment:
+                    yield segment
             continue
 
         segment: list[str] = []

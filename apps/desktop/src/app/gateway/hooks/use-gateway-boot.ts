@@ -23,6 +23,7 @@ import {
   ensureGatewayForProfile,
   gatewayActivationEpoch,
   isActivePrimary,
+  liveSecondaryConnectionIds,
   pruneSecondaryGateways,
   reconnectSecondaryGateways,
   reportPrimaryGatewayState,
@@ -87,6 +88,17 @@ const BOOT_RETRY_MAX_ATTEMPTS = 5
 // Base delay for boot retries. Deliberately slower than the socket reconnect
 // loop's 300ms: each attempt may rebuild an SSH master + remote dashboard.
 const BOOT_RETRY_BASE_DELAY_MS = 2_000
+
+/** Registry identity whose runtimes died with the primary connection. */
+export function primaryRuntimeConnectionId(connection: Pick<HermesConnection, 'connectionId' | 'mode'>): null | string {
+  const connectionId = connection.connectionId?.trim()
+
+  if (connectionId) {
+    return connectionId
+  }
+
+  return connection.mode === 'local' ? 'local' : null
+}
 
 interface GatewayBootOptions {
   beforeConnectionSwitch: () => void
@@ -253,7 +265,12 @@ export function useGatewayBoot({
         reconnectFailingSince = null
         // A respawned backend re-mints (recycles) runtime ids, so any tile's
         // bound runtime id is now stale — drop them so each tile re-resumes.
-        resetTileRuntimeBindings()
+        // A legacy remote primary has no registry identity to scope by; fall
+        // back to preserving only Bot runtimes owned by provably-live
+        // secondaries so the restarted backend's own tiles still rebind.
+        resetTileRuntimeBindings(
+          primaryRuntimeConnectionId(conn) ?? { liveConnectionIds: liveSecondaryConnectionIds() }
+        )
         // Same staleness, other half: pre-reconnect busy flags are keyed by
         // those dead runtime ids and would never receive their terminal
         // busy:false — clear them or the sidebar running arc lies forever
