@@ -47,6 +47,24 @@ def test_legacy_desktop_policy_is_read_when_top_level_is_absent(tmp_path):
     assert policy.legacy_location is True
 
 
+def test_default_only_top_level_sentinel_falls_back_to_legacy_policy(tmp_path):
+    policy = resolve_conversation_worktree_policy(
+        {
+            "conversation_worktree": None,
+            "desktop": {
+                "conversation_worktree": {
+                    "enabled": True,
+                    "source_worktree": str(tmp_path / "stable"),
+                    "worktree_root": str(tmp_path / "worktrees"),
+                }
+            },
+        }
+    )
+
+    assert policy.enabled is True
+    assert policy.legacy_location is True
+
+
 @pytest.mark.parametrize(
     "config, expected_field",
     [
@@ -113,6 +131,35 @@ def test_enabled_policy_requires_retention_and_safe_values(tmp_path):
                     "source_worktree": str(tmp_path / "stable"),
                     "worktree_root": str(tmp_path / "worktrees"),
                     "bootstrap_command": "python3 bootstrap.py",
+                }
+            }
+        )
+
+
+def test_bootstrap_requires_non_empty_command_when_enabled(tmp_path):
+    with pytest.raises(ConversationWorktreePolicyError, match="bootstrap_command"):
+        resolve_conversation_worktree_policy(
+            {
+                "conversation_worktree": {
+                    "enabled": True,
+                    "source_worktree": str(tmp_path / "stable"),
+                    "worktree_root": str(tmp_path / "worktrees"),
+                    "bootstrap": True,
+                    "bootstrap_command": [],
+                }
+            }
+        )
+
+
+def test_branch_prefix_rejects_invalid_ref_component(tmp_path):
+    with pytest.raises(ConversationWorktreePolicyError, match="branch_prefix"):
+        resolve_conversation_worktree_policy(
+            {
+                "conversation_worktree": {
+                    "enabled": True,
+                    "source_worktree": str(tmp_path / "stable"),
+                    "worktree_root": str(tmp_path / "worktrees"),
+                    "branch_prefix": "hermes/.session",
                 }
             }
         )

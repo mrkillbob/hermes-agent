@@ -34,9 +34,15 @@ _BRANCH_FORBIDDEN = frozenset(" ~^:?*[\\")
 def _section(config: Mapping[str, object]) -> tuple[Mapping[str, object], bool]:
     if "conversation_worktree" in config:
         section = config["conversation_worktree"]
-        if not isinstance(section, Mapping):
+        if section is None:
+            # ``DEFAULT_CONFIG`` uses None as a presence sentinel. Deep merge
+            # preserves it only when no user top-level policy exists, so the
+            # legacy desktop block remains observable during the migration.
+            pass
+        elif not isinstance(section, Mapping):
             raise ConversationWorktreePolicyError("conversation_worktree must be a mapping")
-        return section, False
+        else:
+            return section, False
 
     desktop = config.get("desktop", {})
     if not isinstance(desktop, Mapping):
@@ -81,6 +87,7 @@ def _branch_prefix(section: Mapping[str, object]) -> str:
     if not isinstance(value, str):
         raise ConversationWorktreePolicyError("branch_prefix must be a non-empty safe branch prefix")
     prefix = value.strip()
+    components = prefix.split("/")
     if (
         not prefix
         or prefix.startswith("/")
@@ -90,6 +97,8 @@ def _branch_prefix(section: Mapping[str, object]) -> str:
         or "@{" in prefix
         or prefix.endswith(".")
         or prefix.endswith(".lock")
+        or prefix == "@"
+        or any(component.startswith(".") or component.endswith(".lock") for component in components)
         or any(char in _BRANCH_FORBIDDEN or char.isspace() for char in prefix)
     ):
         raise ConversationWorktreePolicyError("branch_prefix must be a non-empty safe branch prefix")
@@ -113,6 +122,8 @@ def resolve_conversation_worktree_policy(config: Mapping[str, object]) -> Conver
     source_worktree = _absolute_path(section, "source_worktree")
     worktree_root = _absolute_path(section, "worktree_root")
     retain_until_explicit_cleanup = _boolean(section, "retain_until_explicit_cleanup", True)
+    bootstrap = _boolean(section, "bootstrap", False)
+    bootstrap_command = _bootstrap_command(section)
 
     if enabled and source_worktree is None:
         raise ConversationWorktreePolicyError("source_worktree is required when enabled")
@@ -122,14 +133,18 @@ def resolve_conversation_worktree_policy(config: Mapping[str, object]) -> Conver
         raise ConversationWorktreePolicyError(
             "retain_until_explicit_cleanup must be true when enabled"
         )
+    if bootstrap and not bootstrap_command:
+        raise ConversationWorktreePolicyError(
+            "bootstrap_command must be non-empty when bootstrap is enabled"
+        )
 
     return ConversationWorktreePolicy(
         enabled=enabled,
         source_worktree=source_worktree,
         worktree_root=worktree_root,
         branch_prefix=_branch_prefix(section),
-        bootstrap=_boolean(section, "bootstrap", False),
-        bootstrap_command=_bootstrap_command(section),
+        bootstrap=bootstrap,
+        bootstrap_command=bootstrap_command,
         bootstrap_timeout=_positive_timeout(section, "bootstrap_timeout", 300.0),
         create_timeout=_positive_timeout(section, "create_timeout", 60.0),
         retain_until_explicit_cleanup=retain_until_explicit_cleanup,
