@@ -1116,8 +1116,17 @@ def test_progress_discloses_scope_when_graph_exceeds_task_limit(kanban_home):
     assert "Latest note" not in result.response
 
 
-def test_truncated_progress_labels_next_list_as_partial(kanban_home):
+def test_truncated_progress_labels_next_list_as_partial(kanban_home, monkeypatch):
     from gateway.progress_queries import resolve_progress_query
+
+    # The bounded traversal orders siblings by their random task IDs. Pin the
+    # IDs so the ready child is deliberately inside the first 24 nodes; this
+    # test exercises partial-label formatting, not random token ordering.
+    task_ids = iter(
+        ["t_f0000000", "t_00000000"]
+        + [f"t_{index + 0x10000000:08x}" for index in range(23)]
+    )
+    monkeypatch.setattr(kb, "_new_task_id", lambda: next(task_ids))
 
     with kb.connect(board=BOARD) as conn:
         root = _task(conn, "Exception Burndown", status="done")
