@@ -985,10 +985,18 @@ class ConversationWorktreeManager:
             ["worktree", "list", "--porcelain"],
             "policy",
         )
-        for line in registered.splitlines():
-            if not line.startswith("worktree "):
+        registered_paths = [
+            Path(line.removeprefix("worktree ")).resolve()
+            for line in registered.splitlines()
+            if line.startswith("worktree ")
+        ]
+        primary_path = registered_paths[0] if registered_paths else None
+        for registered_path in registered_paths:
+            # Git lists the primary checkout first. A conventional
+            # <primary>/.worktrees root is safe after the common-dir check
+            # above, while nesting under a linked sibling remains unsafe.
+            if registered_path == primary_path:
                 continue
-            registered_path = Path(line.removeprefix("worktree ")).resolve()
             root_is_nested = self._is_within(root, registered_path)
             target_is_nested = self._is_within(expected_path, registered_path)
             existing_owns_target = (
