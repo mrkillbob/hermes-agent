@@ -42,6 +42,16 @@ def git(path: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def git_worktree_is_locked(repo: Path, worktree: Path) -> bool:
+    current: Path | None = None
+    for line in git(repo, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            current = Path(line.removeprefix("worktree ")).resolve()
+        elif current == worktree.resolve() and line.startswith("locked"):
+            return True
+    return False
+
+
 @pytest.fixture
 def prepared_binding(tmp_path):
     remote = tmp_path / "remote.git"
@@ -387,6 +397,8 @@ def test_remove_failure_returns_bounded_sanitized_evidence_and_keeps_ledger(
 
     monkeypatch.setattr(manager, "_run_git", fail_remove)
 
+    assert git_worktree_is_locked(source, binding.path)
+
     result = manager.remove_after_explicit_request(binding.root_session_id)
 
     assert result.removed is False
@@ -397,6 +409,7 @@ def test_remove_failure_returns_bounded_sanitized_evidence_and_keeps_ledger(
     assert "\x00" not in result.failure_message
     assert len(result.failure_message) <= 300
     assert binding.path.exists()
+    assert git_worktree_is_locked(source, binding.path)
     assert sibling.exists()
     record = db.get_conversation_worktree(binding.root_session_id)
     assert record is not None

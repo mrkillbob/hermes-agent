@@ -628,6 +628,24 @@ class ConversationWorktreeManager:
                             return CleanupResult(False, verdict)
 
                         path = Path(current.worktree_path).resolve()
+                        unlocked = self._run_git(
+                            source,
+                            ["worktree", "unlock", str(path)],
+                            self._policy.create_timeout,
+                            "cleanup",
+                        )
+                        if unlocked.returncode != 0:
+                            message = self._sanitize_remove_failure(unlocked.stderr)
+                            logger.warning(
+                                "conversation_worktree.remove_failed phase=unlock message=%s",
+                                message,
+                            )
+                            return CleanupResult(
+                                False,
+                                CleanupVerdict(False, ("remove_failed",)),
+                                failure_phase="unlock",
+                                failure_message=message,
+                            )
                         removed = self._run_git(
                             source,
                             ["worktree", "remove", str(path)],
@@ -635,6 +653,13 @@ class ConversationWorktreeManager:
                             "cleanup",
                         )
                         if removed.returncode != 0:
+                            try:
+                                self._ensure_git_worktree_locked(source, current)
+                            except ConversationWorktreeError:
+                                logger.warning(
+                                    "conversation_worktree.relock_after_remove_failure_failed",
+                                    exc_info=True,
+                                )
                             message = self._sanitize_remove_failure(removed.stderr)
                             logger.warning(
                                 "conversation_worktree.remove_failed phase=remove message=%s",
