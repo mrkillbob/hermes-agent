@@ -3568,6 +3568,19 @@ def _is_ssh_remote_tilde_cwd(backend: str, cwd: str) -> bool:
     return cwd == "~" or cwd.startswith("~/")
 
 
+def _kanban_worker_workspace(env: Dict[str, str]) -> Optional[str]:
+    """Return the dispatcher-assigned workspace for a live kanban worker."""
+    if not str(env.get("HERMES_KANBAN_TASK") or "").strip():
+        return None
+    workspace = str(env.get("HERMES_KANBAN_WORKSPACE") or "").strip()
+    if not workspace:
+        return None
+    workspace = os.path.expanduser(workspace)
+    if not os.path.isabs(workspace) or not os.path.isdir(workspace):
+        return None
+    return workspace
+
+
 def apply_terminal_config_to_env(
     *,
     env: Optional[Dict[str, str]] = None,
@@ -3586,6 +3599,7 @@ def apply_terminal_config_to_env(
     missing env vars; they never replace unrelated exported/.env values.
     """
     target = os.environ if env is None else env
+    worker_workspace = _kanban_worker_workspace(target)
 
     raw_config = read_raw_config()
     raw_terminal_cfg = raw_config.get("terminal")
@@ -3621,6 +3635,16 @@ def apply_terminal_config_to_env(
         if not _terminal_config_value_is_bridgeable(cfg_key, value):
             continue
         if cfg_key == "cwd":
+            # The dispatcher already resolved and validated this task's
+            # workspace before spawning the worker.  A profile-level
+            # terminal.cwd is the profile's stable launch base, not authority
+            # for this individual task.  Keep the worker pin across every
+            # config bridge (including terminal_tool's late first-use bridge),
+            # otherwise relative terminal/file operations escape the assigned
+            # worktree even though Popen used the correct cwd.
+            if worker_workspace is not None:
+                target[env_var] = worker_workspace
+                continue
             raw_cwd = str(value or "").strip()
             if isinstance(value, str) and not _is_ssh_remote_tilde_cwd(
                 terminal_backend, raw_cwd
