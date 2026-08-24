@@ -42,8 +42,8 @@ describe('RightSidebarPane', () => {
   afterEach(() => {
     cleanup()
     $connection.set(null)
-    $selectedStoredSessionId.set(null)
-    $workspaceCwdOwner.set(null)
+    setSelectedStoredSessionId(null)
+    setWorkspaceCwdOwner(null)
     setCurrentCwd('')
     setFreshDraftReady(false)
     setSelectedStoredSessionId(null)
@@ -68,11 +68,11 @@ describe('RightSidebarPane', () => {
   })
 
   it('does not read a retained cwd while it belongs to a previous session', async () => {
-    $selectedStoredSessionId.set('new-session')
-    $workspaceCwdOwner.set('previous-session')
+    setSelectedStoredSessionId('new-session')
+    setWorkspaceCwdOwner('previous-session')
     setCurrentCwd('/home/doug/default-profile-workspace')
 
-    render(<RightSidebarPane onActivateFile={vi.fn()} onActivateFolder={vi.fn()} />)
+    renderAt(<RightSidebarPane onActivateFile={vi.fn()} onActivateFolder={vi.fn()} />)
 
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Refresh tree' })).toBeNull())
     expect(readDir).not.toHaveBeenCalled()
