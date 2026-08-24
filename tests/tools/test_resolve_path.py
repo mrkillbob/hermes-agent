@@ -1,5 +1,6 @@
 """Tests for _resolve_path() — TERMINAL_CWD-aware path resolution in file_tools."""
 
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,9 +77,27 @@ class TestResolvePath:
         terminal_tool.record_session_cwd(session_key, str(workspace))
         tokens = set_session_vars(session_key=session_key, cwd=str(workspace))
         try:
-            result = file_tools._resolve_path("README.md", task_id=child_task_id)
+            result = file_tools._resolve_path("dir/README.md", task_id=child_task_id)
         finally:
             clear_session_vars(tokens)
             terminal_tool.clear_session_cwd(session_key)
 
-        assert result == workspace / "README.md"
+        assert result == workspace / "dir" / "README.md"
+
+    def test_session_cwd_inheritance_failure_leaves_debug_breadcrumb(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """A failed inherited-session lookup is diagnosable without breaking fallback."""
+        monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+
+        from tools import file_tools, terminal_tool
+
+        def fail_session_lookup():
+            raise RuntimeError("session registry unavailable")
+
+        monkeypatch.setattr(terminal_tool, "_current_session_key", fail_session_lookup)
+        with caplog.at_level(logging.DEBUG, logger="tools.file_tools"):
+            result = file_tools._resolve_path("README.md", task_id="delegated-child")
+
+        assert result == tmp_path / "README.md"
+        assert "session cwd inheritance unavailable" in caplog.text

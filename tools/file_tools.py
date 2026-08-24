@@ -289,12 +289,16 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
          mirrored into the record at registration; kept as a direct fallback
          so a cleared/never-written record still resolves the workspace.
       3. The active parent session's cwd when a delegated/background task has
-         its own task id but inherits that session's context.
+         its own task id but inherits that session's context. This session
+         anchor intentionally precedes ``$TERMINAL_CWD``: the environment
+         value is the session's launch directory, while the recorded cwd may
+         reflect a later ``cd`` in the active conversation.
       4. A sentinel-free absolute ``$TERMINAL_CWD`` (the worktree path set by
          ``cli.py``/``main.py`` for ``-w`` sessions).
 
-    Returns ``None`` only when there is genuinely no reliable anchor, in which
-    case callers fall back to the process cwd.
+    Returns ``None`` only when there is genuinely no recorded task, inherited
+    session, or environment anchor, in which case callers fall back to the
+    process cwd.
     """
     try:
         from tools.terminal_tool import get_session_cwd
@@ -333,7 +337,7 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
             if inherited:
                 return inherited
     except Exception:
-        pass
+        logger.debug("session cwd inheritance unavailable", exc_info=True)
 
     return _configured_terminal_cwd()
 
