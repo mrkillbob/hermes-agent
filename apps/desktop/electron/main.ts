@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -33,6 +33,16 @@ import {
 import { classifyActiveRuntime } from './active-runtime-state'
 import { destroyKeepaliveAgents, downloadAgentFor, jsonAgentFor, withRetry } from './api-transport'
 import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } from './backend-child'
+import {
+  type BackendOutputTail,
+  claimDecision,
+  createBackendOutputTail,
+  execText,
+  isPidOnlyStartMarker,
+  pidOnlyStartMarker,
+  probeStartMarker,
+  processStartMarker
+} from './backend-claim'
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { buildDesktopBackendEnv, hermesManagedNodePathEntries, normalizeHermesHomeRoot } from './backend-env'
@@ -194,6 +204,9 @@ import {
 } from './hardening'
 import { cursorPointInWindow } from './hud-cursor'
 import { startHudGameOverlayWatch } from './hud-game-overlay'
+import { applyHudResetBounds, defaultHudBounds } from './hud-geometry'
+import { promoteHudOnHyprland } from './hud-hyprland'
+import { hudInputPolicy } from './hud-input-policy'
 import { registerHudIpc } from './hud-ipc'
 import { snapHudBounds } from './hud-snap'
 import { createHudSnapShortcut } from './hud-snap-shortcut'
@@ -219,11 +232,7 @@ import {
 import { runNativeLogin } from './native-oauth-login'
 import { loadNativeTokenSet, type NativeTokenStoreIo, persistNativeTokenSet } from './native-token-store'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
-import {
-  createParentStartMarkerResolver,
-  electronProcessStartMarker,
-  parentWatchdogEnv
-} from './parent-process-identity'
+import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { registerPetOverlayIpc } from './pet-overlay-ipc'
 import {
   buildRegistryProfileRoutes,
@@ -3158,70 +3167,9 @@ function writeBackendOwnership(contents) {
   }
 }
 
-function execText(command, args, { timeout = 3000 } = {}) {
-  return new Promise<string>((resolve, reject) => {
-    execFile(command, args, hiddenWindowsChildOptions({ encoding: 'utf8', timeout }), (error, stdout) => {
-      if (error) {
-        reject(error)
-      } else {
-        resolve(String(stdout || '').trim())
-      }
-    })
-  })
-}
-
-async function processStartMarker(pid) {
-  if (process.platform === 'linux') {
-    const stat = await fs.promises.readFile(`/proc/${pid}/stat`, 'utf8')
-
-    const fields = stat
-      .slice(stat.lastIndexOf(')') + 1)
-      .trim()
-      .split(/\s+/)
-
-    if (!/^\d+$/.test(fields[19] || '')) {
-      throw new Error(`Invalid /proc start marker for PID ${pid}`)
-    }
-
-    return `linux:${fields[19]}`
-  }
-
-  if (IS_WINDOWS) {
-    const electronMarker =
-      pid === process.pid ? electronProcessStartMarker(pid, process.pid, process.getCreationTime?.()) : null
-
-    if (electronMarker) {
-      return electronMarker
-    }
-
-    const ticks = await execText(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `$p = Get-Process -Id ${pid} -ErrorAction Stop; $p.StartTime.ToUniversalTime().Ticks`
-      ],
-      // PowerShell 5.1 cold starts routinely exceed the default 3s execText
-      // budget (2.4-8s observed in #87169); give the marker probe headroom.
-      { timeout: 30_000 }
-    )
-
-    if (!/^\d+$/.test(ticks)) {
-      throw new Error(`Invalid Windows start marker for PID ${pid}`)
-    }
-
-    return `win:${ticks}`
-  }
-
-  const started = await execText('ps', ['-p', String(pid), '-o', 'lstart='])
-
-  if (!started) {
-    throw new Error(`Missing process start marker for PID ${pid}`)
-  }
-
-  return `ps:${started}`
-}
+// execText and processStartMarker moved to backend-claim.ts (#93608) so the
+// claim/probe policy is testable — including on Windows CI with real
+// PowerShell — without booting Electron. main.ts calls through the module.
 
 async function backendCommandForPid(pid) {
   try {
@@ -3243,6 +3191,22 @@ async function backendCommandForPid(pid) {
 }
 
 async function processIdentityMatches(identity) {
+  // Degraded PID-only identity (#93608): the start-marker probe failed while
+  // the child was verifiably alive, so only PID liveness can be checked here.
+  // backendIdentityMatches layers the command-line check on top before
+  // anything destructive relies on the answer.
+  if (isPidOnlyStartMarker(identity.startMarker)) {
+    try {
+      process.kill(identity.pid, 0)
+
+      return true
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code
+
+      return code === 'ESRCH' || code === 'ENOENT' ? false : code === 'EPERM' ? true : undefined
+    }
+  }
+
   try {
     return (await processStartMarker(identity.pid)) === identity.startMarker
   } catch (error) {
@@ -3365,14 +3329,42 @@ const desktopParentStartMarker = createParentStartMarkerResolver({
   }
 })
 
-async function claimBackendChild(child, command, profile, nonce) {
+async function claimBackendChild(child, command, profile, nonce, outputTail: BackendOutputTail | null = null) {
+  // Probe/claim policy lives in backend-claim.ts (#93608): a marker probe
+  // that fails against a LIVE child degrades to PID-only identity — matching
+  // createParentStartMarkerResolver — instead of killing a healthy backend
+  // over a flaky Get-Process (PS 5.1 cold starts, #87169). Only a child that
+  // actually died keeps the fail-closed throw, now carrying its stderr tail.
+  const probe = await probeStartMarker(child.pid)
+  const decision = claimDecision(child.exitCode === null && !child.killed, probe)
+
+  if (decision.action === 'fail') {
+    stopBackendChild(child)
+    await waitForBackendExit(child)
+    throw new Error(
+      `Hermes backend (PID ${child.pid}) died before its identity could be recorded: ${decision.reason}${outputTail?.describe() ?? ''}`
+    )
+  }
+
+  let startMarker
+
+  if (decision.action === 'degrade') {
+    startMarker = pidOnlyStartMarker(child.pid)
+    rememberLog(
+      `WARNING: process start marker probe failed for live Hermes backend PID ${child.pid}; ` +
+        `claiming with PID-only identity instead of stopping it: ${decision.reason}`
+    )
+  } else {
+    startMarker = decision.startMarker
+  }
+
   try {
     const identity = await backendOwnership.claim({
       command,
       nonce,
       pid: child.pid,
       profile,
-      startMarker: await processStartMarker(child.pid),
+      startMarker,
       // Record the spawning Electron so reapOrphans can tell an orphaned
       // backend (parent gone) from one owned by a live instance — a live
       // parent's backend is never reaped (#87295).
@@ -3386,7 +3378,9 @@ async function claimBackendChild(child, command, profile, nonce) {
   } catch (error) {
     stopBackendChild(child)
     await waitForBackendExit(child)
-    throw new Error(`Could not persist ownership for the Hermes backend: ${error.message}`)
+    throw new Error(
+      `Could not persist ownership for the Hermes backend: ${error.message}${outputTail?.describe() ?? ''}`
+    )
   }
 }
 
@@ -4277,8 +4271,21 @@ function resolveWebDist() {
 }
 
 function resolveRendererIndex() {
-  const candidates = [path.join(APP_ROOT, 'dist', 'index.html'), path.join(resolveWebDist(), 'index.html')]
-  const present = candidates.filter(fileExists)
+  const asarIndex = path.join(APP_ROOT, 'dist', 'index.html')
+  const webDistIndex = path.join(resolveWebDist(), 'index.html')
+
+  // A packaged build ships dist/ twice: inside app.asar AND — because
+  // asarUnpack lists dist/** — beside it in app.asar.unpacked. Prefer the
+  // unpacked tree, matching the resolveWebDist()/unpackedPathFor precedent:
+  // it is the copy the embedded dashboard serves and the copy a repair
+  // rewrites, while pointing the window at the asar-internal index.html is
+  // exactly how lazy chunks end up fetched from a path that cannot serve
+  // them (#93479). Every window loader shares this resolver (main, overlay,
+  // quick), so the ordering fix covers all of them. Dev is unchanged:
+  // unpackedPathFor is a no-op outside an asar, so both candidates collapse
+  // to APP_ROOT/dist and the original order is preserved.
+  const candidates = IS_PACKAGED ? [webDistIndex, asarIndex] : [asarIndex, webDistIndex]
+  const present = [...new Set(candidates)].filter(fileExists)
 
   // index.html and the hashed chunks it names are one generation. An update
   // that replaces only one of the two shipped copies (app.asar vs
@@ -6591,6 +6598,19 @@ function restorePersistedZoomLevel(window) {
   const saved = readZoomState()
 
   if (saved != null) {
+    // Drift-guard: skip when this window already shows the persisted level.
+    // Blindly re-applying on every resize/move would race the compositor's
+    // surface reconfigure during a Wayland resize storm (Cosmic tiled mode
+    // fires one whenever a new session window opens — #84818) and keep the
+    // renderer notification stream churning for no gain. The settle-verify
+    // chain in installZoomReassertOnWindowEvents re-applies only when the
+    // window actually drifted from the persisted level.
+    const current = window.webContents?.getZoomLevel?.()
+
+    if (current != null && Math.abs(current - saved) < 1e-9) {
+      return
+    }
+
     applyZoomLevel(window.webContents, saved)
 
     return
@@ -10533,7 +10553,13 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
 
   entry.process = child
   entry.token = token
-  await claimBackendChild(child, `${backend.command} ${backend.args.join(' ')}`, profile, backendNonce)
+  // Buffer stdout+stderr from the instant of spawn (#93608): an early crash's
+  // traceback must survive into the claim error and the before-ready exit
+  // message instead of a bare exit code. rememberLog attaches later, after
+  // the claim, and would miss anything printed before it.
+  const outputTail = createBackendOutputTail()
+  outputTail.attach(child)
+  await claimBackendChild(child, `${backend.command} ${backend.args.join(' ')}`, profile, backendNonce, outputTail)
 
   child.stdout.on('data', rememberLog)
   child.stderr.on('data', rememberLog)
@@ -10558,13 +10584,18 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
 
     if (!ready) {
       rejectStart?.(
-        new Error(`Hermes backend for profile "${profile}" exited before it became ready (${signal || code}).`)
+        new Error(
+          `Hermes backend for profile "${profile}" exited before it became ready (${signal || code}).${outputTail.describe()}`
+        )
       )
     }
   })
 
   // Discover the ephemeral port the child bound to
-  const port = await Promise.race([waitForDashboardPortAnnouncement(child, { readyFile }), startFailed])
+  const port = await Promise.race([
+    waitForDashboardPortAnnouncement(child, { describeOutputTail: () => outputTail.describe(), readyFile }),
+    startFailed
+  ])
 
   if (readyFile) {
     fs.unlink(readyFile, () => {})
@@ -10909,7 +10940,19 @@ async function startHermes() {
       })
     )
 
-    await claimBackendChild(hermesProcess, `${backend.command} ${backend.args.join(' ')}`, profile, backendNonce)
+    // Buffer stdout+stderr from the instant of spawn (#93608): an early
+    // crash's traceback must survive into the claim error and the
+    // before-ready exit message shown by the boot UI. rememberLog attaches
+    // later, after the claim, and would miss anything printed before it.
+    const primaryOutputTail = createBackendOutputTail()
+    primaryOutputTail.attach(hermesProcess)
+    await claimBackendChild(
+      hermesProcess,
+      `${backend.command} ${backend.args.join(' ')}`,
+      profile,
+      backendNonce,
+      primaryOutputTail
+    )
     const processOwner = backendConnectionState.attachProcess(connectionAttempt, hermesProcess)
 
     if (!processOwner) {
@@ -10968,7 +11011,7 @@ async function startHermes() {
       sendBackendExit({ code, signal })
 
       if (!backendReady) {
-        const message = `Hermes backend exited before it became ready (${signal || code}).`
+        const message = `Hermes backend exited before it became ready (${signal || code}).${primaryOutputTail.describe()}`
         updateBootProgress(
           {
             error: message,
@@ -10990,7 +11033,10 @@ async function startHermes() {
 
     // Discover the ephemeral port the child bound to
     const port = await Promise.race([
-      waitForDashboardPortAnnouncement(hermesProcess, { readyFile }),
+      waitForDashboardPortAnnouncement(hermesProcess, {
+        describeOutputTail: () => primaryOutputTail.describe(),
+        readyFile
+      }),
       backendStartFailed
     ])
 
@@ -11597,9 +11643,6 @@ let hudProfile = null
 // of a game chat frame, and where one belongs. Defaults only: once the user
 // moves or resizes the HUD, hud-state.json wins (same pattern as the main
 // window's window-state.json).
-const HUD_WIDTH = 620
-const HUD_HEIGHT = 320
-const HUD_BOTTOM_MARGIN = 72
 const HUD_STATE_PATH = path.join(app.getPath('userData'), 'hud-state.json')
 
 function readHudState() {
@@ -11634,6 +11677,26 @@ function persistHudState() {
   }
 }
 
+function resetHudWindowLayout(): boolean {
+  if (!hudWindow || hudWindow.isDestroyed()) {
+    return false
+  }
+
+  const win = hudWindow
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+  const bounds = defaultHudBounds(display?.workArea)
+
+  if (!applyHudResetBounds(win, bounds)) {
+    rememberLog('[hud-state] reset layout failed while applying native bounds')
+
+    return false
+  }
+
+  persistHudState()
+
+  return true
+}
+
 const schedulePersistHudState = debounce(persistHudState, 250)
 
 // How often Linux gets told where the cursor is. Fast enough that the bar is
@@ -11666,6 +11729,8 @@ function applyHudSnapToPointer() {
 
   // setBounds — NOT setPosition alone: on Windows, a transparent frameless
   // window silently grows ~1px per setPosition call (see move-by handler).
+  // On native Wayland the compositor ignores the position half; the snap
+  // shortcut is therefore a documented no-op there.
   hudWindow.setBounds({
     x: origin.x,
     y: origin.y,
@@ -11699,6 +11764,21 @@ function registerHudSnapShortcut() {
  */
 function startHudCursorFeed(win: BrowserWindow) {
   if (process.platform !== 'linux') {
+    return
+  }
+
+  // On an X11 window `setIgnoreMouseEvents(false)` does not restore the input
+  // region once the window has ignored the mouse. Ignore is a one-way door
+  // there, so the HUD is held solid for its whole life (the companion veto
+  // is in the hermes:hud:ignore-mouse handler). Native Wayland keeps the
+  // poll — that is what re-arms click-through when the pointer returns.
+  if (hudInputPolicy(process.platform, process.env, process.argv) === 'solid') {
+    try {
+      win.setIgnoreMouseEvents(false)
+    } catch {
+      // best effort
+    }
+
     return
   }
 
@@ -11792,19 +11872,7 @@ function hudBounds() {
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
   const area = display?.workArea
 
-  if (!area) {
-    return { width: HUD_WIDTH, height: HUD_HEIGHT, x: undefined, y: undefined }
-  }
-
-  const width = Math.min(HUD_WIDTH, area.width)
-  const height = Math.min(HUD_HEIGHT, area.height)
-
-  return {
-    width,
-    height,
-    x: Math.round(area.x + (area.width - width) / 2),
-    y: Math.round(Math.max(area.y, area.y + area.height - height - HUD_BOTTOM_MARGIN))
-  }
+  return defaultHudBounds(area)
 }
 
 function hudUrl(sessionId, profile) {
@@ -11847,7 +11915,7 @@ function spawnHudWindow(sessionId, profile) {
     // interprets pointer capture near the edge as a resize gesture, so the
     // window grows a few px every drag (worse at >100% DPI scaling). The
     // composer drag calls setPosition, which must move the window, not resize
-    // it. Resizing is done by the renderer's corner handle through
+    // it. Resizing is done by the renderer's edge/corner handles through
     // `hermes:hud:set-bounds`, which flips resizable on for the call — the
     // same pattern the pet overlay uses for its wheel-scale.
     resizable: false,
@@ -11881,14 +11949,17 @@ function spawnHudWindow(sessionId, profile) {
   win.setAlwaysOnTop(true, IS_MAC ? 'floating' : 'screen-saver')
   win.setHiddenInMissionControl?.(true)
 
-  try {
-    win.setVisibleOnAllWorkspaces(
-      true,
-      IS_MAC ? { visibleOnFullScreen: true, skipTransformProcessType: true } : undefined
-    )
-  } catch {
-    // Not supported everywhere — best effort.
+  if (IS_MAC) {
+    try {
+      win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
+    } catch {
+      // Not supported everywhere — best effort.
+    }
   }
+
+  // Linux intentionally starts on ONE virtual desktop. During a renderer
+  // grab, hermes:hud:workspace-transfer temporarily makes the X11 window
+  // sticky; releasing it assigns the HUD to KDE's then-current desktop.
 
   // Streaming into a window that is ALWAYS blurred (the user is in another
   // app) is the entire feature, so it gets the same stream-aware unthrottling
@@ -11913,6 +11984,12 @@ function spawnHudWindow(sessionId, profile) {
       if (hudRestoreMainWindow && mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.hide()
       }
+
+      // Hyprland tiles new toplevels. alwaysOnTop is compositor-owned on
+      // native Wayland, and xdg_toplevel.move is ignored on a tiled window,
+      // so the HUD never becomes an overlay and cannot be dragged. Same
+      // socket as read_window_below; no-op everywhere else.
+      void promoteHudOnHyprland({ title: HUD_WINDOW_TITLE })
     }
   })
 
@@ -12651,6 +12728,7 @@ const hudIpc = registerHudIpc({
   getHudWindow: () => hudWindow,
   openHudWindow,
   closeHudWindow,
+  resetHudLayout: resetHudWindowLayout,
   setHudSessionId: value => {
     hudSessionId = value
   }

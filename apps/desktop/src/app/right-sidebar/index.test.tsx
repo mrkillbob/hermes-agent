@@ -30,6 +30,9 @@ function renderAt(element: ReactElement, path = '/stored-session') {
 describe('RightSidebarPane', () => {
   beforeEach(() => {
     $connection.set(null)
+    setSelectedStoredSessionId(null)
+    setWorkspaceCwdOwner(null)
+    setFreshDraftReady(false)
     resetProjectTreeState()
     readDir.mockReset()
     readDir.mockResolvedValue({ entries: [{ isDirectory: false, name: 'README.md', path: '/repo/README.md' }] })
@@ -39,6 +42,8 @@ describe('RightSidebarPane', () => {
   afterEach(() => {
     cleanup()
     $connection.set(null)
+    $selectedStoredSessionId.set(null)
+    $workspaceCwdOwner.set(null)
     setCurrentCwd('')
     setFreshDraftReady(false)
     setSelectedStoredSessionId(null)
@@ -60,6 +65,17 @@ describe('RightSidebarPane', () => {
 
     // The freeform folder picker is retired.
     expect(screen.queryByRole('button', { name: 'Open folder' })).toBeNull()
+  })
+
+  it('does not read a retained cwd while it belongs to a previous session', async () => {
+    $selectedStoredSessionId.set('new-session')
+    $workspaceCwdOwner.set('previous-session')
+    setCurrentCwd('/home/doug/default-profile-workspace')
+
+    render(<RightSidebarPane onActivateFile={vi.fn()} onActivateFolder={vi.fn()} />)
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Refresh tree' })).toBeNull())
+    expect(readDir).not.toHaveBeenCalled()
   })
 
   it('shows no tree for a detached chat (no working dir)', async () => {

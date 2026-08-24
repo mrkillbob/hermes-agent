@@ -271,16 +271,45 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
     scheduler provider here (no live adapters; delivery falls back to the
     per-platform send path).
 
+    Every local profile's store is ticked, not just this backend's own
+    (#69377's desktop sibling): the desktop pools per-profile backends and
+    reaps them after ~10 idle minutes, so a secondary profile's ticker dies
+    with its backend and that profile's jobs silently stop firing until the
+    user next opens it ("tasks on the sleeping profile could be idle" —
+    community report, Aug 2026). The primary backend outlives the pool, so it
+    owns every profile's tick, exactly like a multiplex gateway. External
+    providers keep the single-store behavior — their registries are not
+    profile-scoped (see _notify_cron_provider_for_profile).
+
     Cross-process safe: the built-in provider's ``cron.scheduler.tick`` takes
-    the ``cron/.tick.lock`` file lock, so this never double-fires alongside a
-    real gateway on the same HERMES_HOME — whichever process grabs the lock
-    first wins the tick.
+    the per-store ``cron/.tick.lock`` file lock, so this never double-fires
+    alongside a real gateway or a live pool backend on the same profile home —
+    whichever process grabs the lock first wins the tick.
     """
-    from cron.scheduler_provider import resolve_cron_scheduler
+    from cron.scheduler_provider import InProcessCronScheduler, resolve_cron_scheduler
 
     provider = resolve_cron_scheduler()
+
+    start_kwargs: dict = {"interval": interval}
+    if isinstance(provider, InProcessCronScheduler):
+        try:
+            from hermes_cli.profiles import profiles_to_serve
+
+            profile_homes = list(profiles_to_serve(multiplex=True))
+            if len(profile_homes) > 1:
+                start_kwargs["profile_homes"] = profile_homes
+                _log.info(
+                    "Desktop cron scheduler will tick %d profile(s): %s",
+                    len(profile_homes),
+                    [name for name, _home in profile_homes],
+                )
+        except Exception:
+            # Fail open to the single-store ticker — the active profile's
+            # jobs must keep firing even if profile enumeration breaks.
+            _log.exception("Desktop cron: profile enumeration failed; ticking active profile only")
+
     _log.info("Desktop cron scheduler started (provider=%s, interval=%ds)", provider.name, interval)
-    provider.start(stop_event, interval=interval)
+    provider.start(stop_event, **start_kwargs)
 
 
 def _warm_gateway_module() -> None:
@@ -17380,6 +17409,12 @@ async def pty_ws(ws: WebSocket) -> None:
             _forget_active_session_file(active_session_file)
         elif not resume:
             resume = _read_active_session_file(active_session_file)
+            if resume:
+                # The client only knows to pin the viewport to the bottom
+                # when it requested `?resume=`. Tell it a replay is coming
+                # anyway so the implicit active-session fallback gets the
+                # same follow-scroll treatment as an explicit resume (#93518).
+                await ws.send_json({"type": "resume", "id": resume})
 
     resolve_kwargs = {
         "resume": resume,
@@ -19219,6 +19254,91 @@ def _demo() -> None:
     print("web_server parent-death watchdog self-check: OK")
 
 
+# ── Port-conflict sentinel (#93608) ─────────────────────────────────────────
+# When the requested port is already bound, uvicorn's ``bind_socket()``
+# catches the OSError itself and does ``logger.error(exc); sys.exit(1)`` — a
+# bare ERROR line plus the same exit 1 as any real backend crash. The desktop
+# spawn (and any script wrapping ``hermes serve``) cannot tell "port occupied"
+# from "backend broken". So we probe the exact bind before handing the socket
+# to uvicorn and, on conflict, emit ONE machine-readable stdout sentinel plus
+# a human hint, then exit with a distinct code.
+#
+# 75 == BSD ``EX_TEMPFAIL`` (sysexits.h) — the codebase's existing convention
+# for "transient environmental condition, not a code failure" (see
+# gateway/restart.py and kanban_db.py's quota-wall sentinel).
+PORT_IN_USE_EXIT_CODE = 75
+
+# One line, stable format, parsed by machines — mirrors the shape of the
+# HERMES_BACKEND_READY sentinel (which is NOT changed by any of this).
+_PORT_IN_USE_SENTINEL = "BACKEND_PORT_IN_USE port={port}"
+
+
+def _is_addr_in_use_error(exc: OSError) -> bool:
+    """True when ``exc`` is the platform's address-in-use bind failure."""
+    import errno
+
+    codes = {errno.EADDRINUSE, 98, 48, 10048}  # POSIX, Linux, macOS, WinSock
+    if exc.errno in codes:
+        return True
+    return getattr(exc, "winerror", None) == 10048  # WSAEADDRINUSE
+
+
+def _port_bind_conflict(host: str, port: int) -> bool:
+    """Probe whether binding ``host:port`` would fail with EADDRINUSE.
+
+    ``port == 0`` (ephemeral) can never conflict — the kernel picks a free
+    port — so the probe is skipped and ``--port 0`` behaves exactly as
+    before. Any probe error other than address-in-use returns ``False`` so
+    uvicorn surfaces it with its normal diagnostics (bad host, EACCES, …).
+    """
+    if not port:
+        return False
+    import socket as _socket
+
+    family = _socket.AF_INET6 if ":" in host else _socket.AF_INET
+    try:
+        probe = _socket.socket(family, _socket.SOCK_STREAM)
+    except OSError:
+        return False
+    try:
+        import sys as _sys_mod
+
+        _exclusive = getattr(_socket, "SO_EXCLUSIVEADDRUSE", None)
+        if _sys_mod.platform == "win32" and _exclusive is not None:
+            # Windows: SO_REUSEADDR means "bind over anyone" — a probe (or
+            # uvicorn bind) with it SUCCEEDS on top of a live LISTEN socket,
+            # so it can never detect a conflict. SO_EXCLUSIVEADDRUSE makes
+            # the probe fail with WSAEADDRINUSE exactly when another socket
+            # holds the port (the reporter's 10048 shape in #93608).
+            probe.setsockopt(_socket.SOL_SOCKET, _exclusive, 1)
+        else:
+            # POSIX: match uvicorn's bind flags (uvicorn/config.py
+            # bind_socket) so the probe conflicts exactly when uvicorn's own
+            # bind would: SO_REUSEADDR lets TIME_WAIT remnants pass while a
+            # live LISTEN socket still fails.
+            probe.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        probe.bind((host, port))
+    except OSError as exc:
+        return _is_addr_in_use_error(exc)
+    except Exception:
+        return False
+    finally:
+        probe.close()
+    return False
+
+
+def _report_port_in_use(host: str, port: int) -> None:
+    """Print the machine sentinel + a human hint naming likely holders."""
+    print(_PORT_IN_USE_SENTINEL.format(port=port), flush=True)
+    print(
+        f"  Port {port} on {host} is already in use — likely another "
+        "'hermes serve' / 'hermes dashboard' backend or the Hermes gateway. "
+        "Stop the other process, or pass --port <other> "
+        "(--port 0 picks a free ephemeral port).",
+        flush=True,
+    )
+
+
 def start_server(
     host: str = "127.0.0.1",
     port: int = 9119,
@@ -19419,9 +19539,9 @@ def start_server(
     # (bind port 0 → close → uvicorn rebind): the socket is held by
     # uvicorn the entire time, so no other process can steal the port.
     #
-    # For explicit non-zero ports, if the port is taken uvicorn catches
-    # OSError inside create_server() and exits with a clear error — no
-    # separate preflight probe needed.
+    # For explicit non-zero ports, a taken port is detected by the #93608
+    # preflight probe below (BACKEND_PORT_IN_USE sentinel + distinct exit
+    # code); uvicorn's own bind error remains the fallback for races.
     # Loopback binds are the Desktop case: a single local client, no reverse
     # proxy in front. uvicorn's ws keepalive ping runs ON the same event loop
     # as agent turns, and a single synchronous GIL-holding call on a worker
@@ -19475,6 +19595,16 @@ def start_server(
         ws_max_size=_DESKTOP_ATTACHMENT_WS_MAX_BYTES,
     )
     server = uvicorn.Server(config)
+
+    # ── #93608: machine-readable port-conflict detection ──────────────
+    # uvicorn's own bind_socket() would catch the EADDRINUSE and exit 1
+    # with a bare ERROR line — indistinguishable from "backend broken".
+    # Probe the exact bind first so a conflict surfaces as the stable
+    # BACKEND_PORT_IN_USE sentinel + a distinct exit code instead.
+    # ``--port 0`` (ephemeral) is skipped by the probe and unaffected.
+    if _port_bind_conflict(host, port):
+        _report_port_in_use(host, port)
+        raise SystemExit(PORT_IN_USE_EXIT_CODE)
 
     async def _serve():
         # Split startup from main_loop so we can read the bound port
@@ -19615,6 +19745,15 @@ def start_server(
             asyncio.run(_serve())
         except KeyboardInterrupt:
             return
+        except SystemExit as exc:
+            # Probe-to-bind race (#93608): another process grabbed the port
+            # between our preflight probe and uvicorn's real bind. uvicorn's
+            # bind_socket() exits 1 — re-check the bind and translate a
+            # confirmed conflict into the sentinel + distinct exit code.
+            if exc.code == 1 and _port_bind_conflict(host, port):
+                _report_port_in_use(host, port)
+                raise SystemExit(PORT_IN_USE_EXIT_CODE) from None
+            raise
         return
 
     # Windows-only path. Resolve the runner + loop factory FIRST (and fall back
@@ -19649,3 +19788,9 @@ def start_server(
             asyncio.run(_serve())
     except KeyboardInterrupt:
         return
+    except SystemExit as exc:
+        # Same probe-to-bind race translation as the POSIX branch (#93608).
+        if exc.code == 1 and _port_bind_conflict(host, port):
+            _report_port_in_use(host, port)
+            raise SystemExit(PORT_IN_USE_EXIT_CODE) from None
+        raise
