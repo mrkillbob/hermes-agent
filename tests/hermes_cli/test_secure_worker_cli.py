@@ -30,6 +30,27 @@ def test_cli_registers_required_commands() -> None:
     }
 
 
+def test_remote_audit_parser_accepts_manifest_and_policy_proofs(tmp_path: Path) -> None:
+    parser = _parser()
+    args = parser.parse_args(
+        [
+            "audit",
+            "--config",
+            str(tmp_path / "profile.yaml"),
+            "--pack",
+            str(tmp_path / "pack"),
+            "--manifest",
+            str(tmp_path / "manifest.json"),
+            "--policy",
+            str(tmp_path / "policy.json"),
+            "--image-lock",
+            str(tmp_path / "image-lock.json"),
+        ]
+    )
+    assert args.manifest.endswith("manifest.json")
+    assert args.policy.endswith("policy.json")
+
+
 def test_attest_requires_explicit_privacy_confirmation(tmp_path: Path) -> None:
     parser = _parser()
     output = tmp_path / "attestation.json"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -197,21 +198,29 @@ def _fresh_attestation(now: datetime) -> dict[str, object]:
     }
 
 
-def test_rendered_ox_profile_passes_when_every_boundary_is_present(tmp_path: Path) -> None:
+def _built_remote_boundary(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy
+) -> tuple[Path, Path, dict[str, object]]:
     pack = tmp_path / "pack"
-    pack.mkdir()
-    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    manifest = tmp_path / "manifest.json"
+    build_context_pack(source_repo, ["src/logic.py"], pack, manifest, policy)
     config = render_ox_profile(
-        pack_root=pack,
-        broker_python="/opt/hermes-worker/bin/python",
-        staging_owner="private-staging",
-        staging_repo="ox-proposals",
-        worker_image=PINNED_IMAGE,
+        pack, "/pinned/python", "owner", "staging", PINNED_IMAGE
     )
+    return pack, manifest, config
+
+
+def test_rendered_ox_profile_passes_when_every_boundary_is_present(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy
+) -> None:
+    pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
 
     report = audit_profile_boundary(
         config,
         pack_root=pack,
+        manifest_path=manifest,
+        policy=policy,
         privacy_attestation=_fresh_attestation(now),
         docker_available=True,
         admitted_worker_image=PINNED_IMAGE,
@@ -220,6 +229,8 @@ def test_rendered_ox_profile_passes_when_every_boundary_is_present(tmp_path: Pat
 
     assert report.allowed is True
     assert report.reasons == ()
+    assert report.manifest_sha256 == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert report.source_commit == _git(source_repo, "rev-parse", "HEAD")
     assert config["mcp_servers"]["secure-github-staging"]["env"][
         "HERMES_STAGING_GITHUB_TOKEN"
     ] == "${HERMES_STAGING_GITHUB_TOKEN}"
@@ -271,7 +282,11 @@ def test_ox_broker_receives_only_explicit_staging_credential(
         (lambda cfg, tmp: cfg["terminal"].update(docker_run_as_host_user=True), "host user"),
         (lambda cfg, tmp: cfg["terminal"].update(docker_volumes=[f"{tmp}:/host"]), "volume"),
         (lambda cfg, tmp: cfg["terminal"].update(docker_extra_args=["--privileged"]), "extra"),
-        (lambda cfg, tmp: cfg["toolsets"].append("web"), "web"),
+        (lambda cfg, tmp: cfg["toolsets"].append("web"), "top-level toolsets"),
+        (lambda cfg, tmp: cfg["platform_toolsets"]["cli"].append("web"), "toolset"),
+        (lambda cfg, tmp: cfg["platform_toolsets"]["cli"].append("browser"), "toolset"),
+        (lambda cfg, tmp: cfg["platform_toolsets"]["cli"].append("computer_use"), "toolset"),
+        (lambda cfg, tmp: cfg["platform_toolsets"]["cli"].append("hermes-cli"), "toolset"),
         (
             lambda cfg, tmp: cfg["mcp_servers"].update(
                 arbitrary={"command": "npx", "args": ["-y", "anything"]}
@@ -294,16 +309,16 @@ def test_ox_broker_receives_only_explicit_staging_credential(
     ],
 )
 def test_remote_profile_mutations_fail_closed(
-    tmp_path: Path, mutation, reason: str
+    source_repo: Path, tmp_path: Path, policy: PackPolicy, mutation, reason: str
 ) -> None:
-    pack = tmp_path / "pack"
-    pack.mkdir()
+    pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
     now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
-    config = render_ox_profile(pack, "/pinned/python", "owner", "staging", PINNED_IMAGE)
     mutation(config, tmp_path)
     report = audit_profile_boundary(
         config,
         pack_root=pack,
+        manifest_path=manifest,
+        policy=policy,
         privacy_attestation=_fresh_attestation(now),
         docker_available=True,
         admitted_worker_image=PINNED_IMAGE,
@@ -313,14 +328,16 @@ def test_remote_profile_mutations_fail_closed(
     assert any(reason.casefold() in item.casefold() for item in report.reasons)
 
 
-def test_remote_profile_denies_docker_down_without_host_fallback(tmp_path: Path) -> None:
-    pack = tmp_path / "pack"
-    pack.mkdir()
+def test_remote_profile_denies_docker_down_without_host_fallback(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy
+) -> None:
+    pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
     now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
-    config = render_ox_profile(pack, "/pinned/python", "owner", "staging", PINNED_IMAGE)
     report = audit_profile_boundary(
         config,
         pack_root=pack,
+        manifest_path=manifest,
+        policy=policy,
         privacy_attestation=_fresh_attestation(now),
         docker_available=False,
         admitted_worker_image=PINNED_IMAGE,
@@ -354,14 +371,18 @@ def test_remote_profile_denies_docker_down_without_host_fallback(tmp_path: Path)
     ],
 )
 def test_remote_profile_denies_missing_invalid_or_stale_attestation(
-    tmp_path: Path, attestation: dict[str, object] | None
+    source_repo: Path,
+    tmp_path: Path,
+    policy: PackPolicy,
+    attestation: dict[str, object] | None,
 ) -> None:
-    pack = tmp_path / "pack"
-    pack.mkdir()
+    pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
     now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
     report = audit_profile_boundary(
-        render_ox_profile(pack, "/pinned/python", "owner", "staging", PINNED_IMAGE),
+        config,
         pack_root=pack,
+        manifest_path=manifest,
+        policy=policy,
         privacy_attestation=attestation,
         docker_available=True,
         admitted_worker_image=PINNED_IMAGE,
@@ -369,6 +390,63 @@ def test_remote_profile_denies_missing_invalid_or_stale_attestation(
     )
     assert report.allowed is False
     assert any("attestation" in item.casefold() for item in report.reasons)
+
+
+@pytest.mark.parametrize("case", ["bare", "tampered", "extra", "wrong_manifest", "wrong_policy"])
+def test_remote_profile_denies_pack_without_exact_manifest_and_policy_proof(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy, case: str
+) -> None:
+    if case == "bare":
+        pack = tmp_path / "pack"
+        pack.mkdir()
+        manifest = tmp_path / "missing-manifest.json"
+    else:
+        pack, manifest, _ = _built_remote_boundary(source_repo, tmp_path, policy)
+    selected_policy = policy
+    if case == "tampered":
+        (pack / "src" / "logic.py").write_text("tampered\n")
+    elif case == "extra":
+        (pack / "unexpected.py").write_text("not admitted\n")
+    elif case == "wrong_manifest":
+        wrong_root = tmp_path / "wrong"
+        wrong_root.mkdir()
+        wrong_source = source_repo.parent / "wrong-source"
+        shutil.copytree(source_repo, wrong_source)
+        (wrong_source / "README.md").write_text("# different admitted content\n")
+        _git(wrong_source, "add", "README.md")
+        _git(wrong_source, "commit", "-qm", "different fixture")
+        build_context_pack(
+            wrong_source,
+            ["README.md"],
+            wrong_root / "pack",
+            wrong_root / "manifest.json",
+            policy,
+        )
+        manifest = wrong_root / "manifest.json"
+    elif case == "wrong_policy":
+        selected_policy = PackPolicy(
+            policy_version="different-policy",
+            max_file_bytes=policy.max_file_bytes,
+            max_pack_bytes=policy.max_pack_bytes,
+            excluded_segments=policy.excluded_segments,
+        )
+
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    report = audit_profile_boundary(
+        render_ox_profile(pack, "/pinned/python", "owner", "staging", PINNED_IMAGE),
+        pack_root=pack,
+        manifest_path=manifest,
+        policy=selected_policy,
+        privacy_attestation=_fresh_attestation(now),
+        docker_available=True,
+        admitted_worker_image=PINNED_IMAGE,
+        now=now,
+    )
+    assert report.allowed is False
+    assert any(
+        "pack" in reason.casefold() or "manifest" in reason.casefold()
+        for reason in report.reasons
+    )
 
 
 def test_local_safe_profile_has_no_remote_fallback_and_passes_without_attestation(
@@ -382,6 +460,8 @@ def test_local_safe_profile_has_no_remote_fallback_and_passes_without_attestatio
     report = audit_profile_boundary(
         config,
         pack_root=None,
+        manifest_path=None,
+        policy=None,
         privacy_attestation=None,
         docker_available=True,
         admitted_worker_image=PINNED_IMAGE,
@@ -403,6 +483,8 @@ def test_local_content_addressed_worker_image_is_admitted(tmp_path: Path) -> Non
     report = audit_profile_boundary(
         config,
         pack_root=None,
+        manifest_path=None,
+        policy=None,
         privacy_attestation=None,
         docker_available=True,
         admitted_worker_image=local_image_id,
@@ -422,6 +504,8 @@ def test_repo_capable_local_profile_rejects_remote_fallback(tmp_path: Path) -> N
     report = audit_profile_boundary(
         config,
         pack_root=None,
+        manifest_path=None,
+        policy=None,
         privacy_attestation=None,
         docker_available=True,
         admitted_worker_image=PINNED_IMAGE,

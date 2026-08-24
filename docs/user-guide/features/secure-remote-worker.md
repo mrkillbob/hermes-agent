@@ -80,6 +80,8 @@ Preflight before inference:
 hermes secure-worker audit \
   --config /private/tmp/ox-sanitized.config.yaml \
   --pack /private/tmp/secure-worker-pack \
+  --manifest /private/tmp/secure-worker-pack.manifest.json \
+  --policy examples/secure-worker/policy.json \
   --attestation /private/tmp/nous-privacy-attestation.json \
   --image-lock /path/to/worker-image.lock.json
 ```

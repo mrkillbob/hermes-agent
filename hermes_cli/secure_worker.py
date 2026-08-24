@@ -142,6 +142,8 @@ class DiffVerificationReceipt:
 class BoundaryReport:
     allowed: bool
     reasons: tuple[str, ...]
+    manifest_sha256: str | None = None
+    source_commit: str | None = None
 
 
 _LOCAL_PROVIDERS = {"ollama", "ollama-launch", "custom"}
@@ -558,6 +560,7 @@ def render_ox_profile(
         "toolsets": [],
         "terminal": _terminal_boundary(pack, worker_image),
         "platform_toolsets": {"cli": ["terminal", "file"]},
+        "agent": {"disabled_toolsets": ["bfl", "kanban"]},
         "skills": {"trusted_project_dirs": []},
         "plugins": {"enabled": [], "disabled": []},
         "mcp_servers": {
@@ -597,6 +600,7 @@ def render_local_safe_profile(
         "toolsets": [],
         "terminal": _terminal_boundary(source, worker_image),
         "platform_toolsets": {"cli": ["terminal", "file"]},
+        "agent": {"disabled_toolsets": ["bfl", "kanban"]},
         "mcp_servers": {},
         "telemetry": {"shared_metrics": {"enabled": False}},
     }
@@ -645,6 +649,8 @@ def audit_profile_boundary(
     config: dict[str, object],
     *,
     pack_root: str | os.PathLike[str] | None,
+    manifest_path: str | os.PathLike[str] | None,
+    policy: PackPolicy | None,
     privacy_attestation: dict[str, object] | None,
     docker_available: bool,
     admitted_worker_image: str | None,
@@ -657,6 +663,8 @@ def audit_profile_boundary(
     provider = str(model.get("provider", ""))
     remote = _is_remote_provider(model)
     terminal = config.get("terminal") if isinstance(config.get("terminal"), dict) else {}
+    manifest_sha256: str | None = None
+    source_commit: str | None = None
 
     if terminal.get("backend") != "docker":
         reasons.append("terminal must use Docker; local/host fallback is denied")
@@ -694,17 +702,46 @@ def audit_profile_boundary(
         qualifier = "remote" if remote else "cloud"
         reasons.append(f"{qualifier} fallback crosses the inference boundary")
 
-    toolsets = config.get("toolsets") if isinstance(config.get("toolsets"), list) else []
-    if any(str(item).casefold() == "web" for item in toolsets):
-        reasons.append("web toolset is denied in a repository-capable profile")
+    if config.get("toolsets") != []:
+        reasons.append("top-level toolsets must be an explicit empty list")
+    if config.get("platform_toolsets") != {"cli": ["terminal", "file"]}:
+        reasons.append("CLI toolset selection must contain only terminal and file")
+    try:
+        from hermes_cli.tools_config import _get_platform_tools
+
+        effective_toolsets = _get_platform_tools(config, "cli")
+    except Exception as exc:
+        reasons.append(f"effective CLI toolset resolution failed: {exc}")
+    else:
+        expected_toolsets = {"terminal", "file"}
+        if remote:
+            expected_toolsets.add("secure-github-staging")
+        if effective_toolsets != expected_toolsets:
+            reasons.append(
+                "effective CLI toolsets exceed the admitted boundary: "
+                + ", ".join(sorted(effective_toolsets))
+            )
 
     if remote:
-        if pack_root is None:
-            reasons.append("remote profile requires an admitted pack cwd")
+        if pack_root is None or manifest_path is None or policy is None:
+            reasons.append("remote profile requires an admitted pack, manifest, and policy")
         else:
-            expected_cwd = str(Path(pack_root).resolve())
+            pack = Path(pack_root).resolve()
+            manifest_file = Path(manifest_path).resolve()
+            expected_cwd = str(pack)
             if str(terminal.get("cwd", "")) != expected_cwd:
                 reasons.append("remote profile cwd does not match the admitted pack")
+            try:
+                receipt = verify_context_pack(pack, manifest_file, policy)
+                bound_digest = _assert_manifest_binding(pack, manifest_file)
+                if receipt.manifest_sha256 != bound_digest:
+                    raise SecurityBoundaryError("pack verification receipt binding mismatch")
+                manifest = PackManifest.from_path(manifest_file)
+            except (OSError, ValueError, TypeError, KeyError, SecurityBoundaryError) as exc:
+                reasons.append(f"admitted pack verification failed: {exc}")
+            else:
+                manifest_sha256 = receipt.manifest_sha256
+                source_commit = manifest.source_commit
         if config.get("provider_routing") != {"data_collection": "deny"}:
             reasons.append("provider data-collection denial is missing")
         valid, attestation_reason = _valid_privacy_attestation(
@@ -747,4 +784,9 @@ def audit_profile_boundary(
                 ):
                     reasons.append("MCP broker identity configuration is invalid")
 
-    return BoundaryReport(allowed=not reasons, reasons=tuple(reasons))
+    return BoundaryReport(
+        allowed=not reasons,
+        reasons=tuple(reasons),
+        manifest_sha256=manifest_sha256,
+        source_commit=source_commit,
+    )

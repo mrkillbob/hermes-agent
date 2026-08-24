@@ -30,6 +30,8 @@ def register_cli(parent: argparse.ArgumentParser) -> None:
     audit = sub.add_parser("audit", help="Audit a profile boundary without changing it")
     audit.add_argument("--config", required=True)
     audit.add_argument("--pack")
+    audit.add_argument("--manifest")
+    audit.add_argument("--policy")
     audit.add_argument("--attestation")
     audit.add_argument("--image-lock", required=True)
     audit.set_defaults(func=cmd_audit)
@@ -109,6 +111,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
         report = audit_profile_boundary(
             config,
             pack_root=args.pack,
+            manifest_path=args.manifest,
+            policy=PackPolicy.from_json(args.policy) if args.policy else None,
             privacy_attestation=attestation,
             docker_available=_docker_available(),
             admitted_worker_image=WorkerImageLock.from_json(args.image_lock).image,
