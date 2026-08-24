@@ -8092,6 +8092,10 @@ class DispatchResult:
     spawned. ``None`` when memory was fine/unknown and the guard imposed
     no restriction. Reclaim/promotion bookkeeping still ran either way;
     deferred tasks stay queued for the next tick."""
+    host_capacity_saturated: bool = False
+    """True when ``kanban.max_in_progress`` already has every host worker
+    slot occupied. Ready work is intentionally deferred in this state, so the
+    gateway must not diagnose the dispatcher or profile as stuck."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -10014,6 +10018,7 @@ def _dispatch_once_locked(
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
         if total_running >= max_in_progress:
+            result.host_capacity_saturated = True
             return result
         remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
