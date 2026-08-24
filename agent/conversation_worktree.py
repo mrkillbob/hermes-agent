@@ -23,7 +23,11 @@ from hermes_cli._subprocess_compat import (
     noninteractive_git_env,
     windows_hide_flags,
 )
-from hermes_state import ConversationWorktreeRecord, SessionDB
+from hermes_state import (
+    ConversationWorktreeConflict,
+    ConversationWorktreeRecord,
+    SessionDB,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -443,9 +447,6 @@ class ConversationWorktreeManager:
             )
 
         existing = self._db.get_conversation_worktree(root_session_id)
-        if existing is not None and existing.state == "ready":
-            return self._validated_ready_binding(existing)
-
         source, source_common_dir = self._source_repository_identity()
         path, branch = self._expected_identity(root_session_id)
         if self._is_within(path, source):
@@ -453,23 +454,35 @@ class ConversationWorktreeManager:
                 "worktree_root must not create conversation worktrees inside source_worktree",
                 phase="policy",
             )
-        self._validate_worktree_root_ownership(source_common_dir)
-
-        if existing is None:
-            base_commit = self._git_stdout(source, ["rev-parse", "HEAD"], "identity")
-            record = self._db.claim_conversation_worktree(
-                root_session_id=root_session_id,
-                worktree_path=str(path),
-                branch=branch,
-                base_commit=base_commit,
-                repo_common_dir=str(source_common_dir),
-            )
-        else:
-            record = existing
-
+        record = existing
         try:
             with self._repository_lock(source_common_dir):
                 record = self._db.get_conversation_worktree(root_session_id) or record
+                self._validate_worktree_root_ownership(
+                    source,
+                    source_common_dir,
+                    expected_path=path,
+                    existing=record,
+                )
+                if record is None:
+                    base_commit = self._git_stdout(
+                        source, ["rev-parse", "HEAD"], "identity"
+                    )
+                    try:
+                        record = self._db.claim_conversation_worktree(
+                            root_session_id=root_session_id,
+                            worktree_path=str(path),
+                            branch=branch,
+                            base_commit=base_commit,
+                            repo_common_dir=str(source_common_dir),
+                        )
+                    except ConversationWorktreeConflict as exc:
+                        record = self._db.get_conversation_worktree(root_session_id)
+                        if record is None:
+                            raise ConversationWorktreeError(
+                                "conversation worktree identity claim conflicted",
+                                phase="identity",
+                            ) from exc
                 self._validate_record_identity(
                     record,
                     path=path,
@@ -479,6 +492,7 @@ class ConversationWorktreeManager:
                 if record.state == "ready":
                     return self._validated_ready_binding(record)
                 self._prepare_worktree(source, record)
+                self._ensure_git_worktree_locked(source, record)
 
             # Bootstrap may be slow, network-bound, or intentionally interactive
             # at the project level. It must never monopolize the repository-wide
@@ -859,7 +873,14 @@ class ConversationWorktreeManager:
             )
         return source, common_dir
 
-    def _validate_worktree_root_ownership(self, source_common_dir: Path) -> None:
+    def _validate_worktree_root_ownership(
+        self,
+        source: Path,
+        source_common_dir: Path,
+        *,
+        expected_path: Path,
+        existing: ConversationWorktreeRecord | None,
+    ) -> None:
         """Refuse a configured output root owned by a different repository.
 
         A worktree directory may sit under a parent repository even when the
@@ -882,13 +903,34 @@ class ConversationWorktreeManager:
             self._policy.create_timeout,
             "policy",
         )
-        if result.returncode != 0:
-            return
-        owner_common_dir = Path(result.stdout.strip()).resolve()
-        if owner_common_dir != source_common_dir.resolve():
-            raise ConversationWorktreeError(
-                "worktree_root is inside an unrelated repository", phase="policy"
+        if result.returncode == 0:
+            owner_common_dir = Path(result.stdout.strip()).resolve()
+            if owner_common_dir != source_common_dir.resolve():
+                raise ConversationWorktreeError(
+                    "worktree_root is inside an unrelated repository", phase="policy"
+                )
+
+        registered = self._git_stdout(
+            source,
+            ["worktree", "list", "--porcelain"],
+            "policy",
+        )
+        for line in registered.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            registered_path = Path(line.removeprefix("worktree ")).resolve()
+            root_is_nested = self._is_within(root, registered_path)
+            target_is_nested = self._is_within(expected_path, registered_path)
+            existing_owns_target = (
+                existing is not None
+                and registered_path == expected_path.resolve()
+                and Path(existing.worktree_path).resolve() == expected_path.resolve()
             )
+            if root_is_nested or (target_is_nested and not existing_owns_target):
+                raise ConversationWorktreeError(
+                    "worktree_root or target is inside a registered worktree",
+                    phase="policy",
+                )
 
     def _expected_identity(self, root_session_id: str) -> tuple[Path, str]:
         worktree_root = self._policy.worktree_root
@@ -962,6 +1004,37 @@ class ConversationWorktreeManager:
             )
         else:
             self._create_worktree(source, record)
+
+    def _ensure_git_worktree_locked(
+        self, source: Path, record: ConversationWorktreeRecord
+    ) -> None:
+        """Keep an active managed tree protected by Git's lifecycle lock."""
+        path = Path(record.worktree_path).resolve()
+        listing = self._git_stdout(
+            source,
+            ["worktree", "list", "--porcelain"],
+            "create",
+        )
+        current_path: Path | None = None
+        for line in listing.splitlines():
+            if line.startswith("worktree "):
+                current_path = Path(line.removeprefix("worktree ")).resolve()
+            elif current_path == path and line.startswith("locked"):
+                return
+
+        # Preserve the lifecycle invariant introduced by #48699 / @JoaoMarcos44:
+        # a Hermes-owned worktree stays Git-locked until its cleanup owner unlocks it.
+        self._git_stdout(
+            source,
+            [
+                "worktree",
+                "lock",
+                "--reason",
+                f"Hermes conversation {record.root_session_id}",
+                str(path),
+            ],
+            "create",
+        )
 
     @contextmanager
     def _repository_lock(self, common_dir: Path) -> Iterator[None]:
@@ -1294,10 +1367,10 @@ class ConversationWorktreeManager:
     def _record_failure(
         self,
         root_session_id: str,
-        record: ConversationWorktreeRecord,
+        record: ConversationWorktreeRecord | None,
         error: ConversationWorktreeError,
     ) -> None:
-        if record.state not in {"creating", "creation_failed"}:
+        if record is None or record.state not in {"creating", "creation_failed"}:
             return
         try:
             self._db.mark_conversation_worktree_failed(

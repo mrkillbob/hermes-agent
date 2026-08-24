@@ -109,6 +109,61 @@ def _process_bind(
         session_db.close()
 
 
+def _process_bind_with_head_pause(
+    repo_path: str,
+    db_path: str,
+    worktree_root: str,
+    root_session_id: str,
+    pause_after_head: bool,
+    head_observed,
+    release_head,
+    done,
+    results,
+):
+    """Expose first-claim HEAD selection without replacing real Git or SQLite."""
+
+    class HeadPausingManager(ConversationWorktreeManager):
+        def _git_stdout(self, cwd, args, phase):
+            value = super()._git_stdout(cwd, args, phase)
+            if (
+                args == ["rev-parse", "HEAD"]
+                and Path(cwd).resolve() == Path(repo_path).resolve()
+            ):
+                head_observed.set()
+                if pause_after_head and not release_head.wait(10):
+                    raise RuntimeError(
+                        "timed out waiting to release first HEAD selection"
+                    )
+            return value
+
+    session_db = SessionDB(Path(db_path))
+    try:
+        worktree_manager = HeadPausingManager(
+            ConversationWorktreePolicy(
+                enabled=True,
+                source_worktree=Path(repo_path),
+                worktree_root=Path(worktree_root),
+                branch_prefix="hermes/session",
+                bootstrap=False,
+                bootstrap_command=(),
+                bootstrap_timeout=1.0,
+                create_timeout=5.0,
+                retain_until_explicit_cleanup=True,
+            ),
+            session_db,
+        )
+        binding = worktree_manager.bind_new_root_session(
+            root_session_id, conversation_kind="interactive"
+        )
+        assert binding is not None
+        results.put(("ok", binding.base_commit, str(binding.path), binding.branch))
+    except BaseException as exc:
+        results.put(("error", type(exc).__name__, str(exc)))
+    finally:
+        done.set()
+        session_db.close()
+
+
 def test_binding_pins_committed_head_without_copying_dirty_stable_files(repo, db, tmp_path):
     base = git(repo, "rev-parse", "HEAD")
     (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
@@ -160,6 +215,26 @@ def test_repeated_root_reuses_same_validated_ready_binding(repo, db, tmp_path):
 
     assert first == second
     assert worktree_manager.resolve_existing_session("root") == first
+
+
+def test_active_managed_worktree_is_git_locked_against_external_removal(
+    repo, db, tmp_path
+):
+    binding = manager(repo, db, tmp_path).bind_new_root_session(
+        "root", conversation_kind="interactive"
+    )
+
+    assert binding is not None
+    removal = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "remove", str(binding.path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert removal.returncode != 0
+    assert "locked" in removal.stderr.lower()
+    assert binding.path.exists()
 
 
 def test_concurrent_same_root_claim_creates_one_binding(repo, tmp_path):
@@ -303,6 +378,73 @@ def test_worktree_root_in_unrelated_repository_is_rejected_before_claim(repo, db
     assert git(unrelated, "status", "--porcelain") == ""
 
 
+def test_worktree_root_inside_sibling_registered_worktree_is_rejected(
+    repo, db, tmp_path
+):
+    sibling = tmp_path / "sibling-worktree"
+    git(repo, "worktree", "add", "-b", "sibling", str(sibling), "HEAD")
+    worktree_manager = manager(
+        repo,
+        db,
+        tmp_path,
+        worktree_root=sibling / "conversation-worktrees",
+    )
+    expected_path, _ = worktree_manager._expected_identity("root")
+
+    try:
+        with pytest.raises(ConversationWorktreeError, match="registered worktree"):
+            worktree_manager.bind_new_root_session(
+                "root", conversation_kind="interactive"
+            )
+    finally:
+        if expected_path.exists():
+            git(repo, "worktree", "remove", "--force", str(expected_path))
+
+    assert db.get_conversation_worktree("root") is None
+    assert git(sibling, "status", "--porcelain") == ""
+
+
+def test_unbound_target_cannot_reuse_registered_worktree_under_external_root(
+    repo, db, tmp_path
+):
+    worktree_manager = manager(repo, db, tmp_path)
+    expected_path, _ = worktree_manager._expected_identity("root")
+    git(repo, "worktree", "add", "-b", "occupied", str(expected_path), "HEAD")
+
+    with pytest.raises(ConversationWorktreeError, match="registered worktree"):
+        worktree_manager.bind_new_root_session("root", conversation_kind="interactive")
+
+    assert db.get_conversation_worktree("root") is None
+
+
+def test_ready_binding_is_rejected_when_configured_root_is_inside_sibling(
+    repo, db, tmp_path
+):
+    sibling = tmp_path / "sibling-ready"
+    git(repo, "worktree", "add", "-b", "sibling-ready", str(sibling), "HEAD")
+    worktree_manager = manager(
+        repo,
+        db,
+        tmp_path,
+        worktree_root=sibling / "conversation-worktrees",
+    )
+    expected_path, expected_branch = worktree_manager._expected_identity("root")
+    base = git(repo, "rev-parse", "HEAD")
+    common_dir = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    git(repo, "worktree", "add", "-b", expected_branch, str(expected_path), base)
+    db.claim_conversation_worktree(
+        root_session_id="root",
+        worktree_path=str(expected_path),
+        branch=expected_branch,
+        base_commit=base,
+        repo_common_dir=common_dir,
+    )
+    db.mark_conversation_worktree_ready("root")
+
+    with pytest.raises(ConversationWorktreeError, match="registered worktree"):
+        worktree_manager.bind_new_root_session("root", conversation_kind="interactive")
+
+
 @pytest.mark.live_system_guard_bypass
 def test_bootstrap_timeout_kills_its_process_tree(repo, db, tmp_path):
     leaked = tmp_path / "leaked-grandchild.txt"
@@ -378,7 +520,7 @@ def test_blocked_bootstrap_does_not_hold_repository_create_lock(repo, db, tmp_pa
     assert failures == []
 
 
-def test_lock_setup_failure_is_recorded_as_controlled_create_failure(
+def test_lock_setup_failure_is_controlled_before_first_claim(
     repo, db, tmp_path, monkeypatch
 ):
     worktree_manager = manager(repo, db, tmp_path)
@@ -390,12 +532,7 @@ def test_lock_setup_failure_is_recorded_as_controlled_create_failure(
     with pytest.raises(ConversationWorktreeError, match="lock.*unavailable"):
         worktree_manager.bind_new_root_session("root", conversation_kind="interactive")
 
-    record = db.get_conversation_worktree("root")
-    assert record is not None
-    assert record.state == "creation_failed"
-    assert record.failure_phase == "create"
-    assert record.failure_message is not None
-    assert len(record.failure_message) <= 500
+    assert db.get_conversation_worktree("root") is None
 
 
 def test_same_root_is_idempotent_across_real_processes(repo, tmp_path):
@@ -416,6 +553,67 @@ def test_same_root_is_idempotent_across_real_processes(repo, tmp_path):
     observed = [results.get(timeout=3), results.get(timeout=3)]
     assert all(result[0] == "ok" for result in observed)
     assert observed[0] == observed[1]
+
+
+def test_first_binding_identity_is_selected_under_repository_lock(repo, tmp_path):
+    context = get_context("spawn")
+    old_head_observed = context.Event()
+    new_head_observed = context.Event()
+    release_old_head = context.Event()
+    unused_release = context.Event()
+    first_done = context.Event()
+    second_done = context.Event()
+    results = context.Queue()
+    common = (
+        str(repo),
+        str(tmp_path / "state.db"),
+        str(tmp_path / "worktrees"),
+        "root",
+    )
+    old_base = git(repo, "rev-parse", "HEAD")
+    first = context.Process(
+        target=_process_bind_with_head_pause,
+        args=(
+            *common,
+            True,
+            old_head_observed,
+            release_old_head,
+            first_done,
+            results,
+        ),
+    )
+    first.start()
+    assert old_head_observed.wait(10)
+
+    (repo / "advanced.txt").write_text("advanced\n", encoding="utf-8")
+    git(repo, "add", "advanced.txt")
+    git(repo, "commit", "-m", "advance source while first contender waits")
+    assert git(repo, "rev-parse", "HEAD") != old_base
+
+    second = context.Process(
+        target=_process_bind_with_head_pause,
+        args=(
+            *common,
+            False,
+            new_head_observed,
+            unused_release,
+            second_done,
+            results,
+        ),
+    )
+    second.start()
+    if new_head_observed.wait(1.0):
+        assert second_done.wait(10)
+    release_old_head.set()
+    first.join(timeout=20)
+    second.join(timeout=20)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    observed = [results.get(timeout=3), results.get(timeout=3)]
+    assert all(result[0] == "ok" for result in observed)
+    assert observed[0] == observed[1]
+    assert observed[0][1] == old_base
 
 
 def test_different_roots_create_unique_worktrees_across_real_processes(repo, tmp_path):
