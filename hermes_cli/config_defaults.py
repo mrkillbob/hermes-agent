@@ -1970,6 +1970,13 @@ DEFAULT_CONFIG = {
         },
     },
 
+    # Read-only shared learning catalog used by the learning graph. This does
+    # not alter prompt memory or make referenced skills executable.
+    "learning": {
+        "vault_dir": "",
+        "shared_catalog_enabled": False,
+    },
+
     # Persistent memory -- bounded curated memory injected into system prompt
     "memory": {
         "memory_enabled": True,
