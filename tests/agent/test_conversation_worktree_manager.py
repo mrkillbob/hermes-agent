@@ -30,6 +30,16 @@ def git(path: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def git_worktree_is_locked(repo: Path, worktree: Path) -> bool:
+    current_path = None
+    for line in git(repo, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            current_path = Path(line.removeprefix("worktree ")).resolve()
+        elif current_path == worktree.resolve() and line.startswith("locked"):
+            return True
+    return False
+
+
 @pytest.fixture
 def repo(tmp_path):
     path = tmp_path / "stable"
@@ -226,7 +236,15 @@ def test_active_managed_worktree_is_git_locked_against_external_removal(
 
     assert binding is not None
     removal = subprocess.run(
-        ["git", "-C", str(repo), "worktree", "remove", str(binding.path)],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "worktree",
+            "remove",
+            "--force",
+            str(binding.path),
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -235,6 +253,32 @@ def test_active_managed_worktree_is_git_locked_against_external_removal(
     assert removal.returncode != 0
     assert "locked" in removal.stderr.lower()
     assert binding.path.exists()
+
+
+def test_bind_reuse_relocks_externally_unlocked_ready_worktree(repo, db, tmp_path):
+    worktree_manager = manager(repo, db, tmp_path)
+    first = worktree_manager.bind_new_root_session("root", conversation_kind="interactive")
+    assert first is not None
+    git(repo, "worktree", "unlock", str(first.path))
+    assert not git_worktree_is_locked(repo, first.path)
+
+    second = worktree_manager.bind_new_root_session("root", conversation_kind="interactive")
+
+    assert second == first
+    assert git_worktree_is_locked(repo, first.path)
+
+
+def test_resolve_relocks_externally_unlocked_ready_worktree(repo, db, tmp_path):
+    worktree_manager = manager(repo, db, tmp_path)
+    first = worktree_manager.bind_new_root_session("root", conversation_kind="interactive")
+    assert first is not None
+    git(repo, "worktree", "unlock", str(first.path))
+    assert not git_worktree_is_locked(repo, first.path)
+
+    resolved = worktree_manager.resolve_existing_session("root")
+
+    assert resolved == first
+    assert git_worktree_is_locked(repo, first.path)
 
 
 def test_concurrent_same_root_claim_creates_one_binding(repo, tmp_path):
@@ -443,6 +487,34 @@ def test_ready_binding_is_rejected_when_configured_root_is_inside_sibling(
 
     with pytest.raises(ConversationWorktreeError, match="registered worktree"):
         worktree_manager.bind_new_root_session("root", conversation_kind="interactive")
+
+
+def test_resolve_rejects_ready_binding_when_configured_root_is_inside_sibling(
+    repo, db, tmp_path
+):
+    sibling = tmp_path / "sibling-resolve"
+    git(repo, "worktree", "add", "-b", "sibling-resolve", str(sibling), "HEAD")
+    worktree_manager = manager(
+        repo,
+        db,
+        tmp_path,
+        worktree_root=sibling / "conversation-worktrees",
+    )
+    expected_path, expected_branch = worktree_manager._expected_identity("root")
+    base = git(repo, "rev-parse", "HEAD")
+    common_dir = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    git(repo, "worktree", "add", "-b", expected_branch, str(expected_path), base)
+    db.claim_conversation_worktree(
+        root_session_id="root",
+        worktree_path=str(expected_path),
+        branch=expected_branch,
+        base_commit=base,
+        repo_common_dir=common_dir,
+    )
+    db.mark_conversation_worktree_ready("root")
+
+    with pytest.raises(ConversationWorktreeError, match="registered worktree"):
+        worktree_manager.resolve_existing_session("root")
 
 
 @pytest.mark.live_system_guard_bypass

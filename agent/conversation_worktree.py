@@ -458,6 +458,14 @@ class ConversationWorktreeManager:
         try:
             with self._repository_lock(source_common_dir):
                 record = self._db.get_conversation_worktree(root_session_id) or record
+                if record is not None and record.state == "ready":
+                    return self._resolve_ready_binding_locked(
+                        source,
+                        source_common_dir,
+                        record,
+                        path=path,
+                        branch=branch,
+                    )
                 self._validate_worktree_root_ownership(
                     source,
                     source_common_dir,
@@ -489,8 +497,6 @@ class ConversationWorktreeManager:
                     branch=branch,
                     repo_common_dir=source_common_dir,
                 )
-                if record.state == "ready":
-                    return self._validated_ready_binding(record)
                 self._prepare_worktree(source, record)
                 self._ensure_git_worktree_locked(source, record)
 
@@ -530,7 +536,46 @@ class ConversationWorktreeManager:
     ) -> ConversationWorktreeBinding | None:
         """Resolve only an already-ready root binding; never create a new one."""
         record = self._db.get_conversation_worktree(root_session_id)
-        return self._validated_ready_binding(record) if record is not None else None
+        if record is None:
+            return None
+        source, source_common_dir = self._source_repository_identity()
+        path, branch = self._expected_identity(root_session_id)
+        if self._is_within(path, source):
+            raise ConversationWorktreeError(
+                "worktree_root must not create conversation worktrees inside source_worktree",
+                phase="policy",
+            )
+        with self._repository_lock(source_common_dir):
+            record = self._db.get_conversation_worktree(root_session_id)
+            if record is None:
+                return None
+            return self._resolve_ready_binding_locked(
+                source,
+                source_common_dir,
+                record,
+                path=path,
+                branch=branch,
+            )
+
+    def _resolve_ready_binding_locked(
+        self,
+        source: Path,
+        source_common_dir: Path,
+        record: ConversationWorktreeRecord,
+        *,
+        path: Path,
+        branch: str,
+    ) -> ConversationWorktreeBinding:
+        """Validate and retain one ready binding while holding its repository lock."""
+        self._validate_worktree_root_ownership(
+            source,
+            source_common_dir,
+            expected_path=path,
+            existing=record,
+        )
+        binding = self._validated_ready_binding(record)
+        self._ensure_git_worktree_locked(source, record)
+        return binding
 
     def inspect_cleanup(
         self,
