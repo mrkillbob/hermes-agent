@@ -37,3 +37,27 @@ class TestResolvePath:
             terminal_tool.clear_session_cwd(task_id)
 
         assert result == live_dir / "nested" / "file.txt"
+
+    def test_delegated_task_inherits_current_session_cwd(self, monkeypatch, tmp_path):
+        """A child task resolves files in its parent desktop session workspace."""
+        workspace = tmp_path / "conversation-worktree"
+        process_cwd = tmp_path / "gateway-launch"
+        workspace.mkdir()
+        process_cwd.mkdir()
+        monkeypatch.chdir(process_cwd)
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools import file_tools, terminal_tool
+
+        session_key = "desktop-session"
+        child_task_id = "delegated-child"
+        terminal_tool.record_session_cwd(session_key, str(workspace))
+        tokens = set_session_vars(session_key=session_key, cwd=str(workspace))
+        try:
+            result = file_tools._resolve_path("README.md", task_id=child_task_id)
+        finally:
+            clear_session_vars(tokens)
+            terminal_tool.clear_session_cwd(session_key)
+
+        assert result == workspace / "README.md"
