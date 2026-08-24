@@ -4045,6 +4045,21 @@ def _patch_config_model(monkeypatch, model, provider=""):
     monkeypatch.setattr(server, "_load_cfg", lambda: {"model": cfg_model})
 
 
+def test_turn_limit_sync_adopts_unlimited_config_for_existing_session(monkeypatch):
+    monkeypatch.delenv("HERMES_TUI_MAX_TURNS", raising=False)
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"agent": {"max_turns": "none"}},
+    )
+    agent = types.SimpleNamespace(max_iterations=32)
+    session = {"agent": agent}
+
+    server._sync_agent_turn_limit_with_config(session)
+
+    assert agent.max_iterations == sys.maxsize
+
+
 def test_config_sync_switches_unpinned_session(monkeypatch):
     _patch_config_model(monkeypatch, "new/model", provider="nous")
     session = _sync_test_session(config_model_seen=("old/model", "nous"))

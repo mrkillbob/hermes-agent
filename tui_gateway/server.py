@@ -7059,6 +7059,15 @@ def _cfg_max_turns(cfg: dict, default: int) -> int:
     return default
 
 
+def _sync_agent_turn_limit_with_config(session: dict) -> None:
+    """Adopt config max-turn edits for an already-built Desktop/TUI agent."""
+    agent = session.get("agent")
+    if agent is None:
+        return
+    current = int(getattr(agent, "max_iterations", 500) or 500)
+    agent.max_iterations = _cfg_max_turns(_load_cfg(), current)
+
+
 def _parse_tui_skills_env() -> list[str]:
     raw = os.environ.get("HERMES_TUI_SKILLS", "")
     skills: list[str] = []
@@ -11343,6 +11352,7 @@ def _run_prompt_submit(
                 # config sync so an explicit pick wins over a config.yaml change.
                 _apply_pending_model_switch(sid, session)
                 _sync_agent_model_with_config(sid, session)
+            _sync_agent_turn_limit_with_config(session)
             # Bot Chat capability sync — adopt Settings→Capabilities edits
             # (skills/toolsets/MCP/SOUL) into the eternal bot session before
             # the turn runs. No-op for every other session shape.
