@@ -7340,12 +7340,18 @@ def _apply_personality_to_session(
     return False, None
 
 
-def _cfg_max_turns(cfg: dict, default: int) -> int:
+def _cfg_max_turns(
+    cfg: dict,
+    default: int,
+    *,
+    invalid_default: int | None = None,
+) -> int:
     from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
+    explicit_default = default if invalid_default is None else invalid_default
     # Env var override (highest priority)
     env_val = os.environ.get("HERMES_TUI_MAX_TURNS")
     if env_val:
-        return _resolve_turn_limit(env_val, default=default)
+        return _resolve_turn_limit(env_val, default=explicit_default)
     # Config file value — route through resolve_turn_limit so that
     # "none"/"unlimited"/0 are first-class spellings, not int() crashes.
     agent_cfg = cfg.get("agent") or {}
@@ -7353,17 +7359,27 @@ def _cfg_max_turns(cfg: dict, default: int) -> int:
     if raw is None:
         raw = cfg.get("max_turns")
     if raw is not None:
-        return _resolve_turn_limit(raw, default=default)
+        return _resolve_turn_limit(raw, default=explicit_default)
     return default
 
 
 def _sync_agent_turn_limit_with_config(session: dict) -> None:
-    """Adopt config max-turn edits for an already-built Desktop/TUI agent."""
+    """Adopt config max-turn edits for an already-built Desktop/TUI agent.
+
+    ``HERMES_TUI_MAX_TURNS`` remains the highest-priority input. An absent
+    value preserves the active limit (important during a transient empty
+    config read), while a malformed explicit value falls back to the same
+    500-turn baseline used to build an interactive gateway agent.
+    """
     agent = session.get("agent")
     if agent is None:
         return
     current = int(getattr(agent, "max_iterations", 500) or 500)
-    agent.max_iterations = _cfg_max_turns(_load_cfg(), current)
+    agent.max_iterations = _cfg_max_turns(
+        _load_cfg(),
+        current,
+        invalid_default=500,
+    )
 
 
 def _parse_tui_skills_env() -> list[str]:
