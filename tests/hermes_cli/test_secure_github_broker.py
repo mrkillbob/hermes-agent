@@ -77,16 +77,20 @@ def test_fixed_repository_is_compiled_into_request(config: BrokerConfig) -> None
 
 
 def test_repository_preflight_requires_exact_private_staging_identity(config: BrokerConfig) -> None:
-    broker = _broker(
-        config,
-        lambda request: httpx.Response(
+    def allowed(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/actions/permissions"):
+            return httpx.Response(200, json={"enabled": False})
+        return httpx.Response(
             200,
             json={
                 "full_name": "private-staging/ox-proposals",
                 "private": True,
                 "permissions": {"pull": True, "push": True, "admin": False},
             },
-        ),
+        )
+    broker = _broker(
+        config,
+        allowed,
     )
     broker.verify_repository_boundary()
 
@@ -102,6 +106,22 @@ def test_repository_preflight_requires_exact_private_staging_identity(config: Br
         denied = _broker(config, lambda request, value=response: httpx.Response(200, json=value))
         with pytest.raises(BrokerError, match="boundary"):
             denied.verify_repository_boundary()
+
+
+def test_repository_preflight_denies_enabled_actions(config: BrokerConfig) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/actions/permissions"):
+            return httpx.Response(200, json={"enabled": True})
+        return httpx.Response(
+            200,
+            json={
+                "full_name": "private-staging/ox-proposals",
+                "private": True,
+                "permissions": {"pull": True, "push": True, "admin": False},
+            },
+        )
+    with pytest.raises(BrokerError, match="Actions"):
+        _broker(config, handler).verify_repository_boundary()
 
 
 @pytest.mark.parametrize(
@@ -121,6 +141,30 @@ def test_path_validation_denies_escape(config: BrokerConfig, value: str) -> None
     broker = _broker(config, lambda request: pytest.fail("network must not be reached"))
     with pytest.raises(BrokerError, match="path"):
         broker.get_file(value, "main")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [".github/workflows/ci.yml", ".github/actions/setup/action.yml", ".github/dependabot.yml"],
+)
+def test_write_denies_github_execution_control_paths_before_http(
+    config: BrokerConfig, value: str
+) -> None:
+    broker = _broker(config, lambda request: pytest.fail("network must not be reached"))
+    with pytest.raises(BrokerError, match="control path"):
+        broker.put_file(value, "payload\n", "proposal", "hermes-proposal/task")
+
+
+def test_writes_and_pull_heads_require_proposal_namespace_before_http(
+    config: BrokerConfig,
+) -> None:
+    broker = _broker(config, lambda request: pytest.fail("network must not be reached"))
+    with pytest.raises(BrokerError, match="proposal branch"):
+        broker.put_file("src/logic.py", "payload\n", "proposal", "main")
+    with pytest.raises(BrokerError, match="proposal branch"):
+        broker.create_branch("main", "main")
+    with pytest.raises(BrokerError, match="proposal branch"):
+        broker.create_pull_request("proposal", "body", "main", "main")
 
 
 def test_redirect_is_rejected_and_token_is_not_in_error(config: BrokerConfig) -> None:
@@ -144,13 +188,15 @@ def test_put_file_uses_fixed_contents_route_and_typed_payload(config: BrokerConf
         return httpx.Response(201, json={"commit": {"sha": "abc123"}})
 
     broker = _broker(config, handler)
-    broker.put_file("src/logic.py", "print('safe')\n", "proposal", "ox/task")
+    broker.put_file(
+        "src/logic.py", "print('safe')\n", "proposal", "hermes-proposal/task"
+    )
     assert captured["method"] == "PUT"
     assert captured["url"] == (
         "https://api.github.com/repos/private-staging/ox-proposals/contents/src/logic.py"
     )
     assert captured["json"] == {
-        "branch": "ox/task",
+        "branch": "hermes-proposal/task",
         "content": "cHJpbnQoJ3NhZmUnKQo=",
         "message": "proposal",
     }
@@ -167,7 +213,7 @@ def test_create_branch_reads_source_then_creates_fixed_ref(config: BrokerConfig)
         return httpx.Response(201, json={"ref": "refs/heads/ox/task"})
 
     broker = _broker(config, handler)
-    broker.create_branch("ox/task", "main")
+    broker.create_branch("hermes-proposal/task", "main")
     assert calls == [
         (
             "GET",
@@ -177,7 +223,7 @@ def test_create_branch_reads_source_then_creates_fixed_ref(config: BrokerConfig)
         (
             "POST",
             "/repos/private-staging/ox-proposals/git/refs",
-            {"ref": "refs/heads/ox/task", "sha": "a" * 40},
+            {"ref": "refs/heads/hermes-proposal/task", "sha": "a" * 40},
         ),
     ]
 
@@ -191,7 +237,7 @@ def test_issue_pull_request_and_review_are_typed(config: BrokerConfig) -> None:
 
     broker = _broker(config, handler)
     broker.create_issue("audit", "body")
-    broker.create_pull_request("proposal", "body", "ox/task", "main")
+    broker.create_pull_request("proposal", "body", "hermes-proposal/task", "main")
     broker.create_review(7, "APPROVE", "reviewed")
     assert calls == [
         "/repos/private-staging/ox-proposals/issues",

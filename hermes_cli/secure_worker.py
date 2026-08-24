@@ -14,6 +14,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -104,6 +105,8 @@ class ManifestFile:
 class PackManifest:
     schema: str
     policy_version: str
+    policy_sha256: str
+    pack_root: str
     source_commit: str
     source_tree: str
     files: tuple[ManifestFile, ...]
@@ -115,6 +118,8 @@ class PackManifest:
         return cls(
             schema=str(data["schema"]),
             policy_version=str(data["policy_version"]),
+            policy_sha256=str(data["policy_sha256"]),
+            pack_root=str(data["pack_root"]),
             source_commit=str(data["source_commit"]),
             source_tree=str(data["source_tree"]),
             files=tuple(ManifestFile(**item) for item in data["files"]),
@@ -144,6 +149,23 @@ class BoundaryReport:
     reasons: tuple[str, ...]
     manifest_sha256: str | None = None
     source_commit: str | None = None
+    config_sha256: str | None = None
+    policy_sha256: str | None = None
+    worker_image: str | None = None
+    broker_executable_sha256: str | None = None
+    broker_module_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class AdmissionReceipt:
+    schema: str
+    config_sha256: str
+    policy_sha256: str
+    manifest_sha256: str
+    source_commit: str
+    worker_image: str
+    broker_executable_sha256: str
+    broker_module_sha256: str
 
 
 _LOCAL_PROVIDERS = {"ollama", "ollama-launch", "custom"}
@@ -160,6 +182,7 @@ _REMOTE_PROVIDER_NAMES = {
     "xai",
 }
 _PINNED_IMAGE_RE = re.compile(r"(?:[^@\s]+@)?sha256:[0-9a-f]{64}")
+_NOUS_SECURE_ENDPOINT = "https://inference-api.nousresearch.com/v1"
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -177,22 +200,28 @@ def _run_git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _run_git_unstripped(repo: Path, *args: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", *args], cwd=repo, check=True, text=True, capture_output=True
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        detail = getattr(exc, "stderr", "") or str(exc)
-        raise SecurityBoundaryError(f"git boundary check failed: {detail.strip()}") from exc
-    return result.stdout
-
-
 def _canonical_json(value: object) -> bytes:
     return (
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
         + b"\n"
     )
+
+
+def _policy_sha256(policy: PackPolicy) -> str:
+    return hashlib.sha256(_canonical_json(asdict(policy))).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise SecurityBoundaryError(f"admitted executable or module is unsafe: {path}")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _assert_external_file(pack: Path, path: Path, label: str) -> None:
+    if path == pack or pack in path.parents:
+        raise SecurityBoundaryError(f"{label} must remain outside the model-writable pack")
+    if path.is_symlink():
+        raise SecurityBoundaryError(f"{label} must not be a symlink")
 
 
 def _normalized_relative_path(raw: str, excluded_segments: Sequence[str]) -> PurePosixPath:
@@ -294,6 +323,8 @@ def build_context_pack(
     manifest = PackManifest(
         schema="hermes.secure-worker.pack-manifest.v1",
         policy_version=policy.policy_version,
+        policy_sha256=_policy_sha256(policy),
+        pack_root=str(pack),
         source_commit=source_commit,
         source_tree=source_tree,
         files=entries,
@@ -313,13 +344,6 @@ def build_context_pack(
         _run_git(pack, "commit", "-qm", f"sanitized pack from {source_commit[:12]}")
         manifest_file.parent.mkdir(parents=True, exist_ok=True)
         manifest_file.write_bytes(_canonical_json(asdict(manifest)))
-        marker = {
-            "schema": "hermes.secure-worker.pack-binding.v1",
-            "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(),
-        }
-        (pack / ".git" / "hermes-secure-worker-pack.json").write_bytes(
-            _canonical_json(marker)
-        )
     except Exception:
         shutil.rmtree(pack, ignore_errors=True)
         try:
@@ -339,11 +363,16 @@ def verify_context_pack(
 
     pack = Path(pack_root).resolve()
     manifest_file = Path(manifest_path).resolve()
+    _assert_external_file(pack, manifest_file, "manifest")
     manifest = PackManifest.from_path(manifest_file)
     if manifest.schema != "hermes.secure-worker.pack-manifest.v1":
         raise SecurityBoundaryError("unsupported manifest schema")
     if manifest.policy_version != policy.policy_version:
         raise SecurityBoundaryError("manifest policy version mismatch")
+    if manifest.policy_sha256 != _policy_sha256(policy):
+        raise SecurityBoundaryError("manifest policy digest mismatch")
+    if manifest.pack_root != str(pack):
+        raise SecurityBoundaryError("pack manifest binding mismatch")
 
     expected = {entry.path: entry for entry in manifest.files}
     actual = {
@@ -367,9 +396,6 @@ def verify_context_pack(
         total += len(data)
     if total != manifest.total_bytes or total > policy.max_pack_bytes:
         raise SecurityBoundaryError("manifest total does not match pack")
-    if _run_git(pack, "status", "--porcelain=v1", "--untracked-files=all"):
-        raise SecurityBoundaryError("pack Git worktree is not clean")
-
     return VerificationReceipt(
         schema="hermes.secure-worker.verification-receipt.v1",
         manifest_sha256=hashlib.sha256(manifest_file.read_bytes()).hexdigest(),
@@ -379,43 +405,15 @@ def verify_context_pack(
 
 
 def _assert_manifest_binding(pack: Path, manifest_file: Path) -> str:
-    marker_path = pack / ".git" / "hermes-secure-worker-pack.json"
-    if not marker_path.is_file() or marker_path.is_symlink():
-        raise SecurityBoundaryError("secure-worker pack marker is missing")
+    _assert_external_file(pack, manifest_file, "manifest")
     try:
-        marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise SecurityBoundaryError("secure-worker pack marker is invalid") from exc
-    digest = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
-    if (
-        marker.get("schema") != "hermes.secure-worker.pack-binding.v1"
-        or marker.get("manifest_sha256") != digest
-    ):
+        manifest = PackManifest.from_path(manifest_file)
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise SecurityBoundaryError("pack manifest binding is invalid") from exc
+    if manifest.pack_root != str(pack):
         raise SecurityBoundaryError("pack manifest binding mismatch")
+    digest = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
     return digest
-
-
-def _status_records(pack: Path) -> list[tuple[str, str]]:
-    raw = _run_git_unstripped(
-        pack, "status", "--porcelain=v1", "-z", "--untracked-files=all"
-    )
-    if not raw:
-        return []
-    records: list[tuple[str, str]] = []
-    chunks = raw.split("\x00")
-    index = 0
-    while index < len(chunks):
-        chunk = chunks[index]
-        index += 1
-        if not chunk:
-            continue
-        if len(chunk) < 4 or chunk[2] != " ":
-            raise SecurityBoundaryError("unable to parse pack Git status")
-        status, path = chunk[:2], chunk[3:]
-        if "R" in status or "C" in status:
-            raise SecurityBoundaryError("renames and copies are outside approved pack")
-        records.append((status, path))
-    return records
 
 
 def verify_proposed_diff(
@@ -431,29 +429,47 @@ def verify_proposed_diff(
     manifest = PackManifest.from_path(manifest_file)
     if manifest.policy_version != policy.policy_version:
         raise SecurityBoundaryError("manifest policy version mismatch")
-    allowed = {entry.path for entry in manifest.files}
+    if manifest.policy_sha256 != _policy_sha256(policy):
+        raise SecurityBoundaryError("manifest policy digest mismatch")
+    expected = {entry.path: entry for entry in manifest.files}
+    actual = {
+        path.relative_to(pack).as_posix()
+        for path in pack.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(pack).parts
+    }
+    extra = actual - set(expected)
+    if extra:
+        raise SecurityBoundaryError(f"change outside approved pack: {sorted(extra)[0]}")
     changed: list[str] = []
+    change_records: list[dict[str, object]] = []
     total = 0
-    for status, rel in _status_records(pack):
+    for rel, entry in sorted(expected.items()):
         canonical = _normalized_relative_path(rel, policy.excluded_segments).as_posix()
-        if canonical not in allowed:
-            raise SecurityBoundaryError(f"change outside approved pack: {canonical}")
-        if "D" in status:
+        if canonical not in actual:
             raise SecurityBoundaryError(f"file deletion denied: {canonical}")
         path = pack / canonical
         if path.is_symlink() or not path.is_file():
             raise SecurityBoundaryError(f"unsafe changed file: {canonical}")
         data = path.read_bytes()
         _assert_safe_content(path, data, policy)
-        total += len(data)
-        if total > policy.max_pack_bytes:
-            raise SecurityBoundaryError("changed-file pack budget exceeded")
-        changed.append(canonical)
-    diff = _run_git_unstripped(pack, "diff", "--binary", "HEAD", "--").encode()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != entry.sha256 or len(data) != entry.bytes:
+            total += len(data)
+            if total > policy.max_pack_bytes:
+                raise SecurityBoundaryError("changed-file pack budget exceeded")
+            changed.append(canonical)
+            change_records.append(
+                {
+                    "path": canonical,
+                    "before_sha256": entry.sha256,
+                    "after_sha256": digest,
+                    "after_bytes": len(data),
+                }
+            )
     return DiffVerificationReceipt(
         schema="hermes.secure-worker.diff-verification.v1",
         manifest_sha256=manifest_sha,
-        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        diff_sha256=hashlib.sha256(_canonical_json(change_records)).hexdigest(),
         changed_paths=tuple(sorted(changed)),
     )
 
@@ -553,7 +569,7 @@ def render_ox_profile(
         "model": {
             "provider": "nous",
             "default": "stealth/ox-alpha",
-            "base_url": "https://inference-api.nousresearch.com/v1",
+            "base_url": _NOUS_SECURE_ENDPOINT,
         },
         "fallback_providers": [],
         "provider_routing": {"data_collection": "deny"},
@@ -665,6 +681,9 @@ def audit_profile_boundary(
     terminal = config.get("terminal") if isinstance(config.get("terminal"), dict) else {}
     manifest_sha256: str | None = None
     source_commit: str | None = None
+    policy_sha256: str | None = None
+    broker_executable_sha256: str | None = None
+    broker_module_sha256: str | None = None
 
     if terminal.get("backend") != "docker":
         reasons.append("terminal must use Docker; local/host fallback is denied")
@@ -706,6 +725,8 @@ def audit_profile_boundary(
         reasons.append("top-level toolsets must be an explicit empty list")
     if config.get("platform_toolsets") != {"cli": ["terminal", "file"]}:
         reasons.append("CLI toolset selection must contain only terminal and file")
+    if config.get("agent") != {"disabled_toolsets": ["bfl", "kanban"]}:
+        reasons.append("agent toolset disables do not match the admitted boundary")
     try:
         from hermes_cli.tools_config import _get_platform_tools
 
@@ -723,6 +744,21 @@ def audit_profile_boundary(
             )
 
     if remote:
+        if config.get("skills") != {"trusted_project_dirs": []}:
+            reasons.append("trusted host project directories are denied")
+        if config.get("plugins") != {"enabled": [], "disabled": []}:
+            reasons.append("plugins must be explicitly empty")
+        if config.get("checkpoints") != {"enabled": False}:
+            reasons.append("checkpoints must be disabled")
+        if config.get("memory") != {
+            "memory_enabled": False,
+            "user_profile_enabled": False,
+        }:
+            reasons.append("memory and user-profile injection must be disabled")
+        if config.get("telemetry") != {"shared_metrics": {"enabled": False}}:
+            reasons.append("shared telemetry must be disabled")
+        if provider.casefold() != "nous" or model.get("base_url") != _NOUS_SECURE_ENDPOINT:
+            reasons.append("remote model endpoint must be the exact admitted Nous endpoint")
         if pack_root is None or manifest_path is None or policy is None:
             reasons.append("remote profile requires an admitted pack, manifest, and policy")
         else:
@@ -742,6 +778,7 @@ def audit_profile_boundary(
             else:
                 manifest_sha256 = receipt.manifest_sha256
                 source_commit = manifest.source_commit
+                policy_sha256 = _policy_sha256(policy)
         if config.get("provider_routing") != {"data_collection": "deny"}:
             reasons.append("provider data-collection denial is missing")
         valid, attestation_reason = _valid_privacy_attestation(
@@ -760,11 +797,27 @@ def audit_profile_boundary(
                 reasons.append("MCP broker configuration is invalid")
             else:
                 command = Path(str(server.get("command", "")))
-                if not command.is_absolute() or server.get("args") != [
+                expected_python = Path(sys.executable).resolve()
+                if (
+                    not command.is_absolute()
+                    or command.is_symlink()
+                    or command.resolve() != expected_python
+                    or server.get("args") != [
                     "-m",
                     "hermes_cli.secure_github_broker",
-                ]:
-                    reasons.append("MCP broker command is not the pinned secure broker")
+                    ]
+                ):
+                    reasons.append(
+                        "MCP broker executable is not the exact admitted interpreter"
+                    )
+                else:
+                    try:
+                        broker_executable_sha256 = _file_sha256(command)
+                        broker_module_sha256 = _file_sha256(
+                            Path(__file__).with_name("secure_github_broker.py")
+                        )
+                    except SecurityBoundaryError as exc:
+                        reasons.append(f"MCP broker identity verification failed: {exc}")
                 broker_env = server.get("env")
                 if (
                     server.get("enabled") is not True
@@ -789,4 +842,72 @@ def audit_profile_boundary(
         reasons=tuple(reasons),
         manifest_sha256=manifest_sha256,
         source_commit=source_commit,
+        config_sha256=hashlib.sha256(_canonical_json(config)).hexdigest(),
+        policy_sha256=policy_sha256,
+        worker_image=str(terminal.get("docker_image", "")),
+        broker_executable_sha256=broker_executable_sha256,
+        broker_module_sha256=broker_module_sha256,
     )
+
+
+def admission_receipt_from_report(report: BoundaryReport) -> AdmissionReceipt:
+    """Convert one successful effective-runtime audit into immutable launch commitments."""
+
+    required = (
+        report.config_sha256,
+        report.policy_sha256,
+        report.manifest_sha256,
+        report.source_commit,
+        report.worker_image,
+        report.broker_executable_sha256,
+        report.broker_module_sha256,
+    )
+    if not report.allowed or not all(required):
+        raise SecurityBoundaryError("an allowed complete remote audit is required")
+    return AdmissionReceipt(
+        schema="hermes.secure-worker.admission-receipt.v1",
+        config_sha256=str(report.config_sha256),
+        policy_sha256=str(report.policy_sha256),
+        manifest_sha256=str(report.manifest_sha256),
+        source_commit=str(report.source_commit),
+        worker_image=str(report.worker_image),
+        broker_executable_sha256=str(report.broker_executable_sha256),
+        broker_module_sha256=str(report.broker_module_sha256),
+    )
+
+
+def write_admission_receipt(
+    report: BoundaryReport,
+    receipt_path: str | os.PathLike[str],
+    *,
+    pack_root: str | os.PathLike[str],
+) -> AdmissionReceipt:
+    path = Path(receipt_path).resolve()
+    pack = Path(pack_root).resolve()
+    _assert_external_file(pack, path, "admission receipt")
+    if path.exists():
+        raise SecurityBoundaryError("admission receipt destination already exists")
+    receipt = admission_receipt_from_report(report)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_canonical_json(asdict(receipt)))
+    return receipt
+
+
+def verify_admission_receipt(
+    report: BoundaryReport,
+    receipt_path: str | os.PathLike[str],
+    *,
+    pack_root: str | os.PathLike[str],
+) -> AdmissionReceipt:
+    path = Path(receipt_path).resolve()
+    _assert_external_file(Path(pack_root).resolve(), path, "admission receipt")
+    if path.is_symlink() or not path.is_file():
+        raise SecurityBoundaryError("admission receipt is missing or unsafe")
+    try:
+        receipt = AdmissionReceipt(**json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, TypeError, ValueError) as exc:
+        raise SecurityBoundaryError("admission receipt is invalid") from exc
+    expected = admission_receipt_from_report(report)
+    if receipt != expected:
+        raise SecurityBoundaryError("admission receipt does not match effective runtime")
+    return receipt

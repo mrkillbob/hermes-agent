@@ -38,6 +38,7 @@ ALLOWED_TOOL_NAMES = {
 _NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 _BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]+")
 _MAX_TEXT = 512_000
+_PROPOSAL_BRANCH_PREFIX = "hermes-proposal/"
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,25 @@ def _repo_path(value: str) -> str:
     ):
         raise BrokerError("invalid repository path")
     return "/".join(quote(part, safe="-._~") for part in path.parts)
+
+
+def _writable_repo_path(value: str) -> str:
+    encoded = _repo_path(value)
+    lowered = PurePosixPath(value).as_posix().casefold()
+    if (
+        lowered == ".github/dependabot.yml"
+        or lowered.startswith(".github/workflows/")
+        or lowered.startswith(".github/actions/")
+    ):
+        raise BrokerError("GitHub execution control path is not writable")
+    return encoded
+
+
+def _proposal_branch(value: str) -> str:
+    branch = _branch(value)
+    if not branch.startswith(_PROPOSAL_BRANCH_PREFIX):
+        raise BrokerError("write target must be a dedicated proposal branch")
+    return branch
 
 
 def _bounded_text(value: str, label: str, *, allow_empty: bool = False) -> str:
@@ -211,13 +231,19 @@ class GitHubStagingBroker:
         ):
             self._audit("verify_repository_boundary", "identity_or_permission_denied")
             raise BrokerError("staging repository boundary verification failed")
+        actions = self._request(
+            "verify_actions_disabled", "GET", f"{self._repo_prefix}/actions/permissions"
+        )
+        if actions.get("enabled") is not False:
+            self._audit("verify_repository_boundary", "actions_enabled_denied")
+            raise BrokerError("GitHub Actions must be disabled in the staging repository")
 
     def get_branch(self, branch: str) -> dict[str, object]:
         branch = _branch(branch)
         return self._request("get_branch", "GET", f"{self._repo_prefix}/branches/{branch}")
 
     def create_branch(self, branch: str, from_branch: str) -> dict[str, object]:
-        branch = _branch(branch)
+        branch = _proposal_branch(branch)
         from_branch = _branch(from_branch)
         source = self._request(
             "get_source_ref",
@@ -249,10 +275,10 @@ class GitHubStagingBroker:
         branch: str,
         sha: str | None = None,
     ) -> dict[str, object]:
-        encoded_path = _repo_path(path)
+        encoded_path = _writable_repo_path(path)
         content = _bounded_text(content, "file content", allow_empty=True)
         message = _bounded_text(message, "commit message")
-        branch = _branch(branch)
+        branch = _proposal_branch(branch)
         payload: dict[str, object] = {
             "message": message,
             "content": base64.b64encode(content.encode()).decode(),
@@ -287,7 +313,7 @@ class GitHubStagingBroker:
             payload={
                 "title": _bounded_text(title, "pull request title"),
                 "body": _bounded_text(body, "pull request body", allow_empty=True),
-                "head": _branch(head),
+                "head": _proposal_branch(head),
                 "base": _branch(base),
             },
         )

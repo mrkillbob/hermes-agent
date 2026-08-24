@@ -83,7 +83,24 @@ hermes secure-worker audit \
   --manifest /private/tmp/secure-worker-pack.manifest.json \
   --policy examples/secure-worker/policy.json \
   --attestation /private/tmp/nous-privacy-attestation.json \
-  --image-lock /path/to/worker-image.lock.json
+  --image-lock /path/to/worker-image.lock.json \
+  --receipt /private/tmp/secure-worker-admission.json
+```
+
+Launch only through the receipt-consuming gate. It re-verifies the exact effective configuration,
+full policy, manifest, image, endpoint, broker executable, and broker module immediately before
+constructing the Hermes process:
+
+```bash
+hermes secure-worker run \
+  --config /private/tmp/ox-sanitized.config.yaml \
+  --pack /private/tmp/secure-worker-pack \
+  --manifest /private/tmp/secure-worker-pack.manifest.json \
+  --policy examples/secure-worker/policy.json \
+  --attestation /private/tmp/nous-privacy-attestation.json \
+  --image-lock /path/to/worker-image.lock.json \
+  --receipt /private/tmp/secure-worker-admission.json \
+  -- "review the admitted proposal"
 ```
 
 Verify the working-tree proposal before any trusted promotion:
@@ -98,7 +115,7 @@ hermes secure-worker verify \
 The verifier does not apply, commit, push, merge, or publish anything to the production repository.
 A trusted local operator reviews and promotes an approved patch separately.
 
-Destroy the pack using its binding marker and retain only a content-free receipt:
+Destroy the pack using its external manifest binding and retain only a content-free receipt:
 
 ```bash
 hermes secure-worker destroy \

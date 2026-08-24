@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sys
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 from hermes_cli.secure_worker import (
     PackPolicy,
     SecurityBoundaryError,
+    admission_receipt_from_report,
     audit_profile_boundary,
     build_context_pack,
     destroy_context_pack,
@@ -19,6 +21,8 @@ from hermes_cli.secure_worker import (
     render_ox_profile,
     verify_proposed_diff,
     verify_context_pack,
+    verify_admission_receipt,
+    write_admission_receipt,
 )
 
 
@@ -205,7 +209,7 @@ def _built_remote_boundary(
     manifest = tmp_path / "manifest.json"
     build_context_pack(source_repo, ["src/logic.py"], pack, manifest, policy)
     config = render_ox_profile(
-        pack, "/pinned/python", "owner", "staging", PINNED_IMAGE
+        pack, str(Path(sys.executable).resolve()), "owner", "staging", PINNED_IMAGE
     )
     return pack, manifest, config
 
@@ -234,6 +238,44 @@ def test_rendered_ox_profile_passes_when_every_boundary_is_present(
     assert config["mcp_servers"]["secure-github-staging"]["env"][
         "HERMES_STAGING_GITHUB_TOKEN"
     ] == "${HERMES_STAGING_GITHUB_TOKEN}"
+
+
+def test_admission_receipt_rejects_audit_to_launch_mutation(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy
+) -> None:
+    pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    report = audit_profile_boundary(
+        config,
+        pack_root=pack,
+        manifest_path=manifest,
+        policy=policy,
+        privacy_attestation=_fresh_attestation(now),
+        docker_available=True,
+        admitted_worker_image=PINNED_IMAGE,
+        now=now,
+    )
+    receipt = tmp_path / "admission.json"
+    write_admission_receipt(report, receipt, pack_root=pack)
+    assert verify_admission_receipt(report, receipt, pack_root=pack) == (
+        admission_receipt_from_report(report)
+    )
+
+    config["mcp_servers"]["secure-github-staging"]["env"][
+        "HERMES_STAGING_GITHUB_REPO"
+    ] = "different-staging"
+    mutated = audit_profile_boundary(
+        config,
+        pack_root=pack,
+        manifest_path=manifest,
+        policy=policy,
+        privacy_attestation=_fresh_attestation(now),
+        docker_available=True,
+        admitted_worker_image=PINNED_IMAGE,
+        now=now,
+    )
+    with pytest.raises(SecurityBoundaryError, match="does not match"):
+        verify_admission_receipt(mutated, receipt, pack_root=pack)
 
 
 def test_ox_broker_receives_only_explicit_staging_credential(
@@ -306,6 +348,16 @@ def test_ox_broker_receives_only_explicit_staging_credential(
             "MCP",
         ),
         (lambda cfg, tmp: cfg.update(fallback_providers=[{"provider": "anthropic"}]), "fallback"),
+        (
+            lambda cfg, tmp: cfg["model"].update(base_url="https://proxy.invalid/v1"),
+            "endpoint",
+        ),
+        (
+            lambda cfg, tmp: cfg["mcp_servers"]["secure-github-staging"].update(
+                command="/bin/echo"
+            ),
+            "broker executable",
+        ),
     ],
 )
 def test_remote_profile_mutations_fail_closed(
@@ -531,6 +583,83 @@ def test_diff_verifier_accepts_safe_modified_approved_file(
     assert len(receipt.diff_sha256) == 64
 
 
+def test_diff_verifier_ignores_model_owned_git_control_plane(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy
+) -> None:
+    pack, manifest = _built_pack(source_repo, tmp_path, policy)
+    payload = tmp_path / "executed"
+    (pack / "src" / "logic.py").write_text("def answer():\n    return 44\n")
+    _git(pack, "config", "diff.external", f"touch {payload}")
+    _git(pack, "update-index", "--assume-unchanged", "src/logic.py")
+    _git(pack, "config", "core.fsmonitor", f"touch {payload}")
+    (pack / ".git" / "info" / "attributes").write_text("* diff=host-command\n")
+    (pack / ".git" / "HEAD").write_text("ref: refs/heads/attacker\n")
+
+    receipt = verify_proposed_diff(pack, manifest, policy)
+
+    assert receipt.changed_paths == ("src/logic.py",)
+    assert not payload.exists()
+
+
+def test_diff_verifier_ignores_replaced_or_symlinked_git_directory(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy
+) -> None:
+    pack, manifest = _built_pack(source_repo, tmp_path, policy)
+    (pack / "src" / "logic.py").write_text("def answer():\n    return 45\n")
+    shutil.rmtree(pack / ".git")
+    hostile_git = tmp_path / "hostile-git"
+    hostile_git.mkdir()
+    (pack / ".git").symlink_to(hostile_git, target_is_directory=True)
+    receipt = verify_proposed_diff(pack, manifest, policy)
+    assert receipt.changed_paths == ("src/logic.py",)
+
+
+def test_remote_audit_rejects_symlinked_broker_executable(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy
+) -> None:
+    pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
+    broker_link = tmp_path / "broker-python"
+    broker_link.symlink_to(Path(sys.executable).resolve())
+    config["mcp_servers"]["secure-github-staging"]["command"] = str(broker_link)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    report = audit_profile_boundary(
+        config,
+        pack_root=pack,
+        manifest_path=manifest,
+        policy=policy,
+        privacy_attestation=_fresh_attestation(now),
+        docker_available=True,
+        admitted_worker_image=PINNED_IMAGE,
+        now=now,
+    )
+    assert report.allowed is False
+    assert any("broker executable" in reason for reason in report.reasons)
+
+
+def test_manifest_binds_full_policy_not_only_version(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy
+) -> None:
+    pack, manifest = _built_pack(source_repo, tmp_path, policy)
+    drifted = PackPolicy(
+        policy_version=policy.policy_version,
+        max_file_bytes=policy.max_file_bytes + 1,
+        max_pack_bytes=policy.max_pack_bytes,
+        excluded_segments=policy.excluded_segments,
+    )
+    with pytest.raises(SecurityBoundaryError, match="policy digest"):
+        verify_context_pack(pack, manifest, drifted)
+
+
+def test_manifest_and_policy_must_remain_outside_model_pack(
+    source_repo: Path, tmp_path: Path, policy: PackPolicy
+) -> None:
+    pack, manifest = _built_pack(source_repo, tmp_path, policy)
+    nested_manifest = pack / "manifest.json"
+    nested_manifest.write_bytes(manifest.read_bytes())
+    with pytest.raises(SecurityBoundaryError, match="outside"):
+        verify_proposed_diff(pack, nested_manifest, policy)
+
+
 def test_diff_verifier_rejects_unexpected_path(
     source_repo: Path, tmp_path: Path, policy: PackPolicy
 ) -> None:
@@ -565,8 +694,9 @@ def test_diff_verifier_rejects_manifest_from_another_pack(
     source_repo: Path, tmp_path: Path, policy: PackPolicy
 ) -> None:
     pack, manifest = _built_pack(source_repo, tmp_path, policy)
-    marker = pack / ".git" / "hermes-secure-worker-pack.json"
-    marker.write_text('{"manifest_sha256":"' + "0" * 64 + '"}\n')
+    row = json.loads(manifest.read_text())
+    row["pack_root"] = str(tmp_path / "other-pack")
+    manifest.write_text(json.dumps(row))
     with pytest.raises(SecurityBoundaryError, match="manifest binding"):
         verify_proposed_diff(pack, manifest, policy)
 
@@ -596,7 +726,7 @@ def test_destroy_rejects_unbound_directory(tmp_path: Path) -> None:
     ordinary.mkdir()
     manifest = tmp_path / "manifest.json"
     manifest.write_text("{}")
-    with pytest.raises(SecurityBoundaryError, match="marker"):
+    with pytest.raises((SecurityBoundaryError, KeyError), match="binding|schema"):
         destroy_context_pack(
             ordinary,
             manifest,
