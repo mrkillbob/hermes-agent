@@ -2647,6 +2647,12 @@ def _resolve_command_cwd(
     if workdir:
         return workdir
     recorded = get_session_cwd(session_key)
+    if env_type not in _CONTAINER_BACKENDS:
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        worker_cwd = resolve_kanban_worker_cwd(recorded)
+        if worker_cwd is not None:
+            return worker_cwd
     if (
         recorded
         and env_type in _CONTAINER_BACKENDS

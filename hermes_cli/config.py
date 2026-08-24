@@ -3568,19 +3568,6 @@ def _is_ssh_remote_tilde_cwd(backend: str, cwd: str) -> bool:
     return cwd == "~" or cwd.startswith("~/")
 
 
-def _kanban_worker_workspace(env: Dict[str, str]) -> Optional[str]:
-    """Return the dispatcher-assigned workspace for a live kanban worker."""
-    if not str(env.get("HERMES_KANBAN_TASK") or "").strip():
-        return None
-    workspace = str(env.get("HERMES_KANBAN_WORKSPACE") or "").strip()
-    if not workspace:
-        return None
-    workspace = os.path.expanduser(workspace)
-    if not os.path.isabs(workspace) or not os.path.isdir(workspace):
-        return None
-    return workspace
-
-
 def apply_terminal_config_to_env(
     *,
     env: Optional[Dict[str, str]] = None,
@@ -3599,7 +3586,9 @@ def apply_terminal_config_to_env(
     missing env vars; they never replace unrelated exported/.env values.
     """
     target = os.environ if env is None else env
-    worker_workspace = _kanban_worker_workspace(target)
+    from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+    worker_workspace = resolve_kanban_worker_cwd(env=target)
 
     raw_config = read_raw_config()
     raw_terminal_cfg = raw_config.get("terminal")

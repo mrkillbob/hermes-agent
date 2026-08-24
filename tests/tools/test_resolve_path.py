@@ -38,6 +38,27 @@ class TestResolvePath:
 
         assert result == live_dir / "nested" / "file.txt"
 
+    def test_kanban_workspace_beats_stale_recorded_session_cwd(self, monkeypatch, tmp_path):
+        """Relative file reads stay in the worker's assigned task worktree."""
+        stable = tmp_path / "stable-base"
+        workspace = tmp_path / "task-worktree"
+        stable.mkdir()
+        workspace.mkdir()
+
+        from tools import file_tools, terminal_tool
+
+        task_id = "kanban-worker-session"
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_workspace")
+        monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+        monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+        terminal_tool.record_session_cwd(task_id, str(stable))
+        try:
+            result = file_tools._resolve_path("README.md", task_id=task_id)
+        finally:
+            terminal_tool.clear_session_cwd(task_id)
+
+        assert result == workspace / "README.md"
+
     def test_delegated_task_inherits_current_session_cwd(self, monkeypatch, tmp_path):
         """A child task resolves files in its parent desktop session workspace."""
         workspace = tmp_path / "conversation-worktree"

@@ -302,9 +302,18 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
         recorded = get_session_cwd(task_id)
     except Exception:
         recorded = None
+    registered = _registered_task_cwd_override(task_id)
+    try:
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        candidate = recorded or registered
+        worker_cwd = resolve_kanban_worker_cwd(candidate)
+    except Exception:
+        worker_cwd = None
+    if worker_cwd and not _uses_container_paths(task_id):
+        return worker_cwd
     if recorded:
         return recorded
-    registered = _registered_task_cwd_override(task_id)
     if registered:
         return registered
 
