@@ -7370,7 +7370,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, goal_mode, goal_max_turns, skills "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -7385,6 +7385,13 @@ def decompose_triage_task(
         # override with its own 'workspace_kind' / 'workspace_path'.
         root_ws_kind = root_row["workspace_kind"] or "scratch"
         root_ws_path = root_row["workspace_path"]
+        # A goal-mode root represents a durable objective, not a one-shot
+        # dispatch.  Its children must keep the same continuation contract;
+        # otherwise the first fan-out silently loses the goal loop and the
+        # coordinator receives premature worker exits instead of handoffs.
+        root_goal_mode = 1 if root_row["goal_mode"] else 0
+        root_goal_max_turns = root_row["goal_max_turns"]
+        root_skills = root_row["skills"]
 
         # Create children. Status is 'todo' regardless of parents — we
         # link them under the root AFTER creation so the dispatcher
@@ -7419,8 +7426,8 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by, goal_mode, goal_max_turns, skills) "
+                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -7431,6 +7438,9 @@ def decompose_triage_task(
                     tenant,
                     now,
                     (author or "decomposer"),
+                    root_goal_mode,
+                    root_goal_max_turns,
+                    root_skills,
                 ),
             )
             _append_event(
@@ -8082,6 +8092,10 @@ class DispatchResult:
     spawned. ``None`` when memory was fine/unknown and the guard imposed
     no restriction. Reclaim/promotion bookkeeping still ran either way;
     deferred tasks stay queued for the next tick."""
+    host_capacity_saturated: bool = False
+    """True when ``kanban.max_in_progress`` already has every host worker
+    slot occupied. Ready work is intentionally deferred in this state, so the
+    gateway must not diagnose the dispatcher or profile as stuck."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -10004,6 +10018,7 @@ def _dispatch_once_locked(
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
         if total_running >= max_in_progress:
+            result.host_capacity_saturated = True
             return result
         remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
@@ -11395,6 +11410,7 @@ def add_notify_sub(
     notifier_profile: Optional[str] = None,
     delivery_mode: Optional[str] = None,
     delivery_metadata: Optional[Mapping[str, Any]] = None,
+    allow_nested: bool = False,
 ) -> None:
     """Register a gateway source that wants terminal-state notifications
     for ``task_id``. Idempotent on (task, platform, chat, thread).
@@ -11437,7 +11453,10 @@ def add_notify_sub(
     insert_chat_type = chat_type or "dm"
     now = int(time.time())
     metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
-    with write_txn(conn):
+    # A caller that creates a task and its notification subscription as one
+    # durable handoff may opt into savepoint composition. The default remains
+    # deliberately loud for accidental nested writes.
+    with write_txn(conn, allow_nested=allow_nested):
         conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs

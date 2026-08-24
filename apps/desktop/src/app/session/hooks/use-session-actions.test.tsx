@@ -29,6 +29,7 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  $freshDraftReady,
   $messages,
   $newChatWorkspaceTarget,
   $resumeFailedSessionId,
@@ -48,7 +49,9 @@ import {
   setResumeFailedSessionId,
   setSelectedStoredSessionId,
   setSessions,
-  setTurnStartedAt
+  setTurnStartedAt,
+  setWorkspaceCwdOwner,
+  workspaceCwdBelongsToSelectedSession
 } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import { $sessionTiles } from '@/store/session-states'
@@ -504,6 +507,49 @@ describe('startFreshSessionDraft', () => {
     expect(navigate).not.toHaveBeenCalled()
     expect($currentCwd.get()).toBe('')
     expect($newChatWorkspaceTarget.get()).toBeNull()
+  })
+
+  it('does not let an implicit fresh draft claim the previous conversation workspace', async () => {
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+
+    setSelectedStoredSessionId('stored-previous')
+    setCurrentCwd('/repo/previous-worktree')
+    setWorkspaceCwdOwner('stored-previous')
+
+    render(<Harness onReady={value => (handle = value)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    act(() => handle!.startFreshSessionDraft({ preserveRoute: true }))
+
+    expect($selectedStoredSessionId.get()).toBeNull()
+    expect(workspaceCwdBelongsToSelectedSession()).toBe(false)
+  })
+
+  it('releases the fresh-draft paint gate when session creation fails', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        throw new Error('create failed')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+
+    render(<Harness onReady={value => (handle = value)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    act(() => handle!.startFreshSessionDraft({ preserveRoute: true }))
+    expect($freshDraftReady.get()).toBe(true)
+
+    await expect(
+      act(async () => {
+        await handle!.createBackendSessionForSend()
+      })
+    ).rejects.toThrow('create failed')
+
+    expect($freshDraftReady.get()).toBe(false)
   })
 
   it('fronts the workspace without closing a terminal that is merely behind a tab', async () => {

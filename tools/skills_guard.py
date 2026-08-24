@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 
-SCANNER_VERSION = "skills-guard-v1"
+SCANNER_VERSION = "skills-guard-v2"
 
 
 
@@ -459,9 +459,12 @@ THREAT_PATTERNS = [
      "sets SUID/SGID bit on a file"),
 
     # ── Agent config persistence ──
-    (r'AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules',
+    (r'(?:\b(?:update|modify|edit|write|change|append|delete|remove|overwrite|rewrite|replace'
+     r'|add\s+to)\b[^\n]{0,2048}(?:AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules)'
+     r'|(?:AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules)[^\n]{0,2048}'
+     r'\b(?:update|modify|edit|write|change|append|delete|remove|overwrite|rewrite|replace)\w*\b)',
      "agent_config_mod", "critical", "persistence",
-     "references agent config files (could persist malicious instructions across sessions)"),
+     "modifies agent config files (could persist malicious instructions across sessions)"),
     (r'\.hermes/config\.yaml|\.hermes/SOUL\.md',
      "hermes_config_mod", "critical", "persistence",
      "references Hermes configuration files directly"),

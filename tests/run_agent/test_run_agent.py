@@ -2751,6 +2751,71 @@ class TestHandleMaxIterations:
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         assert "reasoning" not in kwargs.get("extra_body", {})
 
+    def test_summary_omits_disabled_reasoning_for_mandatory_nous_model(
+        self, agent, monkeypatch
+    ):
+        """The summary path must honor the same Nous capability gate as a normal turn."""
+        import hermes_cli.models as models_mod
+
+        monkeypatch.setattr(models_mod, "_nous_reasoning_caps_failed_at", None)
+        monkeypatch.setattr(
+            models_mod,
+            "_nous_reasoning_caps_cache",
+            {
+                "stealth/ox-alpha": {
+                    "supports_reasoning": True,
+                    "supported_efforts": None,
+                    "mandatory": True,
+                }
+            },
+        )
+        agent.provider = "nous"
+        agent.base_url = "https://inference-api.nousresearch.com/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "stealth/ox-alpha"
+        agent.reasoning_config = {"enabled": False, "effort": "none"}
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations(
+            [{"role": "user", "content": "do stuff"}], 32
+        )
+
+        assert result == "Summary"
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        assert "reasoning" not in kwargs.get("extra_body", {})
+
+    def test_unrelated_profile_override_preserves_generic_summary_reasoning(
+        self, agent, monkeypatch
+    ):
+        """An unrelated profile hook must not implicitly own reasoning policy."""
+        import providers
+        from providers.base import ProviderProfile
+
+        class UnrelatedProfile(ProviderProfile):
+            def build_api_kwargs_extras(self, **context):
+                return {}, {"user": "summary-test"}
+
+        monkeypatch.setattr(
+            providers,
+            "get_provider_profile",
+            lambda _provider: UnrelatedProfile(name="unrelated"),
+        )
+        agent.provider = "unrelated"
+        agent.reasoning_config = {"enabled": True, "effort": "low"}
+        monkeypatch.setattr(agent, "_supports_reasoning_extra_body", lambda: True)
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations(
+            [{"role": "user", "content": "do stuff"}], 32
+        )
+
+        assert result == "Summary"
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        assert kwargs["extra_body"]["reasoning"] == agent.reasoning_config
+        assert kwargs["user"] == "summary-test"
+
     def test_summary_request_removes_orphan_tool_result(self, agent):
         """Regression: max-iterations summary request must NOT contain
         orphan tool results (tool_call_id with no matching assistant tool_call)."""
@@ -4558,16 +4623,8 @@ class TestRunConversation:
 
     def test_kanban_block_called_on_iteration_exhaustion(self, agent, monkeypatch):
         """Regression: kanban worker must signal the dispatcher when its
-        iteration budget is exhausted, otherwise the task silently re-runs
-        forever without ever tripping the failure_limit circuit breaker
-        (issue #23216 / #29747 gap 2).
-
-        As of #29747, the exhaustion path routes through
-        ``kanban_db._record_task_failure(outcome="timed_out")`` so the
-        ``consecutive_failures`` counter increments and the dispatcher's
-        ``failure_limit`` breaker eventually trips. The legacy
-        ``kanban_block`` call was replaced because blocked-outcome runs
-        bypass the failure counter.
+        iteration budget is exhausted. The task is parked as sticky
+        ``needs_input`` so unchanged work cannot silently respawn forever.
         """
         self._setup_agent(agent)
         agent.max_iterations = 2
@@ -4587,13 +4644,12 @@ class TestRunConversation:
             tool_resp, tool_resp, summary_resp,
         ]
 
-        mock_record_failure = MagicMock(return_value=False)
+        mock_block_task = MagicMock(return_value=None)
         mock_connect = MagicMock(return_value=MagicMock())
 
         with (
             patch("run_agent.handle_function_call", return_value="ok"),
-            patch("hermes_cli.kanban_db._record_task_failure",
-                  mock_record_failure),
+            patch("hermes_cli.kanban_db.block_task", mock_block_task),
             patch("hermes_cli.kanban_db.connect", mock_connect),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -4604,20 +4660,15 @@ class TestRunConversation:
         # The agent should have reported the task as not completed.
         assert result["completed"] is False
 
-        # _record_task_failure should have been called exactly once for
-        # the exhaustion event, with outcome="timed_out".
-        assert mock_record_failure.call_count == 1, (
-            f"Expected exactly 1 _record_task_failure call, "
-            f"got {mock_record_failure.call_count}. "
-            f"Calls: {mock_record_failure.call_args_list}"
+        mock_block_task.assert_called_once_with(
+            mock_connect.return_value,
+            "t_test_task_123",
+            reason=(
+                "Iteration budget exhausted (2/2) — provide narrower evidence "
+                "or scope before resuming"
+            ),
+            kind="needs_input",
         )
-        call = mock_record_failure.call_args_list[0]
-        # Positional: (conn, task_id, ...)
-        assert call.args[1] == "t_test_task_123"
-        assert call.kwargs.get("outcome") == "timed_out"
-        assert call.kwargs.get("release_claim") is True
-        assert call.kwargs.get("end_run") is True
-        assert "Iteration budget exhausted" in call.kwargs.get("error", "")
 
     def test_no_kanban_block_when_not_in_kanban_mode(self, agent, monkeypatch):
         """The exhaustion bridge must NOT fire when HERMES_KANBAN_TASK
