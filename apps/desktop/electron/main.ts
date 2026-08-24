@@ -31,6 +31,7 @@ import {
 } from 'electron'
 
 import { classifyActiveRuntime } from './active-runtime-state'
+import { destroyKeepaliveAgents, downloadAgentFor, jsonAgentFor, withRetry } from './api-transport'
 import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } from './backend-child'
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
@@ -86,11 +87,12 @@ import {
   normalizeRemoteHeaders,
   normalizeSshConfig,
   normAuthMode,
+  pathForRegistryBackendRequest,
   pathWithGlobalRemoteProfile,
-  pathWithProfileScope,
   profileHasRemoteConnection,
   profileRemoteOverride,
   profileSshOverride,
+  type RegistryBackendRequestScope,
   remoteRequestMatchesBaseUrl,
   resolveAuthMode,
   resolveProfileApiRequest,
@@ -99,7 +101,6 @@ import {
   resolveTestWsUrl,
   savedProfileSsh,
   tokenPreview,
-  translateSelfProfileQuery,
   withTransientRetries
 } from './connection-config'
 import { applyConnectionConfigAtomically } from './connection-config-apply'
@@ -163,9 +164,11 @@ import { registerFsIpc } from './fs-ipc'
 import {
   filenameFromContentDisposition,
   gatewayFilePath,
+  gatewayFileRequestPaths,
   isNotFoundError,
   parseDataUrlToBuffer,
-  pumpStreamToFile
+  pumpStreamToFile,
+  resolveGatewayFileBackend
 } from './gateway-file-download'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { registerGitIpc } from './git-ipc'
@@ -190,6 +193,7 @@ import {
   writeSecretFileAtomic
 } from './hardening'
 import { cursorPointInWindow } from './hud-cursor'
+import { startHudGameOverlayWatch } from './hud-game-overlay'
 import { registerHudIpc } from './hud-ipc'
 import { snapHudBounds } from './hud-snap'
 import { createHudSnapShortcut } from './hud-snap-shortcut'
@@ -327,7 +331,7 @@ import {
 } from './venv-blocker-scan'
 import { fetchMarketplaceThemes, searchMarketplaceThemes } from './vscode-marketplace'
 import { createWakeIndicatorWindowController } from './wake-indicator-window'
-import { readWindowBelow } from './window-below'
+import { enumerateWindowsFrontToBack, readWindowBelow } from './window-below'
 import { installWindowRendererLifecycle } from './window-renderer-lifecycle'
 import { createWindowRevealController } from './window-reveal'
 import {
@@ -1290,7 +1294,8 @@ function registerMediaProtocol() {
 
       return resolvedPath
     },
-    resolveRemoteConnection: profile => ensureBackend(profile)
+    resolveRemoteConnection: ({ connectionId, profile }) =>
+      connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)
   })
 
   protocol.handle(MEDIA_PROTOCOL, handler)
@@ -4856,99 +4861,113 @@ function multipartBody(upload) {
 }
 
 function fetchJson(url, token, options: any = {}) {
-  return new Promise((resolve, reject) => {
-    const { body, contentType } = options.upload
-      ? multipartBody(options.upload)
-      : {
-          body: options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body)),
-          contentType: 'application/json'
+  // Retry policy lives in api-transport.ts: idempotent verbs retry on any
+  // transient transport error; POST/PUT/DELETE only when the request provably
+  // never reached the server (see shouldRetryRequest) — never double-submit.
+  return withRetry(
+    (requestState: any) =>
+      new Promise((resolve, reject) => {
+        const { body, contentType } = options.upload
+          ? multipartBody(options.upload)
+          : {
+              body: options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body)),
+              contentType: 'application/json'
+            }
+
+        const parsed = new URL(url)
+        const client = parsed.protocol === 'https:' ? https : http
+        const agent = jsonAgentFor(parsed.protocol)
+        const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+
+          return
         }
 
-    const parsed = new URL(url)
-    const client = parsed.protocol === 'https:' ? https : http
-    const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+        const req = client.request(
+          parsed,
+          {
+            agent,
+            method: options.method || 'GET',
+            headers: {
+              ...headersForRemoteRequest(url),
+              ...(options.headers || {}),
+              'Content-Type': contentType,
+              'X-Hermes-Session-Token': token,
+              // RFC 8252 native flow authenticates the gated gateway with a bearer
+              // token instead of the loopback session-token header. When
+              // ``options.bearer`` is set we send Authorization: Bearer <token>;
+              // the gateway's OAuth gate verifies it via the provider stack with
+              // no cookie involved.
+              ...(options.bearer ? { Authorization: `Bearer ${options.bearer}` } : {}),
+              ...(body ? { 'Content-Length': String(body.length) } : {})
+            }
+          },
+          res => {
+            const chunks = []
+            res.on('error', reject)
+            res.on('data', chunk => chunks.push(chunk))
+            res.on('end', () => {
+              const text = Buffer.concat(chunks).toString('utf8')
 
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+              if ((res.statusCode || 500) >= 400) {
+                reject(new Error(`${res.statusCode}: ${text || res.statusMessage}`))
 
-      return
-    }
+                return
+              }
 
-    const req = client.request(
-      parsed,
-      {
-        method: options.method || 'GET',
-        headers: {
-          ...headersForRemoteRequest(url),
-          ...(options.headers || {}),
-          'Content-Type': contentType,
-          'X-Hermes-Session-Token': token,
-          // RFC 8252 native flow authenticates the gated gateway with a bearer
-          // token instead of the loopback session-token header. When
-          // ``options.bearer`` is set we send Authorization: Bearer <token>;
-          // the gateway's OAuth gate verifies it via the provider stack with
-          // no cookie involved.
-          ...(options.bearer ? { Authorization: `Bearer ${options.bearer}` } : {}),
-          ...(body ? { 'Content-Length': String(body.length) } : {})
-        }
-      },
-      res => {
-        const chunks = []
-        res.on('error', reject)
-        res.on('data', chunk => chunks.push(chunk))
-        res.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8')
+              if (!text) {
+                resolve(null)
 
-          if ((res.statusCode || 500) >= 400) {
-            reject(new Error(`${res.statusCode}: ${text || res.statusMessage}`))
+                return
+              }
 
-            return
+              // A 2xx response whose body is HTML means the request fell through
+              // to the SPA index.html (e.g. an unregistered /api path). JSON.parse
+              // would throw an opaque `Unexpected token '<'` here, so surface a
+              // clear diagnostic with the offending URL instead.
+              const looksHtml = /^\s*<(?:!doctype|html)/i.test(text)
+              const contentType = String(res.headers['content-type'] || '')
+
+              if (looksHtml || contentType.includes('text/html')) {
+                reject(
+                  new Error(
+                    `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
+                      'The endpoint is likely missing on the Hermes backend.'
+                  )
+                )
+
+                return
+              }
+
+              try {
+                resolve(JSON.parse(text))
+              } catch {
+                reject(new Error(`Invalid JSON from ${url} (status ${res.statusCode}): ${text.slice(0, 200)}`))
+              }
+            })
           }
+        )
 
-          if (!text) {
-            resolve(null)
-
-            return
-          }
-
-          // A 2xx response whose body is HTML means the request fell through
-          // to the SPA index.html (e.g. an unregistered /api path). JSON.parse
-          // would throw an opaque `Unexpected token '<'` here, so surface a
-          // clear diagnostic with the offending URL instead.
-          const looksHtml = /^\s*<(?:!doctype|html)/i.test(text)
-          const contentType = String(res.headers['content-type'] || '')
-
-          if (looksHtml || contentType.includes('text/html')) {
-            reject(
-              new Error(
-                `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
-                  'The endpoint is likely missing on the Hermes backend.'
-              )
-            )
-
-            return
-          }
-
-          try {
-            resolve(JSON.parse(text))
-          } catch {
-            reject(new Error(`Invalid JSON from ${url} (status ${res.statusCode}): ${text.slice(0, 200)}`))
-          }
+        req.on('error', reject)
+        req.setTimeout(timeoutMs, () => {
+          req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
         })
-      }
-    )
 
-    req.on('error', reject)
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
-    })
+        // From here the request goes on the wire: a later transport error can no
+        // longer prove the server didn't process it, so non-idempotent verbs must
+        // not be retried past this point.
+        requestState.bodySent = true
 
-    if (body) {
-      req.write(body)
-    }
+        if (body) {
+          req.write(body)
+        }
 
-    req.end()
-  })
+        req.end()
+      }),
+    { method: options.method || 'GET' }
+  )
 }
 
 // Token-auth download that streams the response body straight to a
@@ -4975,11 +4994,13 @@ function downloadViaTokenToFile(url, token, ctx, options: any = {}) {
     }
 
     const client = parsed.protocol === 'https:' ? https : http
+    const agent = downloadAgentFor(parsed.protocol)
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     const req = client.request(
       parsed,
       {
+        agent,
         method: 'GET',
         headers: options.bearer ? { Authorization: `Bearer ${options.bearer}` } : { 'X-Hermes-Session-Token': token }
       },
@@ -5014,90 +5035,99 @@ function fetchPublicJson(url, options: any = {}) {
   // NO ``X-Hermes-Session-Token`` header — used by the auth-mode probe before
   // any credentials exist, and any time we must not leak a token to an
   // endpoint that doesn't need one.
-  return new Promise((resolve, reject) => {
-    const body = options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body))
-    let parsed
+  return withRetry(
+    (requestState: any) =>
+      new Promise((resolve, reject) => {
+        const body = options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body))
+        let parsed
 
-    try {
-      parsed = new URL(url)
-    } catch (error) {
-      reject(new Error(`Invalid URL: ${error.message}`))
+        try {
+          parsed = new URL(url)
+        } catch (error) {
+          reject(new Error(`Invalid URL: ${error.message}`))
 
-      return
-    }
-
-    const client = parsed.protocol === 'https:' ? https : http
-    const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
-
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
-
-      return
-    }
-
-    const req = client.request(
-      parsed,
-      {
-        method: options.method || 'GET',
-        headers: {
-          ...headersForRemoteRequest(url),
-          ...(options.headers || {}),
-          'Content-Type': 'application/json',
-          ...(body ? { 'Content-Length': String(body.length) } : {})
+          return
         }
-      },
-      res => {
-        const chunks = []
-        res.on('data', chunk => chunks.push(chunk))
-        res.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8')
 
-          if ((res.statusCode || 500) >= 400) {
-            reject(new Error(`${res.statusCode}: ${text || res.statusMessage}`))
+        const client = parsed.protocol === 'https:' ? https : http
+        const agent = jsonAgentFor(parsed.protocol)
+        const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
-            return
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+
+          return
+        }
+
+        const req = client.request(
+          parsed,
+          {
+            agent,
+            method: options.method || 'GET',
+            headers: {
+              ...headersForRemoteRequest(url),
+              ...(options.headers || {}),
+              'Content-Type': 'application/json',
+              ...(body ? { 'Content-Length': String(body.length) } : {})
+            }
+          },
+          res => {
+            const chunks = []
+            res.on('data', chunk => chunks.push(chunk))
+            res.on('end', () => {
+              const text = Buffer.concat(chunks).toString('utf8')
+
+              if ((res.statusCode || 500) >= 400) {
+                reject(new Error(`${res.statusCode}: ${text || res.statusMessage}`))
+
+                return
+              }
+
+              if (!text) {
+                resolve(null)
+
+                return
+              }
+
+              const looksHtml = /^\s*<(?:!doctype|html)/i.test(text)
+              const contentType = String(res.headers['content-type'] || '')
+
+              if (looksHtml || contentType.includes('text/html')) {
+                reject(
+                  new Error(
+                    `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
+                      'The endpoint is likely missing on the Hermes backend.'
+                  )
+                )
+
+                return
+              }
+
+              try {
+                resolve(JSON.parse(text))
+              } catch {
+                reject(new Error(`Invalid JSON from ${url} (status ${res.statusCode}): ${text.slice(0, 200)}`))
+              }
+            })
           }
+        )
 
-          if (!text) {
-            resolve(null)
-
-            return
-          }
-
-          const looksHtml = /^\s*<(?:!doctype|html)/i.test(text)
-          const contentType = String(res.headers['content-type'] || '')
-
-          if (looksHtml || contentType.includes('text/html')) {
-            reject(
-              new Error(
-                `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
-                  'The endpoint is likely missing on the Hermes backend.'
-              )
-            )
-
-            return
-          }
-
-          try {
-            resolve(JSON.parse(text))
-          } catch {
-            reject(new Error(`Invalid JSON from ${url} (status ${res.statusCode}): ${text.slice(0, 200)}`))
-          }
+        req.on('error', reject)
+        req.setTimeout(timeoutMs, () => {
+          req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
         })
-      }
-    )
 
-    req.on('error', reject)
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
-    })
+        // Past this point the request is on the wire — see fetchJson.
+        requestState.bodySent = true
 
-    if (body) {
-      req.write(body)
-    }
+        if (body) {
+          req.write(body)
+        }
 
-    req.end()
-  })
+        req.end()
+      }),
+    { method: options.method || 'GET' }
+  )
 }
 
 function mimeTypeForPath(filePath) {
@@ -7498,33 +7528,63 @@ function readGatewayErrorText(res): Promise<string> {
   })
 }
 
-async function gatedFileAuth(connection) {
+interface GatewayFileConnection extends RegistryBackendRequestScope {
+  authMode?: 'oauth' | 'token'
+  baseUrl: string
+  token?: null | string
+}
+
+interface GatewayFileSaveContext {
+  fallbackName: string
+  suggested: string
+}
+
+interface GatewayFileSavePayload {
+  connectionId?: unknown
+  path?: unknown
+  profile?: unknown
+  suggestedName?: unknown
+}
+
+async function gatedFileAuth(connection: GatewayFileConnection) {
   const nativeAt =
     connection.authMode === 'oauth' ? await ensureNativeAccessToken(connection.baseUrl).catch(() => null) : null
 
   return resolveGatedDownloadAuth(connection.authMode, nativeAt, connection.token)
 }
 
-async function saveGatewayFile(payload: any = {}) {
+function gatewayFileRequestPath(
+  connection: GatewayFileConnection,
+  connectionId: null | string,
+  profile: null | string,
+  requestPath: string
+) {
+  return connectionId
+    ? pathForRegistryBackendRequest(requestPath, profile, connection)
+    : pathWithGlobalRemoteProfile(requestPath, profile, profileRouteOptions(profile))
+}
+
+async function saveGatewayFile(payload: GatewayFileSavePayload = {}) {
   const filePath = gatewayFilePath(payload.path)
 
   if (!filePath) {
     throw new Error('Missing gateway file path')
   }
 
-  const profile = payload.profile || null
-  const connection = await ensureBackend(profile)
+  const { connection, connectionId, profile } = await resolveGatewayFileBackend<GatewayFileConnection>(payload, {
+    ensureLegacy: ensureBackend,
+    ensureRegistry: ensureRegistryBackend
+  })
+
   const suggested = String(payload.suggestedName || '').trim()
   const fallbackName = path.basename(filePath) || suggested || 'download'
   const ctx = { suggested, fallbackName }
 
-  const requestPath = pathWithGlobalRemoteProfile(
-    `/api/fs/download?path=${encodeURIComponent(filePath)}`,
-    profile,
-    profileRouteOptions(profile)
+  const requestPaths = gatewayFileRequestPaths(filePath, requestPath =>
+    gatewayFileRequestPath(connection, connectionId, profile, requestPath)
   )
 
-  const url = `${connection.baseUrl}${requestPath}`
+  const url = `${connection.baseUrl}${requestPaths.download}`
 
   try {
     const auth = await gatedFileAuth(connection)
@@ -7543,7 +7603,7 @@ async function saveGatewayFile(payload: any = {}) {
     // /api/fs/download 404s here; fall back (ONLY on 404) to the older capped
     // data-URL route so downloads keep working against older backends.
     if (isNotFoundError(error)) {
-      return await saveGatewayFileViaDataUrl(connection, profile, filePath, ctx)
+      return await saveGatewayFileViaDataUrl(connection, requestPaths.dataUrl, ctx)
     }
 
     throw error
@@ -7554,16 +7614,14 @@ async function saveGatewayFile(payload: any = {}) {
 // `/api/fs/read-data-url` route, decode it, and save. Bounded by the gateway's
 // data-URL cap, so it only serves smaller files — enough to keep older gateways
 // working until they gain the streaming route.
-async function saveGatewayFileViaDataUrl(connection, profile, filePath, ctx: any = {}) {
-  const requestPath = pathWithGlobalRemoteProfile(
-    `/api/fs/read-data-url?path=${encodeURIComponent(filePath)}`,
-    profile,
-    profileRouteOptions(profile)
-  )
-
+async function saveGatewayFileViaDataUrl(
+  connection: GatewayFileConnection,
+  requestPath: string,
+  ctx: GatewayFileSaveContext
+) {
   const url = `${connection.baseUrl}${requestPath}`
   const auth = await gatedFileAuth(connection)
-  let json: any
+  let json: unknown
 
   if (auth.kind === 'bearer') {
     json = await fetchJson(url, null, { bearer: auth.token })
@@ -7573,7 +7631,8 @@ async function saveGatewayFileViaDataUrl(connection, profile, filePath, ctx: any
     json = await fetchJson(url, auth.token)
   }
 
-  const dataUrl = json?.dataUrl
+  const dataUrl =
+    json && typeof json === 'object' && 'dataUrl' in json && typeof json.dataUrl === 'string' ? json.dataUrl : ''
 
   if (!dataUrl) {
     throw new Error('Gateway returned no file data')
@@ -11668,6 +11727,46 @@ function startHudCursorFeed(win: BrowserWindow) {
   win.on('closed', () => clearInterval(timer))
 }
 
+/**
+ * Watch for a fullscreen app under the HUD (the Discord-style game overlay
+ * cue) and feed the answer to its renderer. Pure detection lives in
+ * hud-game-overlay.ts; enumeration is the same front-to-back walk the
+ * read_window_below tool uses. The renderer answers with the low-opacity
+ * treatment (`data-hud-game`), so main stays out of the styling business.
+ */
+function startHudGameOverlayFeed(win: BrowserWindow) {
+  const titlesAvailable = IS_MAC ? systemPreferences.getMediaAccessStatus?.('screen') === 'granted' : true
+
+  let last = { active: false, app: '' }
+
+  const push = (state: { active: boolean; app: string }) => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('hermes:hud:game-overlay', state)
+    }
+  }
+
+  // Replay the latest state to every load of this window. The watch pushes only
+  // on CHANGE and its first tick fires the moment the window is created — well
+  // before the renderer has mounted its listener — so a HUD opened over a game
+  // that is already fullscreen would hear the one and only message before it
+  // could receive it, then sit at "no game" forever while main was certain it
+  // had reported one. (Same reason quick entry caches its last state push.)
+  // did-finish-load also covers HMR full reloads during development.
+  win.webContents.on('did-finish-load', () => push(last))
+
+  const dispose = startHudGameOverlayWatch({
+    enumerate: () => enumerateWindowsFrontToBack(process.pid, titlesAvailable),
+    displayBounds: () => screen.getDisplayMatching(win.getBounds()).bounds,
+    selfPid: process.pid,
+    send: state => {
+      last = state
+      push(state)
+    }
+  })
+
+  win.on('closed', dispose)
+}
+
 function hudBounds() {
   // Remembered spot first — validated against the LIVE displays so a HUD
   // parked on an unplugged monitor comes back on-screen instead of lost.
@@ -11802,6 +11901,7 @@ function spawnHudWindow(sessionId, profile) {
   bindGeometryPersistence(win, schedulePersistHudState)
 
   startHudCursorFeed(win)
+  startHudGameOverlayFeed(win)
 
   wireWindowReveal(win, {
     show: () => {
@@ -12547,8 +12647,6 @@ registerPetOverlayIpc({
 // --- HUD mode (chrome-free floating chat) — see hud-ipc.ts. ---------------
 const hudIpc = registerHudIpc({
   isMac: IS_MAC,
-  isWindows: IS_WINDOWS,
-  glassSupported: GLASS_SUPPORTED,
   getTranslucencyState: () => translucencyState,
   getHudWindow: () => hudWindow,
   openHudWindow,
@@ -13807,9 +13905,7 @@ async function dispatchRegistryApiRequest(
 ) {
   const connection: any = await ensureRegistryBackend(registryConnectionId, routeProfile)
 
-  const requestPath = connection.sharedRemote
-    ? pathWithProfileScope(request.path, requestProfile)
-    : translateSelfProfileQuery(request.path, requestProfile, connection.remoteProfile)
+  const requestPath = pathForRegistryBackendRequest(request.path, requestProfile, connection)
 
   return fetchJsonForBackend(connection, requestPath, {
     method: request?.method,
@@ -14440,6 +14536,12 @@ app.on('before-quit', () => {
     translucencyWriteTimer = null
     writePersistedTranslucency(translucencyState)
   }
+})
+
+// Close the pooled keep-alive sockets on quit so lingering connections can't
+// hold the event loop open or leak FDs past app teardown.
+app.on('will-quit', () => {
+  destroyKeepaliveAgents()
 })
 
 // Answered synchronously so preload can publish the verdict before the
