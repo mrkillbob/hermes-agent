@@ -1514,7 +1514,7 @@ stt:
 # Intermediate tool results stay out of the LLM's context window.
 code_execution:
   timeout: 300         # Max seconds per script before kill (default: 300 = 5 min)
-  max_tool_calls: 50   # Max RPC tool calls per execution (default: 50)
+  max_tool_calls: 50   # Max RPC tool calls per execution (default: 50; 0 = unlimited)
 
 # =============================================================================
 # Subagent Delegation

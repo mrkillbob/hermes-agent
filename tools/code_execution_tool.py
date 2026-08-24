@@ -77,6 +77,11 @@ MAX_STDOUT_BYTES = 50_000    # 50 KB
 MAX_STDERR_BYTES = 10_000    # 10 KB
 
 
+def _tool_call_limit_reached(current: int, maximum: int) -> bool:
+    """Return whether the RPC budget is exhausted (``maximum <= 0`` is unlimited)."""
+    return maximum > 0 and current >= maximum
+
+
 def _assemble_stdout_result(
     head: bytes,
     tail: bytes = b"",
@@ -727,7 +732,7 @@ def _rpc_server_loop(
                     continue
 
                 # Enforce tool call limit
-                if tool_call_counter[0] >= max_tool_calls:
+                if _tool_call_limit_reached(tool_call_counter[0], max_tool_calls):
                     resp = tool_error(
                         f"Tool call limit reached ({max_tool_calls}). "
                         "No more tool calls allowed in this execution."
@@ -1006,7 +1011,7 @@ def _rpc_poll_loop(
                         f"Available: {available}"
                     )
                 # Enforce tool call limit
-                elif tool_call_counter[0] >= max_tool_calls:
+                elif _tool_call_limit_reached(tool_call_counter[0], max_tool_calls):
                     tool_result = tool_error(
                         f"Tool call limit reached ({max_tool_calls}). "
                         "No more tool calls allowed in this execution."

@@ -225,6 +225,19 @@ class TestExecuteCodeRemoteTempDir(unittest.TestCase):
                       "TZ value must be wrapped in single quotes by shlex.quote()")
 
 
+class TestToolCallLimit(unittest.TestCase):
+    def test_zero_disables_tool_call_limit(self):
+        from tools.code_execution_tool import _tool_call_limit_reached
+
+        self.assertFalse(_tool_call_limit_reached(100_000, 0))
+
+    def test_positive_limit_is_enforced(self):
+        from tools.code_execution_tool import _tool_call_limit_reached
+
+        self.assertFalse(_tool_call_limit_reached(4, 5))
+        self.assertTrue(_tool_call_limit_reached(5, 5))
+
+
 @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestExecuteCode(unittest.TestCase):
     """Integration tests using the mock dispatcher."""
