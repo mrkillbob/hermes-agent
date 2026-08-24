@@ -46,6 +46,7 @@ import {
   $currentReasoningEffort,
   $messages,
   $newChatWorkspaceTarget,
+  $newChatWorkspaceTargetGeneration,
   $sessions,
   $yoloActive,
   getSessionOwnerHint,
@@ -470,6 +471,7 @@ export function useSessionActions({
     async (preview: string | null = null): Promise<string | null> => {
       const startingStoredSessionId = selectedStoredSessionIdRef.current
       const startingRouteToken = getRouteToken()
+      const startingWorkspaceGeneration = $newChatWorkspaceTargetGeneration.get()
 
       creatingSessionRef.current = true
 
@@ -564,6 +566,13 @@ export function useSessionActions({
 
         return created.session_id
       } finally {
+        // A rejected/aborted create must not leave the draft-only paint gate
+        // latched forever. Do not clear it when the user started a newer draft
+        // while this request was in flight; that draft owns the next generation.
+        if ($newChatWorkspaceTargetGeneration.get() === startingWorkspaceGeneration) {
+          setFreshDraftReady(false)
+        }
+
         window.setTimeout(() => {
           creatingSessionRef.current = false
         }, 0)

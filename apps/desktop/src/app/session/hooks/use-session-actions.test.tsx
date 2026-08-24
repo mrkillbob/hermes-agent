@@ -27,6 +27,7 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  $freshDraftReady,
   $messages,
   $newChatWorkspaceTarget,
   $resumeFailedSessionId,
@@ -517,6 +518,32 @@ describe('startFreshSessionDraft', () => {
 
     expect($selectedStoredSessionId.get()).toBeNull()
     expect(workspaceCwdBelongsToSelectedSession()).toBe(false)
+  })
+
+  it('releases the fresh-draft paint gate when session creation fails', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        throw new Error('create failed')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+
+    render(<Harness onReady={value => (handle = value)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    act(() => handle!.startFreshSessionDraft({ preserveRoute: true }))
+    expect($freshDraftReady.get()).toBe(true)
+
+    await expect(
+      act(async () => {
+        await handle!.createBackendSessionForSend()
+      })
+    ).rejects.toThrow('create failed')
+
+    expect($freshDraftReady.get()).toBe(false)
   })
 
   it('fronts the workspace without closing a terminal that is merely behind a tab', async () => {
