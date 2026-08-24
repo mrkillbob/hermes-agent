@@ -887,6 +887,10 @@ export const ar = defineLocale({
           label: 'توليد العناوين',
           hint: 'عناوين الجلسات'
         },
+        review: {
+          label: 'المراجعة',
+          hint: 'وكيل المراجعة الفرعي /review'
+        },
         curator: {
           label: 'المنسّق',
           hint: 'مراجعة استخدام المهارات'
@@ -2251,6 +2255,7 @@ export const ar = defineLocale({
       gateway: 'البوابة',
       gatewayReady: 'البوابة جاهزة',
       gatewayNeedsSetup: 'البوابة تحتاج إعدادا',
+      gatewayUnavailable: 'الاستدلال غير متاح',
       gatewayChecking: 'جار فحص البوابة',
       gatewayConnecting: 'جار اتصال البوابة',
       gatewayOffline: 'البوابة غير متصلة',

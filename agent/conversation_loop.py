@@ -42,6 +42,7 @@ from agent.error_classifier import FailoverReason, classify_api_error
 from agent.message_metadata import append_message
 from agent.turn_context import (
     _compression_warrants_another_preflight_pass,
+    _review_fork_first_request_pending,
     build_turn_context,
     compose_user_api_content,
     reanchor_current_turn_user_idx,
@@ -51,6 +52,7 @@ from agent.runtime_cwd import resolve_agent_cwd
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
+    coalesce_tool_call_id,
     _sanitize_messages_non_ascii,
     _sanitize_messages_surrogates,
     _sanitize_structure_non_ascii,
@@ -117,6 +119,26 @@ RUN_BUDGET_WRAPUP_NOTICE = (
     "now. Produce the required final deliverable (answer/JSON/summary) from "
     "the state you already have, completing only mandatory writes."
 )
+
+
+def _review_input_budget_exhausted(agent: Any) -> bool:
+    """True when a detached review fork has replayed its aggregate input budget.
+
+    Only forks carrying an explicit ``_review_input_token_budget`` (the
+    background-review path, #93057) are gated; every other agent returns
+    False and is unaffected. ``session_input_tokens`` accumulates from
+    provider usage after each response, so the check fires at the top of the
+    NEXT tool-loop iteration — the budget-crossing request is admitted and
+    completes (its tool writes land), then the loop stops before any further
+    provider call. This caps the review's total replayed input, complementing
+    the per-request bound provided by detached in-memory compaction and the
+    ``_REVIEW_MAX_ITERATIONS`` iteration cap.
+    """
+    budget = getattr(agent, "_review_input_token_budget", None)
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        return False
+    used = getattr(agent, "session_input_tokens", 0)
+    return isinstance(used, int) and not isinstance(used, bool) and used >= budget
 
 
 def _maybe_inject_run_budget_wrapup(agent: Any, messages: List[Dict[str, Any]]) -> bool:
@@ -2013,6 +2035,21 @@ def run_conversation(
             if not agent.quiet_mode:
                 agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
             break
+
+        # Aggregate input budget for detached auxiliary forks (background
+        # review, #93057): compaction bounds each request; this bounds the
+        # review as a whole. Fires between iterations — the budget-crossing
+        # request completed (its tool writes landed), and the tool loop stops
+        # before the next provider call, mirroring the iteration-budget exit.
+        if _review_input_budget_exhausted(agent):
+            _turn_exit_reason = "review_input_budget_exhausted"
+            if not agent.quiet_mode:
+                agent._safe_print(
+                    f"\n⏹️  Review input budget exhausted "
+                    f"({int(agent.session_input_tokens):,} tokens) — stopping "
+                    f"the review tool loop before the next provider call."
+                )
+            break
         
         api_call_count += 1
         agent._api_call_count = api_call_count
@@ -2638,6 +2675,7 @@ def run_conversation(
         )()
         if (
             agent.compression_enabled
+            and not _review_fork_first_request_pending(agent)
             and len(messages) > 1
             and compression_attempts < max_compression_attempts
             and not _preflight_compression_blocked
@@ -7083,7 +7121,7 @@ def run_conversation(
                         append_message(messages, {
                             "role": "tool",
                             "name": tc.function.name,
-                            "tool_call_id": tc.id,
+                            "tool_call_id": coalesce_tool_call_id(tc),
                             "content": content,
                         })
                     continue
@@ -7187,7 +7225,7 @@ def run_conversation(
                             append_message(messages, {
                                 "role": "tool",
                                 "name": tc.function.name,
-                                "tool_call_id": tc.id,
+                                "tool_call_id": coalesce_tool_call_id(tc),
                                 "content": tool_result,
                             })
                         continue
@@ -7335,7 +7373,7 @@ def run_conversation(
                         append_message(messages, {
                             "role": "tool",
                             "name": tc.function.name,
-                            "tool_call_id": tc.id,
+                            "tool_call_id": coalesce_tool_call_id(tc),
                             "content": _invalid_tool_name_error_content(
                                 tc.function.name, agent.valid_tool_names
                             ),

@@ -33,6 +33,7 @@ from agent.auxiliary_client import (
 )
 from agent.context_engine import ContextEngine, sanitize_memory_context
 from agent.error_classifier import FailoverReason, classify_api_error
+from agent.message_sanitization import tool_result_id_variants
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
     get_model_context_length,
@@ -2098,6 +2099,7 @@ class ContextCompressor(ContextEngine):
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
         self._anti_thrash_recovery_deadline = 0.0
+        self._structural_no_op_backoff_until = 0.0
         self._prellm_skip_count = 0
         self._fallback_compression_streak = 0
         self._verify_compaction_cleared_threshold = False
@@ -2401,6 +2403,7 @@ class ContextCompressor(ContextEngine):
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
         self._anti_thrash_recovery_deadline = 0.0
+        self._structural_no_op_backoff_until = 0.0
         self._prellm_skip_count = 0
         self._fallback_compression_streak = 0
         self._verify_compaction_cleared_threshold = False
@@ -2433,6 +2436,7 @@ class ContextCompressor(ContextEngine):
         self._ineffective_compression_count = 0
         self._prellm_skip_count = 0
         self._anti_thrash_recovery_deadline = 0.0
+        self._structural_no_op_backoff_until = 0.0
         self._proactive_prune_rearm_tokens = 0
         self.get_active_compression_failure_cooldown()
         self._load_fallback_compression_streak()
@@ -2613,6 +2617,31 @@ class ContextCompressor(ContextEngine):
         self._ineffective_compression_count = count
         self._persist_ineffective_compression_count()
 
+    def _record_structural_no_op(self, reason: str) -> None:
+        """Defer retries after a structural no-op WITHOUT striking the breaker.
+
+        A structural no-op (too few messages / no compressible window /
+        empty post-handoff window) means the protection window left nothing
+        eligible to compress *right now* — compression was never really
+        attempted, so there is nothing "ineffective" to score (#93022).
+        Counting these as strikes permanently disarms auto-compaction on
+        short sessions even after they later grow real compressible
+        material. The transient backoff preserves #40803's guarantee (a
+        transcript that can never shrink does not re-fire the scan every
+        turn) while auto-compaction resumes on its own once the backoff
+        lapses or the transcript outgrows the window.
+        """
+        self._structural_no_op_backoff_until = (
+            time.monotonic() + self._STRUCTURAL_NO_OP_BACKOFF_SECONDS
+        )
+        if not self.quiet_mode:
+            logger.warning(
+                "Compression skipped (%s): retrying in %.0fs "
+                "(structural no-op backoff)",
+                reason,
+                self._STRUCTURAL_NO_OP_BACKOFF_SECONDS,
+            )
+
     def record_rejected_compaction(self) -> None:
         """Record one compaction whose result was REJECTED before committing.
 
@@ -2651,6 +2680,10 @@ class ContextCompressor(ContextEngine):
         exactly the incompressible-transcript case the ineffective-strike
         breaker exists for, and its recovery probe bounds the block.
         """
+        # A completed boundary is proof the transcript was compressible, so
+        # lift any pending structural no-op backoff (#93022) alongside the
+        # usual bookkeeping.
+        self._structural_no_op_backoff_until = 0.0
         self._verify_compaction_cleared_threshold = True
         if feasibility_skip:
             # A deliberate pre-LLM feasibility skip (#60451) is not a
@@ -2967,6 +3000,17 @@ class ContextCompressor(ContextEngine):
     # before it rides into the provider's hard context limit.
     _ANTI_THRASH_RECOVERY_SECONDS = 300.0
 
+    # Structural no-op backoff (#93022): when a compression attempt finds
+    # nothing eligible inside the protection window (too few messages, empty
+    # window, post-handoff residue), that is "nothing to compress right now"
+    # — not an ineffective attempt — so it must not strike the anti-thrash
+    # breaker (a short session would otherwise permanently disarm
+    # auto-compaction). Instead, defer retries for this long so a transcript
+    # that can never shrink doesn't re-fire the scan every turn (#40803's
+    # frozen-CLI loop). Compaction resumes automatically once the backoff
+    # lapses or the transcript outgrows the window.
+    _STRUCTURAL_NO_OP_BACKOFF_SECONDS = 300.0
+
     @staticmethod
     def _coerce_max_tokens(value: Any) -> int | None:
         """Normalize a max_tokens value to a positive int or None.
@@ -3262,6 +3306,9 @@ class ContextCompressor(ContextEngine):
         # no-op/abort without inferring progress from message-list length.
         self._last_compression_made_progress: bool = False
         self._summary_failure_cooldown_until: float = 0.0
+        # Transient deferral after a structural no-op (#93022) — see the
+        # _STRUCTURAL_NO_OP_BACKOFF_SECONDS class constant.
+        self._structural_no_op_backoff_until: float = 0.0
         # True while the live local cooldown failed to persist to the DB;
         # a refresh must then treat an empty durable row as unknown, not
         # cleared (see get_active_compression_failure_cooldown).
@@ -3526,6 +3573,10 @@ class ContextCompressor(ContextEngine):
         * ``"cooldown:<seconds>"`` — the summary LLM is recovering from a
           recent 429/transient failure; compression is deferred to avoid the
           freeze loop described in #11529.
+        * ``"structural_backoff:<seconds>"`` — a recent attempt found nothing
+          eligible inside the protection window (#93022); retries are
+          deferred transiently and compaction resumes when the backoff
+          lapses or the transcript outgrows the window.
         * ``"ineffective"`` — anti-thrashing has backed off (the last two
           compressions each saved <10%, or the fallback streak tripped).
         * ``None`` — no block active.
@@ -3533,6 +3584,11 @@ class ContextCompressor(ContextEngine):
         _cooldown_remaining = self._summary_failure_cooldown_until - time.monotonic()
         if _cooldown_remaining > 0:
             return f"cooldown:{_cooldown_remaining:.0f}"
+        _structural_remaining = (
+            self._structural_no_op_backoff_until - time.monotonic()
+        )
+        if _structural_remaining > 0:
+            return f"structural_backoff:{_structural_remaining:.0f}"
         if (
             self._ineffective_compression_count >= 2
             or self._fallback_compression_streak >= 2
@@ -3595,6 +3651,23 @@ class ContextCompressor(ContextEngine):
                 logger.debug(
                     "Compression deferred — summary LLM in cooldown for %.0fs more",
                     _cooldown_remaining,
+                )
+            return True
+        # Structural no-op backoff (#93022): a recent attempt found nothing
+        # eligible inside the protection window. Unlike the ineffective
+        # breaker below this is inherently transient (in-memory only, no
+        # strikes accumulate), so a short session that tripped it can still
+        # auto-compact normally once the backoff lapses or the transcript
+        # outgrows the protection window.
+        _structural_remaining = (
+            self._structural_no_op_backoff_until - time.monotonic()
+        )
+        if _structural_remaining > 0:
+            if not self.quiet_mode:
+                logger.debug(
+                    "Compression deferred — structural no-op backoff for "
+                    "%.0fs more",
+                    _structural_remaining,
                 )
             return True
         # Anti-thrashing: back off if recent compressions were ineffective.
@@ -5707,10 +5780,25 @@ This compaction should PRIORITISE preserving all information related to the focu
 
     @staticmethod
     def _get_tool_call_id(tc) -> str:
-        """Extract the call ID from a tool_call entry (dict or SimpleNamespace)."""
+        """Extract the canonical call ID from a tool_call entry (dict or
+        SimpleNamespace), for logging/display only. Matching logic must use
+        :meth:`_tool_call_id_variants` instead — see its docstring."""
         if isinstance(tc, dict):
             return tc.get("call_id", "") or tc.get("id", "") or ""
         return getattr(tc, "call_id", "") or getattr(tc, "id", "") or ""
+
+    @staticmethod
+    def _tool_call_id_variants(tc) -> set:
+        """Return every id variant a tool result might reference *tc* by.
+
+        Thin forwarder — the policy owner is
+        ``agent.message_sanitization.tool_call_id_variants``, which also
+        expands ``response_item_id`` and composite ``call|item`` bridge
+        spellings (#63000), so the compressor's pairing tolerance matches
+        the pre-call sanitizer's exactly and the two can never drift.
+        """
+        from agent.message_sanitization import tool_call_id_variants
+        return set(tool_call_id_variants(tc))
 
     def _sanitize_tool_pairs(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Fix orphaned tool_call / tool_result pairs after compression.
@@ -5738,23 +5826,28 @@ This compaction should PRIORITISE preserving all information related to the focu
         for msg in messages:
             if msg.get("role") == "assistant":
                 for tc in msg.get("tool_calls") or []:
-                    cid = self._get_tool_call_id(tc)
-                    if cid:
-                        surviving_call_ids.add(cid)
+                    surviving_call_ids |= self._tool_call_id_variants(tc)
 
         result_call_ids: set = set()
         for msg in messages:
             if msg.get("role") == "tool":
                 cid = msg.get("tool_call_id")
                 if cid:
-                    result_call_ids.add(cid)
+                    # Expand alias spellings on the RESULT side too — a
+                    # composite ``call|item`` tool_call_id must match a
+                    # tool_call registered under either half (#63000).
+                    result_call_ids |= tool_result_id_variants(cid)
 
         # 1. Remove tool results whose call_id has no matching assistant tool_call
         orphaned_results = result_call_ids - surviving_call_ids
         if orphaned_results:
             messages = [
                 m for m in messages
-                if not (m.get("role") == "tool" and m.get("tool_call_id") in orphaned_results)
+                if not (
+                    m.get("role") == "tool"
+                    and (rv := tool_result_id_variants(m.get("tool_call_id")))
+                    and not (rv & surviving_call_ids)
+                )
             ]
             if not self.quiet_mode:
                 logger.info("Compression sanitizer: removed %d orphaned tool result(s)", len(orphaned_results))
@@ -5763,8 +5856,11 @@ This compaction should PRIORITISE preserving all information related to the focu
         #    were dropped.  Stripping is preferred over inserting stub results
         #    because stubs can be dropped by downstream repair_message_sequence
         #    when call_id != id (Codex Responses API format), re-exposing orphans.
-        missing_results = surviving_call_ids - result_call_ids
-        if missing_results:
+        #    A tool_call survives if ANY of its id variants still has a
+        #    matching result — checking only one variant per side is exactly
+        #    the mismatch this method exists to avoid.
+        stripped_count = 0
+        if surviving_call_ids - result_call_ids:
             # --- In-flight tool chain protection (issue #79278) -------------
             # A strip here must distinguish a *pending* tool_call (the model's
             # live request whose result the executor has not yet appended) from
@@ -5809,8 +5905,9 @@ This compaction should PRIORITISE preserving all information related to the focu
                 tcs = msg.get("tool_calls")
                 if not tcs:
                     continue
-                kept = [tc for tc in tcs if self._get_tool_call_id(tc) not in missing_results]
+                kept = [tc for tc in tcs if self._tool_call_id_variants(tc) & result_call_ids]
                 if len(kept) != len(tcs):
+                    stripped_count += len(tcs) - len(kept)
                     if kept:
                         msg["tool_calls"] = kept
                     else:
@@ -5820,10 +5917,10 @@ This compaction should PRIORITISE preserving all information related to the focu
                         content = msg.get("content")
                         if not content or (isinstance(content, str) and not content.strip()):
                             msg["content"] = "(tool call removed)"
-            if not self.quiet_mode:
+            if stripped_count and not self.quiet_mode:
                 logger.info(
                     "Compression sanitizer: stripped %d orphaned tool_call(s) from assistant messages",
-                    len(missing_results),
+                    stripped_count,
                 )
 
         return messages
@@ -7223,29 +7320,25 @@ This compaction should PRIORITISE preserving all information related to the focu
         # this, /compress would silently no-op for 30-60s after a failure.
         if force:
             self._clear_compression_failure_cooldown()
+            # Manual /compress also overrides a structural no-op backoff
+            # (#93022): an explicit user request must always get a real try.
+            self._structural_no_op_backoff_until = 0.0
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
         _min_for_compress = self._protect_head_size(messages) + 3 + 1
         if n_messages <= _min_for_compress:
-            # Record the no-op, exactly as the sibling "no compressable window"
-            # branch below does (#40803). Returning without touching the
-            # anti-thrashing counter leaves should_compress() saying True on a
-            # transcript that can never shrink: when the prompt sits above the
-            # threshold because of the incompressible floor (system prompt +
-            # tool schemas), every subsequent turn re-fires a compaction that
-            # returns here unchanged, and the CLI appears frozen.
-            self._record_ineffective_compression_verdict(
-                self._ineffective_compression_count + 1,
-            )
+            # Structural no-op, not an ineffective attempt (#93022): with this
+            # few messages there is nothing eligible to compress yet. Defer
+            # retries via the transient backoff instead of striking the
+            # anti-thrashing breaker — striking it here permanently disarmed
+            # auto-compaction on short sessions even after they grew real
+            # compressible material. The backoff still prevents #40803's
+            # per-turn re-fire loop on a transcript that cannot shrink.
             self._last_compression_savings_pct = 0.0
             telemetry["failure_class"] = "insufficient_messages"
-            if not self.quiet_mode:
-                logger.warning(
-                    "Cannot compress: only %d messages (need > %d). "
-                    "ineffective_compression_count=%d",
-                    n_messages, _min_for_compress,
-                    self._ineffective_compression_count,
-                )
+            self._record_structural_no_op(
+                f"only {n_messages} messages (need > {_min_for_compress})"
+            )
             return messages
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
@@ -7313,22 +7406,17 @@ This compaction should PRIORITISE preserving all information related to the focu
             )
             telemetry["failure_class"] = "no_compressible_window"
             # No compressable window — the entire transcript fits within
-            # the tail budget (soft_ceiling).  Without recording this as
-            # an ineffective compression the anti-thrashing guard in
-            # should_compress() never fires and every subsequent turn
-            # re-triggers a no-op compression loop.  (#40803)
-            self._record_ineffective_compression_verdict(
-                self._ineffective_compression_count + 1,
-            )
+            # the tail budget (soft_ceiling): nothing was eligible to
+            # compress. This is a structural no-op, not an ineffective
+            # attempt (#93022), so defer retries via the transient backoff
+            # instead of striking the anti-thrashing breaker; the backoff
+            # still prevents #40803's per-turn no-op compression loop on a
+            # transcript that cannot shrink.
             self._last_compression_savings_pct = 0.0
-            if not self.quiet_mode:
-                logger.warning(
-                    "Compression skipped: compress_start (%d) >= compress_end (%d) "
-                    "— transcript fits within tail budget, nothing to compress. "
-                    "ineffective_compression_count=%d",
-                    compress_start, compress_end,
-                    self._ineffective_compression_count,
-                )
+            self._record_structural_no_op(
+                f"compress_start ({compress_start}) >= compress_end "
+                f"({compress_end}) - transcript fits within tail budget"
+            )
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]
@@ -7452,30 +7540,21 @@ This compaction should PRIORITISE preserving all information related to the focu
             # is nothing new to summarize.  Skip the summary call entirely:
             # without this guard the empty window still reached
             # _generate_summary, wasting an aux LLM call that aborts
-            # noisily on empty input (#59496).  Mirrors the sibling
-            # "no compressable window" guard above (#40803): record an
-            # ineffective strike through the durable write-through helper
-            # so the anti-thrash breaker in should_compress() can stop the
-            # loop — this shape cannot shrink, so every subsequent turn
-            # would otherwise re-fire the same no-op.  The rehydrated
-            # _previous_summary is deliberately KEPT (not rolled back as
-            # the summary-abort path does for #57835): it came from a
-            # handoff genuinely present in this transcript, which is
-            # returned unchanged.
+            # noisily on empty input (#59496).  Like the sibling "no
+            # compressable window" guard above, this is a structural no-op,
+            # not an ineffective attempt (#93022): defer retries via the
+            # transient backoff instead of striking the anti-thrash breaker,
+            # while still stopping #40803's per-turn re-fire of the same
+            # no-op.  The rehydrated _previous_summary is deliberately KEPT
+            # (not rolled back as the summary-abort path does for #57835):
+            # it came from a handoff genuinely present in this transcript,
+            # which is returned unchanged.
             telemetry["failure_class"] = "empty_post_handoff_window"
-            self._record_ineffective_compression_verdict(
-                self._ineffective_compression_count + 1,
-            )
             self._last_compression_savings_pct = 0.0
-            if not self.quiet_mode:
-                logger.warning(
-                    "Compression skipped: latest context summary leaves no "
-                    "new turns to summarize in window %d-%d. "
-                    "ineffective_compression_count=%d",
-                    compress_start,
-                    compress_end,
-                    self._ineffective_compression_count,
-                )
+            self._record_structural_no_op(
+                f"window {compress_start}-{compress_end} holds only "
+                "already-summarized handoffs"
+            )
             return messages
 
         if not self.quiet_mode:

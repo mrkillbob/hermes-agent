@@ -965,6 +965,7 @@ export const zhHant = defineLocale({
         approval: { label: '核准', hint: '智慧自動核准' },
         mcp: { label: 'MCP', hint: 'MCP 工具路由' },
         title_generation: { label: '標題生成', hint: '工作階段標題' },
+        review: { label: '評審', hint: '/review 評審子代理' },
         curator: { label: '策展器', hint: '技能使用審查' }
       }
     },
@@ -2434,6 +2435,7 @@ export const zhHant = defineLocale({
       gateway: '閘道',
       gatewayReady: '就緒',
       gatewayNeedsSetup: '需要設定',
+      gatewayUnavailable: '推論不可用',
       gatewayChecking: '檢查中',
       gatewayConnecting: '連線中',
       gatewayOffline: '離線',

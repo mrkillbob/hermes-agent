@@ -35,7 +35,12 @@ import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } f
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { buildDesktopBackendEnv, hermesManagedNodePathEntries, normalizeHermesHomeRoot } from './backend-env'
-import { isReauthRequiredError, makeNousCloudBackendDownError, waitForHermesReady } from './backend-health'
+import {
+  isReauthRequiredError,
+  makeNousCloudBackendDownError,
+  makeUnsignedOauthError,
+  waitForHermesReady
+} from './backend-health'
 import { backendCommandMatches, createBackendOwnership, createBackendShutdownCoordinator } from './backend-ownership'
 import {
   canImportHermesCli,
@@ -97,6 +102,7 @@ import {
   translateSelfProfileQuery,
   withTransientRetries
 } from './connection-config'
+import { applyConnectionConfigAtomically } from './connection-config-apply'
 import {
   backendScopeKey,
   backendScopePrefix,
@@ -106,6 +112,8 @@ import {
   migrateV1ToRegistry,
   normalizeConnectionInput,
   normalizeRegistry,
+  reconcileAppliedGlobalConnection,
+  reconcileRegistryDrift,
   rememberSshEnumeration,
   removeConnection,
   resolvedConnectionId,
@@ -245,6 +253,7 @@ import {
   fetchPrimaryProfileSessions,
   fetchRegistrySessionRows,
   fetchRemoteProfileSessions,
+  findRemoteOwnerProfileForSession,
   mergeProfileSessionWindow,
   type RegistrySessionSource,
   spliceRegistrySessionRows
@@ -8525,6 +8534,11 @@ function writeDesktopConnectionConfig(config) {
  * connections.json does not exist yet). Same mtime-cache + tighten-mode
  * discipline as readDesktopConnectionConfig; a corrupt registry degrades to
  * local-only via normalizeRegistry rather than throwing at boot.
+ *
+ * An EXISTING registry is additionally reconciled against v1 when the two have
+ * drifted — see reconcileRegistryDrift. The one-shot migration cannot cover a
+ * user who registered nothing and then pointed Settings -> Gateway at a remote,
+ * and until that heals, every launch re-homes them onto a local backend.
  */
 function readDesktopConnectionsRegistry() {
   let mtime = null
@@ -8569,6 +8583,28 @@ function readDesktopConnectionsRegistry() {
     registry = normalizeRegistry(JSON.parse(fs.readFileSync(DESKTOP_CONNECTIONS_REGISTRY_PATH, 'utf8')))
   } catch {
     registry = normalizeRegistry(null)
+  }
+
+  // Heal v1 -> v2 drift: the v1 global route names a remote this registry has
+  // never heard of, so the live descriptor resolves to no connectionId and the
+  // launch pick sends the window somewhere else. Persist so the repair is a
+  // one-time event rather than a recomputation on every read; a failed write
+  // still returns the healed registry for this session.
+  const reconciled = reconcileRegistryDrift(registry, readDesktopConnectionConfig())
+
+  if (reconciled.changed) {
+    registry = reconciled.registry
+
+    try {
+      writeDesktopConnectionsRegistry(registry)
+
+      return connectionRegistryCache
+    } catch {
+      connectionRegistryCache = registry
+      connectionRegistryCacheMtime = null
+
+      return registry
+    }
   }
 
   connectionRegistryCache = registry
@@ -9008,13 +9044,7 @@ async function buildRemoteConnection(
       !oauthSessionIsLive(hasNativeSession(baseUrl), await hasLiveOauthSession(baseUrl)) &&
       oauthGuardMayHardFail(await gatewayAuthProviders(baseUrl, remoteHeaders))
     ) {
-      const err = new Error(
-        'Remote Hermes gateway uses OAuth, but you are not signed in. ' +
-          'Open Settings → Gateway and click "Sign in", or switch back to Local.'
-      ) as any
-
-      err.needsOauthLogin = true
-      throw err
+      throw makeUnsignedOauthError()
     }
 
     let ticket
@@ -9717,10 +9747,11 @@ async function testDesktopConnectionConfig(input: any = {}) {
   const wantRemote =
     modeIsRemoteLike(block?.mode) || (!key && modeIsRemoteLike(config.mode)) || (modeIsRemoteLike(input.mode) && block)
 
-  // ``/api/status`` is public on every gateway (no creds needed), so a
-  // reachability test works for local, token, and oauth modes alike — we only
-  // need a base URL. For a remote config we normalize the URL from the input;
-  // for local we fall back to the resolved/started backend.
+  // Test ``/api/status`` through the connection's real auth path. Self-hosted
+  // gateways may protect it, and an anonymous success/failure would not prove
+  // that the OAuth cookie/native bearer or configured token is reusable. For
+  // a remote config we normalize the URL from the input; for local we fall
+  // back to the resolved/started backend.
   let baseUrl
   let token = null
   let authMode = 'token'
@@ -9742,7 +9773,7 @@ async function testDesktopConnectionConfig(input: any = {}) {
     testHeaders = remote.headers || {}
   }
 
-  const status = (await fetchJson(`${baseUrl}/api/status`, token, { timeoutMs: 8_000, headers: testHeaders })) as any
+  const status = (await fetchConnectionStatus(baseUrl, authMode, token, testHeaders)) as any
 
   // The HTTP status check above proves the backend is reachable, but the chat
   // surface only works once the renderer's live WebSocket to ``/api/ws``
@@ -9774,6 +9805,28 @@ async function testDesktopConnectionConfig(input: any = {}) {
     baseUrl,
     version: status?.version || null
   }
+}
+
+async function fetchConnectionStatus(baseUrl, authMode, token, headers = {}) {
+  const url = `${baseUrl}/api/status`
+
+  if (authMode === 'oauth') {
+    // Native PKCE bearer first, OAuth session cookies second — the same two
+    // credentials real traffic uses, in the same order. A refresh failure is
+    // NOT a silent downgrade to an anonymous probe: the cookie path is still
+    // an authenticated request, and if neither credential works the probe
+    // fails, which is the correct answer for a gateway we cannot reach with
+    // the credentials we hold.
+    const nativeAt = await ensureNativeAccessToken(baseUrl).catch(() => null)
+
+    if (nativeAt) {
+      return fetchJson(url, null, { timeoutMs: 8_000, bearer: nativeAt, headers })
+    }
+
+    return fetchJsonViaOauthSession(url, { timeoutMs: 8_000, headers })
+  }
+
+  return fetchJson(url, token, { timeoutMs: 8_000, headers })
 }
 
 function resetBootProgressForReconnect() {
@@ -12335,7 +12388,7 @@ ipcMain.handle('hermes:connection:revalidate', async () => {
         connectionPromise,
         currentConnectionPromise: () => backendConnectionState.getPromise(),
         log: rememberLog,
-        probe: fetchPublicJson,
+        probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
         resetConnection: () => resetHermesConnection({ soft: true }),
         tracker: remoteLiveness
       }),
@@ -12366,7 +12419,7 @@ function revalidatePool() {
   return revalidatePooledRemoteBackends({
     entries: backendPool.entries(),
     log: rememberLog,
-    probe: fetchPublicJson,
+    probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
     stopBackend: stopPoolBackend,
     tracker: remoteLiveness
   })
@@ -12809,7 +12862,7 @@ ipcMain.handle('hermes:connections:test', async (_event, id) => {
     }
   }
 
-  const status = (await fetchJson(`${baseUrl}/api/status`, token, { timeoutMs: 8_000, headers: testHeaders })) as any
+  const status = (await fetchConnectionStatus(baseUrl, authMode, token, testHeaders)) as any
 
   // The Test button is the cheapest moment to (re)learn this backend's stable
   // identity for the same-backend roster collapse + Settings hint.
@@ -13322,32 +13375,47 @@ ipcMain.handle('hermes:connection-config:save', async (_event, payload) => {
   return sanitizeDesktopConnectionConfig(config, payload?.profile)
 })
 ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
-  const config = coerceDesktopConnectionConfig(payload)
-  writeDesktopConnectionConfig(config)
+  const previousConfig = readDesktopConnectionConfig()
+  const previousRegistry = readDesktopConnectionsRegistry()
+  const config = coerceDesktopConnectionConfig(payload, previousConfig)
 
   const key = connectionScopeKey(payload?.profile)
   const scope = key || ''
+  const nextRegistry = key ? previousRegistry : reconcileAppliedGlobalConnection(previousRegistry, config)
 
-  await applyConnectionChange({
-    cancelAndWait: value => sshBootstrapCoordinator.cancelAndWait(value),
-    isPrimary: !key || key === primaryProfileKey(),
-    rehomePrimary: () =>
-      rehomePrimaryConnection({
-        clearLocalBootstrapFailure: () => {
-          // A remote connection bypasses local runtime/bootstrap failures. Clear
-          // the local-install latch so unsupported/failure escape paths can re-home.
-          bootstrapFailure = null
-        },
-        mode: config.mode,
-        notifyConnectionApplied: sendConnectionApplied,
-        resumeFirstRunRemote: abandonFirstRunSetupChoiceForRemoteApply,
-        teardownPrimaryBackend: teardownPrimaryBackendAndWait
-      }),
-    scope,
-    sendApplied: sendConnectionApplied,
-    stopPool: stopPoolBackend,
-    teardownPrimary: () => teardownPrimaryBackendAndWait({ soft: true }),
-    teardownSsh: value => teardownSshConnection(value || null)
+  await applyConnectionConfigAtomically({
+    previousConfig,
+    previousRegistry,
+    nextConfig: config,
+    nextRegistry,
+    // Exercise the same authenticated REST + real WebSocket legs before either
+    // config file changes. A rejected OAuth session or blocked /api/ws leaves
+    // the previous primary/current connection intact.
+    preflight: !key && modeIsRemoteLike(config.mode) ? () => testDesktopConnectionConfig(payload) : undefined,
+    writeConfig: writeDesktopConnectionConfig,
+    writeRegistry: writeDesktopConnectionsRegistry,
+    apply: () =>
+      applyConnectionChange({
+        cancelAndWait: value => sshBootstrapCoordinator.cancelAndWait(value),
+        isPrimary: !key || key === primaryProfileKey(),
+        rehomePrimary: () =>
+          rehomePrimaryConnection({
+            clearLocalBootstrapFailure: () => {
+              // A remote connection bypasses local runtime/bootstrap failures. Clear
+              // the local-install latch so unsupported/failure escape paths can re-home.
+              bootstrapFailure = null
+            },
+            mode: config.mode,
+            notifyConnectionApplied: sendConnectionApplied,
+            resumeFirstRunRemote: abandonFirstRunSetupChoiceForRemoteApply,
+            teardownPrimaryBackend: teardownPrimaryBackendAndWait
+          }),
+        scope,
+        sendApplied: sendConnectionApplied,
+        stopPool: stopPoolBackend,
+        teardownPrimary: () => teardownPrimaryBackendAndWait({ soft: true }),
+        teardownSsh: value => teardownSshConnection(value || null)
+      })
   })
 
   return sanitizeDesktopConnectionConfig(config, payload?.profile)
@@ -13484,10 +13552,21 @@ async function interceptSessionRequestForRemote(request) {
   //  - global remote mode: ONE backend serves every profile via ?profile=, so
   //    route there and KEEP the profile param so it opens the right state.db.
   if (/^\/api\/sessions\/[^/]+(\/messages)?$/.test(pathname)) {
-    const profile = (searchParams.get('profile') || request.profile || '').trim()
+    let profile = (searchParams.get('profile') || request.profile || '').trim()
 
     if (!profile) {
-      return undefined
+      // No explicit owner hint (#85834). The list endpoints above already know
+      // which remote profile owns each row (remoteSessionList tags s.profile),
+      // but a caller without a hint used to fall straight through to the LOCAL
+      // backend and 404 on its state.db even though the session lives on a
+      // remote. Consult the same remote lists to find the owner; only fall
+      // through when the id is genuinely unknown remotely.
+      const sessionId = decodeURIComponent(pathname.split('/')[3] || '')
+      profile = (await remoteOwnerProfileForSession(sessionId)) || ''
+
+      if (!profile) {
+        return undefined
+      }
     }
 
     // Preserve every non-profile query param (limit/offset/order pagination —
@@ -13544,6 +13623,39 @@ async function remoteSessionList(profile, searchParams) {
   }
 
   return { ...(data as any), sessions: rowsOf(data) }
+}
+
+// #85834: find which remote profile owns a session id when the caller gave no
+// profile hint (pure lookup lives in profile-session-routing.ts). Results are
+// memoized briefly so a burst of hint-less reads (transcript + messages)
+// costs one sweep across the configured remotes.
+const remoteOwnerBySessionId = new Map<string, { at: number; profile: null | string }>()
+const REMOTE_OWNER_CACHE_TTL_MS = 30_000
+
+async function remoteOwnerProfileForSession(sessionId: string) {
+  if (!sessionId) {
+    return null
+  }
+
+  const remoteProfiles = configuredRemoteProfileNames()
+
+  if (remoteProfiles.length === 0) {
+    return null
+  }
+
+  const cached = remoteOwnerBySessionId.get(sessionId)
+
+  if (cached && Date.now() - cached.at < REMOTE_OWNER_CACHE_TTL_MS) {
+    return cached.profile
+  }
+
+  const owner = await findRemoteOwnerProfileForSession(sessionId, remoteProfiles, (profile, params) =>
+    remoteSessionList(profile, params)
+  ).catch(() => null)
+
+  remoteOwnerBySessionId.set(sessionId, { at: Date.now(), profile: owner })
+
+  return owner
 }
 
 // Resolve one /api/profiles/sessions slice with remote profiles spliced in —

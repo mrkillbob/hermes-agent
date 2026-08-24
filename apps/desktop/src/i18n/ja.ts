@@ -998,6 +998,7 @@ export const ja = defineLocale({
         approval: { label: '承認', hint: 'スマート自動承認' },
         mcp: { label: 'MCP', hint: 'MCP ツールルーティング' },
         title_generation: { label: 'タイトル生成', hint: 'セッションタイトル' },
+        review: { label: 'レビュー', hint: '/review レビューサブエージェント' },
         curator: { label: 'キュレーター', hint: 'スキル使用レビュー' }
       }
     },
@@ -2522,6 +2523,7 @@ export const ja = defineLocale({
       gateway: 'ゲートウェイ',
       gatewayReady: '準備完了',
       gatewayNeedsSetup: '設定が必要',
+      gatewayUnavailable: '推論を利用できません',
       gatewayChecking: '確認中',
       gatewayConnecting: '接続中',
       gatewayOffline: 'オフライン',
