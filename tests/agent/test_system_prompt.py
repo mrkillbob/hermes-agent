@@ -93,6 +93,7 @@ def test_guarded_prompt_replaces_verbose_coaching_and_compacts_skills():
         OPENAI_MODEL_EXECUTION_GUIDANCE,
         PARALLEL_TOOL_CALL_GUIDANCE,
         TASK_COMPLETION_GUIDANCE,
+        TOOL_USE_ENFORCEMENT_GUIDANCE,
     )
     from agent.system_prompt import GUARDED_EXECUTION_CONTRACT
 
@@ -115,10 +116,25 @@ def test_guarded_prompt_replaces_verbose_coaching_and_compacts_skills():
     assert GUARDED_EXECUTION_CONTRACT in stable
     assert "worktree" in GUARDED_EXECUTION_CONTRACT.lower()
     assert "verify" in GUARDED_EXECUTION_CONTRACT.lower()
-    assert TASK_COMPLETION_GUIDANCE not in stable
+    assert TASK_COMPLETION_GUIDANCE in stable
+    assert TOOL_USE_ENFORCEMENT_GUIDANCE in stable
     assert PARALLEL_TOOL_CALL_GUIDANCE not in stable
     assert OPENAI_MODEL_EXECUTION_GUIDANCE not in stable
     assert skills.call_args.kwargs["compact_all_categories"] is True
+
+
+def test_guarded_prompt_keeps_kanban_worker_lifecycle_guidance():
+    agent = _make_agent(
+        valid_tool_names=["kanban_show", "read_file"],
+        _kanban_worker_guidance="KANBAN_WORKER_LIFECYCLE",
+        platform="desktop",
+        provider="ollama-launch",
+        model="hermes-qwen3-fast",
+    )
+    with patch("agent.coding_context.guarded_prompt_enabled", return_value=True):
+        stable = _stable_prompt(agent)
+
+    assert "KANBAN_WORKER_LIFECYCLE" in stable
 
 
 def _init_code_repo(path):

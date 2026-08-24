@@ -434,7 +434,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # path is blocked) are not model-family specific.  Gated only by
     # config.yaml ``agent.task_completion_guidance`` (default True) so
     # users who want a leaner prompt can turn it off.
-    if (not _guarded_prompt and getattr(agent, "_task_completion_guidance", True)
+    if (getattr(agent, "_task_completion_guidance", True)
             and agent.valid_tool_names):
         stable_parts.append(TASK_COMPLETION_GUIDANCE)
 
@@ -472,16 +472,15 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in agent.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
-        # Kanban worker/orchestrator lifecycle — only present when the
-        # dispatcher spawned this process (kanban_show check_fn gates on
-        # HERMES_KANBAN_TASK env var). Normal chat sessions never see
-        # this block. Resolved once at __init__ (see _kanban_worker_guidance).
-        _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
-        if _kanban_guidance:
-            tool_guidance.append(_kanban_guidance)
-        elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
-            # Fallback for code paths that bypass agent_init (rare).
-            tool_guidance.append(KANBAN_GUIDANCE)
+    # Kanban worker/orchestrator lifecycle is load-bearing whenever the
+    # dispatcher spawned this process. Guarded local workers keep this compact,
+    # env-gated protocol even though ordinary tool coaching is suppressed.
+    _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
+    if _kanban_guidance:
+        tool_guidance.append(_kanban_guidance)
+    elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
+        # Fallback for code paths that bypass agent_init (rare).
+        tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
 
@@ -508,7 +507,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     #   true  — always inject (all models)
     #   false — never inject
     #   list  — custom model-name substrings to match
-    if not _guarded_prompt and agent.valid_tool_names:
+    if agent.valid_tool_names:
         _enforce = agent._tool_use_enforcement
         _inject = False
         if _enforce is True or (isinstance(_enforce, str) and _enforce.lower() in {"true", "always", "yes", "on"}):

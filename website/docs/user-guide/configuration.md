@@ -1778,7 +1778,7 @@ The gate is independent of `tool_use_enforcement` — either can be on without t
 
 ## Guarded Prompt Mode
 
-For smaller local coding models, guarded prompt mode replaces redundant long-form coaching with a compact contract that retains the current-worktree rule, tool grounding, permission checks, verification before completion, skill loading, and deferred tool discovery. It does **not** change tool-side permission enforcement or hide any skill.
+For smaller local coding models, guarded prompt mode replaces redundant long-form coaching with a compact contract that retains the current-worktree rule, tool grounding, permission checks, verification before completion, skill loading, and deferred tool discovery. Universal task-completion guidance, configured tool-use enforcement, and the environment-gated Kanban worker lifecycle protocol remain active because they prevent load-bearing execution failures. It does **not** change tool-side permission enforcement or hide any skill.
 
 It is disabled by default and requires `coding_context: focus`, a detected coding workspace, and an exact provider/model route pair. This makes the mode reversible and prevents it from silently affecting another model.
 

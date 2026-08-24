@@ -239,7 +239,9 @@ DEFAULT_CONFIG = {
         "coding_context": "auto",
         # Guarded prompt profile — opt-in, exact provider/model route pairs
         # only. It replaces redundant long-form coaching with a compact
-        # worktree/tool/verification contract and renders skills names-only.
+        # worktree/verification contract and renders skills names-only. The
+        # task-completion, configured tool-use enforcement, and env-gated
+        # Kanban worker protocol remain load-bearing in this mode.
         # Requires coding_context: focus and a coding workspace. It is safe to
         # list local Ollama and Copilot routes together because matching is by
         # pair, not independent provider/model allowlists.

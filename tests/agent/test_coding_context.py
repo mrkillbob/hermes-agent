@@ -114,14 +114,14 @@ class TestGuardedPrompt:
             platform="desktop",
             cwd=tmp_path,
             provider="ollama-launch",
-            model="qwen3:4b-instruct",
+            model="unrelated",
             config=cfg,
         ) is False
         assert cc.guarded_prompt_enabled(
             platform="desktop",
             cwd=tmp_path,
-            provider="ollama-launch",
-            model="qwen3:4b-instruct",
+            provider="some-other-provider",
+            model="hermes-qwen3-fast",
             config=cfg,
         ) is False
 
