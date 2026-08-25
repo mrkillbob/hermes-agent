@@ -240,6 +240,10 @@ def test_github_client_reads_private_repository_and_canonical_merge_state() -> N
             "merge_commit_sha": None,
             "title": "$(touch /tmp/untrusted-title)",
             "body": "; rm -rf untrusted-body",
+            "labels": [
+                {"name": "sweeper:risk-session-state"},
+                {"name": "ci-reviewed"},
+            ],
         }
     )
     repository = {
@@ -273,8 +277,19 @@ def test_github_client_reads_private_repository_and_canonical_merge_state() -> N
         head_sha="a" * 40,
         merged=False,
         merge_commit_oid=None,
+        labels=("sweeper:risk-session-state", "ci-reviewed"),
     )
     assert runner.calls == [repository_argv, repository_argv, pull_argv]
+
+
+def test_github_client_preserves_canonical_pr_labels_for_worker_routing() -> None:
+    argv = ("gh", "api", "repos/acme/widgets/pulls/17")
+    row = canonical_pull()
+    row["labels"] = [{"name": "type/perf"}, {"name": "sweeper:risk-session-state"}]
+
+    pull = GitHubClient(RecordingRunner({argv: row})).get_pull_request("acme/widgets", 17)
+
+    assert pull.labels == ("type/perf", "sweeper:risk-session-state")
 
 
 def test_github_client_reads_review_decision_and_unresolved_threads_with_fixed_graphql_argv() -> None:

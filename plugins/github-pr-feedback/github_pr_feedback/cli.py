@@ -109,6 +109,7 @@ class DoctorProbe:
                 for assignee in {
                     policy.assignee or "",
                     *(rule.assignee for rule in policy.assignee_rules),
+                    *(rule.assignee for rule in policy.routing_rules),
                     *(
                         [policy.local_ci_audit.assignee]
                         if policy.local_ci_audit is not None
@@ -836,6 +837,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "include_bot_feedback",
         "auto_dispatch",
         "assignee_rules",
+        "routing_rules",
         "local_ci_audit",
         "merge_maintainer",
         "repair_steward",

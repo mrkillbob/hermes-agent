@@ -90,6 +90,29 @@ plugins:
             match_any: [market data, option chain, quote, hydration, freshness]
           - assignee: structural-ratchet-steward
             match_any: [structural ratchet, extraction, file size, monolith]
+        # Optional typed routing layered above assignee_rules. Canonical GitHub
+        # labels and bounded feedback text are evidence; explicit precedence
+        # makes risk routes win over ordinary component routes. Equal top-ranked
+        # routes fail to the fallback assignee and require independent review.
+        routing_rules:
+          - assignee: session-state-steward
+            precedence: 100
+            match_any: [resume failed, cannot open conversation]
+            match_labels_any: [sweeper:risk-session-state, area/sessions]
+            tags: [type/bug, area/sessions]
+            priority: P1
+            blast_radius: broad
+            risks: [session-state]
+            requires_review: true
+          - assignee: performance-patch-steward
+            precedence: 20
+            match_any: [latency, throughput, provider wait]
+            match_labels_any: [type/perf]
+            tags: [type/perf]
+            priority: P2
+            blast_radius: moderate
+            risks: []
+            requires_review: false
         board: repairs
 ```
 
@@ -158,6 +181,18 @@ no unresolved review thread, and no unprocessed admitted feedback. Missing or
 unknown evidence blocks. The controller selects the first configured method
 that the repository currently enables, binds the command with
 `--match-head-commit`, and accepts success only from canonical merged readback.
+PRs carrying a `sweeper:risk-*`, `sweeper:blast-broad`,
+`sweeper:blast-massive`, or `telemetry` label also require the explicit
+`ci-reviewed` label. This gate is evaluated again on both exact-head snapshots;
+task prose cannot satisfy it.
+
+Typed `routing_rules` do not execute model classification. The controller
+matches canonical PR labels and bounded feedback text, then records the chosen
+tags, priority, blast radius, risks, review requirement, and ambiguity verdict
+in the Kanban task's evidence. Highest precedence wins; match count breaks ties
+within a precedence level. An equal top rank never guesses between specialists:
+it routes to the fallback orchestrator and requires an independent exact-head
+safety review.
 
 The `pr-merge-maintainer` Kanban profile is an observability worker. It may
 explain deterministic blocker codes, but it cannot edit, push, reply, approve,

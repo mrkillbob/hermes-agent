@@ -439,6 +439,92 @@ def test_enabled_policy_parses_bounded_assignee_rules_and_uses_fallback_on_a_tie
     assert policy.assignee_for("Performance and runtime regression") == "repair-agent"
 
 
+def test_typed_routing_prefers_explicit_risk_precedence_and_preserves_metadata(
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "widgets"
+    initialize_git_worktree(repository_path)
+    raw = enabled_raw_config(repository_path)
+    raw["routing_rules"] = [
+        {
+            "assignee": "performance-specialist",
+            "precedence": 20,
+            "match_any": ["latency"],
+            "match_labels_any": ["type/perf"],
+            "tags": ["type/perf", "comp/agent"],
+            "priority": "P2",
+            "blast_radius": "moderate",
+            "risks": [],
+            "requires_review": False,
+        },
+        {
+            "assignee": "session-state-steward",
+            "precedence": 100,
+            "match_any": ["resume failed"],
+            "match_labels_any": ["sweeper:risk-session-state"],
+            "tags": ["type/bug", "area/sessions"],
+            "priority": "P1",
+            "blast_radius": "broad",
+            "risks": ["session-state"],
+            "requires_review": True,
+        },
+    ]
+
+    policy = load_policy(raw)
+    decision = policy.route(
+        "Latency regressed while resume failed",
+        labels=("type/perf", "sweeper:risk-session-state"),
+    )
+
+    assert decision.assignee == "session-state-steward"
+    assert decision.tags == ("type/bug", "area/sessions")
+    assert decision.priority == "P1"
+    assert decision.blast_radius == "broad"
+    assert decision.risks == ("session-state",)
+    assert decision.requires_review is True
+    assert decision.ambiguous is False
+
+
+def test_typed_routing_fails_an_equal_precedence_tie_to_the_fallback_reviewer(
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "widgets"
+    initialize_git_worktree(repository_path)
+    raw = enabled_raw_config(repository_path)
+    raw["assignee"] = "task-orchestrator"
+    raw["routing_rules"] = [
+        {
+            "assignee": "runtime-specialist",
+            "precedence": 50,
+            "match_any": ["crash"],
+            "match_labels_any": [],
+            "tags": ["type/bug"],
+            "priority": "P1",
+            "blast_radius": "moderate",
+            "risks": [],
+            "requires_review": False,
+        },
+        {
+            "assignee": "gateway-specialist",
+            "precedence": 50,
+            "match_any": ["crash"],
+            "match_labels_any": [],
+            "tags": ["comp/gateway"],
+            "priority": "P1",
+            "blast_radius": "moderate",
+            "risks": [],
+            "requires_review": False,
+        },
+    ]
+
+    decision = load_policy(raw).route("gateway crash", labels=())
+
+    assert decision.assignee == "task-orchestrator"
+    assert decision.ambiguous is True
+    assert decision.requires_review is True
+    assert decision.tags == ("routing/ambiguous",)
+
+
 def test_enabled_policy_requires_explicit_opt_in_for_automatic_worker_dispatch(
     tmp_path: Path,
 ) -> None:

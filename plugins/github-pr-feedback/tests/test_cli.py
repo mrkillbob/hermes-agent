@@ -882,6 +882,7 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "include_bot_feedback",
         "auto_dispatch",
         "assignee_rules",
+        "routing_rules",
         "local_ci_audit",
         "merge_maintainer",
         "repair_steward",

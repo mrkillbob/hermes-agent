@@ -150,6 +150,14 @@ def evaluate_merge(
         blockers.append("changes_requested")
     if snapshot.review_state.unresolved_thread_count:
         blockers.append("unresolved_review_threads")
+    labels = {label.casefold() for label in pull.labels}
+    governed_review_required = any(
+        label.startswith("sweeper:risk-")
+        or label in {"sweeper:blast-broad", "sweeper:blast-massive", "telemetry"}
+        for label in labels
+    )
+    if governed_review_required and "ci-reviewed" not in labels:
+        blockers.append("governed_review_missing")
     if not snapshot.feedback_clear:
         blockers.append("feedback_unprocessed")
     method = next(

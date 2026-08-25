@@ -16,6 +16,7 @@ from github_pr_feedback.controller import (
     ScanController,
     _ci_failure_assignee,
     _ci_receipt_feedback_reason,
+    _task,
 )
 from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt, CommandEvidence
 from github_pr_feedback.github_client import CheckState, Feedback
@@ -336,6 +337,130 @@ def test_scan_routes_actionable_feedback_to_the_best_configured_specialist(
     assert result.created == 1
     assert kanban.tasks[0].assignee == "performance-specialist"
     ledger.close()
+
+
+def test_scan_records_label_driven_routing_and_review_gate_on_the_task(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    raw = {
+        "enabled": True,
+        "repositories": [
+            {
+                "base_repository": "acme/widgets",
+                "head_repository": "acme/widgets",
+                "local_path": str(local_path),
+                "owner_login": "owner",
+                "branch_prefixes": ["codex/"],
+            }
+        ],
+        "reviewer_logins": ["reviewer"],
+        "reviewer_associations": [],
+        "not_before": "2026-08-24T00:00:00Z",
+        "assignee": "task-orchestrator",
+        "routing_rules": [
+            {
+                "assignee": "session-state-steward",
+                "precedence": 100,
+                "match_any": ["resume"],
+                "match_labels_any": ["sweeper:risk-session-state"],
+                "tags": ["type/bug", "area/sessions"],
+                "priority": "P1",
+                "blast_radius": "broad",
+                "risks": ["session-state"],
+                "requires_review": True,
+            }
+        ],
+        "board": "repairs",
+    }
+    pull = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        sha,
+        labels=("sweeper:risk-session-state",),
+    )
+    github = FakeGitHub(
+        pull,
+        (feedback("resume", body="Resume can open the wrong session."),),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        load_policy(raw), ledger, github, kanban, RecordingLocalGit()
+    ).scan()
+
+    assert result.created == 1
+    task = kanban.tasks[0]
+    assert task.assignee == "session-state-steward"
+    assert task.evidence["routing"] == {
+        "tags": ["type/bug", "area/sessions"],
+        "priority": "P1",
+        "blast_radius": "broad",
+        "risks": ["session-state"],
+        "requires_review": True,
+        "ambiguous": False,
+    }
+    assert "independent safety review" in task.instructions
+    ledger.close()
+
+
+def test_typed_ci_owner_override_preserves_risk_metadata_and_review_gate(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    raw = {
+        "enabled": True,
+        "repositories": [
+            {
+                "base_repository": "acme/widgets",
+                "head_repository": "acme/widgets",
+                "local_path": str(local_path),
+                "owner_login": "owner",
+                "branch_prefixes": ["codex/"],
+            }
+        ],
+        "reviewer_logins": ["reviewer"],
+        "reviewer_associations": [],
+        "not_before": "2026-08-24T00:00:00Z",
+        "assignee": "task-orchestrator",
+        "routing_rules": [
+            {
+                "assignee": "session-state-steward",
+                "precedence": 100,
+                "match_any": [],
+                "match_labels_any": ["sweeper:risk-session-state"],
+                "tags": ["area/sessions"],
+                "priority": "P1",
+                "blast_radius": "broad",
+                "risks": ["session-state"],
+                "requires_review": True,
+            }
+        ],
+        "board": "repairs",
+    }
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "issue_comment", "ci-failure", sha
+    )
+
+    task = _task(
+        load_policy(raw),
+        receipt,
+        PreparedWorktree(tmp_path / "worktree", "codex/fix", sha),
+        "Local CI audit reports a static failure.",
+        control_home=tmp_path,
+        assignee_override="ci-static-fixer",
+        labels=("sweeper:risk-session-state",),
+    )
+
+    assert task.assignee == "ci-static-fixer"
+    assert task.evidence["routing"]["risks"] == ["session-state"]
+    assert task.evidence["routing"]["requires_review"] is True
+    assert "independent safety review" in task.instructions
 
 
 def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_reply_scope(
