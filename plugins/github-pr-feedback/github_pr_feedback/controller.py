@@ -575,6 +575,7 @@ class ScanController:
                     prepared,
                     feedback.body,
                     control_home=self._control_home,
+                    assignee_override=self._typed_ci_assignee(receipt, feedback.body),
                 )
             )
             self._ledger.finalize(receipt, task_id, lease)
@@ -587,6 +588,16 @@ class ScanController:
                 return "exact_head_unavailable"
             return "dispatch_failed"
         return None
+
+    def _typed_ci_assignee(self, receipt: FeedbackReceipt, body: str) -> str | None:
+        if "local pr ci audit" not in body.casefold():
+            return None
+        audit = self._ledger.latest_ci_receipt_for_head(
+            receipt.repository, receipt.pr_number, receipt.head_sha
+        )
+        allowed = {rule.assignee for rule in self._policy.assignee_rules}
+        assignee = _ci_failure_assignee(audit)
+        return assignee if assignee in allowed else None
 
 
 def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool:
@@ -633,6 +644,7 @@ def _task(
     body: str,
     *,
     control_home: Path,
+    assignee_override: str | None = None,
 ) -> KanbanTask:
     """Construct a scope-bounded task; feedback remains evidence, never instructions."""
 
@@ -671,7 +683,7 @@ def _task(
         title=f"GitHub PR feedback: {receipt.repository}#{receipt.pr_number}",
         instructions=instructions,
         board=policy.board or "",
-        assignee=policy.assignee_for(body),
+        assignee=assignee_override or policy.assignee_for(body),
         repository_path=prepared.path,
         head_sha=receipt.head_sha,
         branch=prepared.branch,
@@ -682,6 +694,29 @@ def _task(
         initial_status="running" if auto_dispatch else "blocked",
         max_retries=3 if auto_dispatch else 1,
     )
+
+
+def _ci_failure_assignee(receipt: object) -> str | None:
+    """Route only from a typed failed command, never from comment prose."""
+
+    from .ci_runner import CIAuditReceipt
+
+    if not isinstance(receipt, CIAuditReceipt) or receipt.status != "failed":
+        return None
+    failed = next((command for command in receipt.commands if command.returncode != 0), None)
+    if failed is None:
+        return "ci-general-fixer"
+    command = " ".join(failed.argv).casefold()
+    executable = Path(failed.argv[0]).name.casefold() if failed.argv else ""
+    if executable in {"npm", "npx", "pnpm", "yarn"} or "frontend" in command:
+        return "ci-frontend-fixer"
+    if "run_hygiene_lane.py" in command or "check_ci_governance.py" in command:
+        return "ci-hygiene-fixer"
+    if "run_static_lane.py" in command:
+        return "ci-static-fixer"
+    if "run_test_lane.py" in command or "pytest" in command:
+        return "ci-test-fixer"
+    return "ci-general-fixer"
 
 
 def _local_ci_task(

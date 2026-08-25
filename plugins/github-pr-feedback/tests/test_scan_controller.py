@@ -14,8 +14,10 @@ from github_pr_feedback.controller import (
     LocalGitRepository,
     PreparedWorktree,
     ScanController,
+    _ci_failure_assignee,
 )
-from github_pr_feedback.github_client import Feedback
+from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt, CommandEvidence
+from github_pr_feedback.github_client import CheckState, Feedback
 from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.policy import (
     FeedbackReceipt,
@@ -51,6 +53,44 @@ class FakeGitHub:
     def actions_enabled(self, repository: str) -> bool:
         assert repository == self.pull_request.base_repository
         return self.actions_are_enabled
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (("python3", "scripts/run_hygiene_lane.py"), "ci-hygiene-fixer"),
+        (("python3", "scripts/run_static_lane.py"), "ci-static-fixer"),
+        (("python3", "scripts/run_test_lane.py", "--lane", "unit"), "ci-test-fixer"),
+        (("npm", "run", "build"), "ci-frontend-fixer"),
+        (("python3", "scripts/unknown_ci_check.py"), "ci-general-fixer"),
+    ],
+)
+def test_typed_ci_receipt_routes_to_the_exact_failure_owner(
+    argv: tuple[str, ...], expected: str
+) -> None:
+    receipt = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, "b" * 40, "a" * 40),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(
+            CommandEvidence(
+                argv=argv,
+                cwd="/tmp/worktree",
+                returncode=1,
+                duration_ms=1,
+                timed_out=False,
+                stdout_sha256="0" * 64,
+                stderr_sha256="0" * 64,
+                classification="logic regression",
+            ),
+        ),
+    )
+
+    assert _ci_failure_assignee(receipt) == expected
 
 
 class MixedPullRequestGitHub(FakeGitHub):

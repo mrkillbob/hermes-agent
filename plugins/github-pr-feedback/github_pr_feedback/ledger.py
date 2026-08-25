@@ -462,6 +462,25 @@ class FeedbackLedger:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise LedgerStateError("stored CI receipt is invalid") from error
 
+    def latest_ci_receipt_for_head(
+        self, repository: str, pr_number: int, head_sha: str
+    ) -> object | None:
+        """Return the newest typed audit receipt for an exact PR head."""
+
+        from .ci_runner import CIAuditReceipt
+
+        row = self._connection.execute(
+            "SELECT evidence_json FROM ci_audit_receipts WHERE repository = ? AND pr_number = ? "
+            "AND head_sha = ? ORDER BY completed_at DESC LIMIT 1",
+            (repository, pr_number, head_sha),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return CIAuditReceipt.from_payload(json.loads(row[0]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise LedgerStateError("stored CI receipt is invalid") from error
+
     def completed_merge_receipt(self, repository: str, pr_number: int) -> object | None:
         from .merge_controller import MergeReceipt
 
