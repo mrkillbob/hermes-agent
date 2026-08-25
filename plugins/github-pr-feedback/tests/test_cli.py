@@ -450,6 +450,67 @@ def test_merge_maintainer_task_has_no_model_merge_authority(tmp_path: Path) -> N
     assert "Model output cannot waive" in task.instructions
 
 
+def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
+    tmp_path: Path,
+) -> None:
+    from github_pr_feedback.cli import _load_policy_from_context, _run_merge_scan
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    manifest = repository / "tests" / "manifests" / "test_lanes.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("version = 1\n", encoding="utf-8")
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": False,
+        "post_merge": {"enabled": False},
+    }
+    policy = _load_policy_from_context(RecordingContext(settings))
+
+    class ListingOnlyGitHub:
+        def list_open_pull_requests(self, repository: str, owner_login: str):
+            return (
+                PullRequest(
+                    17,
+                    "OPEN",
+                    "acme/widgets",
+                    "acme/widgets",
+                    "owner",
+                    "codex/fix",
+                    "a" * 40,
+                ),
+            )
+
+        def __getattr__(self, name: str):
+            raise AssertionError(f"unexpected expensive GitHub read: {name}")
+
+    class NoTasks:
+        def create_or_get_task(self, task):
+            raise AssertionError("missing CI receipt must not create an observability task")
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    try:
+        result = _run_merge_scan(
+            policy,
+            ledger,
+            github=ListingOnlyGitHub(),
+            kanban=NoTasks(),
+        )
+    finally:
+        ledger.close()
+
+    assert result["status"] == "ok"
+    assert result["blocked"] == {"17": ["ci_receipt_missing"]}
+    assert result["maintainer_tasks_created"] == 0
+
+
 def test_doctor_read_only_verifies_every_runtime_dependency(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

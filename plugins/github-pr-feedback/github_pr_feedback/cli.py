@@ -547,12 +547,36 @@ def _run_merge_scan(
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
     source = CanonicalMergeEvidenceSource(policy, github, ledger)
+    manifest_path = (
+        policy.targets[merge_policy.repository].local_path
+        / "tests"
+        / "manifests"
+        / "test_lanes.toml"
+    )
+    if not manifest_path.is_file():
+        return {
+            "status": "degraded",
+            "processed": 0,
+            "merged": [],
+            "blocked": {"canonical_read": ["ci_manifest_unavailable"]},
+        }
+    manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     merged: list[dict[str, object]] = []
     blocked: dict[str, list[str]] = {}
     deployments: list[dict[str, object]] = []
     tasks_created = 0
     degraded = False
     for pull_request in pull_requests:
+        receipt = ledger.latest_passing_ci_receipt(
+            merge_policy.repository,
+            pull_request.number,
+            pull_request.head_sha,
+            manifest_digest=manifest_digest,
+            not_before=datetime.min.replace(tzinfo=UTC),
+        )
+        if receipt is None:
+            blocked[str(pull_request.number)] = ["ci_receipt_missing"]
+            continue
         try:
             result = MergeController(
                 merge_policy,
