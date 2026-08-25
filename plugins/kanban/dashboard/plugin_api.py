@@ -461,6 +461,14 @@ def get_board(
         # for boards with hundreds of tasks). Truncated to a card-size
         # preview here — the full text is available via /tasks/:id.
         summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
+        current_run_starts = {
+            row["task_id"]: row["started_at"]
+            for row in conn.execute(
+                "SELECT t.id AS task_id, r.started_at AS started_at "
+                "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+                "WHERE t.status = 'running'"
+            ).fetchall()
+        }
 
         for t in tasks:
             full = summary_map.get(t.id)
@@ -468,6 +476,10 @@ def get_board(
                 full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None
             )
             d = _task_dict(t, latest_summary=preview)
+            if t.id in current_run_starts:
+                # The card clock describes the active attempt, not the first
+                # attempt retained on tasks.started_at across reclaims.
+                d["started_at"] = current_run_starts[t.id]
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
