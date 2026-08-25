@@ -142,6 +142,7 @@ import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import { formatDesktopLogLine } from './desktop-log-line'
 import { resolveDesktopRemoteRoute } from './desktop-remote-route'
+import { shouldHealMissingUpdateBranch } from './update-branch-policy'
 import {
   buildPosixCleanupScript,
   buildWindowsCleanupScript,
@@ -2793,6 +2794,15 @@ async function resolveHealedBranch(updateRoot, branch) {
   const probe = await runGit(['ls-remote', '--exit-code', '--heads', remote, branch], { cwd: updateRoot })
 
   if (probe.code !== 2) {
+    return branch
+  }
+
+  const current = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: updateRoot })
+  const currentBranch = current.code === 0 ? current.stdout.trim() : ''
+  if (!shouldHealMissingUpdateBranch({ configuredBranch: branch, currentBranch })) {
+    rememberLog(
+      `[updates] origin/${branch} is gone, but it is the active local checkout; retaining it instead of falling back to main`
+    )
     return branch
   }
 
