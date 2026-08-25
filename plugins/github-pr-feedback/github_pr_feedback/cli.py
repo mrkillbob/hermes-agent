@@ -25,6 +25,7 @@ from .merge_controller import (
 )
 from .policy import FeedbackReceipt, PluginPolicy, load_policy
 from .post_merge import PostMergeExecutor
+from .repair_controller import RepairController
 
 try:
     from hermes_constants import get_default_hermes_root
@@ -113,6 +114,11 @@ class DoctorProbe:
                     *(
                         [policy.merge_maintainer.assignee]
                         if policy.merge_maintainer is not None
+                        else []
+                    ),
+                    *(
+                        [policy.repair_steward.assignee]
+                        if policy.repair_steward is not None
                         else []
                     ),
                 }
@@ -324,8 +330,18 @@ def _scan(ctx: Any) -> int:
         return 1
     ledger = FeedbackLedger.for_current_profile()
     merge_payload: dict[str, object] | None = None
+    repair_payload: dict[str, object] | None = None
     try:
         result = _controller(policy, ledger).scan()
+        if policy.repair_steward is not None:
+            repair = RepairController(
+                policy,
+                ledger,
+                GitHubClient(),
+                KanbanSubprocessClient(),
+                control_home=get_default_hermes_root(),
+            ).scan()
+            repair_payload = _scan_payload(repair)
         if policy.merge_maintainer is not None:
             merge_payload = _run_merge_scan(policy, ledger)
     finally:
@@ -333,8 +349,14 @@ def _scan(ctx: Any) -> int:
     payload = _scan_payload(result)
     if merge_payload is not None:
         payload["merge"] = merge_payload
+    if repair_payload is not None:
+        payload["repair"] = repair_payload
     print(json.dumps(payload, sort_keys=True))
-    return 1 if result.degraded or (merge_payload or {}).get("status") == "degraded" else 0
+    return 1 if (
+        result.degraded
+        or (repair_payload or {}).get("status") == "degraded"
+        or (merge_payload or {}).get("status") == "degraded"
+    ) else 0
 
 
 def _retry(ctx: Any, args: argparse.Namespace) -> int:
@@ -677,6 +699,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "assignee_rules",
         "local_ci_audit",
         "merge_maintainer",
+        "repair_steward",
         "not_before",
         "assignee",
         "board",

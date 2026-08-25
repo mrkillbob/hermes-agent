@@ -12,7 +12,7 @@ from typing import Mapping, Sequence
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _FEEDBACK_KINDS = frozenset(
-    {"issue_comment", "review_comment", "review", "pr_local_ci"}
+    {"issue_comment", "review_comment", "review", "pr_local_ci", "pr_repair"}
 )
 MAX_ASSIGNEE_RULES = 32
 MAX_MATCH_TERMS_PER_RULE = 32
@@ -155,6 +155,10 @@ class LocalCIAuditPolicy:
 
     assignee: str
     post_results: bool
+    repositories: frozenset[str] = frozenset()
+
+    def applies_to(self, repository: str) -> bool:
+        return not self.repositories or repository in self.repositories
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +188,15 @@ class MergeMaintainerPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class RepairStewardPolicy:
+    """Exact-head, non-merging authority for bounded PR repairs."""
+
+    assignee: str
+    repositories: frozenset[str]
+    report_only: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PluginPolicy:
     enabled: bool
     targets: Mapping[str, RepositoryTarget]
@@ -198,6 +211,7 @@ class PluginPolicy:
     assignee_rules: tuple[AssigneeRule, ...] = ()
     local_ci_audit: LocalCIAuditPolicy | None = None
     merge_maintainer: MergeMaintainerPolicy | None = None
+    repair_steward: RepairStewardPolicy | None = None
 
     def assignee_for(self, body: str) -> str:
         """Choose the unique highest-scoring specialist, otherwise the fallback."""
@@ -314,16 +328,47 @@ def _parse_assignee_rules(raw: object) -> tuple[AssigneeRule, ...]:
 def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
     if not isinstance(raw, Mapping):
         raise ValueError("local_ci_audit must be a mapping")
-    if set(raw) != {"enabled", "assignee", "post_results"}:
+    required = {"enabled", "assignee", "post_results"}
+    if not required.issubset(raw) or set(raw).difference(required | {"repositories"}):
         raise ValueError("local_ci_audit has missing or unknown fields")
     enabled = raw["enabled"]
     post_results = raw["post_results"]
     if not isinstance(enabled, bool) or not isinstance(post_results, bool):
         raise ValueError("local_ci_audit booleans are invalid")
     assignee = _nonempty_string(raw["assignee"], "local_ci_audit assignee")
+    repositories = (
+        frozenset(_string_list(raw["repositories"], "local_ci_audit repositories"))
+        if "repositories" in raw
+        else frozenset()
+    )
     if not enabled:
         return None
-    return LocalCIAuditPolicy(assignee=assignee, post_results=post_results)
+    return LocalCIAuditPolicy(
+        assignee=assignee, post_results=post_results, repositories=repositories
+    )
+
+
+def _parse_repair_steward(
+    raw: object, *, targets: Mapping[str, RepositoryTarget]
+) -> RepairStewardPolicy | None:
+    if not isinstance(raw, Mapping):
+        raise ValueError("repair_steward must be a mapping")
+    if set(raw) != {"enabled", "assignee", "repositories", "report_only"}:
+        raise ValueError("repair_steward has missing or unknown fields")
+    if not isinstance(raw["enabled"], bool) or not isinstance(raw["report_only"], bool):
+        raise ValueError("repair_steward booleans are invalid")
+    repositories = frozenset(
+        _string_list(raw["repositories"], "repair_steward repositories")
+    )
+    if not repositories or not repositories.issubset(targets):
+        raise ValueError("repair_steward repositories must be configured targets")
+    if not raw["enabled"]:
+        return None
+    return RepairStewardPolicy(
+        assignee=_nonempty_string(raw["assignee"], "repair_steward assignee"),
+        repositories=repositories,
+        report_only=raw["report_only"],
+    )
 
 
 def _relative_path(value: object, field: str) -> str:
@@ -484,6 +529,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "assignee_rules",
         "local_ci_audit",
         "merge_maintainer",
+        "repair_steward",
     }
     if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("enabled configuration has missing or unknown fields")
@@ -533,14 +579,26 @@ def load_policy(raw: object) -> PluginPolicy:
         assignee_rules=(
             _parse_assignee_rules(raw["assignee_rules"]) if "assignee_rules" in raw else ()
         ),
-        local_ci_audit=(
-            _parse_local_ci_audit(raw["local_ci_audit"])
-            if "local_ci_audit" in raw
-            else None
-        ),
+        local_ci_audit=_validated_local_ci_audit(raw, targets),
         merge_maintainer=(
             _parse_merge_maintainer(raw["merge_maintainer"], targets=targets)
             if "merge_maintainer" in raw
             else None
         ),
+        repair_steward=(
+            _parse_repair_steward(raw["repair_steward"], targets=targets)
+            if "repair_steward" in raw
+            else None
+        ),
     )
+
+
+def _validated_local_ci_audit(
+    raw: Mapping[str, object], targets: Mapping[str, RepositoryTarget]
+) -> LocalCIAuditPolicy | None:
+    if "local_ci_audit" not in raw:
+        return None
+    policy = _parse_local_ci_audit(raw["local_ci_audit"])
+    if policy is not None and policy.repositories and not policy.repositories.issubset(targets):
+        raise ValueError("local_ci_audit repositories must be configured targets")
+    return policy

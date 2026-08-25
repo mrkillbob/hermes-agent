@@ -19,6 +19,7 @@ from .ledger import ClaimLease, FeedbackLedger, LedgerStateError
 from .policy import FeedbackReceipt, PluginPolicy, PullRequest, RepositoryTarget
 
 MAX_ADMISSIONS_PER_SCAN = 25
+LOCAL_CI_FEEDBACK_ID = "local-ci-audit-v2"
 _SHA = re.compile(r"^[0-9a-fA-F]{40,64}$")
 DEFAULT_CLAIM_LEASE = timedelta(minutes=5)
 _SELF_RESOLUTION_PREFIXES = (
@@ -289,7 +290,10 @@ class ScanController:
             target = self._policy.targets[repository]
             actions_enabled: bool | None = None
             actions_state_unavailable = False
-            if self._policy.local_ci_audit is not None:
+            if (
+                self._policy.local_ci_audit is not None
+                and self._policy.local_ci_audit.applies_to(repository)
+            ):
                 try:
                     actions_enabled = self._github.actions_enabled(repository)
                 except Exception:  # noqa: BLE001 - an uncertain gate must fail closed.
@@ -304,7 +308,10 @@ class ScanController:
                 if not pull_request_admission.admitted:
                     skipped[pull_request_admission.reason or "not_admitted"] += 1
                     continue
-                if self._policy.local_ci_audit is not None:
+                if (
+                    self._policy.local_ci_audit is not None
+                    and self._policy.local_ci_audit.applies_to(repository)
+                ):
                     if actions_state_unavailable:
                         skipped["github_ci_state_unavailable"] += 1
                     elif actions_enabled:
@@ -312,8 +319,9 @@ class ScanController:
                     elif attempted >= MAX_ADMISSIONS_PER_SCAN:
                         skipped["admission_cap"] += 1
                     else:
-                        attempted += 1
                         audit_error = self._dispatch_local_ci(pull_request)
+                        if audit_error != "duplicate":
+                            attempted += 1
                         if audit_error is None:
                             created += 1
                         else:
@@ -411,7 +419,7 @@ class ScanController:
             repository=current.base_repository,
             pr_number=current.number,
             feedback_kind="pr_local_ci",
-            feedback_id="local-ci-audit-v1",
+            feedback_id=LOCAL_CI_FEEDBACK_ID,
             head_sha=current.head_sha,
         )
         claimed_at = self._clock()

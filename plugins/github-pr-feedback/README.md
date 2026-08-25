@@ -54,6 +54,17 @@ plugins:
           enabled: false
           assignee: pr-local-ci-auditor
           post_results: false
+          repositories:
+            - example-owner/example-repository
+        # Optional exact-head repair owner for confirmed conflicts, requested
+        # changes, and non-green repository checks. It may repair and push but
+        # never merge. Start in report-only mode.
+        repair_steward:
+          enabled: false
+          assignee: pr-repair-steward
+          repositories:
+            - example-owner/example-repository
+          report_only: true
         # Optional deterministic merge owner. Keep report-only enabled until
         # exact-head CI receipts and blocker decisions have been observed.
         merge_maintainer:
@@ -128,6 +139,15 @@ verified the exact head, pushed its bounded fix, and posted the factual reply,
 the card supplies a fixed `complete-feedback` acknowledgement command. That
 command rereads the canonical resolved head and records the action separately;
 it cannot create CI or merge receipts.
+
+When `repair_steward.enabled: true`, reconciliation independently rereads each
+configured PR's exact head and creates a deduplicated repair card only for a
+canonical merge conflict, change request, or non-green repository check. In
+report-only mode the card is blocked and cannot write. In active mode it may
+normal-merge the configured base into the verified head branch, make the
+smallest confirmed repair, run focused tests, push normally, and post factual
+evidence. It cannot merge or approve the PR, delete branches, change settings,
+force-push, rewrite published history, or weaken tests and safety gates.
 
 When `merge_maintainer.enabled: true`, each reconciliation also evaluates open
 PRs from the configured author and same repository. It requires a private

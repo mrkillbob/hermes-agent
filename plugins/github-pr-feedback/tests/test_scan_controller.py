@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from github_pr_feedback.controller import (
+    LOCAL_CI_FEEDBACK_ID,
     MAX_ADMISSIONS_PER_SCAN,
     GitCommandResult,
     LocalGitRepository,
@@ -389,6 +390,66 @@ def test_scan_dispatches_a_new_local_ci_audit_when_the_pr_head_changes(
     assert second.created == 1
     assert [task.head_sha for task in kanban.tasks] == [first_sha, second_sha]
     assert kanban.tasks[0].idempotency_key != kanban.tasks[1].idempotency_key
+    ledger.close()
+
+
+def test_duplicate_local_ci_receipts_do_not_starve_a_new_head_after_comment_fixes(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    stale_pulls = tuple(
+        PullRequest(number, "OPEN", "acme/widgets", "acme/widgets", "owner", "codex/fix", sha)
+        for number in range(1, MAX_ADMISSIONS_PER_SCAN + 1)
+    )
+    repaired = PullRequest(
+        MAX_ADMISSIONS_PER_SCAN + 1,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/comment-fix",
+        "b" * 40,
+    )
+
+    class ManyPullsGitHub(FakeGitHub):
+        def list_open_pull_requests(self, repository: str, owner_login: str):
+            return (*stale_pulls, repaired)
+
+        def get_pull_request(self, repository: str, number: int):
+            return next(pull for pull in (*stale_pulls, repaired) if pull.number == number)
+
+        def list_feedback(self, repository: str, number: int):
+            return ()
+
+    github = ManyPullsGitHub(stale_pulls[0], ())
+    github.actions_are_enabled = False
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    claimed_at = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    for pull in stale_pulls:
+        receipt = FeedbackReceipt(
+            "acme/widgets", pull.number, "pr_local_ci", LOCAL_CI_FEEDBACK_ID, pull.head_sha
+        )
+        lease = ledger.claim(
+            receipt,
+            owner="seed",
+            claimed_at=claimed_at,
+            stale_before=claimed_at - timedelta(minutes=5),
+        )
+        assert lease is not None
+        ledger.finalize(receipt, f"done-{pull.number}", lease)
+    kanban = RecordingKanban()
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped["duplicate"] == MAX_ADMISSIONS_PER_SCAN
+    assert result.skipped.get("admission_cap", 0) == 0
+    assert [task.evidence["pr_number"] for task in kanban.tasks] == [repaired.number]
     ledger.close()
 
 
