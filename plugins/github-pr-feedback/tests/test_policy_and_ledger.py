@@ -255,6 +255,28 @@ def test_disabled_config_is_not_admitted(tmp_path: Path) -> None:
     assert policy.admit(admitted_pr(), Reviewer("trusted-reviewer", "MEMBER"), receipt()).reason == "disabled"
 
 
+def test_dispatched_feedback_is_not_actioned_until_explicit_exact_head_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    item = receipt()
+    lease = claim_lease(ledger, item)
+    assert lease is not None
+    ledger.finalize(item, "task-17", lease)
+
+    assert ledger.was_completed_on_any_head(item) is True
+    assert ledger.was_actioned_on_any_head(item) is False
+
+    ledger.mark_feedback_actioned(
+        item,
+        resolved_head_sha="b" * 40,
+        actioned_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+    )
+
+    assert ledger.was_actioned_on_any_head(item) is True
+    ledger.close()
+
+
 @pytest.mark.parametrize(
     "raw",
     [

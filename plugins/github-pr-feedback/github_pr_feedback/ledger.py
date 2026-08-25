@@ -135,6 +135,9 @@ class FeedbackLedger:
             "lease_version": "lease_version INTEGER NOT NULL DEFAULT 0",
             "workspace_path": "workspace_path TEXT",
             "expected_sha": "expected_sha TEXT",
+            "action_status": "action_status TEXT NOT NULL DEFAULT 'pending'",
+            "actioned_head_sha": "actioned_head_sha TEXT",
+            "actioned_at": "actioned_at TEXT",
         }
         for name, declaration in additions.items():
             if name not in columns:
@@ -217,6 +220,40 @@ class FeedbackLedger:
             receipt.key[:4],
         ).fetchone()
         return row is not None
+
+    def was_actioned_on_any_head(self, receipt: FeedbackReceipt) -> bool:
+        row = self._connection.execute(
+            "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+            "AND feedback_kind = ? AND feedback_id = ? AND action_status = 'completed' LIMIT 1",
+            receipt.key[:4],
+        ).fetchone()
+        return row is not None
+
+    def mark_feedback_actioned(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        resolved_head_sha: str,
+        actioned_at: datetime,
+    ) -> None:
+        if receipt.feedback_kind == "pr_local_ci":
+            raise ValueError("local CI dispatches are not feedback actions")
+        if (
+            not isinstance(resolved_head_sha, str)
+            or len(resolved_head_sha) != 40
+            or any(character not in "0123456789abcdefABCDEF" for character in resolved_head_sha)
+        ):
+            raise ValueError("resolved_head_sha must be a full hexadecimal SHA")
+        actioned_at = _aware_utc(actioned_at, "actioned_at")
+        with self._transaction():
+            result = self._connection.execute(
+                "UPDATE feedback_receipts SET action_status = 'completed', actioned_head_sha = ?, "
+                "actioned_at = ? WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ? AND status = 'completed'",
+                (resolved_head_sha.lower(), actioned_at.isoformat(), *receipt.key),
+            )
+            if result.rowcount != 1:
+                raise LedgerStateError("feedback dispatch is not complete")
 
     def retry(
         self,

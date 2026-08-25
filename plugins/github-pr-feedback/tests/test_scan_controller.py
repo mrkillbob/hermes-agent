@@ -239,6 +239,8 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     assert "post a factual PR reply" in task.instructions
     assert "Do not merge" in task.instructions
     assert "still equals the expected receipt SHA" in task.instructions
+    assert "complete-feedback" in task.instructions
+    assert "full literal resolved head SHA" in task.instructions
     ledger.close()
 
 
@@ -281,6 +283,8 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert "scripts/run_hygiene_lane.py" in task.instructions
     assert "scripts/run_static_lane.py" in task.instructions
     assert "scripts/run_test_lane.py" in task.instructions
+    assert "hermes github-pr-feedback audit-pr" in task.instructions
+    assert f"--head-sha {sha}" in task.instructions
     ledger.close()
 
 

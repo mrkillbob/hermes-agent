@@ -4,8 +4,11 @@
 reads canonical GitHub pull-request feedback, applies a strict local policy,
 and creates exact-head Kanban tasks for admitted feedback. An independent,
 explicitly configured lane can also schedule read-only local CI audits for PR
-heads when repository GitHub Actions are disabled. The scanner itself never
-pushes, replies, merges, changes GitHub settings, or handles credentials.
+heads when repository GitHub Actions are disabled. A separately opt-in,
+deterministic maintainer can merge an exact tested head after all configured
+safety gates pass. Models never own merge authority, construct merge argv, or
+create passing receipts. The plugin never pushes source branches, approves,
+changes GitHub settings, deletes branches, or handles credentials.
 
 ## Install and configure
 
@@ -51,6 +54,19 @@ plugins:
           enabled: false
           assignee: pr-local-ci-auditor
           post_results: false
+        # Optional deterministic merge owner. Keep report-only enabled until
+        # exact-head CI receipts and blocker decisions have been observed.
+        merge_maintainer:
+          enabled: false
+          assignee: pr-merge-maintainer
+          repository: example-owner/example-repository
+          author_login: example-owner
+          base_branch: stable
+          merge_methods: [squash, rebase, merge]
+          receipt_max_age_seconds: 21600
+          report_only: true
+          post_merge:
+            enabled: false
         not_before: "2026-01-01T00:00:00Z"
         # Fallback when no rule wins uniquely, including ambiguous ties.
         assignee: task-orchestrator
@@ -78,6 +94,7 @@ Run the readiness check before enabling or scanning:
 hermes github-pr-feedback doctor
 hermes github-pr-feedback status
 hermes github-pr-feedback scan
+hermes github-pr-feedback merge-status
 ```
 
 `scan` is safe to repeat. It records durable receipt state and creates one
@@ -99,8 +116,40 @@ audit identity includes the PR head SHA, so repeated scans deduplicate the same
 head and a later head automatically receives a fresh audit. The worker must
 re-read the canonical PR head, use the exact receipt worktree, keep tracked
 files unchanged, and run repository-owned governance, hygiene, static,
-required test-lane, and changed-frontend checks. It may post one factual result
-comment when `post_results: true`, but cannot edit, push, approve, or merge.
+required test-lane, and changed-frontend checks through the deterministic
+`audit-pr` command embedded in the card. It may post one factual result comment
+when `post_results: true`, but cannot edit, push, approve, or merge. Only the
+typed SQLite receipt produced by `audit-pr` can satisfy a merge gate; task prose
+and GitHub comments are informational.
+
+Feedback dispatch and feedback completion are different states. Creating a
+Kanban card never clears a merge blocker. After an opted-in repair worker has
+verified the exact head, pushed its bounded fix, and posted the factual reply,
+the card supplies a fixed `complete-feedback` acknowledgement command. That
+command rereads the canonical resolved head and records the action separately;
+it cannot create CI or merge receipts.
+
+When `merge_maintainer.enabled: true`, each reconciliation also evaluates open
+PRs from the configured author and same repository. It requires a private
+repository, exact base and head identities, an admitted branch prefix, a fresh
+passing local-CI receipt for the current lane-manifest digest, clean explicit
+mergeability, green GitHub checks when Actions is enabled, no change request,
+no unresolved review thread, and no unprocessed admitted feedback. Missing or
+unknown evidence blocks. The controller selects the first configured method
+that the repository currently enables, binds the command with
+`--match-head-commit`, and accepts success only from canonical merged readback.
+
+The `pr-merge-maintainer` Kanban profile is an observability worker. It may
+explain deterministic blocker codes, but it cannot edit, push, reply, approve,
+merge, change policy, waive a gate, or create receipts. Roll out in stages:
+collect CI receipts, use `report_only: true`, enable automatic merging, and only
+then separately configure and enable a post-merge hook.
+
+An enabled post-merge hook uses a dedicated clean deployment worktree. It
+proves the configured protected runtime is absent, fast-forwards the configured
+base branch, runs a fixed package argv, verifies the bundle identity, relaunches
+only that bundle, and repeats the runtime census. Merge and deployment receipts
+are separate, so a rebuild failure never rewrites merge truth.
 
 In `auto_dispatch` mode, the worker must independently validate the finding,
 re-read the canonical PR immediately before any GitHub write, and require that
@@ -161,5 +210,6 @@ HERMES_EXECUTABLE=/absolute/path/to/hermes
 
 The wrapper refuses an unset, relative, missing, or non-executable
 `HERMES_EXECUTABLE`, then runs exactly that absolute executable with
-`github-pr-feedback scan`. It does not accept arguments, start a model, create
-webhooks, or perform GitHub writes.
+`github-pr-feedback scan`. It does not accept arguments, start a model, or
+create webhooks. GitHub remains read-only unless the strict merge maintainer is
+explicitly enabled and not in report-only mode.

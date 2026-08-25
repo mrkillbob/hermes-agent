@@ -15,7 +15,8 @@ import pytest
 
 from github_pr_feedback.controller import KanbanTask
 from github_pr_feedback.ledger import FeedbackLedger
-from github_pr_feedback.policy import FeedbackReceipt
+from github_pr_feedback.merge_controller import MergeDecision
+from github_pr_feedback.policy import FeedbackReceipt, PullRequest
 
 
 def _plugin_module():
@@ -251,6 +252,40 @@ def test_cli_exposes_status_doctor_and_an_exact_immutable_retry_identity() -> No
 
     assert parser.parse_args(["status"]).github_pr_feedback_action == "status"
     assert parser.parse_args(["doctor"]).github_pr_feedback_action == "doctor"
+    audit = parser.parse_args(
+        [
+            "audit-pr",
+            "--repository",
+            "acme/widgets",
+            "--pr-number",
+            "17",
+            "--head-sha",
+            "a" * 40,
+            "--worktree",
+            "/repositories/widgets",
+        ]
+    )
+    assert audit.github_pr_feedback_action == "audit-pr"
+    assert parser.parse_args(["merge-scan"]).github_pr_feedback_action == "merge-scan"
+    assert parser.parse_args(["merge-status"]).github_pr_feedback_action == "merge-status"
+    completed = parser.parse_args(
+        [
+            "complete-feedback",
+            "--repository",
+            "acme/widgets",
+            "--pr-number",
+            "17",
+            "--feedback-kind",
+            "review_comment",
+            "--feedback-id",
+            "120",
+            "--receipt-head-sha",
+            "a" * 40,
+            "--resolved-head-sha",
+            "b" * 40,
+        ]
+    )
+    assert completed.github_pr_feedback_action == "complete-feedback"
     retry = parser.parse_args(
         [
             "retry",
@@ -347,6 +382,72 @@ def test_namespaced_context_preserves_auto_dispatch_and_local_ci_audit_settings(
     assert policy.auto_dispatch is True
     assert policy.local_ci_audit is not None
     assert policy.local_ci_audit.assignee == "pr-local-ci-auditor"
+
+
+def test_namespaced_context_preserves_strict_merge_maintainer_settings(tmp_path: Path) -> None:
+    from github_pr_feedback.cli import _load_policy_from_context
+
+    repository = tmp_path / "repository"
+    deployment = tmp_path / "deployment"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(["git", "init", "--quiet", str(deployment)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash", "rebase", "merge"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": True,
+        "post_merge": {"enabled": False},
+    }
+
+    loaded = _load_policy_from_context(RecordingContext(settings))
+
+    assert loaded.merge_maintainer is not None
+    assert loaded.merge_maintainer.assignee == "pr-merge-maintainer"
+    assert loaded.merge_maintainer.merge_methods == ("squash", "rebase", "merge")
+    assert loaded.merge_maintainer.report_only is True
+
+
+def test_merge_maintainer_task_has_no_model_merge_authority(tmp_path: Path) -> None:
+    from github_pr_feedback.cli import _load_policy_from_context, _merge_maintainer_task
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash", "rebase", "merge"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": True,
+        "post_merge": {"enabled": False},
+    }
+    loaded = _load_policy_from_context(RecordingContext(settings))
+    pull = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        "a" * 40,
+    )
+    decision = MergeDecision(False, ("ci_receipt_missing",), None, "d" * 64)
+
+    task = _merge_maintainer_task(loaded, pull, decision)
+
+    assert task.assignee == "pr-merge-maintainer"
+    assert task.initial_status == "running"
+    assert task.evidence["blockers"] == ["ci_receipt_missing"]
+    assert "Do not edit source, push, reply, approve, merge" in task.instructions
+    assert "Model output cannot waive" in task.instructions
 
 
 def test_doctor_read_only_verifies_every_runtime_dependency(
@@ -640,6 +741,7 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "auto_dispatch",
         "assignee_rules",
         "local_ci_audit",
+        "merge_maintainer",
         "not_before",
         "assignee",
         "board",

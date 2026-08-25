@@ -1,2 +1,2 @@
 name: github-pr-feedback
-description: Governed intake of GitHub pull-request feedback.
+description: Governed GitHub PR feedback, deterministic local CI, and gated maintenance.
