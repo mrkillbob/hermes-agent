@@ -5182,6 +5182,103 @@ def reclaim_task(
     return True
 
 
+def suspend_task_for_watchdog(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    expected_run_id: int,
+    reason: str,
+    finding: dict[str, Any],
+    termination_fn=None,
+) -> bool:
+    """Stop one unhealthy worker and preserve its task as ``blocked``.
+
+    This is stricter than operator-driven :func:`reclaim_task`: automatic
+    supervision must prove that a host-local worker terminated before its
+    claim is released. If termination cannot be verified, no task or run row
+    changes and the caller can surface the task for operator intervention.
+    """
+    row = conn.execute(
+        "SELECT status, current_run_id, claim_lock, worker_pid "
+        "FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if (
+        row is None
+        or row["status"] != "running"
+        or row["current_run_id"] is None
+        or int(row["current_run_id"]) != int(expected_run_id)
+    ):
+        return False
+
+    terminate = termination_fn or (
+        lambda pid, lock: _terminate_reclaimed_worker(pid, lock)
+    )
+    termination = terminate(row["worker_pid"], row["claim_lock"])
+    if not (
+        isinstance(termination, dict)
+        and termination.get("host_local")
+        and termination.get("termination_attempted")
+        and termination.get("terminated")
+    ):
+        return False
+
+    with write_txn(conn):
+        current = conn.execute(
+            "SELECT status, current_run_id, claim_lock FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if (
+            current is None
+            or current["status"] != "running"
+            or current["current_run_id"] is None
+            or int(current["current_run_id"]) != int(expected_run_id)
+            or current["claim_lock"] != row["claim_lock"]
+        ):
+            return False
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL, block_kind = 'transient' "
+            "WHERE id = ? AND status = 'running' AND current_run_id = ?",
+            (task_id, int(expected_run_id)),
+        )
+        if cur.rowcount != 1:
+            return False
+        metadata = {"watchdog_finding": finding, "termination": termination}
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="watchdog_blocked",
+            status="blocked",
+            summary=reason,
+            metadata=metadata,
+        )
+        # Preserve the kernel's sticky-block contract. ``recompute_ready``
+        # distinguishes deliberate blocks from circuit-breaker recovery by
+        # the canonical ``blocked`` event; without it, completing the repair
+        # parent could prematurely promote the original before watchdog
+        # reconciliation verifies the receipt.
+        _append_event(
+            conn,
+            task_id,
+            "blocked",
+            {"reason": reason, "kind": "transient", "source": "worker_watchdog"},
+            run_id=run_id,
+        )
+        _append_event(
+            conn,
+            task_id,
+            "watchdog_blocked",
+            {
+                **finding,
+                "reason": reason,
+                "termination": termination,
+            },
+            run_id=run_id,
+        )
+    return True
+
+
 def reassign_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -8068,6 +8165,12 @@ class DispatchResult:
     stale: list[str] = field(default_factory=list)
     """Task ids reclaimed because no progress (heartbeat) was seen
     within ``dispatch_stale_timeout_seconds``."""
+    watchdog_blocked: list[str] = field(default_factory=list)
+    """Task ids suspended after deterministic repeated no-progress evidence."""
+    watchdog_restarted: list[str] = field(default_factory=list)
+    """Task ids requeued after their linked watchdog repair completed."""
+    watchdog_needs_operator: list[str] = field(default_factory=list)
+    """Task ids left fail-closed because repair or termination needs an operator."""
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """Tasks skipped by the respawn guard, as ``(task_id, reason)`` pairs.
 
@@ -9977,6 +10080,26 @@ def _dispatch_once_locked(
     reap_worker_zombies()
 
     result = DispatchResult()
+    if not dry_run:
+        try:
+            from hermes_cli.kanban_worker_watchdog import (
+                load_watchdog_config,
+                run_watchdog_tick,
+            )
+
+            watchdog_result = run_watchdog_tick(
+                conn,
+                board=board,
+                config=load_watchdog_config(),
+            )
+            result.watchdog_blocked.extend(watchdog_result.blocked)
+            result.watchdog_restarted.extend(watchdog_result.restarted)
+            result.watchdog_needs_operator.extend(watchdog_result.needs_operator)
+        except Exception:
+            # Supervision is a safety aid, never a dispatcher availability
+            # dependency. Leave current claims untouched and try again next
+            # tick after logging the diagnostic.
+            _log.exception("kanban worker watchdog tick failed")
     result.reclaimed = release_stale_claims(conn)
     if reconcile_orphans:
         # Orphaned-card reconciliation: requeue 'running' cards whose claim
