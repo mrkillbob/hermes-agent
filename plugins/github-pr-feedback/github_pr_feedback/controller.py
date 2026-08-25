@@ -308,33 +308,13 @@ class ScanController:
                 if not pull_request_admission.admitted:
                     skipped[pull_request_admission.reason or "not_admitted"] += 1
                     continue
-                if (
-                    self._policy.local_ci_audit is not None
-                    and self._policy.local_ci_audit.applies_to(repository)
-                ):
-                    if actions_state_unavailable:
-                        skipped["github_ci_state_unavailable"] += 1
-                    elif actions_enabled:
-                        skipped["github_ci_enabled"] += 1
-                    elif attempted >= MAX_ADMISSIONS_PER_SCAN:
-                        skipped["admission_cap"] += 1
-                    else:
-                        audit_error = self._dispatch_local_ci(pull_request)
-                        if audit_error != "duplicate":
-                            attempted += 1
-                        if audit_error is None:
-                            created += 1
-                        else:
-                            skipped[audit_error] += 1
                 try:
                     feedback_items = self._github.list_feedback(repository, pull_request.number)
                 except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
                     skipped["github_error"] += 1
                     continue
+                feedback_pending = False
                 for feedback in feedback_items:
-                    if attempted >= MAX_ADMISSIONS_PER_SCAN:
-                        skipped["admission_cap"] += 1
-                        continue
                     target = self._policy.targets.get(pull_request.base_repository)
                     if target is None:
                         skipped["base_repository_not_allowed"] += 1
@@ -375,6 +355,11 @@ class ScanController:
                     if not current_admission.admitted:
                         skipped[current_admission.reason or "not_admitted"] += 1
                         continue
+                    if not self._ledger.was_actioned_on_any_head(receipt):
+                        feedback_pending = True
+                    if attempted >= MAX_ADMISSIONS_PER_SCAN:
+                        skipped["admission_cap"] += 1
+                        continue
                     if self._ledger.was_completed_on_any_head(receipt):
                         skipped["already_queued"] += 1
                         continue
@@ -400,6 +385,26 @@ class ScanController:
                         skipped[dispatch_error] += 1
                         continue
                     created += 1
+                if (
+                    self._policy.local_ci_audit is not None
+                    and self._policy.local_ci_audit.applies_to(repository)
+                ):
+                    if feedback_pending:
+                        skipped["feedback_pending"] += 1
+                    elif actions_state_unavailable:
+                        skipped["github_ci_state_unavailable"] += 1
+                    elif actions_enabled:
+                        skipped["github_ci_enabled"] += 1
+                    elif attempted >= MAX_ADMISSIONS_PER_SCAN:
+                        skipped["admission_cap"] += 1
+                    else:
+                        audit_error = self._dispatch_local_ci(pull_request)
+                        if audit_error != "duplicate":
+                            attempted += 1
+                        if audit_error is None:
+                            created += 1
+                        else:
+                            skipped[audit_error] += 1
         return _scan_result(created, skipped)
 
     def _dispatch_local_ci(self, listed: PullRequest) -> str | None:

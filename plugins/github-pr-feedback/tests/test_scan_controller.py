@@ -393,6 +393,59 @@ def test_scan_dispatches_a_new_local_ci_audit_when_the_pr_head_changes(
     ledger.close()
 
 
+def test_local_ci_waits_while_admitted_feedback_is_unactioned(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("needs-fix"),))
+    github.actions_are_enabled = False
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped["feedback_pending"] == 1
+    assert [task.title for task in kanban.tasks] == ["GitHub PR feedback: acme/widgets#17"]
+    ledger.close()
+
+
+def test_local_ci_runs_after_all_admitted_feedback_is_actioned(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    item = feedback("fixed")
+    github = FakeGitHub(admitted_pull_request(sha), (item,))
+    github.actions_are_enabled = False
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    receipt = FeedbackReceipt("acme/widgets", 17, item.kind, item.feedback_id, sha)
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    lease = ledger.claim(
+        receipt,
+        owner="seed",
+        claimed_at=now,
+        stale_before=now - timedelta(minutes=5),
+    )
+    assert lease is not None
+    ledger.finalize(receipt, "feedback-task", lease)
+    ledger.mark_feedback_actioned(receipt, resolved_head_sha=sha, actioned_at=now)
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped["already_queued"] == 1
+    assert result.skipped.get("feedback_pending", 0) == 0
+    assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
+    ledger.close()
+
+
 def test_duplicate_local_ci_receipts_do_not_starve_a_new_head_after_comment_fixes(
     tmp_path: Path,
 ) -> None:
