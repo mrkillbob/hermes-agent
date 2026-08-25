@@ -435,6 +435,33 @@ class FeedbackLedger:
             raise LedgerStateError("stored CI receipt status is inconsistent")
         return receipt
 
+    def latest_ci_receipt(
+        self,
+        repository: str,
+        pr_number: int,
+        head_sha: str,
+        *,
+        manifest_digest: str,
+        not_before: datetime,
+    ) -> object | None:
+        """Return the latest typed receipt, including a failed audit, for an exact lane."""
+
+        from .ci_runner import CIAuditReceipt
+
+        boundary = _aware_utc(not_before, "not_before")
+        row = self._connection.execute(
+            "SELECT evidence_json FROM ci_audit_receipts WHERE repository = ? AND pr_number = ? "
+            "AND head_sha = ? AND manifest_digest = ? AND completed_at >= ? "
+            "ORDER BY completed_at DESC LIMIT 1",
+            (repository, pr_number, head_sha, manifest_digest, boundary.isoformat()),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return CIAuditReceipt.from_payload(json.loads(row[0]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise LedgerStateError("stored CI receipt is invalid") from error
+
     def completed_merge_receipt(self, repository: str, pr_number: int) -> object | None:
         from .merge_controller import MergeReceipt
 

@@ -567,7 +567,7 @@ def _run_merge_scan(
     tasks_created = 0
     degraded = False
     for pull_request in pull_requests:
-        receipt = ledger.latest_passing_ci_receipt(
+        receipt = ledger.latest_ci_receipt(
             merge_policy.repository,
             pull_request.number,
             pull_request.head_sha,
@@ -576,6 +576,9 @@ def _run_merge_scan(
         )
         if receipt is None:
             blocked[str(pull_request.number)] = ["ci_receipt_missing"]
+            continue
+        if receipt.status != "passed":
+            blocked[str(pull_request.number)] = ["ci_receipt_not_passing"]
             continue
         try:
             result = MergeController(

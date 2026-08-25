@@ -301,7 +301,7 @@ class CanonicalMergeEvidenceSource:
         if not manifest_path.is_file():
             raise GitHubClientError("CI manifest was unavailable")
         manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-        receipt = self._ledger.latest_passing_ci_receipt(
+        receipt = self._ledger.latest_ci_receipt(
             policy.repository,
             number,
             pull.head_sha,

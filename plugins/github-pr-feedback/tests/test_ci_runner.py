@@ -242,4 +242,11 @@ def test_failed_command_is_durable_evidence_but_never_a_passing_receipt(tmp_path
         manifest_digest=receipt.manifest_digest,
         not_before=NOW - timedelta(days=1),
     ) is None
+    assert ledger.latest_ci_receipt(
+        "acme/widgets",
+        17,
+        HEAD_SHA,
+        manifest_digest=receipt.manifest_digest,
+        not_before=NOW - timedelta(days=1),
+    ) == receipt
     ledger.close()
