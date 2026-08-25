@@ -15,6 +15,7 @@ from github_pr_feedback.controller import (
     PreparedWorktree,
     ScanController,
     _ci_failure_assignee,
+    _ci_receipt_feedback_reason,
 )
 from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt, CommandEvidence
 from github_pr_feedback.github_client import CheckState, Feedback
@@ -91,6 +92,47 @@ def test_typed_ci_receipt_routes_to_the_exact_failure_owner(
     )
 
     assert _ci_failure_assignee(receipt) == expected
+
+
+def test_superseded_ci_receipt_comment_does_not_create_duplicate_repair(
+    tmp_path: Path,
+) -> None:
+    identity = CIAuditIdentity("acme/widgets", 17, "b" * 40, "a" * 40)
+    older = CIAuditReceipt(
+        receipt_id="1" * 64,
+        identity=identity,
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+    latest = CIAuditReceipt(
+        receipt_id="2" * 64,
+        identity=identity,
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 2, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 3, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(older)
+    ledger.record_ci_receipt(latest)
+    feedback_receipt = FeedbackReceipt(
+        "acme/widgets", 17, "issue_comment", "comment-1", "a" * 40
+    )
+
+    reason = _ci_receipt_feedback_reason(
+        ledger,
+        feedback_receipt,
+        f"Local CI audit completed. Authoritative receipt: `{'1' * 64}`.",
+    )
+
+    assert reason == "superseded_ci_receipt"
+    ledger.close()
 
 
 class MixedPullRequestGitHub(FakeGitHub):

@@ -44,6 +44,10 @@ _ACTION_REMAINS_MARKERS = (
 _CODEX_REVIEW_ENVELOPE_PREFIX = (
     "### 💡 codex review here are some automated review suggestions for this pull request."
 )
+_CI_RECEIPT_COMMENT = re.compile(
+    r"authoritative receipt:\s*`([0-9a-f]{64})`",
+    flags=re.IGNORECASE,
+)
 _DEGRADED_REASONS = frozenset(
     {
         "github_error",
@@ -332,6 +336,12 @@ class ScanController:
                         feedback_id=feedback.feedback_id,
                         head_sha=pull_request.head_sha,
                     )
+                    receipt_reason = _ci_receipt_feedback_reason(
+                        self._ledger, receipt, feedback.body
+                    )
+                    if receipt_reason is not None:
+                        skipped[receipt_reason] += 1
+                        continue
                     admission = self._policy.admit(
                         pull_request,
                         feedback.reviewer,
@@ -525,6 +535,12 @@ class ScanController:
         if reason is not None:
             skipped[reason] += 1
             return None
+        receipt_reason = _ci_receipt_feedback_reason(
+            self._ledger, receipt, feedback.body
+        )
+        if receipt_reason is not None:
+            skipped[receipt_reason] += 1
+            return None
         admission = self._policy.admit(
             current,
             feedback.reviewer,
@@ -614,6 +630,29 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
     if body.startswith(_SELF_RESOLUTION_PREFIXES):
         return True
     return body.startswith("confirmed ") and "superseded" in body
+
+
+def _ci_receipt_feedback_reason(
+    ledger: FeedbackLedger, receipt: FeedbackReceipt, body: str
+) -> str | None:
+    """Ignore stale or passing audit comments while retaining the latest failure."""
+
+    normalized = body.casefold()
+    if "local ci audit" not in normalized and "local pr ci audit" not in normalized:
+        return None
+    marker = _CI_RECEIPT_COMMENT.search(body)
+    if marker is None:
+        return None
+    audit = ledger.latest_ci_receipt_for_head(
+        receipt.repository, receipt.pr_number, receipt.head_sha
+    )
+    if audit is None:
+        return None
+    if marker.group(1).casefold() != audit.receipt_id.casefold():
+        return "superseded_ci_receipt"
+    if audit.status == "passed":
+        return "passing_ci_receipt"
+    return None
 
 
 def _is_non_actionable_review_container(feedback: Feedback) -> bool:
