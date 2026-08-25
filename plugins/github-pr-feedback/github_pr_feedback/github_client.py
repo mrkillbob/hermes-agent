@@ -347,6 +347,7 @@ class GitHubClient:
             for row in reviews
             if isinstance(row, dict) and row.get("submitted_at") is not None
         )
+        feedback.sort(key=lambda item: item.created_at)
         return tuple(feedback)
 
     def _read_pages(self, endpoint: str) -> tuple[dict[str, Any], ...]:
