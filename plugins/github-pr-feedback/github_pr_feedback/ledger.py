@@ -16,6 +16,7 @@ from .policy import FeedbackReceipt
 try:  # Hermes supplies the profile-aware source of truth at runtime.
     from hermes_constants import get_hermes_home
 except ImportError:  # Standalone unit tests remain dependency-free.
+
     def get_hermes_home() -> Path:
         return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 
@@ -36,6 +37,16 @@ class MergeLease:
     claimed_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class MaintenanceReceipt:
+    repository: str
+    head_sha: str
+    lane: str
+    status: str
+    summary: str
+    completed_at: datetime
+
+
 class LedgerStateError(RuntimeError):
     """The caller tried to finalize or fail a receipt it does not hold."""
 
@@ -49,8 +60,7 @@ class FeedbackLedger:
         self._connection = sqlite3.connect(self.path, isolation_level=None, timeout=5.0)
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
-        self._connection.execute(
-            """
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS feedback_receipts (
                 repository TEXT NOT NULL,
                 pr_number INTEGER NOT NULL,
@@ -68,11 +78,29 @@ class FeedbackLedger:
                 expected_sha TEXT,
                 PRIMARY KEY (repository, pr_number, feedback_kind, feedback_id, head_sha)
             )
-            """
-        )
+            """)
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS maintenance_heads (
+                repository TEXT NOT NULL,
+                base_branch TEXT NOT NULL,
+                head_sha TEXT NOT NULL,
+                first_observed_at TEXT NOT NULL,
+                PRIMARY KEY (repository, base_branch)
+            )
+            """)
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS maintenance_receipts (
+                repository TEXT NOT NULL,
+                head_sha TEXT NOT NULL,
+                lane TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('passed', 'failed')),
+                summary TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                PRIMARY KEY (repository, head_sha, lane)
+            )
+            """)
         self._migrate_lease_columns()
-        self._connection.execute(
-            """
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS ci_audit_receipts (
                 receipt_id TEXT PRIMARY KEY,
                 repository TEXT NOT NULL,
@@ -86,14 +114,12 @@ class FeedbackLedger:
                 evidence_json TEXT NOT NULL,
                 UNIQUE (repository, pr_number, head_sha, manifest_digest, completed_at)
             )
-            """
-        )
+            """)
         self._connection.execute(
             "CREATE INDEX IF NOT EXISTS ci_receipt_lookup ON ci_audit_receipts "
             "(repository, pr_number, head_sha, manifest_digest, status, completed_at)"
         )
-        self._connection.execute(
-            """
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS merge_attempts (
                 repository TEXT NOT NULL,
                 pr_number INTEGER NOT NULL,
@@ -108,10 +134,8 @@ class FeedbackLedger:
                 last_error TEXT,
                 PRIMARY KEY (repository, pr_number, head_sha)
             )
-            """
-        )
-        self._connection.execute(
-            """
+            """)
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS deployment_receipts (
                 receipt_id TEXT PRIMARY KEY,
                 repository TEXT NOT NULL,
@@ -121,8 +145,7 @@ class FeedbackLedger:
                 completed_at TEXT NOT NULL,
                 receipt_json TEXT NOT NULL
             )
-            """
-        )
+            """)
 
     def _migrate_lease_columns(self) -> None:
         columns = {
@@ -164,6 +187,95 @@ class FeedbackLedger:
         else:
             self._connection.execute("COMMIT")
 
+    def observe_maintenance_head(
+        self,
+        repository: str,
+        base_branch: str,
+        head_sha: str,
+        *,
+        observed_at: datetime,
+    ) -> datetime:
+        """Return the first time the current exact base head was observed."""
+
+        observed_at = _aware_utc(observed_at, "observed_at")
+        identity = tuple(value.strip() for value in (repository, base_branch, head_sha))
+        if not all(identity):
+            raise ValueError("maintenance head identity must be non-empty")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT head_sha, first_observed_at FROM maintenance_heads "
+                "WHERE repository = ? AND base_branch = ?",
+                identity[:2],
+            ).fetchone()
+            if row is not None and row[0] == identity[2]:
+                return datetime.fromisoformat(row[1])
+            self._connection.execute(
+                "INSERT INTO maintenance_heads "
+                "(repository, base_branch, head_sha, first_observed_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(repository, base_branch) DO UPDATE SET "
+                "head_sha = excluded.head_sha, first_observed_at = excluded.first_observed_at",
+                (*identity, observed_at.isoformat()),
+            )
+        return observed_at
+
+    def record_maintenance_receipt(
+        self,
+        *,
+        repository: str,
+        head_sha: str,
+        lane: str,
+        status: str,
+        summary: str,
+        completed_at: datetime,
+    ) -> None:
+        """Record one immutable, exact-head lane outcome; identical retries are idempotent."""
+
+        completed_at = _aware_utc(completed_at, "completed_at")
+        values = tuple(
+            value.strip() for value in (repository, head_sha, lane, status, summary)
+        )
+        if not all(values[:4]) or status not in {"passed", "failed"}:
+            raise ValueError("maintenance receipt is invalid")
+        if len(summary) > 4000:
+            raise ValueError("maintenance receipt summary is too long")
+        row_values = (*values, completed_at.isoformat())
+        with self._transaction():
+            existing = self._connection.execute(
+                "SELECT repository, head_sha, lane, status, summary, completed_at "
+                "FROM maintenance_receipts WHERE repository = ? AND head_sha = ? AND lane = ?",
+                values[:3],
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != row_values:
+                    raise LedgerStateError("maintenance receipt is immutable")
+                return
+            self._connection.execute(
+                "INSERT INTO maintenance_receipts "
+                "(repository, head_sha, lane, status, summary, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                row_values,
+            )
+
+    def maintenance_receipts(
+        self, repository: str, head_sha: str
+    ) -> dict[str, MaintenanceReceipt]:
+        rows = self._connection.execute(
+            "SELECT lane, status, summary, completed_at FROM maintenance_receipts "
+            "WHERE repository = ? AND head_sha = ?",
+            (repository, head_sha),
+        )
+        return {
+            row[0]: MaintenanceReceipt(
+                repository=repository,
+                head_sha=head_sha,
+                lane=row[0],
+                status=row[1],
+                summary=row[2],
+                completed_at=datetime.fromisoformat(row[3]),
+            )
+            for row in rows
+        }
+
     def claim(
         self,
         receipt: FeedbackReceipt,
@@ -179,7 +291,8 @@ class FeedbackLedger:
         stale_before = _aware_utc(stale_before, "stale_before")
         with self._transaction():
             serialized_repair = receipt.feedback_kind != "pr_local_ci" and not (
-                receipt.feedback_kind == "pr_repair" and receipt.feedback_id.startswith("report:")
+                receipt.feedback_kind == "pr_repair"
+                and receipt.feedback_id.startswith("report:")
             )
             if serialized_repair:
                 active_repair = self._connection.execute(
@@ -217,7 +330,10 @@ class FeedbackLedger:
             stale = stored_claimed_at is None
             if stored_claimed_at is not None:
                 try:
-                    stale = datetime.fromisoformat(stored_claimed_at).astimezone(UTC) <= stale_before
+                    stale = (
+                        datetime.fromisoformat(stored_claimed_at).astimezone(UTC)
+                        <= stale_before
+                    )
                 except (TypeError, ValueError):
                     stale = True
             if status != "claimed" or not stale:
@@ -261,7 +377,10 @@ class FeedbackLedger:
         if (
             not isinstance(resolved_head_sha, str)
             or len(resolved_head_sha) != 40
-            or any(character not in "0123456789abcdefABCDEF" for character in resolved_head_sha)
+            or any(
+                character not in "0123456789abcdefABCDEF"
+                for character in resolved_head_sha
+            )
         ):
             raise ValueError("resolved_head_sha must be a full hexadecimal SHA")
         actioned_at = _aware_utc(actioned_at, "actioned_at")
@@ -304,9 +423,13 @@ class FeedbackLedger:
                 "AND head_sha = ? AND status = 'failed'",
                 (owner, claimed_at.isoformat(), version, *receipt.key),
             )
-            return ClaimLease(owner, claimed_at, version) if result.rowcount == 1 else None
+            return (
+                ClaimLease(owner, claimed_at, version) if result.rowcount == 1 else None
+            )
 
-    def finalize(self, receipt: FeedbackReceipt, task_id: str, lease: ClaimLease) -> None:
+    def finalize(
+        self, receipt: FeedbackReceipt, task_id: str, lease: ClaimLease
+    ) -> None:
         task_id = task_id.strip() if isinstance(task_id, str) else ""
         if not task_id:
             raise ValueError("task_id must be a non-empty string")
@@ -362,7 +485,13 @@ class FeedbackLedger:
                 "UPDATE feedback_receipts SET workspace_path = ?, expected_sha = ? "
                 "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? AND feedback_id = ? "
                 "AND head_sha = ? AND status = 'claimed' AND claim_owner = ? AND lease_version = ?",
-                (str(workspace), expected_sha, *receipt.key, lease.owner, lease.version),
+                (
+                    str(workspace),
+                    expected_sha,
+                    *receipt.key,
+                    lease.owner,
+                    lease.version,
+                ),
             )
             if result.rowcount != 1:
                 raise LedgerStateError("receipt lease is not held")
@@ -403,7 +532,9 @@ class FeedbackLedger:
 
         if not isinstance(receipt, CIAuditReceipt):
             raise TypeError("receipt must be a CIAuditReceipt")
-        payload = json.dumps(receipt.to_payload(), sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(
+            receipt.to_payload(), sort_keys=True, separators=(",", ":")
+        )
         if len(payload.encode("utf-8")) > 1_000_000:
             raise ValueError("CI receipt evidence exceeds its bounded limit")
         with self._transaction():
@@ -634,7 +765,9 @@ class FeedbackLedger:
 
         if not isinstance(receipt, DeploymentReceipt):
             raise TypeError("receipt must be a DeploymentReceipt")
-        payload = json.dumps(receipt.to_payload(), sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(
+            receipt.to_payload(), sort_keys=True, separators=(",", ":")
+        )
         with self._transaction():
             self._connection.execute(
                 "INSERT INTO deployment_receipts "
@@ -651,7 +784,9 @@ class FeedbackLedger:
                 ),
             )
 
-    def latest_deployment_receipt(self, repository: str, pr_number: int) -> object | None:
+    def latest_deployment_receipt(
+        self, repository: str, pr_number: int
+    ) -> object | None:
         from .post_merge import DeploymentReceipt
 
         row = self._connection.execute(
@@ -671,6 +806,10 @@ class FeedbackLedger:
 
 
 def _aware_utc(value: datetime, field: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValueError(f"{field} must be timezone-aware")
     return value.astimezone(UTC)

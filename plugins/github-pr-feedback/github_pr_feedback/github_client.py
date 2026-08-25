@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from .policy import PullRequest, Reviewer
 
@@ -130,11 +131,59 @@ class GitHubClient:
                 "number,state,headRepository,author,headRefName,headRefOid",
             ]
         )
-        if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
-            raise GitHubClientError("GitHub pull request list was not a list of objects")
+        if not isinstance(payload, list) or any(
+            not isinstance(row, dict) for row in payload
+        ):
+            raise GitHubClientError(
+                "GitHub pull request list was not a list of objects"
+            )
         if len(payload) >= MAX_DISCOVERED_PULL_REQUESTS:
-            raise GitHubClientError("GitHub owned pull request query reached its coverage cap")
+            raise GitHubClientError(
+                "GitHub owned pull request query reached its coverage cap"
+            )
         return tuple(_listed_pull_request(repository, row) for row in payload)
+
+    def list_all_open_pull_requests(self, repository: str) -> tuple[PullRequest, ...]:
+        """Read every open PR so maintenance never races an unmerged change."""
+
+        repository = _validated_repository(repository)
+        payload = self._json(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repository,
+                "--state",
+                "open",
+                "--limit",
+                "100",
+                "--json",
+                "number,state,headRepository,author,headRefName,headRefOid",
+            ]
+        )
+        if not isinstance(payload, list) or any(
+            not isinstance(row, dict) for row in payload
+        ):
+            raise GitHubClientError(
+                "GitHub pull request list was not a list of objects"
+            )
+        if len(payload) >= MAX_DISCOVERED_PULL_REQUESTS:
+            raise GitHubClientError(
+                "GitHub pull request query reached its coverage cap"
+            )
+        return tuple(_listed_pull_request(repository, row) for row in payload)
+
+    def get_branch_head(self, repository: str, branch: str) -> str:
+        repository = _validated_repository(repository)
+        branch = _required_string(branch)
+        payload = self._read_object(
+            f"repos/{repository}/branches/{quote(branch, safe='')}"
+        )
+        try:
+            return _validated_sha(payload["commit"]["sha"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise GitHubClientError("GitHub branch head was unavailable") from error
 
     def get_pull_request(self, repository: str, number: int) -> PullRequest:
         row = self._read_object(f"repos/{repository}/pulls/{number}")
@@ -142,7 +191,9 @@ class GitHubClient:
 
     def actions_enabled(self, repository: str) -> bool:
         payload = self._json(["gh", "api", f"repos/{repository}/actions/permissions"])
-        if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("enabled"), bool
+        ):
             raise GitHubClientError("GitHub Actions permissions had an invalid shape")
         return payload["enabled"]
 
@@ -157,7 +208,9 @@ class GitHubClient:
         payload = self._read_object(f"repos/{_validated_repository(repository)}")
         fields = ("allow_squash_merge", "allow_rebase_merge", "allow_merge_commit")
         if any(not isinstance(payload.get(field), bool) for field in fields):
-            raise GitHubClientError("GitHub repository merge policy had an invalid shape")
+            raise GitHubClientError(
+                "GitHub repository merge policy had an invalid shape"
+            )
         return RepositoryMergePolicy(
             squash=payload["allow_squash_merge"],
             rebase=payload["allow_rebase_merge"],
@@ -184,7 +237,10 @@ class GitHubClient:
                 or not isinstance(merge_state_status, str)
                 or merge_state_status.casefold() == "unknown"
                 or not isinstance(merged, bool)
-                or (merge_commit_oid is not None and not _SHA.fullmatch(merge_commit_oid))
+                or (
+                    merge_commit_oid is not None
+                    and not _SHA.fullmatch(merge_commit_oid)
+                )
             ):
                 raise TypeError("merge state field has invalid shape")
             pull = PullRequestMergeState(
@@ -204,7 +260,9 @@ class GitHubClient:
                 merge_commit_oid=merge_commit_oid,
             )
         except (KeyError, TypeError, ValueError) as error:
-            raise GitHubClientError("GitHub pull request merge state was unavailable") from error
+            raise GitHubClientError(
+                "GitHub pull request merge state was unavailable"
+            ) from error
         if pull.number != number:
             raise GitHubClientError("GitHub pull request merge state identity changed")
         return pull
@@ -240,9 +298,17 @@ class GitHubClient:
                 "REVIEW_REQUIRED",
             }:
                 raise TypeError("review decision is unknown")
-            if not isinstance(nodes, list) or not isinstance(has_next_page, bool) or has_next_page:
+            if (
+                not isinstance(nodes, list)
+                or not isinstance(has_next_page, bool)
+                or has_next_page
+            ):
                 raise TypeError("review thread coverage is incomplete")
-            if any(not isinstance(node, dict) or not isinstance(node.get("isResolved"), bool) for node in nodes):
+            if any(
+                not isinstance(node, dict)
+                or not isinstance(node.get("isResolved"), bool)
+                for node in nodes
+            ):
                 raise TypeError("review thread is malformed")
         except (KeyError, TypeError) as error:
             raise GitHubClientError("GitHub review state was unavailable") from error
@@ -335,12 +401,24 @@ class GitHubClient:
         )
 
     def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
-        issue_comments = self._read_pages(f"repos/{repository}/issues/{number}/comments?per_page=100")
-        review_comments = self._read_pages(f"repos/{repository}/pulls/{number}/comments?per_page=100")
-        reviews = self._read_pages(f"repos/{repository}/pulls/{number}/reviews?per_page=100")
+        issue_comments = self._read_pages(
+            f"repos/{repository}/issues/{number}/comments?per_page=100"
+        )
+        review_comments = self._read_pages(
+            f"repos/{repository}/pulls/{number}/comments?per_page=100"
+        )
+        reviews = self._read_pages(
+            f"repos/{repository}/pulls/{number}/reviews?per_page=100"
+        )
         feedback = [
-            *(_feedback("issue_comment", row, timestamp_key="created_at") for row in issue_comments),
-            *(_feedback("review_comment", row, timestamp_key="created_at") for row in review_comments),
+            *(
+                _feedback("issue_comment", row, timestamp_key="created_at")
+                for row in issue_comments
+            ),
+            *(
+                _feedback("review_comment", row, timestamp_key="created_at")
+                for row in review_comments
+            ),
         ]
         feedback.extend(
             _feedback("review", row, timestamp_key="submitted_at")
@@ -352,7 +430,9 @@ class GitHubClient:
 
     def _read_pages(self, endpoint: str) -> tuple[dict[str, Any], ...]:
         payload = self._json(["gh", "api", "--paginate", "--slurp", endpoint])
-        if not isinstance(payload, list) or any(not isinstance(page, list) for page in payload):
+        if not isinstance(payload, list) or any(
+            not isinstance(page, list) for page in payload
+        ):
             raise GitHubClientError("GitHub paginated response was not a list of pages")
         rows = tuple(row for page in payload for row in page)
         if any(not isinstance(row, dict) for row in rows):
@@ -386,7 +466,9 @@ def _pull_request(row: dict[str, Any]) -> PullRequest:
             head_sha=head["sha"],
         )
     except (KeyError, TypeError, ValueError) as error:
-        raise GitHubClientError("GitHub pull request has missing required fields") from error
+        raise GitHubClientError(
+            "GitHub pull request has missing required fields"
+        ) from error
 
 
 def _listed_pull_request(base_repository: str, row: dict[str, Any]) -> PullRequest:
@@ -401,7 +483,9 @@ def _listed_pull_request(base_repository: str, row: dict[str, Any]) -> PullReque
             head_sha=row["headRefOid"],
         )
     except (KeyError, TypeError, ValueError) as error:
-        raise GitHubClientError("GitHub pull request has missing required fields") from error
+        raise GitHubClientError(
+            "GitHub pull request has missing required fields"
+        ) from error
 
 
 def _feedback(kind: str, row: dict[str, Any], *, timestamp_key: str) -> Feedback:
@@ -421,7 +505,9 @@ def _feedback(kind: str, row: dict[str, Any], *, timestamp_key: str) -> Feedback
             is_bot=user.get("type") == "Bot",
         )
     except (KeyError, TypeError, ValueError) as error:
-        raise GitHubClientError("GitHub feedback has missing required fields") from error
+        raise GitHubClientError(
+            "GitHub feedback has missing required fields"
+        ) from error
 
 
 def _timestamp(value: object) -> datetime:
