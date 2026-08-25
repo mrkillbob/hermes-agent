@@ -531,7 +531,7 @@ def _ci_audit_comment(receipt: CIAuditReceipt) -> str:
         for command in receipt.commands
     )
     body = (
-        f"Local CI audit completed for exact head `{receipt.identity.head_sha}` "
+        f"Addressed local CI audit for exact head `{receipt.identity.head_sha}` "
         f"(base `{receipt.identity.base_sha}`). Commands: {commands}. "
         f"Authoritative receipt: `{receipt.receipt_id}`. "
         + (

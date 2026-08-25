@@ -590,7 +590,8 @@ class ScanController:
         return None
 
     def _typed_ci_assignee(self, receipt: FeedbackReceipt, body: str) -> str | None:
-        if "local pr ci audit" not in body.casefold():
+        normalized = body.casefold()
+        if "local pr ci audit" not in normalized and "local ci audit" not in normalized:
             return None
         audit = self._ledger.latest_ci_receipt_for_head(
             receipt.repository, receipt.pr_number, receipt.head_sha
