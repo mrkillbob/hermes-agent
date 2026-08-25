@@ -727,6 +727,15 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
                 ),
             ),
             feedback(
+                "static-worker-completion-receipt",
+                reviewer="owner",
+                body=(
+                    "## Static lane fix — verified\n\nFixed the reported static failures.\n\n"
+                    "**Commit:** `abc123`\n\n**Focused verification:** flake8 passed.\n\n"
+                    "**Files changed:** 1 file."
+                ),
+            ),
+            feedback(
                 "still-actionable",
                 reviewer="owner",
                 body="Fixed the first case, but one blocker remains and still needs work.",
@@ -739,7 +748,7 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
     result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
 
     assert result.created == 1
-    assert result.skipped["self_resolution_receipt"] == 3
+    assert result.skipped["self_resolution_receipt"] == 4
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["still-actionable"]
     ledger.close()
 
