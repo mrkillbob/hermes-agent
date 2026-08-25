@@ -5435,10 +5435,57 @@ def complete_task(
         if not _parents_satisfied(conn, task_id):
             return False
         prior = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?",
+            "SELECT status, current_run_id FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         prior_status = prior["status"] if prior else None
+        review_approval = prior_status == "review"
+        if (
+            prior_status == "running"
+            and prior
+            and prior["current_run_id"] is not None
+        ):
+            claim_event = conn.execute(
+                "SELECT payload FROM task_events "
+                "WHERE task_id = ? AND run_id = ? AND kind = 'claimed' "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id, int(prior["current_run_id"])),
+            ).fetchone()
+            try:
+                claim_payload = (
+                    json.loads(claim_event["payload"])
+                    if claim_event and claim_event["payload"]
+                    else {}
+                )
+            except (json.JSONDecodeError, TypeError):
+                claim_payload = {}
+            review_approval = (
+                isinstance(claim_payload, dict)
+                and claim_payload.get("source_status") == "review"
+            )
+        recognition_recipient: Optional[str] = None
+        if review_approval:
+            review_event = conn.execute(
+                "SELECT payload FROM task_events "
+                "WHERE task_id = ? AND kind = 'review_requested' "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            try:
+                review_payload = (
+                    json.loads(review_event["payload"])
+                    if review_event and review_event["payload"]
+                    else {}
+                )
+            except (json.JSONDecodeError, TypeError):
+                review_payload = {}
+            implementer = (
+                review_payload.get("implementer")
+                if isinstance(review_payload, dict)
+                else None
+            )
+            if isinstance(implementer, str) and implementer.strip():
+                recognition_recipient = implementer.strip()
         if expected_run_id is None:
             cur = conn.execute(
                 """
@@ -5549,6 +5596,21 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
+        if recognition_recipient is not None:
+            _append_event(
+                conn,
+                task_id,
+                "private_recognition",
+                {
+                    "basis": "independent_review_approved",
+                    "message": (
+                        "Strong work: your work passed independent review. "
+                        "Carry forward the same evidence-first, tightly scoped approach."
+                    ),
+                    "recipient_profile": recognition_recipient,
+                },
+                run_id=run_id,
+            )
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
@@ -11208,6 +11270,31 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     # most recent 5 completed runs, excluding this task so the retry
     # section above isn't duplicated. Safe on assignee=None (skipped).
     if task.assignee:
+        recognition_rows = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE kind = 'private_recognition' "
+            "ORDER BY id DESC LIMIT 500"
+        ).fetchall()
+        for recognition_row in recognition_rows:
+            try:
+                recognition = json.loads(recognition_row["payload"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(recognition, dict):
+                continue
+            if recognition.get("recipient_profile") != task.assignee:
+                continue
+            message = recognition.get("message")
+            if isinstance(message, str) and message.strip():
+                lines.append("## Private recognition")
+                lines.append(_cap(message))
+                lines.append(
+                    "_This is encouragement only. Re-verify the current task and keep all "
+                    "safety, scope, and acceptance gates unchanged._"
+                )
+                lines.append("")
+            break
+
         role_rows = conn.execute(
             "SELECT t.id, t.title, r.summary, r.ended_at "
             "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
