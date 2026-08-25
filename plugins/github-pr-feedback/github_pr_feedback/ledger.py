@@ -110,6 +110,19 @@ class FeedbackLedger:
             )
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deployment_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                repository TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                merge_commit_oid TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+                completed_at TEXT NOT NULL,
+                receipt_json TEXT NOT NULL
+            )
+            """
+        )
 
     def _migrate_lease_columns(self) -> None:
         columns = {
@@ -512,6 +525,43 @@ class FeedbackLedger:
             if status in counts:
                 counts[status] = int(count)
         return counts
+
+    def record_deployment_receipt(self, receipt: object) -> None:
+        from .post_merge import DeploymentReceipt
+
+        if not isinstance(receipt, DeploymentReceipt):
+            raise TypeError("receipt must be a DeploymentReceipt")
+        payload = json.dumps(receipt.to_payload(), sort_keys=True, separators=(",", ":"))
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO deployment_receipts "
+                "(receipt_id, repository, pr_number, merge_commit_oid, status, completed_at, "
+                "receipt_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    receipt.receipt_id,
+                    receipt.repository,
+                    receipt.pr_number,
+                    receipt.merge_commit_oid,
+                    receipt.status,
+                    receipt.completed_at.isoformat(),
+                    payload,
+                ),
+            )
+
+    def latest_deployment_receipt(self, repository: str, pr_number: int) -> object | None:
+        from .post_merge import DeploymentReceipt
+
+        row = self._connection.execute(
+            "SELECT receipt_json FROM deployment_receipts WHERE repository = ? AND pr_number = ? "
+            "ORDER BY completed_at DESC LIMIT 1",
+            (repository, pr_number),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return DeploymentReceipt.from_payload(json.loads(row[0]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise LedgerStateError("stored deployment receipt is invalid") from error
 
     def close(self) -> None:
         self._connection.close()
