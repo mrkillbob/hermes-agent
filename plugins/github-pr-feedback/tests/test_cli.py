@@ -629,7 +629,7 @@ def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
     seen: list[FeedbackReceipt] = []
 
     class RevalidatingController:
-        def __init__(self, *_args: object) -> None:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def retry_failed(self, receipt: FeedbackReceipt) -> ScanResult:

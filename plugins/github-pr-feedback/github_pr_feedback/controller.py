@@ -258,12 +258,19 @@ class ScanController:
         claim_owner: str | None = None,
         clock: Callable[[], datetime] | None = None,
         claim_lease: timedelta = DEFAULT_CLAIM_LEASE,
+        control_home: Path | None = None,
     ) -> None:
         self._policy = policy
         self._ledger = ledger
         self._github = github
         self._kanban = kanban
         self._local_git = local_git or LocalGitRepository(ledger.path.parent / "worktrees")
+        default_control_home = (
+            ledger.path.parent.parent
+            if ledger.path.parent.name == "github-pr-feedback"
+            else ledger.path.parent
+        )
+        self._control_home = Path(control_home or default_control_home).expanduser().resolve()
         self._claim_owner = (claim_owner or f"scanner-{uuid4().hex}").strip()
         if not self._claim_owner:
             raise ValueError("claim_owner must be a non-empty string")
@@ -434,6 +441,7 @@ class ScanController:
                     self._policy,
                     receipt,
                     prepared,
+                    control_home=self._control_home,
                     post_results=audit_policy.post_results,
                 )
             )
@@ -548,7 +556,13 @@ class ScanController:
                 prepared.expected_sha,
             )
             task_id = self._kanban.create_or_get_task(
-                _task(self._policy, receipt, prepared, feedback.body)
+                _task(
+                    self._policy,
+                    receipt,
+                    prepared,
+                    feedback.body,
+                    control_home=self._control_home,
+                )
             )
             self._ledger.finalize(receipt, task_id, lease)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
@@ -604,6 +618,8 @@ def _task(
     receipt: FeedbackReceipt,
     prepared: PreparedWorktree,
     body: str,
+    *,
+    control_home: Path,
 ) -> KanbanTask:
     """Construct a scope-bounded task; feedback remains evidence, never instructions."""
 
@@ -624,8 +640,9 @@ def _task(
         "PR reply with the commit and test evidence. Before any GitHub write, re-read the canonical PR "
         "and require that its head still equals the expected receipt SHA; otherwise stop fail-closed. "
         "Do not merge; merge remains controlled by deterministic safety gates. After the verified "
-        "push and factual reply, acknowledge this exact feedback with `hermes github-pr-feedback "
-        f"complete-feedback --repository {shlex.quote(receipt.repository)} --pr-number "
+        "push and factual reply, acknowledge this exact feedback with `"
+        f"{_governed_command_prefix(control_home)} complete-feedback "
+        f"--repository {shlex.quote(receipt.repository)} --pr-number "
         f"{receipt.pr_number} --feedback-kind {shlex.quote(receipt.feedback_kind)} --feedback-id "
         f"{shlex.quote(receipt.feedback_id)} --receipt-head-sha {shlex.quote(receipt.head_sha)} "
         "--resolved-head-sha <full literal resolved head SHA>`. Never use shell substitution for "
@@ -659,6 +676,7 @@ def _local_ci_task(
     receipt: FeedbackReceipt,
     prepared: PreparedWorktree,
     *,
+    control_home: Path,
     post_results: bool,
 ) -> KanbanTask:
     """Build a read-only, exact-head audit task for a PR without GitHub CI."""
@@ -677,7 +695,8 @@ def _local_ci_task(
         "Do not push, approve, or merge. Bootstrap only the worktree-local ignored environment if "
         "needed. Do not manually duplicate the CI lane commands. Create the authoritative typed "
         "receipt by running exactly: "
-        f"hermes github-pr-feedback audit-pr --repository {shlex.quote(receipt.repository)} "
+        f"{_governed_command_prefix(control_home)} audit-pr --repository "
+        f"{shlex.quote(receipt.repository)} "
         f"--pr-number {receipt.pr_number} --head-sha {shlex.quote(receipt.head_sha)} "
         f"--worktree {shlex.quote(str(prepared.path))}. The deterministic command runs the "
         "repository-owned CI governance check, scripts/run_hygiene_lane.py, "
@@ -710,6 +729,12 @@ def _local_ci_task(
         initial_status="running",
         max_retries=3,
     )
+
+
+def _governed_command_prefix(control_home: Path) -> str:
+    """Pin worker callbacks to the scanner's shared control plane."""
+
+    return f"env HERMES_HOME={shlex.quote(str(control_home))} hermes github-pr-feedback"
 
 
 def _receipt_idempotency_key(receipt: FeedbackReceipt) -> str:

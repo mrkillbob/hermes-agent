@@ -229,7 +229,15 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     kanban = RecordingKanban()
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
 
-    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+    control_home = tmp_path / "control home"
+    result = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+        control_home=control_home,
+    ).scan()
 
     assert result.created == 1
     task = kanban.tasks[0]
@@ -240,6 +248,9 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     assert "Do not merge" in task.instructions
     assert "still equals the expected receipt SHA" in task.instructions
     assert "complete-feedback" in task.instructions
+    assert f"env HERMES_HOME='{control_home}' hermes github-pr-feedback complete-feedback" in (
+        task.instructions
+    )
     assert "full literal resolved head SHA" in task.instructions
     ledger.close()
 
@@ -258,8 +269,23 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     kanban = RecordingKanban()
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
 
-    first = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
-    second = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+    control_home = tmp_path / "control home"
+    first = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+        control_home=control_home,
+    ).scan()
+    second = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+        control_home=control_home,
+    ).scan()
 
     assert first.created == 1
     assert second.created == 0
@@ -284,6 +310,9 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert "scripts/run_static_lane.py" in task.instructions
     assert "scripts/run_test_lane.py" in task.instructions
     assert "hermes github-pr-feedback audit-pr" in task.instructions
+    assert f"env HERMES_HOME='{control_home}' hermes github-pr-feedback audit-pr" in (
+        task.instructions
+    )
     assert f"--head-sha {sha}" in task.instructions
     ledger.close()
 

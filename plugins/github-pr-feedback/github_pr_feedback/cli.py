@@ -410,7 +410,13 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
 
 
 def _controller(policy: PluginPolicy, ledger: FeedbackLedger) -> ScanController:
-    return ScanController(policy, ledger, GitHubClient(), KanbanSubprocessClient())
+    return ScanController(
+        policy,
+        ledger,
+        GitHubClient(),
+        KanbanSubprocessClient(),
+        control_home=get_default_hermes_root(),
+    )
 
 
 def _scan_payload(result) -> dict[str, object]:
