@@ -441,6 +441,9 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
         print(json.dumps({"status": "feedback_action_not_recorded"}, sort_keys=True))
         return_code = 1
     else:
+        local_ci_status = _controller(policy, ledger).dispatch_local_ci_after_feedback(
+            current
+        )
         print(
             json.dumps(
                 {
@@ -450,6 +453,7 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
                     "feedback_kind": receipt.feedback_kind,
                     "feedback_id": receipt.feedback_id,
                     "resolved_head_sha": str(args.resolved_head_sha).casefold(),
+                    "local_ci_status": local_ci_status,
                 },
                 sort_keys=True,
             )

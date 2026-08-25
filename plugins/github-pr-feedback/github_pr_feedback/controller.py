@@ -418,6 +418,48 @@ class ScanController:
                             skipped[audit_error] += 1
         return _scan_result(created, skipped)
 
+    def dispatch_local_ci_after_feedback(self, current: PullRequest) -> str:
+        """Immediately hand an actioned feedback head to the local-CI lane."""
+        audit_policy = self._policy.local_ci_audit
+        if audit_policy is None or not audit_policy.applies_to(current.base_repository):
+            return "local_ci_disabled"
+        try:
+            if self._github.actions_enabled(current.base_repository):
+                return "github_ci_enabled"
+            feedback_items = self._github.list_feedback(
+                current.base_repository, current.number
+            )
+        except Exception:  # noqa: BLE001 - uncertain readiness must fail closed.
+            return "github_error"
+        admission = self._policy.admit_pull_request(current)
+        if not admission.admitted or admission.target is None:
+            return admission.reason or "not_admitted"
+        for feedback in feedback_items:
+            if self._feedback_reason(
+                feedback, owner_login=admission.target.owner_login
+            ) is not None:
+                continue
+            receipt = FeedbackReceipt(
+                repository=current.base_repository,
+                pr_number=current.number,
+                feedback_kind=feedback.kind,
+                feedback_id=feedback.feedback_id,
+                head_sha=current.head_sha,
+            )
+            if _ci_receipt_feedback_reason(self._ledger, receipt, feedback.body) is not None:
+                continue
+            feedback_admission = self._policy.admit(
+                current,
+                feedback.reviewer,
+                receipt,
+                is_bot=feedback.is_bot,
+            )
+            if feedback_admission.admitted and not self._ledger.was_actioned_on_any_head(
+                receipt
+            ):
+                return "feedback_pending"
+        return self._dispatch_local_ci(current) or "scheduled"
+
     def _dispatch_local_ci(self, listed: PullRequest) -> str | None:
         audit_policy = self._policy.local_ci_audit
         if audit_policy is None:

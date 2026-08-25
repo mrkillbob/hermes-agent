@@ -572,6 +572,48 @@ def test_local_ci_runs_after_all_admitted_feedback_is_actioned(tmp_path: Path) -
     ledger.close()
 
 
+def test_completed_feedback_immediately_schedules_exact_head_local_ci(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        auto_dispatch=True,
+        local_ci_audit=True,
+    )
+    item = feedback("fixed")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    receipt = FeedbackReceipt("acme/widgets", 17, item.kind, item.feedback_id, sha)
+    lease = ledger.claim(
+        receipt,
+        owner="feedback-worker",
+        claimed_at=datetime(2026, 8, 24, 1, 0, tzinfo=UTC),
+        stale_before=datetime(2026, 8, 24, 0, 55, tzinfo=UTC),
+    )
+    assert lease is not None
+    ledger.finalize(receipt, "feedback-task", lease)
+    ledger.mark_feedback_actioned(
+        receipt,
+        resolved_head_sha=sha,
+        actioned_at=datetime(2026, 8, 24, 2, 0, tzinfo=UTC),
+    )
+    kanban = RecordingKanban()
+    github = FakeGitHub(admitted_pull_request(sha), (item,))
+    github.actions_are_enabled = False
+    controller = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+    )
+
+    status = controller.dispatch_local_ci_after_feedback(admitted_pull_request(sha))
+
+    assert status == "scheduled"
+    assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
+    ledger.close()
+
+
 def test_duplicate_local_ci_receipts_do_not_starve_a_new_head_after_comment_fixes(
     tmp_path: Path,
 ) -> None:
