@@ -95,6 +95,11 @@ class GitHub:
         return CheckState(False, True, 0)
 
 
+class GitHubWithoutChecks(GitHub):
+    def get_check_state(self, repository: str, head_sha: str):
+        raise RuntimeError("check state unavailable")
+
+
 class LocalGit:
     def prepare_receipt_worktree(self, path: Path, receipt):
         return PreparedWorktree(path / "exact", "hermes/repair", receipt.head_sha)
@@ -149,6 +154,28 @@ def test_report_only_repair_scan_creates_a_blocked_observation(tmp_path: Path) -
     assert result.created == 1
     assert kanban.tasks[0].initial_status == "blocked"
     assert "Report only" in kanban.tasks[0].instructions
+    ledger.close()
+
+
+def test_unavailable_checks_do_not_hide_a_confirmed_merge_conflict(
+    tmp_path: Path,
+) -> None:
+    configured = policy(tmp_path)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+
+    result = RepairController(
+        configured,
+        ledger,
+        GitHubWithoutChecks(),
+        kanban,
+        LocalGit(),
+    ).scan()
+
+    assert result.created == 1
+    assert result.skipped["check_state_unavailable"] == 1
+    assert result.degraded is False
+    assert "merge_conflict" in kanban.tasks[0].evidence["triggers"]
     ledger.close()
 
 

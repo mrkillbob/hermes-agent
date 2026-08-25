@@ -80,11 +80,15 @@ class RepairController:
                 try:
                     pull = self._github.get_merge_state(repository, listed.number)
                     review = self._github.get_review_state(repository, listed.number)
-                    checks = self._github.get_check_state(repository, pull.head_sha)
                 except Exception:
                     skipped["github_state_unavailable"] += 1
                     degraded = True
                     continue
+                try:
+                    checks = self._github.get_check_state(repository, pull.head_sha)
+                except Exception:
+                    checks = CheckState(False, True, 0)
+                    skipped["check_state_unavailable"] += 1
                 if pull.head_sha != listed.head_sha:
                     skipped["head_changed"] += 1
                     continue
