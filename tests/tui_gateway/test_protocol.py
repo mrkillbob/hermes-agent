@@ -683,6 +683,41 @@ def test_approval_respond_falls_back_to_stored_session_id(server, monkeypatch):
     ]
 
 
+def test_approval_respond_finds_exact_request_after_live_session_record_is_gone(server):
+    """A still-blocked approval remains answerable after its UI runtime is re-minted."""
+    from tools import approval
+
+    session_key = "orphaned-agent-session"
+    request_id = "req-orphaned-approval"
+    entry = approval._ApprovalEntry(
+        {
+            "command": "git branch -D stale-branch",
+            "description": "force delete a local branch",
+            "request_id": request_id,
+        }
+    )
+    approval._gateway_queues[session_key] = [entry]
+    try:
+        response = server.handle_request(
+            {
+                "id": "r-orphaned-approval",
+                "method": "approval.respond",
+                "params": {
+                    "session_id": "gone-ui-session",
+                    "request_id": request_id,
+                    "choice": "once",
+                },
+            }
+        )
+
+        assert response["result"] == {"resolved": 1}
+        assert entry.result == "once"
+        assert entry.event.is_set()
+        assert approval.list_gateway_approvals(session_key) == []
+    finally:
+        approval._gateway_queues.pop(session_key, None)
+
+
 def test_approval_respond_4001_when_nothing_resolves(server, monkeypatch):
     from tools import approval
 
