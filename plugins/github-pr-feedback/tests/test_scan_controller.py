@@ -718,6 +718,14 @@ def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
                 ),
             ),
             feedback(
+                "confirmed-no-code-change",
+                reviewer="owner",
+                body=(
+                    "Confirmed resolved at the exact PR head. No further code change "
+                    "required; no new commit pushed."
+                ),
+            ),
+            feedback(
                 "stable-tip-separate-card",
                 reviewer="owner",
                 body=(
@@ -744,7 +752,7 @@ def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
     result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
 
     assert result.created == 1
-    assert result.skipped["self_resolution_receipt"] == 3
+    assert result.skipped["self_resolution_receipt"] == 4
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["pr-regression"]
     ledger.close()
 
