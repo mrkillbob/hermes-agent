@@ -672,6 +672,12 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
         return False
     if body.startswith(_SELF_RESOLUTION_PREFIXES):
         return True
+    if (
+        body.startswith("resolved ")
+        and "verification:" in body
+        and "no merge performed" in body
+    ):
+        return True
     if any(
         marker in body
         for marker in (
