@@ -8288,9 +8288,7 @@ def _terminate_reclaimed_worker(
         return info
     info["host_local"] = True
 
-    kill = signal_fn if signal_fn is not None else (
-        os.kill if hasattr(os, "kill") else None
-    )
+    kill = signal_fn if signal_fn is not None else _worker_tree_signal
     if kill is None:
         return info
 
@@ -8324,6 +8322,31 @@ def _terminate_reclaimed_worker(
 
     info["terminated"] = not _pid_alive(pid)
     return info
+
+
+def _worker_tree_signal(pid: int, sig: int) -> None:
+    """Signal a dispatcher-owned worker and its descendants.
+
+    Kanban workers are spawned with ``start_new_session=True``, so on POSIX
+    the worker PID is also the process-group ID. Signalling only the leader
+    leaves terminal commands and provider children running after a reclaim or
+    timeout. Use the group only when ownership is provable and never target
+    the gateway's own group; otherwise retain the per-PID fallback.
+    """
+    if (
+        os.name != "nt"
+        and hasattr(os, "killpg")
+        and hasattr(os, "getpgid")
+        and hasattr(os, "getpgrp")
+    ):
+        try:
+            pgid = os.getpgid(int(pid))
+            if pgid == int(pid) and pgid != os.getpgrp():
+                os.killpg(pgid, sig)
+                return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    os.kill(int(pid), sig)
 
 
 def _worker_survived_termination(termination: dict) -> bool:
@@ -8483,9 +8506,7 @@ def enforce_max_runtime(
         # want a cleaner shutdown can install their own SIGTERM handler
         # before the grace expires.
         killed = False
-        kill = signal_fn if signal_fn is not None else (
-            os.kill if hasattr(os, "kill") else None
-        )
+        kill = signal_fn if signal_fn is not None else _worker_tree_signal
         if kill is not None:
             try:
                 kill(pid, signal.SIGTERM)
