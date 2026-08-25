@@ -244,7 +244,7 @@ def _kanban_create_argv(task: KanbanTask) -> list[str]:
         f"{task.instructions}\n\n{task.evidence_heading}:\n"
         f"{json.dumps(task.evidence, sort_keys=True)}"
     )
-    return [
+    argv = [
         "hermes",
         "kanban",
         "--board",
@@ -261,10 +261,11 @@ def _kanban_create_argv(task: KanbanTask) -> list[str]:
         task.idempotency_key,
         "--max-retries",
         str(task.max_retries),
-        "--initial-status",
-        task.initial_status,
-        "--json",
     ]
+    if task.max_runtime_seconds is not None:
+        argv.extend(["--max-runtime", str(task.max_runtime_seconds)])
+    argv.extend(["--initial-status", task.initial_status, "--json"])
+    return argv
 
 
 def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:

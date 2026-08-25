@@ -154,7 +154,9 @@ def test_kanban_client_dispatches_an_opted_in_repair_as_ready() -> None:
     from github_pr_feedback.cli import KanbanSubprocessClient
 
     runner = RecordingKanbanRunner('{"id": "task-123"}')
-    task = replace(kanban_task(), initial_status="running", max_retries=3)
+    task = replace(
+        kanban_task(), initial_status="running", max_retries=3, max_runtime_seconds=1200
+    )
 
     task_id = KanbanSubprocessClient(runner).create_or_get_task(task)
 
@@ -163,6 +165,8 @@ def test_kanban_client_dispatches_an_opted_in_repair_as_ready() -> None:
     assert runner.calls[0][status_index] == "running"
     retries_index = runner.calls[0].index("--max-retries") + 1
     assert runner.calls[0][retries_index] == "3"
+    runtime_index = runner.calls[0].index("--max-runtime") + 1
+    assert runner.calls[0][runtime_index] == "1200"
 
 
 def test_kanban_client_uses_the_task_specific_evidence_heading() -> None:
