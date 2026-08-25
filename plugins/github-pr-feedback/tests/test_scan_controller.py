@@ -736,6 +736,14 @@ def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
                 ),
             ),
             feedback(
+                "reverified-no-change-needed",
+                reviewer="owner",
+                body=(
+                    "Re-verified at the exact head: the governed transition is enforced and "
+                    "the focused suite passes. No further change needed."
+                ),
+            ),
+            feedback(
                 "stable-tip-separate-card",
                 reviewer="owner",
                 body=(
@@ -762,7 +770,7 @@ def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
     result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
 
     assert result.created == 1
-    assert result.skipped["self_resolution_receipt"] == 5
+    assert result.skipped["self_resolution_receipt"] == 6
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["pr-regression"]
     ledger.close()
 
