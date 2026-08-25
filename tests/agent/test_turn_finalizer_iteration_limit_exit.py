@@ -362,6 +362,49 @@ def test_bounded_fallback_does_not_fire_without_kanban_task(monkeypatch):
     record.assert_not_called()
 
 
+@pytest.mark.parametrize(("budget_remaining", "api_call_count"), [(57, 3), (0, 60)])
+def test_guardrail_halt_closes_kanban_run_before_worker_exits(
+    monkeypatch, budget_remaining, api_call_count
+):
+    """A controlled tool-loop halt must not become a clean-exit protocol violation."""
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "task-guardrail")
+    record = MagicMock(name="record_task_failure")
+    conn = SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
+    monkeypatch.setattr("hermes_cli.kanban_db._record_task_failure", record)
+    agent = _LimitAgent(budget_remaining=budget_remaining)
+    agent._tool_guardrail_halt_decision = SimpleNamespace(
+        tool_name="terminal",
+        code="same_tool_failure_halt",
+        to_metadata=lambda: {
+            "tool_name": "terminal",
+            "code": "same_tool_failure_halt",
+        },
+    )
+
+    result = _finalize(
+        agent,
+        final_response="I stopped retrying terminal.",
+        exit_reason="guardrail_halt",
+        api_call_count=api_call_count,
+    )
+
+    record.assert_called_once_with(
+        conn,
+        "task-guardrail",
+        "Tool guardrail halted terminal: same_tool_failure_halt",
+        outcome="crashed",
+        release_claim=True,
+        end_run=True,
+        event_payload_extra={
+            "guardrail": "same_tool_failure_halt",
+            "tool_name": "terminal",
+        },
+    )
+    assert result["turn_exit_reason"] == "guardrail_halt"
+
+
 def test_bounded_fallback_does_not_fire_when_budget_not_exhausted(monkeypatch):
     """When budget is NOT exhausted but turn is interrupted and a kanban
     task is active, the bounded fallback must NOT fire (#87096).
