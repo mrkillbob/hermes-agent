@@ -168,6 +168,30 @@ def test_evaluate_merge_selects_first_configured_repository_enabled_method() -> 
     assert len(decision.snapshot_digest) == 64
 
 
+def test_evaluate_merge_requires_review_label_for_governed_risk_or_broad_blast() -> None:
+    snapshot = eligible_snapshot(
+        pull_request=pr_state(labels=("sweeper:risk-session-state", "sweeper:blast-broad"))
+    )
+
+    decision = evaluate_merge(policy(), snapshot, now=NOW)
+
+    assert decision.eligible is False
+    assert "governed_review_missing" in decision.blockers
+
+
+def test_evaluate_merge_accepts_governed_risk_after_explicit_review_label() -> None:
+    snapshot = eligible_snapshot(
+        pull_request=pr_state(
+            labels=("sweeper:risk-session-state", "sweeper:blast-broad", "ci-reviewed")
+        )
+    )
+
+    decision = evaluate_merge(policy(), snapshot, now=NOW)
+
+    assert decision.eligible is True
+    assert "governed_review_missing" not in decision.blockers
+
+
 class SnapshotSource:
     def __init__(self, snapshots: list[MergeSnapshot]) -> None:
         self.snapshots = snapshots

@@ -83,6 +83,7 @@ class PullRequestMergeState:
     head_sha: str
     merged: bool
     merge_commit_oid: str | None
+    labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +178,7 @@ class GitHubClient:
             merge_state_status = row["mergeable_state"]
             merged = row["merged"]
             merge_commit_oid = row.get("merge_commit_sha")
+            raw_labels = row.get("labels", [])
             if (
                 not isinstance(state, str)
                 or not isinstance(is_draft, bool)
@@ -185,6 +187,11 @@ class GitHubClient:
                 or merge_state_status.casefold() == "unknown"
                 or not isinstance(merged, bool)
                 or (merge_commit_oid is not None and not _SHA.fullmatch(merge_commit_oid))
+                or not isinstance(raw_labels, list)
+                or any(
+                    not isinstance(label, dict) or not isinstance(label.get("name"), str)
+                    for label in raw_labels
+                )
             ):
                 raise TypeError("merge state field has invalid shape")
             pull = PullRequestMergeState(
@@ -202,6 +209,7 @@ class GitHubClient:
                 head_sha=_validated_sha(head["sha"]),
                 merged=merged,
                 merge_commit_oid=merge_commit_oid,
+                labels=tuple(label["name"] for label in raw_labels),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise GitHubClientError("GitHub pull request merge state was unavailable") from error
@@ -376,6 +384,12 @@ def _pull_request(row: dict[str, Any]) -> PullRequest:
     try:
         base = row["base"]
         head = row["head"]
+        raw_labels = row.get("labels", [])
+        if not isinstance(raw_labels, list) or any(
+            not isinstance(label, dict) or not isinstance(label.get("name"), str)
+            for label in raw_labels
+        ):
+            raise TypeError("labels must be a list of named objects")
         return PullRequest(
             number=row["number"],
             state=row["state"],
@@ -384,6 +398,7 @@ def _pull_request(row: dict[str, Any]) -> PullRequest:
             author_login=row["user"]["login"],
             head_ref_name=head["ref"],
             head_sha=head["sha"],
+            labels=tuple(label["name"] for label in raw_labels),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise GitHubClientError("GitHub pull request has missing required fields") from error

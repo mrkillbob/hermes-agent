@@ -20,6 +20,8 @@ MAX_COMMAND_ARGUMENTS = 32
 MAX_COMMAND_ARGUMENT_LENGTH = 4096
 _SHELL_COMMANDS = frozenset({"bash", "dash", "fish", "sh", "zsh"})
 _MERGE_METHODS = frozenset({"squash", "rebase", "merge"})
+_ROUTING_PRIORITIES = frozenset({"P0", "P1", "P2", "P3", "P4"})
+_BLAST_RADII = frozenset({"contained", "moderate", "broad", "massive"})
 
 
 def _nonempty_string(value: object, field: str) -> str:
@@ -98,6 +100,7 @@ class PullRequest:
     author_login: str
     head_ref_name: str
     head_sha: str
+    labels: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.number, int) or isinstance(self.number, bool) or self.number < 1:
@@ -108,6 +111,11 @@ class PullRequest:
         object.__setattr__(self, "author_login", _nonempty_string(self.author_login, "author_login"))
         object.__setattr__(self, "head_ref_name", _nonempty_string(self.head_ref_name, "head_ref_name"))
         object.__setattr__(self, "head_sha", _nonempty_string(self.head_sha, "head_sha"))
+        object.__setattr__(
+            self,
+            "labels",
+            tuple(_nonempty_string(label, "pull request label") for label in self.labels),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +155,32 @@ class AssigneeRule:
 
     assignee: str
     match_any: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingRule:
+    """A typed, deterministic Kanban route derived from canonical labels and bounded text."""
+
+    assignee: str
+    precedence: int
+    match_any: tuple[str, ...]
+    match_labels_any: tuple[str, ...]
+    tags: tuple[str, ...]
+    priority: str
+    blast_radius: str
+    risks: tuple[str, ...]
+    requires_review: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingDecision:
+    assignee: str
+    tags: tuple[str, ...] = ()
+    priority: str | None = None
+    blast_radius: str | None = None
+    risks: tuple[str, ...] = ()
+    requires_review: bool = False
+    ambiguous: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,12 +243,20 @@ class PluginPolicy:
     assignee: str | None
     board: str | None
     assignee_rules: tuple[AssigneeRule, ...] = ()
+    routing_rules: tuple[RoutingRule, ...] = ()
     local_ci_audit: LocalCIAuditPolicy | None = None
     merge_maintainer: MergeMaintainerPolicy | None = None
     repair_steward: RepairStewardPolicy | None = None
 
     def assignee_for(self, body: str) -> str:
         """Choose the unique highest-scoring specialist, otherwise the fallback."""
+
+        if self.routing_rules:
+            return self.route(body).assignee
+
+        return self._legacy_assignee_for(body)
+
+    def _legacy_assignee_for(self, body: str) -> str:
 
         normalized = " ".join(body.casefold().split())
         scores = tuple(
@@ -226,6 +268,41 @@ class PluginPolicy:
         if len(winners) == 1:
             return winners.pop()
         return self.assignee or ""
+
+    def route(self, body: str, *, labels: Sequence[str] = ()) -> RoutingDecision:
+        """Select one typed route, failing equal-precedence ambiguity to the fallback."""
+
+        normalized = " ".join(body.casefold().split())
+        normalized_labels = {label.casefold() for label in labels}
+        matches: list[tuple[int, int, RoutingRule]] = []
+        for rule in self.routing_rules:
+            text_hits = sum(_term_matches(normalized, term) for term in rule.match_any)
+            label_hits = sum(label in normalized_labels for label in rule.match_labels_any)
+            score = text_hits + label_hits
+            if score:
+                matches.append((rule.precedence, score, rule))
+        if not matches:
+            return RoutingDecision(self._legacy_assignee_for(body))
+        best_rank = max((precedence, score) for precedence, score, _rule in matches)
+        winners = [
+            rule for precedence, score, rule in matches if (precedence, score) == best_rank
+        ]
+        if len(winners) != 1:
+            return RoutingDecision(
+                self.assignee or "",
+                tags=("routing/ambiguous",),
+                requires_review=True,
+                ambiguous=True,
+            )
+        winner = winners[0]
+        return RoutingDecision(
+            assignee=winner.assignee,
+            tags=winner.tags,
+            priority=winner.priority,
+            blast_radius=winner.blast_radius,
+            risks=winner.risks,
+            requires_review=winner.requires_review,
+        )
 
     def admit_pull_request(self, pull_request: PullRequest) -> Admission:
         """Admit only an exact configured PR before reading any feedback bodies."""
@@ -322,6 +399,78 @@ def _parse_assignee_rules(raw: object) -> tuple[AssigneeRule, ...]:
         if len(terms) > MAX_MATCH_TERMS_PER_RULE:
             raise ValueError("match_any exceeds its bounded limit")
         rules.append(AssigneeRule(_nonempty_string(item["assignee"], "assignee"), terms))
+    return tuple(rules)
+
+
+def _optional_string_list(value: object, field: str, *, normalize=str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError(f"{field} must be a list of strings")
+    return tuple(normalize(_nonempty_string(item, field)) for item in value)
+
+
+def _parse_routing_rules(raw: object) -> tuple[RoutingRule, ...]:
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence) or not raw:
+        raise ValueError("routing_rules must be a non-empty list")
+    if len(raw) > MAX_ASSIGNEE_RULES:
+        raise ValueError("routing_rules exceeds its bounded limit")
+    expected = {
+        "assignee",
+        "precedence",
+        "match_any",
+        "match_labels_any",
+        "tags",
+        "priority",
+        "blast_radius",
+        "risks",
+        "requires_review",
+    }
+    rules: list[RoutingRule] = []
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) != expected:
+            raise ValueError("routing_rules entries have missing or unknown fields")
+        precedence = item["precedence"]
+        requires_review = item["requires_review"]
+        if (
+            not isinstance(precedence, int)
+            or isinstance(precedence, bool)
+            or not 0 <= precedence <= 1000
+        ):
+            raise ValueError("routing precedence must be an integer from 0 to 1000")
+        if not isinstance(requires_review, bool):
+            raise ValueError("routing requires_review must be a boolean")
+        terms = _optional_string_list(item["match_any"], "routing match_any", normalize=str.casefold)
+        labels = _optional_string_list(
+            item["match_labels_any"], "routing match_labels_any", normalize=str.casefold
+        )
+        if not terms and not labels:
+            raise ValueError("routing rule must include a text term or label")
+        if len(terms) > MAX_MATCH_TERMS_PER_RULE or len(labels) > MAX_MATCH_TERMS_PER_RULE:
+            raise ValueError("routing match terms exceed their bounded limit")
+        tags = _optional_string_list(item["tags"], "routing tags")
+        risks = _optional_string_list(item["risks"], "routing risks", normalize=str.casefold)
+        if len(tags) > MAX_MATCH_TERMS_PER_RULE or len(risks) > MAX_MATCH_TERMS_PER_RULE:
+            raise ValueError("routing metadata exceeds its bounded limit")
+        priority = _nonempty_string(item["priority"], "routing priority").upper()
+        blast_radius = _nonempty_string(
+            item["blast_radius"], "routing blast_radius"
+        ).casefold()
+        if priority not in _ROUTING_PRIORITIES:
+            raise ValueError("routing priority must be P0 through P4")
+        if blast_radius not in _BLAST_RADII:
+            raise ValueError("routing blast_radius is invalid")
+        rules.append(
+            RoutingRule(
+                assignee=_nonempty_string(item["assignee"], "routing assignee"),
+                precedence=precedence,
+                match_any=terms,
+                match_labels_any=labels,
+                tags=tags,
+                priority=priority,
+                blast_radius=blast_radius,
+                risks=risks,
+                requires_review=requires_review,
+            )
+        )
     return tuple(rules)
 
 
@@ -527,6 +676,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "include_bot_feedback",
         "auto_dispatch",
         "assignee_rules",
+        "routing_rules",
         "local_ci_audit",
         "merge_maintainer",
         "repair_steward",
@@ -578,6 +728,9 @@ def load_policy(raw: object) -> PluginPolicy:
         board=_nonempty_string(raw["board"], "board"),
         assignee_rules=(
             _parse_assignee_rules(raw["assignee_rules"]) if "assignee_rules" in raw else ()
+        ),
+        routing_rules=(
+            _parse_routing_rules(raw["routing_rules"]) if "routing_rules" in raw else ()
         ),
         local_ci_audit=_validated_local_ci_audit(raw, targets),
         merge_maintainer=(
