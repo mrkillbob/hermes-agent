@@ -2763,6 +2763,28 @@ DEFAULT_CONFIG = {
         # raise these to keep more early failure evidence.
         "worker_log_rotate_bytes": 2 * 1024 * 1024,
         "worker_log_backup_count": 1,
+        # Deterministic worker-log supervisor. Enabled by default so confirmed
+        # no-progress loops cannot consume a worker indefinitely. Blank routes
+        # inherit fallback_profile, then the configured orchestrator/default
+        # assignee, then the active profile. Explicit category routes win.
+        "worker_watchdog": {
+            "enabled": True,
+            "grace_seconds": 600,
+            "log_tail_bytes": 262144,
+            "repeat_threshold": 3,
+            "compaction_threshold": 3,
+            "reasoning_repeat_threshold": 3,
+            "min_reasoning_chars": 120,
+            "max_recovery_attempts": 2,
+            "repair_max_runtime_seconds": 1200,
+            "fallback_profile": "",
+            "repair_profiles": {
+                "tool_failure_loop": "",
+                "compaction_loop": "",
+                "provider_stall_loop": "",
+                "reasoning_loop": "",
+            },
+        },
         # Profile assigned to the root/orchestration task after Triage
         # decomposition. When unset, falls back to the default profile (the
         # one `hermes` launches with no -p flag). This does not control the
