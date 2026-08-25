@@ -1,0 +1,1168 @@
+from __future__ import annotations
+
+import sqlite3
+import subprocess
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from github_pr_feedback.controller import (
+    MAX_ADMISSIONS_PER_SCAN,
+    GitCommandResult,
+    LocalGitRepository,
+    PreparedWorktree,
+    ScanController,
+)
+from github_pr_feedback.github_client import Feedback
+from github_pr_feedback.ledger import FeedbackLedger
+from github_pr_feedback.policy import (
+    FeedbackReceipt,
+    PullRequest,
+    Reviewer,
+    load_policy,
+)
+
+
+class FakeGitHub:
+    def __init__(self, pull_request: PullRequest, feedback: tuple[Feedback, ...], current: PullRequest | None = None) -> None:
+        self.pull_request = pull_request
+        self.feedback = feedback
+        self.current = current or pull_request
+        self.current_calls: list[tuple[str, int]] = []
+        self.actions_are_enabled = True
+
+    def list_open_pull_requests(
+        self, repository: str, owner_login: str
+    ) -> tuple[PullRequest, ...]:
+        assert repository == self.pull_request.base_repository
+        assert owner_login == self.pull_request.author_login
+        return (self.pull_request,)
+
+    def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
+        assert (repository, number) == (self.pull_request.base_repository, self.pull_request.number)
+        return self.feedback
+
+    def get_pull_request(self, repository: str, number: int) -> PullRequest:
+        self.current_calls.append((repository, number))
+        return self.current
+
+    def actions_enabled(self, repository: str) -> bool:
+        assert repository == self.pull_request.base_repository
+        return self.actions_are_enabled
+
+
+class MixedPullRequestGitHub(FakeGitHub):
+    def __init__(self, admitted: PullRequest, foreign: PullRequest, feedback: tuple[Feedback, ...]) -> None:
+        super().__init__(admitted, feedback)
+        self.foreign = foreign
+        self.feedback_calls: list[int] = []
+
+    def list_open_pull_requests(
+        self, repository: str, owner_login: str
+    ) -> tuple[PullRequest, ...]:
+        assert repository == self.pull_request.base_repository
+        assert owner_login == self.pull_request.author_login
+        return (self.foreign, self.pull_request)
+
+    def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
+        self.feedback_calls.append(number)
+        if number != self.pull_request.number:
+            raise AssertionError("feedback for an out-of-policy PR must not be fetched")
+        return self.feedback
+
+
+class RecordingLocalGit:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, object]] = []
+
+    def prepare_receipt_worktree(self, path: Path, receipt: FeedbackReceipt) -> PreparedWorktree:
+        self.calls.append((path, receipt))
+        return PreparedWorktree(
+            path.parent / "prepared-worktree",
+            "hermes/github-pr-feedback/receipt-branch",
+            receipt.head_sha,
+        )
+
+
+class RecordingKanban:
+    def __init__(self) -> None:
+        self.tasks: list[object] = []
+
+    def create_task(self, task: object) -> str:
+        self.tasks.append(task)
+        return f"kanban-{len(self.tasks)}"
+
+    def create_or_get_task(self, task: object) -> str:
+        self.tasks.append(task)
+        return f"kanban-{len(self.tasks)}"
+
+
+class FailingKanban:
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def create_or_get_task(self, task: object) -> str:
+        self.calls.append(task)
+        raise RuntimeError("Kanban unavailable")
+
+
+class LostResponseKanban:
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+        self.created_by_key: dict[str, str] = {}
+
+    def create_or_get_task(self, task: object) -> str:
+        self.calls.append(task)
+        key = task.idempotency_key
+        if key not in self.created_by_key:
+            self.created_by_key[key] = "kanban-recovered"
+            raise RuntimeError("Kanban response lost")
+        return self.created_by_key[key]
+
+
+class RecordingGitRunner:
+    def __init__(self, results: list[GitCommandResult]) -> None:
+        self.results = iter(results)
+        self.calls: list[list[str]] = []
+
+    def run(self, argv: list[str]) -> GitCommandResult:
+        self.calls.append(argv)
+        return next(self.results)
+
+
+def test_scan_creates_one_bounded_untrusted_task_and_deduplicates_with_sqlite(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    pull_request = admitted_pull_request(sha)
+    github = FakeGitHub(
+        pull_request,
+        (
+            feedback("old", created_at="2026-08-23T23:59:59Z"),
+            feedback("self", reviewer="owner"),
+            feedback("bot", is_bot=True),
+            feedback("allowed", body="x" * 6000),
+        ),
+    )
+    kanban = RecordingKanban()
+    local_git = RecordingLocalGit()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    scanner = ScanController(policy, ledger, github, kanban, local_git)
+
+    first = scanner.scan()
+    second = scanner.scan()
+
+    assert first.created == 3
+    assert second.created == 0
+    assert len(kanban.tasks) == 3
+    task = next(task for task in kanban.tasks if task.evidence["feedback_id"] == "allowed")
+    assert task.repository_path == local_path.parent / "prepared-worktree"
+    assert task.head_sha == sha
+    assert task.branch == "hermes/github-pr-feedback/receipt-branch"
+    assert task.board == "repairs"
+    assert task.assignee == "repair-agent"
+    assert len(task.evidence["body"]) == 2000
+    assert task.evidence["untrusted"] is True
+    assert "push/reply/merge require operator approval" in task.instructions
+    assert local_git.calls[0][0] == local_path
+    persisted = ledger._connection.execute(
+        "SELECT workspace_path, expected_sha FROM feedback_receipts WHERE feedback_id = 'allowed'"
+    ).fetchone()
+    assert persisted == (str(local_path.parent / "prepared-worktree"), sha)
+    assert {task.evidence["feedback_id"] for task in kanban.tasks} == {"self", "bot", "allowed"}
+    ledger.close()
+
+
+def test_scan_routes_actionable_feedback_to_the_best_configured_specialist(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    raw = {
+        "enabled": True,
+        "repositories": [
+            {
+                "base_repository": "acme/widgets",
+                "head_repository": "acme/widgets",
+                "local_path": str(local_path),
+                "owner_login": "owner",
+                "branch_prefixes": ["codex/"],
+            }
+        ],
+        "reviewer_logins": ["reviewer"],
+        "reviewer_associations": [],
+        "not_before": "2026-08-24T00:00:00Z",
+        "assignee": "task-orchestrator",
+        "assignee_rules": [
+            {"assignee": "performance-specialist", "match_any": ["latency", "throughput"]},
+            {"assignee": "market-data-specialist", "match_any": ["market data", "quote"]},
+        ],
+        "board": "repairs",
+    }
+    policy = load_policy(raw)
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (feedback("slow", body="[P1] Reduce latency and improve throughput in this hot path."),),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert kanban.tasks[0].assignee == "performance-specialist"
+    ledger.close()
+
+
+def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_reply_scope(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        auto_dispatch=True,
+    )
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (feedback("actionable", body="[P1] Fix the confirmed runtime regression."),),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    task = kanban.tasks[0]
+    assert getattr(task, "initial_status", None) == "running"
+    assert getattr(task, "max_retries", None) == 3
+    assert "commit and push" in task.instructions
+    assert "post a factual PR reply" in task.instructions
+    assert "Do not merge" in task.instructions
+    assert "still equals the expected receipt SHA" in task.instructions
+    ledger.close()
+
+
+def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disabled(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    github = FakeGitHub(admitted_pull_request(sha), ())
+    github.actions_are_enabled = False
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    first = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+    second = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert first.created == 1
+    assert second.created == 0
+    assert len(kanban.tasks) == 1
+    task = kanban.tasks[0]
+    assert task.title == "Local PR CI audit: acme/widgets#17"
+    assert task.assignee == "pr-local-ci-auditor"
+    assert task.initial_status == "running"
+    assert task.max_retries == 3
+    assert task.evidence_heading == "Canonical PR audit receipt (JSON)"
+    assert task.evidence == {
+        "repository": "acme/widgets",
+        "pr_number": 17,
+        "expected_head_sha": sha,
+        "github_actions_enabled": False,
+        "post_results": True,
+    }
+    assert "Do not edit source files" in task.instructions
+    assert "Do not push, approve, or merge" in task.instructions
+    assert "post one factual audit summary" in task.instructions
+    assert "scripts/run_hygiene_lane.py" in task.instructions
+    assert "scripts/run_static_lane.py" in task.instructions
+    assert "scripts/run_test_lane.py" in task.instructions
+    ledger.close()
+
+
+def test_scan_does_not_dispatch_local_ci_when_github_actions_are_enabled(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    github = FakeGitHub(admitted_pull_request(sha), ())
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 0
+    assert result.skipped["github_ci_enabled"] == 1
+    assert kanban.tasks == []
+    ledger.close()
+
+
+def test_scan_fails_closed_and_reports_degraded_when_actions_state_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    class UnavailableActionsGitHub(FakeGitHub):
+        def actions_enabled(self, repository: str) -> bool:
+            raise RuntimeError(f"cannot read {repository}")
+
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    github = UnavailableActionsGitHub(admitted_pull_request(sha), ())
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 0
+    assert result.skipped["github_ci_state_unavailable"] == 1
+    assert result.degraded is True
+    assert kanban.tasks == []
+    ledger.close()
+
+
+def test_scan_dispatches_a_new_local_ci_audit_when_the_pr_head_changes(
+    tmp_path: Path,
+) -> None:
+    local_path, first_sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    github = FakeGitHub(admitted_pull_request(first_sha), ())
+    github.actions_are_enabled = False
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    scanner = ScanController(policy, ledger, github, kanban, RecordingLocalGit())
+
+    first = scanner.scan()
+    second_sha = "b" * 40
+    github.pull_request = admitted_pull_request(second_sha)
+    github.current = github.pull_request
+    second = scanner.scan()
+
+    assert first.created == 1
+    assert second.created == 1
+    assert [task.head_sha for task in kanban.tasks] == [first_sha, second_sha]
+    assert kanban.tasks[0].idempotency_key != kanban.tasks[1].idempotency_key
+    ledger.close()
+
+
+def test_scan_refetches_head_before_dispatching_a_local_ci_audit(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (),
+        current=admitted_pull_request("b" * 40),
+    )
+    github.actions_are_enabled = False
+    kanban = RecordingKanban()
+    local_git = RecordingLocalGit()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, local_git).scan()
+
+    assert result.created == 0
+    assert result.skipped["head_changed"] == 1
+    assert local_git.calls == []
+    assert kanban.tasks == []
+    ledger.close()
+
+
+def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (
+            feedback(
+                "addressed",
+                reviewer="owner",
+                body="Addressed the review at exact head abc123. Verification passed.",
+            ),
+            feedback(
+                "superseded",
+                reviewer="owner",
+                body="Confirmed the gap. This narrower PR is superseded by #22.",
+            ),
+            feedback(
+                "still-actionable",
+                reviewer="owner",
+                body="Fixed the first case, but one blocker remains and still needs work.",
+            ),
+        ),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped["self_resolution_receipt"] == 2
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["still-actionable"]
+    ledger.close()
+
+
+def test_scan_suppresses_non_actionable_review_containers_but_keeps_inline_findings(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    created_at = datetime.fromisoformat("2026-08-24T00:00:00+00:00")
+    reviewer = Reviewer("codex-review-bot", "MEMBER")
+    boilerplate = (
+        "### 💡 Codex Review\n"
+        "Here are some automated review suggestions for this pull request.\n"
+        "**Reviewed commit:** `abc123`"
+    )
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (
+            Feedback("review", "empty-review", reviewer, "", created_at, True),
+            Feedback("review", "review-envelope", reviewer, boilerplate, created_at, True),
+            Feedback(
+                "review_comment",
+                "inline-finding",
+                reviewer,
+                "[P1] Preserve the fallback when the provider omits strikes.",
+                created_at,
+                True,
+            ),
+        ),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped["non_actionable_review_container"] == 2
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["inline-finding"]
+    ledger.close()
+
+
+def test_scan_suppresses_self_review_comment_receipt_only_when_no_action_remains(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    created_at = datetime.fromisoformat("2026-08-24T00:00:00+00:00")
+    owner = Reviewer("owner", "MEMBER")
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (
+            Feedback(
+                "review_comment",
+                "fixed-reply",
+                owner,
+                "Fixed at 026649c79. Focused verification passed.",
+                created_at,
+                False,
+            ),
+            Feedback(
+                "review_comment",
+                "remaining-reply",
+                owner,
+                "Fixed the first case, but one blocker remains and still needs work.",
+                created_at,
+                False,
+            ),
+        ),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped["self_resolution_receipt"] == 1
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["remaining-reply"]
+    ledger.close()
+
+
+def test_scan_refetches_the_head_and_does_not_claim_or_dispatch_a_race(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    listed = admitted_pull_request(sha)
+    current = admitted_pull_request("b" * 40)
+    github = FakeGitHub(listed, (feedback("race"),), current)
+    kanban = RecordingKanban()
+    local_git = RecordingLocalGit()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, local_git).scan()
+
+    assert result.created == 0
+    assert result.skipped["head_changed"] == 1
+    assert kanban.tasks == []
+    assert local_git.calls == []
+    assert sqlite3.connect(tmp_path / "ledger.sqlite3").execute(
+        "SELECT COUNT(*) FROM feedback_receipts"
+    ).fetchone() == (0,)
+    ledger.close()
+
+
+def test_scan_filters_out_of_policy_pull_requests_before_fetching_their_feedback(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    admitted = admitted_pull_request(sha)
+    foreign = PullRequest(
+        99,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "someone-else",
+        "codex/unrelated",
+        "b" * 40,
+    )
+    github = MixedPullRequestGitHub(admitted, foreign, (feedback("allowed"),))
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped["author_not_allowed"] == 1
+    assert result.skipped.get("github_error", 0) == 0
+    assert github.feedback_calls == [17]
+    ledger.close()
+
+
+def test_scan_does_not_requeue_feedback_already_completed_on_an_older_head(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    prior = FeedbackReceipt("acme/widgets", 17, "issue_comment", "already-seen", "b" * 40)
+    lease = ledger.claim(
+        prior,
+        owner="prior-scanner",
+        claimed_at=datetime(2026, 8, 24, 1, 0, tzinfo=UTC),
+        stale_before=datetime(2026, 8, 24, 0, 55, tzinfo=UTC),
+    )
+    assert lease is not None
+    ledger.finalize(prior, "kanban-prior", lease)
+    kanban = RecordingKanban()
+
+    result = ScanController(
+        policy,
+        ledger,
+        FakeGitHub(admitted_pull_request(sha), (feedback("already-seen"),)),
+        kanban,
+        RecordingLocalGit(),
+    ).scan()
+
+    assert result.created == 0
+    assert result.skipped["already_queued"] == 1
+    assert kanban.tasks == []
+    ledger.close()
+
+
+def test_scan_has_a_fixed_per_run_admission_cap(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    feedback_items = tuple(feedback(str(number)) for number in range(MAX_ADMISSIONS_PER_SCAN + 2))
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy, ledger, FakeGitHub(admitted_pull_request(sha), feedback_items), kanban, RecordingLocalGit()
+    ).scan()
+
+    assert result.created == MAX_ADMISSIONS_PER_SCAN
+    assert result.skipped["admission_cap"] == 2
+    assert result.degraded is True
+    ledger.close()
+
+
+def test_scan_cap_counts_failed_dispatch_attempts(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    feedback_items = tuple(feedback(str(number)) for number in range(MAX_ADMISSIONS_PER_SCAN + 2))
+    kanban = FailingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy, ledger, FakeGitHub(admitted_pull_request(sha), feedback_items), kanban, RecordingLocalGit()
+    ).scan()
+
+    assert result.created == 0
+    assert len(kanban.calls) == MAX_ADMISSIONS_PER_SCAN
+    assert result.skipped["admission_cap"] == 2
+    assert result.degraded is True
+    ledger.close()
+
+
+def test_explicit_retry_revalidates_canonical_head_before_claiming_failed_receipt(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "failed", sha)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    lease = ledger.claim(
+        receipt,
+        owner="test-scanner",
+        claimed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+        stale_before=datetime(2026, 8, 24, 11, 55, tzinfo=UTC),
+    )
+    assert lease is not None
+    ledger.fail(receipt, "Kanban unavailable", lease)
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("failed"),), admitted_pull_request("b" * 40))
+
+    result = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit()).retry_failed(receipt)
+
+    assert result.created == 0
+    assert result.skipped["head_changed"] == 1
+    assert github.current_calls == [("acme/widgets", 17)]
+    assert receipt_status(ledger, receipt) == "failed"
+    ledger.close()
+
+
+def test_explicit_retry_recovers_a_lost_kanban_response_with_the_same_receipt_key(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("lost-response"),))
+    kanban = LostResponseKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    scanner = ScanController(policy, ledger, github, kanban, RecordingLocalGit())
+
+    first = scanner.scan()
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "lost-response", sha)
+    retry = scanner.retry_failed(receipt)
+
+    assert first.created == 0
+    assert retry.created == 1
+    assert len(kanban.created_by_key) == 1
+    assert [task.idempotency_key for task in kanban.calls] == [
+        kanban.calls[0].idempotency_key,
+        kanban.calls[0].idempotency_key,
+    ]
+    assert receipt_status(ledger, receipt) == "completed"
+    assert receipt_task_id(ledger, receipt) == "kanban-recovered"
+    ledger.close()
+
+
+def test_scan_recovers_a_stale_receipt_after_process_death_immediately_after_claim(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("death-after-claim"),))
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    claimed_at = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+
+    class CrashAfterClaim:
+        def prepare_receipt_worktree(self, _path: Path, _receipt: FeedbackReceipt) -> PreparedWorktree:
+            raise SystemExit("simulated process death after claim")
+
+    with pytest.raises(SystemExit, match="after claim"):
+        ScanController(
+            policy,
+            ledger,
+            github,
+            RecordingKanban(),
+            CrashAfterClaim(),
+            claim_owner="scanner-a",
+            clock=lambda: claimed_at,
+        ).scan()
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "death-after-claim", sha)
+    assert receipt_expected_sha(ledger, receipt) == sha
+
+    kanban = RecordingKanban()
+    recovered = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+        claim_owner="scanner-b",
+        clock=lambda: claimed_at + timedelta(minutes=6),
+    ).scan()
+
+    assert recovered.created == 1
+    assert receipt_status(ledger, receipt) == "completed"
+    assert receipt_lease_version(ledger, receipt) == 2
+    ledger.close()
+
+
+def test_scan_recovers_a_stale_receipt_after_process_death_after_worktree_creation(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("death-after-worktree"),))
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    claimed_at = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    local_git = LocalGitRepository(tmp_path / "profile" / "worktrees")
+
+    class CrashAfterWorktree:
+        def __init__(self) -> None:
+            self.prepared: PreparedWorktree | None = None
+
+        def prepare_receipt_worktree(self, path: Path, receipt: FeedbackReceipt) -> PreparedWorktree:
+            self.prepared = local_git.prepare_receipt_worktree(path, receipt)
+            raise SystemExit("simulated process death after worktree")
+
+    crashing_git = CrashAfterWorktree()
+    with pytest.raises(SystemExit, match="after worktree"):
+        ScanController(
+            policy,
+            ledger,
+            github,
+            RecordingKanban(),
+            crashing_git,
+            claim_owner="scanner-a",
+            clock=lambda: claimed_at,
+        ).scan()
+    assert crashing_git.prepared is not None
+
+    kanban = RecordingKanban()
+    recovered = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        local_git,
+        claim_owner="scanner-b",
+        clock=lambda: claimed_at + timedelta(minutes=6),
+    ).scan()
+
+    assert recovered.created == 1
+    assert kanban.tasks[0].repository_path == crashing_git.prepared.path
+    assert git_output(crashing_git.prepared.path, "rev-parse", "HEAD") == sha
+    ledger.close()
+
+
+def test_scan_recovers_a_stale_receipt_after_task_creation_response_is_lost_to_process_death(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("death-after-task"),))
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    claimed_at = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+
+    class CrashAfterTaskCreation:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+            self.created_by_key: dict[str, str] = {}
+
+        def create_or_get_task(self, task: object) -> str:
+            self.calls.append(task)
+            key = task.idempotency_key
+            if key not in self.created_by_key:
+                self.created_by_key[key] = "kanban-existing"
+                raise SystemExit("simulated process death after task creation")
+            return self.created_by_key[key]
+
+    kanban = CrashAfterTaskCreation()
+    with pytest.raises(SystemExit, match="after task creation"):
+        ScanController(
+            policy,
+            ledger,
+            github,
+            kanban,
+            RecordingLocalGit(),
+            claim_owner="scanner-a",
+            clock=lambda: claimed_at,
+        ).scan()
+
+    recovered = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+        claim_owner="scanner-b",
+        clock=lambda: claimed_at + timedelta(minutes=6),
+    ).scan()
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "death-after-task", sha)
+
+    assert recovered.created == 1
+    assert len(kanban.created_by_key) == 1
+    assert [task.idempotency_key for task in kanban.calls] == [
+        kanban.calls[0].idempotency_key,
+        kanban.calls[0].idempotency_key,
+    ]
+    assert receipt_task_id(ledger, receipt) == "kanban-existing"
+    assert receipt_lease_version(ledger, receipt) == 2
+    ledger.close()
+
+
+def test_explicit_retry_revalidates_the_canonical_reviewer_before_retrying(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "untrusted", sha)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    lease = ledger.claim(
+        receipt,
+        owner="test-scanner",
+        claimed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+        stale_before=datetime(2026, 8, 24, 11, 55, tzinfo=UTC),
+    )
+    assert lease is not None
+    ledger.fail(receipt, "Kanban unavailable", lease)
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("untrusted", reviewer="stranger"),))
+
+    result = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit()).retry_failed(receipt)
+
+    assert result.created == 0
+    assert result.skipped["reviewer_not_allowed"] == 1
+    assert github.current_calls == [("acme/widgets", 17)]
+    assert receipt_status(ledger, receipt) == "failed"
+    ledger.close()
+
+
+def test_scan_rejects_a_feedback_timestamp_without_a_timezone(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    item = feedback("naive")
+    object.__setattr__(item, "created_at", datetime.fromisoformat("2026-08-24T00:00:00"))
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy, ledger, FakeGitHub(admitted_pull_request(sha), (item,)), kanban, RecordingLocalGit()
+    ).scan()
+
+    assert result.created == 0
+    assert result.skipped["invalid_feedback_timestamp"] == 1
+    assert kanban.tasks == []
+    ledger.close()
+
+
+def test_scan_marks_incomplete_canonical_github_coverage_as_degraded(tmp_path: Path) -> None:
+    local_path, _sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    class UnavailableGitHub:
+        def list_open_pull_requests(
+            self, _repository: str, _owner_login: str
+        ) -> tuple[PullRequest, ...]:
+            raise RuntimeError("canonical read unavailable")
+
+    result = ScanController(
+        policy,
+        ledger,
+        UnavailableGitHub(),
+        RecordingKanban(),
+        RecordingLocalGit(),
+    ).scan()
+
+    assert result.created == 0
+    assert result.skipped == {"github_error": 1}
+    assert result.degraded is True
+    ledger.close()
+
+
+def test_scan_marks_missing_local_exact_head_as_degraded_with_a_precise_reason(
+    tmp_path: Path,
+) -> None:
+    local_path, local_sha = initialized_repository(tmp_path)
+    unavailable_sha = "b" * 40
+    assert local_sha != unavailable_sha
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy,
+        ledger,
+        FakeGitHub(admitted_pull_request(unavailable_sha), (feedback("missing-head"),)),
+        RecordingKanban(),
+        LocalGitRepository(tmp_path / "profile" / "worktrees"),
+    ).scan()
+
+    assert result.created == 0
+    assert result.skipped == {"exact_head_unavailable": 1}
+    assert result.degraded is True
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "missing-head", unavailable_sha)
+    assert receipt_status(ledger, receipt) == "failed"
+    ledger.close()
+
+
+def test_local_git_creates_a_deterministic_receipt_branch_at_the_verified_head_with_fixed_argv() -> None:
+    sha = "a" * 40
+    runner = RecordingGitRunner(
+        [
+            GitCommandResult(0, ""),
+            GitCommandResult(1, ""),
+            GitCommandResult(0, ""),
+            GitCommandResult(0, f"{sha}\n"),
+        ]
+    )
+    repository = LocalGitRepository(runner)
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "feedback-1", sha)
+
+    branch = repository.prepare_receipt_branch(Path("/repositories/widgets"), receipt)
+
+    assert branch.startswith("hermes/github-pr-feedback/")
+    assert runner.calls == [
+        ["git", "-C", "/repositories/widgets", "cat-file", "-e", f"{sha}^{{commit}}"],
+        [
+            "git",
+            "-C",
+            "/repositories/widgets",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{branch}^{{commit}}",
+        ],
+        ["git", "-C", "/repositories/widgets", "branch", branch, sha],
+        [
+            "git",
+            "-C",
+            "/repositories/widgets",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{branch}^{{commit}}",
+        ],
+    ]
+
+
+def test_local_git_rejects_an_existing_deterministic_branch_at_a_different_head() -> None:
+    sha = "a" * 40
+    runner = RecordingGitRunner([GitCommandResult(0, ""), GitCommandResult(0, f"{'b' * 40}\n")])
+    repository = LocalGitRepository(runner)
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "feedback-1", sha)
+
+    with pytest.raises(RuntimeError, match="collides"):
+        repository.prepare_receipt_branch(Path("/repositories/widgets"), receipt)
+
+
+def test_local_git_materializes_and_reuses_a_deterministic_linked_worktree_at_exact_head(
+    tmp_path: Path,
+) -> None:
+    source, original_sha = initialized_repository(tmp_path)
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "exact-head", original_sha)
+    repository = LocalGitRepository(tmp_path / "profile" / "worktrees")
+
+    first = repository.prepare_receipt_worktree(source, receipt)
+    (source / "README.md").write_text("branch moved\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "move source branch",
+        ],
+        check=True,
+    )
+    moved_sha = git_output(source, "rev-parse", "HEAD")
+    second = repository.prepare_receipt_worktree(source, receipt)
+
+    assert moved_sha != original_sha
+    assert second == first
+    assert first.path != source
+    assert git_output(first.path, "rev-parse", "HEAD") == original_sha
+    assert first.expected_sha == original_sha
+    assert first.branch.startswith("hermes/github-pr-feedback/")
+
+
+def test_local_git_hard_fails_if_a_materialized_receipt_worktree_head_changes(
+    tmp_path: Path,
+) -> None:
+    source, original_sha = initialized_repository(tmp_path)
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "tampered", original_sha)
+    repository = LocalGitRepository(tmp_path / "profile" / "worktrees")
+    prepared = repository.prepare_receipt_worktree(source, receipt)
+    (source / "second.txt").write_text("second\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "add", "second.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "second",
+        ],
+        check=True,
+    )
+    moved_sha = git_output(source, "rev-parse", "HEAD")
+    subprocess.run(["git", "-C", str(prepared.path), "checkout", "--quiet", "--detach", moved_sha], check=True)
+
+    with pytest.raises(RuntimeError, match="worktree HEAD does not match expected SHA"):
+        repository.prepare_receipt_worktree(source, receipt)
+
+
+def test_local_git_reports_an_unavailable_exact_head_without_falling_back_to_local_head(
+    tmp_path: Path,
+) -> None:
+    source, local_sha = initialized_repository(tmp_path)
+    unavailable_sha = "b" * 40
+    assert unavailable_sha != local_sha
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "unavailable", unavailable_sha)
+    repository = LocalGitRepository(tmp_path / "profile" / "worktrees")
+
+    with pytest.raises(RuntimeError, match="exact head is unavailable in configured repository"):
+        repository.prepare_receipt_worktree(source, receipt)
+
+    assert list((tmp_path / "profile" / "worktrees").glob("*")) == []
+
+
+def initialized_repository(tmp_path: Path) -> tuple[Path, str]:
+    path = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(path)], check=True)
+    (path / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+    )
+    sha = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    return path, sha
+
+
+def git_output(path: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def configured_policy(
+    local_path: Path,
+    *,
+    not_before: str,
+    auto_dispatch: bool = False,
+    local_ci_audit: bool = False,
+):
+    raw = {
+            "enabled": True,
+            "repositories": [
+                {
+                    "base_repository": "acme/widgets",
+                    "head_repository": "acme/widgets",
+                    "local_path": str(local_path),
+                    "owner_login": "owner",
+                    "branch_prefixes": ["codex/"],
+                }
+            ],
+            "reviewer_logins": ["reviewer"],
+            "reviewer_associations": [],
+            "include_self_feedback": True,
+            "include_bot_feedback": True,
+            "auto_dispatch": auto_dispatch,
+            "not_before": not_before,
+            "assignee": "repair-agent",
+            "board": "repairs",
+        }
+    if local_ci_audit:
+        raw["local_ci_audit"] = {
+            "enabled": True,
+            "assignee": "pr-local-ci-auditor",
+            "post_results": True,
+        }
+    return load_policy(raw)
+
+
+def admitted_pull_request(sha: str) -> PullRequest:
+    return PullRequest(17, "OPEN", "acme/widgets", "acme/widgets", "owner", "codex/fix", sha)
+
+
+def feedback(
+    feedback_id: str,
+    *,
+    body: str = "please change this",
+    reviewer: str = "reviewer",
+    is_bot: bool = False,
+    created_at: str = "2026-08-24T00:00:00Z",
+) -> Feedback:
+    return Feedback(
+        "issue_comment",
+        feedback_id,
+        Reviewer(reviewer, "MEMBER"),
+        body,
+        datetime.fromisoformat(created_at),
+        is_bot,
+    )
+
+
+def receipt_status(ledger: FeedbackLedger, receipt: FeedbackReceipt) -> str:
+    row = ledger._connection.execute(
+        "SELECT status FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+        "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+        receipt.key,
+    ).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def receipt_task_id(ledger: FeedbackLedger, receipt: FeedbackReceipt) -> str | None:
+    row = ledger._connection.execute(
+        "SELECT task_id FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+        "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+        receipt.key,
+    ).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def receipt_lease_version(ledger: FeedbackLedger, receipt: FeedbackReceipt) -> int:
+    row = ledger._connection.execute(
+        "SELECT lease_version FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+        "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+        receipt.key,
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def receipt_expected_sha(ledger: FeedbackLedger, receipt: FeedbackReceipt) -> str | None:
+    row = ledger._connection.execute(
+        "SELECT expected_sha FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+        "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+        receipt.key,
+    ).fetchone()
+    assert row is not None
+    return row[0]

@@ -1,0 +1,165 @@
+# github-pr-feedback
+
+`github-pr-feedback` is a disabled-by-default standalone Hermes plugin. It
+reads canonical GitHub pull-request feedback, applies a strict local policy,
+and creates exact-head Kanban tasks for admitted feedback. An independent,
+explicitly configured lane can also schedule read-only local CI audits for PR
+heads when repository GitHub Actions are disabled. The scanner itself never
+pushes, replies, merges, changes GitHub settings, or handles credentials.
+
+## Install and configure
+
+Copy this directory to the profile-owned flat plugin location. The shell
+default below is intentional: an unset `HERMES_HOME` resolves to the normal
+per-user Hermes profile instead of `/plugins`.
+
+```sh
+HERMES_PROFILE_HOME="${HERMES_HOME:-$HOME/.hermes}"
+mkdir -p "$HERMES_PROFILE_HOME/plugins"
+cp -R /path/to/github-pr-feedback "$HERMES_PROFILE_HOME/plugins/github-pr-feedback"
+```
+
+Then opt in explicitly in `$HERMES_PROFILE_HOME/config.yaml`. Values below are
+placeholders; use real absolute paths to existing local Git worktrees and
+replace every placeholder before setting `enabled: true`.
+
+```yaml
+plugins:
+  enabled:
+    - github-pr-feedback
+  entries:
+    github-pr-feedback:
+      settings:
+        enabled: false
+        repositories:
+          - base_repository: example-owner/example-repository
+            head_repository: example-owner/example-repository
+            local_path: /absolute/path/to/local/repository
+            owner_login: example-owner
+            branch_prefixes:
+              - codex/
+        reviewer_logins:
+          - trusted-reviewer
+        reviewer_associations: []
+        include_self_feedback: false
+        include_bot_feedback: false
+        auto_dispatch: false
+        # Optional exact-head audit lane. It runs only when the canonical
+        # repository Actions permission is `enabled: false` and reruns once
+        # for each new PR head SHA.
+        local_ci_audit:
+          enabled: false
+          assignee: pr-local-ci-auditor
+          post_results: false
+        not_before: "2026-01-01T00:00:00Z"
+        # Fallback when no rule wins uniquely, including ambiguous ties.
+        assignee: task-orchestrator
+        # Optional, ordered and bounded deterministic routing. Each rule scores
+        # one point per distinct term found in the bounded feedback body.
+        assignee_rules:
+          - assignee: performance-patch-steward
+            match_any: [latency, performance, throughput, profiling]
+          - assignee: data-authority-patch-steward
+            match_any: [market data, option chain, quote, hydration, freshness]
+          - assignee: structural-ratchet-steward
+            match_any: [structural ratchet, extraction, file size, monolith]
+        board: repairs
+```
+
+The plugin receives these values only through Hermes's namespaced plugin
+context (`plugins.entries.github-pr-feedback.settings`); it does not parse
+global YAML itself. GitHub authentication remains the existing local `gh`
+authentication. Do not put tokens, private keys, or GitHub secrets in this
+configuration.
+
+Run the readiness check before enabling or scanning:
+
+```sh
+hermes github-pr-feedback doctor
+hermes github-pr-feedback status
+hermes github-pr-feedback scan
+```
+
+`scan` is safe to repeat. It records durable receipt state and creates one
+Kanban card only for feedback that passes all admission checks. By default the
+card starts `blocked`. With the explicit `auto_dispatch: true` opt-in, it starts
+`ready` on the deterministically selected specialist profile. Before creating
+the card, the plugin synchronously creates or verifies a deterministic linked
+Git worktree at the admitted receipt SHA and passes that concrete directory as
+`dir:/absolute/path`. If that exact commit is absent locally, or the prepared
+worktree `HEAD` differs, the scan fails degraded and never substitutes a local
+branch tip. Its body keeps the bounded GitHub text in an explicitly untrusted
+JSON evidence envelope.
+
+With `local_ci_audit.enabled: true`, the scan also reads the canonical
+`repos/{owner}/{repository}/actions/permissions` endpoint. It creates a ready,
+read-only audit card only when `enabled` is exactly `false`; an unavailable or
+malformed permission response is degraded and fails closed. The immutable
+audit identity includes the PR head SHA, so repeated scans deduplicate the same
+head and a later head automatically receives a fresh audit. The worker must
+re-read the canonical PR head, use the exact receipt worktree, keep tracked
+files unchanged, and run repository-owned governance, hygiene, static,
+required test-lane, and changed-frontend checks. It may post one factual result
+comment when `post_results: true`, but cannot edit, push, approve, or merge.
+
+In `auto_dispatch` mode, the worker must independently validate the finding,
+re-read the canonical PR immediately before any GitHub write, and require that
+the head still equals the receipt SHA. A confirmed bounded repair may be
+committed, pushed to the verified PR head branch, and followed by a factual PR
+reply containing the commit and test evidence. Merge always remains
+operator-gated. Without `auto_dispatch`, starting repair work and every GitHub
+write remain operator decisions.
+
+Claimed receipts carry a durable lease owner, UTC claim time, and monotonic
+lease version. A later scan may reclaim a stale claim only after rereading and
+readmitting the canonical PR and feedback. The immutable receipt identity and
+idempotency key are reused, so recovery asks Kanban to create-or-get the same
+card after a crash or lost response.
+
+`doctor` is read-only. For an enabled configuration it checks the `gh`
+executable and authentication, the Hermes executable, configured board and
+every fallback/routed/audit assignee, ledger access, and each repository's
+linked-worktree capability.
+`scan` and `retry` return nonzero with `"status": "degraded"` when canonical
+coverage or dispatch is incomplete.
+
+To retry one dispatch failure, supply all five immutable receipt fields; retry
+always asks the controller to reread and re-admit canonical GitHub state first.
+
+```sh
+hermes github-pr-feedback retry \
+  --repository example-owner/example-repository \
+  --pr-number 17 \
+  --feedback-kind review_comment \
+  --feedback-id 123456 \
+  --head-sha 0123456789abcdef0123456789abcdef01234567
+```
+
+## Cron reconciliation
+
+Cron is reconciliation only; it must not invoke an agent or pass arbitrary CLI
+arguments. Resolve and record the Hermes executable while an interactive PATH
+is available, then copy the supplied non-agent wrapper under the active profile:
+
+```sh
+HERMES_PROFILE_HOME="${HERMES_HOME:-$HOME/.hermes}"
+HERMES_EXECUTABLE="$(command -v hermes)"
+test -n "$HERMES_EXECUTABLE" && test "${HERMES_EXECUTABLE#/}" != "$HERMES_EXECUTABLE"
+mkdir -p "$HERMES_PROFILE_HOME/scripts" "$HERMES_PROFILE_HOME/logs"
+cp scripts/github-pr-feedback-scan.py "$HERMES_PROFILE_HOME/scripts/github-pr-feedback-scan.py"
+chmod 755 "$HERMES_PROFILE_HOME/scripts/github-pr-feedback-scan.py"
+```
+
+For example, set the profile explicitly in the crontab and invoke that fixed
+wrapper every five minutes:
+
+```cron
+HERMES_HOME=/absolute/path/to/hermes-profile
+HERMES_EXECUTABLE=/absolute/path/to/hermes
+*/5 * * * * /usr/bin/python3 "$HERMES_HOME/scripts/github-pr-feedback-scan.py" >> "$HERMES_HOME/logs/github-pr-feedback-scan.log" 2>&1
+```
+
+The wrapper refuses an unset, relative, missing, or non-executable
+`HERMES_EXECUTABLE`, then runs exactly that absolute executable with
+`github-pr-feedback scan`. It does not accept arguments, start a model, create
+webhooks, or perform GitHub writes.
