@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .controller import KanbanTask, ScanController
-from .ci_runner import CIAuditIdentity, CIValidationError, LocalCIRunner
+from .ci_runner import CIAuditIdentity, CIAuditReceipt, CIValidationError, LocalCIRunner
 from .github_client import GitHubClient, GitHubClientError
 from .ledger import FeedbackLedger, LedgerStateError
 from .merge_controller import (
@@ -485,6 +485,26 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
         print(json.dumps({"status": "audit_unavailable"}, sort_keys=True))
         return_code = 1
     else:
+        try:
+            final_state = github.get_merge_state(args.repository, args.pr_number)
+            if final_state.head_sha != receipt.identity.head_sha:
+                raise CIValidationError("canonical PR head changed after audit")
+            if policy.local_ci_audit.post_results:
+                feedback = github.list_feedback(
+                    receipt.identity.repository, receipt.identity.pr_number
+                )
+                if not any(receipt.receipt_id in item.body for item in feedback):
+                    github.post_issue_comment(
+                        receipt.identity.repository,
+                        receipt.identity.pr_number,
+                        _ci_audit_comment(receipt),
+                    )
+            _complete_current_ci_task(receipt)
+        except (CIValidationError, GitHubClientError, RuntimeError):
+            print(json.dumps({"status": "audit_handoff_unavailable"}, sort_keys=True))
+            return_code = 1
+        else:
+            return_code = 0 if receipt.status == "passed" else 1
         print(
             json.dumps(
                 {
@@ -499,10 +519,58 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
-        return_code = 0 if receipt.status == "passed" else 1
     finally:
         ledger.close()
     return return_code
+
+
+def _ci_audit_comment(receipt: CIAuditReceipt) -> str:
+    commands = "; ".join(
+        f"`{' '.join(command.argv)}` rc={command.returncode} "
+        f"({command.classification}, {command.duration_ms / 1000:.2f}s)"
+        for command in receipt.commands
+    )
+    body = (
+        f"Local CI audit completed for exact head `{receipt.identity.head_sha}` "
+        f"(base `{receipt.identity.base_sha}`). Commands: {commands}. "
+        f"Authoritative receipt: `{receipt.receipt_id}`. "
+        + (
+            "All required lanes passed."
+            if receipt.status == "passed"
+            else "The failed receipt remains merge-blocking; later fail-fast lanes may be absent."
+        )
+    )
+    if len(body) > 4000:
+        raise RuntimeError("CI audit comment exceeds the bounded GitHub payload")
+    return body
+
+
+def _complete_current_ci_task(receipt: CIAuditReceipt) -> None:
+    task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    if not task_id:
+        return
+    board = os.environ.get("HERMES_KANBAN_BOARD", "").strip()
+    argv = ["hermes", "kanban"]
+    if board:
+        argv.extend(["--board", board])
+    argv.extend(
+        [
+            "complete",
+            task_id,
+            "--result",
+            f"Exact-head local CI receipt {receipt.receipt_id}: {receipt.status}.",
+        ]
+    )
+    completed = subprocess.run(
+        argv,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("Kanban audit completion failed")
 
 
 def _merge_scan(ctx: Any) -> int:

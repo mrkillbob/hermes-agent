@@ -1093,3 +1093,50 @@ def profile_snapshot(root: Path) -> dict[str, tuple[int, int]]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def test_ci_audit_handoff_completes_current_task_without_waiting_for_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from github_pr_feedback.ci_runner import (
+        CIAuditIdentity,
+        CIAuditReceipt,
+        CheckState,
+    )
+    from github_pr_feedback.cli import _complete_current_ci_task
+
+    receipt = CIAuditReceipt(
+        receipt_id="r" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, "a" * 40, "b" * 40),
+        manifest_digest="m" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class Completed:
+        returncode = 0
+
+    def run(argv: list[str], **kwargs: object) -> Completed:
+        calls.append((argv, kwargs))
+        return Completed()
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_exact")
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "repairs")
+    monkeypatch.setattr("github_pr_feedback.cli.subprocess.run", run)
+
+    _complete_current_ci_task(receipt)
+
+    assert calls[0][0] == [
+        "hermes",
+        "kanban",
+        "--board",
+        "repairs",
+        "complete",
+        "t_exact",
+        "--result",
+        f"Exact-head local CI receipt {'r' * 64}: failed.",
+    ]

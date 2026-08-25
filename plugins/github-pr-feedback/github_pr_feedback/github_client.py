@@ -315,6 +315,25 @@ class GitHubClient:
             ]
         )
 
+    def post_issue_comment(self, repository: str, number: int, body: str) -> None:
+        """Post one bounded factual PR comment through fixed argv."""
+
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        if not isinstance(body, str) or not body.strip() or len(body) > 4000:
+            raise ValueError("comment body must contain 1 to 4000 characters")
+        self._runner.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repository}/issues/{number}/comments",
+                "--method",
+                "POST",
+                "--field",
+                f"body={body}",
+            ]
+        )
+
     def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
         issue_comments = self._read_pages(f"repos/{repository}/issues/{number}/comments?per_page=100")
         review_comments = self._read_pages(f"repos/{repository}/pulls/{number}/comments?per_page=100")

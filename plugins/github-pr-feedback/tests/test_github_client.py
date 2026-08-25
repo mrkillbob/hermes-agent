@@ -88,6 +88,23 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
     assert runner.calls == [pulls_argv, comments_argv, review_comments_argv, reviews_argv]
 
 
+def test_github_client_posts_bounded_issue_comment_with_fixed_argv() -> None:
+    argv = (
+        "gh",
+        "api",
+        "repos/acme/widgets/issues/17/comments",
+        "--method",
+        "POST",
+        "--field",
+        "body=exact-head receipt passed",
+    )
+    runner = RecordingRunner({argv: {"id": 1}})
+
+    GitHubClient(runner).post_issue_comment("acme/widgets", 17, "exact-head receipt passed")
+
+    assert runner.calls == [argv]
+
+
 def test_github_client_fails_closed_when_filtered_pr_list_lacks_canonical_fields() -> None:
     argv = (
         "gh",
