@@ -175,6 +175,52 @@ def test_local_ci_runner_executes_only_required_lanes_and_records_exact_head_rec
     ledger.close()
 
 
+def test_local_ci_runner_bootstraps_missing_repo_venv_before_ci(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+    bootstrap = worktree / "scripts/bootstrap_agent_workspace.py"
+    bootstrap.write_text("# fixture\n", encoding="utf-8")
+
+    class BootstrappingRunner(RecordingRunner):
+        def run(
+            self,
+            argv: tuple[str, ...],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            timeout: int,
+        ) -> CompletedCommand:
+            result = super().run(argv, cwd=cwd, env=env, timeout=timeout)
+            if argv == ("python3", "scripts/bootstrap_agent_workspace.py", "--venv", "link"):
+                executable = cwd / ".venv/bin/python"
+                executable.parent.mkdir(parents=True)
+                executable.write_text("#!/bin/sh\n", encoding="utf-8")
+                executable.chmod(0o755)
+            return result
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    commands = BootstrappingRunner()
+    runner = LocalCIRunner(
+        FakeGitHub(merge_state()),
+        ledger,
+        command_runner=commands,
+        inspector=FakeInspector(),
+        now=lambda: NOW,
+    )
+
+    receipt = runner.run(CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), worktree)
+
+    assert receipt.status == "passed"
+    assert commands.calls[0][0] == (
+        "python3",
+        "scripts/bootstrap_agent_workspace.py",
+        "--venv",
+        "link",
+    )
+    assert commands.calls[1][0] == (".venv/bin/python", "scripts/check_ci_governance.py")
+    ledger.close()
+
+
 def test_local_ci_runner_adds_locked_frontend_checks_only_for_frontend_changes(
     tmp_path: Path,
 ) -> None:
@@ -249,4 +295,29 @@ def test_failed_command_is_durable_evidence_but_never_a_passing_receipt(tmp_path
         manifest_digest=receipt.manifest_digest,
         not_before=NOW - timedelta(days=1),
     ) == receipt
+    ledger.close()
+
+
+def test_missing_ci_executable_is_classified_environment_blocked(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+
+    class MissingExecutableRunner(RecordingRunner):
+        def run(
+            self,
+            argv: tuple[str, ...],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            timeout: int,
+        ) -> CompletedCommand:
+            self.calls.append((argv, cwd, dict(env), timeout))
+            return CompletedCommand(127, "", "FileNotFoundError", 1, False)
+
+    runner, ledger, _commands = build_runner(tmp_path, commands=MissingExecutableRunner())
+
+    receipt = runner.run(CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), worktree)
+
+    assert receipt.status == "failed"
+    assert receipt.commands[0].classification == "environment-blocked"
     ledger.close()

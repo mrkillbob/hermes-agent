@@ -27,6 +27,7 @@ _REQUIRED_SCRIPTS = (
     "scripts/run_test_lane.py",
 )
 _COMMAND_TIMEOUT_SECONDS = 3600
+_BOOTSTRAP_TIMEOUT_SECONDS = 900
 
 
 class CIValidationError(RuntimeError):
@@ -293,6 +294,7 @@ class LocalCIRunner:
         scripts = tuple(worktree / relative for relative in _REQUIRED_SCRIPTS)
         if not manifest_path.is_file() or any(not script.is_file() for script in scripts):
             raise CIValidationError("required CI owner files are missing")
+        self._ensure_python_environment(worktree)
         manifest_bytes = manifest_path.read_bytes()
         manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
         lanes = _required_lanes(manifest_bytes)
@@ -385,6 +387,30 @@ class LocalCIRunner:
         self._ledger.record_ci_receipt(receipt)
         return receipt
 
+    def _ensure_python_environment(self, worktree: Path) -> None:
+        executable = Path(self._python_argv[0])
+        if executable.is_absolute() or "/" not in str(executable):
+            return
+        resolved = worktree / executable
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return
+        bootstrap = worktree / "scripts/bootstrap_agent_workspace.py"
+        if not bootstrap.is_file():
+            raise CIValidationError("worktree Python environment is missing")
+        result = self._commands.run(
+            ("python3", "scripts/bootstrap_agent_workspace.py", "--venv", "link"),
+            cwd=worktree,
+            env=dict(os.environ),
+            timeout=_BOOTSTRAP_TIMEOUT_SECONDS,
+        )
+        if (
+            result.returncode != 0
+            or result.timed_out
+            or not resolved.is_file()
+            or not os.access(resolved, os.X_OK)
+        ):
+            raise CIValidationError("worktree Python bootstrap failed")
+
 
 def _required_lanes(manifest_bytes: bytes) -> tuple[str, ...]:
     try:
@@ -427,7 +453,7 @@ def _command_evidence(
     except ValueError as error:
         raise CIValidationError("CI command escaped its worktree") from error
     classification = "passed"
-    if result.timed_out:
+    if result.timed_out or result.returncode in {126, 127}:
         classification = "environment-blocked"
     elif result.returncode != 0:
         classification = "logic-regression"
