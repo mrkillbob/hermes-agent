@@ -719,6 +719,14 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
                 body="Confirmed the gap. This narrower PR is superseded by #22.",
             ),
             feedback(
+                "worker-completion-receipt",
+                reviewer="owner",
+                body=(
+                    "Resolved the PR-introduced static failures in abc123. "
+                    "Verification: 8 focused tests passed. No merge performed."
+                ),
+            ),
+            feedback(
                 "still-actionable",
                 reviewer="owner",
                 body="Fixed the first case, but one blocker remains and still needs work.",
@@ -731,7 +739,7 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
     result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
 
     assert result.created == 1
-    assert result.skipped["self_resolution_receipt"] == 2
+    assert result.skipped["self_resolution_receipt"] == 3
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["still-actionable"]
     ledger.close()
 
