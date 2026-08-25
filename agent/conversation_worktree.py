@@ -285,6 +285,20 @@ def _owner_claim_matches(
     )
 
 
+def _owner_claim_matches_record(
+    data: object, *, record: ConversationWorktreeRecord
+) -> bool:
+    """Require ownership evidence for this exact durable conversation root."""
+    return (
+        _owner_claim_matches(
+            data,
+            worktree_path=Path(record.worktree_path),
+            repo_common_dir=Path(record.repo_common_dir),
+        )
+        and data.get("root_session_id") == record.root_session_id
+    )
+
+
 def conversation_worktree_ownership_verdict(path: Path) -> bool | None:
     """Return manager ownership, absence, or an unverified ownership state.
 
@@ -1291,10 +1305,21 @@ class ConversationWorktreeManager:
                 "recovery",
             )
         ).resolve()
-        if actual_branch != record.branch or actual_common != source_common_dir:
+        if actual_common != source_common_dir:
             raise ConversationWorktreeError(
-                "ready conversation worktree failed identity validation", phase="recovery"
+                "ready conversation worktree failed identity validation",
+                phase="recovery",
             )
+        if actual_branch != record.branch:
+            # A conversation can legitimately rename its branch while preparing
+            # or merging a PR. Accept only that narrow drift: the checkout must
+            # remain on a named branch and both independent owner claims must
+            # still bind the exact root, path, and common repository.
+            if not actual_branch or not self._exact_owner_claims_present(record):
+                raise ConversationWorktreeError(
+                    "ready conversation worktree failed identity validation",
+                    phase="recovery",
+                )
         ancestor = self._run_git(
             path,
             ["merge-base", "--is-ancestor", record.base_commit, "HEAD"],
@@ -1308,8 +1333,40 @@ class ConversationWorktreeManager:
             )
         self._ensure_common_owner_claim(record)
         self._ensure_owner_marker(record)
-        self._event("conversation_worktree.reuse", root_session_id=record.root_session_id)
-        return self._binding_from_record(record)
+        self._event(
+            "conversation_worktree.reuse", root_session_id=record.root_session_id
+        )
+        binding = self._binding_from_record(record)
+        if actual_branch != binding.branch:
+            binding = ConversationWorktreeBinding(
+                root_session_id=binding.root_session_id,
+                path=binding.path,
+                branch=actual_branch,
+                base_commit=binding.base_commit,
+                repo_common_dir=binding.repo_common_dir,
+            )
+        return binding
+
+    def _exact_owner_claims_present(self, record: ConversationWorktreeRecord) -> bool:
+        """Verify both durable ownership claims without repairing either one."""
+        path = Path(record.worktree_path)
+        try:
+            marker_text = self._git_stdout(
+                path, ["rev-parse", "--git-path", _OWNER_MARKER], "recovery"
+            )
+            marker = Path(marker_text)
+            if not marker.is_absolute():
+                marker = path / marker
+            common_claim = _common_owner_claim_path(
+                Path(record.repo_common_dir).resolve(), path
+            )
+            marker_data = json.loads(marker.read_text(encoding="utf-8"))
+            common_data = json.loads(common_claim.read_text(encoding="utf-8"))
+        except (ConversationWorktreeError, OSError, ValueError, TypeError):
+            return False
+        return _owner_claim_matches_record(
+            marker_data, record=record
+        ) and _owner_claim_matches_record(common_data, record=record)
 
     def _ensure_owner_marker(self, record: ConversationWorktreeRecord) -> None:
         path = Path(record.worktree_path)

@@ -227,6 +227,43 @@ def test_repeated_root_reuses_same_validated_ready_binding(repo, db, tmp_path):
     assert worktree_manager.resolve_existing_session("root") == first
 
 
+def test_resolve_accepts_exact_owned_ready_worktree_after_branch_rename(
+    repo, db, tmp_path
+):
+    worktree_manager = manager(repo, db, tmp_path)
+    first = worktree_manager.bind_new_root_session(
+        "root", conversation_kind="interactive"
+    )
+    assert first is not None
+
+    git(first.path, "branch", "-m", "hermes/resumed-conversation-work")
+
+    resolved = worktree_manager.resolve_existing_session("root")
+
+    assert resolved is not None
+    assert resolved.path == first.path
+    assert resolved.branch == "hermes/resumed-conversation-work"
+    assert resolved.base_commit == first.base_commit
+
+
+def test_resolve_rejects_branch_rename_when_exact_owner_marker_is_missing(
+    repo, db, tmp_path
+):
+    worktree_manager = manager(repo, db, tmp_path)
+    first = worktree_manager.bind_new_root_session(
+        "root", conversation_kind="interactive"
+    )
+    assert first is not None
+    marker = Path(
+        git(first.path, "rev-parse", "--git-path", "hermes-conversation-owner-v1")
+    )
+    marker.unlink()
+    git(first.path, "branch", "-m", "hermes/unowned-rename")
+
+    with pytest.raises(ConversationWorktreeError, match="identity validation"):
+        worktree_manager.resolve_existing_session("root")
+
+
 def test_active_managed_worktree_is_git_locked_against_external_removal(
     repo, db, tmp_path
 ):
