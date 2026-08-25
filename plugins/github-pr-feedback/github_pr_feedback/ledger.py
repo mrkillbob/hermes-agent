@@ -27,6 +27,15 @@ class ClaimLease:
     version: int
 
 
+@dataclass(frozen=True, slots=True)
+class MergeLease:
+    repository: str
+    pr_number: int
+    head_sha: str
+    owner: str
+    claimed_at: datetime
+
+
 class LedgerStateError(RuntimeError):
     """The caller tried to finalize or fail a receipt it does not hold."""
 
@@ -82,6 +91,24 @@ class FeedbackLedger:
         self._connection.execute(
             "CREATE INDEX IF NOT EXISTS ci_receipt_lookup ON ci_audit_receipts "
             "(repository, pr_number, head_sha, manifest_digest, status, completed_at)"
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS merge_attempts (
+                repository TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                head_sha TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('claimed', 'verification_required', 'completed', 'failed')
+                ),
+                owner TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                receipt_json TEXT,
+                last_error TEXT,
+                PRIMARY KEY (repository, pr_number, head_sha)
+            )
+            """
         )
 
     def _migrate_lease_columns(self) -> None:
@@ -357,6 +384,134 @@ class FeedbackLedger:
         if receipt.status != "passed":
             raise LedgerStateError("stored CI receipt status is inconsistent")
         return receipt
+
+    def completed_merge_receipt(self, repository: str, pr_number: int) -> object | None:
+        from .merge_controller import MergeReceipt
+
+        row = self._connection.execute(
+            "SELECT receipt_json FROM merge_attempts WHERE repository = ? AND pr_number = ? "
+            "AND status = 'completed' ORDER BY updated_at DESC LIMIT 1",
+            (repository, pr_number),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        try:
+            return MergeReceipt.from_payload(json.loads(row[0]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise LedgerStateError("stored merge receipt is invalid") from error
+
+    def claim_merge_lease(
+        self,
+        repository: str,
+        pr_number: int,
+        head_sha: str,
+        *,
+        owner: str,
+        claimed_at: datetime,
+    ) -> MergeLease | None:
+        owner = owner.strip() if isinstance(owner, str) else ""
+        if not owner:
+            raise ValueError("merge lease owner must be a non-empty string")
+        claimed_at = _aware_utc(claimed_at, "claimed_at")
+        with self._transaction():
+            completed = self._connection.execute(
+                "SELECT 1 FROM merge_attempts WHERE repository = ? AND pr_number = ? "
+                "AND status = 'completed' LIMIT 1",
+                (repository, pr_number),
+            ).fetchone()
+            if completed is not None:
+                return None
+            existing = self._connection.execute(
+                "SELECT status FROM merge_attempts WHERE repository = ? AND pr_number = ? "
+                "AND head_sha = ?",
+                (repository, pr_number, head_sha),
+            ).fetchone()
+            if existing is None:
+                self._connection.execute(
+                    "INSERT INTO merge_attempts "
+                    "(repository, pr_number, head_sha, status, owner, claimed_at, updated_at) "
+                    "VALUES (?, ?, ?, 'claimed', ?, ?, ?)",
+                    (
+                        repository,
+                        pr_number,
+                        head_sha,
+                        owner,
+                        claimed_at.isoformat(),
+                        claimed_at.isoformat(),
+                    ),
+                )
+            elif existing[0] == "failed":
+                self._connection.execute(
+                    "UPDATE merge_attempts SET status = 'claimed', owner = ?, claimed_at = ?, "
+                    "updated_at = ?, receipt_json = NULL, last_error = NULL WHERE repository = ? "
+                    "AND pr_number = ? AND head_sha = ? AND status = 'failed'",
+                    (
+                        owner,
+                        claimed_at.isoformat(),
+                        claimed_at.isoformat(),
+                        repository,
+                        pr_number,
+                        head_sha,
+                    ),
+                )
+            else:
+                return None
+        return MergeLease(repository, pr_number, head_sha, owner, claimed_at)
+
+    def finish_merge_lease(
+        self,
+        lease: MergeLease,
+        *,
+        status: str,
+        updated_at: datetime,
+        receipt: object | None = None,
+        error: str | None = None,
+    ) -> None:
+        from .merge_controller import MergeReceipt
+
+        if status not in {"verification_required", "completed", "failed"}:
+            raise ValueError("merge terminal status is invalid")
+        if status == "completed" and not isinstance(receipt, MergeReceipt):
+            raise ValueError("completed merge requires a typed receipt")
+        updated_at = _aware_utc(updated_at, "updated_at")
+        receipt_json = (
+            json.dumps(receipt.to_payload(), sort_keys=True, separators=(",", ":"))
+            if isinstance(receipt, MergeReceipt)
+            else None
+        )
+        with self._transaction():
+            result = self._connection.execute(
+                "UPDATE merge_attempts SET status = ?, updated_at = ?, receipt_json = ?, "
+                "last_error = ? WHERE repository = ? AND pr_number = ? AND head_sha = ? "
+                "AND status = 'claimed' AND owner = ? AND claimed_at = ?",
+                (
+                    status,
+                    updated_at.isoformat(),
+                    receipt_json,
+                    (error or "")[:1000] or None,
+                    lease.repository,
+                    lease.pr_number,
+                    lease.head_sha,
+                    lease.owner,
+                    lease.claimed_at.isoformat(),
+                ),
+            )
+            if result.rowcount != 1:
+                raise LedgerStateError("merge lease is not held")
+
+    def merge_status_counts(self) -> dict[str, int]:
+        counts = {
+            "claimed": 0,
+            "verification_required": 0,
+            "completed": 0,
+            "failed": 0,
+        }
+        for status, count in self._connection.execute(
+            "SELECT status, COUNT(*) FROM merge_attempts GROUP BY status"
+        ):
+            if status in counts:
+                counts[status] = int(count)
+        return counts
 
     def close(self) -> None:
         self._connection.close()
