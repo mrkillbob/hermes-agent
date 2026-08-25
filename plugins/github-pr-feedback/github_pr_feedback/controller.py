@@ -639,6 +639,8 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
             "no additional commits are required",
             "no further code change required",
             "no further code changes required",
+            "no further source change required",
+            "no further source changes required",
             "no further audit rerun performed",
         )
     ):
