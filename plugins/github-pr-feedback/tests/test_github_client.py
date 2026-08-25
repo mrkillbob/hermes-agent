@@ -160,6 +160,34 @@ def test_github_client_bounds_untrusted_feedback_body_at_intake() -> None:
     assert len(feedback[0].body) == 2000
 
 
+def test_github_client_orders_feedback_chronologically_across_api_kinds() -> None:
+    responses = feedback_responses("later resolution")
+    issue_key = (
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        "repos/acme/widgets/issues/17/comments?per_page=100",
+    )
+    review_key = (
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        "repos/acme/widgets/pulls/17/comments?per_page=100",
+    )
+    responses[issue_key] = [
+        [canonical_feedback("resolution", "fixed", created_at="2026-08-24T00:05:00Z")]
+    ]
+    responses[review_key] = [
+        [canonical_feedback("finding", "fix this", created_at="2026-08-24T00:01:00Z")]
+    ]
+
+    feedback = GitHubClient(RecordingRunner(responses)).list_feedback("acme/widgets", 17)
+
+    assert [item.feedback_id for item in feedback[:2]] == ["finding", "resolution"]
+
+
 def test_github_client_accepts_a_submitted_review_with_no_text_body() -> None:
     responses = feedback_responses("ordinary")
     reviews_key = (
@@ -465,12 +493,16 @@ def canonical_list_pull(number: int = 17, head_sha: str = "a" * 40) -> dict[str,
 
 
 def canonical_feedback(
-    feedback_id: str, body: str | None, *, submitted_at: str | None = "2026-08-24T00:00:00Z"
+    feedback_id: str,
+    body: str | None,
+    *,
+    submitted_at: str | None = "2026-08-24T00:00:00Z",
+    created_at: str = "2026-08-24T00:00:00Z",
 ) -> dict[str, object]:
     return {
         "id": feedback_id,
         "body": body,
-        "created_at": "2026-08-24T00:00:00Z",
+        "created_at": created_at,
         "submitted_at": submitted_at,
         "user": {"login": "reviewer", "type": "User"},
         "author_association": "MEMBER",
