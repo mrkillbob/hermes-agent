@@ -264,6 +264,41 @@ def test_resolve_rejects_branch_rename_when_exact_owner_marker_is_missing(
         worktree_manager.resolve_existing_session("root")
 
 
+def test_resolve_accepts_exact_owned_rewrite_when_base_is_in_worktree_reflog(
+    repo, db, tmp_path
+):
+    worktree_manager = manager(repo, db, tmp_path)
+    first = worktree_manager.bind_new_root_session(
+        "root", conversation_kind="interactive"
+    )
+    assert first is not None
+    unrelated = git(first.path, "commit-tree", "HEAD^{tree}", "-m", "rewritten root")
+    git(first.path, "reset", "--hard", unrelated)
+
+    resolved = worktree_manager.resolve_existing_session("root")
+
+    assert resolved is not None
+    assert resolved.path == first.path
+    assert resolved.base_commit == first.base_commit
+
+
+def test_resolve_rejects_rewrite_when_base_is_absent_from_worktree_reflog(
+    repo, db, tmp_path
+):
+    worktree_manager = manager(repo, db, tmp_path)
+    first = worktree_manager.bind_new_root_session(
+        "root", conversation_kind="interactive"
+    )
+    assert first is not None
+    unrelated = git(first.path, "commit-tree", "HEAD^{tree}", "-m", "unrelated root")
+    git(first.path, "reset", "--hard", unrelated)
+    git_dir = Path(git(first.path, "rev-parse", "--path-format=absolute", "--git-dir"))
+    (git_dir / "logs" / "HEAD").unlink()
+
+    with pytest.raises(ConversationWorktreeError, match="no longer descends"):
+        worktree_manager.resolve_existing_session("root")
+
+
 def test_active_managed_worktree_is_git_locked_against_external_removal(
     repo, db, tmp_path
 ):

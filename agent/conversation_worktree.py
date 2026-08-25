@@ -1327,10 +1327,19 @@ class ConversationWorktreeManager:
             "recovery",
         )
         if ancestor.returncode != 0:
-            raise ConversationWorktreeError(
-                "ready conversation worktree no longer descends from its base commit",
-                phase="recovery",
-            )
+            # Rebase/squash/reset workflows used while merging PRs can rewrite
+            # every descendant without changing checkout ownership. Recover
+            # only when this exact worktree's HEAD reflog proves the recorded
+            # creation base was previously checked out here, and both durable
+            # ownership claims still match. A replacement checkout with no
+            # local continuity proof remains rejected.
+            if not self._exact_owner_claims_present(
+                record
+            ) or not self._worktree_reflog_contains_base(record):
+                raise ConversationWorktreeError(
+                    "ready conversation worktree no longer descends from its base commit",
+                    phase="recovery",
+                )
         self._ensure_common_owner_claim(record)
         self._ensure_owner_marker(record)
         self._event(
@@ -1367,6 +1376,25 @@ class ConversationWorktreeManager:
         return _owner_claim_matches_record(
             marker_data, record=record
         ) and _owner_claim_matches_record(common_data, record=record)
+
+    def _worktree_reflog_contains_base(self, record: ConversationWorktreeRecord) -> bool:
+        """Prove rewritten HEAD continuity using this worktree's own reflog."""
+        path = Path(record.worktree_path)
+        try:
+            reflog_text = self._git_stdout(
+                path, ["rev-parse", "--git-path", "logs/HEAD"], "recovery"
+            )
+            reflog_path = Path(reflog_text)
+            if not reflog_path.is_absolute():
+                reflog_path = path / reflog_path
+            lines = reflog_path.read_text(encoding="utf-8").splitlines()
+        except (ConversationWorktreeError, OSError):
+            return False
+        for line in lines:
+            fields = line.split(None, 2)
+            if record.base_commit in fields[:2]:
+                return True
+        return False
 
     def _ensure_owner_marker(self, record: ConversationWorktreeRecord) -> None:
         path = Path(record.worktree_path)
