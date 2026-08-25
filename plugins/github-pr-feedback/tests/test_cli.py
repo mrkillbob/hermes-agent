@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -1140,3 +1141,23 @@ def test_ci_audit_handoff_completes_current_task_without_waiting_for_model(
         "--result",
         f"Exact-head local CI receipt {'r' * 64}: failed.",
     ]
+
+
+def test_ci_audit_handoff_terminates_only_a_task_scoped_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from github_pr_feedback.cli import _terminate_current_ci_worker
+
+    signals: list[tuple[int, object]] = []
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr("github_pr_feedback.cli.os.getppid", lambda: 4321)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli.os.kill", lambda pid, sig: signals.append((pid, sig))
+    )
+
+    _terminate_current_ci_worker()
+    assert signals == []
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_exact")
+    _terminate_current_ci_worker()
+    assert signals == [(4321, signal.SIGTERM)]

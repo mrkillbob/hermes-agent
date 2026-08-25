@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -460,6 +461,7 @@ def _status() -> int:
 
 
 def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
+    handoff_completed = False
     try:
         policy = _load_policy_from_context(ctx)
         if policy.local_ci_audit is None:
@@ -500,6 +502,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                         _ci_audit_comment(receipt),
                     )
             _complete_current_ci_task(receipt)
+            handoff_completed = True
         except (CIValidationError, GitHubClientError, RuntimeError):
             print(json.dumps({"status": "audit_handoff_unavailable"}, sort_keys=True))
             return_code = 1
@@ -517,8 +520,11 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     "command_count": len(receipt.commands),
                 },
                 sort_keys=True,
-            )
+            ),
+            flush=True,
         )
+        if handoff_completed:
+            _terminate_current_ci_worker()
     finally:
         ledger.close()
     return return_code
@@ -571,6 +577,16 @@ def _complete_current_ci_task(receipt: CIAuditReceipt) -> None:
     )
     if completed.returncode != 0:
         raise RuntimeError("Kanban audit completion failed")
+
+
+def _terminate_current_ci_worker() -> None:
+    """End only the task-scoped parent after the durable handoff is complete."""
+
+    if not os.environ.get("HERMES_KANBAN_TASK", "").strip():
+        return
+    parent_pid = os.getppid()
+    if parent_pid > 1:
+        os.kill(parent_pid, signal.SIGTERM)
 
 
 def _merge_scan(ctx: Any) -> int:
