@@ -718,6 +718,17 @@ def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
                 ),
             ),
             feedback(
+                "stable-tip-separate-card",
+                reviewer="owner",
+                body=(
+                    "Re: local PR CI audit receipt 4743945a — validated and reproduced "
+                    "at the exact tested SHA. Assessment: pre-existing governance drift "
+                    "on the branch lineage, not introduced by this PR; consistent with "
+                    "failures reproducing on stable tip. A separate repair card has been "
+                    "opened rather than patching inside this refactor."
+                ),
+            ),
+            feedback(
                 "pr-regression",
                 reviewer="owner",
                 body=(
@@ -733,7 +744,7 @@ def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
     result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
 
     assert result.created == 1
-    assert result.skipped["self_resolution_receipt"] == 2
+    assert result.skipped["self_resolution_receipt"] == 3
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["pr-regression"]
     ledger.close()
 

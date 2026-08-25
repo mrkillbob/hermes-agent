@@ -652,7 +652,14 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
         )
     )
     inherited_marker = "pre-existing" in body and any(
-        marker in body for marker in ("stable base", "base tip", "canonical base")
+        marker in body
+        for marker in (
+            "stable base",
+            "stable tip",
+            "base tip",
+            "canonical base",
+            "branch lineage",
+        )
     )
     routed_separately = "separate repair" in body or "not introduced by this pr" in body
     if audit_marker and inherited_marker and routed_separately:
