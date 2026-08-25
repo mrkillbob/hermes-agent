@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import signal
 import shutil
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from .controller import KanbanTask, ScanController
 from .ci_runner import CIAuditIdentity, CIAuditReceipt, CIValidationError, LocalCIRunner
@@ -329,24 +331,28 @@ def _scan(ctx: Any) -> int:
     except ValueError:
         print(json.dumps({"status": "invalid_configuration"}, sort_keys=True))
         return 1
-    ledger = FeedbackLedger.for_current_profile()
-    merge_payload: dict[str, object] | None = None
-    repair_payload: dict[str, object] | None = None
-    try:
-        result = _controller(policy, ledger).scan()
-        if policy.repair_steward is not None:
-            repair = RepairController(
-                policy,
-                ledger,
-                GitHubClient(),
-                KanbanSubprocessClient(),
-                control_home=get_default_hermes_root(),
-            ).scan()
-            repair_payload = _scan_payload(repair)
-        if policy.merge_maintainer is not None:
-            merge_payload = _run_merge_scan(policy, ledger)
-    finally:
-        ledger.close()
+    with _exclusive_scan_lock() as acquired:
+        if not acquired:
+            print(json.dumps({"status": "scan_in_progress"}, sort_keys=True))
+            return 0
+        ledger = FeedbackLedger.for_current_profile()
+        merge_payload: dict[str, object] | None = None
+        repair_payload: dict[str, object] | None = None
+        try:
+            result = _controller(policy, ledger).scan()
+            if policy.repair_steward is not None:
+                repair = RepairController(
+                    policy,
+                    ledger,
+                    GitHubClient(),
+                    KanbanSubprocessClient(),
+                    control_home=get_default_hermes_root(),
+                ).scan()
+                repair_payload = _scan_payload(repair)
+            if policy.merge_maintainer is not None:
+                merge_payload = _run_merge_scan(policy, ledger)
+        finally:
+            ledger.close()
     payload = _scan_payload(result)
     if merge_payload is not None:
         payload["merge"] = merge_payload
@@ -358,6 +364,27 @@ def _scan(ctx: Any) -> int:
         or (repair_payload or {}).get("status") == "degraded"
         or (merge_payload or {}).get("status") == "degraded"
     ) else 0
+
+
+@contextmanager
+def _exclusive_scan_lock(control_home: Path | None = None) -> Iterator[bool]:
+    """Allow only one full feedback scan per Hermes control home."""
+
+    lock_root = (control_home or get_default_hermes_root()) / "github-pr-feedback"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    handle = (lock_root / "scan.lock").open("a+")
+    acquired = False
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError:
+            pass
+        yield acquired
+    finally:
+        if acquired:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def _retry(ctx: Any, args: argparse.Namespace) -> int:

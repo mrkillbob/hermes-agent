@@ -245,6 +245,18 @@ def test_scan_reads_disabled_policy_through_the_plugin_config_context(
     assert context.config_reads == ["enabled"]
 
 
+def test_scan_lock_rejects_a_concurrent_scan_for_the_same_control_home(tmp_path: Path) -> None:
+    from github_pr_feedback.cli import _exclusive_scan_lock
+
+    with _exclusive_scan_lock(tmp_path) as first:
+        with _exclusive_scan_lock(tmp_path) as second:
+            assert first is True
+            assert second is False
+
+    with _exclusive_scan_lock(tmp_path) as after_release:
+        assert after_release is True
+
+
 def test_cli_exposes_status_doctor_and_an_exact_immutable_retry_identity() -> None:
     context = RecordingContext()
     _plugin_module().register(context)
