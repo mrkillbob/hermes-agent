@@ -103,6 +103,7 @@ def prepare_repository(path: Path, *, frontend: bool = False) -> None:
         "scripts/run_hygiene_lane.py",
         "scripts/run_static_lane.py",
         "scripts/run_test_lane.py",
+        "scripts/run_local_ci_audit.py",
     ):
         target = path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -238,6 +239,39 @@ def test_local_ci_runner_adds_locked_frontend_checks_only_for_frontend_changes(
         ("npm", "run", "build"),
     ]
     assert all(call[1] == worktree / "frontend" for call in commands.calls[-4:])
+    ledger.close()
+
+
+def test_environment_lane_uses_the_repo_owned_locked_install_runner(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+    manifest = worktree / "tests/manifests/test_lanes.toml"
+    manifest.write_text(
+        """
+[lanes.locked_install_parity]
+ci_status = "required"
+selection_rule = "environment_check"
+pytest_args = []
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    runner, ledger, commands = build_runner(tmp_path)
+
+    runner.run(CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), worktree)
+
+    lane_argv = commands.calls[3][0]
+    assert lane_argv[:4] == (
+        "python3",
+        "scripts/run_local_ci_audit.py",
+        "--job",
+        "locked_install_parity",
+    )
+    assert "scripts/run_test_lane.py" not in lane_argv
+    assert lane_argv[-2] == "--output"
+    assert lane_argv[-1].endswith(
+        f"hermes-local-ci-receipts/acme-widgets/17/{HEAD_SHA}/locked_install_parity.json"
+    )
     ledger.close()
 
 

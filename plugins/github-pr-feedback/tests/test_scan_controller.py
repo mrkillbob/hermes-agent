@@ -232,11 +232,19 @@ def test_scan_creates_one_bounded_untrusted_task_and_deduplicates_with_sqlite(tm
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     scanner = ScanController(policy, ledger, github, kanban, local_git)
 
-    first = scanner.scan()
-    second = scanner.scan()
+    scans = []
+    for feedback_id, kind in (("self", "issue_comment"), ("bot", "issue_comment")):
+        scans.append(scanner.scan())
+        ledger.mark_feedback_actioned(
+            FeedbackReceipt("acme/widgets", 17, kind, feedback_id, sha),
+            resolved_head_sha=sha,
+            actioned_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        )
+    scans.append(scanner.scan())
+    duplicate_scan = scanner.scan()
 
-    assert first.created == 3
-    assert second.created == 0
+    assert [result.created for result in scans] == [1, 1, 1]
+    assert duplicate_scan.created == 0
     assert len(kanban.tasks) == 3
     task = next(task for task in kanban.tasks if task.evidence["feedback_id"] == "allowed")
     assert task.repository_path == local_path.parent / "prepared-worktree"
@@ -253,6 +261,40 @@ def test_scan_creates_one_bounded_untrusted_task_and_deduplicates_with_sqlite(tm
     ).fetchone()
     assert persisted == (str(local_path.parent / "prepared-worktree"), sha)
     assert {task.evidence["feedback_id"] for task in kanban.tasks} == {"self", "bot", "allowed"}
+    ledger.close()
+
+
+def test_scan_serializes_distinct_feedback_for_the_same_pr_head(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (
+            feedback("first", body="[P1] Fix the first regression."),
+            feedback("second", body="[P1] Fix the second regression."),
+        ),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    scanner = ScanController(policy, ledger, github, kanban, RecordingLocalGit())
+
+    first_scan = scanner.scan()
+    second_scan = scanner.scan()
+
+    assert first_scan.created == 1
+    assert second_scan.created == 0
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["first"]
+    first_receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "first", sha)
+    ledger.mark_feedback_actioned(
+        first_receipt,
+        resolved_head_sha=sha,
+        actioned_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+    )
+
+    third_scan = scanner.scan()
+
+    assert third_scan.created == 1
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["first", "second"]
     ledger.close()
 
 
@@ -522,7 +564,7 @@ def test_local_ci_runs_after_all_admitted_feedback_is_actioned(tmp_path: Path) -
     result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
 
     assert result.created == 1
-    assert result.skipped["already_queued"] == 1
+    assert result.skipped["already_actioned"] == 1
     assert result.skipped.get("feedback_pending", 0) == 0
     assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
     ledger.close()
@@ -822,7 +864,7 @@ def test_scan_filters_out_of_policy_pull_requests_before_fetching_their_feedback
     ledger.close()
 
 
-def test_scan_does_not_requeue_feedback_already_completed_on_an_older_head(
+def test_scan_requeues_unactioned_feedback_after_the_pr_head_changes(
     tmp_path: Path,
 ) -> None:
     local_path, sha = initialized_repository(tmp_path)
@@ -847,8 +889,44 @@ def test_scan_does_not_requeue_feedback_already_completed_on_an_older_head(
         RecordingLocalGit(),
     ).scan()
 
+    assert result.created == 1
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["already-seen"]
+    assert kanban.tasks[0].head_sha == sha
+    ledger.close()
+
+
+def test_scan_does_not_requeue_feedback_actioned_on_an_older_head(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    prior = FeedbackReceipt("acme/widgets", 17, "issue_comment", "already-fixed", "b" * 40)
+    lease = ledger.claim(
+        prior,
+        owner="prior-scanner",
+        claimed_at=datetime(2026, 8, 24, 1, 0, tzinfo=UTC),
+        stale_before=datetime(2026, 8, 24, 0, 55, tzinfo=UTC),
+    )
+    assert lease is not None
+    ledger.finalize(prior, "kanban-prior", lease)
+    ledger.mark_feedback_actioned(
+        prior,
+        resolved_head_sha="c" * 40,
+        actioned_at=datetime(2026, 8, 24, 2, 0, tzinfo=UTC),
+    )
+    kanban = RecordingKanban()
+
+    result = ScanController(
+        policy,
+        ledger,
+        FakeGitHub(admitted_pull_request(sha), (feedback("already-fixed"),)),
+        kanban,
+        RecordingLocalGit(),
+    ).scan()
+
     assert result.created == 0
-    assert result.skipped["already_queued"] == 1
+    assert result.skipped["already_actioned"] == 1
     assert kanban.tasks == []
     ledger.close()
 
@@ -856,12 +934,42 @@ def test_scan_does_not_requeue_feedback_already_completed_on_an_older_head(
 def test_scan_has_a_fixed_per_run_admission_cap(tmp_path: Path) -> None:
     local_path, sha = initialized_repository(tmp_path)
     policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
-    feedback_items = tuple(feedback(str(number)) for number in range(MAX_ADMISSIONS_PER_SCAN + 2))
+    pull_requests = tuple(
+        PullRequest(
+            number,
+            "OPEN",
+            "acme/widgets",
+            "acme/widgets",
+            "owner",
+            f"codex/fix-{number}",
+            sha,
+        )
+        for number in range(1, MAX_ADMISSIONS_PER_SCAN + 3)
+    )
+
+    class ManyPullRequestGitHub(FakeGitHub):
+        def list_open_pull_requests(
+            self, repository: str, owner_login: str
+        ) -> tuple[PullRequest, ...]:
+            assert repository == "acme/widgets"
+            assert owner_login == "owner"
+            return pull_requests
+
+        def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
+            return (feedback(str(number)),)
+
+        def get_pull_request(self, repository: str, number: int) -> PullRequest:
+            return pull_requests[number - 1]
+
     kanban = RecordingKanban()
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
 
     result = ScanController(
-        policy, ledger, FakeGitHub(admitted_pull_request(sha), feedback_items), kanban, RecordingLocalGit()
+        policy,
+        ledger,
+        ManyPullRequestGitHub(pull_requests[0], ()),
+        kanban,
+        RecordingLocalGit(),
     ).scan()
 
     assert result.created == MAX_ADMISSIONS_PER_SCAN

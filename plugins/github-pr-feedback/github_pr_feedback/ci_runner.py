@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 import tomllib
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ _REQUIRED_SCRIPTS = (
     "scripts/run_hygiene_lane.py",
     "scripts/run_static_lane.py",
     "scripts/run_test_lane.py",
+    "scripts/run_local_ci_audit.py",
 )
 _COMMAND_TIMEOUT_SECONDS = 3600
 _BOOTSTRAP_TIMEOUT_SECONDS = 900
@@ -322,7 +324,7 @@ class LocalCIRunner:
         ]
         command_specs.extend(
             (
-                self._python_argv + ("scripts/run_test_lane.py", "--lane", lane),
+                _lane_argv(self._python_argv, lane, identity),
                 worktree,
                 {},
             )
@@ -410,6 +412,28 @@ class LocalCIRunner:
             or not os.access(resolved, os.X_OK)
         ):
             raise CIValidationError("worktree Python bootstrap failed")
+
+
+def _lane_argv(
+    python_argv: tuple[str, ...], lane: str, identity: CIAuditIdentity
+) -> tuple[str, ...]:
+    if lane != "locked_install_parity":
+        return python_argv + ("scripts/run_test_lane.py", "--lane", lane)
+    output = (
+        Path(tempfile.gettempdir())
+        / "hermes-local-ci-receipts"
+        / identity.repository.replace("/", "-")
+        / str(identity.pr_number)
+        / identity.head_sha
+        / "locked_install_parity.json"
+    )
+    return python_argv + (
+        "scripts/run_local_ci_audit.py",
+        "--job",
+        lane,
+        "--output",
+        str(output),
+    )
 
 
 def _required_lanes(manifest_bytes: bytes) -> tuple[str, ...]:

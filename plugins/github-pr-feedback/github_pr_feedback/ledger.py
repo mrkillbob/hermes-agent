@@ -178,6 +178,26 @@ class FeedbackLedger:
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         stale_before = _aware_utc(stale_before, "stale_before")
         with self._transaction():
+            serialized_repair = receipt.feedback_kind != "pr_local_ci" and not (
+                receipt.feedback_kind == "pr_repair" and receipt.feedback_id.startswith("report:")
+            )
+            if serialized_repair:
+                active_repair = self._connection.execute(
+                    "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                    "AND head_sha = ? AND feedback_kind != 'pr_local_ci' "
+                    "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%') "
+                    "AND NOT (feedback_kind = ? AND feedback_id = ?) "
+                    "AND status IN ('claimed', 'completed') AND action_status = 'pending' LIMIT 1",
+                    (
+                        receipt.repository,
+                        receipt.pr_number,
+                        receipt.head_sha,
+                        receipt.feedback_kind,
+                        receipt.feedback_id,
+                    ),
+                ).fetchone()
+                if active_repair is not None:
+                    return None
             row = self._connection.execute(
                 "SELECT status, claimed_at, lease_version FROM feedback_receipts "
                 "WHERE repository = ? AND pr_number = ? "

@@ -367,8 +367,8 @@ class ScanController:
                         continue
                     if not self._ledger.was_actioned_on_any_head(receipt):
                         feedback_pending = True
-                    if self._ledger.was_completed_on_any_head(receipt):
-                        skipped["already_queued"] += 1
+                    if self._ledger.was_actioned_on_any_head(receipt):
+                        skipped["already_actioned"] += 1
                         continue
                     if attempted >= MAX_ADMISSIONS_PER_SCAN:
                         skipped["admission_cap"] += 1
