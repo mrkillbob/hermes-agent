@@ -650,6 +650,52 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
     ledger.close()
 
 
+def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (
+            feedback(
+                "base-inherited",
+                reviewer="owner",
+                body=(
+                    "Local PR CI audit: the hygiene failures are pre-existing and "
+                    "reproduce on the stable base. Recommendation: use a separate "
+                    "repair card; no PR-head repair was performed."
+                ),
+            ),
+            feedback(
+                "already-fixed",
+                reviewer="owner",
+                body=(
+                    "Validated at the receipt head. No additional changes required; "
+                    "focused verification passed."
+                ),
+            ),
+            feedback(
+                "pr-regression",
+                reviewer="owner",
+                body=(
+                    "Local CI audit: static lane failed with a PR-introduced logic "
+                    "regression. The changed extraction source still needs work."
+                ),
+            ),
+        ),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped["self_resolution_receipt"] == 2
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["pr-regression"]
+    ledger.close()
+
+
 def test_scan_suppresses_non_actionable_review_containers_but_keeps_inline_findings(
     tmp_path: Path,
 ) -> None:

@@ -629,6 +629,34 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
         return False
     if body.startswith(_SELF_RESOLUTION_PREFIXES):
         return True
+    if any(
+        marker in body
+        for marker in (
+            "no additional change required",
+            "no additional changes required",
+            "no additional commit is required",
+            "no additional commits are required",
+            "no further audit rerun performed",
+        )
+    ):
+        return True
+    if " are repaired in " in body and "verification" in body:
+        return True
+    audit_marker = any(
+        marker in body
+        for marker in (
+            "local ci audit",
+            "local pr ci audit",
+            "re-audit reconciliation",
+            "hygiene-lane receipt follow-up",
+        )
+    )
+    inherited_marker = "pre-existing" in body and any(
+        marker in body for marker in ("stable base", "base tip", "canonical base")
+    )
+    routed_separately = "separate repair" in body or "not introduced by this pr" in body
+    if audit_marker and inherited_marker and routed_separately:
+        return True
     return body.startswith("confirmed ") and "superseded" in body
 
 
