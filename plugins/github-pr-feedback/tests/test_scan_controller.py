@@ -88,12 +88,133 @@ def test_typed_ci_receipt_routes_to_the_exact_failure_owner(
                 timed_out=False,
                 stdout_sha256="0" * 64,
                 stderr_sha256="0" * 64,
-                classification="logic regression",
+                classification="logic-regression",
             ),
         ),
     )
 
     assert _ci_failure_assignee(receipt) == expected
+
+
+def test_environment_blocked_ci_receipt_does_not_dispatch_a_fixer() -> None:
+    receipt = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, "b" * 40, "a" * 40),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(
+            CommandEvidence(
+                argv=("python3", "scripts/run_static_lane.py"),
+                cwd=".",
+                returncode=127,
+                duration_ms=1,
+                timed_out=False,
+                stdout_sha256="0" * 64,
+                stderr_sha256="0" * 64,
+                classification="environment-blocked",
+            ),
+        ),
+    )
+
+    assert _ci_failure_assignee(receipt) is None
+
+
+def test_failed_exact_head_static_receipt_immediately_dispatches_one_typed_fixer(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    base_sha = "b" * 40
+    raw = {
+        "enabled": True,
+        "repositories": [
+            {
+                "base_repository": "acme/widgets",
+                "head_repository": "acme/widgets",
+                "local_path": str(local_path),
+                "owner_login": "owner",
+                "branch_prefixes": ["codex/"],
+            }
+        ],
+        "reviewer_logins": ["reviewer"],
+        "reviewer_associations": [],
+        "not_before": "2026-08-24T00:00:00Z",
+        "assignee": "task-orchestrator",
+        "routing_rules": [
+            {
+                "assignee": "ci-static-fixer",
+                "precedence": 150,
+                "match_any": ["static lane"],
+                "match_labels_any": ["ci/static"],
+                "tags": ["type/ci", "ci/static"],
+                "priority": "P2",
+                "blast_radius": "contained",
+                "risks": [],
+                "requires_review": False,
+            }
+        ],
+        "auto_dispatch": True,
+        "board": "repairs",
+        "local_ci_audit": {
+            "enabled": True,
+            "assignee": "pr-local-ci-auditor",
+            "post_results": True,
+        },
+    }
+    current = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="main",
+        base_sha=base_sha,
+    )
+    github = FakeGitHub(current, ())
+    kanban = RecordingKanban()
+    local_git = RecordingLocalGit()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    receipt = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, base_sha, head_sha),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(
+            CommandEvidence(
+                argv=(".venv/bin/python", "scripts/run_static_lane.py"),
+                cwd=".",
+                returncode=1,
+                duration_ms=1,
+                timed_out=False,
+                stdout_sha256="0" * 64,
+                stderr_sha256="0" * 64,
+                classification="logic-regression",
+            ),
+        ),
+    )
+    ledger.record_ci_receipt(receipt)
+    controller = ScanController(
+        load_policy(raw), ledger, github, kanban, local_git, control_home=tmp_path
+    )
+
+    assert controller.dispatch_ci_failure(receipt) == "scheduled"
+    assert controller.dispatch_ci_failure(receipt) == "duplicate"
+    assert len(kanban.tasks) == 1
+    task = kanban.tasks[0]
+    assert task.assignee == "ci-static-fixer"
+    assert task.head_sha == head_sha
+    assert task.initial_status == "running"
+    assert task.evidence["ci_receipt_id"] == "f" * 64
+    assert task.evidence["failed_command"]["classification"] == "logic-regression"
+    assert local_git.calls[0][1].feedback_kind == "pr_repair"
+    ledger.close()
 
 
 def test_superseded_ci_receipt_comment_does_not_create_duplicate_repair(

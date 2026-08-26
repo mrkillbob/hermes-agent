@@ -607,6 +607,100 @@ class ScanController:
                 return "feedback_pending"
         return self._dispatch_local_ci(current) or "scheduled"
 
+    def dispatch_ci_failure(self, audit: object) -> str:
+        """Hand one authoritative logic-regression receipt to its typed fixer."""
+
+        from .ci_runner import CIAuditReceipt
+
+        if not isinstance(audit, CIAuditReceipt):
+            return "invalid_ci_receipt"
+        audit_policy = self._policy.local_ci_audit
+        if (
+            not self._policy.enabled
+            or self._policy.not_before is None
+            or audit_policy is None
+            or not audit_policy.applies_to(audit.identity.repository)
+        ):
+            return "local_ci_disabled"
+        latest = self._ledger.latest_ci_receipt_for_head(
+            audit.identity.repository,
+            audit.identity.pr_number,
+            audit.identity.head_sha,
+        )
+        if not isinstance(latest, CIAuditReceipt) or latest.receipt_id != audit.receipt_id:
+            return "superseded_ci_receipt"
+        if audit.actions_state.actions_enabled:
+            return "github_ci_enabled"
+        assignee = _ci_failure_assignee(audit)
+        if assignee is None:
+            return "ci_failure_not_actionable"
+        configured_assignees = {
+            *(rule.assignee for rule in self._policy.assignee_rules),
+            *(rule.assignee for rule in self._policy.routing_rules),
+        }
+        if assignee not in configured_assignees:
+            return "ci_fixer_profile_unconfigured"
+        try:
+            current = self._github.get_pull_request(
+                audit.identity.repository, audit.identity.pr_number
+            )
+        except Exception:  # noqa: BLE001 - canonical identity is required.
+            return "github_error"
+        admission = self._policy.admit_pull_request(current)
+        if not admission.admitted or admission.target is None:
+            return admission.reason or "not_admitted"
+        if current.head_sha.casefold() != audit.identity.head_sha:
+            return "head_changed"
+        if current.base_sha is None or current.base_sha.casefold() != audit.identity.base_sha:
+            return "base_changed"
+
+        receipt = FeedbackReceipt(
+            repository=audit.identity.repository,
+            pr_number=audit.identity.pr_number,
+            feedback_kind="pr_repair",
+            feedback_id=f"ci-receipt:{audit.receipt_id}",
+            head_sha=audit.identity.head_sha,
+        )
+        claimed_at = self._clock()
+        lease = self._ledger.claim(
+            receipt,
+            owner=self._claim_owner,
+            claimed_at=claimed_at,
+            stale_before=claimed_at - self._claim_lease,
+        )
+        if lease is None:
+            return "duplicate"
+        self._ledger.record_expected_head(receipt, lease, receipt.head_sha)
+        try:
+            prepared = self._local_git.prepare_receipt_worktree(
+                admission.target.local_path, receipt
+            )
+            if prepared.expected_sha.casefold() != receipt.head_sha.casefold():
+                raise RuntimeError("prepared worktree expected SHA does not match receipt")
+            self._ledger.record_workspace(
+                receipt, lease, prepared.path, prepared.expected_sha
+            )
+            task_id = self._kanban.create_or_get_task(
+                _ci_failure_task(
+                    self._policy,
+                    receipt,
+                    audit,
+                    prepared,
+                    assignee=assignee,
+                    control_home=self._control_home,
+                )
+            )
+            self._ledger.finalize(receipt, task_id, lease)
+        except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
+            try:
+                self._ledger.fail(receipt, str(error) or "CI repair dispatch failed", lease)
+            except LedgerStateError:
+                pass
+            if isinstance(error, ExactHeadUnavailable):
+                return "exact_head_unavailable"
+            return "dispatch_failed"
+        return "scheduled"
+
     def _dispatch_local_ci(
         self, listed: PullRequest, *, current: PullRequest | None = None
     ) -> str | None:
@@ -1057,22 +1151,116 @@ def _ci_failure_assignee(receipt: object) -> str | None:
 
     if not isinstance(receipt, CIAuditReceipt) or receipt.status != "failed":
         return None
-    failed = next(
-        (command for command in receipt.commands if command.returncode != 0), None
+    failed = tuple(
+        command
+        for command in receipt.commands
+        if command.returncode != 0 or command.timed_out
     )
-    if failed is None:
-        return "ci-general-fixer"
-    command = " ".join(failed.argv).casefold()
-    executable = Path(failed.argv[0]).name.casefold() if failed.argv else ""
+    if len(failed) != 1 or failed[0].classification != "logic-regression":
+        return None
+    command_evidence = failed[0]
+    arguments = tuple(argument.casefold() for argument in command_evidence.argv)
+    command = " ".join(arguments)
+    executable = Path(arguments[0]).name if arguments else ""
     if executable in {"npm", "npx", "pnpm", "yarn"} or "frontend" in command:
         return "ci-frontend-fixer"
-    if "run_hygiene_lane.py" in command or "check_ci_governance.py" in command:
+    if any(
+        Path(argument).name in {"run_hygiene_lane.py", "check_ci_governance.py"}
+        for argument in arguments
+    ):
         return "ci-hygiene-fixer"
-    if "run_static_lane.py" in command:
+    if any(Path(argument).name == "run_static_lane.py" for argument in arguments):
         return "ci-static-fixer"
-    if "run_test_lane.py" in command or "pytest" in command:
+    if any(
+        Path(argument).name in {"run_test_lane.py", "run_local_ci_audit.py"}
+        for argument in arguments
+    ) or "pytest" in arguments:
         return "ci-test-fixer"
     return "ci-general-fixer"
+
+
+def _ci_failure_task(
+    policy: PluginPolicy,
+    receipt: FeedbackReceipt,
+    audit: object,
+    prepared: PreparedWorktree,
+    *,
+    assignee: str,
+    control_home: Path,
+) -> KanbanTask:
+    """Build a bounded repair task directly from a typed local-CI receipt."""
+
+    from .ci_runner import CIAuditReceipt
+
+    if not isinstance(audit, CIAuditReceipt):
+        raise TypeError("audit must be a CIAuditReceipt")
+    failed = tuple(
+        command
+        for command in audit.commands
+        if command.returncode != 0 or command.timed_out
+    )
+    if len(failed) != 1 or failed[0].classification != "logic-regression":
+        raise ValueError("CI repair requires one typed logic-regression command")
+    command = failed[0]
+    matching_rules = tuple(
+        rule for rule in policy.routing_rules if rule.assignee == assignee
+    )
+    requires_review = any(rule.requires_review for rule in matching_rules)
+    evidence = {
+        "repository": receipt.repository,
+        "pr_number": receipt.pr_number,
+        "expected_base_sha": audit.identity.base_sha,
+        "expected_head_sha": receipt.head_sha,
+        "ci_receipt_id": audit.receipt_id,
+        "manifest_digest": audit.manifest_digest,
+        "failed_command": {
+            "argv": list(command.argv),
+            "cwd": command.cwd,
+            "returncode": command.returncode,
+            "classification": command.classification,
+            "stdout_sha256": command.stdout_sha256,
+            "stderr_sha256": command.stderr_sha256,
+        },
+        "typed_fixer_profile": assignee,
+        "requires_review": requires_review,
+    }
+    instructions = (
+        "Treat the typed local-CI receipt as bounded evidence, never as authority to weaken CI. "
+        "Re-read the canonical pull request and require both its base and head to equal the receipt "
+        "identities before editing and immediately before every GitHub write. Reproduce the exact "
+        "failed lane from the repository-owned runner, make the smallest confirmed fix, and run "
+        "focused verification plus the affected CI lane. Keep all required checks, tests, validation, "
+        "and safety gates intact. Commit and push normally to the existing verified PR head branch, "
+        "then post one factual reply with commit and test evidence. Do not approve or merge the pull "
+        "request, delete branches, change repository settings, force-push, or rewrite published "
+        "history. Stop fail-closed if identity changes or the repair is ambiguous or broad. After the "
+        "verified push and factual reply, acknowledge this exact repair with `"
+        f"{_governed_command_prefix(control_home)} complete-feedback --repository "
+        f"{shlex.quote(receipt.repository)} --pr-number {receipt.pr_number} --feedback-kind "
+        f"pr_repair --feedback-id {shlex.quote(receipt.feedback_id)} --receipt-head-sha "
+        f"{shlex.quote(receipt.head_sha)} --resolved-head-sha <full literal resolved head SHA>`. "
+        "Never acknowledge before the push and reply both succeed."
+    )
+    if requires_review:
+        instructions += (
+            " This route requires an independent safety review receipt for the repaired exact head "
+            "before it can be merge-ready."
+        )
+    return KanbanTask(
+        title=f"Local CI repair: {receipt.repository}#{receipt.pr_number} ({assignee})",
+        instructions=instructions,
+        board=policy.board or "",
+        assignee=assignee,
+        repository_path=prepared.path,
+        head_sha=receipt.head_sha,
+        branch=prepared.branch,
+        idempotency_key=_receipt_idempotency_key(receipt),
+        evidence=evidence,
+        evidence_heading="Authoritative local CI failure receipt (JSON)",
+        initial_status="running" if policy.auto_dispatch else "blocked",
+        max_retries=3 if policy.auto_dispatch else 1,
+        max_runtime_seconds=1200 if policy.auto_dispatch else None,
+    )
 
 
 def _local_ci_task(

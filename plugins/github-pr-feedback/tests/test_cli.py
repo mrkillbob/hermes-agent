@@ -1313,6 +1313,132 @@ def test_ci_audit_handoff_completes_current_task_without_waiting_for_model(
     ]
 
 
+def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from github_pr_feedback.ci_runner import (
+        CIAuditIdentity,
+        CIAuditReceipt,
+        CommandEvidence,
+    )
+    from github_pr_feedback.cli import _audit_pr
+    from github_pr_feedback.github_client import CheckState, PullRequestMergeState
+
+    head_sha = "a" * 40
+    base_sha = "b" * 40
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    settings = enabled_settings(Path(__file__).resolve().parents[3])
+    settings["auto_dispatch"] = True
+    settings["routing_rules"] = [
+        {
+            "assignee": "ci-static-fixer",
+            "precedence": 150,
+            "match_any": ["static lane"],
+            "match_labels_any": ["ci/static"],
+            "tags": ["type/ci", "ci/static"],
+            "priority": "P2",
+            "blast_radius": "contained",
+            "risks": [],
+            "requires_review": False,
+        }
+    ]
+    settings["local_ci_audit"] = {
+        "enabled": True,
+        "assignee": "pr-local-ci-auditor",
+        "post_results": True,
+    }
+    receipt = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, base_sha, head_sha),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(
+            CommandEvidence(
+                argv=(".venv/bin/python", "scripts/run_static_lane.py"),
+                cwd=".",
+                returncode=1,
+                duration_ms=1,
+                timed_out=False,
+                stdout_sha256="0" * 64,
+                stderr_sha256="0" * 64,
+                classification="logic-regression",
+            ),
+        ),
+    )
+
+    class GitHub:
+        def get_merge_state(self, repository: str, pr_number: int):
+            return PullRequestMergeState(
+                repository=repository,
+                number=pr_number,
+                state="OPEN",
+                is_draft=False,
+                merged=False,
+                mergeable=True,
+                merge_state_status="CLEAN",
+                base_branch="main",
+                base_sha=base_sha,
+                head_repository=repository,
+                author_login="owner",
+                head_ref_name="codex/fix",
+                head_sha=head_sha,
+                merge_commit_oid=None,
+            )
+
+        def list_feedback(self, _repository: str, _pr_number: int):
+            return ()
+
+        def post_issue_comment(self, _repository: str, _pr_number: int, _body: str):
+            return None
+
+    class Runner:
+        def __init__(self, _github: object, _ledger: object) -> None:
+            pass
+
+        def run(self, _identity: object, _worktree: Path) -> CIAuditReceipt:
+            return receipt
+
+    class Ledger:
+        def close(self) -> None:
+            pass
+
+    dispatched: list[CIAuditReceipt] = []
+
+    class Controller:
+        def dispatch_ci_failure(self, audit: CIAuditReceipt) -> str:
+            dispatched.append(audit)
+            return "scheduled"
+
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", GitHub)
+    monkeypatch.setattr("github_pr_feedback.cli.LocalCIRunner", Runner)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli.FeedbackLedger.for_current_profile", lambda: Ledger()
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._controller", lambda _policy, _ledger: Controller()
+    )
+    monkeypatch.setattr("github_pr_feedback.cli._complete_current_ci_task", lambda _receipt: None)
+    monkeypatch.setattr("github_pr_feedback.cli._terminate_current_ci_worker", lambda: None)
+
+    result = _audit_pr(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha=head_sha,
+            worktree=str(repository),
+        ),
+    )
+
+    assert result == 1
+    assert dispatched == [receipt]
+
+
 def test_ci_audit_handoff_terminates_only_a_task_scoped_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

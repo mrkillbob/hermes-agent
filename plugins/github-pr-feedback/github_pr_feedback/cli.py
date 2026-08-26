@@ -680,6 +680,10 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                         receipt.identity.pr_number,
                         _ci_audit_comment(receipt),
                     )
+            if receipt.status == "failed":
+                repair_status = _controller(policy, ledger).dispatch_ci_failure(receipt)
+                if repair_status not in {"scheduled", "duplicate"}:
+                    raise RuntimeError(f"typed CI repair handoff failed: {repair_status}")
             _complete_current_ci_task(receipt)
             handoff_completed = True
         except (CIValidationError, GitHubClientError, RuntimeError):
