@@ -30,7 +30,8 @@ describe('toggleMessageReaction owner routing', () => {
         id: 'message-1',
         role: 'assistant',
         rowId: 42,
-        content: 'done'
+        content: 'done',
+        parts: []
       } as ChatMessage
     ])
     mocks.requestForOwnedSession.mockResolvedValue({
@@ -44,7 +45,8 @@ describe('toggleMessageReaction owner routing', () => {
       id: 'message-1',
       role: 'assistant',
       rowId: 42,
-      content: 'done'
+      content: 'done',
+      parts: []
     } as ChatMessage
 
     await toggleMessageReaction(message, '👍')
