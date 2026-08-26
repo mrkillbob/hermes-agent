@@ -106,7 +106,20 @@ class RepairController:
                     lambda listed: self._read_snapshot(repository, listed), pulls
                 )
                 ordered_snapshots = tuple(snapshots)
-            for listed, snapshot in zip(pulls, ordered_snapshots, strict=True):
+            repair_candidates = list(zip(pulls, ordered_snapshots, strict=True))
+            repair_candidates.sort(
+                key=lambda candidate: (
+                    candidate[1] is None,
+                    bool(
+                        candidate[1] is not None
+                        and (
+                            not candidate[1][0].mergeable
+                            or candidate[1][0].merge_state_status == "DIRTY"
+                        )
+                    ),
+                )
+            )
+            for listed, snapshot in repair_candidates:
                 if snapshot is None:
                     skipped["github_state_unavailable"] += 1
                     degraded = True

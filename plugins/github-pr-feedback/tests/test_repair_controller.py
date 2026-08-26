@@ -159,6 +159,14 @@ class RefreshInFlightGitHub(ManyBehindBaseGitHub):
         return state
 
 
+class MixedConflictBaseGitHub(ManyBehindBaseGitHub):
+    def get_merge_state(self, repository: str, number: int):
+        state = super().get_merge_state(repository, number)
+        if number == 17:
+            return replace(state, mergeable=False, merge_state_status="DIRTY")
+        return state
+
+
 class ConcurrentReadGitHub(GitHub):
     def __init__(self) -> None:
         self.barrier = threading.Barrier(3)
@@ -270,6 +278,25 @@ def test_repair_controller_dispatches_only_one_base_refresh_per_scan(
     assert result.created == 1
     assert result.skipped["base_refresh_serialized"] == 1
     assert len(kanban.tasks) == 1
+    ledger.close()
+
+
+def test_base_refresh_prefers_clean_pr_before_conflicted_pr(tmp_path: Path) -> None:
+    configured = policy(tmp_path, merge_maintainer=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+
+    result = RepairController(
+        configured,
+        ledger,
+        MixedConflictBaseGitHub(),
+        kanban,
+        LocalGit(),
+    ).scan()
+
+    assert result.created == 1
+    assert kanban.tasks[0].evidence["pr_number"] == 18
+    assert kanban.tasks[0].evidence["triggers"] == ["base_refresh_required"]
     ledger.close()
 
 
