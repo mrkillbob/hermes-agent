@@ -18,6 +18,7 @@ from agent.llm_egress_firewall import (
     AuthorizedEgress,
     DestinationClass,
     EgressBlocked,
+    EgressDecision,
     LLMEgressFirewall,
     LiteralSegment,
     OutboundText,
@@ -27,6 +28,7 @@ from agent.llm_egress_firewall import (
     TypedOutboundRequest,
     classify_destination,
     source_grant_digest,
+    static_literal_sha256,
 )
 
 
@@ -66,7 +68,7 @@ def _request(payload: str = "ordinary prompt"):
 def _typed_request(request, *, source_grant: SourceGrant | None = None):
     def typed(value):
         if isinstance(value, str):
-            return SanitizedSegment(value)
+            return LiteralSegment(value)
         if isinstance(value, list):
             return [typed(item) for item in value]
         if isinstance(value, dict):
@@ -87,8 +89,31 @@ def _typed_request(request, *, source_grant: SourceGrant | None = None):
     )
 
 
-def firewall(tmp_path: Path, **kwargs) -> LLMEgressFirewall:
-    return LLMEgressFirewall(tmp_path, **kwargs)
+_COMMON_STATIC_LITERALS = {
+    "messages",
+    "role",
+    "content",
+    "user",
+    "session_id",
+    "session-1",
+    "turn_id",
+    "turn-1",
+    "request_id",
+    "req-1",
+    "policy_digest",
+    "policy-1",
+}
+
+
+def firewall(tmp_path: Path, *, static_literals=(), **kwargs) -> LLMEgressFirewall:
+    allowed = _COMMON_STATIC_LITERALS | set(static_literals)
+    return LLMEgressFirewall(
+        tmp_path,
+        static_literal_hashes_by_policy={
+            "policy-1": frozenset(static_literal_sha256(value) for value in allowed)
+        },
+        **kwargs,
+    )
 
 
 def test_lan_and_unknown_are_remote_while_numeric_loopback_is_loopback():
@@ -144,20 +169,21 @@ def test_loopback_request_is_allowed_without_source_grant(tmp_path):
 
 def test_remote_request_requires_an_exact_source_grant(tmp_path):
     path = tmp_path / "private.py"
-    path.write_text("private source\npublic source\n", encoding="utf-8")
+    path.write_text("x=1\npublic source\n", encoding="utf-8")
     grant = _source_grant(path)
     request = _request("private source\n")
     with pytest.raises(EgressBlocked) as exc_info:
         firewall(tmp_path).preflight(_typed_request(request), _route(), grants=())
     assert "untrusted_provenance" in exc_info.value.decision.reason_codes
 
-    authorization = firewall(tmp_path).preflight(
+    decision = firewall(tmp_path).preflight(
         _typed_request(request, source_grant=grant),
         _route(),
         grants=(grant,),
     )
-    assert isinstance(authorization, AuthorizedEgress)
-    assert authorization.allowed is True
+    assert isinstance(decision, EgressDecision)
+    assert decision.allowed is True
+    assert decision.payload_sha256
 
 
 def test_unrelated_grant_and_incomplete_typed_source_request_are_denied(tmp_path):
@@ -209,21 +235,87 @@ def test_source_bytes_cannot_be_smuggled_as_a_sanitized_literal(tmp_path):
     assert "source_grant_unbound" in exc_info.value.decision.reason_codes
 
 
+def test_only_exact_policy_allowlisted_static_wrappers_accompany_source(tmp_path):
+    path = tmp_path / "private.py"
+    path.write_text("x=1\n", encoding="utf-8")
+    grant = _source_grant(path)
+    typed_request = _typed_request(_request("ignored"), source_grant=grant)
+    typed_request.payload["messages"][0]["content"] = OutboundText(
+        (
+            LiteralSegment("<source>\n"),
+            SourceBoundSegment(source_grant_digest(grant)),
+            LiteralSegment("</source>"),
+        )
+    )
+    gate = firewall(tmp_path, static_literals={"<source>\n", "</source>"})
+    authorization = gate.authorize(typed_request, _route(), grants=(grant,))
+    assert json.loads(authorization.payload_bytes)["messages"][0]["content"] == (
+        "<source>\nx=1\n</source>"
+    )
+
+    typed_request.payload["messages"][0]["content"] = OutboundText(
+        (
+            LiteralSegment("<changed>\n"),
+            SourceBoundSegment(source_grant_digest(grant)),
+            LiteralSegment("</source>"),
+        )
+    )
+    with pytest.raises(EgressBlocked) as changed_exc:
+        gate.preflight(typed_request, _route(), grants=(grant,))
+    assert "static_literal_not_allowed" in changed_exc.value.decision.reason_codes
+
+    typed_request.payload["messages"][0]["content"] = OutboundText(
+        (
+            SanitizedSegment("<source>\n"),
+            SourceBoundSegment(source_grant_digest(grant)),
+            LiteralSegment("</source>"),
+        )
+    )
+    with pytest.raises(EgressBlocked) as sanitized_exc:
+        gate.preflight(typed_request, _route(), grants=(grant,))
+    assert "sanitized_segment_forbidden" in sanitized_exc.value.decision.reason_codes
+
+
+def test_second_source_cannot_be_mislabeled_as_allowlisted_literal(tmp_path):
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("x=1\n", encoding="utf-8")
+    second.write_text("y=2\n", encoding="utf-8")
+    first_grant = _source_grant(first)
+    second_grant = _source_grant(second)
+    typed_request = _typed_request(_request("ignored"), source_grant=first_grant)
+    typed_request.payload["messages"][0]["content"] = OutboundText(
+        (
+            SourceBoundSegment(source_grant_digest(first_grant)),
+            LiteralSegment("y=2\n"),
+        )
+    )
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            typed_request,
+            _route(),
+            grants=(first_grant, second_grant),
+        )
+    assert "static_literal_not_allowed" in exc_info.value.decision.reason_codes
+    assert "source_bytes_in_literal" in exc_info.value.decision.reason_codes
+    assert "source_grant_unbound" in exc_info.value.decision.reason_codes
+
+
 def test_source_bytes_are_constructed_from_grant_and_authorized_bytes_reject_tampering(tmp_path):
     path = tmp_path / "private.py"
-    path.write_text("verified source\n", encoding="utf-8")
+    path.write_text("x=1\n", encoding="utf-8")
     grant = _source_grant(path)
     raw_request = _request("ignored raw bytes")
     typed_request = _typed_request(raw_request, source_grant=grant)
-    authorization = firewall(tmp_path).preflight(typed_request, _route(), grants=(grant,))
+    authorization = firewall(tmp_path).authorize(typed_request, _route(), grants=(grant,))
     authorized_payload = json.loads(authorization.payload_bytes)
-    assert authorized_payload["messages"][0]["content"] == "verified source\n"
+    assert authorized_payload["messages"][0]["content"] == "x=1\n"
     assert "ignored raw bytes" not in authorization.payload_bytes.decode("utf-8")
 
     typed_request.payload["messages"][0]["content"] = LiteralSegment("tampered")
     assert authorization.payload_bytes == authorization.verify_payload(authorization.payload_bytes)
     with pytest.raises(EgressBlocked) as exc_info:
-        authorization.verify_payload(authorization.payload_bytes.replace(b"verified", b"tampered"))
+        authorization.verify_payload(authorization.payload_bytes.replace(b"x=1", b"x=2"))
     assert "payload_digest_mismatch" in exc_info.value.decision.reason_codes
 
 
@@ -290,11 +382,14 @@ def test_sensitive_path_and_forged_grant_fail_closed(tmp_path, monkeypatch):
 
 
 def test_forced_secret_redaction_rejects_instead_of_rewriting(tmp_path):
+    path = tmp_path / "secret.txt"
+    path.write_text("token=super-secret-value\n", encoding="utf-8")
+    grant = _source_grant(path)
     with pytest.raises(EgressBlocked) as exc_info:
         firewall(tmp_path).preflight(
-            _typed_request(_request("token=super-secret-value")),
+            _typed_request(_request("ignored"), source_grant=grant),
             _route(),
-            grants=(object(),),
+            grants=(grant,),
         )
     assert "secret_detected" in exc_info.value.decision.reason_codes
 
@@ -307,17 +402,22 @@ def test_forced_secret_redaction_rejects_instead_of_rewriting(tmp_path):
         base64.b64encode(b"sk-x").decode("ascii"),
         base64.b64encode(b"sk-short").decode("ascii").rstrip("="),
         base64.urlsafe_b64encode(b"\xfb\xffshort-secret").decode("ascii").rstrip("="),
+        base64.b64encode(b"\x01\x02\x03").decode("ascii"),
+        base64.urlsafe_b64encode(b"\xfb\xff\x00").decode("ascii").rstrip("="),
     ],
 )
 def test_canonical_base64_payloads_are_rejected_even_when_decoded_content_is_benign(
     tmp_path,
     payload,
 ):
+    path = tmp_path / "encoded.txt"
+    path.write_text(payload + "\n", encoding="utf-8")
+    grant = _source_grant(path)
     with pytest.raises(EgressBlocked) as exc_info:
         firewall(tmp_path).preflight(
-            _typed_request(_request(payload)),
+            _typed_request(_request("ignored"), source_grant=grant),
             _route(),
-            grants=(object(),),
+            grants=(grant,),
         )
     assert "base64_payload" in exc_info.value.decision.reason_codes
 
@@ -381,15 +481,14 @@ def test_byte_and_token_caps_allow_the_exact_boundary(tmp_path):
 
 def test_allow_receipt_contains_hashes_and_counts_but_no_payload(tmp_path):
     path = tmp_path / "private.py"
-    path.write_text("private source\n", encoding="utf-8")
+    path.write_text("x=1\n", encoding="utf-8")
     grant = _source_grant(path)
     request = _request("private source\n")
-    authorization = firewall(tmp_path).preflight(
+    decision = firewall(tmp_path).preflight(
         _typed_request(request, source_grant=grant),
         _route(),
         grants=(grant,),
     )
-    decision = authorization.decision
     receipt = json.loads((tmp_path / "llm-egress-receipts.jsonl").read_text().splitlines()[0])
     assert receipt["payload_sha256"] == decision.payload_sha256
     assert receipt["serialized_bytes"] == decision.serialized_bytes
@@ -415,7 +514,7 @@ def test_receipt_hashes_unsafe_identity_and_route_labels(tmp_path):
 
 def test_receipt_is_owner_only_and_rejects_symlink_ledger(tmp_path):
     path = tmp_path / "private.py"
-    path.write_text("private source\n", encoding="utf-8")
+    path.write_text("x=1\n", encoding="utf-8")
     grant = _source_grant(path)
     request = _request("private source\n")
     ledger = tmp_path / "llm-egress-receipts.jsonl"

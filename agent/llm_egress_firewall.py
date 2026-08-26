@@ -159,7 +159,7 @@ class AuthorizedEgress:
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:@/-]{0,256}$")
 _LOCAL_PROCESS_MODES = frozenset({"local_process", "in_process"})
 _BASE64_CANDIDATE = re.compile(
-    r"(?<![A-Za-z0-9_+/\-])([A-Za-z0-9_+/\-]{6,}={0,2})(?![A-Za-z0-9_+/=\-])"
+    r"(?<![A-Za-z0-9_+/\-])([A-Za-z0-9_+/\-]{4,}={0,2})(?![A-Za-z0-9_+/=\-])"
 )
 _MAX_BASE64_CANDIDATE_CHARS = 262_144
 
@@ -256,31 +256,21 @@ def source_grant_digest(grant: SourceGrant) -> str:
     return sha256(encoded).hexdigest()
 
 
+def static_literal_sha256(text: str) -> str:
+    """Hash one exact UTF-8 static literal for a policy allowlist."""
+
+    if not isinstance(text, str):
+        raise TypeError("static literal must be text")
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
 def _canonical_base64_candidate(candidate: str) -> bool:
     """Recognize bounded canonical encodings without flagging ordinary IDs."""
 
-    if not 6 <= len(candidate) <= _MAX_BASE64_CANDIDATE_CHARS:
+    if not 4 <= len(candidate) <= _MAX_BASE64_CANDIDATE_CHARS:
         return False
     unpadded = candidate.rstrip("=")
     if "=" in unpadded or len(unpadded) % 4 == 1:
-        return False
-    # A strict round-trip alone cannot distinguish an ordinary alphabet-only
-    # word (for example ``ordinary``) from unpadded Base64.  Require an
-    # encoding-shaped token: canonical padding, alphabet-specific symbols, or
-    # the mixed alpha/numeric shape emitted by short unpadded encodings.
-    mixed_alphanumeric = (
-        len(unpadded) >= 10
-        and any(char.islower() for char in unpadded)
-        and any(char.isupper() for char in unpadded)
-        and any(char.isdigit() for char in unpadded)
-    )
-    encoding_shape = (
-        candidate.endswith("=")
-        or any(char in candidate for char in "+/")
-        or (any(char in candidate for char in "_-") and mixed_alphanumeric)
-        or mixed_alphanumeric
-    )
-    if not encoding_shape:
         return False
     padded = unpadded + "=" * (-len(unpadded) % 4)
     encoded = padded.encode("ascii")
@@ -294,7 +284,7 @@ def _canonical_base64_candidate(candidate: str) -> bool:
             if altchars is None
             else base64.urlsafe_b64encode(decoded)
         ).decode("ascii")
-        if candidate in {canonical_padded, canonical_padded.rstrip("=")} and len(decoded) >= 4:
+        if candidate in {canonical_padded, canonical_padded.rstrip("=")} and decoded:
             return True
     return False
 
@@ -365,6 +355,7 @@ class LLMEgressFirewall:
         max_serialized_bytes: int = 262_144,
         max_conservative_tokens: int = 87_382,
         conservative_chars_per_token: int = 3,
+        static_literal_hashes_by_policy: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         if max_serialized_bytes <= 0:
             raise ValueError("max_serialized_bytes must be positive")
@@ -377,8 +368,27 @@ class LLMEgressFirewall:
         self._max_serialized_bytes = max_serialized_bytes
         self._max_conservative_tokens = max_conservative_tokens
         self._conservative_chars_per_token = conservative_chars_per_token
+        self._static_literal_hashes_by_policy = {
+            str(policy_digest): frozenset(
+                digest
+                for digest in digests
+                if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+            )
+            for policy_digest, digests in (static_literal_hashes_by_policy or {}).items()
+        }
 
     def preflight(
+        self,
+        request: Mapping[str, Any] | TypedOutboundRequest,
+        route: Any,
+        *,
+        grants: Sequence[SourceGrant] = (),
+    ) -> EgressDecision:
+        """Preserve the content-free Task 1 decision interface."""
+
+        return self.authorize(request, route, grants=grants).decision
+
+    def authorize(
         self,
         request: Mapping[str, Any] | TypedOutboundRequest,
         route: Any,
@@ -432,12 +442,13 @@ class LLMEgressFirewall:
             reasons.extend(grant_reasons)
 
         if typed_request is not None:
-            logical_request, construction_reasons, source_segment_count = (
+            logical_request, construction_reasons, source_segment_count, scan_values = (
                 self._construct_typed_request(typed_request, grant_contents)
             )
             reasons.extend(construction_reasons)
         else:
             logical_request = request
+            scan_values = request
 
         try:
             serialized = json.dumps(
@@ -477,12 +488,12 @@ class LLMEgressFirewall:
 
         if destination in {DestinationClass.REMOTE, DestinationClass.UNKNOWN}:
             try:
-                if _contains_secret(logical_request):
+                if _contains_secret(scan_values):
                     reasons.append("secret_detected")
             except Exception:
                 reasons.append("redaction_failed")
             try:
-                if _contains_canonical_base64(logical_request):
+                if _contains_canonical_base64(scan_values):
                     reasons.append("base64_payload")
             except Exception:
                 reasons.append("base64_scan_failed")
@@ -594,25 +605,43 @@ class LLMEgressFirewall:
         self,
         request: TypedOutboundRequest,
         grant_contents: Mapping[str, tuple[SourceGrant, bytes]],
-    ) -> tuple[Mapping[str, Any], list[str], int]:
+    ) -> tuple[Mapping[str, Any], list[str], int, list[str]]:
         """Build a plain JSON request exclusively from typed segment nodes."""
 
         reasons: list[str] = []
         referenced_grants: set[str] = set()
         source_segment_count = 0
+        scan_values: list[str] = []
+        allowed_static_hashes = self._static_literal_hashes_by_policy.get(
+            request.policy_digest,
+            frozenset(),
+        )
+
+        def require_static_literal(text: str) -> None:
+            if static_literal_sha256(text) not in allowed_static_hashes:
+                reasons.append("static_literal_not_allowed")
+                scan_values.append(text)
 
         def render_text_segment(
             segment: LiteralSegment | SanitizedSegment | SourceBoundSegment,
         ) -> str:
             nonlocal source_segment_count
-            if isinstance(segment, (LiteralSegment, SanitizedSegment)):
+            if isinstance(segment, LiteralSegment):
                 if not isinstance(segment.text, str):
                     reasons.append("invalid_literal_segment")
                     return ""
+                require_static_literal(segment.text)
                 encoded_literal = segment.text.encode("utf-8")
                 if any(content and content in encoded_literal for _, content in grant_contents.values()):
                     reasons.append("source_bytes_in_literal")
                 return segment.text
+            if isinstance(segment, SanitizedSegment):
+                reasons.append("sanitized_segment_forbidden")
+                if isinstance(segment.text, str):
+                    scan_values.append(segment.text)
+                    return segment.text
+                reasons.append("invalid_literal_segment")
+                return ""
             if isinstance(segment, SourceBoundSegment):
                 grant_and_content = grant_contents.get(segment.source_grant_digest)
                 if grant_and_content is None:
@@ -625,6 +654,7 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
+                scan_values.append(text)
                 return text
             reasons.append("invalid_source_segment")
             return ""
@@ -640,11 +670,15 @@ class LLMEgressFirewall:
                     if not isinstance(key, str):
                         reasons.append("invalid_request_key")
                         continue
+                    require_static_literal(key)
                     rendered[key] = render(item)
                 return rendered
             if isinstance(value, (list, tuple)):
                 return [render(item) for item in value]
             if value is None or isinstance(value, (bool, int, float)):
+                require_static_literal(
+                    json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+                )
                 return value
             # In particular, raw strings and bytes are not remote request
             # material. Every outbound string must have a typed owner.
@@ -669,7 +703,7 @@ class LLMEgressFirewall:
                 reasons.append("request_identity_mismatch")
         if set(grant_contents) - referenced_grants:
             reasons.append("source_grant_unbound")
-        return rendered_payload, reasons, source_segment_count
+        return rendered_payload, reasons, source_segment_count, scan_values
 
     def _block(
         self,
@@ -745,4 +779,5 @@ __all__ = [
     "TypedOutboundRequest",
     "classify_destination",
     "source_grant_digest",
+    "static_literal_sha256",
 ]
