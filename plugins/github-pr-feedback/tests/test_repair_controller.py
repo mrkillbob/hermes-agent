@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import threading
 
-from github_pr_feedback.controller import PreparedWorktree
+from github_pr_feedback.controller import FeedbackReceipt, PreparedWorktree
 from github_pr_feedback.github_client import (
     CheckState,
     PullRequestMergeState,
@@ -252,6 +252,40 @@ def test_repair_controller_dispatches_only_one_base_refresh_per_scan(
     assert result.created == 1
     assert result.skipped["base_refresh_serialized"] == 1
     assert len(kanban.tasks) == 1
+    ledger.close()
+
+
+def test_unrelated_pending_feedback_does_not_consume_the_base_refresh_slot(
+    tmp_path: Path,
+) -> None:
+    configured = policy(tmp_path, merge_maintainer=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    unrelated = FeedbackReceipt(
+        "acme/widgets", 17, "review_comment", "review-1", "7" * 40
+    )
+    lease = ledger.claim(
+        unrelated,
+        owner="feedback-controller",
+        claimed_at=now,
+        stale_before=now,
+    )
+    assert lease is not None
+    ledger.finalize(unrelated, "feedback-task", lease)
+    kanban = Kanban()
+
+    result = RepairController(
+        configured,
+        ledger,
+        ManyBehindBaseGitHub(),
+        kanban,
+        LocalGit(),
+        clock=lambda: now,
+    ).scan()
+
+    assert result.created == 1
+    assert result.skipped["duplicate"] == 1
+    assert kanban.tasks[0].evidence["pr_number"] == 18
     ledger.close()
 
 

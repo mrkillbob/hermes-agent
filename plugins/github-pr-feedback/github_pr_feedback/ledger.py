@@ -357,6 +357,21 @@ class FeedbackLedger:
         ).fetchone()
         return row is not None
 
+    def exact_receipt_status(self, receipt: FeedbackReceipt) -> str | None:
+        """Return the durable status for this exact immutable receipt, if present."""
+
+        row = self._connection.execute(
+            "SELECT status FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+            "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+            receipt.key,
+        ).fetchone()
+        if row is None:
+            return None
+        status = row[0]
+        if status not in {"claimed", "completed", "failed"}:
+            raise LedgerStateError("stored feedback receipt status is invalid")
+        return str(status)
+
     def was_actioned_on_any_head(self, receipt: FeedbackReceipt) -> bool:
         row = self._connection.execute(
             "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "

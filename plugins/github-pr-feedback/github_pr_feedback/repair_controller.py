@@ -132,7 +132,6 @@ class RepairController:
                     if base_refresh_dispatched:
                         skipped["base_refresh_serialized"] += 1
                         continue
-                    base_refresh_dispatched = True
                 if not triggers:
                     skipped["no_repair_trigger"] += 1
                     continue
@@ -148,8 +147,16 @@ class RepairController:
                     stale_before=self._clock() - timedelta(minutes=15),
                 )
                 if lease is None:
+                    if (
+                        base_refresh_required
+                        and self._ledger.exact_receipt_status(receipt)
+                        in {"claimed", "completed"}
+                    ):
+                        base_refresh_dispatched = True
                     skipped["duplicate"] += 1
                     continue
+                if base_refresh_required:
+                    base_refresh_dispatched = True
                 try:
                     prepared = self._local_git.prepare_receipt_worktree(
                         target.local_path, receipt
