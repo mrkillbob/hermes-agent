@@ -20,6 +20,7 @@ from .ledger import ClaimLease, FeedbackLedger, LedgerStateError
 from .policy import FeedbackReceipt, PluginPolicy, PullRequest, RepositoryTarget, RoutingDecision
 
 MAX_ADMISSIONS_PER_SCAN = 25
+MAX_PARALLEL_PR_READS = 2
 LOCAL_CI_FEEDBACK_ID = "local-ci-audit-v2"
 _SHA = re.compile(r"^[0-9a-fA-F]{40,64}$")
 DEFAULT_CLAIM_LEASE = timedelta(minutes=5)
@@ -500,7 +501,10 @@ class ScanController:
                 for pull_request in admitted_pull_requests
             )
             with ThreadPoolExecutor(
-                max_workers=min(6, max(1, len(admitted_pull_requests)))
+                max_workers=min(
+                    MAX_PARALLEL_PR_READS,
+                    max(1, len(admitted_pull_requests)),
+                )
             ) as executor:
                 snapshots = tuple(
                     executor.map(

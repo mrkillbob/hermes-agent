@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import threading
+import time
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -913,7 +914,9 @@ class ConcurrentScanGitHub(FakeGitHub):
     def __init__(self, pulls: tuple[PullRequest, ...]) -> None:
         super().__init__(pulls[0], ())
         self.pulls = pulls
-        self.barrier = threading.Barrier(len(pulls))
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
 
     def list_open_pull_requests(
         self, repository: str, owner_login: str
@@ -921,7 +924,12 @@ class ConcurrentScanGitHub(FakeGitHub):
         return self.pulls
 
     def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
-        self.barrier.wait(timeout=1)
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        time.sleep(0.05)
+        with self.lock:
+            self.active -= 1
         return ()
 
 
@@ -2323,10 +2331,11 @@ def test_scan_reads_independent_pull_feedback_concurrently(tmp_path: Path) -> No
     )
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
 
+    github = ConcurrentScanGitHub(pulls)
     result = ScanController(
         policy,
         ledger,
-        ConcurrentScanGitHub(pulls),
+        github,
         RecordingKanban(),
         RecordingLocalGit(),
     ).scan()
@@ -2334,6 +2343,7 @@ def test_scan_reads_independent_pull_feedback_concurrently(tmp_path: Path) -> No
     assert result.created == 0
     assert result.skipped == {}
     assert result.degraded is False
+    assert github.max_active == 2
     ledger.close()
 
 
