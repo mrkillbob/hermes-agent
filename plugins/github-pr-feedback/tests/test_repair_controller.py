@@ -355,6 +355,45 @@ def test_unrelated_pending_feedback_does_not_consume_the_base_refresh_slot(
     ledger.close()
 
 
+def test_archived_pending_feedback_is_superseded_by_current_base_refresh(
+    tmp_path: Path,
+) -> None:
+    configured = policy(tmp_path, merge_maintainer=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    unrelated = FeedbackReceipt(
+        "acme/widgets", 17, "review_comment", "review-1", "7" * 40
+    )
+    lease = ledger.claim(
+        unrelated,
+        owner="feedback-controller",
+        claimed_at=now,
+        stale_before=now,
+    )
+    assert lease is not None
+    ledger.finalize(unrelated, "archived-feedback-task", lease)
+
+    class ArchivedKanban(Kanban):
+        def task_status(self, board: str, task_id: str) -> str | None:
+            assert board == "repairs"
+            assert task_id == "archived-feedback-task"
+            return "archived"
+
+    kanban = ArchivedKanban()
+    result = RepairController(
+        configured,
+        ledger,
+        ManyBehindBaseGitHub(),
+        kanban,
+        LocalGit(),
+        clock=lambda: now,
+    ).scan()
+
+    assert result.created == 1
+    assert kanban.tasks[0].evidence["pr_number"] == 17
+    ledger.close()
+
+
 def test_report_only_repair_scan_creates_a_blocked_observation(tmp_path: Path) -> None:
     configured = policy(tmp_path, report_only=True)
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")

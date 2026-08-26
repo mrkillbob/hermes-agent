@@ -198,21 +198,35 @@ def _claim_with_orphan_recovery(
     )
     if lease is not None:
         return lease
-    task_id = ledger.exact_pending_task_id(receipt)
     task_status = getattr(kanban, "task_status", None)
-    if task_id is None or not callable(task_status):
+    bindings = ledger.pending_task_bindings_for_head(receipt)
+    if not bindings or not callable(task_status):
         return None
-    try:
-        status = task_status(board, task_id)
-    except RuntimeError:
-        return None
-    if status != "archived":
-        return None
-    return ledger.reopen_orphaned_dispatch(
+    for binding in bindings:
+        try:
+            status = task_status(board, binding.task_id)
+        except RuntimeError:
+            return None
+        if status != "archived":
+            return None
+    exact_task_id: str | None = None
+    for binding in bindings:
+        if binding.receipt.key == receipt.key:
+            exact_task_id = binding.task_id
+            continue
+        ledger.supersede_archived_dispatch(binding.receipt, task_id=binding.task_id)
+    if exact_task_id is not None:
+        return ledger.reopen_orphaned_dispatch(
+            receipt,
+            task_id=exact_task_id,
+            owner=owner,
+            claimed_at=claimed_at,
+        )
+    return ledger.claim(
         receipt,
-        task_id=task_id,
         owner=owner,
         claimed_at=claimed_at,
+        stale_before=stale_before,
     )
 
 

@@ -29,6 +29,12 @@ class ClaimLease:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingTaskBinding:
+    receipt: FeedbackReceipt
+    task_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class MergeLease:
     repository: str
     pr_number: int
@@ -372,18 +378,54 @@ class FeedbackLedger:
             raise LedgerStateError("stored feedback receipt status is invalid")
         return str(status)
 
-    def exact_pending_task_id(self, receipt: FeedbackReceipt) -> str | None:
-        """Return the task holding an exact completed-but-unacknowledged dispatch."""
+    def pending_task_bindings_for_head(
+        self, receipt: FeedbackReceipt
+    ) -> tuple[PendingTaskBinding, ...]:
+        """Return every pending dispatch that serializes work on this exact PR head."""
 
-        row = self._connection.execute(
-            "SELECT task_id FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
-            "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ? "
-            "AND status = 'completed' AND action_status = 'pending'",
-            receipt.key,
-        ).fetchone()
-        if row is None or not isinstance(row[0], str) or not row[0].strip():
-            return None
-        return row[0].strip()
+        rows = self._connection.execute(
+            "SELECT feedback_kind, feedback_id, task_id FROM feedback_receipts "
+            "WHERE repository = ? AND pr_number = ? AND head_sha = ? "
+            "AND feedback_kind != 'pr_local_ci' AND status = 'completed' "
+            "AND action_status = 'pending' ORDER BY claimed_at, feedback_kind, feedback_id",
+            (receipt.repository, receipt.pr_number, receipt.head_sha),
+        )
+        bindings: list[PendingTaskBinding] = []
+        for feedback_kind, feedback_id, task_id in rows:
+            if not isinstance(task_id, str) or not task_id.strip():
+                continue
+            bindings.append(
+                PendingTaskBinding(
+                    FeedbackReceipt(
+                        receipt.repository,
+                        receipt.pr_number,
+                        str(feedback_kind),
+                        str(feedback_id),
+                        receipt.head_sha,
+                    ),
+                    task_id.strip(),
+                )
+            )
+        return tuple(bindings)
+
+    def supersede_archived_dispatch(
+        self, receipt: FeedbackReceipt, *, task_id: str
+    ) -> bool:
+        """Release one serialized dispatch after its exact task is proven archived."""
+
+        task_id = task_id.strip() if isinstance(task_id, str) else ""
+        if not task_id:
+            raise ValueError("task_id must be a non-empty string")
+        with self._transaction():
+            result = self._connection.execute(
+                "UPDATE feedback_receipts SET action_status = 'superseded', "
+                "last_error = 'archived Kanban task superseded by current exact-head work' "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ? AND status = 'completed' "
+                "AND action_status = 'pending' AND task_id = ?",
+                (*receipt.key, task_id),
+            )
+            return result.rowcount == 1
 
     def reopen_orphaned_dispatch(
         self,
