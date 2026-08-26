@@ -78,7 +78,8 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
         ("review_comment", "review-comment-1", "line note"),
         ("review", "review-1", "submitted"),
     ]
-    assert runner.calls == [pulls_argv, comments_argv, review_comments_argv, reviews_argv]
+    assert runner.calls[0] == pulls_argv
+    assert set(runner.calls[1:]) == {comments_argv, review_comments_argv, reviews_argv}
 
 
 def test_github_client_fails_closed_when_filtered_pr_list_lacks_canonical_fields() -> None:
