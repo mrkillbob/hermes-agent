@@ -76,7 +76,7 @@ _LANE_PASS_EVIDENCE = re.compile(
 )
 _CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
 _CI_RECEIPT_COMMENT = re.compile(
-    r"(?:authoritative\s+)?receipt(?:_id)?\s*:?\s*`?([0-9a-f]{64})`?",
+    r"(?:authoritative\s+)?receipt(?:_id|\s+id)?\s*:?\s*`?([0-9a-f]{64})`?",
     flags=re.IGNORECASE,
 )
 _DEGRADED_REASONS = frozenset(

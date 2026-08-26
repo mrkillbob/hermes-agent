@@ -715,6 +715,7 @@ def test_only_archived_exact_head_fixer_is_recreated(
         "Authoritative receipt: `{receipt_id}`.",
         "Receipt `{receipt_id}`, manifest digest present.",
         "receipt_id `{receipt_id}`, status failed.",
+        "Receipt id: {receipt_id} — status failed.",
     ),
 )
 def test_superseded_ci_receipt_comment_does_not_create_duplicate_repair(
