@@ -792,6 +792,28 @@ def test_self_resolution_accepts_fixed_import_with_reproduced_old_failures() -> 
     assert _is_self_resolution_receipt(item, owner_login="owner") is True
 
 
+@pytest.mark.parametrize(
+    "body",
+    (
+        (
+            f"Base refresh: normal-merged origin/stable ({'b' * 40}) into the "
+            f"verified PR head {'a' * 40} (clean ort merge, zero conflicts). "
+            f"Focused check: 20 passed. Canonical head is now {'c' * 40}."
+        ),
+        (
+            f"Base refresh for this PR: canonical head was re-verified at {'a' * 40}. "
+            f"Canonical stable ({'b' * 40}) was merged via a normal ort merge with "
+            f"zero conflicts. Merge commit {'c' * 40} was pushed as a plain "
+            "fast-forward. Focused tests: 50 passed."
+        ),
+    ),
+)
+def test_self_resolution_accepts_completed_base_refresh_receipts(body: str) -> None:
+    item = feedback("base-refresh-receipt", reviewer="owner", body=body)
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is True
+
+
 class MixedPullRequestGitHub(FakeGitHub):
     def __init__(self, admitted: PullRequest, foreign: PullRequest, feedback: tuple[Feedback, ...]) -> None:
         super().__init__(admitted, feedback)
