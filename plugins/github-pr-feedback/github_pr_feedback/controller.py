@@ -32,6 +32,7 @@ _SELF_RESOLUTION_PREFIXES = (
     "fixed both ",
     "fixed the ",
     "base refresh:",
+    "base refresh ",
     "base refresh for this pr:",
     "rebased ",
     "split started with ",

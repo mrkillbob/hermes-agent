@@ -806,6 +806,12 @@ def test_self_resolution_accepts_fixed_import_with_reproduced_old_failures() -> 
             f"zero conflicts. Merge commit {'c' * 40} was pushed as a plain "
             "fast-forward. Focused tests: 50 passed."
         ),
+        (
+            f"Base refresh repair (base_refresh_required): verified head {'a' * 40}; "
+            f"normal-merged stable ({'b' * 40}) with zero conflicts. Merge commit "
+            f"{'c' * 40} pushed as a normal fast-forward. Focused tests: 34 passed. "
+            "No tests or gates were modified."
+        ),
     ),
 )
 def test_self_resolution_accepts_completed_base_refresh_receipts(body: str) -> None:
