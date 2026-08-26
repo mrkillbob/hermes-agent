@@ -723,6 +723,90 @@ def test_merge_scan_reports_failed_exact_head_receipt_as_not_passing(
     assert result["maintainer_tasks_created"] == 0
 
 
+def test_merge_scan_reconciles_verification_required_pr_that_is_no_longer_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from github_pr_feedback.cli import _load_policy_from_context, _run_merge_scan
+    from github_pr_feedback.merge_controller import (
+        MergeDecision,
+        MergeReceipt,
+        MergeRunResult,
+    )
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    manifest = repository / "tests" / "manifests" / "test_lanes.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("version = 1\n", encoding="utf-8")
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": False,
+        "post_merge": {"enabled": False},
+    }
+    policy = _load_policy_from_context(RecordingContext(settings))
+    receipt = MergeReceipt(
+        repository="acme/widgets",
+        pr_number=149,
+        author_login="owner",
+        base_branch="stable",
+        tested_head_sha="a" * 40,
+        ci_receipt_id="d" * 64,
+        snapshot_digest="e" * 64,
+        method="squash",
+        merge_commit_oid="c" * 40,
+        merged_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        executor="test",
+    )
+
+    class GitHub:
+        def list_open_pull_requests(self, repository: str, owner_login: str):
+            return ()
+
+    class Ledger:
+        def verification_required_merge_numbers(self, repository: str):
+            return (149,)
+
+    class Controller:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def run(self, number: int) -> MergeRunResult:
+            assert number == 149
+            return MergeRunResult(
+                MergeDecision(True, (), "squash", "e" * 64), receipt
+            )
+
+    monkeypatch.setattr(
+        "github_pr_feedback.cli.CanonicalMergeEvidenceSource", lambda *args: object()
+    )
+    monkeypatch.setattr("github_pr_feedback.cli.MergeController", Controller)
+
+    result = _run_merge_scan(
+        policy,
+        Ledger(),
+        github=GitHub(),
+        kanban=object(),
+    )
+
+    assert result["processed"] == 1
+    assert result["merged"] == [
+        {
+            "pr_number": 149,
+            "head_sha": "a" * 40,
+            "method": "squash",
+            "merge_commit_oid": "c" * 40,
+        }
+    ]
+
+
 def test_doctor_read_only_verifies_every_runtime_dependency(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

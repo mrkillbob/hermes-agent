@@ -833,20 +833,33 @@ def _run_merge_scan(
     deployments: list[dict[str, object]] = []
     tasks_created = 0
     degraded = False
-    for pull_request in pull_requests:
-        receipt = ledger.latest_ci_receipt(
-            merge_policy.repository,
-            pull_request.number,
-            pull_request.head_sha,
-            manifest_digest=manifest_digest,
-            not_before=datetime.min.replace(tzinfo=UTC),
-        )
-        if receipt is None:
-            blocked[str(pull_request.number)] = ["ci_receipt_missing"]
-            continue
-        if receipt.status != "passed":
-            blocked[str(pull_request.number)] = ["ci_receipt_not_passing"]
-            continue
+    open_by_number = {pull_request.number: pull_request for pull_request in pull_requests}
+    pending_reader = getattr(ledger, "verification_required_merge_numbers", None)
+    pending_numbers = tuple(
+        pending_reader(merge_policy.repository) if callable(pending_reader) else ()
+    )
+    pending_set = set(pending_numbers)
+    numbers = (
+        *pending_numbers,
+        *(number for number in open_by_number if number not in pending_set),
+    )
+    for number in numbers:
+        pull_request = open_by_number.get(number)
+        if number not in pending_set:
+            assert pull_request is not None
+            receipt = ledger.latest_ci_receipt(
+                merge_policy.repository,
+                pull_request.number,
+                pull_request.head_sha,
+                manifest_digest=manifest_digest,
+                not_before=datetime.min.replace(tzinfo=UTC),
+            )
+            if receipt is None:
+                blocked[str(pull_request.number)] = ["ci_receipt_missing"]
+                continue
+            if receipt.status != "passed":
+                blocked[str(pull_request.number)] = ["ci_receipt_not_passing"]
+                continue
         try:
             result = MergeController(
                 merge_policy,
@@ -854,11 +867,11 @@ def _run_merge_scan(
                 github,
                 ledger,
                 owner="github-pr-feedback-merge-controller",
-            ).run(pull_request.number)
+            ).run(number)
             if result.receipt is not None:
                 merged.append(
                     {
-                        "pr_number": pull_request.number,
+                        "pr_number": number,
                         "head_sha": result.receipt.tested_head_sha,
                         "method": result.receipt.method,
                         "merge_commit_oid": result.receipt.merge_commit_oid,
@@ -866,7 +879,7 @@ def _run_merge_scan(
                 )
                 if merge_policy.post_merge is not None:
                     existing = ledger.latest_deployment_receipt(
-                        merge_policy.repository, pull_request.number
+                        merge_policy.repository, number
                     )
                     if getattr(existing, "status", None) != "completed":
                         deployment = PostMergeExecutor(
@@ -874,24 +887,25 @@ def _run_merge_scan(
                         ).run(result.receipt)
                         deployments.append(
                             {
-                                "pr_number": pull_request.number,
+                                "pr_number": number,
                                 "status": deployment.status,
                                 "blocker": deployment.blocker,
                             }
                         )
                 continue
             blocker_codes = list(result.decision.blockers)
-            blocked[str(pull_request.number)] = blocker_codes
-            kanban.create_or_get_task(
-                _merge_maintainer_task(policy, pull_request, result.decision)
-            )
-            tasks_created += 1
+            blocked[str(number)] = blocker_codes
+            if pull_request is not None:
+                kanban.create_or_get_task(
+                    _merge_maintainer_task(policy, pull_request, result.decision)
+                )
+                tasks_created += 1
         except (GitHubClientError, RuntimeError, ValueError):
             degraded = True
-            blocked[str(pull_request.number)] = ["merge_evidence_unavailable"]
+            blocked[str(number)] = ["merge_evidence_unavailable"]
     return {
         "status": "degraded" if degraded else "ok",
-        "processed": len(pull_requests),
+        "processed": len(numbers),
         "merged": merged,
         "blocked": blocked,
         "maintainer_tasks_created": tasks_created,

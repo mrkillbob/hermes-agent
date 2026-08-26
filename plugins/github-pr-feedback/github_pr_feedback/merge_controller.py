@@ -18,7 +18,7 @@ from .github_client import (
     RepositoryMergePolicy,
     ReviewState,
 )
-from .ledger import FeedbackLedger
+from .ledger import FeedbackLedger, MergeLease
 from .policy import FeedbackReceipt, MergeMaintainerPolicy, PluginPolicy, PullRequest
 
 
@@ -100,6 +100,19 @@ class MergeEvidenceSource(Protocol):
     def snapshot(self, number: int) -> MergeSnapshot: ...
 
 
+def _allowed_merge_method(
+    policy: MergeMaintainerPolicy, repository_policy: RepositoryMergePolicy
+) -> str | None:
+    return next(
+        (
+            candidate
+            for candidate in policy.merge_methods
+            if repository_policy.allows(candidate)
+        ),
+        None,
+    )
+
+
 def evaluate_merge(
     policy: MergeMaintainerPolicy, snapshot: MergeSnapshot, *, now: datetime
 ) -> MergeDecision:
@@ -163,14 +176,7 @@ def evaluate_merge(
         blockers.append("governed_review_missing")
     if not snapshot.feedback_clear:
         blockers.append("feedback_unprocessed")
-    method = next(
-        (
-            candidate
-            for candidate in policy.merge_methods
-            if snapshot.repository_merge_policy.allows(candidate)
-        ),
-        None,
-    )
+    method = _allowed_merge_method(policy, snapshot.repository_merge_policy)
     if method is None:
         blockers.append("merge_method_unavailable")
     digest = _snapshot_digest(snapshot, receipt)
@@ -206,6 +212,21 @@ class MergeController:
         if isinstance(completed, MergeReceipt):
             decision = MergeDecision(True, (), completed.method, completed.snapshot_digest)
             return MergeRunResult(decision, completed)
+        pending = self._ledger.verification_required_merge_lease(
+            self._policy.repository, number
+        )
+        if pending is not None:
+            snapshot = self._source.snapshot(number)
+            reconciled = self._reconcile_verified_merge(pending, snapshot)
+            if reconciled is not None:
+                return reconciled
+            blocked = MergeDecision(
+                False,
+                ("merge_verification_required",),
+                None,
+                _snapshot_digest(snapshot, snapshot.ci_receipt),
+            )
+            return MergeRunResult(blocked, None)
         first_snapshot = self._source.snapshot(number)
         first = evaluate_merge(self._policy, first_snapshot, now=self._now())
         if not first.eligible or self._policy.report_only:
@@ -289,6 +310,55 @@ class MergeController:
             lease, status="completed", updated_at=self._now(), receipt=receipt
         )
         return MergeRunResult(second, receipt)
+
+    def _reconcile_verified_merge(
+        self, lease: MergeLease, snapshot: MergeSnapshot
+    ) -> MergeRunResult | None:
+        """Complete an ambiguous attempt only from exact canonical merged truth."""
+
+        pull = snapshot.pull_request
+        ci_receipt = snapshot.ci_receipt
+        method = _allowed_merge_method(self._policy, snapshot.repository_merge_policy)
+        if (
+            not snapshot.repository_private
+            or not snapshot.branch_allowed
+            or pull.repository != lease.repository
+            or pull.number != lease.pr_number
+            or pull.head_sha != lease.head_sha
+            or pull.state != "CLOSED"
+            or not pull.merged
+            or pull.merge_commit_oid is None
+            or pull.author_login.casefold() != self._policy.author_login.casefold()
+            or pull.head_repository != self._policy.repository
+            or pull.base_branch != self._policy.base_branch
+            or method is None
+            or not isinstance(ci_receipt, CIAuditReceipt)
+            or ci_receipt.status != "passed"
+            or ci_receipt.identity.repository != lease.repository
+            or ci_receipt.identity.pr_number != lease.pr_number
+            or ci_receipt.identity.head_sha != lease.head_sha
+            or ci_receipt.identity.base_sha != pull.base_sha
+            or ci_receipt.manifest_digest != snapshot.manifest_digest
+        ):
+            return None
+        digest = _snapshot_digest(snapshot, ci_receipt)
+        receipt = MergeReceipt(
+            repository=lease.repository,
+            pr_number=lease.pr_number,
+            author_login=pull.author_login,
+            base_branch=pull.base_branch,
+            tested_head_sha=lease.head_sha,
+            ci_receipt_id=ci_receipt.receipt_id,
+            snapshot_digest=digest,
+            method=method,
+            merge_commit_oid=pull.merge_commit_oid,
+            merged_at=_aware_utc(self._now()),
+            executor=self._owner,
+        )
+        self._ledger.complete_verified_merge(
+            lease, updated_at=self._now(), receipt=receipt
+        )
+        return MergeRunResult(MergeDecision(True, (), method, digest), receipt)
 
 
 class CanonicalMergeEvidenceSource:

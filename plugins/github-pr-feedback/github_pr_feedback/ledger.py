@@ -662,6 +662,73 @@ class FeedbackLedger:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise LedgerStateError("stored merge receipt is invalid") from error
 
+    def verification_required_merge_lease(
+        self, repository: str, pr_number: int
+    ) -> MergeLease | None:
+        """Return the immutable attempt identity awaiting canonical readback."""
+
+        row = self._connection.execute(
+            "SELECT head_sha, owner, claimed_at FROM merge_attempts "
+            "WHERE repository = ? AND pr_number = ? AND status = 'verification_required' "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (repository, pr_number),
+        ).fetchone()
+        if row is None:
+            return None
+        return MergeLease(
+            repository,
+            pr_number,
+            str(row[0]),
+            str(row[1]),
+            _aware_utc(datetime.fromisoformat(str(row[2])), "claimed_at"),
+        )
+
+    def verification_required_merge_numbers(self, repository: str) -> tuple[int, ...]:
+        """List ambiguous merge attempts that still require canonical readback."""
+
+        rows = self._connection.execute(
+            "SELECT pr_number FROM merge_attempts WHERE repository = ? "
+            "AND status = 'verification_required' ORDER BY pr_number",
+            (repository,),
+        ).fetchall()
+        return tuple(int(row[0]) for row in rows)
+
+    def complete_verified_merge(
+        self,
+        lease: MergeLease,
+        *,
+        updated_at: datetime,
+        receipt: object,
+    ) -> None:
+        """Atomically reconcile one ambiguous write from canonical merged truth."""
+
+        from .merge_controller import MergeReceipt
+
+        if not isinstance(receipt, MergeReceipt):
+            raise ValueError("verified merge completion requires a typed receipt")
+        updated_at = _aware_utc(updated_at, "updated_at")
+        receipt_json = json.dumps(
+            receipt.to_payload(), sort_keys=True, separators=(",", ":")
+        )
+        with self._transaction():
+            result = self._connection.execute(
+                "UPDATE merge_attempts SET status = 'completed', updated_at = ?, "
+                "receipt_json = ?, last_error = NULL WHERE repository = ? AND pr_number = ? "
+                "AND head_sha = ? AND status = 'verification_required' AND owner = ? "
+                "AND claimed_at = ?",
+                (
+                    updated_at.isoformat(),
+                    receipt_json,
+                    lease.repository,
+                    lease.pr_number,
+                    lease.head_sha,
+                    lease.owner,
+                    lease.claimed_at.isoformat(),
+                ),
+            )
+            if result.rowcount != 1:
+                raise LedgerStateError("merge verification attempt changed")
+
     def claim_merge_lease(
         self,
         repository: str,

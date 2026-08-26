@@ -222,7 +222,7 @@ class SnapshotSource:
 class RecordingGitHub:
     def __init__(
         self,
-        readbacks: list[PullRequestMergeState],
+        readbacks: list[PullRequestMergeState | Exception],
         *,
         merge_error: Exception | None = None,
     ) -> None:
@@ -238,7 +238,10 @@ class RecordingGitHub:
             raise self.merge_error
 
     def get_merge_state(self, repository: str, number: int) -> PullRequestMergeState:
-        return self.readbacks.pop(0)
+        readback = self.readbacks.pop(0)
+        if isinstance(readback, Exception):
+            raise readback
+        return readback
 
 
 def test_merge_controller_rereads_under_lease_and_stops_on_a_race(tmp_path: Path) -> None:
@@ -333,6 +336,46 @@ def test_ambiguous_merge_write_uses_readback_and_never_blindly_retries(tmp_path:
     assert result.receipt is not None
     assert result.receipt.merge_commit_oid == MERGE_SHA
     assert len(github.merge_calls) == 1
+    ledger.close()
+
+
+def test_verification_required_attempt_reconciles_canonical_merged_truth_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    snapshot = eligible_snapshot()
+    merged_snapshot = eligible_snapshot(
+        pull_request=pr_state(
+            state="CLOSED",
+            merged=True,
+            merge_commit_oid=MERGE_SHA,
+        )
+    )
+    github = RecordingGitHub([GitHubClientError("readback unavailable")])
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = MergeController(
+        policy(),
+        SnapshotSource([snapshot, snapshot, merged_snapshot]),
+        github,
+        ledger,
+        owner="test",
+        now=lambda: NOW,
+    )
+
+    ambiguous = controller.run(17)
+    reconciled = controller.run(17)
+
+    assert ambiguous.receipt is None
+    assert ambiguous.decision.blockers == ("merge_verification_required",)
+    assert reconciled.receipt is not None
+    assert reconciled.receipt.tested_head_sha == HEAD_SHA
+    assert reconciled.receipt.merge_commit_oid == MERGE_SHA
+    assert github.merge_calls == [("acme/widgets", 17, HEAD_SHA, "squash")]
+    assert ledger.merge_status_counts() == {
+        "claimed": 0,
+        "verification_required": 0,
+        "completed": 1,
+        "failed": 0,
+    }
     ledger.close()
 
 
