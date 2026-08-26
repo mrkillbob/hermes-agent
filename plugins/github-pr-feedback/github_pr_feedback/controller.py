@@ -43,9 +43,17 @@ _ACTION_REMAINS_MARKERS = (
     "unresolved",
 )
 _BOUNDED_ACTION_REMAINS = re.compile(
-    r"\b(?:still failing|needs fixing|needs repair|remaining failures?)\b"
+    r"\b(?:still failing|still fails|needs fixing|needs repair|remaining failures?)\b"
 )
 _BARE_FAILS = re.compile(r"\bfails\b")
+_FAILURE_LANES = (
+    "run_static_lane.py",
+    "run_hygiene_lane.py",
+    "static lane",
+    "static-lane",
+    "hygiene lane",
+    "hygiene-lane",
+)
 _HISTORIC_FAILURE_CONTEXT = (
     "reproduced",
     "reproduction",
@@ -60,13 +68,7 @@ _RESOLVED_AFTER_FAILURE = (
     "after repair",
     "root cause and fix",
 )
-_PASS_AFTER_FAILURE = (
-    "status: pass",
-    "status=pass",
-    "checks passed",
-    "passed",
-    "rc=0",
-)
+_LANE_PASS_EVIDENCE = re.compile(r"\b(?:status\s*:?\s*pass|rc\s*=\s*0|passes|passed)\b")
 _CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
 _CI_RECEIPT_COMMENT = re.compile(
     r"authoritative receipt:\s*`([0-9a-f]{64})`",
@@ -1122,10 +1124,34 @@ def _has_unresolved_action(body: str) -> bool:
         after = body[match.end() :]
         factual_history = (
             any(marker in context for marker in _HISTORIC_FAILURE_CONTEXT)
-            and any(marker in after for marker in _RESOLVED_AFTER_FAILURE)
-            and any(marker in after for marker in _PASS_AFTER_FAILURE)
+            and _same_lane_passes_after_resolution(context, after)
         )
         if not factual_history:
+            return True
+    return False
+
+
+def _same_lane_passes_after_resolution(context: str, after: str) -> bool:
+    transitions = [
+        after.find(marker)
+        for marker in _RESOLVED_AFTER_FAILURE
+        if marker in after
+    ]
+    if not transitions:
+        return False
+    post_fix = after[min(transitions) :]
+    for lane in _FAILURE_LANES:
+        if lane not in context:
+            continue
+        lane_start = post_fix.find(lane)
+        if lane_start < 0:
+            continue
+        boundaries = [
+            post_fix.find(separator, lane_start + len(lane))
+            for separator in (". ", "; ", "! ", "? ")
+        ]
+        lane_end = min((boundary for boundary in boundaries if boundary >= 0), default=len(post_fix))
+        if _LANE_PASS_EVIDENCE.search(post_fix[lane_start:lane_end]) is not None:
             return True
     return False
 

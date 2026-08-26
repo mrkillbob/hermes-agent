@@ -1325,6 +1325,7 @@ def test_scan_keeps_owner_ci_repair_requests_and_non_owner_bot_comments(
         "One remaining failure requires action.",
         "Two remaining failures require action.",
         "The current static lane fails.",
+        "The current static lane still fails.",
     ],
 )
 def test_self_resolution_fail_opens_for_bounded_unresolved_action_language(
@@ -1370,6 +1371,34 @@ def test_self_resolution_keeps_factual_historic_failure_reproduction() -> None:
     )
 
     assert _is_self_resolution_receipt(item, owner_login="owner") is True
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        (
+            "reproduced at the pristine receipt where run_static_lane.py fails and "
+            "still fails after the fix; with the fix, unrelated focused checks passed."
+        ),
+        (
+            "reproduced at the pristine receipt where run_static_lane.py fails; "
+            "with the fix, unrelated focused checks passed."
+        ),
+    ],
+)
+def test_self_resolution_does_not_treat_unrelated_passes_as_same_lane_resolution(
+    evidence: str,
+) -> None:
+    item = feedback(
+        "ambiguous-historic-reproduction",
+        reviewer="owner",
+        body=(
+            "Local CI repair for receipt e7cd950e landed at head "
+            f"{'a' * 40}. Evidence: {evidence} No merge was performed."
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is False
 
 
 @pytest.mark.parametrize(
