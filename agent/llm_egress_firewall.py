@@ -162,6 +162,13 @@ _BASE64_CANDIDATE = re.compile(
     r"(?<![A-Za-z0-9_+/\-])([A-Za-z0-9_+/\-]{4,}={0,2})(?![A-Za-z0-9_+/=\-])"
 )
 _MAX_BASE64_CANDIDATE_CHARS = 262_144
+# These are fixed provider-protocol grammar atoms, not a caller-configurable
+# egress allowlist. Several happen to round-trip as unpadded Base64 even though
+# they are required JSON schema words. They still go through the final secret
+# scan; this set only resolves the mathematical ambiguity in Base64 detection.
+_PROTOCOL_GRAMMAR_ATOMS = frozenset(
+    {"messages", "role", "content", "user", "assistant", "system", "tool"}
+)
 
 
 def classify_destination(
@@ -267,6 +274,8 @@ def static_literal_sha256(text: str) -> str:
 def _canonical_base64_candidate(candidate: str) -> bool:
     """Recognize bounded canonical encodings without flagging ordinary IDs."""
 
+    if candidate in _PROTOCOL_GRAMMAR_ATOMS:
+        return False
     if not 4 <= len(candidate) <= _MAX_BASE64_CANDIDATE_CHARS:
         return False
     unpadded = candidate.rstrip("=")
@@ -618,9 +627,13 @@ class LLMEgressFirewall:
         )
 
         def require_static_literal(text: str) -> None:
+            # Provenance authorization and content safety are independent.
+            # Every rendered text atom is scanned again immediately before
+            # authorization, including exact policy-bound static literals and
+            # structural keys/scalars.
+            scan_values.append(text)
             if static_literal_sha256(text) not in allowed_static_hashes:
                 reasons.append("static_literal_not_allowed")
-                scan_values.append(text)
 
         def render_text_segment(
             segment: LiteralSegment | SanitizedSegment | SourceBoundSegment,

@@ -75,7 +75,9 @@ def _typed_request(request, *, source_grant: SourceGrant | None = None):
             return {key: typed(item) for key, item in value.items()}
         return value
 
-    payload = typed(request)
+    # Request identity is control-plane metadata for grant binding and receipts,
+    # not provider payload. Keep only the logical provider request here.
+    payload = typed({"messages": request["messages"]})
     if source_grant is not None:
         payload["messages"][0]["content"] = OutboundText(
             (SourceBoundSegment(source_grant_digest(source_grant)),)
@@ -274,6 +276,31 @@ def test_only_exact_policy_allowlisted_static_wrappers_accompany_source(tmp_path
     with pytest.raises(EgressBlocked) as sanitized_exc:
         gate.preflight(typed_request, _route(), grants=(grant,))
     assert "sanitized_segment_forbidden" in sanitized_exc.value.decision.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "reason"),
+    [
+        ("token=super-secret-value\n", "secret_detected"),
+        ("AQID\n", "base64_payload"),
+    ],
+)
+def test_allowlisted_static_wrapper_still_passes_final_send_scan(tmp_path, wrapper, reason):
+    path = tmp_path / "private.py"
+    path.write_text("x=1\n", encoding="utf-8")
+    grant = _source_grant(path)
+    typed_request = _typed_request(_request("ignored"), source_grant=grant)
+    typed_request.payload["messages"][0]["content"] = OutboundText(
+        (
+            LiteralSegment(wrapper),
+            SourceBoundSegment(source_grant_digest(grant)),
+        )
+    )
+    gate = firewall(tmp_path, static_literals={wrapper})
+    with pytest.raises(EgressBlocked) as exc_info:
+        gate.authorize(typed_request, _route(), grants=(grant,))
+    assert reason in exc_info.value.decision.reason_codes
+    assert not exc_info.value.decision.allowed
 
 
 def test_second_source_cannot_be_mislabeled_as_allowlisted_literal(tmp_path):
