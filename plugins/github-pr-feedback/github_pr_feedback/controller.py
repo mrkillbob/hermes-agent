@@ -41,9 +41,7 @@ _ACTION_REMAINS_MARKERS = (
     "todo",
     "unresolved",
 )
-_CODEX_REVIEW_ENVELOPE_PREFIX = (
-    "### 💡 codex review here are some automated review suggestions for this pull request."
-)
+_CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
 _CI_RECEIPT_COMMENT = re.compile(
     r"authoritative receipt:\s*`([0-9a-f]{64})`",
     flags=re.IGNORECASE,
@@ -159,7 +157,9 @@ class LocalGitRepository:
                 raise TypeError("runner was supplied twice")
             runner = worktree_root
             worktree_root = None
-        self._worktree_root = Path(worktree_root or Path.cwd() / ".github-pr-feedback-worktrees")
+        self._worktree_root = Path(
+            worktree_root or Path.cwd() / ".github-pr-feedback-worktrees"
+        )
         self._runner = runner or SubprocessGitRunner()
 
     def prepare_receipt_worktree(
@@ -171,20 +171,36 @@ class LocalGitRepository:
             ["git", "-C", str(path), "cat-file", "-e", f"{receipt.head_sha}^{{commit}}"]
         )
         if object_check.returncode != 0:
-            raise ExactHeadUnavailable("exact head is unavailable in configured repository")
+            raise ExactHeadUnavailable(
+                "exact head is unavailable in configured repository"
+            )
 
-        branch = self.prepare_receipt_branch(path, receipt, object_already_verified=True)
-        workspace = self._worktree_root / sha256(
-            "\x00".join(map(str, receipt.key)).encode("utf-8")
-        ).hexdigest()
+        branch = self.prepare_receipt_branch(
+            path, receipt, object_already_verified=True
+        )
+        workspace = (
+            self._worktree_root
+            / sha256("\x00".join(map(str, receipt.key)).encode("utf-8")).hexdigest()
+        )
         self._worktree_root.mkdir(parents=True, exist_ok=True)
         if workspace.is_symlink():
-            raise RuntimeError("deterministic receipt worktree path must not be a symlink")
+            raise RuntimeError(
+                "deterministic receipt worktree path must not be a symlink"
+            )
         if workspace.exists():
             self._verify_worktree(workspace, receipt.head_sha)
         else:
             self._run(
-                ["git", "-C", str(path), "worktree", "add", "--quiet", str(workspace), branch]
+                [
+                    "git",
+                    "-C",
+                    str(path),
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    str(workspace),
+                    branch,
+                ]
             )
             self._verify_worktree(workspace, receipt.head_sha)
         return PreparedWorktree(workspace.resolve(), branch, receipt.head_sha)
@@ -200,7 +216,16 @@ class LocalGitRepository:
             raise ValueError("head SHA is not a full Git object ID")
         branch = _receipt_branch(receipt)
         if not object_already_verified:
-            self._run(["git", "-C", str(path), "cat-file", "-e", f"{receipt.head_sha}^{{commit}}"])
+            self._run(
+                [
+                    "git",
+                    "-C",
+                    str(path),
+                    "cat-file",
+                    "-e",
+                    f"{receipt.head_sha}^{{commit}}",
+                ]
+            )
         current = self._run(
             [
                 "git",
@@ -215,7 +240,9 @@ class LocalGitRepository:
         ).strip()
         if current:
             if current.casefold() != receipt.head_sha.casefold():
-                raise RuntimeError("deterministic receipt branch collides with another commit")
+                raise RuntimeError(
+                    "deterministic receipt branch collides with another commit"
+                )
             return branch
         self._run(["git", "-C", str(path), "branch", branch, receipt.head_sha])
         verified = self._run(
@@ -232,6 +259,67 @@ class LocalGitRepository:
         if verified.casefold() != receipt.head_sha.casefold():
             raise RuntimeError("receipt branch does not point at the required head")
         return branch
+
+    def prepare_maintenance_worktree(
+        self,
+        repository_path: Path,
+        repository: str,
+        head_sha: str,
+        lane: str,
+    ) -> Path:
+        """Materialize one isolated, immutable workspace for a maintenance lane."""
+
+        if not _SHA.fullmatch(head_sha):
+            raise ValueError("head SHA is not a full Git object ID")
+        if not repository.strip() or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", lane):
+            raise ValueError("maintenance workspace identity is invalid")
+        self._run(
+            [
+                "git",
+                "-C",
+                str(repository_path),
+                "cat-file",
+                "-e",
+                f"{head_sha}^{{commit}}",
+            ]
+        )
+        digest = sha256(f"{repository}\0{head_sha}\0{lane}".encode("utf-8")).hexdigest()
+        branch = f"hermes/release-maintenance/{digest[:20]}"
+        current = self._run(
+            [
+                "git",
+                "-C",
+                str(repository_path),
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{branch}^{{commit}}",
+            ],
+            missing_ok=True,
+        ).strip()
+        if current and current.casefold() != head_sha.casefold():
+            raise RuntimeError("maintenance branch collides with another commit")
+        if not current:
+            self._run(["git", "-C", str(repository_path), "branch", branch, head_sha])
+        workspace = self._worktree_root / f"maintenance-{digest}"
+        self._worktree_root.mkdir(parents=True, exist_ok=True)
+        if workspace.is_symlink():
+            raise RuntimeError("maintenance worktree path must not be a symlink")
+        if not workspace.exists():
+            self._run(
+                [
+                    "git",
+                    "-C",
+                    str(repository_path),
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    str(workspace),
+                    branch,
+                ]
+            )
+        self._verify_worktree(workspace, head_sha)
+        return workspace.resolve()
 
     def _verify_worktree(self, workspace: Path, expected_sha: str) -> None:
         top = self._run(
@@ -270,13 +358,17 @@ class ScanController:
         self._ledger = ledger
         self._github = github
         self._kanban = kanban
-        self._local_git = local_git or LocalGitRepository(ledger.path.parent / "worktrees")
+        self._local_git = local_git or LocalGitRepository(
+            ledger.path.parent / "worktrees"
+        )
         default_control_home = (
             ledger.path.parent.parent
             if ledger.path.parent.name == "github-pr-feedback"
             else ledger.path.parent
         )
-        self._control_home = Path(control_home or default_control_home).expanduser().resolve()
+        self._control_home = (
+            Path(control_home or default_control_home).expanduser().resolve()
+        )
         self._claim_owner = (claim_owner or f"scanner-{uuid4().hex}").strip()
         if not self._claim_owner:
             raise ValueError("claim_owner must be a non-empty string")
@@ -304,7 +396,9 @@ class ScanController:
                 except Exception:  # noqa: BLE001 - an uncertain gate must fail closed.
                     actions_state_unavailable = True
             try:
-                pull_requests = self._github.list_open_pull_requests(repository, target.owner_login)
+                pull_requests = self._github.list_open_pull_requests(
+                    repository, target.owner_login
+                )
             except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
                 skipped["github_error"] += 1
                 continue
@@ -314,8 +408,12 @@ class ScanController:
                     skipped[pull_request_admission.reason or "not_admitted"] += 1
                     continue
                 try:
-                    feedback_items = self._github.list_feedback(repository, pull_request.number)
-                except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
+                    feedback_items = self._github.list_feedback(
+                        repository, pull_request.number
+                    )
+                except (
+                    Exception
+                ):  # noqa: BLE001 - an adapter failure must not admit work.
                     skipped["github_error"] += 1
                     continue
                 feedback_pending = False
@@ -353,8 +451,12 @@ class ScanController:
                         skipped[admission.reason or "not_admitted"] += 1
                         continue
                     try:
-                        current = self._github.get_pull_request(receipt.repository, receipt.pr_number)
-                    except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
+                        current = self._github.get_pull_request(
+                            receipt.repository, receipt.pr_number
+                        )
+                    except (
+                        Exception
+                    ):  # noqa: BLE001 - an adapter failure must not admit work.
                         skipped["github_error"] += 1
                         continue
                     current_admission = self._policy.admit(
@@ -436,9 +538,12 @@ class ScanController:
         if not admission.admitted or admission.target is None:
             return admission.reason or "not_admitted"
         for feedback in feedback_items:
-            if self._feedback_reason(
-                feedback, owner_login=admission.target.owner_login
-            ) is not None:
+            if (
+                self._feedback_reason(
+                    feedback, owner_login=admission.target.owner_login
+                )
+                is not None
+            ):
                 continue
             receipt = FeedbackReceipt(
                 repository=current.base_repository,
@@ -447,7 +552,10 @@ class ScanController:
                 feedback_id=feedback.feedback_id,
                 head_sha=current.head_sha,
             )
-            if _ci_receipt_feedback_reason(self._ledger, receipt, feedback.body) is not None:
+            if (
+                _ci_receipt_feedback_reason(self._ledger, receipt, feedback.body)
+                is not None
+            ):
                 continue
             feedback_admission = self._policy.admit(
                 current,
@@ -455,8 +563,9 @@ class ScanController:
                 receipt,
                 is_bot=feedback.is_bot,
             )
-            if feedback_admission.admitted and not self._ledger.was_actioned_on_any_head(
-                receipt
+            if (
+                feedback_admission.admitted
+                and not self._ledger.was_actioned_on_any_head(receipt)
             ):
                 return "feedback_pending"
         return self._dispatch_local_ci(current) or "scheduled"
@@ -466,7 +575,9 @@ class ScanController:
         if audit_policy is None:
             return "local_ci_disabled"
         try:
-            current = self._github.get_pull_request(listed.base_repository, listed.number)
+            current = self._github.get_pull_request(
+                listed.base_repository, listed.number
+            )
         except Exception:  # noqa: BLE001 - canonical state is required.
             return "github_error"
         admission = self._policy.admit_pull_request(current)
@@ -496,7 +607,9 @@ class ScanController:
                 admission.target.local_path, receipt
             )
             if prepared.expected_sha.casefold() != receipt.head_sha.casefold():
-                raise RuntimeError("prepared worktree expected SHA does not match receipt")
+                raise RuntimeError(
+                    "prepared worktree expected SHA does not match receipt"
+                )
             self._ledger.record_workspace(
                 receipt,
                 lease,
@@ -555,8 +668,12 @@ class ScanController:
         self, receipt: FeedbackReceipt, skipped: Counter[str]
     ) -> tuple[Feedback, RepositoryTarget, tuple[str, ...]] | None:
         try:
-            current = self._github.get_pull_request(receipt.repository, receipt.pr_number)
-            feedback_items = self._github.list_feedback(receipt.repository, receipt.pr_number)
+            current = self._github.get_pull_request(
+                receipt.repository, receipt.pr_number
+            )
+            feedback_items = self._github.list_feedback(
+                receipt.repository, receipt.pr_number
+            )
         except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
             skipped["github_error"] += 1
             return None
@@ -564,7 +681,8 @@ class ScanController:
             (
                 candidate
                 for candidate in feedback_items
-                if candidate.kind == receipt.feedback_kind and candidate.feedback_id == receipt.feedback_id
+                if candidate.kind == receipt.feedback_kind
+                and candidate.feedback_id == receipt.feedback_id
             ),
             None,
         )
@@ -621,9 +739,13 @@ class ScanController:
         labels: tuple[str, ...] = (),
     ) -> str | None:
         try:
-            prepared = self._local_git.prepare_receipt_worktree(target.local_path, receipt)
+            prepared = self._local_git.prepare_receipt_worktree(
+                target.local_path, receipt
+            )
             if prepared.expected_sha.casefold() != receipt.head_sha.casefold():
-                raise RuntimeError("prepared worktree expected SHA does not match receipt")
+                raise RuntimeError(
+                    "prepared worktree expected SHA does not match receipt"
+                )
             self._ledger.record_workspace(
                 receipt,
                 lease,
@@ -878,7 +1000,9 @@ def _ci_failure_assignee(receipt: object) -> str | None:
 
     if not isinstance(receipt, CIAuditReceipt) or receipt.status != "failed":
         return None
-    failed = next((command for command in receipt.commands if command.returncode != 0), None)
+    failed = next(
+        (command for command in receipt.commands if command.returncode != 0), None
+    )
     if failed is None:
         return "ci-general-fixer"
     command = " ".join(failed.argv).casefold()

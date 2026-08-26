@@ -9,6 +9,8 @@ deterministic maintainer can merge an exact tested head after all configured
 safety gates pass. Models never own merge authority, construct merge argv, or
 create passing receipts. The plugin never pushes source branches, approves,
 changes GitHub settings, deletes branches, or handles credentials.
+An optional release-maintenance steward waits for the merge queue to become
+quiet, pins the exact base SHA, and dispatches specialist end-stage audits.
 
 ## Install and configure
 
@@ -78,6 +80,35 @@ plugins:
           report_only: true
           post_merge:
             enabled: false
+        # Optional end-stage repository maintenance. It never runs while any
+        # PR remains open and waits for the same base SHA to remain unchanged
+        # for the full quiet period. Commands are literal argv, never shell.
+        release_maintenance:
+          enabled: false
+          assignee: release-maintenance-steward
+          repository: example-owner/example-repository
+          base_branch: stable
+          quiet_period_seconds: 1800
+          max_runtime_seconds: 7200
+          lanes:
+            - name: hygiene
+              assignee: repository-hygiene-steward
+              command: [python3, tools/check_hygiene.py]
+            - name: unit-tests
+              assignee: test-contract-steward
+              command: [python3, -m, pytest, -q]
+            - name: static-analysis
+              assignee: code-quality-steward
+              command: [python3, tools/check_static.py]
+            - name: performance
+              assignee: performance-audit-steward
+              command: [python3, tools/check_performance.py]
+            - name: security
+              assignee: security-audit-steward
+              command: [python3, tools/check_security.py]
+            - name: logic-review
+              assignee: logic-review-steward
+              command: [python3, tools/check_logic_contracts.py]
         not_before: "2026-01-01T00:00:00Z"
         # Fallback when no rule wins uniquely, including ambiguous ties.
         assignee: task-orchestrator
@@ -199,6 +230,25 @@ explain deterministic blocker codes, but it cannot edit, push, reply, approve,
 merge, change policy, waive a gate, or create receipts. Roll out in stages:
 collect CI receipts, use `report_only: true`, enable automatic merging, and only
 then separately configure and enable a post-merge hook.
+
+When `release_maintenance.enabled: true`, the ordinary reconciliation scan
+first requires a canonical repository-wide open-PR count of zero. It observes
+the configured base SHA durably and dispatches nothing until that exact SHA has
+remained unchanged for `quiet_period_seconds`. Each lane receives its own
+exact-head linked worktree and specialist profile, runs one configured literal
+argv as a read-only audit, and records an immutable `passed` or `failed`
+receipt with `complete-maintenance`. A failed receipt creates one bounded
+repair task for that lane; its summary is untrusted evidence, the worker must
+reproduce the issue, and it may open a focused PR but never merge. New repair
+PRs pause the steward. After every lane passes on the same SHA, a separate
+final verifier reruns the complete matrix. Only its typed passing receipt marks
+that maintenance wave complete. A new merged base SHA starts a new quiet clock;
+the SHA-scoped idempotency keys prevent duplicate audit and repair storms.
+
+Audit and final-verification tasks must never start or restart `main.py` or any
+protected runtime. Configure repository-owned commands that are safe to run in
+an isolated worktree, and create every named specialist profile before enabling
+the feature; `doctor` verifies the configured board and assignees.
 
 An enabled post-merge hook uses a dedicated clean deployment worktree. It
 proves the configured protected runtime is absent, fast-forwards the configured

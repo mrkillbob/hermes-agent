@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -15,9 +16,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Callable, Iterator, Protocol
 
-from .controller import KanbanTask, ScanController
+from .controller import KanbanTask, LocalGitRepository, ScanController
 from .ci_runner import CIAuditIdentity, CIAuditReceipt, CIValidationError, LocalCIRunner
 from .github_client import GitHubClient, GitHubClientError
 from .ledger import FeedbackLedger, LedgerStateError
@@ -29,15 +30,28 @@ from .merge_controller import (
 from .policy import FeedbackReceipt, PluginPolicy, load_policy
 from .post_merge import PostMergeExecutor
 from .repair_controller import RepairController
+from .release_maintenance import (
+    FINAL_LANE,
+    MaintenanceGitHub,
+    MaintenanceWorkspaces,
+    ReleaseMaintenanceController,
+)
 
 try:
     from hermes_constants import get_default_hermes_root
 except ImportError:
+
     def get_default_hermes_root() -> Path:
         configured = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-        return configured.parent.parent if configured.parent.name == "profiles" else configured
+        return (
+            configured.parent.parent
+            if configured.parent.name == "profiles"
+            else configured
+        )
+
 
 _MISSING = object()
+_FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +101,9 @@ class SubprocessDoctorRunner:
 class DoctorProbe:
     """Read-only readiness probes with an injected external-command boundary."""
 
-    def __init__(self, hermes_root: Path, runner: DoctorCommandRunner | None = None) -> None:
+    def __init__(
+        self, hermes_root: Path, runner: DoctorCommandRunner | None = None
+    ) -> None:
         self._hermes_root = Path(hermes_root)
         self._runner = runner or SubprocessDoctorRunner()
 
@@ -125,6 +141,17 @@ class DoctorProbe:
                         if policy.repair_steward is not None
                         else []
                     ),
+                    *(
+                        [
+                            policy.release_maintenance.assignee,
+                            *(
+                                lane.assignee
+                                for lane in policy.release_maintenance.lanes
+                            ),
+                        ]
+                        if policy.release_maintenance is not None
+                        else []
+                    ),
                 }
             ),
             "ledger_access": self._ledger_access(ledger_path),
@@ -147,7 +174,9 @@ class DoctorProbe:
         if board == "default":
             return self._hermes_root.is_dir()
         directory = self._hermes_root / "kanban" / "boards" / board
-        return (directory / "board.json").is_file() or (directory / "kanban.db").is_file()
+        return (directory / "board.json").is_file() or (
+            directory / "kanban.db"
+        ).is_file()
 
     def _assignee_exists(self, assignee: str) -> bool:
         if not _safe_name(assignee):
@@ -168,7 +197,9 @@ class DoctorProbe:
         except OSError:
             return False
 
-    def _repositories_ready(self, repositories: tuple[Path, ...], worktree_root: Path) -> bool:
+    def _repositories_ready(
+        self, repositories: tuple[Path, ...], worktree_root: Path
+    ) -> bool:
         git = self._runner.which("git")
         all_ready = git is not None and _nearest_existing_parent_access(worktree_root)
         if git is None:
@@ -275,22 +306,33 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     subcommands = parser.add_subparsers(dest="github_pr_feedback_action", required=True)
     subcommands.add_parser("scan", help="Read and dispatch newly admitted feedback")
     subcommands.add_parser("status", help="Show durable receipt counts")
-    subcommands.add_parser("doctor", help="Check configuration readiness without scanning")
-    retry = subcommands.add_parser("retry", help="Retry one failed, immutable feedback receipt")
+    subcommands.add_parser(
+        "doctor", help="Check configuration readiness without scanning"
+    )
+    retry = subcommands.add_parser(
+        "retry", help="Retry one failed, immutable feedback receipt"
+    )
     retry.add_argument("--repository", required=True)
     retry.add_argument("--pr-number", required=True, type=int)
     retry.add_argument("--feedback-kind", required=True)
     retry.add_argument("--feedback-id", required=True)
     retry.add_argument("--head-sha", required=True)
-    audit = subcommands.add_parser("audit-pr", help="Run deterministic CI for one exact PR head")
+    audit = subcommands.add_parser(
+        "audit-pr", help="Run deterministic CI for one exact PR head"
+    )
     audit.add_argument("--repository", required=True)
     audit.add_argument("--pr-number", required=True, type=int)
     audit.add_argument("--head-sha", required=True)
     audit.add_argument("--worktree", required=True, type=Path)
-    subcommands.add_parser("merge-scan", help="Evaluate and merge strictly eligible PR heads")
-    subcommands.add_parser("merge-status", help="Show bounded merge and deployment counts")
+    subcommands.add_parser(
+        "merge-scan", help="Evaluate and merge strictly eligible PR heads"
+    )
+    subcommands.add_parser(
+        "merge-status", help="Show bounded merge and deployment counts"
+    )
     completed = subcommands.add_parser(
-        "complete-feedback", help="Acknowledge one dispatched feedback action after push and reply"
+        "complete-feedback",
+        help="Acknowledge one dispatched feedback action after push and reply",
     )
     completed.add_argument("--repository", required=True)
     completed.add_argument("--pr-number", required=True, type=int)
@@ -298,6 +340,15 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     completed.add_argument("--feedback-id", required=True)
     completed.add_argument("--receipt-head-sha", required=True)
     completed.add_argument("--resolved-head-sha", required=True)
+    maintenance = subcommands.add_parser(
+        "complete-maintenance",
+        help="Record one typed exact-head maintenance lane receipt",
+    )
+    maintenance.add_argument("--repository", required=True)
+    maintenance.add_argument("--head-sha", required=True)
+    maintenance.add_argument("--lane", required=True)
+    maintenance.add_argument("--status", required=True, choices=("passed", "failed"))
+    maintenance.add_argument("--summary", required=True)
 
 
 def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
@@ -318,7 +369,52 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _merge_status()
     if action == "complete-feedback":
         return _complete_feedback(ctx, args)
+    if action == "complete-maintenance":
+        return _complete_maintenance(ctx, args)
     return 2
+
+
+def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        maintenance = policy.release_maintenance
+        if maintenance is None:
+            raise ValueError("release maintenance is disabled")
+        allowed_lanes = {lane.name for lane in maintenance.lanes} | {FINAL_LANE}
+        if (
+            args.repository != maintenance.repository
+            or args.lane not in allowed_lanes
+            or not _FULL_SHA.fullmatch(args.head_sha)
+        ):
+            raise ValueError("maintenance receipt identity is not configured")
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            ledger.record_maintenance_receipt(
+                repository=args.repository,
+                head_sha=args.head_sha.casefold(),
+                lane=args.lane,
+                status=args.status,
+                summary=args.summary,
+                completed_at=datetime.now(UTC),
+            )
+        finally:
+            ledger.close()
+    except (LedgerStateError, ValueError):
+        print(json.dumps({"status": "rejected"}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "recorded",
+                "repository": args.repository,
+                "head_sha": args.head_sha.casefold(),
+                "lane": args.lane,
+                "result": args.status,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def cli_bindings(ctx: Any) -> tuple[Any, Any]:
@@ -340,6 +436,7 @@ def _scan(ctx: Any) -> int:
         ledger = FeedbackLedger.for_current_profile()
         merge_payload: dict[str, object] | None = None
         repair_payload: dict[str, object] | None = None
+        maintenance_payload: dict[str, object] | None = None
         try:
             result = _controller(policy, ledger).scan()
             if policy.repair_steward is not None:
@@ -353,6 +450,8 @@ def _scan(ctx: Any) -> int:
                 repair_payload = _scan_payload(repair)
             if policy.merge_maintainer is not None:
                 merge_payload = _run_merge_scan(policy, ledger)
+            if policy.release_maintenance is not None:
+                maintenance_payload = _run_release_maintenance_scan(policy, ledger)
         finally:
             ledger.close()
     payload = _scan_payload(result)
@@ -360,12 +459,57 @@ def _scan(ctx: Any) -> int:
         payload["merge"] = merge_payload
     if repair_payload is not None:
         payload["repair"] = repair_payload
+    if maintenance_payload is not None:
+        payload["release_maintenance"] = maintenance_payload
     print(json.dumps(payload, sort_keys=True))
-    return 1 if (
-        result.degraded
-        or (repair_payload or {}).get("status") == "degraded"
-        or (merge_payload or {}).get("status") == "degraded"
-    ) else 0
+    return (
+        1
+        if (
+            result.degraded
+            or (repair_payload or {}).get("status") == "degraded"
+            or (merge_payload or {}).get("status") == "degraded"
+            or (maintenance_payload or {}).get("status") == "degraded"
+        )
+        else 0
+    )
+
+
+def _run_release_maintenance_scan(
+    policy: PluginPolicy,
+    ledger: FeedbackLedger,
+    *,
+    github: MaintenanceGitHub | None = None,
+    kanban: KanbanSubprocessClient | None = None,
+    workspaces: MaintenanceWorkspaces | None = None,
+    now: Callable[[], datetime] | None = None,
+    control_home: Path | None = None,
+) -> dict[str, object]:
+    maintenance = policy.release_maintenance
+    if maintenance is None:
+        return {
+            "status": "disabled",
+            "head_sha": None,
+            "tasks_created": 0,
+            "blockers": [],
+        }
+    target = policy.targets[maintenance.repository]
+    result = ReleaseMaintenanceController(
+        maintenance,
+        target,
+        ledger,
+        github or GitHubClient(),
+        kanban or KanbanSubprocessClient(),
+        workspaces or LocalGitRepository(ledger.path.parent / "maintenance-worktrees"),
+        now=now,
+        control_home=control_home or get_default_hermes_root(),
+        board=policy.board or "maintenance",
+    ).scan()
+    return {
+        "status": result.status,
+        "head_sha": result.head_sha,
+        "tasks_created": result.tasks_created,
+        "blockers": list(result.blockers),
+    }
 
 
 @contextmanager
@@ -429,7 +573,9 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
         ):
             raise ValueError("resolved head is not canonical")
     except (ValueError, GitHubClientError):
-        print(json.dumps({"status": "invalid_or_raced_feedback_action"}, sort_keys=True))
+        print(
+            json.dumps({"status": "invalid_or_raced_feedback_action"}, sort_keys=True)
+        )
         return 1
     ledger = FeedbackLedger.for_current_profile()
     try:
@@ -845,6 +991,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "local_ci_audit",
         "merge_maintainer",
         "repair_steward",
+        "release_maintenance",
         "not_before",
         "assignee",
         "board",
@@ -856,9 +1003,14 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
 
 
 def _safe_name(value: str) -> bool:
-    return bool(value) and len(value) <= 64 and all(
-        character.isalnum() or character in "-_." for character in value
-    ) and "/" not in value and "\\" not in value and value not in {".", ".."}
+    return (
+        bool(value)
+        and len(value) <= 64
+        and all(character.isalnum() or character in "-_." for character in value)
+        and "/" not in value
+        and "\\" not in value
+        and value not in {".", ".."}
+    )
 
 
 def _nearest_existing_parent_access(path: Path) -> bool:

@@ -44,7 +44,12 @@ def configured_policy(tmp_path: Path):
 
 
 def initialize_git_worktree(path: Path) -> None:
-    subprocess.run(["git", "init", "--quiet", str(path)], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "init", "--quiet", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def enabled_raw_config(local_path: Path) -> dict[str, object]:
@@ -67,7 +72,9 @@ def enabled_raw_config(local_path: Path) -> dict[str, object]:
     }
 
 
-def enabled_merge_config(repository_path: Path, deployment_path: Path) -> dict[str, object]:
+def enabled_merge_config(
+    repository_path: Path, deployment_path: Path
+) -> dict[str, object]:
     raw = enabled_raw_config(repository_path)
     raw["merge_maintainer"] = {
         "enabled": True,
@@ -97,6 +104,108 @@ def enabled_merge_config(repository_path: Path, deployment_path: Path) -> dict[s
     return raw
 
 
+def enabled_release_maintenance_config(repository_path: Path) -> dict[str, object]:
+    raw = enabled_raw_config(repository_path)
+    raw["release_maintenance"] = {
+        "enabled": True,
+        "assignee": "release-maintenance-steward",
+        "repository": "acme/widgets",
+        "base_branch": "stable",
+        "quiet_period_seconds": 900,
+        "max_runtime_seconds": 7200,
+        "lanes": [
+            {
+                "name": "unit-tests",
+                "assignee": "test-contract-steward",
+                "command": ["python3", "-m", "pytest", "-q"],
+            },
+            {
+                "name": "static-analysis",
+                "assignee": "code-quality-steward",
+                "command": ["python3", "tools/check_static.py"],
+            },
+        ],
+    }
+    return raw
+
+
+def test_enabled_policy_parses_release_maintenance_lane_matrix(tmp_path: Path) -> None:
+    repository_path = tmp_path / "widgets"
+    initialize_git_worktree(repository_path)
+
+    policy = load_policy(enabled_release_maintenance_config(repository_path))
+
+    assert policy.release_maintenance.assignee == "release-maintenance-steward"
+    assert policy.release_maintenance.repository == "acme/widgets"
+    assert policy.release_maintenance.base_branch == "stable"
+    assert policy.release_maintenance.quiet_period_seconds == 900
+    assert policy.release_maintenance.max_runtime_seconds == 7200
+    assert [lane.name for lane in policy.release_maintenance.lanes] == [
+        "unit-tests",
+        "static-analysis",
+    ]
+    assert policy.release_maintenance.lanes[0].command == (
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+    )
+
+
+def test_release_maintenance_rejects_a_protected_runtime_command(tmp_path: Path) -> None:
+    repository_path = tmp_path / "widgets"
+    initialize_git_worktree(repository_path)
+    raw = enabled_release_maintenance_config(repository_path)
+    raw["release_maintenance"]["lanes"][0]["command"] = ["python3", "main.py"]
+
+    with pytest.raises(ValueError, match="protected runtime"):
+        load_policy(raw)
+
+
+def test_maintenance_head_quiet_clock_resets_only_when_base_head_changes(
+    tmp_path: Path,
+) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    first = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+
+    assert (
+        ledger.observe_maintenance_head(
+            "acme/widgets", "stable", "a" * 40, observed_at=first
+        )
+        == first
+    )
+    assert (
+        ledger.observe_maintenance_head(
+            "acme/widgets", "stable", "a" * 40, observed_at=first + timedelta(minutes=5)
+        )
+        == first
+    )
+    changed = ledger.observe_maintenance_head(
+        "acme/widgets", "stable", "b" * 40, observed_at=first + timedelta(minutes=6)
+    )
+
+    assert changed == first + timedelta(minutes=6)
+
+
+def test_maintenance_receipts_are_exact_head_and_lane_scoped(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    completed_at = datetime(2026, 8, 25, 12, 30, tzinfo=UTC)
+
+    ledger.record_maintenance_receipt(
+        repository="acme/widgets",
+        head_sha="a" * 40,
+        lane="unit-tests",
+        status="failed",
+        summary="3 tests failed",
+        completed_at=completed_at,
+    )
+
+    receipts = ledger.maintenance_receipts("acme/widgets", "a" * 40)
+    assert receipts["unit-tests"].status == "failed"
+    assert receipts["unit-tests"].summary == "3 tests failed"
+    assert ledger.maintenance_receipts("acme/widgets", "b" * 40) == {}
+
+
 def test_merge_maintainer_is_disabled_by_default(tmp_path: Path) -> None:
     repository_path = tmp_path / "widgets"
     initialize_git_worktree(repository_path)
@@ -106,7 +215,9 @@ def test_merge_maintainer_is_disabled_by_default(tmp_path: Path) -> None:
     assert policy.merge_maintainer is None
 
 
-def test_enabled_policy_parses_strict_merge_and_post_merge_settings(tmp_path: Path) -> None:
+def test_enabled_policy_parses_strict_merge_and_post_merge_settings(
+    tmp_path: Path,
+) -> None:
     repository_path = tmp_path / "widgets"
     deployment_path = tmp_path / "deployment"
     initialize_git_worktree(repository_path)
@@ -151,9 +262,13 @@ def test_enabled_policy_parses_strict_merge_and_post_merge_settings(tmp_path: Pa
         lambda merge: merge.update({"merge_methods": ["squash", "squash"]}),
         lambda merge: merge.update({"post_merge": {"deployment_path": "/tmp"}}),
         lambda merge: merge["post_merge"].update({"unknown": True}),
-        lambda merge: merge["post_merge"].update({"protected_runtime_entry": "/main.py"}),
+        lambda merge: merge["post_merge"].update(
+            {"protected_runtime_entry": "/main.py"}
+        ),
         lambda merge: merge["post_merge"].update({"bundle_path": "../Example.app"}),
-        lambda merge: merge["post_merge"].update({"package_argv": "python3 tools/tb.py"}),
+        lambda merge: merge["post_merge"].update(
+            {"package_argv": "python3 tools/tb.py"}
+        ),
         lambda merge: merge["post_merge"].update({"relaunch_argv": []}),
     ],
 )
@@ -171,7 +286,9 @@ def test_enabled_policy_rejects_unsafe_merge_maintainer_settings(
         load_policy(raw)
 
 
-def test_disabled_post_merge_hook_requires_only_explicit_enabled_flag(tmp_path: Path) -> None:
+def test_disabled_post_merge_hook_requires_only_explicit_enabled_flag(
+    tmp_path: Path,
+) -> None:
     repository_path = tmp_path / "widgets"
     deployment_path = tmp_path / "deployment"
     initialize_git_worktree(repository_path)
@@ -252,7 +369,12 @@ def claim_lease(
 def test_disabled_config_is_not_admitted(tmp_path: Path) -> None:
     policy = load_policy({"enabled": False})
 
-    assert policy.admit(admitted_pr(), Reviewer("trusted-reviewer", "MEMBER"), receipt()).reason == "disabled"
+    assert (
+        policy.admit(
+            admitted_pr(), Reviewer("trusted-reviewer", "MEMBER"), receipt()
+        ).reason
+        == "disabled"
+    )
 
 
 def test_dispatched_feedback_is_not_actioned_until_explicit_exact_head_acknowledgement(
@@ -433,7 +555,10 @@ def test_enabled_policy_parses_bounded_assignee_rules_and_uses_fallback_on_a_tie
 
     policy = load_policy(raw)
 
-    assert policy.assignee_for("Reduce runtime latency and performance overhead") == "performance-specialist"
+    assert (
+        policy.assignee_for("Reduce runtime latency and performance overhead")
+        == "performance-specialist"
+    )
     assert policy.assignee_for("Investigate a runtime crash") == "runtime-specialist"
     assert policy.assignee_for("Documentation typo") == "repair-agent"
     assert policy.assignee_for("Performance and runtime regression") == "repair-agent"
@@ -548,7 +673,13 @@ def test_enabled_policy_requires_explicit_opt_in_for_automatic_worker_dispatch(
         [],
         [{"assignee": "performance-specialist"}],
         [{"assignee": "performance-specialist", "match_any": []}],
-        [{"assignee": "performance-specialist", "match_any": ["latency"], "extra": True}],
+        [
+            {
+                "assignee": "performance-specialist",
+                "match_any": ["latency"],
+                "extra": True,
+            }
+        ],
     ],
 )
 def test_enabled_policy_rejects_malformed_assignee_rules(
@@ -563,26 +694,58 @@ def test_enabled_policy_rejects_malformed_assignee_rules(
         load_policy(raw)
 
 
-def test_completed_feedback_identity_is_detected_across_head_changes(tmp_path: Path) -> None:
+def test_completed_feedback_identity_is_detected_across_head_changes(
+    tmp_path: Path,
+) -> None:
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     prior = receipt(head_sha="a" * 40)
     lease = claim_lease(ledger, prior)
     ledger.finalize(prior, "kanban-1", lease)
 
     assert ledger.was_completed_on_any_head(receipt(head_sha="b" * 40)) is True
-    assert ledger.was_completed_on_any_head(receipt(feedback_id="different", head_sha="b" * 40)) is False
+    assert (
+        ledger.was_completed_on_any_head(
+            receipt(feedback_id="different", head_sha="b" * 40)
+        )
+        is False
+    )
     ledger.close()
 
 
 @pytest.mark.parametrize(
     ("pr_overrides", "reviewer", "receipt_overrides", "reason"),
     [
-        ({"base_repository": "acme/other"}, Reviewer("trusted-reviewer", "MEMBER"), {}, "base_repository_not_allowed"),
-        ({"head_repository": "fork/widgets"}, Reviewer("trusted-reviewer", "MEMBER"), {}, "head_repository_not_allowed"),
-        ({"author_login": "someone-else"}, Reviewer("trusted-reviewer", "MEMBER"), {}, "author_not_allowed"),
-        ({"head_ref_name": "feature/no-prefix"}, Reviewer("trusted-reviewer", "MEMBER"), {}, "branch_not_allowed"),
+        (
+            {"base_repository": "acme/other"},
+            Reviewer("trusted-reviewer", "MEMBER"),
+            {},
+            "base_repository_not_allowed",
+        ),
+        (
+            {"head_repository": "fork/widgets"},
+            Reviewer("trusted-reviewer", "MEMBER"),
+            {},
+            "head_repository_not_allowed",
+        ),
+        (
+            {"author_login": "someone-else"},
+            Reviewer("trusted-reviewer", "MEMBER"),
+            {},
+            "author_not_allowed",
+        ),
+        (
+            {"head_ref_name": "feature/no-prefix"},
+            Reviewer("trusted-reviewer", "MEMBER"),
+            {},
+            "branch_not_allowed",
+        ),
         ({}, Reviewer("stranger", "CONTRIBUTOR"), {}, "reviewer_not_allowed"),
-        ({}, Reviewer("trusted-reviewer", "MEMBER"), {"head_sha": "b" * 40}, "head_changed"),
+        (
+            {},
+            Reviewer("trusted-reviewer", "MEMBER"),
+            {"head_sha": "b" * 40},
+            "head_changed",
+        ),
     ],
 )
 def test_policy_rejects_untrusted_or_changed_pull_request_state(
@@ -594,7 +757,9 @@ def test_policy_rejects_untrusted_or_changed_pull_request_state(
 ) -> None:
     policy = configured_policy(tmp_path)
 
-    admission = policy.admit(admitted_pr(**pr_overrides), reviewer, receipt(**receipt_overrides))
+    admission = policy.admit(
+        admitted_pr(**pr_overrides), reviewer, receipt(**receipt_overrides)
+    )
 
     assert admission.admitted is False
     assert admission.reason == reason
@@ -603,7 +768,9 @@ def test_policy_rejects_untrusted_or_changed_pull_request_state(
 def test_policy_admits_exact_allowed_state(tmp_path: Path) -> None:
     policy = configured_policy(tmp_path)
 
-    admission = policy.admit(admitted_pr(), Reviewer("trusted-reviewer", "CONTRIBUTOR"), receipt())
+    admission = policy.admit(
+        admitted_pr(), Reviewer("trusted-reviewer", "CONTRIBUTOR"), receipt()
+    )
 
     assert admission.admitted is True
     assert admission.reason is None
@@ -630,10 +797,14 @@ def test_policy_allows_only_an_explicitly_configured_head_fork(tmp_path: Path) -
             "board": "repairs",
         }
     )
-    pr = admitted_pr(base_repository="upstream/widgets", head_repository="owner/widgets")
+    pr = admitted_pr(
+        base_repository="upstream/widgets", head_repository="owner/widgets"
+    )
     admitted_receipt = receipt(repository="upstream/widgets")
 
-    admission = policy.admit(pr, Reviewer("trusted-reviewer", "CONTRIBUTOR"), admitted_receipt)
+    admission = policy.admit(
+        pr, Reviewer("trusted-reviewer", "CONTRIBUTOR"), admitted_receipt
+    )
 
     assert admission.admitted is True
 
@@ -661,7 +832,9 @@ def test_ledger_deduplicates_completed_receipt_after_restart(tmp_path: Path) -> 
     restarted.close()
 
 
-def test_ledger_deduplicates_an_in_progress_receipt_after_restart(tmp_path: Path) -> None:
+def test_ledger_deduplicates_an_in_progress_receipt_after_restart(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "state" / "ledger.sqlite3"
     first = FeedbackLedger(db_path)
 
@@ -680,11 +853,14 @@ def test_ledger_retries_a_receipt_after_task_creation_failure(tmp_path: Path) ->
     assert lease is not None
     ledger.fail(receipt(), "kanban unavailable", lease)
     assert claim_lease(ledger, receipt()) is None
-    assert ledger.retry(
-        receipt(),
-        owner="retry-scanner",
-        claimed_at=datetime(2026, 8, 24, 12, 1, tzinfo=UTC),
-    ) is not None
+    assert (
+        ledger.retry(
+            receipt(),
+            owner="retry-scanner",
+            claimed_at=datetime(2026, 8, 24, 12, 1, tzinfo=UTC),
+        )
+        is not None
+    )
     ledger.close()
 
 
@@ -714,7 +890,11 @@ def test_ledger_reclaims_only_a_stale_claim_with_a_new_owner_time_and_version(
     )
 
     assert first is not None
-    assert (first.owner, first.claimed_at, first.version) == ("scanner-a", claimed_at, 1)
+    assert (first.owner, first.claimed_at, first.version) == (
+        "scanner-a",
+        claimed_at,
+        1,
+    )
     assert active_duplicate is None
     assert reclaimed is not None
     assert (reclaimed.owner, reclaimed.claimed_at, reclaimed.version) == (
@@ -786,9 +966,16 @@ def test_ledger_migrates_and_reclaims_a_legacy_claim_without_lease_metadata(
     assert reclaimed is not None
     assert (reclaimed.owner, reclaimed.version) == ("migration-scanner", 1)
     columns = {
-        row[1] for row in ledger._connection.execute("PRAGMA table_info(feedback_receipts)")
+        row[1]
+        for row in ledger._connection.execute("PRAGMA table_info(feedback_receipts)")
     }
-    assert {"claim_owner", "claimed_at", "lease_version", "workspace_path", "expected_sha"} <= columns
+    assert {
+        "claim_owner",
+        "claimed_at",
+        "lease_version",
+        "workspace_path",
+        "expected_sha",
+    } <= columns
     ledger.close()
 
 
@@ -805,7 +992,12 @@ def test_policy_accepts_a_linked_git_worktree(tmp_path: Path) -> None:
     linked = tmp_path / "linked"
     initialize_git_worktree(main)
     (main / "README.md").write_text("fixture\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(main), "add", "README.md"], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(main), "add", "README.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     subprocess.run(
         [
             "git",
@@ -825,7 +1017,17 @@ def test_policy_accepts_a_linked_git_worktree(tmp_path: Path) -> None:
         text=True,
     )
     subprocess.run(
-        ["git", "-C", str(main), "worktree", "add", "--quiet", "-b", "linked", str(linked)],
+        [
+            "git",
+            "-C",
+            str(main),
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "linked",
+            str(linked),
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -836,8 +1038,12 @@ def test_policy_accepts_a_linked_git_worktree(tmp_path: Path) -> None:
     assert policy.enabled is True
 
 
-def test_ledger_uses_profile_scoped_hermes_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("github_pr_feedback.ledger.get_hermes_home", lambda: tmp_path / "profile")
+def test_ledger_uses_profile_scoped_hermes_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "github_pr_feedback.ledger.get_hermes_home", lambda: tmp_path / "profile"
+    )
 
     ledger = FeedbackLedger.for_current_profile()
 
@@ -848,7 +1054,9 @@ def test_ledger_uses_profile_scoped_hermes_home(monkeypatch: pytest.MonkeyPatch,
 def test_plugin_directory_exposes_hermes_register_entry_point() -> None:
     plugin_root = Path(__file__).parents[1]
     spec = importlib.util.spec_from_file_location(
-        "plugin_under_test", plugin_root / "__init__.py", submodule_search_locations=[str(plugin_root)]
+        "plugin_under_test",
+        plugin_root / "__init__.py",
+        submodule_search_locations=[str(plugin_root)],
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

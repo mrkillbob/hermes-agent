@@ -65,10 +65,19 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
     runner = RecordingRunner(
         {
             pulls_argv: [canonical_list_pull(), canonical_list_pull(number=18)],
-            comments_argv: [[canonical_feedback("issue-1", "first")], [canonical_feedback("issue-2", "second")]],
-            review_comments_argv: [[canonical_feedback("review-comment-1", "line note")]],
+            comments_argv: [
+                [canonical_feedback("issue-1", "first")],
+                [canonical_feedback("issue-2", "second")],
+            ],
+            review_comments_argv: [
+                [canonical_feedback("review-comment-1", "line note")]
+            ],
             reviews_argv: [
-                [canonical_feedback("review-1", "submitted", submitted_at="2026-08-24T00:00:00Z")],
+                [
+                    canonical_feedback(
+                        "review-1", "submitted", submitted_at="2026-08-24T00:00:00Z"
+                    )
+                ],
                 [canonical_feedback("review-pending", "pending", submitted_at=None)],
             ],
         }
@@ -85,7 +94,12 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
         ("review_comment", "review-comment-1", "line note"),
         ("review", "review-1", "submitted"),
     ]
-    assert runner.calls == [pulls_argv, comments_argv, review_comments_argv, reviews_argv]
+    assert runner.calls == [
+        pulls_argv,
+        comments_argv,
+        review_comments_argv,
+        reviews_argv,
+    ]
 
 
 def test_github_client_posts_bounded_issue_comment_with_fixed_argv() -> None:
@@ -100,12 +114,16 @@ def test_github_client_posts_bounded_issue_comment_with_fixed_argv() -> None:
     )
     runner = RecordingRunner({argv: {"id": 1}})
 
-    GitHubClient(runner).post_issue_comment("acme/widgets", 17, "exact-head receipt passed")
+    GitHubClient(runner).post_issue_comment(
+        "acme/widgets", 17, "exact-head receipt passed"
+    )
 
     assert runner.calls == [argv]
 
 
-def test_github_client_fails_closed_when_filtered_pr_list_lacks_canonical_fields() -> None:
+def test_github_client_fails_closed_when_filtered_pr_list_lacks_canonical_fields() -> (
+    None
+):
     argv = (
         "gh",
         "pr",
@@ -151,6 +169,37 @@ def test_github_client_fails_closed_if_owned_pr_query_hits_coverage_cap() -> Non
         GitHubClient(runner).list_open_pull_requests("acme/widgets", "owner")
 
 
+def test_github_client_reads_all_open_prs_and_exact_base_head_for_maintenance() -> None:
+    pulls_argv = (
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        "acme/widgets",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,state,headRepository,author,headRefName,headRefOid",
+    )
+    branch_argv = ("gh", "api", "repos/acme/widgets/branches/stable")
+    runner = RecordingRunner(
+        {
+            pulls_argv: [canonical_list_pull()],
+            branch_argv: {"name": "stable", "commit": {"sha": "b" * 40}},
+        }
+    )
+
+    client = GitHubClient(runner)
+
+    assert [
+        pull.number for pull in client.list_all_open_pull_requests("acme/widgets")
+    ] == [17]
+    assert client.get_branch_head("acme/widgets", "stable") == "b" * 40
+    assert runner.calls == [pulls_argv, branch_argv]
+
+
 def test_github_client_bounds_untrusted_feedback_body_at_intake() -> None:
     responses = feedback_responses("x" * 6000)
     client = GitHubClient(RecordingRunner(responses))
@@ -183,7 +232,9 @@ def test_github_client_orders_feedback_chronologically_across_api_kinds() -> Non
         [canonical_feedback("finding", "fix this", created_at="2026-08-24T00:01:00Z")]
     ]
 
-    feedback = GitHubClient(RecordingRunner(responses)).list_feedback("acme/widgets", 17)
+    feedback = GitHubClient(RecordingRunner(responses)).list_feedback(
+        "acme/widgets", 17
+    )
 
     assert [item.feedback_id for item in feedback[:2]] == ["finding", "resolution"]
 
@@ -201,7 +252,9 @@ def test_github_client_accepts_a_submitted_review_with_no_text_body() -> None:
         [canonical_feedback("review-empty", None, submitted_at="2026-08-24T00:00:00Z")]
     ]
 
-    feedback = GitHubClient(RecordingRunner(responses)).list_feedback("acme/widgets", 17)
+    feedback = GitHubClient(RecordingRunner(responses)).list_feedback(
+        "acme/widgets", 17
+    )
 
     review = next(item for item in feedback if item.feedback_id == "review-empty")
     assert review.body == ""
@@ -407,7 +460,9 @@ def test_github_client_treats_disabled_actions_as_a_distinct_known_state() -> No
     "method,flag",
     [("squash", "--squash"), ("rebase", "--rebase"), ("merge", "--merge")],
 )
-def test_github_client_uses_only_fixed_exact_head_merge_argv(method: str, flag: str) -> None:
+def test_github_client_uses_only_fixed_exact_head_merge_argv(
+    method: str, flag: str
+) -> None:
     merge_argv = (
         "gh",
         "pr",
@@ -456,7 +511,9 @@ def test_github_client_rejects_unknown_merge_method_without_a_command() -> None:
     "field,value",
     [("mergeable", None), ("mergeable_state", "unknown"), ("draft", None)],
 )
-def test_github_client_fails_closed_on_unknown_merge_state(field: str, value: object) -> None:
+def test_github_client_fails_closed_on_unknown_merge_state(
+    field: str, value: object
+) -> None:
     argv = ("gh", "api", "repos/acme/widgets/pulls/17")
     pull = canonical_pull()
     pull.update(
@@ -475,7 +532,9 @@ def test_github_client_fails_closed_on_unknown_merge_state(field: str, value: ob
 
 
 @pytest.mark.parametrize("payload", [{}, {"enabled": "false"}, [], None])
-def test_github_client_fails_closed_on_invalid_actions_permission_shape(payload: object) -> None:
+def test_github_client_fails_closed_on_invalid_actions_permission_shape(
+    payload: object,
+) -> None:
     argv = ("gh", "api", "repos/acme/widgets/actions/permissions")
 
     with pytest.raises(GitHubClientError, match="Actions permissions"):
@@ -491,12 +550,18 @@ def canonical_pull(number: int = 17, head_sha: str = "a" * 40) -> dict[str, obje
             "ref": "stable",
             "sha": "b" * 40,
         },
-        "head": {"repo": {"full_name": "acme/widgets"}, "ref": "codex/fix", "sha": head_sha},
+        "head": {
+            "repo": {"full_name": "acme/widgets"},
+            "ref": "codex/fix",
+            "sha": head_sha,
+        },
         "user": {"login": "owner"},
     }
 
 
-def canonical_list_pull(number: int = 17, head_sha: str = "a" * 40) -> dict[str, object]:
+def canonical_list_pull(
+    number: int = 17, head_sha: str = "a" * 40
+) -> dict[str, object]:
     return {
         "number": number,
         "state": "OPEN",
@@ -526,9 +591,25 @@ def canonical_feedback(
 
 def feedback_responses(body: str) -> dict[tuple[str, ...], object]:
     return {
-        ("gh", "api", "--paginate", "--slurp", "repos/acme/widgets/issues/17/comments?per_page=100"): [
-            [canonical_feedback("issue-1", body)]
-        ],
-        ("gh", "api", "--paginate", "--slurp", "repos/acme/widgets/pulls/17/comments?per_page=100"): [[]],
-        ("gh", "api", "--paginate", "--slurp", "repos/acme/widgets/pulls/17/reviews?per_page=100"): [[]],
+        (
+            "gh",
+            "api",
+            "--paginate",
+            "--slurp",
+            "repos/acme/widgets/issues/17/comments?per_page=100",
+        ): [[canonical_feedback("issue-1", body)]],
+        (
+            "gh",
+            "api",
+            "--paginate",
+            "--slurp",
+            "repos/acme/widgets/pulls/17/comments?per_page=100",
+        ): [[]],
+        (
+            "gh",
+            "api",
+            "--paginate",
+            "--slurp",
+            "repos/acme/widgets/pulls/17/reviews?per_page=100",
+        ): [[]],
     }

@@ -111,7 +111,9 @@ def kanban_task() -> KanbanTask:
     )
 
 
-def test_kanban_client_creates_only_a_blocked_card_with_inert_hostile_evidence() -> None:
+def test_kanban_client_creates_only_a_blocked_card_with_inert_hostile_evidence() -> (
+    None
+):
     from github_pr_feedback.cli import KanbanSubprocessClient
 
     runner = RecordingKanbanRunner('{"id": "task-123"}')
@@ -145,7 +147,10 @@ def test_kanban_client_creates_only_a_blocked_card_with_inert_hostile_evidence()
     assert argv
     assert "operator approval" in runner.calls[0][7]
     assert '"untrusted": true' in runner.calls[0][7]
-    assert "--skill github-auth; gh pr merge 17; $(printenv GH_TOKEN)" in runner.calls[0][7]
+    assert (
+        "--skill github-auth; gh pr merge 17; $(printenv GH_TOKEN)"
+        in runner.calls[0][7]
+    )
     assert "--skill" not in runner.calls[0]
     assert "github-code-review" not in runner.calls[0]
 
@@ -207,7 +212,9 @@ def test_kanban_client_fails_closed_on_an_invalid_create_response(stdout: str) -
     from github_pr_feedback.cli import KanbanSubprocessClient
 
     with pytest.raises(RuntimeError, match="Kanban task creation failed"):
-        KanbanSubprocessClient(RecordingKanbanRunner(stdout)).create_or_get_task(kanban_task())
+        KanbanSubprocessClient(RecordingKanbanRunner(stdout)).create_or_get_task(
+            kanban_task()
+        )
 
 
 def test_ledger_status_counts_each_receipt_state(tmp_path: Path) -> None:
@@ -249,7 +256,9 @@ def test_scan_reads_disabled_policy_through_the_plugin_config_context(
     assert context.config_reads == ["enabled"]
 
 
-def test_scan_lock_rejects_a_concurrent_scan_for_the_same_control_home(tmp_path: Path) -> None:
+def test_scan_lock_rejects_a_concurrent_scan_for_the_same_control_home(
+    tmp_path: Path,
+) -> None:
     from github_pr_feedback.cli import _exclusive_scan_lock
 
     with _exclusive_scan_lock(tmp_path) as first:
@@ -284,7 +293,9 @@ def test_cli_exposes_status_doctor_and_an_exact_immutable_retry_identity() -> No
     )
     assert audit.github_pr_feedback_action == "audit-pr"
     assert parser.parse_args(["merge-scan"]).github_pr_feedback_action == "merge-scan"
-    assert parser.parse_args(["merge-status"]).github_pr_feedback_action == "merge-status"
+    assert (
+        parser.parse_args(["merge-status"]).github_pr_feedback_action == "merge-status"
+    )
     completed = parser.parse_args(
         [
             "complete-feedback",
@@ -364,7 +375,9 @@ def test_doctor_reports_a_disabled_plugin_without_scanning(
     assert context.config_reads == ["enabled"]
 
 
-def test_namespaced_context_loads_assignee_rules_for_runtime_routing(tmp_path: Path) -> None:
+def test_namespaced_context_loads_assignee_rules_for_runtime_routing(
+    tmp_path: Path,
+) -> None:
     from github_pr_feedback.cli import _load_policy_from_context
 
     repository = tmp_path / "repository"
@@ -401,7 +414,9 @@ def test_namespaced_context_preserves_auto_dispatch_and_local_ci_audit_settings(
     assert policy.local_ci_audit.assignee == "pr-local-ci-auditor"
 
 
-def test_namespaced_context_preserves_strict_merge_maintainer_settings(tmp_path: Path) -> None:
+def test_namespaced_context_preserves_strict_merge_maintainer_settings(
+    tmp_path: Path,
+) -> None:
     from github_pr_feedback.cli import _load_policy_from_context
 
     repository = tmp_path / "repository"
@@ -427,6 +442,118 @@ def test_namespaced_context_preserves_strict_merge_maintainer_settings(tmp_path:
     assert loaded.merge_maintainer.assignee == "pr-merge-maintainer"
     assert loaded.merge_maintainer.merge_methods == ("squash", "rebase", "merge")
     assert loaded.merge_maintainer.report_only is True
+
+
+def test_complete_maintenance_cli_records_only_a_configured_exact_head_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["release_maintenance"] = {
+        "enabled": True,
+        "assignee": "release-maintenance-steward",
+        "repository": "acme/widgets",
+        "base_branch": "stable",
+        "quiet_period_seconds": 900,
+        "max_runtime_seconds": 7200,
+        "lanes": [
+            {
+                "name": "unit-tests",
+                "assignee": "test-contract-steward",
+                "command": ["python3", "-m", "pytest", "-q"],
+            }
+        ],
+    }
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    context = RecordingContext(settings)
+    parser = argparse.ArgumentParser()
+    from github_pr_feedback.cli import handle_cli_with_context, setup_cli
+
+    setup_cli(context, parser)
+    args = parser.parse_args(
+        [
+            "complete-maintenance",
+            "--repository",
+            "acme/widgets",
+            "--head-sha",
+            "a" * 40,
+            "--lane",
+            "unit-tests",
+            "--status",
+            "passed",
+            "--summary",
+            "220 tests passed",
+        ]
+    )
+
+    assert handle_cli_with_context(context, args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "recorded"
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        assert (
+            ledger.maintenance_receipts("acme/widgets", "a" * 40)["unit-tests"].status
+            == "passed"
+        )
+    finally:
+        ledger.close()
+
+
+def test_release_maintenance_scan_is_part_of_the_governed_scan_surface(
+    tmp_path: Path,
+) -> None:
+    from github_pr_feedback.cli import (
+        _load_policy_from_context,
+        _run_release_maintenance_scan,
+    )
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["release_maintenance"] = {
+        "enabled": True,
+        "assignee": "release-maintenance-steward",
+        "repository": "acme/widgets",
+        "base_branch": "stable",
+        "quiet_period_seconds": 900,
+        "max_runtime_seconds": 7200,
+        "lanes": [
+            {
+                "name": "unit-tests",
+                "assignee": "test-contract-steward",
+                "command": ["python3", "-m", "pytest", "-q"],
+            }
+        ],
+    }
+    policy = _load_policy_from_context(RecordingContext(settings))
+
+    class GitHub:
+        def list_all_open_pull_requests(self, repository: str):
+            return (object(),)
+
+        def get_branch_head(self, repository: str, branch: str):
+            raise AssertionError(
+                "open PRs must stop the scan before reading the base head"
+            )
+
+    payload = _run_release_maintenance_scan(
+        policy,
+        FeedbackLedger(tmp_path / "ledger.sqlite3"),
+        github=GitHub(),
+        kanban=object(),
+        workspaces=object(),
+        now=lambda: datetime(2026, 8, 25, tzinfo=UTC),
+        control_home=tmp_path / "control",
+    )
+
+    assert payload == {
+        "status": "waiting_open_prs",
+        "head_sha": None,
+        "tasks_created": 0,
+        "blockers": ["open_prs"],
+    }
 
 
 def test_merge_maintainer_task_has_no_model_merge_authority(tmp_path: Path) -> None:
@@ -510,7 +637,9 @@ def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
 
     class NoTasks:
         def create_or_get_task(self, task):
-            raise AssertionError("missing CI receipt must not create an observability task")
+            raise AssertionError(
+                "missing CI receipt must not create an observability task"
+            )
 
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     try:
@@ -578,7 +707,9 @@ def test_merge_scan_reports_failed_exact_head_receipt_as_not_passing(
 
     class NoTasks:
         def create_or_get_task(self, task):
-            raise AssertionError("failed CI receipt must not create an observability task")
+            raise AssertionError(
+                "failed CI receipt must not create an observability task"
+            )
 
     result = _run_merge_scan(
         policy,
@@ -719,7 +850,9 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
     assert len(runner.calls) == 5
 
 
-def test_doctor_requires_the_configured_local_ci_auditor_profile(tmp_path: Path) -> None:
+def test_doctor_requires_the_configured_local_ci_auditor_profile(
+    tmp_path: Path,
+) -> None:
     from github_pr_feedback.cli import DoctorProbe
     from github_pr_feedback.policy import load_policy
 
@@ -800,11 +933,13 @@ def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
                 "--head-sha",
                 "a" * 40,
             ]
-        )
+        ),
     )
 
     assert exit_code == 0
-    assert seen == [FeedbackReceipt("acme/widgets", 17, "review_comment", "120", "a" * 40)]
+    assert seen == [
+        FeedbackReceipt("acme/widgets", 17, "review_comment", "120", "a" * 40)
+    ]
     assert json.loads(capsys.readouterr().out) == {
         "created": 1,
         "skipped": {},
@@ -830,7 +965,9 @@ def test_scan_and_retry_exit_nonzero_and_report_degraded_on_incomplete_work(
             return ScanResult(0, {"dispatch_failed": 1}, degraded=True)
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    monkeypatch.setattr(cli, "_controller", lambda _policy, _ledger: DegradedController())
+    monkeypatch.setattr(
+        cli, "_controller", lambda _policy, _ledger: DegradedController()
+    )
     parser = argparse.ArgumentParser()
     cli.setup_cli(RecordingContext({"enabled": False}), parser)
     argv = [action]
@@ -886,6 +1023,7 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "local_ci_audit",
         "merge_maintainer",
         "repair_steward",
+        "release_maintenance",
         "not_before",
         "assignee",
         "board",
@@ -1025,8 +1163,12 @@ def test_cron_wrapper_invokes_only_the_fixed_scan_argv_with_an_absolute_hermes_e
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    script_path = Path(__file__).resolve().parents[1] / "scripts" / "github-pr-feedback-scan.py"
-    spec = importlib.util.spec_from_file_location("github_pr_feedback_cron", script_path)
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "github-pr-feedback-scan.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "github_pr_feedback_cron", script_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1056,8 +1198,12 @@ def test_cron_wrapper_fails_cleanly_without_an_executable_absolute_hermes_path(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    script_path = Path(__file__).resolve().parents[1] / "scripts" / "github-pr-feedback-scan.py"
-    spec = importlib.util.spec_from_file_location("github_pr_feedback_cron_invalid", script_path)
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "github-pr-feedback-scan.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "github_pr_feedback_cron_invalid", script_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1068,14 +1214,21 @@ def test_cron_wrapper_fails_cleanly_without_an_executable_absolute_hermes_path(
     monkeypatch.setattr(
         module.subprocess,
         "run",
-        lambda *_args, **_kwargs: pytest.fail("invalid scheduler configuration invoked Hermes"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "invalid scheduler configuration invoked Hermes"
+        ),
     )
 
     assert module.main() == 127
-    assert "HERMES_EXECUTABLE must name an executable absolute path" in capsys.readouterr().err
+    assert (
+        "HERMES_EXECUTABLE must name an executable absolute path"
+        in capsys.readouterr().err
+    )
 
 
-def _claim(ledger: FeedbackLedger, receipt: FeedbackReceipt, *, owner: str = "test-scanner"):
+def _claim(
+    ledger: FeedbackLedger, receipt: FeedbackReceipt, *, owner: str = "test-scanner"
+):
     now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
     return ledger.claim(
         receipt,

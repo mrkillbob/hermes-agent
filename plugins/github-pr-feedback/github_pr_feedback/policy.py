@@ -9,7 +9,6 @@ import re
 import subprocess
 from typing import Mapping, Sequence
 
-
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _FEEDBACK_KINDS = frozenset(
     {"issue_comment", "review_comment", "review", "pr_local_ci", "pr_repair"}
@@ -22,6 +21,8 @@ _SHELL_COMMANDS = frozenset({"bash", "dash", "fish", "sh", "zsh"})
 _MERGE_METHODS = frozenset({"squash", "rebase", "merge"})
 _ROUTING_PRIORITIES = frozenset({"P0", "P1", "P2", "P3", "P4"})
 _BLAST_RADII = frozenset({"contained", "moderate", "broad", "massive"})
+_MAINTENANCE_LANE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+MAX_MAINTENANCE_LANES = 8
 
 
 def _nonempty_string(value: object, field: str) -> str:
@@ -51,7 +52,14 @@ def _is_git_worktree(path: Path) -> bool:
 
     try:
         result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree", "--show-toplevel"],
+            [
+                "git",
+                "-C",
+                str(path),
+                "rev-parse",
+                "--is-inside-work-tree",
+                "--show-toplevel",
+            ],
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -76,17 +84,33 @@ class FeedbackReceipt:
     head_sha: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "repository", _repository(self.repository, "repository"))
-        if not isinstance(self.pr_number, int) or isinstance(self.pr_number, bool) or self.pr_number < 1:
+        object.__setattr__(
+            self, "repository", _repository(self.repository, "repository")
+        )
+        if (
+            not isinstance(self.pr_number, int)
+            or isinstance(self.pr_number, bool)
+            or self.pr_number < 1
+        ):
             raise ValueError("pr_number must be a positive integer")
         if self.feedback_kind not in _FEEDBACK_KINDS:
             raise ValueError("feedback_kind is not supported")
-        object.__setattr__(self, "feedback_id", _nonempty_string(self.feedback_id, "feedback_id"))
-        object.__setattr__(self, "head_sha", _nonempty_string(self.head_sha, "head_sha"))
+        object.__setattr__(
+            self, "feedback_id", _nonempty_string(self.feedback_id, "feedback_id")
+        )
+        object.__setattr__(
+            self, "head_sha", _nonempty_string(self.head_sha, "head_sha")
+        )
 
     @property
     def key(self) -> tuple[str, int, str, str, str]:
-        return (self.repository, self.pr_number, self.feedback_kind, self.feedback_id, self.head_sha)
+        return (
+            self.repository,
+            self.pr_number,
+            self.feedback_kind,
+            self.feedback_id,
+            self.head_sha,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,14 +127,32 @@ class PullRequest:
     labels: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.number, int) or isinstance(self.number, bool) or self.number < 1:
+        if (
+            not isinstance(self.number, int)
+            or isinstance(self.number, bool)
+            or self.number < 1
+        ):
             raise ValueError("number must be a positive integer")
         object.__setattr__(self, "state", _nonempty_string(self.state, "state").upper())
-        object.__setattr__(self, "base_repository", _repository(self.base_repository, "base_repository"))
-        object.__setattr__(self, "head_repository", _repository(self.head_repository, "head_repository"))
-        object.__setattr__(self, "author_login", _nonempty_string(self.author_login, "author_login"))
-        object.__setattr__(self, "head_ref_name", _nonempty_string(self.head_ref_name, "head_ref_name"))
-        object.__setattr__(self, "head_sha", _nonempty_string(self.head_sha, "head_sha"))
+        object.__setattr__(
+            self,
+            "base_repository",
+            _repository(self.base_repository, "base_repository"),
+        )
+        object.__setattr__(
+            self,
+            "head_repository",
+            _repository(self.head_repository, "head_repository"),
+        )
+        object.__setattr__(
+            self, "author_login", _nonempty_string(self.author_login, "author_login")
+        )
+        object.__setattr__(
+            self, "head_ref_name", _nonempty_string(self.head_ref_name, "head_ref_name")
+        )
+        object.__setattr__(
+            self, "head_sha", _nonempty_string(self.head_sha, "head_sha")
+        )
         object.__setattr__(
             self,
             "labels",
@@ -124,7 +166,9 @@ class Reviewer:
     association: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "login", _nonempty_string(self.login, "reviewer login"))
+        object.__setattr__(
+            self, "login", _nonempty_string(self.login, "reviewer login")
+        )
         if self.association is not None:
             object.__setattr__(
                 self,
@@ -231,6 +275,27 @@ class RepairStewardPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class ReleaseMaintenanceLane:
+    """One bounded, deterministic command lane and its specialist owner."""
+
+    name: str
+    assignee: str
+    command: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseMaintenancePolicy:
+    """Quiescence-gated, exact-head repository maintenance policy."""
+
+    assignee: str
+    repository: str
+    base_branch: str
+    quiet_period_seconds: int
+    max_runtime_seconds: int
+    lanes: tuple[ReleaseMaintenanceLane, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PluginPolicy:
     enabled: bool
     targets: Mapping[str, RepositoryTarget]
@@ -247,6 +312,7 @@ class PluginPolicy:
     local_ci_audit: LocalCIAuditPolicy | None = None
     merge_maintainer: MergeMaintainerPolicy | None = None
     repair_steward: RepairStewardPolicy | None = None
+    release_maintenance: ReleaseMaintenancePolicy | None = None
 
     def assignee_for(self, body: str) -> str:
         """Choose the unique highest-scoring specialist, otherwise the fallback."""
@@ -260,11 +326,16 @@ class PluginPolicy:
 
         normalized = " ".join(body.casefold().split())
         scores = tuple(
-            (sum(_term_matches(normalized, term) for term in rule.match_any), rule.assignee)
+            (
+                sum(_term_matches(normalized, term) for term in rule.match_any),
+                rule.assignee,
+            )
             for rule in self.assignee_rules
         )
         best_score = max((score for score, _assignee in scores), default=0)
-        winners = {assignee for score, assignee in scores if score == best_score and score > 0}
+        winners = {
+            assignee for score, assignee in scores if score == best_score and score > 0
+        }
         if len(winners) == 1:
             return winners.pop()
         return self.assignee or ""
@@ -318,7 +389,10 @@ class PluginPolicy:
             return Admission(False, "pull_request_not_open")
         if pull_request.author_login.casefold() != target.owner_login.casefold():
             return Admission(False, "author_not_allowed")
-        if not any(pull_request.head_ref_name.startswith(prefix) for prefix in target.branch_prefixes):
+        if not any(
+            pull_request.head_ref_name.startswith(prefix)
+            for prefix in target.branch_prefixes
+        ):
             return Admission(False, "branch_not_allowed")
         return Admission(True, target=target)
 
@@ -345,7 +419,10 @@ class PluginPolicy:
         trusted_bot = self.include_bot_feedback and is_bot
         if not (trusted_login or trusted_association or trusted_self or trusted_bot):
             return Admission(False, "reviewer_not_allowed")
-        if receipt.pr_number != pull_request.number or receipt.head_sha != pull_request.head_sha:
+        if (
+            receipt.pr_number != pull_request.number
+            or receipt.head_sha != pull_request.head_sha
+        ):
             return Admission(False, "head_changed")
         return Admission(True, target=target)
 
@@ -353,14 +430,23 @@ class PluginPolicy:
 def _parse_target(raw: object) -> RepositoryTarget:
     if not isinstance(raw, Mapping):
         raise ValueError("repositories entries must be mappings")
-    expected = {"base_repository", "head_repository", "local_path", "owner_login", "branch_prefixes"}
+    expected = {
+        "base_repository",
+        "head_repository",
+        "local_path",
+        "owner_login",
+        "branch_prefixes",
+    }
     if set(raw) != expected:
         raise ValueError("repository target has missing or unknown fields")
     path = Path(_nonempty_string(raw["local_path"], "local_path"))
     if not path.is_absolute() or not path.is_dir() or not _is_git_worktree(path):
         raise ValueError("local_path must be an existing local Git repository")
     prefixes = _string_list(raw["branch_prefixes"], "branch_prefixes")
-    if any(prefix.startswith("refs/") or any(char.isspace() for char in prefix) for prefix in prefixes):
+    if any(
+        prefix.startswith("refs/") or any(char.isspace() for char in prefix)
+        for prefix in prefixes
+    ):
         raise ValueError("branch_prefixes must be literal branch prefixes")
     return RepositoryTarget(
         base_repository=_repository(raw["base_repository"], "base_repository"),
@@ -398,7 +484,9 @@ def _parse_assignee_rules(raw: object) -> tuple[AssigneeRule, ...]:
         terms = _string_list(item["match_any"], "match_any", normalize=str.casefold)
         if len(terms) > MAX_MATCH_TERMS_PER_RULE:
             raise ValueError("match_any exceeds its bounded limit")
-        rules.append(AssigneeRule(_nonempty_string(item["assignee"], "assignee"), terms))
+        rules.append(
+            AssigneeRule(_nonempty_string(item["assignee"], "assignee"), terms)
+        )
     return tuple(rules)
 
 
@@ -523,7 +611,11 @@ def _parse_repair_steward(
 def _relative_path(value: object, field: str) -> str:
     text = _nonempty_string(value, field)
     path = Path(text)
-    if path.is_absolute() or "\x00" in text or any(part in {"", ".", ".."} for part in path.parts):
+    if (
+        path.is_absolute()
+        or "\x00" in text
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
         raise ValueError(f"{field} must be a normalized relative path")
     return text
 
@@ -545,7 +637,9 @@ def _command_argv(value: object, field: str) -> tuple[str, ...]:
     return argv
 
 
-def _parse_post_merge(raw: object, *, target: RepositoryTarget) -> PostMergePolicy | None:
+def _parse_post_merge(
+    raw: object, *, target: RepositoryTarget
+) -> PostMergePolicy | None:
     if not isinstance(raw, Mapping):
         raise ValueError("post_merge must be a mapping")
     enabled = raw.get("enabled")
@@ -583,7 +677,9 @@ def _parse_post_merge(raw: object, *, target: RepositoryTarget) -> PostMergePoli
         ),
         package_argv=_command_argv(raw["package_argv"], "package_argv"),
         bundle_path=_relative_path(raw["bundle_path"], "bundle_path"),
-        bundle_identifier=_nonempty_string(raw["bundle_identifier"], "bundle_identifier"),
+        bundle_identifier=_nonempty_string(
+            raw["bundle_identifier"], "bundle_identifier"
+        ),
         relaunch_argv=_command_argv(raw["relaunch_argv"], "relaunch_argv"),
     )
 
@@ -616,12 +712,18 @@ def _parse_merge_maintainer(
     repository = _repository(raw["repository"], "merge_maintainer repository")
     target = targets.get(repository)
     if target is None or target.head_repository != repository:
-        raise ValueError("merge_maintainer repository must be an exact same-repository target")
-    author_login = _nonempty_string(raw["author_login"], "merge_maintainer author_login")
+        raise ValueError(
+            "merge_maintainer repository must be an exact same-repository target"
+        )
+    author_login = _nonempty_string(
+        raw["author_login"], "merge_maintainer author_login"
+    )
     if author_login.casefold() != target.owner_login.casefold():
         raise ValueError("merge_maintainer author_login must match the target owner")
     base_branch = _nonempty_string(raw["base_branch"], "merge_maintainer base_branch")
-    if base_branch.startswith("refs/") or any(character.isspace() for character in base_branch):
+    if base_branch.startswith("refs/") or any(
+        character.isspace() for character in base_branch
+    ):
         raise ValueError("merge_maintainer base_branch must be a literal branch name")
     merge_methods = _string_list(
         raw["merge_methods"], "merge_maintainer merge_methods", normalize=str.casefold
@@ -652,6 +754,102 @@ def _parse_merge_maintainer(
     )
 
 
+def _parse_release_maintenance(
+    raw: object, *, targets: Mapping[str, RepositoryTarget]
+) -> ReleaseMaintenancePolicy | None:
+    if not isinstance(raw, Mapping):
+        raise ValueError("release_maintenance must be a mapping")
+    enabled = raw.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ValueError("release_maintenance enabled must be a boolean")
+    if not enabled:
+        if set(raw) != {"enabled"}:
+            raise ValueError("disabled release_maintenance has unknown fields")
+        return None
+    expected = {
+        "enabled",
+        "assignee",
+        "repository",
+        "base_branch",
+        "quiet_period_seconds",
+        "max_runtime_seconds",
+        "lanes",
+    }
+    if set(raw) != expected:
+        raise ValueError("release_maintenance has missing or unknown fields")
+    repository = _repository(raw["repository"], "release_maintenance repository")
+    target = targets.get(repository)
+    if target is None or target.head_repository != repository:
+        raise ValueError(
+            "release_maintenance repository must be an exact same-repository target"
+        )
+    base_branch = _nonempty_string(
+        raw["base_branch"], "release_maintenance base_branch"
+    )
+    if base_branch.startswith("refs/") or any(
+        character.isspace() for character in base_branch
+    ):
+        raise ValueError(
+            "release_maintenance base_branch must be a literal branch name"
+        )
+    quiet_period_seconds = raw["quiet_period_seconds"]
+    max_runtime_seconds = raw["max_runtime_seconds"]
+    if (
+        not isinstance(quiet_period_seconds, int)
+        or isinstance(quiet_period_seconds, bool)
+        or quiet_period_seconds < 60
+    ):
+        raise ValueError("quiet_period_seconds must be an integer of at least 60")
+    if (
+        not isinstance(max_runtime_seconds, int)
+        or isinstance(max_runtime_seconds, bool)
+        or max_runtime_seconds < 60
+    ):
+        raise ValueError("max_runtime_seconds must be an integer of at least 60")
+    raw_lanes = raw["lanes"]
+    if isinstance(raw_lanes, (str, bytes)) or not isinstance(raw_lanes, Sequence):
+        raise ValueError("release_maintenance lanes must be a non-empty list")
+    if not 1 <= len(raw_lanes) <= MAX_MAINTENANCE_LANES:
+        raise ValueError(
+            "release_maintenance must configure between one and eight lanes"
+        )
+    lanes: list[ReleaseMaintenanceLane] = []
+    for item in raw_lanes:
+        if not isinstance(item, Mapping) or set(item) != {
+            "name",
+            "assignee",
+            "command",
+        }:
+            raise ValueError("release_maintenance lane has missing or unknown fields")
+        name = _nonempty_string(
+            item["name"], "release_maintenance lane name"
+        ).casefold()
+        if not _MAINTENANCE_LANE.fullmatch(name):
+            raise ValueError("release_maintenance lane name is invalid")
+        command = _command_argv(item["command"], "release_maintenance lane command")
+        if any(Path(argument).name.casefold() == "main.py" for argument in command):
+            raise ValueError("release_maintenance cannot launch the protected runtime")
+        lanes.append(
+            ReleaseMaintenanceLane(
+                name=name,
+                assignee=_nonempty_string(
+                    item["assignee"], "release_maintenance lane assignee"
+                ),
+                command=command,
+            )
+        )
+    if len({lane.name for lane in lanes}) != len(lanes):
+        raise ValueError("release_maintenance lane names must be unique")
+    return ReleaseMaintenancePolicy(
+        assignee=_nonempty_string(raw["assignee"], "release_maintenance assignee"),
+        repository=repository,
+        base_branch=base_branch,
+        quiet_period_seconds=quiet_period_seconds,
+        max_runtime_seconds=max_runtime_seconds,
+        lanes=tuple(lanes),
+    )
+
+
 def load_policy(raw: object) -> PluginPolicy:
     """Parse plugin configuration, retaining no enabled behavior on any omission."""
 
@@ -661,7 +859,9 @@ def load_policy(raw: object) -> PluginPolicy:
     if not isinstance(enabled, bool):
         raise ValueError("enabled must be a boolean")
     if not enabled:
-        return PluginPolicy(False, {}, frozenset(), frozenset(), False, False, False, None, None, None)
+        return PluginPolicy(
+            False, {}, frozenset(), frozenset(), False, False, False, None, None, None
+        )
     required = {
         "enabled",
         "repositories",
@@ -680,6 +880,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "local_ci_audit",
         "merge_maintainer",
         "repair_steward",
+        "release_maintenance",
     }
     if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("enabled configuration has missing or unknown fields")
@@ -700,17 +901,27 @@ def load_policy(raw: object) -> PluginPolicy:
         raise ValueError("repositories must not be empty")
     targets = {target.base_repository: target for target in parsed_targets}
     if len(targets) != len(parsed_targets):
-        raise ValueError("each base_repository may have only one configured head_repository")
+        raise ValueError(
+            "each base_repository may have only one configured head_repository"
+        )
     reviewer_logins = (
         frozenset()
         if raw["reviewer_logins"] == []
-        else frozenset(_string_list(raw["reviewer_logins"], "reviewer_logins", normalize=str.casefold))
+        else frozenset(
+            _string_list(
+                raw["reviewer_logins"], "reviewer_logins", normalize=str.casefold
+            )
+        )
     )
     reviewer_associations = (
         frozenset()
         if raw["reviewer_associations"] == []
         else frozenset(
-            _string_list(raw["reviewer_associations"], "reviewer_associations", normalize=str.upper)
+            _string_list(
+                raw["reviewer_associations"],
+                "reviewer_associations",
+                normalize=str.upper,
+            )
         )
     )
     if not reviewer_logins and not reviewer_associations:
@@ -727,7 +938,9 @@ def load_policy(raw: object) -> PluginPolicy:
         assignee=_nonempty_string(raw["assignee"], "assignee"),
         board=_nonempty_string(raw["board"], "board"),
         assignee_rules=(
-            _parse_assignee_rules(raw["assignee_rules"]) if "assignee_rules" in raw else ()
+            _parse_assignee_rules(raw["assignee_rules"])
+            if "assignee_rules" in raw
+            else ()
         ),
         routing_rules=(
             _parse_routing_rules(raw["routing_rules"]) if "routing_rules" in raw else ()
@@ -743,6 +956,11 @@ def load_policy(raw: object) -> PluginPolicy:
             if "repair_steward" in raw
             else None
         ),
+        release_maintenance=(
+            _parse_release_maintenance(raw["release_maintenance"], targets=targets)
+            if "release_maintenance" in raw
+            else None
+        ),
     )
 
 
@@ -752,6 +970,10 @@ def _validated_local_ci_audit(
     if "local_ci_audit" not in raw:
         return None
     policy = _parse_local_ci_audit(raw["local_ci_audit"])
-    if policy is not None and policy.repositories and not policy.repositories.issubset(targets):
+    if (
+        policy is not None
+        and policy.repositories
+        and not policy.repositories.issubset(targets)
+    ):
         raise ValueError("local_ci_audit repositories must be configured targets")
     return policy
