@@ -42,6 +42,31 @@ _ACTION_REMAINS_MARKERS = (
     "todo",
     "unresolved",
 )
+_BOUNDED_ACTION_REMAINS = re.compile(
+    r"\b(?:still failing|needs fixing|needs repair|remaining failures?)\b"
+)
+_BARE_FAILS = re.compile(r"\bfails\b")
+_HISTORIC_FAILURE_CONTEXT = (
+    "reproduced",
+    "reproduction",
+    "reported",
+    "before the fix",
+    "prior to the fix",
+    "pristine receipt",
+)
+_RESOLVED_AFTER_FAILURE = (
+    "with the fix",
+    "after the fix",
+    "after repair",
+    "root cause and fix",
+)
+_PASS_AFTER_FAILURE = (
+    "status: pass",
+    "status=pass",
+    "checks passed",
+    "passed",
+    "rc=0",
+)
 _CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
 _CI_RECEIPT_COMMENT = re.compile(
     r"authoritative receipt:\s*`([0-9a-f]{64})`",
@@ -951,8 +976,10 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
         return False
     if feedback.reviewer.login.casefold() != owner_login.casefold():
         return False
+    if len(feedback.body) >= MAX_FEEDBACK_BODY_CHARS:
+        return False
     body = " ".join(feedback.body.casefold().split())
-    if not body or any(marker in body for marker in _ACTION_REMAINS_MARKERS):
+    if not body or _has_unresolved_action(body):
         return False
     if body.startswith(_SELF_RESOLUTION_PREFIXES):
         return True
@@ -1079,6 +1106,28 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
     if audit_marker and inherited_marker and routed_separately:
         return True
     return body.startswith("confirmed ") and "superseded" in body
+
+
+def _has_unresolved_action(body: str) -> bool:
+    if any(marker in body for marker in _ACTION_REMAINS_MARKERS):
+        return True
+    if _BOUNDED_ACTION_REMAINS.search(body) is not None:
+        return True
+    for match in _BARE_FAILS.finditer(body):
+        clause_start = max(
+            body.rfind(separator, 0, match.start())
+            for separator in (". ", "! ", "? ")
+        )
+        context = body[clause_start + 1 : match.end()]
+        after = body[match.end() :]
+        factual_history = (
+            any(marker in context for marker in _HISTORIC_FAILURE_CONTEXT)
+            and any(marker in after for marker in _RESOLVED_AFTER_FAILURE)
+            and any(marker in after for marker in _PASS_AFTER_FAILURE)
+        )
+        if not factual_history:
+            return True
+    return False
 
 
 def _ci_receipt_feedback_reason(

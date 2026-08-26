@@ -17,10 +17,11 @@ from github_pr_feedback.controller import (
     ScanController,
     _ci_failure_assignee,
     _ci_receipt_feedback_reason,
+    _is_self_resolution_receipt,
     _task,
 )
 from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt, CommandEvidence
-from github_pr_feedback.github_client import CheckState, Feedback
+from github_pr_feedback.github_client import MAX_FEEDBACK_BODY_CHARS, CheckState, Feedback
 from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.policy import (
     FeedbackReceipt,
@@ -1312,6 +1313,145 @@ def test_scan_keeps_owner_ci_repair_requests_and_non_owner_bot_comments(
     assert result.created == 1
     assert result.skipped.get("self_resolution_receipt", 0) == 0
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["genuine-feedback"]
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    "action_language",
+    [
+        "The current static lane is still failing.",
+        "This needs fixing.",
+        "This needs repair.",
+        "One remaining failure requires action.",
+        "Two remaining failures require action.",
+        "The current static lane fails.",
+    ],
+)
+def test_self_resolution_fail_opens_for_bounded_unresolved_action_language(
+    action_language: str,
+) -> None:
+    item = feedback(
+        "unresolved-completion-shape",
+        reviewer="owner",
+        body=(
+            "Local-CI static-lane repair for this PR is in place at commit "
+            f"{'a' * 40} (current PR head). Re-validated on the exact receipt tree: "
+            "run_static_lane.py status: pass, rc=0. No merge was performed. "
+            f"{action_language}"
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is False
+
+
+def test_self_resolution_fail_opens_when_the_github_body_reaches_the_intake_cap() -> None:
+    prefix = (
+        "Local-CI static-lane repair for this PR is in place at commit "
+        f"{'a' * 40} (current PR head). Re-validated on the exact receipt tree: "
+        "run_static_lane.py status: pass, rc=0. No merge was performed. "
+    )
+    body = prefix + "x" * (MAX_FEEDBACK_BODY_CHARS - len(prefix))
+    assert len(body) == MAX_FEEDBACK_BODY_CHARS
+    item = feedback("capped-completion-shape", reviewer="owner", body=body)
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is False
+
+
+def test_self_resolution_keeps_factual_historic_failure_reproduction() -> None:
+    item = feedback(
+        "historic-reproduction",
+        reviewer="owner",
+        body=(
+            "Local CI repair for receipt e7cd950e landed at head "
+            f"{'a' * 40}. Evidence: reproduced at the pristine receipt head where "
+            "run_static_lane.py fails; with the fix, run_static_lane.py status=pass, "
+            "all checks passed. No merge was performed."
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "body"),
+    [
+        (
+            "issue_comment",
+            "Local-CI static-lane repair for this PR is in place at commit "
+            f"{'a' * 40} (current PR head). Re-validated on the receipt tree: "
+            "run_static_lane.py status: pass. No merge was performed.",
+        ),
+        (
+            "review_comment",
+            "Local CI repair for receipt e7cd950e landed at head "
+            f"{'a' * 40}. Evidence: run_hygiene_lane.py rc=0, all checks passed; "
+            "no gate was relaxed.",
+        ),
+        (
+            "issue_comment",
+            "Repaired the local-CI static-lane failure reported for exact head "
+            f"`{'b' * 40}`. Root cause and fix (commit `{'a' * 40}`, 2 files changed). "
+            f"Verification, all at commit `{'a' * 40}`; no CI configuration, required "
+            "checks, or safety gates were modified: run_static_lane.py status: pass; "
+            "focused pytest -> 14 passed.",
+        ),
+    ],
+)
+def test_exact_live_completion_shapes_remain_admitted_when_authored_by_a_non_owner_bot(
+    kind: str,
+    body: str,
+) -> None:
+    item = Feedback(
+        kind,
+        "non-owner-live-shape",
+        Reviewer("ci-repair-bot", "MEMBER"),
+        body,
+        datetime.fromisoformat("2026-08-24T00:00:00+00:00"),
+        True,
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is False
+
+
+@pytest.mark.parametrize(
+    ("action_language", "expected_title", "expected_pending"),
+    [
+        ("", "Local PR CI audit: acme/widgets#17", 0),
+        (" The current static lane still fails.", "GitHub PR feedback: acme/widgets#17", 1),
+    ],
+)
+def test_local_ci_ordering_ignores_only_completed_owner_receipts(
+    tmp_path: Path,
+    action_language: str,
+    expected_title: str,
+    expected_pending: int,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    item = feedback(
+        "owner-completion",
+        reviewer="owner",
+        body=(
+            "Local-CI static-lane repair for this PR is in place at commit "
+            f"{sha} (current PR head). Re-validated on the exact receipt tree: "
+            "run_static_lane.py status: pass, rc=0. No merge was performed."
+            f"{action_language}"
+        ),
+    )
+    github = FakeGitHub(admitted_pull_request(sha), (item,))
+    github.actions_are_enabled = False
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped.get("feedback_pending", 0) == expected_pending
+    assert [task.title for task in kanban.tasks] == [expected_title]
     ledger.close()
 
 
