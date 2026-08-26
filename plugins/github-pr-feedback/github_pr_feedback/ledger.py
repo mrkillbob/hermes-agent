@@ -152,6 +152,16 @@ class FeedbackLedger:
                 receipt_json TEXT NOT NULL
             )
             """)
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS feedback_scan_watermarks (
+                repository TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                head_sha TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                scanned_at TEXT NOT NULL,
+                PRIMARY KEY (repository, pr_number)
+            )
+            """)
 
     def _migrate_lease_columns(self) -> None:
         columns = {
@@ -192,6 +202,55 @@ class FeedbackLedger:
             raise
         else:
             self._connection.execute("COMMIT")
+
+    def feedback_scan_is_current(
+        self,
+        repository: str,
+        pr_number: int,
+        head_sha: str,
+        updated_at: datetime,
+    ) -> bool:
+        """Return whether feedback was read for this exact current PR update."""
+
+        updated_at = _aware_utc(updated_at, "updated_at")
+        row = self._connection.execute(
+            "SELECT head_sha, updated_at FROM feedback_scan_watermarks "
+            "WHERE repository = ? AND pr_number = ?",
+            (repository, pr_number),
+        ).fetchone()
+        return row is not None and row == (
+            head_sha.casefold(),
+            updated_at.isoformat(),
+        )
+
+    def record_feedback_scan(
+        self,
+        repository: str,
+        pr_number: int,
+        head_sha: str,
+        updated_at: datetime,
+        *,
+        scanned_at: datetime,
+    ) -> None:
+        """Advance a PR watermark only after its feedback read succeeded."""
+
+        updated_at = _aware_utc(updated_at, "updated_at")
+        scanned_at = _aware_utc(scanned_at, "scanned_at")
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO feedback_scan_watermarks "
+                "(repository, pr_number, head_sha, updated_at, scanned_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(repository, pr_number) DO UPDATE SET "
+                "head_sha = excluded.head_sha, updated_at = excluded.updated_at, "
+                "scanned_at = excluded.scanned_at",
+                (
+                    repository,
+                    pr_number,
+                    head_sha.casefold(),
+                    updated_at.isoformat(),
+                    scanned_at.isoformat(),
+                ),
+            )
 
     def observe_maintenance_head(
         self,

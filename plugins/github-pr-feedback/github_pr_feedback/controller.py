@@ -489,25 +489,47 @@ class ScanController:
                 and self._policy.local_ci_audit.applies_to(repository)
                 and actions_enabled is False
             )
+            feedback_current = tuple(
+                pull_request.updated_at is not None
+                and self._ledger.feedback_scan_is_current(
+                    repository,
+                    pull_request.number,
+                    pull_request.head_sha,
+                    pull_request.updated_at,
+                )
+                for pull_request in admitted_pull_requests
+            )
             with ThreadPoolExecutor(
                 max_workers=min(6, max(1, len(admitted_pull_requests)))
             ) as executor:
                 snapshots = tuple(
                     executor.map(
-                        lambda pull_request: self._read_scan_snapshot(
-                            repository,
-                            pull_request,
-                            need_current_for_ci=need_current_for_ci,
+                        lambda item: (
+                            (None, ())
+                            if item[1]
+                            else self._read_scan_snapshot(
+                                repository,
+                                item[0],
+                                need_current_for_ci=need_current_for_ci,
+                            )
                         ),
-                        admitted_pull_requests,
+                        zip(admitted_pull_requests, feedback_current, strict=True),
                     )
                 )
-            for pull_request, snapshot in zip(
-                admitted_pull_requests, snapshots, strict=True
+            for pull_request, snapshot, was_current in zip(
+                admitted_pull_requests, snapshots, feedback_current, strict=True
             ):
                 if snapshot is None:
                     skipped["github_error"] += 1
                     continue
+                if not was_current and pull_request.updated_at is not None:
+                    self._ledger.record_feedback_scan(
+                        repository,
+                        pull_request.number,
+                        pull_request.head_sha,
+                        pull_request.updated_at,
+                        scanned_at=self._clock(),
+                    )
                 current, feedback_items = snapshot
                 feedback_pending = False
                 base_refresh_pending = False

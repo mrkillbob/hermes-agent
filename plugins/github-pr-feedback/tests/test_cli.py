@@ -63,7 +63,7 @@ def test_register_exposes_the_github_feedback_cli_command() -> None:
     assert parser.parse_args(["scan"]).github_pr_feedback_action == "scan"
 
 
-def test_scan_claims_pr_repairs_before_feedback_and_local_ci(
+def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -98,7 +98,7 @@ def test_scan_claims_pr_repairs_before_feedback_and_local_ci(
 
         def scan(self) -> ScanResult:
             order.append("repair")
-            return ScanResult(1, {})
+            return ScanResult(0, {"github_state_unavailable": 1}, degraded=True)
 
     class Feedback:
         def scan(self) -> ScanResult:
@@ -111,9 +111,10 @@ def test_scan_claims_pr_repairs_before_feedback_and_local_ci(
     monkeypatch.setattr("github_pr_feedback.cli.RepairController", Repair)
     monkeypatch.setattr("github_pr_feedback.cli._controller", lambda *_args: Feedback())
 
-    assert _scan(object()) == 0
-    assert order == ["repair", "feedback"]
-    assert json.loads(capsys.readouterr().out)["repair"]["created"] == 1
+    assert _scan(object()) == 1
+    assert order == ["feedback", "repair"]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["repair"]["status"] == "degraded"
 
 
 class RecordingKanbanRunner:

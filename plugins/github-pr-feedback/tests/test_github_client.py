@@ -53,7 +53,7 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
         "--limit",
         "100",
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid",
+        "number,state,headRepository,author,headRefName,headRefOid,updatedAt",
     )
     comments_argv = (
         "gh",
@@ -312,7 +312,7 @@ def test_github_client_fails_closed_when_filtered_pr_list_lacks_canonical_fields
         "--limit",
         "100",
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid",
+        "number,state,headRepository,author,headRefName,headRefOid,updatedAt",
     )
     runner = RecordingRunner({argv: [{"number": 17}]})
 
@@ -334,7 +334,7 @@ def test_github_client_fails_closed_if_owned_pr_query_hits_coverage_cap() -> Non
         "--limit",
         "100",
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid",
+        "number,state,headRepository,author,headRefName,headRefOid,updatedAt",
     )
     runner = RecordingRunner(
         {argv: [canonical_list_pull(number=number) for number in range(1, 101)]}
@@ -356,7 +356,7 @@ def test_github_client_reads_all_open_prs_and_exact_base_head_for_maintenance() 
         "--limit",
         "100",
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid",
+        "number,state,headRepository,author,headRefName,headRefOid,updatedAt",
     )
     branch_argv = ("gh", "api", "repos/acme/widgets/branches/stable")
     runner = RecordingRunner(
@@ -772,6 +772,7 @@ def canonical_list_pull(
         "author": {"login": "owner"},
         "headRefName": "codex/fix",
         "headRefOid": head_sha,
+        "updatedAt": "2026-08-26T08:00:00Z",
     }
 
 

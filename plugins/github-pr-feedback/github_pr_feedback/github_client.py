@@ -140,7 +140,7 @@ class GitHubClient:
                 "--limit",
                 "100",
                 "--json",
-                "number,state,headRepository,author,headRefName,headRefOid",
+                "number,state,headRepository,author,headRefName,headRefOid,updatedAt",
             ]
         )
         if not isinstance(payload, list) or any(
@@ -171,7 +171,7 @@ class GitHubClient:
                 "--limit",
                 "100",
                 "--json",
-                "number,state,headRepository,author,headRefName,headRefOid",
+                "number,state,headRepository,author,headRefName,headRefOid,updatedAt",
             ]
         )
         if not isinstance(payload, list) or any(
@@ -619,6 +619,7 @@ def _listed_pull_request(base_repository: str, row: dict[str, Any]) -> PullReque
             author_login=row["author"]["login"],
             head_ref_name=row["headRefName"],
             head_sha=row["headRefOid"],
+            updated_at=_timestamp(row["updatedAt"]),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise GitHubClientError(

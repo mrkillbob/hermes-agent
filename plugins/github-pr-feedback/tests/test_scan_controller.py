@@ -38,6 +38,7 @@ class FakeGitHub:
         self.feedback = feedback
         self.current = current or pull_request
         self.current_calls: list[tuple[str, int]] = []
+        self.feedback_calls: list[tuple[str, int]] = []
         self.branch_calls: list[tuple[str, str]] = []
         self.actions_are_enabled = True
         self.branch_head = self.current.base_sha
@@ -51,6 +52,7 @@ class FakeGitHub:
 
     def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
         assert (repository, number) == (self.pull_request.base_repository, self.pull_request.number)
+        self.feedback_calls.append((repository, number))
         return self.feedback
 
     def get_pull_request(self, repository: str, number: int) -> PullRequest:
@@ -131,6 +133,42 @@ def test_environment_blocked_ci_receipt_does_not_dispatch_a_fixer() -> None:
     )
 
     assert _ci_failure_assignee(receipt) is None
+
+
+def test_unchanged_pr_update_watermark_skips_repeated_feedback_reads(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+    )
+    pull_request = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        updated_at=datetime(2026, 8, 26, 8, 0, tzinfo=UTC),
+    )
+    github = FakeGitHub(pull_request, ())
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = ScanController(
+        policy,
+        ledger,
+        github,
+        RecordingKanban(),
+        RecordingLocalGit(),
+    )
+
+    first = controller.scan()
+    second = controller.scan()
+
+    assert first.degraded is False
+    assert second.degraded is False
+    assert github.feedback_calls == [("acme/widgets", 17)]
 
 
 def test_failed_ci_receipt_waits_for_current_base_before_dispatching_fixer(

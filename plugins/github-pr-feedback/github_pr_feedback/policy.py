@@ -135,6 +135,7 @@ class PullRequest:
     labels: tuple[str, ...] = ()
     base_branch: str | None = None
     base_sha: str | None = None
+    updated_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -154,6 +155,12 @@ class PullRequest:
             "head_repository",
             _repository(self.head_repository, "head_repository"),
         )
+        if self.updated_at is not None:
+            if not isinstance(self.updated_at, datetime) or self.updated_at.tzinfo is None:
+                raise ValueError("updated_at must be a timezone-aware datetime")
+            object.__setattr__(
+                self, "updated_at", self.updated_at.astimezone(timezone.utc)
+            )
         object.__setattr__(
             self, "author_login", _nonempty_string(self.author_login, "author_login")
         )
