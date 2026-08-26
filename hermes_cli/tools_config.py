@@ -1005,7 +1005,9 @@ def install_cua_driver(
     ``_CUA_INSTALLER_TIMEOUT`` and install.ps1's concurrency lock can add
     a further ~600s wait on Windows). ``hermes computer-use install
     --upgrade`` leaves it False — an explicit upgrade request should still
-    reinstall when the check is indeterminate.
+    reinstall when the check is indeterminate. On Windows this flag also
+    prevents every installer run, because install.ps1 may require console or
+    UAC consent; automatic updates instead point at the explicit command.
 
     ``show_installer_progress`` controls the installer's own progress line.
     ``hermes update`` already prints a contextual line before its update
@@ -1123,6 +1125,16 @@ def install_cua_driver(
                 "the override and run: hermes computer-use install --upgrade"
             )
             return False
+        if is_windows and require_confirmed_update:
+            _print_info(
+                "    Automatic Windows updates cannot safely run cua-driver's "
+                "interactive repair installer."
+            )
+            _print_info(
+                "    Repair it from an interactive terminal with: "
+                "hermes computer-use install --upgrade"
+            )
+            return False
         _print_info("    Repairing it with the current upstream installer.")
 
     # upgrade=True path — refresh to the latest upstream release.
@@ -1177,6 +1189,25 @@ def install_cua_driver(
             )
             return True
         if _state is not None and _state.get("update_available"):
+            if is_windows and require_confirmed_update:
+                _latest = _state.get("latest_version")
+                if _latest:
+                    _print_info(
+                        f"    {driver_cmd} {_latest} is available; keeping the "
+                        "installed version because its Windows installer may "
+                        "require interactive consent."
+                    )
+                else:
+                    _print_info(
+                        f"    A newer {driver_cmd} release is available; "
+                        "keeping the installed version because its Windows "
+                        "installer may require interactive consent."
+                    )
+                _print_info(
+                    "    Update it from an interactive terminal with: "
+                    "hermes computer-use install --upgrade"
+                )
+                return True
             # Pin the installer to the release check-update just confirmed.
             # `latest_version` comes from the GitHub Releases API, so its
             # assets are published — unlike the installer script's baked
@@ -1189,6 +1220,22 @@ def install_cua_driver(
             _latest = str(_state.get("latest_version") or "").strip().lstrip("vV")
             if _re.fullmatch(r"\d+(\.\d+)*", _latest):
                 confirmed_version = _latest
+
+    if is_windows and require_confirmed_update and not binary:
+        # Missing-binary path (driver enabled in config but never installed,
+        # or wiped by a failed install). Same rule as the repair and
+        # confirmed-update branches above: an automatic Windows update must
+        # never launch install.ps1, which can demand console/UAC consent the
+        # hidden updater cannot provide (#87703).
+        _print_info(
+            "    cua-driver is not installed; automatic Windows updates "
+            "cannot safely run its interactive installer."
+        )
+        _print_info(
+            "    Install it from an interactive terminal with: "
+            "hermes computer-use install --upgrade"
+        )
+        return False
 
     if binary:
         # Show before/after version when we have a baseline. Best-effort.
