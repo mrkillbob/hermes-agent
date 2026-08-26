@@ -276,6 +276,7 @@ def test_failed_exact_head_static_receipt_immediately_dispatches_one_typed_fixer
     assert task.assignee == "ci-static-fixer"
     assert task.head_sha == head_sha
     assert task.initial_status == "running"
+    assert task.max_runtime_seconds == 1800
     assert task.evidence["ci_receipt_id"] == "f" * 64
     assert task.evidence["failed_command"]["classification"] == "logic-regression"
     assert local_git.calls[0][1].feedback_kind == "pr_repair"

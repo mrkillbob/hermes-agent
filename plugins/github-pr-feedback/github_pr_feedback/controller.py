@@ -1283,7 +1283,7 @@ def _ci_failure_task(
         evidence_heading="Authoritative local CI failure receipt (JSON)",
         initial_status="running" if policy.auto_dispatch else "blocked",
         max_retries=3 if policy.auto_dispatch else 1,
-        max_runtime_seconds=1200 if policy.auto_dispatch else None,
+        max_runtime_seconds=1800 if policy.auto_dispatch else None,
     )
 
 
