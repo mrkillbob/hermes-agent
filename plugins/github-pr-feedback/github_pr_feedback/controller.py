@@ -969,6 +969,65 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
         and "**files changed:**" in body
     ):
         return True
+    completed_ci_repair = (
+        body.startswith(
+            "local-ci static-lane repair for this pr is in place at commit "
+        )
+        or body.startswith(
+            "repaired the local-ci static-lane failure reported for exact head "
+        )
+        or (
+            body.startswith("local ci repair for receipt ")
+            and " landed at head " in body
+        )
+    )
+    exact_head_evidence = re.search(
+        r"\b(?:commit|head)\s+`?[0-9a-f]{40,64}`?\b", body
+    ) is not None
+    verification_evidence = any(
+        marker in body
+        for marker in ("re-validated", "verification:", "verification,", "evidence:")
+    )
+    lane_evidence = any(
+        marker in body
+        for marker in (
+            "run_static_lane.py",
+            "run_hygiene_lane.py",
+            "static lane",
+            "static-lane",
+            "hygiene lane",
+            "hygiene-lane",
+        )
+    )
+    passing_evidence = any(
+        marker in body
+        for marker in (
+            "status: pass",
+            "status=pass",
+            "checks passed",
+            "zero findings",
+            "rc=0",
+        )
+    )
+    merge_remains_gated = any(
+        marker in body
+        for marker in (
+            "no merge was performed",
+            "no merge performed",
+            "merge remains gated",
+            "merge remains controlled",
+            "no ci configuration, required checks, or safety gates were modified",
+        )
+    ) or ("no gate" in body and "relaxed" in body)
+    if (
+        completed_ci_repair
+        and exact_head_evidence
+        and verification_evidence
+        and lane_evidence
+        and passing_evidence
+        and merge_remains_gated
+    ):
+        return True
     if any(
         marker in body
         for marker in (

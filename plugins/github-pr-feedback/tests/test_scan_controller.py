@@ -1194,6 +1194,127 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
     ledger.close()
 
 
+@pytest.mark.parametrize(
+    ("kind", "body"),
+    [
+        (
+            "issue_comment",
+            "Local-CI static-lane repair for this PR is in place at commit {sha} "
+            "(current PR head). Re-validated today on the exact receipt tree: "
+            "run_static_lane.py status: pass, rc=0; zero findings. No merge was "
+            "performed; merge remains controlled by the deterministic safety gates.",
+        ),
+        (
+            "review_comment",
+            "Local CI repair for receipt e7cd950e landed at head {sha} "
+            "(fast-forward push to this branch; no gate, cap, baseline, or manifest "
+            "relaxed). Evidence: reproduced at the pristine receipt head; with the fix, "
+            "run_hygiene_lane.py rc=0, all 42 checks passed; run_static_lane.py rc=0, "
+            "status=pass.",
+        ),
+        (
+            "issue_comment",
+            "Repaired the local-CI static-lane failure reported for exact head "
+            "`6d5e11b8d62429e1c3042086f9269b539475c3d4`. Root cause and fix "
+            "(commit `50d0baa40effd44085194438fc9fab73381efa94`, 2 files changed). "
+            "Verification, all at commit `50d0baa40effd44085194438fc9fab73381efa94`; "
+            "no CI configuration, required checks, or safety gates were modified: "
+            "run_static_lane.py -> status: pass, errors: []; focused pytest -> 14 passed.",
+        ),
+    ],
+)
+def test_scan_suppresses_factual_owner_ci_completion_comments(
+    tmp_path: Path,
+    kind: str,
+    body: str,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    owner = Reviewer("owner", "MEMBER")
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (
+            Feedback(
+                kind,
+                "factual-owner-completion",
+                owner,
+                body.format(sha=sha),
+                datetime.fromisoformat("2026-08-24T00:00:00+00:00"),
+                False,
+            ),
+        ),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 0
+    assert result.skipped["self_resolution_receipt"] == 1
+    assert kanban.tasks == []
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "reviewer", "is_bot", "body"),
+    [
+        (
+            "issue_comment",
+            "owner",
+            False,
+            "Please perform a local CI repair for this PR at current head {sha}. "
+            "The static lane currently fails. Do not merge.",
+        ),
+        (
+            "review_comment",
+            "ci-review-bot",
+            True,
+            "Local CI repair for this PR is in place at commit {sha}. Static lane "
+            "verification passed. No merge was performed.",
+        ),
+        (
+            "issue_comment",
+            "owner",
+            False,
+            "Local-CI static-lane repair for this PR is in place at commit {sha}. "
+            "Static lane verification passed and no merge was performed, but one "
+            "blocker remains.",
+        ),
+    ],
+)
+def test_scan_keeps_owner_ci_repair_requests_and_non_owner_bot_comments(
+    tmp_path: Path,
+    kind: str,
+    reviewer: str,
+    is_bot: bool,
+    body: str,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (
+            Feedback(
+                kind,
+                "genuine-feedback",
+                Reviewer(reviewer, "MEMBER"),
+                body.format(sha=sha),
+                datetime.fromisoformat("2026-08-24T00:00:00+00:00"),
+                is_bot,
+            ),
+        ),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped.get("self_resolution_receipt", 0) == 0
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["genuine-feedback"]
+    ledger.close()
+
+
 def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
     tmp_path: Path,
 ) -> None:
