@@ -476,6 +476,8 @@ def _pull_request(row: dict[str, Any]) -> PullRequest:
             head_ref_name=head["ref"],
             head_sha=head["sha"],
             labels=tuple(label["name"] for label in raw_labels),
+            base_branch=base["ref"],
+            base_sha=base["sha"],
         )
     except (KeyError, TypeError, ValueError) as error:
         raise GitHubClientError(

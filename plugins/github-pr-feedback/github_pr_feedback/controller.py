@@ -589,7 +589,7 @@ class ScanController:
             repository=current.base_repository,
             pr_number=current.number,
             feedback_kind="pr_local_ci",
-            feedback_id=LOCAL_CI_FEEDBACK_ID,
+            feedback_id=_local_ci_feedback_id(current),
             head_sha=current.head_sha,
         )
         claimed_at = self._clock()
@@ -898,6 +898,14 @@ def _is_non_actionable_review_container(feedback: Feedback) -> bool:
 def _receipt_branch(receipt: FeedbackReceipt) -> str:
     digest = sha256("\x00".join(map(str, receipt.key)).encode("utf-8")).hexdigest()
     return f"hermes/github-pr-feedback/{digest}"
+
+
+def _local_ci_feedback_id(pull_request: PullRequest) -> str:
+    """Scope CI dispatch identity to both immutable PR and base heads."""
+
+    if pull_request.base_sha is None:
+        return LOCAL_CI_FEEDBACK_ID
+    return f"{LOCAL_CI_FEEDBACK_ID}:{pull_request.base_sha.casefold()}"
 
 
 def _task(

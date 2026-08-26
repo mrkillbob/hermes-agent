@@ -267,6 +267,8 @@ def test_github_client_gets_the_current_pull_request_with_fixed_argv() -> None:
     pull_request = GitHubClient(runner).get_pull_request("acme/widgets", 17)
 
     assert pull_request.number == 17
+    assert pull_request.base_branch == "stable"
+    assert pull_request.base_sha == "b" * 40
     assert runner.calls == [argv]
 
 

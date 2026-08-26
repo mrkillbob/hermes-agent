@@ -10,6 +10,7 @@ import subprocess
 from typing import Mapping, Sequence
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _FEEDBACK_KINDS = frozenset(
     {"issue_comment", "review_comment", "review", "pr_local_ci", "pr_repair"}
 )
@@ -36,6 +37,13 @@ def _repository(value: object, field: str) -> str:
     if not _REPOSITORY.fullmatch(repository):
         raise ValueError(f"{field} must be an exact owner/repository name")
     return repository
+
+
+def _sha(value: object, field: str) -> str:
+    candidate = _nonempty_string(value, field)
+    if not _SHA.fullmatch(candidate):
+        raise ValueError(f"{field} must be a full Git object ID")
+    return candidate.casefold()
 
 
 def _string_list(value: object, field: str, *, normalize=str) -> tuple[str, ...]:
@@ -125,6 +133,8 @@ class PullRequest:
     head_ref_name: str
     head_sha: str
     labels: tuple[str, ...] = ()
+    base_branch: str | None = None
+    base_sha: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -158,6 +168,13 @@ class PullRequest:
             "labels",
             tuple(_nonempty_string(label, "pull request label") for label in self.labels),
         )
+        if (self.base_branch is None) != (self.base_sha is None):
+            raise ValueError("base_branch and base_sha must be provided together")
+        if self.base_branch is not None:
+            object.__setattr__(
+                self, "base_branch", _nonempty_string(self.base_branch, "base_branch")
+            )
+            object.__setattr__(self, "base_sha", _sha(self.base_sha, "base_sha"))
 
 
 @dataclass(frozen=True, slots=True)

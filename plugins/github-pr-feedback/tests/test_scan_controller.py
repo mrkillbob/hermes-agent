@@ -644,6 +644,57 @@ def test_scan_dispatches_a_new_local_ci_audit_when_the_pr_head_changes(
     ledger.close()
 
 
+def test_scan_dispatches_a_new_local_ci_audit_when_only_the_base_head_changes(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    first = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha="1" * 40,
+    )
+    github = FakeGitHub(first, ())
+    github.actions_are_enabled = False
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    scanner = ScanController(policy, ledger, github, kanban, RecordingLocalGit())
+
+    first_scan = scanner.scan()
+    second = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha="2" * 40,
+    )
+    github.pull_request = second
+    github.current = second
+    second_scan = scanner.scan()
+    duplicate_scan = scanner.scan()
+
+    assert first_scan.created == 1
+    assert second_scan.created == 1
+    assert duplicate_scan.created == 0
+    assert [task.head_sha for task in kanban.tasks] == [head_sha, head_sha]
+    assert kanban.tasks[0].idempotency_key != kanban.tasks[1].idempotency_key
+    ledger.close()
+
+
 def test_local_ci_waits_while_admitted_feedback_is_unactioned(tmp_path: Path) -> None:
     local_path, sha = initialized_repository(tmp_path)
     policy = configured_policy(
