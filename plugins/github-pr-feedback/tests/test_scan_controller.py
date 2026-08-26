@@ -33,6 +33,10 @@ from github_pr_feedback.policy import (
 )
 
 
+def test_scan_admission_budget_covers_a_large_pr_repair_queue() -> None:
+    assert MAX_ADMISSIONS_PER_SCAN >= 64
+
+
 class FakeGitHub:
     def __init__(self, pull_request: PullRequest, feedback: tuple[Feedback, ...], current: PullRequest | None = None) -> None:
         self.pull_request = pull_request

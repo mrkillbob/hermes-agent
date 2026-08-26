@@ -19,7 +19,7 @@ from .github_client import MAX_FEEDBACK_BODY_CHARS, Feedback
 from .ledger import ClaimLease, FeedbackLedger, LedgerStateError
 from .policy import FeedbackReceipt, PluginPolicy, PullRequest, RepositoryTarget, RoutingDecision
 
-MAX_ADMISSIONS_PER_SCAN = 25
+MAX_ADMISSIONS_PER_SCAN = 64
 MAX_PARALLEL_PR_READS = 2
 LOCAL_CI_FEEDBACK_ID = "local-ci-audit-v2"
 _SHA = re.compile(r"^[0-9a-fA-F]{40,64}$")
