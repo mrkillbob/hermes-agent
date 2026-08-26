@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -13,7 +14,7 @@ from uuid import uuid4
 from .controller import KanbanClient, KanbanTask, LocalGit, LocalGitRepository
 from .github_client import CheckState, GitHubClient, PullRequestMergeState, ReviewState
 from .ledger import FeedbackLedger, LedgerStateError
-from .policy import FeedbackReceipt, PluginPolicy
+from .policy import FeedbackReceipt, PluginPolicy, PullRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,18 +77,18 @@ class RepairController:
                 skipped["github_state_unavailable"] += 1
                 degraded = True
                 continue
-            for listed in pulls:
-                try:
-                    pull = self._github.get_merge_state(repository, listed.number)
-                    review = self._github.get_review_state(repository, listed.number)
-                except Exception:
+            with ThreadPoolExecutor(max_workers=min(6, max(1, len(pulls)))) as executor:
+                snapshots = executor.map(
+                    lambda listed: self._read_snapshot(repository, listed), pulls
+                )
+                ordered_snapshots = tuple(snapshots)
+            for listed, snapshot in zip(pulls, ordered_snapshots, strict=True):
+                if snapshot is None:
                     skipped["github_state_unavailable"] += 1
                     degraded = True
                     continue
-                try:
-                    checks = self._github.get_check_state(repository, pull.head_sha)
-                except Exception:
-                    checks = CheckState(False, True, 0)
+                pull, review, checks, checks_unavailable = snapshot
+                if checks_unavailable:
                     skipped["check_state_unavailable"] += 1
                 if pull.head_sha != listed.head_sha:
                     skipped["head_changed"] += 1
@@ -142,6 +143,25 @@ class RepairController:
                     skipped["dispatch_failed"] += 1
                     degraded = True
         return RepairScanResult(created, dict(skipped), degraded)
+
+    def _read_snapshot(
+        self, repository: str, listed: PullRequest
+    ) -> tuple[PullRequestMergeState, ReviewState, CheckState, bool] | None:
+        """Read one PR's independent canonical state without mutating the ledger."""
+
+        try:
+            pull = self._github.get_merge_state(repository, listed.number)
+            review = self._github.get_review_state(repository, listed.number)
+        except Exception:
+            return None
+        try:
+            checks = self._github.get_check_state(repository, pull.head_sha)
+        except Exception:
+            checks = CheckState(False, True, 0)
+            checks_unavailable = True
+        else:
+            checks_unavailable = False
+        return pull, review, checks, checks_unavailable
 
 
 def _repair_task(

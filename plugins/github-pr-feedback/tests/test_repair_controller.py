@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 import subprocess
+import threading
 
 from github_pr_feedback.controller import PreparedWorktree
 from github_pr_feedback.github_client import (
@@ -19,11 +20,11 @@ SHA = "a" * 40
 
 
 def merge_state(
-    *, mergeable: bool = True, status: str = "CLEAN"
+    *, number: int = 17, mergeable: bool = True, status: str = "CLEAN"
 ) -> PullRequestMergeState:
     return PullRequestMergeState(
         repository="acme/widgets",
-        number=17,
+        number=number,
         state="OPEN",
         is_draft=False,
         mergeable=mergeable,
@@ -98,6 +99,23 @@ class GitHub:
 class GitHubWithoutChecks(GitHub):
     def get_check_state(self, repository: str, head_sha: str):
         raise RuntimeError("check state unavailable")
+
+
+class ConcurrentReadGitHub(GitHub):
+    def __init__(self) -> None:
+        self.barrier = threading.Barrier(3)
+
+    def list_open_pull_requests(self, repository: str, owner: str):
+        from github_pr_feedback.policy import PullRequest
+
+        return tuple(
+            PullRequest(number, "OPEN", repository, repository, owner, "codex/fix", SHA)
+            for number in (17, 18, 19)
+        )
+
+    def get_merge_state(self, repository: str, number: int):
+        self.barrier.wait(timeout=1)
+        return merge_state(number=number)
 
 
 class LocalGit:
@@ -176,6 +194,24 @@ def test_unavailable_checks_do_not_hide_a_confirmed_merge_conflict(
     assert result.skipped["check_state_unavailable"] == 1
     assert result.degraded is False
     assert "merge_conflict" in kanban.tasks[0].evidence["triggers"]
+    ledger.close()
+
+
+def test_repair_scan_reads_independent_pull_states_concurrently(tmp_path: Path) -> None:
+    configured = policy(tmp_path)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = RepairController(
+        configured,
+        ledger,
+        ConcurrentReadGitHub(),
+        Kanban(),
+        LocalGit(),
+    ).scan()
+
+    assert result.created == 0
+    assert result.skipped == {"no_repair_trigger": 3}
+    assert result.degraded is False
     ledger.close()
 
 
