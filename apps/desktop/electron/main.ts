@@ -149,7 +149,6 @@ import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import { formatDesktopLogLine } from './desktop-log-line'
 import { resolveDesktopRemoteRoute } from './desktop-remote-route'
-import { shouldHealMissingUpdateBranch } from './update-branch-policy'
 import {
   buildPosixCleanupScript,
   buildWindowsCleanupScript,
@@ -326,6 +325,7 @@ import {
   windowOpacityFor,
   windowOpacityOptions
 } from './translucency'
+import { shouldHealMissingUpdateBranch } from './update-branch-policy'
 import {
   compareApiUrl,
   parseCompareBehindCount,
