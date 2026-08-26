@@ -144,6 +144,158 @@ def test_github_client_posts_bounded_issue_comment_with_fixed_argv() -> None:
     assert runner.calls == [argv]
 
 
+def test_github_client_resolves_only_the_thread_for_one_exact_review_comment() -> None:
+    query_argv = (
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        "query=" + GitHubClient.REVIEW_THREAD_QUERY,
+        "-F",
+        "owner=acme",
+        "-F",
+        "name=widgets",
+        "-F",
+        "number=17",
+    )
+    mutation_argv = (
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        "query=" + GitHubClient.RESOLVE_REVIEW_THREAD_MUTATION,
+        "-F",
+        "threadId=PRRT_exact",
+    )
+    runner = RecordingRunner(
+        {
+            query_argv: {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "headRefOid": "a" * 40,
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "PRRT_other",
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [{"databaseId": 41}],
+                                            "pageInfo": {"hasNextPage": False},
+                                        },
+                                    },
+                                    {
+                                        "id": "PRRT_exact",
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [{"databaseId": 42}],
+                                            "pageInfo": {"hasNextPage": False},
+                                        },
+                                    },
+                                ],
+                                "pageInfo": {"hasNextPage": False},
+                            }
+                        }
+                    }
+                }
+            },
+            mutation_argv: {
+                "data": {
+                    "resolveReviewThread": {
+                        "thread": {"id": "PRRT_exact", "isResolved": True}
+                    }
+                }
+            },
+        }
+    )
+
+    assert GitHubClient(runner).resolve_review_thread_for_comment(
+        "acme/widgets", 17, "42", expected_head_sha="a" * 40
+    )
+    assert runner.calls == [query_argv, mutation_argv]
+
+
+def test_github_client_does_not_mutate_an_already_resolved_exact_thread() -> None:
+    query_argv = (
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        "query=" + GitHubClient.REVIEW_THREAD_QUERY,
+        "-F",
+        "owner=acme",
+        "-F",
+        "name=widgets",
+        "-F",
+        "number=17",
+    )
+    runner = RecordingRunner(
+        {
+            query_argv: {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "headRefOid": "a" * 40,
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "PRRT_exact",
+                                        "isResolved": True,
+                                        "comments": {
+                                            "nodes": [{"databaseId": 42}],
+                                            "pageInfo": {"hasNextPage": False},
+                                        },
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": False},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+    assert not GitHubClient(runner).resolve_review_thread_for_comment(
+        "acme/widgets", 17, "42", expected_head_sha="a" * 40
+    )
+    assert runner.calls == [query_argv]
+
+
+def test_github_client_fails_closed_on_incomplete_review_thread_coverage() -> None:
+    query_argv = (
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        "query=" + GitHubClient.REVIEW_THREAD_QUERY,
+        "-F",
+        "owner=acme",
+        "-F",
+        "name=widgets",
+        "-F",
+        "number=17",
+    )
+    payload = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "headRefOid": "a" * 40,
+                    "reviewThreads": {
+                        "nodes": [],
+                        "pageInfo": {"hasNextPage": True},
+                    }
+                }
+            }
+        }
+    }
+
+    with pytest.raises(GitHubClientError, match="review thread"):
+        GitHubClient(RecordingRunner({query_argv: payload})).resolve_review_thread_for_comment(
+            "acme/widgets", 17, "42", expected_head_sha="a" * 40
+        )
+
+
 def test_github_client_fails_closed_when_filtered_pr_list_lacks_canonical_fields() -> (
     None
 ):

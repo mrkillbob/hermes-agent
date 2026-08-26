@@ -1584,6 +1584,14 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
             "reproduces. Focused verification: run_static_lane.py status=pass. No source "
             "files were changed.",
         ),
+        (
+            "issue_comment",
+            "Static-lane repair pushed at {sha} (head was re-read before any write). "
+            "Changes (3 files): formatting and scoped lint provenance only. Verification: "
+            "run_static_lane.py -> pass; run_hygiene_lane.py -> pass; runtime tests passed. "
+            "Merge remains gated; no CI configuration, required checks, or safety gates were "
+            "modified.",
+        ),
     ],
 )
 def test_scan_suppresses_factual_owner_ci_completion_comments(
@@ -1642,6 +1650,13 @@ def test_scan_suppresses_factual_owner_ci_completion_comments(
             "Local-CI static-lane repair for this PR is in place at commit {sha}. "
             "Static lane verification passed and no merge was performed, but one "
             "blocker remains.",
+        ),
+        (
+            "issue_comment",
+            "owner",
+            False,
+            "Static-lane repair pushed at {sha}. Changes (1 file). Verification: "
+            "unrelated-test -> pass.",
         ),
     ],
 )

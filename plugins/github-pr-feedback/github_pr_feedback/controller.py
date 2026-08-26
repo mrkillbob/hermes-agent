@@ -68,7 +68,9 @@ _RESOLVED_AFTER_FAILURE = (
     "after repair",
     "root cause and fix",
 )
-_LANE_PASS_EVIDENCE = re.compile(r"\b(?:status\s*[:=]?\s*pass|rc\s*=\s*0|passes|passed)\b")
+_LANE_PASS_EVIDENCE = re.compile(
+    r"\b(?:status\s*[:=]?\s*pass|rc\s*=\s*0|passes|passed)|->\s*pass\b"
+)
 _CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
 _CI_RECEIPT_COMMENT = re.compile(
     r"(?:authoritative\s+)?receipt:\s*`([0-9a-f]{64})`",
@@ -1085,9 +1087,12 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
             body.startswith("local ci repair for receipt ")
             and " landed at head " in body
         )
+        or body.startswith("static-lane repair pushed at ")
     )
     exact_head_evidence = re.search(
         r"\b(?:commit|head)\s+`?[0-9a-f]{40,64}`?\b", body
+    ) is not None or re.match(
+        r"static-lane repair pushed at `?[0-9a-f]{40,64}`?\b", body
     ) is not None
     verification_evidence = any(
         marker in body
@@ -1113,7 +1118,7 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
             "zero findings",
             "rc=0",
         )
-    )
+    ) or _LANE_PASS_EVIDENCE.search(body) is not None
     merge_remains_gated = any(
         marker in body
         for marker in (
@@ -1492,6 +1497,7 @@ def _ci_failure_task(
         f"{shlex.quote(receipt.repository)} --pr-number {receipt.pr_number} --feedback-kind "
         f"pr_repair --feedback-id {shlex.quote(receipt.feedback_id)} --receipt-head-sha "
         f"{shlex.quote(receipt.head_sha)} --resolved-head-sha <full literal resolved head SHA>`. "
+        "The factual reply must state that merge remains gated and no CI/safety gate was relaxed. "
         "Never acknowledge before the push and reply both succeed."
     )
     if requires_review:

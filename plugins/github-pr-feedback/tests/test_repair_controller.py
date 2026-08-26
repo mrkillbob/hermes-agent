@@ -245,6 +245,8 @@ def test_repair_controller_routes_a_stale_pr_base_into_the_refresh_lane(
     assert "--resolved-head-sha <full literal resolved head SHA>" in (
         kanban.tasks[0].instructions
     )
+    assert "evaluating at most two viable resolutions" in kanban.tasks[0].instructions
+    assert "Within 10 minutes" in kanban.tasks[0].instructions
     ledger.close()
 
 

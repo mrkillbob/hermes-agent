@@ -409,6 +409,50 @@ class FeedbackLedger:
             if result.rowcount != 1:
                 raise LedgerStateError("feedback dispatch is not complete")
 
+    def begin_feedback_action(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        resolved_head_sha: str,
+        actioned_at: datetime,
+    ) -> None:
+        """Durably admit an idempotent external feedback reconciliation."""
+
+        if receipt.feedback_kind == "pr_local_ci":
+            raise ValueError("local CI dispatches are not feedback actions")
+        if (
+            not isinstance(resolved_head_sha, str)
+            or len(resolved_head_sha) != 40
+            or any(
+                character not in "0123456789abcdefABCDEF"
+                for character in resolved_head_sha
+            )
+        ):
+            raise ValueError("resolved_head_sha must be a full hexadecimal SHA")
+        actioned_at = _aware_utc(actioned_at, "actioned_at")
+        normalized_head = resolved_head_sha.casefold()
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT status, action_status, actioned_head_sha FROM feedback_receipts "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ?",
+                receipt.key,
+            ).fetchone()
+            if row is None or row[0] != "completed":
+                raise LedgerStateError("feedback dispatch is not complete")
+            if row[1] in {"resolving", "completed"}:
+                if row[2] != normalized_head:
+                    raise LedgerStateError("feedback action head changed")
+                return
+            if row[1] != "pending":
+                raise LedgerStateError("feedback action status is invalid")
+            self._connection.execute(
+                "UPDATE feedback_receipts SET action_status = 'resolving', "
+                "actioned_head_sha = ?, actioned_at = ? WHERE repository = ? AND pr_number = ? "
+                "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+                (normalized_head, actioned_at.isoformat(), *receipt.key),
+            )
+
     def retry(
         self,
         receipt: FeedbackReceipt,

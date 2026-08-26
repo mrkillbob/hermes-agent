@@ -265,7 +265,11 @@ def _repair_task(
             "identity changes or the repair is ambiguous or broad. After the verified push and "
             "factual reply both succeed, acknowledge this exact repair with `"
             f"{completion_command}`. Never use shell substitution for the resolved SHA, and do not "
-            "complete the Kanban task until this acknowledgement succeeds."
+            "complete the Kanban task until this acknowledgement succeeds. No-progress rule: after "
+            "evaluating at most two viable resolutions, choose the smallest existing repository "
+            "pattern. Within 10 minutes, either produce a tracked patch plus a focused check result, "
+            "complete an already-resolved receipt with evidence, or stop with one exact blocker. "
+            "Do not keep comparing equivalent approaches."
         )
     evidence = {
         "repository": receipt.repository,

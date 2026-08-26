@@ -565,7 +565,8 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
             args.feedback_id,
             args.receipt_head_sha,
         )
-        current = GitHubClient().get_pull_request(args.repository, args.pr_number)
+        github = GitHubClient()
+        current = github.get_pull_request(args.repository, args.pr_number)
         admission = policy.admit_pull_request(current)
         if (
             not admission.admitted
@@ -579,11 +580,31 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
         return 1
     ledger = FeedbackLedger.for_current_profile()
     try:
+        ledger.begin_feedback_action(
+            receipt,
+            resolved_head_sha=args.resolved_head_sha,
+            actioned_at=datetime.now(UTC),
+        )
+        review_thread_resolved = False
+        if receipt.feedback_kind == "review_comment":
+            review_thread_resolved = github.resolve_review_thread_for_comment(
+                receipt.repository,
+                receipt.pr_number,
+                receipt.feedback_id,
+                expected_head_sha=args.resolved_head_sha,
+            )
         ledger.mark_feedback_actioned(
             receipt,
             resolved_head_sha=args.resolved_head_sha,
             actioned_at=datetime.now(UTC),
         )
+    except GitHubClientError:
+        print(
+            json.dumps(
+                {"status": "feedback_action_reconciliation_pending"}, sort_keys=True
+            )
+        )
+        return_code = 1
     except (ValueError, LedgerStateError):
         print(json.dumps({"status": "feedback_action_not_recorded"}, sort_keys=True))
         return_code = 1
@@ -600,6 +621,7 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
                     "feedback_kind": receipt.feedback_kind,
                     "feedback_id": receipt.feedback_id,
                     "resolved_head_sha": str(args.resolved_head_sha).casefold(),
+                    "review_thread_resolved": review_thread_resolved,
                     "local_ci_status": local_ci_status,
                 },
                 sort_keys=True,

@@ -109,6 +109,16 @@ class GitHubClient:
         "pullRequest(number:$number){reviewDecision reviewThreads(first:100){nodes{isResolved}"
         "pageInfo{hasNextPage}}}}}"
     )
+    REVIEW_THREAD_QUERY = (
+        "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
+        "pullRequest(number:$number){headRefOid reviewThreads(first:100){nodes{id isResolved "
+        "comments(first:100){nodes{databaseId} pageInfo{hasNextPage}}} "
+        "pageInfo{hasNextPage}}}}}"
+    )
+    RESOLVE_REVIEW_THREAD_MUTATION = (
+        "mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){"
+        "thread{id isResolved}}}"
+    )
 
     def __init__(self, runner: CommandRunner | None = None) -> None:
         self._runner = runner or SubprocessCommandRunner()
@@ -421,6 +431,103 @@ class GitHubClient:
                 f"body={body}",
             ]
         )
+
+    def resolve_review_thread_for_comment(
+        self,
+        repository: str,
+        number: int,
+        comment_id: str,
+        *,
+        expected_head_sha: str,
+    ) -> bool:
+        """Resolve only the complete review thread containing one exact REST comment ID."""
+
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        expected_head_sha = _validated_sha(expected_head_sha)
+        try:
+            database_id = int(comment_id)
+        except (TypeError, ValueError) as error:
+            raise ValueError("review comment ID must be a positive integer") from error
+        if database_id <= 0:
+            raise ValueError("review comment ID must be a positive integer")
+        owner, name = repository.split("/", 1)
+        payload = self._json(
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                "query=" + self.REVIEW_THREAD_QUERY,
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+                "-F",
+                f"number={number}",
+            ]
+        )
+        try:
+            if "errors" in payload:
+                raise TypeError("GraphQL query returned errors")
+            pull = payload["data"]["repository"]["pullRequest"]
+            observed_head_sha = _validated_sha(pull["headRefOid"])
+            if observed_head_sha.casefold() != expected_head_sha.casefold():
+                raise TypeError("pull request head changed")
+            threads = pull["reviewThreads"]
+            nodes = threads["nodes"]
+            if threads["pageInfo"]["hasNextPage"] is not False or not isinstance(
+                nodes, list
+            ):
+                raise TypeError("review thread coverage is incomplete")
+            matches = []
+            for node in nodes:
+                if not isinstance(node, dict):
+                    raise TypeError("review thread is malformed")
+                comments = node["comments"]
+                comment_nodes = comments["nodes"]
+                if comments["pageInfo"]["hasNextPage"] is not False or not isinstance(
+                    comment_nodes, list
+                ):
+                    raise TypeError("review comment coverage is incomplete")
+                if any(not isinstance(comment, dict) for comment in comment_nodes):
+                    raise TypeError("review comment is malformed")
+                if any(
+                    type(comment.get("databaseId")) is int
+                    and comment["databaseId"] == database_id
+                    for comment in comment_nodes
+                ):
+                    matches.append(node)
+            if len(matches) != 1:
+                raise TypeError("review comment did not identify exactly one thread")
+            thread_id = _required_string(matches[0]["id"])
+            resolved = matches[0]["isResolved"]
+            if not isinstance(resolved, bool):
+                raise TypeError("review thread resolution state is invalid")
+        except (KeyError, TypeError, ValueError) as error:
+            raise GitHubClientError("GitHub review thread was unavailable") from error
+        if resolved:
+            return False
+        mutation = self._json(
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                "query=" + self.RESOLVE_REVIEW_THREAD_MUTATION,
+                "-F",
+                f"threadId={thread_id}",
+            ]
+        )
+        try:
+            if "errors" in mutation:
+                raise TypeError("GraphQL mutation returned errors")
+            result = mutation["data"]["resolveReviewThread"]["thread"]
+            if result["id"] != thread_id or result["isResolved"] is not True:
+                raise TypeError("review thread resolution was not confirmed")
+        except (KeyError, TypeError) as error:
+            raise GitHubClientError("GitHub review thread resolution failed") from error
+        return True
 
     def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
         endpoints = (

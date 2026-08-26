@@ -867,6 +867,39 @@ def test_local_ci_claim_waits_for_active_exact_head_repair(tmp_path: Path) -> No
     ledger.close()
 
 
+def test_feedback_action_uses_a_retryable_resolving_transition(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    item = receipt(feedback_kind="review_comment", feedback_id="42")
+    lease = claim_lease(ledger, item)
+    assert lease is not None
+    ledger.finalize(item, "review-task", lease)
+    resolved_head = "b" * 40
+    started_at = datetime(2026, 8, 24, 13, 0, tzinfo=UTC)
+
+    ledger.begin_feedback_action(
+        item, resolved_head_sha=resolved_head, actioned_at=started_at
+    )
+    ledger.begin_feedback_action(
+        item, resolved_head_sha=resolved_head, actioned_at=started_at
+    )
+    row = ledger._connection.execute(
+        "SELECT action_status, actioned_head_sha FROM feedback_receipts WHERE "
+        "repository = ? AND pr_number = ? AND feedback_kind = ? AND feedback_id = ? "
+        "AND head_sha = ?",
+        item.key,
+    ).fetchone()
+    assert row == ("resolving", resolved_head)
+
+    ledger.mark_feedback_actioned(
+        item, resolved_head_sha=resolved_head, actioned_at=started_at
+    )
+    ledger.begin_feedback_action(
+        item, resolved_head_sha=resolved_head, actioned_at=started_at
+    )
+    assert ledger.was_actioned_on_any_head(item)
+    ledger.close()
+
+
 def test_ledger_retries_a_receipt_after_task_creation_failure(tmp_path: Path) -> None:
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
 
