@@ -13,6 +13,7 @@ import binascii
 import fcntl
 import ipaddress
 import json
+import math
 import os
 import re
 from dataclasses import asdict, dataclass, replace
@@ -688,6 +689,9 @@ class LLMEgressFirewall:
                 return rendered
             if isinstance(value, (list, tuple)):
                 return [render(item) for item in value]
+            if isinstance(value, float) and not math.isfinite(value):
+                reasons.append("non_finite_number")
+                return None
             if value is None or isinstance(value, (bool, int, float)):
                 require_static_literal(
                     json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":"))

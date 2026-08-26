@@ -346,6 +346,25 @@ def test_source_bytes_are_constructed_from_grant_and_authorized_bytes_reject_tam
     assert "payload_digest_mismatch" in exc_info.value.decision.reason_codes
 
 
+def test_dynamic_grammar_atom_still_requires_an_exact_current_source_grant(tmp_path):
+    path = tmp_path / "private.py"
+    path.write_text("user\n", encoding="utf-8")
+    grant = _source_grant(path)
+    typed_request = _typed_request(_request("ignored"), source_grant=grant)
+
+    with pytest.raises(EgressBlocked) as missing_exc:
+        firewall(tmp_path).preflight(typed_request, _route(), grants=())
+    assert "untrusted_provenance" in missing_exc.value.decision.reason_codes
+
+    authorization = firewall(tmp_path).authorize(typed_request, _route(), grants=(grant,))
+    assert json.loads(authorization.payload_bytes)["messages"][0]["content"] == "user\n"
+
+    path.write_text("tool\n", encoding="utf-8")
+    with pytest.raises(EgressBlocked) as changed_exc:
+        firewall(tmp_path).preflight(typed_request, _route(), grants=(grant,))
+    assert "source_hash_mismatch" in changed_exc.value.decision.reason_codes
+
+
 def test_typed_payload_identity_cannot_diverge_from_grant_binding_identity(tmp_path):
     path = tmp_path / "private.py"
     path.write_text("verified source\n", encoding="utf-8")
@@ -504,6 +523,27 @@ def test_byte_and_token_caps_allow_the_exact_boundary(tmp_path):
         max_conservative_tokens=token_count,
     ).preflight(request, _route(base_url="http://127.0.0.1:11434"))
     assert decision.allowed is True
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_typed_number_is_blocked_with_content_free_receipt(tmp_path, value):
+    path = tmp_path / "private.py"
+    path.write_text("x=1\n", encoding="utf-8")
+    grant = _source_grant(path)
+    typed_request = _typed_request(_request("ignored"), source_grant=grant)
+    typed_request.payload["temperature"] = value
+    gate = firewall(tmp_path, static_literals={"temperature"})
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        gate.preflight(typed_request, _route(), grants=(grant,))
+    assert exc_info.value.decision.reason_codes == ("non_finite_number",)
+
+    receipt_text = (tmp_path / "llm-egress-receipts.jsonl").read_text()
+    receipt = json.loads(receipt_text)
+    assert receipt["decision"] == "block"
+    assert receipt["reason_codes"] == ["non_finite_number"]
+    assert "NaN" not in receipt_text
+    assert "Infinity" not in receipt_text
 
 
 def test_allow_receipt_contains_hashes_and_counts_but_no_payload(tmp_path):
