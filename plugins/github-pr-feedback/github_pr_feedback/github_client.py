@@ -234,6 +234,22 @@ class GitHubClient:
             merge_commit_oid = row.get("merge_commit_sha")
             raw_labels = row.get("labels", [])
             if (
+                isinstance(state, str)
+                and state.casefold() == "closed"
+                and merged is True
+                and mergeable is None
+                and isinstance(merge_state_status, str)
+                and merge_state_status.casefold() == "unknown"
+                and isinstance(merge_commit_oid, str)
+                and _SHA.fullmatch(merge_commit_oid)
+            ):
+                # GitHub stops computing pre-merge fields after a successful
+                # merge. Canonical terminal truth is stronger than the now
+                # inapplicable mergeability probe, so normalize only this
+                # exact REST shape for idempotent post-write reconciliation.
+                mergeable = True
+                merge_state_status = "merged"
+            if (
                 not isinstance(state, str)
                 or not isinstance(is_draft, bool)
                 or not isinstance(mergeable, bool)

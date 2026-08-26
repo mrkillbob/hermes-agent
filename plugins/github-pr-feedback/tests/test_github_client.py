@@ -556,6 +556,32 @@ def test_github_client_fails_closed_on_unknown_merge_state(
         GitHubClient(RecordingRunner({argv: pull})).get_merge_state("acme/widgets", 17)
 
 
+def test_github_client_accepts_terminal_merged_truth_when_mergeability_is_no_longer_applicable(
+) -> None:
+    argv = ("gh", "api", "repos/acme/widgets/pulls/17")
+    pull = canonical_pull()
+    pull.update(
+        {
+            "state": "closed",
+            "draft": False,
+            "mergeable": None,
+            "mergeable_state": "unknown",
+            "merged": True,
+            "merge_commit_sha": "c" * 40,
+        }
+    )
+
+    state = GitHubClient(RecordingRunner({argv: pull})).get_merge_state(
+        "acme/widgets", 17
+    )
+
+    assert state.state == "CLOSED"
+    assert state.merged is True
+    assert state.mergeable is True
+    assert state.merge_state_status == "MERGED"
+    assert state.merge_commit_oid == "c" * 40
+
+
 @pytest.mark.parametrize("payload", [{}, {"enabled": "false"}, [], None])
 def test_github_client_fails_closed_on_invalid_actions_permission_shape(
     payload: object,
