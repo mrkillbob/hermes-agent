@@ -68,7 +68,7 @@ _RESOLVED_AFTER_FAILURE = (
     "after repair",
     "root cause and fix",
 )
-_LANE_PASS_EVIDENCE = re.compile(r"\b(?:status\s*:?\s*pass|rc\s*=\s*0|passes|passed)\b")
+_LANE_PASS_EVIDENCE = re.compile(r"\b(?:status\s*[:=]?\s*pass|rc\s*=\s*0|passes|passed)\b")
 _CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
 _CI_RECEIPT_COMMENT = re.compile(
     r"authoritative receipt:\s*`([0-9a-f]{64})`",

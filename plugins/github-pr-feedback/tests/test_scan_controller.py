@@ -1373,6 +1373,21 @@ def test_self_resolution_keeps_factual_historic_failure_reproduction() -> None:
     assert _is_self_resolution_receipt(item, owner_login="owner") is True
 
 
+def test_self_resolution_accepts_same_lane_status_equals_pass_evidence() -> None:
+    item = feedback(
+        "historic-status-equals-pass",
+        reviewer="owner",
+        body=(
+            "Local CI repair for receipt e7cd950e landed at head "
+            f"{'a' * 40}. Evidence: reproduced at the pristine receipt where "
+            "run_static_lane.py fails; with the fix, run_static_lane.py status=pass. "
+            "No merge was performed."
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is True
+
+
 @pytest.mark.parametrize(
     "evidence",
     [
