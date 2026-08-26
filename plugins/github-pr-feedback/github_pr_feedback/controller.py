@@ -78,6 +78,9 @@ _LANE_PASS_EVIDENCE = re.compile(
 _CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
 _HEX_RECEIPT_TOKEN = re.compile(r"\b[0-9a-f]{64}\b", flags=re.IGNORECASE)
 _RECEIPT_WORD = re.compile(r"\breceipt(?:_id|\s+id)?\b", flags=re.IGNORECASE)
+_TESTED_HEAD = re.compile(
+    r"\btested\s+head\s+`?([0-9a-f]{40})`?\b", flags=re.IGNORECASE
+)
 _DEGRADED_REASONS = frozenset(
     {
         "github_error",
@@ -1142,6 +1145,29 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
         and _BOUNDED_ACTION_REMAINS.search(body) is None
     ):
         return True
+    semantic_static_repair = (
+        (
+            "static-lane repair" in body
+            or ("static lane" in body and "fix" in body)
+            or ("static-lane failure" in body and "fix" in body)
+        )
+        and re.search(r"\b(?:commit|head)\s*:?\s*`?[0-9a-f]{40,64}`?\b", body)
+        is not None
+        and any(marker in body for marker in ("verification", "evidence", "after the fix"))
+        and _LANE_PASS_EVIDENCE.search(body) is not None
+        and any(
+            marker in body
+            for marker in (
+                "merge remains gated",
+                "no safety gate was relaxed",
+                "no required check",
+            )
+        )
+        and not any(marker in body for marker in _ACTION_REMAINS_MARKERS)
+        and _BOUNDED_ACTION_REMAINS.search(body) is None
+    )
+    if semantic_static_repair:
+        return True
     if _has_unresolved_action(body):
         return False
     if (
@@ -1365,6 +1391,13 @@ def _ci_receipt_feedback_reason(
     receipt_id = _ci_receipt_id(body)
     if receipt_id is None:
         return None
+    tested_head = _TESTED_HEAD.search(body)
+    if (
+        tested_head is not None
+        and "local ci audit" in body.casefold()
+        and tested_head.group(1).casefold() != receipt.head_sha.casefold()
+    ):
+        return "superseded_ci_receipt"
     audit = ledger.latest_ci_receipt_for_head(
         receipt.repository, receipt.pr_number, receipt.head_sha
     )

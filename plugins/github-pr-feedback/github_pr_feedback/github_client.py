@@ -18,7 +18,7 @@ class GitHubClientError(RuntimeError):
     """Canonical GitHub data was unavailable or did not have the required shape."""
 
 
-MAX_FEEDBACK_BODY_CHARS = 2000
+MAX_FEEDBACK_BODY_CHARS = 16_384
 MAX_DISCOVERED_PULL_REQUESTS = 100
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")

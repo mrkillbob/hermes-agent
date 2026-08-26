@@ -6,6 +6,7 @@ import threading
 import pytest
 
 from github_pr_feedback.github_client import (
+    MAX_FEEDBACK_BODY_CHARS,
     CheckState,
     GitHubClient,
     GitHubClientError,
@@ -376,12 +377,12 @@ def test_github_client_reads_all_open_prs_and_exact_base_head_for_maintenance() 
 
 
 def test_github_client_bounds_untrusted_feedback_body_at_intake() -> None:
-    responses = feedback_responses("x" * 6000)
+    responses = feedback_responses("x" * (MAX_FEEDBACK_BODY_CHARS + 1_000))
     client = GitHubClient(RecordingRunner(responses))
 
     feedback = client.list_feedback("acme/widgets", 17)
 
-    assert len(feedback[0].body) == 2000
+    assert len(feedback[0].body) == MAX_FEEDBACK_BODY_CHARS
 
 
 def test_github_client_orders_feedback_chronologically_across_api_kinds() -> None:

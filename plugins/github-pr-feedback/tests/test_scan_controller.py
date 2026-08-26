@@ -801,6 +801,38 @@ def test_superseded_ci_receipt_comment_does_not_create_duplicate_repair(
     ledger.close()
 
 
+def test_ci_receipt_for_an_older_tested_head_is_superseded_after_repair(
+    tmp_path: Path,
+) -> None:
+    old_head = "a" * 40
+    current_head = "c" * 40
+    audit = CIAuditReceipt(
+        receipt_id="1" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, "b" * 40, old_head),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(audit)
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "issue_comment", "comment-1", current_head
+    )
+
+    reason = _ci_receipt_feedback_reason(
+        ledger,
+        receipt,
+        "Local CI audit (read-only, exact-head): tested head "
+        f"{old_head}. Receipt {'1' * 64}: FAILED. Recommend a separate repair card.",
+    )
+
+    assert reason == "superseded_ci_receipt"
+    ledger.close()
+
+
 def test_self_resolution_accepts_exact_fixed_commit_with_historic_failures() -> None:
     item = feedback(
         "fixed-with-historic-failures",
@@ -831,6 +863,45 @@ def test_self_resolution_accepts_fixed_import_with_reproduced_old_failures() -> 
         ),
     )
 
+    assert _is_self_resolution_receipt(item, owner_login="owner") is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        (
+            f"Reproduced the static-lane failure at head {'a' * 40}. "
+            f"Fix (commit {'b' * 40}): added the scoped header. "
+            "Verification after the fix: static lane status: pass (rc=0), 47 passed. "
+            "No safety gate was relaxed; merge remains gated."
+        ),
+        (
+            "Static-lane repair for the local-CI receipt, pushed at the verified "
+            f"head {'a' * 40}. Commit: {'b' * 40}. Failure reproduced before the fix. "
+            "After the fix the same lane returns status: pass, rc=0; 50 passed. "
+            "No required check or safety gate was relaxed; merge remains gated."
+        ),
+    ),
+)
+def test_self_resolution_understands_semantic_static_repair_receipts(
+    body: str,
+) -> None:
+    item = feedback("semantic-static-repair", reviewer="owner", body=body)
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is True
+
+
+def test_self_resolution_accepts_a_bounded_long_static_repair_receipt() -> None:
+    body = (
+        "Static-lane repair for the local-CI receipt, pushed at verified "
+        f"head {'a' * 40}. Commit: {'b' * 40}. "
+        "Verification after the fix: status: pass, rc=0; 50 passed. "
+        "No required check or safety gate was relaxed; merge remains gated. "
+        + ("Bounded command evidence and file attribution. " * 70)
+    )
+    item = feedback("long-static-repair", reviewer="owner", body=body)
+
+    assert 2_000 < len(item.body) < 16_384
     assert _is_self_resolution_receipt(item, owner_login="owner") is True
 
 
@@ -1002,7 +1073,7 @@ def test_scan_creates_one_bounded_untrusted_task_and_deduplicates_with_sqlite(tm
             feedback("old", created_at="2026-08-23T23:59:59Z"),
             feedback("self", reviewer="owner"),
             feedback("bot", is_bot=True),
-            feedback("allowed", body="x" * 6000),
+            feedback("allowed", body="x" * (MAX_FEEDBACK_BODY_CHARS + 1_000)),
         ),
     )
     kanban = RecordingKanban()
@@ -1030,7 +1101,7 @@ def test_scan_creates_one_bounded_untrusted_task_and_deduplicates_with_sqlite(tm
     assert task.branch == "hermes/github-pr-feedback/receipt-branch"
     assert task.board == "repairs"
     assert task.assignee == "repair-agent"
-    assert len(task.evidence["body"]) == 2000
+    assert len(task.evidence["body"]) == MAX_FEEDBACK_BODY_CHARS
     assert task.evidence["untrusted"] is True
     assert "push/reply/merge require operator approval" in task.instructions
     assert local_git.calls[0][0] == local_path
