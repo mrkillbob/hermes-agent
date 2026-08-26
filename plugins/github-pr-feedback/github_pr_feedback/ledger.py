@@ -386,7 +386,9 @@ class FeedbackLedger:
         rows = self._connection.execute(
             "SELECT feedback_kind, feedback_id, task_id FROM feedback_receipts "
             "WHERE repository = ? AND pr_number = ? AND head_sha = ? "
-            "AND feedback_kind != 'pr_local_ci' AND status = 'completed' "
+            "AND feedback_kind != 'pr_local_ci' "
+            "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%') "
+            "AND status = 'completed' "
             "AND action_status = 'pending' ORDER BY claimed_at, feedback_kind, feedback_id",
             (receipt.repository, receipt.pr_number, receipt.head_sha),
         )
@@ -408,76 +410,109 @@ class FeedbackLedger:
             )
         return tuple(bindings)
 
-    def supersede_archived_dispatch(
-        self, receipt: FeedbackReceipt, *, task_id: str
-    ) -> bool:
-        """Release one serialized dispatch after its exact task is proven archived."""
-
-        task_id = task_id.strip() if isinstance(task_id, str) else ""
-        if not task_id:
-            raise ValueError("task_id must be a non-empty string")
-        with self._transaction():
-            result = self._connection.execute(
-                "UPDATE feedback_receipts SET action_status = 'superseded', "
-                "last_error = 'archived Kanban task superseded by current exact-head work' "
-                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
-                "AND feedback_id = ? AND head_sha = ? AND status = 'completed' "
-                "AND action_status = 'pending' AND task_id = ?",
-                (*receipt.key, task_id),
-            )
-            return result.rowcount == 1
-
-    def reopen_orphaned_dispatch(
+    def replace_archived_dispatches(
         self,
         receipt: FeedbackReceipt,
         *,
-        task_id: str,
+        archived: tuple[PendingTaskBinding, ...],
         owner: str,
         claimed_at: datetime,
     ) -> ClaimLease | None:
-        """Reclaim an exact dispatch only after its Kanban task is proven absent/archived."""
+        """Atomically supersede a verified archived set and acquire its replacement."""
 
-        task_id = task_id.strip() if isinstance(task_id, str) else ""
         owner = owner.strip() if isinstance(owner, str) else ""
-        if not task_id or not owner:
-            raise ValueError("task_id and claim owner must be non-empty strings")
+        if not owner or not archived:
+            raise ValueError("claim owner and archived bindings must be non-empty")
         claimed_at = _aware_utc(claimed_at, "claimed_at")
+        expected = {
+            (binding.receipt.feedback_kind, binding.receipt.feedback_id, binding.task_id)
+            for binding in archived
+            if binding.receipt.repository == receipt.repository
+            and binding.receipt.pr_number == receipt.pr_number
+            and binding.receipt.head_sha == receipt.head_sha
+            and binding.task_id
+        }
+        if len(expected) != len(archived):
+            raise ValueError("archived bindings must be unique and match the replacement head")
         with self._transaction():
-            row = self._connection.execute(
-                "SELECT lease_version FROM feedback_receipts WHERE repository = ? "
-                "AND pr_number = ? AND feedback_kind = ? AND feedback_id = ? "
-                "AND head_sha = ? AND status = 'completed' AND action_status = 'pending' "
-                "AND task_id = ?",
-                (*receipt.key, task_id),
-            ).fetchone()
-            if row is None:
+            rows = tuple(
+                self._connection.execute(
+                    "SELECT feedback_kind, feedback_id, task_id, status, lease_version "
+                    "FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                    "AND head_sha = ? AND feedback_kind != 'pr_local_ci' "
+                    "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%') "
+                    "AND status IN ('claimed', 'completed') AND action_status = 'pending'",
+                    (receipt.repository, receipt.pr_number, receipt.head_sha),
+                )
+            )
+            if any(row[3] != "completed" or not row[2] for row in rows):
                 return None
-            other = self._connection.execute(
-                "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
-                "AND head_sha = ? AND feedback_kind != 'pr_local_ci' "
-                "AND NOT (feedback_kind = ? AND feedback_id = ?) "
-                "AND status IN ('claimed', 'completed') AND action_status = 'pending' LIMIT 1",
+            actual = {(str(row[0]), str(row[1]), str(row[2])) for row in rows}
+            if actual != expected:
+                return None
+            exact_row = next(
                 (
-                    receipt.repository,
-                    receipt.pr_number,
-                    receipt.head_sha,
-                    receipt.feedback_kind,
-                    receipt.feedback_id,
+                    row
+                    for row in rows
+                    if (str(row[0]), str(row[1]))
+                    == (receipt.feedback_kind, receipt.feedback_id)
                 ),
-            ).fetchone()
-            if other is not None:
-                return None
-            version = int(row[0] or 0) + 1
-            result = self._connection.execute(
+                None,
+            )
+            if exact_row is None:
+                existing = self._connection.execute(
+                    "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                    "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+                    receipt.key,
+                ).fetchone()
+                if existing is not None:
+                    return None
+            for row in rows:
+                if exact_row is not None and row is exact_row:
+                    continue
+                result = self._connection.execute(
+                    "UPDATE feedback_receipts SET action_status = 'superseded', "
+                    "last_error = 'archived Kanban task superseded by current exact-head work' "
+                    "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                    "AND feedback_id = ? AND head_sha = ? AND status = 'completed' "
+                    "AND action_status = 'pending' AND task_id = ?",
+                    (
+                        receipt.repository,
+                        receipt.pr_number,
+                        str(row[0]),
+                        str(row[1]),
+                        receipt.head_sha,
+                        str(row[2]),
+                    ),
+                )
+                if result.rowcount != 1:
+                    raise LedgerStateError("archived dispatch set changed during replacement")
+            if exact_row is None:
+                self._connection.execute(
+                    "INSERT INTO feedback_receipts "
+                    "(repository, pr_number, feedback_kind, feedback_id, head_sha, status, "
+                    "attempts, claim_owner, claimed_at, lease_version) "
+                    "VALUES (?, ?, ?, ?, ?, 'claimed', 1, ?, ?, 1)",
+                    (*receipt.key, owner, claimed_at.isoformat()),
+                )
+                return ClaimLease(owner, claimed_at, 1)
+            version = int(exact_row[4] or 0) + 1
+            reopened = self._connection.execute(
                 "UPDATE feedback_receipts SET status = 'claimed', task_id = NULL, "
                 "last_error = NULL, attempts = attempts + 1, claim_owner = ?, claimed_at = ?, "
                 "lease_version = ? WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
                 "AND feedback_id = ? AND head_sha = ? AND status = 'completed' "
                 "AND action_status = 'pending' AND task_id = ?",
-                (owner, claimed_at.isoformat(), version, *receipt.key, task_id),
+                (
+                    owner,
+                    claimed_at.isoformat(),
+                    version,
+                    *receipt.key,
+                    str(exact_row[2]),
+                ),
             )
-            if result.rowcount != 1:
-                return None
+            if reopened.rowcount != 1:
+                raise LedgerStateError("exact archived dispatch changed during replacement")
             return ClaimLease(owner, claimed_at, version)
 
     def was_actioned_on_any_head(self, receipt: FeedbackReceipt) -> bool:

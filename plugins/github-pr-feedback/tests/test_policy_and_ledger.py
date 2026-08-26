@@ -1105,6 +1105,39 @@ def test_ledger_uses_profile_scoped_hermes_home(
     ledger.close()
 
 
+def test_archived_dispatch_replacement_is_all_or_nothing(tmp_path: Path) -> None:
+    from github_pr_feedback.ledger import PendingTaskBinding
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "review_comment", "review-1", "a" * 40
+    )
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    lease = ledger.claim(receipt, owner="scanner", claimed_at=now, stale_before=now)
+    assert lease is not None
+    ledger.finalize(receipt, "real-task", lease)
+    replacement = FeedbackReceipt(
+        "acme/widgets", 17, "pr_repair", "repair:base_refresh_required", "a" * 40
+    )
+
+    acquired = ledger.replace_archived_dispatches(
+        replacement,
+        archived=(PendingTaskBinding(receipt, "wrong-task"),),
+        owner="repair-scanner",
+        claimed_at=now,
+    )
+
+    assert acquired is None
+    row = ledger._connection.execute(
+        "SELECT action_status FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+        "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+        receipt.key,
+    ).fetchone()
+    assert row == ("pending",)
+    assert ledger.exact_receipt_status(replacement) is None
+    ledger.close()
+
+
 def test_plugin_directory_exposes_hermes_register_entry_point() -> None:
     plugin_root = Path(__file__).parents[1]
     spec = importlib.util.spec_from_file_location(

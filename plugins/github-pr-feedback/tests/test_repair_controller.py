@@ -372,6 +372,17 @@ def test_archived_pending_feedback_is_superseded_by_current_base_refresh(
     )
     assert lease is not None
     ledger.finalize(unrelated, "archived-feedback-task", lease)
+    report = FeedbackReceipt(
+        "acme/widgets", 17, "pr_repair", "report:observation", "7" * 40
+    )
+    report_lease = ledger.claim(
+        report,
+        owner="report-controller",
+        claimed_at=now,
+        stale_before=now,
+    )
+    assert report_lease is not None
+    ledger.finalize(report, "active-report-task", report_lease)
 
     class ArchivedKanban(Kanban):
         def task_status(self, board: str, task_id: str) -> str | None:
@@ -391,6 +402,14 @@ def test_archived_pending_feedback_is_superseded_by_current_base_refresh(
 
     assert result.created == 1
     assert kanban.tasks[0].evidence["pr_number"] == 17
+    action_rows = dict(
+        ledger._connection.execute(
+            "SELECT feedback_id, action_status FROM feedback_receipts "
+            "WHERE repository = 'acme/widgets' AND pr_number = 17"
+        )
+    )
+    assert action_rows["review-1"] == "superseded"
+    assert action_rows["report:observation"] == "pending"
     ledger.close()
 
 

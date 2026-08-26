@@ -209,24 +209,11 @@ def _claim_with_orphan_recovery(
             return None
         if status != "archived":
             return None
-    exact_task_id: str | None = None
-    for binding in bindings:
-        if binding.receipt.key == receipt.key:
-            exact_task_id = binding.task_id
-            continue
-        ledger.supersede_archived_dispatch(binding.receipt, task_id=binding.task_id)
-    if exact_task_id is not None:
-        return ledger.reopen_orphaned_dispatch(
-            receipt,
-            task_id=exact_task_id,
-            owner=owner,
-            claimed_at=claimed_at,
-        )
-    return ledger.claim(
+    return ledger.replace_archived_dispatches(
         receipt,
+        archived=bindings,
         owner=owner,
         claimed_at=claimed_at,
-        stale_before=stale_before,
     )
 
 
