@@ -17,6 +17,7 @@ import os
 import re
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
+from hmac import compare_digest
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -52,14 +53,42 @@ class SourceGrant:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceSegmentBinding:
-    """Bind exact byte offsets in the final request to one source grant."""
+class LiteralSegment:
+    """Application-owned literal text for a typed outbound request."""
 
-    request_path: tuple[str | int, ...]
-    byte_start: int
-    byte_end: int
-    content_sha256: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class SanitizedSegment:
+    """Non-source text that must still pass final secret and encoding scans."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceBoundSegment:
+    """Opaque reference whose text is loaded only from a verified grant."""
+
     source_grant_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class OutboundText:
+    """Ordered typed segments that construct one outbound JSON string."""
+
+    segments: tuple[LiteralSegment | SanitizedSegment | SourceBoundSegment, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TypedOutboundRequest:
+    """Remote request recipe; no independent raw string leaf is permitted."""
+
+    payload: Mapping[str, Any]
+    session_id: str
+    turn_id: str
+    request_id: str
+    policy_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,10 +120,46 @@ class EgressBlocked(RuntimeError):
         super().__init__(f"LLM egress blocked: {reasons}")
 
 
+@dataclass(frozen=True, slots=True)
+class AuthorizedEgress:
+    """Immutable exact bytes that a provider callback is authorized to send."""
+
+    decision: EgressDecision
+    payload_bytes: bytes
+
+    @property
+    def allowed(self) -> bool:
+        return self.decision.allowed
+
+    @property
+    def destination_class(self) -> DestinationClass:
+        return self.decision.destination_class
+
+    @property
+    def reason_codes(self) -> tuple[str, ...]:
+        return self.decision.reason_codes
+
+    def verify_payload(self, candidate: bytes) -> bytes:
+        """Return the authorized bytes or reject a post-preflight mutation."""
+
+        if not isinstance(candidate, bytes) or not compare_digest(
+            sha256(candidate).hexdigest(),
+            self.decision.payload_sha256,
+        ):
+            raise EgressBlocked(
+                replace(
+                    self.decision,
+                    allowed=False,
+                    reason_codes=("payload_digest_mismatch",),
+                )
+            )
+        return self.payload_bytes
+
+
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:@/-]{0,256}$")
 _LOCAL_PROCESS_MODES = frozenset({"local_process", "in_process"})
 _BASE64_CANDIDATE = re.compile(
-    r"(?<![A-Za-z0-9_+/\-])([A-Za-z0-9_+/\-]{24,}={0,2})(?![A-Za-z0-9_+/=\-])"
+    r"(?<![A-Za-z0-9_+/\-])([A-Za-z0-9_+/\-]{6,}={0,2})(?![A-Za-z0-9_+/=\-])"
 )
 _MAX_BASE64_CANDIDATE_CHARS = 262_144
 
@@ -194,42 +259,42 @@ def source_grant_digest(grant: SourceGrant) -> str:
 def _canonical_base64_candidate(candidate: str) -> bool:
     """Recognize bounded canonical encodings without flagging ordinary IDs."""
 
-    if not 24 <= len(candidate) <= _MAX_BASE64_CANDIDATE_CHARS:
+    if not 6 <= len(candidate) <= _MAX_BASE64_CANDIDATE_CHARS:
         return False
-    if len(candidate) % 4 != 0:
+    unpadded = candidate.rstrip("=")
+    if "=" in unpadded or len(unpadded) % 4 == 1:
         return False
-    encoded = candidate.encode("ascii")
-    decoded_variants: list[bytes] = []
+    # A strict round-trip alone cannot distinguish an ordinary alphabet-only
+    # word (for example ``ordinary``) from unpadded Base64.  Require an
+    # encoding-shaped token: canonical padding, alphabet-specific symbols, or
+    # the mixed alpha/numeric shape emitted by short unpadded encodings.
+    mixed_alphanumeric = (
+        len(unpadded) >= 10
+        and any(char.islower() for char in unpadded)
+        and any(char.isupper() for char in unpadded)
+        and any(char.isdigit() for char in unpadded)
+    )
+    encoding_shape = (
+        candidate.endswith("=")
+        or any(char in candidate for char in "+/")
+        or (any(char in candidate for char in "_-") and mixed_alphanumeric)
+        or mixed_alphanumeric
+    )
+    if not encoding_shape:
+        return False
+    padded = unpadded + "=" * (-len(unpadded) % 4)
+    encoded = padded.encode("ascii")
     for altchars in (None, b"-_"):
         try:
             decoded = base64.b64decode(encoded, altchars=altchars, validate=True)
         except (binascii.Error, ValueError):
             continue
-        canonical = (
+        canonical_padded = (
             base64.b64encode(decoded)
             if altchars is None
             else base64.urlsafe_b64encode(decoded)
-        )
-        if canonical == encoded:
-            decoded_variants.append(decoded)
-
-    for decoded in decoded_variants:
-        if len(decoded) < 16:
-            continue
-        # Padding or alphabet-specific symbols are strong encoding markers.
-        if candidate.endswith("=") or any(char in candidate for char in "+/_-"):
-            return True
-        # Unpadded all-alphanumeric strings overlap hashes and opaque IDs.
-        # Require canonical decoding to readable structured text so those
-        # common values do not become false positives.
-        try:
-            decoded_text = decoded.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        printable = sum(char.isprintable() or char in "\r\n\t" for char in decoded_text)
-        if printable / max(len(decoded_text), 1) >= 0.9 and any(
-            not char.isalnum() for char in decoded_text
-        ):
+        ).decode("ascii")
+        if candidate in {canonical_padded, canonical_padded.rstrip("=")} and len(decoded) >= 4:
             return True
     return False
 
@@ -246,11 +311,9 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
         if identity in seen:
             return True
         seen.add(identity)
-        return any(
-            _contains_canonical_base64(key, seen=seen)
-            or _contains_canonical_base64(item, seen=seen)
-            for key, item in value.items()
-        )
+        # Typed request keys are application-owned structure, not payload
+        # segments. Only values can carry caller-controlled concealment.
+        return any(_contains_canonical_base64(item, seen=seen) for item in value.values())
     if isinstance(value, (list, tuple, set, frozenset)):
         identity = id(value)
         if identity in seen:
@@ -317,13 +380,18 @@ class LLMEgressFirewall:
 
     def preflight(
         self,
-        request: Mapping[str, Any],
+        request: Mapping[str, Any] | TypedOutboundRequest,
         route: Any,
         *,
         grants: Sequence[SourceGrant] = (),
-        source_segments: Sequence[SourceSegmentBinding] = (),
-    ) -> EgressDecision:
-        """Authorize one final request or raise a typed, fail-closed result."""
+    ) -> AuthorizedEgress:
+        """Construct and authorize immutable provider bytes or fail closed.
+
+        Remote and unknown destinations accept only ``TypedOutboundRequest``.
+        Source text is loaded from verified grants while constructing the
+        logical request, so no independent raw source-bearing payload exists
+        for a caller to send after preflight.
+        """
 
         provider = str(_route_value(route, "provider", ""))
         model = str(_route_value(route, "model", ""))
@@ -332,15 +400,50 @@ class LLMEgressFirewall:
             _route_value(route, "base_url"),
             _route_value(route, "api_mode"),
         )
-        session_id = _request_identity(request, "session_id")
-        turn_id = _request_identity(request, "turn_id")
-        request_id = _request_identity(request, "request_id")
-        policy_digest = _request_identity(request, "policy_digest")
+        typed_request = request if isinstance(request, TypedOutboundRequest) else None
+        if typed_request is not None:
+            session_id = typed_request.session_id
+            turn_id = typed_request.turn_id
+            request_id = typed_request.request_id
+            policy_digest = typed_request.policy_digest
+        else:
+            session_id = _request_identity(request, "session_id")
+            turn_id = _request_identity(request, "turn_id")
+            request_id = _request_identity(request, "request_id")
+            policy_digest = _request_identity(request, "policy_digest")
+
+        reasons: list[str] = []
+        valid_grants: list[SourceGrant] = []
+        grant_contents: dict[str, tuple[SourceGrant, bytes]] = {}
+        source_segment_count = 0
+
+        if destination == DestinationClass.UNKNOWN:
+            reasons.append("unknown_destination")
+        if destination in {DestinationClass.REMOTE, DestinationClass.UNKNOWN}:
+            if typed_request is None:
+                reasons.append("typed_request_required")
+            grant_reasons, valid_grants, grant_contents = self._validate_grants(
+                grants,
+                session_id=session_id,
+                turn_id=turn_id,
+                request_id=request_id,
+                policy_digest=policy_digest,
+            )
+            reasons.extend(grant_reasons)
+
+        if typed_request is not None:
+            logical_request, construction_reasons, source_segment_count = (
+                self._construct_typed_request(typed_request, grant_contents)
+            )
+            reasons.extend(construction_reasons)
+        else:
+            logical_request = request
 
         try:
             serialized = json.dumps(
-                request,
+                logical_request,
                 ensure_ascii=False,
+                allow_nan=False,
                 separators=(",", ":"),
                 sort_keys=True,
             ).encode("utf-8")
@@ -353,25 +456,20 @@ class LLMEgressFirewall:
                 payload_sha256="",
                 serialized_bytes=0,
                 estimated_tokens=0,
-                source_grant_count=0,
-                source_segment_count=0,
+                source_grant_count=len(valid_grants),
+                source_segment_count=source_segment_count,
                 session_id=session_id,
                 turn_id=turn_id,
                 request_id=request_id,
                 policy_digest=policy_digest,
                 reason_codes=("serialization_failed",),
             )
-            self._block(decision)
+            self._block(decision, valid_grants)
 
         serialized_bytes = len(serialized)
         estimated_tokens = (
             serialized_bytes + self._conservative_chars_per_token - 1
         ) // self._conservative_chars_per_token
-        reasons: list[str] = []
-        valid_grants: list[SourceGrant] = []
-
-        if destination == DestinationClass.UNKNOWN:
-            reasons.append("unknown_destination")
         if serialized_bytes > self._max_serialized_bytes:
             reasons.append("serialized_bytes_exceeded")
         if estimated_tokens > self._max_conservative_tokens:
@@ -379,31 +477,15 @@ class LLMEgressFirewall:
 
         if destination in {DestinationClass.REMOTE, DestinationClass.UNKNOWN}:
             try:
-                if _contains_secret(request):
+                if _contains_secret(logical_request):
                     reasons.append("secret_detected")
             except Exception:
                 reasons.append("redaction_failed")
             try:
-                if _contains_canonical_base64(request):
+                if _contains_canonical_base64(logical_request):
                     reasons.append("base64_payload")
             except Exception:
                 reasons.append("base64_scan_failed")
-
-        if destination == DestinationClass.REMOTE:
-            grant_reasons, valid_grants = self._validate_grants(
-                grants,
-                session_id=session_id,
-                turn_id=turn_id,
-                request_id=request_id,
-                policy_digest=policy_digest,
-            )
-            reasons.extend(grant_reasons)
-            segment_reasons = self._validate_source_segments(
-                request,
-                source_segments,
-                valid_grants,
-            )
-            reasons.extend(segment_reasons)
 
         decision = EgressDecision(
             allowed=not reasons,
@@ -414,7 +496,7 @@ class LLMEgressFirewall:
             serialized_bytes=serialized_bytes,
             estimated_tokens=estimated_tokens,
             source_grant_count=len(valid_grants),
-            source_segment_count=len(source_segments),
+            source_segment_count=source_segment_count,
             session_id=session_id,
             turn_id=turn_id,
             request_id=request_id,
@@ -430,7 +512,7 @@ class LLMEgressFirewall:
             raise EgressBlocked(
                 replace(decision, allowed=False, reason_codes=("receipt_unavailable",))
             ) from None
-        return decision
+        return AuthorizedEgress(decision=decision, payload_bytes=serialized)
 
     def _validate_grants(
         self,
@@ -440,11 +522,12 @@ class LLMEgressFirewall:
         turn_id: str,
         request_id: str,
         policy_digest: str,
-    ) -> tuple[list[str], list[SourceGrant]]:
+    ) -> tuple[list[str], list[SourceGrant], dict[str, tuple[SourceGrant, bytes]]]:
         reasons: list[str] = []
         valid: list[SourceGrant] = []
+        contents: dict[str, tuple[SourceGrant, bytes]] = {}
         if not grants:
-            return ["untrusted_provenance"], valid
+            return ["untrusted_provenance"], valid, contents
 
         for candidate in grants:
             if not isinstance(candidate, SourceGrant):
@@ -501,76 +584,92 @@ class LLMEgressFirewall:
                 reasons.append("source_hash_mismatch")
                 continue
             valid.append(grant)
+            contents[source_grant_digest(grant)] = (grant, content)
 
         if not valid and "untrusted_provenance" not in reasons:
             reasons.append("untrusted_provenance")
-        return reasons, valid
+        return reasons, valid, contents
 
-    def _validate_source_segments(
+    def _construct_typed_request(
         self,
-        request: Mapping[str, Any],
-        source_segments: Sequence[SourceSegmentBinding],
-        valid_grants: Sequence[SourceGrant],
-    ) -> list[str]:
-        if not valid_grants:
-            return []
-        if not source_segments:
-            return ["source_grant_unbound"]
+        request: TypedOutboundRequest,
+        grant_contents: Mapping[str, tuple[SourceGrant, bytes]],
+    ) -> tuple[Mapping[str, Any], list[str], int]:
+        """Build a plain JSON request exclusively from typed segment nodes."""
 
         reasons: list[str] = []
-        grants_by_digest = {source_grant_digest(grant): grant for grant in valid_grants}
         referenced_grants: set[str] = set()
+        source_segment_count = 0
 
-        for binding in source_segments:
-            if not isinstance(binding, SourceSegmentBinding):
-                reasons.append("invalid_source_segment")
-                continue
-            grant = grants_by_digest.get(binding.source_grant_digest)
-            if grant is None:
-                reasons.append("source_segment_grant_mismatch")
-                continue
-            if (
-                binding.byte_start < 0
-                or binding.byte_end <= binding.byte_start
-                or not re.fullmatch(r"[0-9a-f]{64}", binding.content_sha256)
-            ):
-                reasons.append("invalid_source_segment")
-                continue
-            try:
-                current: Any = request
-                for component in binding.request_path:
-                    if isinstance(component, str) and isinstance(current, Mapping):
-                        current = current[component]
-                    elif (
-                        isinstance(component, int)
-                        and not isinstance(component, bool)
-                        and isinstance(current, (list, tuple))
-                    ):
-                        current = current[component]
-                    else:
-                        raise KeyError(component)
-                if not isinstance(current, str):
-                    raise TypeError("source segment target is not text")
-                request_bytes = current.encode("utf-8")
-                segment = request_bytes[binding.byte_start : binding.byte_end]
-            except (IndexError, KeyError, TypeError, UnicodeError):
-                reasons.append("source_segment_unavailable")
-                continue
-            if binding.byte_end > len(request_bytes):
-                reasons.append("source_segment_range_mismatch")
-                continue
-            if (
-                len(segment) != grant.byte_count
-                or sha256(segment).hexdigest() != binding.content_sha256
-                or binding.content_sha256 != grant.content_sha256
-            ):
-                reasons.append("source_segment_hash_mismatch")
-                continue
-            referenced_grants.add(binding.source_grant_digest)
+        def render_text_segment(
+            segment: LiteralSegment | SanitizedSegment | SourceBoundSegment,
+        ) -> str:
+            nonlocal source_segment_count
+            if isinstance(segment, (LiteralSegment, SanitizedSegment)):
+                if not isinstance(segment.text, str):
+                    reasons.append("invalid_literal_segment")
+                    return ""
+                encoded_literal = segment.text.encode("utf-8")
+                if any(content and content in encoded_literal for _, content in grant_contents.values()):
+                    reasons.append("source_bytes_in_literal")
+                return segment.text
+            if isinstance(segment, SourceBoundSegment):
+                grant_and_content = grant_contents.get(segment.source_grant_digest)
+                if grant_and_content is None:
+                    reasons.append("source_segment_grant_mismatch")
+                    return ""
+                try:
+                    text = grant_and_content[1].decode("utf-8")
+                except UnicodeDecodeError:
+                    reasons.append("source_segment_not_text")
+                    return ""
+                referenced_grants.add(segment.source_grant_digest)
+                source_segment_count += 1
+                return text
+            reasons.append("invalid_source_segment")
+            return ""
 
-        if set(grants_by_digest) - referenced_grants:
+        def render(value: Any) -> Any:
+            if isinstance(value, (LiteralSegment, SanitizedSegment, SourceBoundSegment)):
+                return render_text_segment(value)
+            if isinstance(value, OutboundText):
+                return "".join(render_text_segment(segment) for segment in value.segments)
+            if isinstance(value, Mapping):
+                rendered: dict[str, Any] = {}
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        reasons.append("invalid_request_key")
+                        continue
+                    rendered[key] = render(item)
+                return rendered
+            if isinstance(value, (list, tuple)):
+                return [render(item) for item in value]
+            if value is None or isinstance(value, (bool, int, float)):
+                return value
+            # In particular, raw strings and bytes are not remote request
+            # material. Every outbound string must have a typed owner.
+            reasons.append("untyped_request_value")
+            return None
+
+        rendered_payload = render(request.payload)
+        if not isinstance(rendered_payload, Mapping):
+            reasons.append("invalid_typed_request_root")
+            rendered_payload = {}
+        else:
+            bound_identities = {
+                "session_id": request.session_id,
+                "turn_id": request.turn_id,
+                "request_id": request.request_id,
+                "policy_digest": request.policy_digest,
+            }
+            if any(
+                field in rendered_payload and rendered_payload[field] != expected
+                for field, expected in bound_identities.items()
+            ):
+                reasons.append("request_identity_mismatch")
+        if set(grant_contents) - referenced_grants:
             reasons.append("source_grant_unbound")
-        return reasons
+        return rendered_payload, reasons, source_segment_count
 
     def _block(
         self,
@@ -633,12 +732,17 @@ class LLMEgressFirewall:
 
 
 __all__ = [
+    "AuthorizedEgress",
     "DestinationClass",
     "EgressBlocked",
     "EgressDecision",
     "LLMEgressFirewall",
+    "LiteralSegment",
+    "OutboundText",
+    "SanitizedSegment",
+    "SourceBoundSegment",
     "SourceGrant",
-    "SourceSegmentBinding",
+    "TypedOutboundRequest",
     "classify_destination",
     "source_grant_digest",
 ]
