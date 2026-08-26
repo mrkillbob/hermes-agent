@@ -265,6 +265,7 @@ def test_repair_controller_routes_a_stale_pr_base_into_the_refresh_lane(
     )
     assert "evaluating at most two viable resolutions" in kanban.tasks[0].instructions
     assert "Within 10 minutes" in kanban.tasks[0].instructions
+    assert "pr-maintenance-receipt:v1" in kanban.tasks[0].instructions
     ledger.close()
 
 

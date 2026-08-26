@@ -75,10 +75,8 @@ _LANE_PASS_EVIDENCE = re.compile(
     r"\b(?:status\s*[:=]?\s*pass|rc\s*=\s*0|passes|passed)|->\s*pass\b"
 )
 _CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
-_CI_RECEIPT_COMMENT = re.compile(
-    r"(?:authoritative\s+)?receipt(?:_id|\s+id)?\s*:?\s*`?([0-9a-f]{64})`?",
-    flags=re.IGNORECASE,
-)
+_HEX_RECEIPT_TOKEN = re.compile(r"\b[0-9a-f]{64}\b", flags=re.IGNORECASE)
+_RECEIPT_WORD = re.compile(r"\breceipt(?:_id|\s+id)?\b", flags=re.IGNORECASE)
 _DEGRADED_REASONS = frozenset(
     {
         "github_error",
@@ -999,11 +997,11 @@ class ScanController:
         normalized = body.casefold()
         if "local ci audit" not in normalized and "local pr ci audit" not in normalized:
             return None
-        marker = _CI_RECEIPT_COMMENT.search(body)
-        if marker is None:
+        receipt_id = _ci_receipt_id(body)
+        if receipt_id is None:
             return None
         audit = self._ledger.ci_receipt_by_id(
-            receipt.repository, receipt.pr_number, marker.group(1)
+            receipt.repository, receipt.pr_number, receipt_id
         )
         if not isinstance(audit, CIAuditReceipt) or audit.status != "failed":
             return None
@@ -1120,6 +1118,21 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
         return True
     if _has_unresolved_action(body):
         return False
+    if (
+        "pr-maintenance-receipt:v1" in body
+        and "status=completed" in body
+        and re.search(r"\bhead=[0-9a-f]{40,64}\b", body) is not None
+    ):
+        return True
+    semantic_base_refresh = (
+        re.search(r"\bbase\b", body) is not None
+        and re.search(r"\brefresh(?:ed)?\b", body) is not None
+        and re.search(r"\b(?:merge|merged|pushed|fast-forward)\b", body) is not None
+        and re.search(r"\b[0-9a-f]{40,64}\b", body) is not None
+        and _LANE_PASS_EVIDENCE.search(body) is not None
+    )
+    if semantic_base_refresh:
+        return True
     if body.startswith(_SELF_RESOLUTION_PREFIXES):
         return True
     if (
@@ -1323,19 +1336,38 @@ def _ci_receipt_feedback_reason(
     normalized = body.casefold()
     if "local ci audit" not in normalized and "local pr ci audit" not in normalized:
         return None
-    marker = _CI_RECEIPT_COMMENT.search(body)
-    if marker is None:
+    receipt_id = _ci_receipt_id(body)
+    if receipt_id is None:
         return None
     audit = ledger.latest_ci_receipt_for_head(
         receipt.repository, receipt.pr_number, receipt.head_sha
     )
     if audit is None:
         return None
-    if marker.group(1).casefold() != audit.receipt_id.casefold():
+    if receipt_id.casefold() != audit.receipt_id.casefold():
         return "superseded_ci_receipt"
     if audit.status == "passed":
         return "passing_ci_receipt"
     return None
+
+
+def _ci_receipt_id(body: str) -> str | None:
+    """Find the 64-hex token semantically closest to a receipt label."""
+
+    tokens = tuple(_HEX_RECEIPT_TOKEN.finditer(body))
+    labels = tuple(_RECEIPT_WORD.finditer(body))
+    if not tokens or not labels:
+        return None
+
+    def distance(token: re.Match[str]) -> int:
+        token_center = (token.start() + token.end()) // 2
+        return min(
+            abs(token_center - ((label.start() + label.end()) // 2))
+            for label in labels
+        )
+
+    selected = min(tokens, key=distance)
+    return selected.group(0) if distance(selected) <= 120 else None
 
 
 def _is_non_actionable_review_container(feedback: Feedback) -> bool:
@@ -1557,6 +1589,8 @@ def _ci_failure_task(
         f"pr_repair --feedback-id {shlex.quote(receipt.feedback_id)} --receipt-head-sha "
         f"{shlex.quote(receipt.head_sha)} --resolved-head-sha <full literal resolved head SHA>`. "
         "The factual reply must state that merge remains gated and no CI/safety gate was relaxed. "
+        "End the reply with the neutral marker `<!-- pr-maintenance-receipt:v1 "
+        "status=completed kind=ci_repair head=<full literal resolved head SHA> -->`. "
         "Never acknowledge before the push and reply both succeed."
     )
     if requires_review:
@@ -1594,7 +1628,8 @@ def _local_ci_task(
     comment_scope = (
         "After re-reading the PR and confirming the head is still exact, post one factual audit "
         "summary comment containing the tested SHA, commands, outcomes, durations, and evidence "
-        "classification. "
+        "classification. End it with `<!-- pr-ci-receipt:v1 status=<passed|failed> "
+        "id=<full 64-hex receipt id> head=<full tested SHA> -->`. "
         if post_results
         else "Do not write to GitHub. "
     )
