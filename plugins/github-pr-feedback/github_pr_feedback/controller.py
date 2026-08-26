@@ -73,6 +73,8 @@ class GitHubReader(Protocol):
 
     def actions_enabled(self, repository: str) -> bool: ...
 
+    def get_branch_head(self, repository: str, branch: str) -> str: ...
+
 
 class LocalGit(Protocol):
     def prepare_receipt_worktree(
@@ -653,6 +655,20 @@ class ScanController:
             return "head_changed"
         if current.base_sha is None or current.base_sha.casefold() != audit.identity.base_sha:
             return "base_changed"
+        merge_policy = self._policy.merge_maintainer
+        if (
+            merge_policy is not None
+            and merge_policy.repository == current.base_repository
+            and merge_policy.base_branch == current.base_branch
+        ):
+            try:
+                base_head = self._github.get_branch_head(
+                    current.base_repository, current.base_branch
+                )
+            except Exception:  # noqa: BLE001 - stale-base repair must fail closed.
+                return "base_state_unavailable"
+            if base_head.casefold() != current.base_sha.casefold():
+                return "base_refresh_required"
 
         receipt = FeedbackReceipt(
             repository=audit.identity.repository,

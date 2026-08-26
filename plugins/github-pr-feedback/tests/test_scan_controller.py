@@ -37,6 +37,7 @@ class FakeGitHub:
         self.current = current or pull_request
         self.current_calls: list[tuple[str, int]] = []
         self.actions_are_enabled = True
+        self.branch_head = self.current.base_sha
 
     def list_open_pull_requests(
         self, repository: str, owner_login: str
@@ -56,6 +57,12 @@ class FakeGitHub:
     def actions_enabled(self, repository: str) -> bool:
         assert repository == self.pull_request.base_repository
         return self.actions_are_enabled
+
+    def get_branch_head(self, repository: str, branch: str) -> str:
+        assert repository == self.pull_request.base_repository
+        assert branch == self.current.base_branch
+        assert self.branch_head is not None
+        return self.branch_head
 
 
 @pytest.mark.parametrize(
@@ -120,6 +127,64 @@ def test_environment_blocked_ci_receipt_does_not_dispatch_a_fixer() -> None:
     )
 
     assert _ci_failure_assignee(receipt) is None
+
+
+def test_failed_ci_receipt_waits_for_current_base_before_dispatching_fixer(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    old_base = "b" * 40
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+        merge_maintainer=True,
+    )
+    current = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha=old_base,
+    )
+    github = FakeGitHub(current, ())
+    github.branch_head = "c" * 40
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    receipt = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, old_base, head_sha),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(
+            CommandEvidence(
+                argv=(".venv/bin/python", "scripts/run_static_lane.py"),
+                cwd=".",
+                returncode=1,
+                duration_ms=1,
+                timed_out=False,
+                stdout_sha256="0" * 64,
+                stderr_sha256="0" * 64,
+                classification="logic-regression",
+            ),
+        ),
+    )
+    ledger.record_ci_receipt(receipt)
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).dispatch_ci_failure(
+        receipt
+    )
+
+    assert result == "base_refresh_required"
+    assert kanban.tasks == []
+    ledger.close()
 
 
 def test_failed_exact_head_static_receipt_immediately_dispatches_one_typed_fixer(
@@ -1970,6 +2035,7 @@ def configured_policy(
     not_before: str,
     auto_dispatch: bool = False,
     local_ci_audit: bool = False,
+    merge_maintainer: bool = False,
 ):
     raw = {
             "enabled": True,
@@ -2010,6 +2076,18 @@ def configured_policy(
                 "requires_review": False,
             }
         ]
+    if merge_maintainer:
+        raw["merge_maintainer"] = {
+            "enabled": True,
+            "assignee": "pr-merge-maintainer",
+            "repository": "acme/widgets",
+            "author_login": "owner",
+            "base_branch": "stable",
+            "merge_methods": ["squash"],
+            "receipt_max_age_seconds": 3600,
+            "report_only": False,
+            "post_merge": {"enabled": False},
+        }
     return load_policy(raw)
 
 
