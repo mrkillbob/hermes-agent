@@ -213,7 +213,9 @@ def test_repair_controller_dedupes_exact_head_and_preserves_merge_authority(
     task = kanban.tasks[0]
     assert task.assignee == "pr-repair-steward"
     assert task.initial_status == "running"
+    assert task.max_runtime_seconds == 1200
     assert "normal merge" in task.instructions
+    assert "Commit the resolved merge before running base-relative" in task.instructions
     assert "Do not merge the pull request" in task.instructions
     assert "Do not force-push" in task.instructions
     assert "Do not weaken" in task.instructions
