@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -23,6 +24,19 @@ class RecordingRunner:
         key = tuple(argv)
         self.calls.append(key)
         return json.dumps(self.responses[key])
+
+
+class FeedbackBarrierRunner(RecordingRunner):
+    """Prove the three independent feedback reads overlap in production code."""
+
+    def __init__(self, responses: dict[tuple[str, ...], object]) -> None:
+        super().__init__(responses)
+        self.barrier = threading.Barrier(3)
+
+    def run(self, argv: list[str]) -> str:
+        if "--paginate" in argv:
+            self.barrier.wait(timeout=1)
+        return super().run(argv)
 
 
 def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -> None:
@@ -94,12 +108,21 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
         ("review_comment", "review-comment-1", "line note"),
         ("review", "review-1", "submitted"),
     ]
-    assert runner.calls == [
-        pulls_argv,
+    assert runner.calls[0] == pulls_argv
+    assert set(runner.calls[1:]) == {
         comments_argv,
         review_comments_argv,
         reviews_argv,
-    ]
+    }
+
+
+def test_github_client_reads_independent_feedback_endpoints_concurrently() -> None:
+    runner = FeedbackBarrierRunner(feedback_responses("ordinary"))
+
+    feedback = GitHubClient(runner).list_feedback("acme/widgets", 17)
+
+    assert [item.feedback_id for item in feedback] == ["issue-1"]
+    assert len(runner.calls) == 3
 
 
 def test_github_client_posts_bounded_issue_comment_with_fixed_argv() -> None:

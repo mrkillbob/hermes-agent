@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -406,15 +407,15 @@ class GitHubClient:
         )
 
     def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
-        issue_comments = self._read_pages(
-            f"repos/{repository}/issues/{number}/comments?per_page=100"
+        endpoints = (
+            f"repos/{repository}/issues/{number}/comments?per_page=100",
+            f"repos/{repository}/pulls/{number}/comments?per_page=100",
+            f"repos/{repository}/pulls/{number}/reviews?per_page=100",
         )
-        review_comments = self._read_pages(
-            f"repos/{repository}/pulls/{number}/comments?per_page=100"
-        )
-        reviews = self._read_pages(
-            f"repos/{repository}/pulls/{number}/reviews?per_page=100"
-        )
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
+            issue_comments, review_comments, reviews = executor.map(
+                self._read_pages, endpoints
+            )
         feedback = [
             *(
                 _feedback("issue_comment", row, timestamp_key="created_at")
