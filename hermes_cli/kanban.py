@@ -2642,11 +2642,21 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_in_progress_per_profile = _coerce_positive_int(
             _kanban_cfg.get("max_in_progress_per_profile")
         )
+        raw_profile_caps = _kanban_cfg.get("max_in_progress_by_profile", {})
+        max_in_progress_by_profile = {}
+        if isinstance(raw_profile_caps, dict):
+            for profile, raw_cap in raw_profile_caps.items():
+                cap = _coerce_positive_int(raw_cap)
+                if isinstance(profile, str) and profile.strip() and cap is not None:
+                    max_in_progress_by_profile[profile.strip()] = cap
         max_in_progress = _coerce_positive_int(_kanban_cfg.get("max_in_progress"))
         # Memory-derived default when unset (OOF-30/OOF-77) — same
         # fallback the gateway-embedded dispatcher applies, so behaviour
         # matches regardless of which path runs the tick.
-        max_in_progress = kb.resolve_max_in_progress(max_in_progress)
+        max_in_progress = kb.resolve_max_in_progress(
+            max_in_progress,
+            priority_runtime_guard=_kanban_cfg.get("priority_runtime_guard"),
+        )
         # CLI --max overrides config kanban.max_spawn when both are present;
         # CLI is the more explicit signal so it wins.
         cli_max = getattr(args, "max", None)
@@ -2656,6 +2666,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except Exception:
         default_assignee = None
         max_in_progress_per_profile = None
+        max_in_progress_by_profile = {}
         max_in_progress = None
         max_spawn = getattr(args, "max", None)
     with kb.connect_closing() as conn:
@@ -2667,6 +2678,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            max_in_progress_by_profile=max_in_progress_by_profile,
         )
     if getattr(args, "json", False):
         print(json.dumps({

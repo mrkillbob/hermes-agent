@@ -2817,6 +2817,23 @@ DEFAULT_CONFIG = {
         # otherwise saturate one profile's local model / API quota /
         # browser pool while leaving other profiles idle.
         "max_in_progress_per_profile": None,
+        # Optional profile-specific caps. Values intersect with the global
+        # per-profile cap when both are configured. This lets local-model or
+        # other resource-heavy profiles stay at 1-2 workers without reducing
+        # concurrency for cloud-backed profiles.
+        "max_in_progress_by_profile": {},
+        # Generic strict-runtime resource reservation. Disabled until the
+        # operator supplies exact project roots. When enabled, the dispatcher
+        # read-only scans process argv + cwd on every tick and lowers the
+        # global cap only for an exact configured root/entrypoint match. An
+        # unreadable scan fails safe to the protected cap; no process is ever
+        # started, stopped, or signalled by this guard.
+        "priority_runtime_guard": {
+            "enabled": False,
+            "project_roots": [],
+            "entrypoints": ["main.py"],
+            "max_in_progress": 2,
+        },
         # When true, the kanban dispatcher auto-runs the decomposer on
         # tasks that land in Triage (every dispatcher tick). When false,
         # decomposition is manual via `hermes kanban decompose <id>` or

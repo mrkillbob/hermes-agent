@@ -1589,6 +1589,8 @@ class GatewayKanbanWatchersMixin:
                 effective_max_in_progress,
             )
         max_in_progress = effective_max_in_progress
+        normal_max_in_progress = max_in_progress
+        priority_runtime_guard = kanban_cfg.get("priority_runtime_guard", {})
 
         raw_failure_limit = kanban_cfg.get("failure_limit", _kb.DEFAULT_FAILURE_LIMIT)
         try:
@@ -1668,6 +1670,16 @@ class GatewayKanbanWatchersMixin:
                         "kanban dispatcher: max_in_progress_per_profile=%d",
                         max_in_progress_per_profile,
                     )
+        max_in_progress_by_profile = {}
+        raw_profile_caps = kanban_cfg.get("max_in_progress_by_profile", {})
+        if isinstance(raw_profile_caps, dict):
+            for profile, raw_cap in raw_profile_caps.items():
+                try:
+                    cap = int(raw_cap)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(profile, str) and profile.strip() and cap >= 1:
+                    max_in_progress_by_profile[profile.strip()] = cap
 
         # Initial delay so the gateway finishes wiring adapters before the
         # dispatcher spawns workers (those workers may hit gateway notify
@@ -1757,11 +1769,18 @@ class GatewayKanbanWatchersMixin:
                     conn,
                     board=slug,
                     max_spawn=max_spawn,
-                    max_in_progress=max_in_progress,
+                    # Re-scan on every tick so starting or stopping the
+                    # configured priority runtime changes capacity without a
+                    # gateway restart. This is read-only process inspection.
+                    max_in_progress=_kb.resolve_max_in_progress(
+                        normal_max_in_progress,
+                        priority_runtime_guard=priority_runtime_guard,
+                    ),
                     failure_limit=failure_limit,
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
+                    max_in_progress_by_profile=max_in_progress_by_profile,
                     reconcile_orphans=reconcile_orphans,
                 )
             except sqlite3.DatabaseError as exc:
