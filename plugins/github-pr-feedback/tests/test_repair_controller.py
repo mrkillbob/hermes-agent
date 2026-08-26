@@ -42,7 +42,11 @@ def merge_state(
 
 
 def policy(
-    tmp_path: Path, *, report_only: bool = False, merge_maintainer: bool = False
+    tmp_path: Path,
+    *,
+    report_only: bool = False,
+    merge_maintainer: bool = False,
+    max_base_refresh_in_flight: int | None = None,
 ):
     repository = tmp_path / "repo"
     subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
@@ -69,6 +73,10 @@ def policy(
             "report_only": report_only,
         },
     }
+    if max_base_refresh_in_flight is not None:
+        raw["repair_steward"]["max_base_refresh_in_flight"] = (
+            max_base_refresh_in_flight
+        )
     if merge_maintainer:
         raw["merge_maintainer"] = {
             "enabled": True,
@@ -260,7 +268,30 @@ def test_repair_controller_routes_a_stale_pr_base_into_the_refresh_lane(
     ledger.close()
 
 
-def test_repair_controller_dispatches_only_one_base_refresh_per_scan(
+def test_repair_controller_dispatches_base_refreshes_up_to_configured_limit(
+    tmp_path: Path,
+) -> None:
+    configured = policy(
+        tmp_path, merge_maintainer=True, max_base_refresh_in_flight=2
+    )
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+
+    result = RepairController(
+        configured,
+        ledger,
+        ManyBehindBaseGitHub(),
+        kanban,
+        LocalGit(),
+    ).scan()
+
+    assert result.created == 2
+    assert result.skipped.get("base_refresh_serialized", 0) == 0
+    assert len(kanban.tasks) == 2
+    ledger.close()
+
+
+def test_repair_controller_defaults_to_one_base_refresh_in_flight(
     tmp_path: Path,
 ) -> None:
     configured = policy(tmp_path, merge_maintainer=True)

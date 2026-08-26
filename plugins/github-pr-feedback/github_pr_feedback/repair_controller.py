@@ -81,7 +81,7 @@ class RepairController:
         skipped: Counter[str] = Counter()
         degraded = False
         for repository in sorted(configured.repositories):
-            base_refresh_dispatched = False
+            base_refresh_slots_used = 0
             target = self._policy.targets[repository]
             merge_policy = self._policy.merge_maintainer
             base_head: str | None = None
@@ -149,7 +149,10 @@ class RepairController:
                     base_refresh_required=base_refresh_required,
                 )
                 if base_refresh_required:
-                    if base_refresh_dispatched:
+                    if (
+                        base_refresh_slots_used
+                        >= configured.max_base_refresh_in_flight
+                    ):
                         skipped["base_refresh_serialized"] += 1
                         continue
                 if not triggers:
@@ -176,11 +179,11 @@ class RepairController:
                         and self._ledger.exact_receipt_status(receipt)
                         in {"claimed", "completed"}
                     ):
-                        base_refresh_dispatched = True
+                        base_refresh_slots_used += 1
                     skipped["duplicate"] += 1
                     continue
                 if base_refresh_required:
-                    base_refresh_dispatched = True
+                    base_refresh_slots_used += 1
                 try:
                     prepared = self._local_git.prepare_receipt_worktree(
                         target.local_path, receipt

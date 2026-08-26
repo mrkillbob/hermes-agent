@@ -289,6 +289,7 @@ class RepairStewardPolicy:
     assignee: str
     repositories: frozenset[str]
     report_only: bool
+    max_base_refresh_in_flight: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,7 +608,10 @@ def _parse_repair_steward(
 ) -> RepairStewardPolicy | None:
     if not isinstance(raw, Mapping):
         raise ValueError("repair_steward must be a mapping")
-    if set(raw) != {"enabled", "assignee", "repositories", "report_only"}:
+    required = {"enabled", "assignee", "repositories", "report_only"}
+    if not required.issubset(raw) or set(raw) - (
+        required | {"max_base_refresh_in_flight"}
+    ):
         raise ValueError("repair_steward has missing or unknown fields")
     if not isinstance(raw["enabled"], bool) or not isinstance(raw["report_only"], bool):
         raise ValueError("repair_steward booleans are invalid")
@@ -616,12 +620,22 @@ def _parse_repair_steward(
     )
     if not repositories or not repositories.issubset(targets):
         raise ValueError("repair_steward repositories must be configured targets")
+    max_base_refresh_in_flight = raw.get("max_base_refresh_in_flight", 1)
+    if (
+        not isinstance(max_base_refresh_in_flight, int)
+        or isinstance(max_base_refresh_in_flight, bool)
+        or not 1 <= max_base_refresh_in_flight <= 8
+    ):
+        raise ValueError(
+            "repair_steward max_base_refresh_in_flight must be an integer from 1 to 8"
+        )
     if not raw["enabled"]:
         return None
     return RepairStewardPolicy(
         assignee=_nonempty_string(raw["assignee"], "repair_steward assignee"),
         repositories=repositories,
         report_only=raw["report_only"],
+        max_base_refresh_in_flight=max_base_refresh_in_flight,
     )
 
 
