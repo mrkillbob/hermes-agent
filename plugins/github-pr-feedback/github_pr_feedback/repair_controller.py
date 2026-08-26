@@ -12,7 +12,13 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
-from .controller import KanbanClient, KanbanTask, LocalGit, LocalGitRepository
+from .controller import (
+    KanbanClient,
+    KanbanTask,
+    LocalGit,
+    LocalGitRepository,
+    _claim_with_orphan_recovery,
+)
 from .github_client import CheckState, GitHubClient, PullRequestMergeState, ReviewState
 from .ledger import FeedbackLedger, LedgerStateError
 from .policy import FeedbackReceipt, PluginPolicy, PullRequest
@@ -100,21 +106,6 @@ class RepairController:
                     lambda listed: self._read_snapshot(repository, listed), pulls
                 )
                 ordered_snapshots = tuple(snapshots)
-            base_refresh_in_flight = bool(
-                base_head is not None
-                and merge_policy is not None
-                and any(
-                    snapshot is not None
-                    and snapshot[0].base_branch == merge_policy.base_branch
-                    and snapshot[0].base_sha == base_head
-                    and snapshot[0].head_repository == target.head_repository
-                    and any(
-                        snapshot[0].head_ref_name.startswith(prefix)
-                        for prefix in target.branch_prefixes
-                    )
-                    for snapshot in ordered_snapshots
-                )
-            )
             for listed, snapshot in zip(pulls, ordered_snapshots, strict=True):
                 if snapshot is None:
                     skipped["github_state_unavailable"] += 1
@@ -145,9 +136,6 @@ class RepairController:
                     base_refresh_required=base_refresh_required,
                 )
                 if base_refresh_required:
-                    if base_refresh_in_flight:
-                        skipped["base_refresh_in_flight"] += 1
-                        continue
                     if base_refresh_dispatched:
                         skipped["base_refresh_serialized"] += 1
                         continue
@@ -159,11 +147,15 @@ class RepairController:
                 receipt = FeedbackReceipt(
                     repository, pull.number, "pr_repair", trigger_id, pull.head_sha
                 )
-                lease = self._ledger.claim(
+                claimed_at = self._clock()
+                lease = _claim_with_orphan_recovery(
+                    self._ledger,
+                    self._kanban,
                     receipt,
+                    board=self._policy.board or "",
                     owner=self._owner,
-                    claimed_at=self._clock(),
-                    stale_before=self._clock() - timedelta(minutes=15),
+                    claimed_at=claimed_at,
+                    stale_before=claimed_at - timedelta(minutes=15),
                 )
                 if lease is None:
                     if (

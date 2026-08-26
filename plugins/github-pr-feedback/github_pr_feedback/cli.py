@@ -58,6 +58,7 @@ _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 class KanbanCommandResult:
     returncode: int
     stdout: str
+    stderr: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,13 +243,15 @@ class SubprocessKanbanRunner:
                 check=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
                 timeout=30,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             raise RuntimeError("Kanban task creation failed") from error
-        return KanbanCommandResult(completed.returncode, completed.stdout)
+        return KanbanCommandResult(
+            completed.returncode, completed.stdout, completed.stderr[:2000]
+        )
 
 
 class KanbanSubprocessClient:
@@ -269,6 +272,26 @@ class KanbanSubprocessClient:
         if not isinstance(task_id, str) or not task_id.strip():
             raise RuntimeError("Kanban task creation failed")
         return task_id.strip()
+
+    def task_status(self, board: str, task_id: str) -> str | None:
+        result = self._runner.run(
+            ["hermes", "kanban", "--board", board, "show", task_id, "--json"]
+        )
+        if result.returncode != 0:
+            if isinstance(result.stderr, str) and result.stderr.strip().startswith(
+                "no such task:"
+            ):
+                return None
+            raise RuntimeError("Kanban task lookup failed")
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise RuntimeError("Kanban task lookup failed") from error
+        task = payload.get("task") if isinstance(payload, dict) else None
+        status = task.get("status") if isinstance(task, dict) else None
+        if not isinstance(status, str) or not status.strip():
+            raise RuntimeError("Kanban task lookup failed")
+        return status.strip()
 
 
 def _kanban_create_argv(task: KanbanTask) -> list[str]:

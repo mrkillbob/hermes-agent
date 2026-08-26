@@ -273,7 +273,7 @@ def test_repair_controller_dispatches_only_one_base_refresh_per_scan(
     ledger.close()
 
 
-def test_current_base_pr_blocks_another_refresh_until_ci_and_merge_finish(
+def test_current_base_pr_does_not_impersonate_an_in_flight_refresh_task(
     tmp_path: Path,
 ) -> None:
     configured = policy(tmp_path, merge_maintainer=True)
@@ -288,9 +288,9 @@ def test_current_base_pr_blocks_another_refresh_until_ci_and_merge_finish(
         LocalGit(),
     ).scan()
 
-    assert result.created == 0
-    assert result.skipped["base_refresh_in_flight"] == 1
-    assert kanban.tasks == []
+    assert result.created == 1
+    assert result.skipped.get("base_refresh_in_flight", 0) == 0
+    assert kanban.tasks[0].evidence["pr_number"] == 18
     ledger.close()
 
 

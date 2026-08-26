@@ -635,6 +635,80 @@ def test_failed_exact_head_static_receipt_immediately_dispatches_one_typed_fixer
     ledger.close()
 
 
+@pytest.mark.parametrize(
+    ("stored_task_status", "expected_second_result", "expected_task_count"),
+    [("archived", "scheduled", 2), (None, "duplicate", 1)],
+)
+def test_only_archived_exact_head_fixer_is_recreated(
+    tmp_path: Path,
+    stored_task_status: str | None,
+    expected_second_result: str,
+    expected_task_count: int,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    base_sha = "b" * 40
+    configured = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    current = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="main",
+        base_sha=base_sha,
+    )
+    audit = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, base_sha, head_sha),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(
+            CommandEvidence(
+                argv=(".venv/bin/python", "scripts/run_static_lane.py"),
+                cwd=".",
+                returncode=1,
+                duration_ms=1,
+                timed_out=False,
+                stdout_sha256="0" * 64,
+                stderr_sha256="0" * 64,
+                classification="logic-regression",
+            ),
+        ),
+    )
+
+    class ArchivedKanban(RecordingKanban):
+        def task_status(self, board: str, task_id: str) -> str | None:
+            assert board == "repairs"
+            assert task_id == "kanban-1"
+            return stored_task_status
+
+    kanban = ArchivedKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(audit)
+    controller = ScanController(
+        configured,
+        ledger,
+        FakeGitHub(current, ()),
+        kanban,
+        RecordingLocalGit(),
+        control_home=tmp_path,
+    )
+
+    assert controller.dispatch_ci_failure(audit) == "scheduled"
+    assert controller.dispatch_ci_failure(audit) == expected_second_result
+    assert len(kanban.tasks) == expected_task_count
+    ledger.close()
+
+
 def test_superseded_ci_receipt_comment_does_not_create_duplicate_repair(
     tmp_path: Path,
 ) -> None:

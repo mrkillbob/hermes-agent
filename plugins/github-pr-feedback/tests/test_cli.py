@@ -117,16 +117,17 @@ def test_scan_claims_pr_repairs_before_feedback_and_local_ci(
 
 
 class RecordingKanbanRunner:
-    def __init__(self, stdout: str, returncode: int = 0) -> None:
+    def __init__(self, stdout: str, returncode: int = 0, stderr: str = "") -> None:
         self.stdout = stdout
         self.returncode = returncode
+        self.stderr = stderr
         self.calls: list[list[str]] = []
 
     def run(self, argv: list[str]):
         from github_pr_feedback.cli import KanbanCommandResult
 
         self.calls.append(argv)
-        return KanbanCommandResult(self.returncode, self.stdout)
+        return KanbanCommandResult(self.returncode, self.stdout, self.stderr)
 
 
 class RecordingDoctorRunner:
@@ -225,6 +226,48 @@ def test_kanban_client_dispatches_an_opted_in_repair_as_ready() -> None:
     assert runner.calls[0][retries_index] == "3"
     runtime_index = runner.calls[0].index("--max-runtime") + 1
     assert runner.calls[0][runtime_index] == "1200"
+
+
+def test_kanban_client_reads_archived_task_status_for_orphan_reconciliation() -> None:
+    from github_pr_feedback.cli import KanbanSubprocessClient
+
+    runner = RecordingKanbanRunner('{"task": {"id": "task-123", "status": "archived"}}')
+
+    assert KanbanSubprocessClient(runner).task_status("repairs", "task-123") == "archived"
+    assert runner.calls == [
+        ["hermes", "kanban", "--board", "repairs", "show", "task-123", "--json"]
+    ]
+
+
+def test_kanban_client_reads_missing_task_error_from_stderr() -> None:
+    from github_pr_feedback.cli import KanbanSubprocessClient
+
+    client = KanbanSubprocessClient(
+        RecordingKanbanRunner(
+            "", returncode=1, stderr="no such task: task-missing\n"
+        )
+    )
+
+    assert client.task_status("repairs", "task-missing") is None
+
+
+def test_subprocess_kanban_runner_captures_bounded_stderr(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from github_pr_feedback.cli import SubprocessKanbanRunner
+
+    monkeypatch.setattr(
+        "github_pr_feedback.cli.subprocess.run",
+        lambda *_args, **kwargs: (
+            SimpleNamespace(returncode=1, stdout="", stderr="no such task: task-missing\n")
+            if kwargs["stderr"] is subprocess.PIPE
+            else (_ for _ in ()).throw(AssertionError("Kanban stderr must be captured"))
+        ),
+    )
+
+    result = SubprocessKanbanRunner().run(["hermes", "kanban", "show", "task-missing"])
+
+    assert result.stderr == "no such task: task-missing\n"
 
 
 def test_kanban_client_uses_the_task_specific_evidence_heading() -> None:

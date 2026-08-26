@@ -117,6 +117,8 @@ class KanbanClient(Protocol):
 
     def create_or_get_task(self, task: KanbanTask) -> str: ...
 
+    def task_status(self, board: str, task_id: str) -> str | None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class GitCommandResult:
@@ -174,6 +176,44 @@ class ScanResult:
     created: int
     skipped: Mapping[str, int]
     degraded: bool = False
+
+
+def _claim_with_orphan_recovery(
+    ledger: FeedbackLedger,
+    kanban: KanbanClient,
+    receipt: FeedbackReceipt,
+    *,
+    board: str,
+    owner: str,
+    claimed_at: datetime,
+    stale_before: datetime,
+):
+    """Claim normally, or reclaim an exact dispatch whose card is gone/archived."""
+
+    lease = ledger.claim(
+        receipt,
+        owner=owner,
+        claimed_at=claimed_at,
+        stale_before=stale_before,
+    )
+    if lease is not None:
+        return lease
+    task_id = ledger.exact_pending_task_id(receipt)
+    task_status = getattr(kanban, "task_status", None)
+    if task_id is None or not callable(task_status):
+        return None
+    try:
+        status = task_status(board, task_id)
+    except RuntimeError:
+        return None
+    if status != "archived":
+        return None
+    return ledger.reopen_orphaned_dispatch(
+        receipt,
+        task_id=task_id,
+        owner=owner,
+        claimed_at=claimed_at,
+    )
 
 
 class LocalGitRepository:
@@ -723,8 +763,11 @@ class ScanController:
             head_sha=audit.identity.head_sha,
         )
         claimed_at = self._clock()
-        lease = self._ledger.claim(
+        lease = _claim_with_orphan_recovery(
+            self._ledger,
+            self._kanban,
             receipt,
+            board=self._policy.board or "",
             owner=self._claim_owner,
             claimed_at=claimed_at,
             stale_before=claimed_at - self._claim_lease,
@@ -761,6 +804,7 @@ class ScanController:
                 return "exact_head_unavailable"
             return "dispatch_failed"
         return "scheduled"
+
 
     def _dispatch_local_ci(
         self, listed: PullRequest, *, current: PullRequest | None = None

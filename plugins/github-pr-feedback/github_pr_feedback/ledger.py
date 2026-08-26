@@ -372,6 +372,72 @@ class FeedbackLedger:
             raise LedgerStateError("stored feedback receipt status is invalid")
         return str(status)
 
+    def exact_pending_task_id(self, receipt: FeedbackReceipt) -> str | None:
+        """Return the task holding an exact completed-but-unacknowledged dispatch."""
+
+        row = self._connection.execute(
+            "SELECT task_id FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+            "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ? "
+            "AND status = 'completed' AND action_status = 'pending'",
+            receipt.key,
+        ).fetchone()
+        if row is None or not isinstance(row[0], str) or not row[0].strip():
+            return None
+        return row[0].strip()
+
+    def reopen_orphaned_dispatch(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        task_id: str,
+        owner: str,
+        claimed_at: datetime,
+    ) -> ClaimLease | None:
+        """Reclaim an exact dispatch only after its Kanban task is proven absent/archived."""
+
+        task_id = task_id.strip() if isinstance(task_id, str) else ""
+        owner = owner.strip() if isinstance(owner, str) else ""
+        if not task_id or not owner:
+            raise ValueError("task_id and claim owner must be non-empty strings")
+        claimed_at = _aware_utc(claimed_at, "claimed_at")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT lease_version FROM feedback_receipts WHERE repository = ? "
+                "AND pr_number = ? AND feedback_kind = ? AND feedback_id = ? "
+                "AND head_sha = ? AND status = 'completed' AND action_status = 'pending' "
+                "AND task_id = ?",
+                (*receipt.key, task_id),
+            ).fetchone()
+            if row is None:
+                return None
+            other = self._connection.execute(
+                "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                "AND head_sha = ? AND feedback_kind != 'pr_local_ci' "
+                "AND NOT (feedback_kind = ? AND feedback_id = ?) "
+                "AND status IN ('claimed', 'completed') AND action_status = 'pending' LIMIT 1",
+                (
+                    receipt.repository,
+                    receipt.pr_number,
+                    receipt.head_sha,
+                    receipt.feedback_kind,
+                    receipt.feedback_id,
+                ),
+            ).fetchone()
+            if other is not None:
+                return None
+            version = int(row[0] or 0) + 1
+            result = self._connection.execute(
+                "UPDATE feedback_receipts SET status = 'claimed', task_id = NULL, "
+                "last_error = NULL, attempts = attempts + 1, claim_owner = ?, claimed_at = ?, "
+                "lease_version = ? WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ? AND status = 'completed' "
+                "AND action_status = 'pending' AND task_id = ?",
+                (owner, claimed_at.isoformat(), version, *receipt.key, task_id),
+            )
+            if result.rowcount != 1:
+                return None
+            return ClaimLease(owner, claimed_at, version)
+
     def was_actioned_on_any_head(self, receipt: FeedbackReceipt) -> bool:
         row = self._connection.execute(
             "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
