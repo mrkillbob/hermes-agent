@@ -846,6 +846,27 @@ def test_ledger_deduplicates_an_in_progress_receipt_after_restart(
     restarted.close()
 
 
+def test_local_ci_claim_waits_for_active_exact_head_repair(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    repair = receipt(feedback_kind="pr_repair", feedback_id="repair:merge_conflict")
+    audit = receipt(feedback_kind="pr_local_ci", feedback_id="local-ci-audit-v1")
+    repair_lease = claim_lease(ledger, repair)
+
+    assert repair_lease is not None
+    assert claim_lease(ledger, audit, owner="ci-scanner") is None
+
+    ledger.finalize(repair, "repair-task", repair_lease)
+    assert claim_lease(ledger, audit, owner="ci-scanner") is None
+
+    ledger.mark_feedback_actioned(
+        repair,
+        resolved_head_sha=repair.head_sha,
+        actioned_at=datetime(2026, 8, 24, 13, 0, tzinfo=UTC),
+    )
+    assert claim_lease(ledger, audit, owner="ci-scanner") is not None
+    ledger.close()
+
+
 def test_ledger_retries_a_receipt_after_task_creation_failure(tmp_path: Path) -> None:
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
 

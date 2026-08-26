@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -241,6 +242,16 @@ def _repair_task(
             "edit, commit, push, reply, approve, merge, or change configuration."
         )
     else:
+        completion_command = (
+            f"env HERMES_HOME={shlex.quote(str(control_home))} hermes "
+            "github-pr-feedback complete-feedback "
+            f"--repository {shlex.quote(receipt.repository)} "
+            f"--pr-number {receipt.pr_number} "
+            f"--feedback-kind {shlex.quote(receipt.feedback_kind)} "
+            f"--feedback-id {shlex.quote(receipt.feedback_id)} "
+            f"--receipt-head-sha {shlex.quote(receipt.head_sha)} "
+            "--resolved-head-sha <full literal resolved head SHA>"
+        )
         authority = (
             "Re-read the canonical pull request and require its head to equal expected_head_sha. "
             f"For a merge conflict or base_refresh_required trigger, fetch the canonical base and "
@@ -251,7 +262,10 @@ def _repair_task(
             "reply with commit and test evidence. Do not merge the pull request, approve it, delete "
             "branches, or change repository settings. Do not force-push or rewrite published history. "
             "Do not weaken tests, required checks, validation, or safety gates. Stop fail-closed if "
-            "identity changes or the repair is ambiguous or broad."
+            "identity changes or the repair is ambiguous or broad. After the verified push and "
+            "factual reply both succeed, acknowledge this exact repair with `"
+            f"{completion_command}`. Never use shell substitution for the resolved SHA, and do not "
+            "complete the Kanban task until this acknowledgement succeeds."
         )
     evidence = {
         "repository": receipt.repository,

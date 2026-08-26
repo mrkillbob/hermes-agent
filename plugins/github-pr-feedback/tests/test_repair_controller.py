@@ -239,6 +239,12 @@ def test_repair_controller_routes_a_stale_pr_base_into_the_refresh_lane(
     assert kanban.tasks[0].evidence["triggers"] == ["base_refresh_required"]
     assert "normal merge" in kanban.tasks[0].instructions
     assert "base_refresh_required" in kanban.tasks[0].instructions
+    assert "hermes github-pr-feedback complete-feedback" in kanban.tasks[0].instructions
+    assert "--feedback-kind pr_repair" in kanban.tasks[0].instructions
+    assert "--feedback-id repair:base_refresh_required" in kanban.tasks[0].instructions
+    assert "--resolved-head-sha <full literal resolved head SHA>" in (
+        kanban.tasks[0].instructions
+    )
     ledger.close()
 
 

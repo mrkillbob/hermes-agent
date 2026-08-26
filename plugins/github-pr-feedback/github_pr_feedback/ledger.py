@@ -290,7 +290,7 @@ class FeedbackLedger:
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         stale_before = _aware_utc(stale_before, "stale_before")
         with self._transaction():
-            serialized_repair = receipt.feedback_kind != "pr_local_ci" and not (
+            serialized_repair = not (
                 receipt.feedback_kind == "pr_repair"
                 and receipt.feedback_id.startswith("report:")
             )
@@ -639,6 +639,25 @@ class FeedbackLedger:
             "SELECT evidence_json FROM ci_audit_receipts WHERE repository = ? AND pr_number = ? "
             "AND head_sha = ? ORDER BY completed_at DESC LIMIT 1",
             (repository, pr_number, head_sha),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return CIAuditReceipt.from_payload(json.loads(row[0]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise LedgerStateError("stored CI receipt is invalid") from error
+
+    def ci_receipt_by_id(
+        self, repository: str, pr_number: int, receipt_id: str
+    ) -> object | None:
+        """Return one immutable typed audit receipt by its globally unique ID."""
+
+        from .ci_runner import CIAuditReceipt
+
+        row = self._connection.execute(
+            "SELECT evidence_json FROM ci_audit_receipts WHERE repository = ? AND pr_number = ? "
+            "AND receipt_id = ? LIMIT 1",
+            (repository, pr_number, receipt_id.casefold()),
         ).fetchone()
         if row is None:
             return None

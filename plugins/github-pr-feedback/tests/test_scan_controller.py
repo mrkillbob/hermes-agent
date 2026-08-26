@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import threading
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -37,6 +38,7 @@ class FakeGitHub:
         self.feedback = feedback
         self.current = current or pull_request
         self.current_calls: list[tuple[str, int]] = []
+        self.branch_calls: list[tuple[str, str]] = []
         self.actions_are_enabled = True
         self.branch_head = self.current.base_sha
 
@@ -60,6 +62,7 @@ class FakeGitHub:
         return self.actions_are_enabled
 
     def get_branch_head(self, repository: str, branch: str) -> str:
+        self.branch_calls.append((repository, branch))
         assert repository == self.pull_request.base_repository
         assert branch == self.current.base_branch
         assert self.branch_head is not None
@@ -185,6 +188,354 @@ def test_failed_ci_receipt_waits_for_current_base_before_dispatching_fixer(
 
     assert result == "base_refresh_required"
     assert kanban.tasks == []
+    ledger.close()
+
+
+def test_failed_ci_audit_comment_waits_for_current_base_before_typed_routing(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    old_base = "b" * 40
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+        merge_maintainer=True,
+    )
+    current = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha=old_base,
+    )
+    audit = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, old_base, head_sha),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(
+            CommandEvidence(
+                argv=(".venv/bin/python", "scripts/run_static_lane.py"),
+                cwd=".",
+                returncode=1,
+                duration_ms=1,
+                timed_out=False,
+                stdout_sha256="0" * 64,
+                stderr_sha256="0" * 64,
+                classification="logic-regression",
+            ),
+        ),
+    )
+    item = feedback(
+        "stale-ci-comment",
+        reviewer="owner",
+        body=(
+            "Local CI audit (hosted GitHub Actions disabled): failed. "
+            f"Receipt: `{audit.receipt_id}` (base {old_base}). "
+            "scripts/run_static_lane.py failed, logic regression."
+        ),
+    )
+    github = FakeGitHub(current, (item,))
+    github.branch_head = "c" * 40
+    github.actions_are_enabled = False
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(audit)
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 0
+    assert result.skipped["base_refresh_required"] == 1
+    assert result.skipped.get("feedback_pending", 0) == 0
+    assert github.current_calls == [("acme/widgets", 17)]
+    assert github.branch_calls == [("acme/widgets", "stable")]
+    assert kanban.tasks == []
+    ledger.close()
+
+
+def test_ordinary_feedback_referencing_ci_is_not_bound_to_a_failed_receipt(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    old_base = "b" * 40
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+        merge_maintainer=True,
+    )
+    current = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha=old_base,
+    )
+    audit = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, old_base, head_sha),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+    item = feedback(
+        "ordinary-ci-reference",
+        reviewer="owner",
+        body="Please fix the PR regression described by the local CI audit; it still fails.",
+    )
+    github = FakeGitHub(current, (item,))
+    github.branch_head = "c" * 40
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(audit)
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert result.skipped.get("base_refresh_required", 0) == 0
+    assert github.branch_calls == []
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == [
+        "ordinary-ci-reference"
+    ]
+    ledger.close()
+
+
+def test_failed_ci_comment_is_suppressed_after_base_refresh_changes_head(
+    tmp_path: Path,
+) -> None:
+    local_path, stale_head = initialized_repository(tmp_path)
+    old_base = "b" * 40
+    refreshed_head = "d" * 40
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+        merge_maintainer=True,
+    )
+    current = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        refreshed_head,
+        base_branch="stable",
+        base_sha="c" * 40,
+    )
+    audit = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, old_base, stale_head),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+    item = feedback(
+        "stale-ci-comment",
+        reviewer="owner",
+        body=(
+            "Local CI audit failed. "
+            f"Authoritative receipt: `{audit.receipt_id}`."
+        ),
+    )
+    github = FakeGitHub(current, (item,))
+    github.actions_are_enabled = True
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(audit)
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 0
+    assert result.skipped["superseded_ci_receipt"] == 1
+    assert result.skipped.get("feedback_pending", 0) == 0
+    assert github.branch_calls == []
+    assert kanban.tasks == []
+    ledger.close()
+
+
+def test_duplicate_failed_ci_comments_share_one_base_head_lookup(tmp_path: Path) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    old_base = "b" * 40
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+        merge_maintainer=True,
+    )
+    current = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha=old_base,
+    )
+    audit = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, old_base, head_sha),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+    body = f"Local CI audit failed. Receipt: `{audit.receipt_id}`."
+    github = FakeGitHub(
+        current,
+        (
+            feedback("ci-comment-a", reviewer="owner", body=body),
+            feedback("ci-comment-b", reviewer="owner", body=body),
+        ),
+    )
+    github.branch_head = "c" * 40
+    github.actions_are_enabled = False
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(audit)
+
+    result = ScanController(
+        policy, ledger, github, RecordingKanban(), RecordingLocalGit()
+    ).scan()
+
+    assert result.created == 0
+    assert result.skipped["base_refresh_required"] == 2
+    assert github.branch_calls == [("acme/widgets", "stable")]
+    ledger.close()
+
+
+def test_failed_ci_comment_base_lookup_failure_is_degraded(tmp_path: Path) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    base_sha = "b" * 40
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+        merge_maintainer=True,
+    )
+    current = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha=base_sha,
+    )
+    audit = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, base_sha, head_sha),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+    item = feedback(
+        "ci-comment",
+        reviewer="owner",
+        body=f"Local CI audit failed. Receipt: `{audit.receipt_id}`.",
+    )
+
+    class UnavailableBaseGitHub(FakeGitHub):
+        def get_branch_head(self, repository: str, branch: str) -> str:
+            self.branch_calls.append((repository, branch))
+            raise RuntimeError("base unavailable")
+
+    github = UnavailableBaseGitHub(current, (item,))
+    github.actions_are_enabled = False
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(audit)
+
+    result = ScanController(
+        policy, ledger, github, RecordingKanban(), RecordingLocalGit()
+    ).scan()
+
+    assert result.created == 0
+    assert result.skipped["base_state_unavailable"] == 1
+    assert result.degraded is True
+    ledger.close()
+
+
+def test_retry_admission_precedes_stale_ci_comment_base_lookup(tmp_path: Path) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    old_base = "b" * 40
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+        merge_maintainer=True,
+    )
+    closed = PullRequest(
+        17,
+        "CLOSED",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha=old_base,
+    )
+    receipt_id = "f" * 64
+    item = feedback(
+        "stale-ci-comment",
+        reviewer="owner",
+        body=(
+            "Local CI audit failed. "
+            f"Authoritative receipt: `{receipt_id}`."
+        ),
+    )
+    github = FakeGitHub(closed, (item,))
+    github.branch_head = "c" * 40
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(
+        CIAuditReceipt(
+            receipt_id=receipt_id,
+            identity=CIAuditIdentity("acme/widgets", 17, old_base, head_sha),
+            manifest_digest="e" * 64,
+            status="failed",
+            started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+            actions_state=CheckState(False, True, 0),
+            commands=(),
+        )
+    )
+    skipped: Counter[str] = Counter()
+    controller = ScanController(
+        policy, ledger, github, RecordingKanban(), RecordingLocalGit()
+    )
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "issue_comment", "stale-ci-comment", head_sha
+    )
+
+    assert controller._revalidate(receipt, skipped) is None
+    assert skipped == {"pull_request_not_open": 1}
+    assert github.branch_calls == []
     ledger.close()
 
 
@@ -1221,6 +1572,17 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
             "Verification, all at commit `50d0baa40effd44085194438fc9fab73381efa94`; "
             "no CI configuration, required checks, or safety gates were modified: "
             "run_static_lane.py -> status: pass, errors: []; focused pytest -> 14 passed.",
+        ),
+        (
+            "issue_comment",
+            "Verification at head {sha} (current canonical PR head): merge parents "
+            "confirmed with no history rewrite. Focused verification: 14 tests passed.",
+        ),
+        (
+            "issue_comment",
+            "Validated against exact head {sha}. The reported static failure no longer "
+            "reproduces. Focused verification: run_static_lane.py status=pass. No source "
+            "files were changed.",
         ),
     ],
 )

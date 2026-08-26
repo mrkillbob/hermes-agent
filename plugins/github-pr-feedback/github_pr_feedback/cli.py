@@ -438,7 +438,6 @@ def _scan(ctx: Any) -> int:
         repair_payload: dict[str, object] | None = None
         maintenance_payload: dict[str, object] | None = None
         try:
-            result = _controller(policy, ledger).scan()
             if policy.repair_steward is not None:
                 repair = RepairController(
                     policy,
@@ -448,6 +447,7 @@ def _scan(ctx: Any) -> int:
                     control_home=get_default_hermes_root(),
                 ).scan()
                 repair_payload = _scan_payload(repair)
+            result = _controller(policy, ledger).scan()
             if policy.merge_maintainer is not None:
                 merge_payload = _run_merge_scan(policy, ledger)
             if policy.release_maintenance is not None:

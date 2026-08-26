@@ -63,6 +63,59 @@ def test_register_exposes_the_github_feedback_cli_command() -> None:
     assert parser.parse_args(["scan"]).github_pr_feedback_action == "scan"
 
 
+def test_scan_claims_pr_repairs_before_feedback_and_local_ci(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _scan
+    from github_pr_feedback.controller import ScanResult
+
+    order: list[str] = []
+
+    class Lock:
+        def __enter__(self) -> bool:
+            return True
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class Ledger:
+        @classmethod
+        def for_current_profile(cls):
+            return cls()
+
+        def close(self) -> None:
+            pass
+
+    class Policy:
+        repair_steward = object()
+        merge_maintainer = None
+        release_maintenance = None
+
+    class Repair:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def scan(self) -> ScanResult:
+            order.append("repair")
+            return ScanResult(1, {})
+
+    class Feedback:
+        def scan(self) -> ScanResult:
+            order.append("feedback")
+            return ScanResult(0, {})
+
+    monkeypatch.setattr("github_pr_feedback.cli._load_policy_from_context", lambda _ctx: Policy())
+    monkeypatch.setattr("github_pr_feedback.cli._exclusive_scan_lock", lambda: Lock())
+    monkeypatch.setattr("github_pr_feedback.cli.FeedbackLedger", Ledger)
+    monkeypatch.setattr("github_pr_feedback.cli.RepairController", Repair)
+    monkeypatch.setattr("github_pr_feedback.cli._controller", lambda *_args: Feedback())
+
+    assert _scan(object()) == 0
+    assert order == ["repair", "feedback"]
+    assert json.loads(capsys.readouterr().out)["repair"]["created"] == 1
+
+
 class RecordingKanbanRunner:
     def __init__(self, stdout: str, returncode: int = 0) -> None:
         self.stdout = stdout

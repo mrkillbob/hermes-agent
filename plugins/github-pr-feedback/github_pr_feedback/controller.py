@@ -71,13 +71,14 @@ _RESOLVED_AFTER_FAILURE = (
 _LANE_PASS_EVIDENCE = re.compile(r"\b(?:status\s*[:=]?\s*pass|rc\s*=\s*0|passes|passed)\b")
 _CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
 _CI_RECEIPT_COMMENT = re.compile(
-    r"authoritative receipt:\s*`([0-9a-f]{64})`",
+    r"(?:authoritative\s+)?receipt:\s*`([0-9a-f]{64})`",
     flags=re.IGNORECASE,
 )
 _DEGRADED_REASONS = frozenset(
     {
         "github_error",
         "github_ci_state_unavailable",
+        "base_state_unavailable",
         "admission_cap",
         "dispatch_failed",
         "exact_head_unavailable",
@@ -465,6 +466,8 @@ class ScanController:
                     continue
                 current, feedback_items = snapshot
                 feedback_pending = False
+                base_refresh_pending = False
+                base_head_cache: dict[tuple[str, str, str], str | None] = {}
                 for feedback in feedback_items:
                     target = self._policy.targets.get(pull_request.base_repository)
                     if target is None:
@@ -510,6 +513,17 @@ class ScanController:
                     if not current_admission.admitted:
                         skipped[current_admission.reason or "not_admitted"] += 1
                         continue
+                    ci_base_reason = self._ci_feedback_base_reason(
+                        receipt,
+                        feedback.body,
+                        current,
+                        base_head_cache=base_head_cache,
+                    )
+                    if ci_base_reason is not None:
+                        skipped[ci_base_reason] += 1
+                        if ci_base_reason == "base_refresh_required":
+                            base_refresh_pending = True
+                        continue
                     if not self._ledger.was_actioned_on_any_head(receipt):
                         feedback_pending = True
                     if self._ledger.was_actioned_on_any_head(receipt):
@@ -545,7 +559,9 @@ class ScanController:
                     self._policy.local_ci_audit is not None
                     and self._policy.local_ci_audit.applies_to(repository)
                 ):
-                    if feedback_pending:
+                    if base_refresh_pending:
+                        pass
+                    elif feedback_pending:
                         skipped["feedback_pending"] += 1
                     elif actions_state_unavailable:
                         skipped["github_ci_state_unavailable"] += 1
@@ -897,6 +913,10 @@ class ScanController:
         if not admission.admitted or admission.target is None:
             skipped[admission.reason or "not_admitted"] += 1
             return None
+        ci_base_reason = self._ci_feedback_base_reason(receipt, feedback.body, current)
+        if ci_base_reason is not None:
+            skipped[ci_base_reason] += 1
+            return None
         return feedback, admission.target, current.labels
 
     def _feedback_reason(self, feedback: Feedback, *, owner_login: str) -> str | None:
@@ -912,6 +932,62 @@ class ScanController:
             return "non_actionable_review_container"
         if _is_self_resolution_receipt(feedback, owner_login=owner_login):
             return "self_resolution_receipt"
+        return None
+
+    def _ci_feedback_base_reason(
+        self,
+        receipt: FeedbackReceipt,
+        body: str,
+        current: PullRequest,
+        *,
+        base_head_cache: dict[tuple[str, str, str], str | None] | None = None,
+    ) -> str | None:
+        """Fail closed before routing a failed local-CI comment from a stale base."""
+
+        from .ci_runner import CIAuditReceipt
+
+        normalized = body.casefold()
+        if "local ci audit" not in normalized and "local pr ci audit" not in normalized:
+            return None
+        marker = _CI_RECEIPT_COMMENT.search(body)
+        if marker is None:
+            return None
+        audit = self._ledger.ci_receipt_by_id(
+            receipt.repository, receipt.pr_number, marker.group(1)
+        )
+        if not isinstance(audit, CIAuditReceipt) or audit.status != "failed":
+            return None
+        if current.head_sha.casefold() != audit.identity.head_sha.casefold():
+            return "superseded_ci_receipt"
+        if current.base_sha is None or current.base_sha.casefold() != audit.identity.base_sha:
+            return "base_changed"
+        merge_policy = self._policy.merge_maintainer
+        if (
+            merge_policy is None
+            or merge_policy.repository != current.base_repository
+            or merge_policy.base_branch != current.base_branch
+        ):
+            return None
+        cache_key = (
+            current.base_repository,
+            current.base_branch,
+            current.base_sha.casefold(),
+        )
+        if base_head_cache is not None and cache_key in base_head_cache:
+            base_head = base_head_cache[cache_key]
+        else:
+            try:
+                base_head = self._github.get_branch_head(
+                    current.base_repository, current.base_branch
+                )
+            except Exception:  # noqa: BLE001 - stale-base repair must fail closed.
+                base_head = None
+            if base_head_cache is not None:
+                base_head_cache[cache_key] = base_head
+        if base_head is None:
+            return "base_state_unavailable"
+        if base_head.casefold() != current.base_sha.casefold():
+            return "base_refresh_required"
         return None
 
     def _dispatch(
@@ -1071,6 +1147,25 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
             "no further change needed",
             "no further changes needed",
             "no further audit rerun performed",
+        )
+    ):
+        return True
+    verification_only = body.startswith(
+        ("verification at head ", "validated against exact head ")
+    )
+    if (
+        verification_only
+        and exact_head_evidence
+        and "focused verification" in body
+        and _LANE_PASS_EVIDENCE.search(body) is not None
+        and any(
+            marker in body
+            for marker in (
+                "no history rewrite",
+                "no source files were changed",
+                "no ci configuration, required checks, or safety gates were modified",
+                "failure no longer reproduces",
+            )
         )
     ):
         return True
