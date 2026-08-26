@@ -151,6 +151,14 @@ class ManyBehindBaseGitHub(BehindBaseGitHub):
         )
 
 
+class RefreshInFlightGitHub(ManyBehindBaseGitHub):
+    def get_merge_state(self, repository: str, number: int):
+        state = super().get_merge_state(repository, number)
+        if number == 17:
+            return replace(state, base_sha="c" * 40)
+        return state
+
+
 class ConcurrentReadGitHub(GitHub):
     def __init__(self) -> None:
         self.barrier = threading.Barrier(3)
@@ -252,6 +260,27 @@ def test_repair_controller_dispatches_only_one_base_refresh_per_scan(
     assert result.created == 1
     assert result.skipped["base_refresh_serialized"] == 1
     assert len(kanban.tasks) == 1
+    ledger.close()
+
+
+def test_current_base_pr_blocks_another_refresh_until_ci_and_merge_finish(
+    tmp_path: Path,
+) -> None:
+    configured = policy(tmp_path, merge_maintainer=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+
+    result = RepairController(
+        configured,
+        ledger,
+        RefreshInFlightGitHub(),
+        kanban,
+        LocalGit(),
+    ).scan()
+
+    assert result.created == 0
+    assert result.skipped["base_refresh_in_flight"] == 1
+    assert kanban.tasks == []
     ledger.close()
 
 
