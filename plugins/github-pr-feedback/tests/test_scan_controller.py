@@ -707,6 +707,67 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     ledger.close()
 
 
+def test_scan_reconciles_existing_failed_exact_head_receipt_to_typed_fixer(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    base_sha = "b" * 40
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+    )
+    pull_request = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha=base_sha,
+    )
+    github = FakeGitHub(pull_request, ())
+    github.actions_are_enabled = False
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_ci_receipt(
+        CIAuditReceipt(
+            receipt_id="f" * 64,
+            identity=CIAuditIdentity("acme/widgets", 17, base_sha, head_sha),
+            manifest_digest="e" * 64,
+            status="failed",
+            started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+            actions_state=CheckState(False, True, 0),
+            commands=(
+                CommandEvidence(
+                    argv=(".venv/bin/python", "scripts/run_static_lane.py"),
+                    cwd=".",
+                    returncode=1,
+                    duration_ms=1,
+                    timed_out=False,
+                    stdout_sha256="0" * 64,
+                    stderr_sha256="0" * 64,
+                    classification="logic-regression",
+                ),
+            ),
+        )
+    )
+    scanner = ScanController(policy, ledger, github, kanban, RecordingLocalGit())
+
+    first = scanner.scan()
+    second = scanner.scan()
+
+    assert first.created == 1
+    assert second.created == 0
+    assert len(kanban.tasks) == 1
+    assert kanban.tasks[0].assignee == "ci-static-fixer"
+    assert kanban.tasks[0].evidence["ci_receipt_id"] == "f" * 64
+    ledger.close()
+
+
 def test_scan_does_not_dispatch_local_ci_when_github_actions_are_enabled(
     tmp_path: Path,
 ) -> None:
@@ -1936,6 +1997,19 @@ def configured_policy(
             "assignee": "pr-local-ci-auditor",
             "post_results": True,
         }
+        raw["routing_rules"] = [
+            {
+                "assignee": "ci-static-fixer",
+                "precedence": 150,
+                "match_any": ["static lane"],
+                "match_labels_any": ["ci/static"],
+                "tags": ["type/ci", "ci/static"],
+                "priority": "P2",
+                "blast_radius": "contained",
+                "risks": [],
+                "requires_review": False,
+            }
+        ]
     return load_policy(raw)
 
 

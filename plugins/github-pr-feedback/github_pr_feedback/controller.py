@@ -719,6 +719,14 @@ class ScanController:
             return admission.reason or "not_admitted"
         if current.head_sha != listed.head_sha:
             return "head_changed"
+        existing_audit = self._ledger.latest_ci_receipt_for_head(
+            current.base_repository,
+            current.number,
+            current.head_sha,
+        )
+        if getattr(existing_audit, "status", None) == "failed":
+            repair_status = self.dispatch_ci_failure(existing_audit)
+            return None if repair_status == "scheduled" else repair_status
         receipt = FeedbackReceipt(
             repository=current.base_repository,
             pr_number=current.number,
