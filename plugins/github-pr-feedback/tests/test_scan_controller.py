@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -154,6 +155,22 @@ class MixedPullRequestGitHub(FakeGitHub):
         if number != self.pull_request.number:
             raise AssertionError("feedback for an out-of-policy PR must not be fetched")
         return self.feedback
+
+
+class ConcurrentScanGitHub(FakeGitHub):
+    def __init__(self, pulls: tuple[PullRequest, ...]) -> None:
+        super().__init__(pulls[0], ())
+        self.pulls = pulls
+        self.barrier = threading.Barrier(len(pulls))
+
+    def list_open_pull_requests(
+        self, repository: str, owner_login: str
+    ) -> tuple[PullRequest, ...]:
+        return self.pulls
+
+    def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
+        self.barrier.wait(timeout=1)
+        return ()
 
 
 class RecordingLocalGit:
@@ -1133,6 +1150,37 @@ def test_scan_filters_out_of_policy_pull_requests_before_fetching_their_feedback
     assert result.skipped["author_not_allowed"] == 1
     assert result.skipped.get("github_error", 0) == 0
     assert github.feedback_calls == [17]
+    ledger.close()
+
+
+def test_scan_reads_independent_pull_feedback_concurrently(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    pulls = tuple(
+        PullRequest(
+            number,
+            "OPEN",
+            "acme/widgets",
+            "acme/widgets",
+            "owner",
+            f"codex/fix-{number}",
+            sha,
+        )
+        for number in (17, 18, 19)
+    )
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy,
+        ledger,
+        ConcurrentScanGitHub(pulls),
+        RecordingKanban(),
+        RecordingLocalGit(),
+    ).scan()
+
+    assert result.created == 0
+    assert result.skipped == {}
+    assert result.degraded is False
     ledger.close()
 
 

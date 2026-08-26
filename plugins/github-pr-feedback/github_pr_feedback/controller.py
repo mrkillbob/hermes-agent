@@ -7,6 +7,7 @@ import shlex
 import subprocess
 from collections import Counter
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -402,20 +403,38 @@ class ScanController:
             except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
                 skipped["github_error"] += 1
                 continue
+            admitted_pull_requests: list[PullRequest] = []
             for pull_request in pull_requests:
                 pull_request_admission = self._policy.admit_pull_request(pull_request)
                 if not pull_request_admission.admitted:
                     skipped[pull_request_admission.reason or "not_admitted"] += 1
                     continue
-                try:
-                    feedback_items = self._github.list_feedback(
-                        repository, pull_request.number
+                admitted_pull_requests.append(pull_request)
+            need_current_for_ci = bool(
+                self._policy.local_ci_audit is not None
+                and self._policy.local_ci_audit.applies_to(repository)
+                and actions_enabled is False
+            )
+            with ThreadPoolExecutor(
+                max_workers=min(6, max(1, len(admitted_pull_requests)))
+            ) as executor:
+                snapshots = tuple(
+                    executor.map(
+                        lambda pull_request: self._read_scan_snapshot(
+                            repository,
+                            pull_request,
+                            need_current_for_ci=need_current_for_ci,
+                        ),
+                        admitted_pull_requests,
                     )
-                except (
-                    Exception
-                ):  # noqa: BLE001 - an adapter failure must not admit work.
+                )
+            for pull_request, snapshot in zip(
+                admitted_pull_requests, snapshots, strict=True
+            ):
+                if snapshot is None:
                     skipped["github_error"] += 1
                     continue
+                current, feedback_items = snapshot
                 feedback_pending = False
                 for feedback in feedback_items:
                     target = self._policy.targets.get(pull_request.base_repository)
@@ -450,13 +469,7 @@ class ScanController:
                     if not admission.admitted:
                         skipped[admission.reason or "not_admitted"] += 1
                         continue
-                    try:
-                        current = self._github.get_pull_request(
-                            receipt.repository, receipt.pr_number
-                        )
-                    except (
-                        Exception
-                    ):  # noqa: BLE001 - an adapter failure must not admit work.
+                    if current is None:
                         skipped["github_error"] += 1
                         continue
                     current_admission = self._policy.admit(
@@ -512,7 +525,9 @@ class ScanController:
                     elif attempted >= MAX_ADMISSIONS_PER_SCAN:
                         skipped["admission_cap"] += 1
                     else:
-                        audit_error = self._dispatch_local_ci(pull_request)
+                        audit_error = self._dispatch_local_ci(
+                            pull_request, current=current
+                        )
                         if audit_error != "duplicate":
                             attempted += 1
                         if audit_error is None:
@@ -520,6 +535,28 @@ class ScanController:
                         else:
                             skipped[audit_error] += 1
         return _scan_result(created, skipped)
+
+    def _read_scan_snapshot(
+        self,
+        repository: str,
+        pull_request: PullRequest,
+        *,
+        need_current_for_ci: bool,
+    ) -> tuple[PullRequest | None, tuple[Feedback, ...]] | None:
+        """Read one PR's independent feedback and canonical identity off-ledger."""
+
+        try:
+            feedback_items = self._github.list_feedback(
+                repository, pull_request.number
+            )
+            current = (
+                self._github.get_pull_request(repository, pull_request.number)
+                if feedback_items or need_current_for_ci
+                else None
+            )
+        except Exception:  # noqa: BLE001 - canonical read failures fail closed.
+            return None
+        return current, feedback_items
 
     def dispatch_local_ci_after_feedback(self, current: PullRequest) -> str:
         """Immediately hand an actioned feedback head to the local-CI lane."""
@@ -570,16 +607,19 @@ class ScanController:
                 return "feedback_pending"
         return self._dispatch_local_ci(current) or "scheduled"
 
-    def _dispatch_local_ci(self, listed: PullRequest) -> str | None:
+    def _dispatch_local_ci(
+        self, listed: PullRequest, *, current: PullRequest | None = None
+    ) -> str | None:
         audit_policy = self._policy.local_ci_audit
         if audit_policy is None:
             return "local_ci_disabled"
-        try:
-            current = self._github.get_pull_request(
-                listed.base_repository, listed.number
-            )
-        except Exception:  # noqa: BLE001 - canonical state is required.
-            return "github_error"
+        if current is None:
+            try:
+                current = self._github.get_pull_request(
+                    listed.base_repository, listed.number
+                )
+            except Exception:  # noqa: BLE001 - canonical state is required.
+                return "github_error"
         admission = self._policy.admit_pull_request(current)
         if not admission.admitted or admission.target is None:
             return admission.reason or "not_admitted"
