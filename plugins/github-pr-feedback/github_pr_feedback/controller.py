@@ -73,7 +73,7 @@ _LANE_PASS_EVIDENCE = re.compile(
 )
 _CODEX_REVIEW_ENVELOPE_PREFIX = "### 💡 codex review here are some automated review suggestions for this pull request."
 _CI_RECEIPT_COMMENT = re.compile(
-    r"(?:authoritative\s+)?receipt:\s*`([0-9a-f]{64})`",
+    r"(?:authoritative\s+)?receipt(?:_id)?\s*:?\s*`?([0-9a-f]{64})`?",
     flags=re.IGNORECASE,
 )
 _DEGRADED_REASONS = frozenset(
@@ -1104,7 +1104,18 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
     if len(feedback.body) >= MAX_FEEDBACK_BODY_CHARS:
         return False
     body = " ".join(feedback.body.casefold().split())
-    if not body or _has_unresolved_action(body):
+    if not body:
+        return False
+    exact_fixed_commit = re.match(r"fixed in [0-9a-f]{40,64}\b", body) is not None
+    if (
+        exact_fixed_commit
+        and any(marker in body for marker in ("verification:", "focused gate:"))
+        and (_LANE_PASS_EVIDENCE.search(body) is not None or "now succeeds" in body)
+        and not any(marker in body for marker in _ACTION_REMAINS_MARKERS)
+        and _BOUNDED_ACTION_REMAINS.search(body) is None
+    ):
+        return True
+    if _has_unresolved_action(body):
         return False
     if body.startswith(_SELF_RESOLUTION_PREFIXES):
         return True

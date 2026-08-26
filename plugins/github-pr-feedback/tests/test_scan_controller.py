@@ -709,8 +709,16 @@ def test_only_archived_exact_head_fixer_is_recreated(
     ledger.close()
 
 
+@pytest.mark.parametrize(
+    "receipt_text",
+    (
+        "Authoritative receipt: `{receipt_id}`.",
+        "Receipt `{receipt_id}`, manifest digest present.",
+        "receipt_id `{receipt_id}`, status failed.",
+    ),
+)
 def test_superseded_ci_receipt_comment_does_not_create_duplicate_repair(
-    tmp_path: Path,
+    tmp_path: Path, receipt_text: str
 ) -> None:
     identity = CIAuditIdentity("acme/widgets", 17, "b" * 40, "a" * 40)
     older = CIAuditReceipt(
@@ -743,11 +751,45 @@ def test_superseded_ci_receipt_comment_does_not_create_duplicate_repair(
     reason = _ci_receipt_feedback_reason(
         ledger,
         feedback_receipt,
-        f"Local CI audit completed. Authoritative receipt: `{'1' * 64}`.",
+        "Local CI audit completed. "
+        + receipt_text.format(receipt_id="1" * 64),
     )
 
     assert reason == "superseded_ci_receipt"
     ledger.close()
+
+
+def test_self_resolution_accepts_exact_fixed_commit_with_historic_failures() -> None:
+    item = feedback(
+        "fixed-with-historic-failures",
+        reviewer="owner",
+        body=(
+            f"Fixed in {'a' * 40}. Verification: 28 focused tests passed. "
+            "Three pre-existing failures reproduce at the pristine receipt SHA and "
+            "are unrelated to this change."
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is True
+
+
+def test_self_resolution_accepts_fixed_import_with_reproduced_old_failures() -> None:
+    item = feedback(
+        "fixed-import-with-old-failures",
+        reviewer="owner",
+        body=(
+            f"Fixed in {'d' * 40}.\n\n"
+            f"Confirmed at {'9' * 40}: importing the research module fails under "
+            "python3 -S before any scenario executes.\n\n"
+            "Fix: the owner module is now loaded directly from its file path.\n\n"
+            "Verification:\n- python3 -S import now succeeds.\n"
+            "- Focused gate: 28 passed.\n"
+            "- Note: 3 pre-existing failures reproduced identically at the pristine "
+            "receipt SHA, so they are unrelated to this change."
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is True
 
 
 class MixedPullRequestGitHub(FakeGitHub):
