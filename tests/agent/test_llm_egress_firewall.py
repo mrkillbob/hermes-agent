@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import stat
@@ -18,7 +19,9 @@ from agent.llm_egress_firewall import (
     EgressBlocked,
     LLMEgressFirewall,
     SourceGrant,
+    SourceSegmentBinding,
     classify_destination,
+    source_grant_digest,
 )
 
 
@@ -55,6 +58,18 @@ def _request(payload: str = "ordinary prompt"):
     }
 
 
+def _source_binding(grant: SourceGrant, request, *, path=("messages", 0, "content")):
+    value = request["messages"][0]["content"]
+    encoded = value.encode("utf-8")
+    return SourceSegmentBinding(
+        request_path=path,
+        byte_start=0,
+        byte_end=len(encoded),
+        content_sha256=sha256(encoded).hexdigest(),
+        source_grant_digest=source_grant_digest(grant),
+    )
+
+
 def firewall(tmp_path: Path, **kwargs) -> LLMEgressFirewall:
     return LLMEgressFirewall(tmp_path, **kwargs)
 
@@ -74,6 +89,18 @@ def test_destination_classification_does_not_trust_dns_or_provider_name():
     assert classify_destination("custom", "not-a-url", None) == DestinationClass.UNKNOWN
     assert classify_destination("custom", "http://[::1]:8000", None) == DestinationClass.LOOPBACK
     assert classify_destination("custom", "http://100.64.0.1:8000", None) == DestinationClass.REMOTE
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:99999",
+        "http://127.0.0.1:not-a-port",
+        "http://[::1]:99999",
+    ],
+)
+def test_malformed_loopback_ports_are_unknown(url):
+    assert classify_destination("custom", url, None) == DestinationClass.UNKNOWN
 
 
 def test_explicit_in_process_api_mode_is_local_process():
@@ -102,21 +129,63 @@ def test_remote_request_requires_an_exact_source_grant(tmp_path):
     path = tmp_path / "private.py"
     path.write_text("private source\npublic source\n", encoding="utf-8")
     grant = _source_grant(path)
+    request = _request("private source\n")
     with pytest.raises(EgressBlocked) as exc_info:
-        firewall(tmp_path).preflight(_request("private source"), _route(), grants=())
+        firewall(tmp_path).preflight(request, _route(), grants=())
     assert "untrusted_provenance" in exc_info.value.decision.reason_codes
 
-    decision = firewall(tmp_path).preflight(_request("private source"), _route(), grants=(grant,))
+    decision = firewall(tmp_path).preflight(
+        request,
+        _route(),
+        grants=(grant,),
+        source_segments=(_source_binding(grant, request),),
+    )
     assert decision.allowed is True
+
+
+def test_unrelated_grant_and_incomplete_source_manifest_are_denied(tmp_path):
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("first source\n", encoding="utf-8")
+    second.write_text("second source\n", encoding="utf-8")
+    first_grant = _source_grant(first)
+    second_grant = _source_grant(second)
+    request = _request("first source\n")
+    first_binding = _source_binding(first_grant, request)
+
+    with pytest.raises(EgressBlocked) as unrelated_exc:
+        firewall(tmp_path).preflight(
+            request,
+            _route(),
+            grants=(second_grant,),
+            source_segments=(_source_binding(second_grant, request),),
+        )
+    assert "source_segment_hash_mismatch" in unrelated_exc.value.decision.reason_codes
+
+    with pytest.raises(EgressBlocked) as incomplete_exc:
+        firewall(tmp_path).preflight(
+            request,
+            _route(),
+            grants=(first_grant, second_grant),
+            source_segments=(first_binding,),
+        )
+    assert "source_grant_unbound" in incomplete_exc.value.decision.reason_codes
 
 
 def test_modified_source_and_adjacent_slice_are_denied(tmp_path):
     path = tmp_path / "private.py"
     path.write_text("private source\nneighbor\n", encoding="utf-8")
     grant = _source_grant(path)
+    request = _request("private source\n")
+    binding = _source_binding(grant, request)
     path.write_text("changed source\nneighbor\n", encoding="utf-8")
     with pytest.raises(EgressBlocked) as exc_info:
-        firewall(tmp_path).preflight(_request("private source"), _route(), grants=(grant,))
+        firewall(tmp_path).preflight(
+            request,
+            _route(),
+            grants=(grant,),
+            source_segments=(binding,),
+        )
     assert "source_hash_mismatch" in exc_info.value.decision.reason_codes
 
 
@@ -124,8 +193,14 @@ def test_sensitive_path_and_forged_grant_fail_closed(tmp_path, monkeypatch):
     path = tmp_path / ".env"
     path.write_text("API_KEY=sk-test-secret\n", encoding="utf-8")
     grant = _source_grant(path)
+    sensitive_request = _request("API_KEY=sk-test-secret\n")
     with pytest.raises(EgressBlocked) as exc_info:
-        firewall(tmp_path).preflight(_request("private source"), _route(), grants=(grant,))
+        firewall(tmp_path).preflight(
+            sensitive_request,
+            _route(),
+            grants=(grant,),
+            source_segments=(_source_binding(grant, sensitive_request),),
+        )
     assert "sensitive_path" in exc_info.value.decision.reason_codes
 
     missing = tmp_path / "missing.py"
@@ -141,8 +216,14 @@ def test_sensitive_path_and_forged_grant_fail_closed(tmp_path, monkeypatch):
         request_id="req-1",
         policy_digest="policy-1",
     )
+    missing_request = _request("private source\n")
     with pytest.raises(EgressBlocked) as missing_exc:
-        firewall(tmp_path).preflight(_request("private source"), _route(), grants=(forged,))
+        firewall(tmp_path).preflight(
+            missing_request,
+            _route(),
+            grants=(forged,),
+            source_segments=(_source_binding(forged, missing_request),),
+        )
     assert "source_unavailable" in missing_exc.value.decision.reason_codes
 
 
@@ -150,6 +231,30 @@ def test_forced_secret_redaction_rejects_instead_of_rewriting(tmp_path):
     with pytest.raises(EgressBlocked) as exc_info:
         firewall(tmp_path).preflight(_request("token=super-secret-value"), _route(), grants=(object(),))
     assert "secret_detected" in exc_info.value.decision.reason_codes
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        base64.b64encode(b"sk-proj-abc123def456ghi789jkl012").decode("ascii"),
+        base64.urlsafe_b64encode(b"harmless text that is still encoded").decode("ascii"),
+    ],
+)
+def test_canonical_base64_payloads_are_rejected_even_when_decoded_content_is_benign(
+    tmp_path,
+    payload,
+):
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(_request(payload), _route(), grants=(object(),))
+    assert "base64_payload" in exc_info.value.decision.reason_codes
+
+
+def test_ordinary_short_base64_alphabet_words_are_not_false_positives(tmp_path):
+    decision = firewall(tmp_path).preflight(
+        _request("ordinary short words remain usable"),
+        _route(base_url="http://127.0.0.1:11434"),
+    )
+    assert "base64_payload" not in decision.reason_codes
 
 
 def test_scanner_error_fails_closed(monkeypatch, tmp_path):
@@ -195,7 +300,13 @@ def test_allow_receipt_contains_hashes_and_counts_but_no_payload(tmp_path):
     path = tmp_path / "private.py"
     path.write_text("private source\n", encoding="utf-8")
     grant = _source_grant(path)
-    decision = firewall(tmp_path).preflight(_request("private source"), _route(), grants=(grant,))
+    request = _request("private source\n")
+    decision = firewall(tmp_path).preflight(
+        request,
+        _route(),
+        grants=(grant,),
+        source_segments=(_source_binding(grant, request),),
+    )
     receipt = json.loads((tmp_path / "llm-egress-receipts.jsonl").read_text().splitlines()[0])
     assert receipt["payload_sha256"] == decision.payload_sha256
     assert receipt["serialized_bytes"] == decision.serialized_bytes
@@ -223,8 +334,15 @@ def test_receipt_is_owner_only_and_rejects_symlink_ledger(tmp_path):
     path = tmp_path / "private.py"
     path.write_text("private source\n", encoding="utf-8")
     grant = _source_grant(path)
+    request = _request("private source\n")
+    binding = _source_binding(grant, request)
     ledger = tmp_path / "llm-egress-receipts.jsonl"
-    firewall(tmp_path).preflight(_request("private source"), _route(), grants=(grant,))
+    firewall(tmp_path).preflight(
+        request,
+        _route(),
+        grants=(grant,),
+        source_segments=(binding,),
+    )
     assert stat.S_IMODE(ledger.stat().st_mode) == 0o600
 
     ledger.unlink()
@@ -232,7 +350,12 @@ def test_receipt_is_owner_only_and_rejects_symlink_ledger(tmp_path):
     target.write_text("", encoding="utf-8")
     ledger.symlink_to(target)
     with pytest.raises(EgressBlocked) as exc_info:
-        firewall(tmp_path).preflight(_request("private source"), _route(), grants=(grant,))
+        firewall(tmp_path).preflight(
+            request,
+            _route(),
+            grants=(grant,),
+            source_segments=(binding,),
+        )
     assert "receipt_unavailable" in exc_info.value.decision.reason_codes
 
 

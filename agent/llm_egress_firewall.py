@@ -8,6 +8,8 @@ an immutable block decision.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import fcntl
 import ipaddress
 import json
@@ -50,6 +52,17 @@ class SourceGrant:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceSegmentBinding:
+    """Bind exact byte offsets in the final request to one source grant."""
+
+    request_path: tuple[str | int, ...]
+    byte_start: int
+    byte_end: int
+    content_sha256: str
+    source_grant_digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class EgressDecision:
     """Content-free result of one egress preflight."""
 
@@ -61,6 +74,7 @@ class EgressDecision:
     serialized_bytes: int
     estimated_tokens: int
     source_grant_count: int
+    source_segment_count: int
     session_id: str
     turn_id: str
     request_id: str
@@ -79,6 +93,10 @@ class EgressBlocked(RuntimeError):
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:@/-]{0,256}$")
 _LOCAL_PROCESS_MODES = frozenset({"local_process", "in_process"})
+_BASE64_CANDIDATE = re.compile(
+    r"(?<![A-Za-z0-9_+/\-])([A-Za-z0-9_+/\-]{24,}={0,2})(?![A-Za-z0-9_+/=\-])"
+)
+_MAX_BASE64_CANDIDATE_CHARS = 262_144
 
 
 def classify_destination(
@@ -102,6 +120,15 @@ def classify_destination(
     try:
         parsed = urlsplit(base_url.strip())
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            return DestinationClass.UNKNOWN
+        # ``hostname`` does not validate the port.  Accessing ``port`` is
+        # load-bearing: urllib deliberately raises for non-numeric and
+        # out-of-range values that must never inherit loopback trust.
+        try:
+            parsed.port
+        except ValueError:
+            return DestinationClass.UNKNOWN
+        if parsed.netloc.rsplit("@", 1)[-1].endswith(":"):
             return DestinationClass.UNKNOWN
         host = parsed.hostname
         if not host:
@@ -143,6 +170,94 @@ def _receipt_identifier(value: str) -> str:
     except Exception:
         safe = False
     return value if safe else f"sha256:{sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def source_grant_digest(grant: SourceGrant) -> str:
+    """Return the opaque identity used by a source-segment manifest."""
+
+    bound_fields = {
+        "canonical_path": str(grant.canonical_path),
+        "display_path": grant.display_path,
+        "line_start": grant.line_start,
+        "line_end": grant.line_end,
+        "content_sha256": grant.content_sha256,
+        "byte_count": grant.byte_count,
+        "session_id": grant.session_id,
+        "turn_id": grant.turn_id,
+        "request_id": grant.request_id,
+        "policy_digest": grant.policy_digest,
+    }
+    encoded = json.dumps(bound_fields, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _canonical_base64_candidate(candidate: str) -> bool:
+    """Recognize bounded canonical encodings without flagging ordinary IDs."""
+
+    if not 24 <= len(candidate) <= _MAX_BASE64_CANDIDATE_CHARS:
+        return False
+    if len(candidate) % 4 != 0:
+        return False
+    encoded = candidate.encode("ascii")
+    decoded_variants: list[bytes] = []
+    for altchars in (None, b"-_"):
+        try:
+            decoded = base64.b64decode(encoded, altchars=altchars, validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        canonical = (
+            base64.b64encode(decoded)
+            if altchars is None
+            else base64.urlsafe_b64encode(decoded)
+        )
+        if canonical == encoded:
+            decoded_variants.append(decoded)
+
+    for decoded in decoded_variants:
+        if len(decoded) < 16:
+            continue
+        # Padding or alphabet-specific symbols are strong encoding markers.
+        if candidate.endswith("=") or any(char in candidate for char in "+/_-"):
+            return True
+        # Unpadded all-alphanumeric strings overlap hashes and opaque IDs.
+        # Require canonical decoding to readable structured text so those
+        # common values do not become false positives.
+        try:
+            decoded_text = decoded.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        printable = sum(char.isprintable() or char in "\r\n\t" for char in decoded_text)
+        if printable / max(len(decoded_text), 1) >= 0.9 and any(
+            not char.isalnum() for char in decoded_text
+        ):
+            return True
+    return False
+
+
+def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> bool:
+    if isinstance(value, str):
+        return any(_canonical_base64_candidate(match.group(1)) for match in _BASE64_CANDIDATE.finditer(value))
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return True
+    if seen is None:
+        seen = set()
+    if isinstance(value, Mapping):
+        identity = id(value)
+        if identity in seen:
+            return True
+        seen.add(identity)
+        return any(
+            _contains_canonical_base64(key, seen=seen)
+            or _contains_canonical_base64(item, seen=seen)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        identity = id(value)
+        if identity in seen:
+            return True
+        seen.add(identity)
+        return any(_contains_canonical_base64(item, seen=seen) for item in value)
+    return False
 
 
 def _contains_secret(value: Any, *, seen: set[int] | None = None) -> bool:
@@ -206,6 +321,7 @@ class LLMEgressFirewall:
         route: Any,
         *,
         grants: Sequence[SourceGrant] = (),
+        source_segments: Sequence[SourceSegmentBinding] = (),
     ) -> EgressDecision:
         """Authorize one final request or raise a typed, fail-closed result."""
 
@@ -238,6 +354,7 @@ class LLMEgressFirewall:
                 serialized_bytes=0,
                 estimated_tokens=0,
                 source_grant_count=0,
+                source_segment_count=0,
                 session_id=session_id,
                 turn_id=turn_id,
                 request_id=request_id,
@@ -266,6 +383,11 @@ class LLMEgressFirewall:
                     reasons.append("secret_detected")
             except Exception:
                 reasons.append("redaction_failed")
+            try:
+                if _contains_canonical_base64(request):
+                    reasons.append("base64_payload")
+            except Exception:
+                reasons.append("base64_scan_failed")
 
         if destination == DestinationClass.REMOTE:
             grant_reasons, valid_grants = self._validate_grants(
@@ -276,6 +398,12 @@ class LLMEgressFirewall:
                 policy_digest=policy_digest,
             )
             reasons.extend(grant_reasons)
+            segment_reasons = self._validate_source_segments(
+                request,
+                source_segments,
+                valid_grants,
+            )
+            reasons.extend(segment_reasons)
 
         decision = EgressDecision(
             allowed=not reasons,
@@ -286,6 +414,7 @@ class LLMEgressFirewall:
             serialized_bytes=serialized_bytes,
             estimated_tokens=estimated_tokens,
             source_grant_count=len(valid_grants),
+            source_segment_count=len(source_segments),
             session_id=session_id,
             turn_id=turn_id,
             request_id=request_id,
@@ -377,6 +506,72 @@ class LLMEgressFirewall:
             reasons.append("untrusted_provenance")
         return reasons, valid
 
+    def _validate_source_segments(
+        self,
+        request: Mapping[str, Any],
+        source_segments: Sequence[SourceSegmentBinding],
+        valid_grants: Sequence[SourceGrant],
+    ) -> list[str]:
+        if not valid_grants:
+            return []
+        if not source_segments:
+            return ["source_grant_unbound"]
+
+        reasons: list[str] = []
+        grants_by_digest = {source_grant_digest(grant): grant for grant in valid_grants}
+        referenced_grants: set[str] = set()
+
+        for binding in source_segments:
+            if not isinstance(binding, SourceSegmentBinding):
+                reasons.append("invalid_source_segment")
+                continue
+            grant = grants_by_digest.get(binding.source_grant_digest)
+            if grant is None:
+                reasons.append("source_segment_grant_mismatch")
+                continue
+            if (
+                binding.byte_start < 0
+                or binding.byte_end <= binding.byte_start
+                or not re.fullmatch(r"[0-9a-f]{64}", binding.content_sha256)
+            ):
+                reasons.append("invalid_source_segment")
+                continue
+            try:
+                current: Any = request
+                for component in binding.request_path:
+                    if isinstance(component, str) and isinstance(current, Mapping):
+                        current = current[component]
+                    elif (
+                        isinstance(component, int)
+                        and not isinstance(component, bool)
+                        and isinstance(current, (list, tuple))
+                    ):
+                        current = current[component]
+                    else:
+                        raise KeyError(component)
+                if not isinstance(current, str):
+                    raise TypeError("source segment target is not text")
+                request_bytes = current.encode("utf-8")
+                segment = request_bytes[binding.byte_start : binding.byte_end]
+            except (IndexError, KeyError, TypeError, UnicodeError):
+                reasons.append("source_segment_unavailable")
+                continue
+            if binding.byte_end > len(request_bytes):
+                reasons.append("source_segment_range_mismatch")
+                continue
+            if (
+                len(segment) != grant.byte_count
+                or sha256(segment).hexdigest() != binding.content_sha256
+                or binding.content_sha256 != grant.content_sha256
+            ):
+                reasons.append("source_segment_hash_mismatch")
+                continue
+            referenced_grants.add(binding.source_grant_digest)
+
+        if set(grants_by_digest) - referenced_grants:
+            reasons.append("source_grant_unbound")
+        return reasons
+
     def _block(
         self,
         decision: EgressDecision,
@@ -443,5 +638,7 @@ __all__ = [
     "EgressDecision",
     "LLMEgressFirewall",
     "SourceGrant",
+    "SourceSegmentBinding",
     "classify_destination",
+    "source_grant_digest",
 ]
