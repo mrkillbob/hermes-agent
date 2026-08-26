@@ -33,6 +33,7 @@ class MergeSnapshot:
     ci_receipt: CIAuditReceipt | None
     manifest_digest: str
     feedback_clear: bool
+    base_head_sha: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +119,8 @@ def evaluate_merge(
         blockers.append("head_repository_not_allowed")
     if pull.base_branch != policy.base_branch:
         blockers.append("base_branch_mismatch")
+    if pull.base_sha != snapshot.base_head_sha:
+        blockers.append("base_head_changed")
     if not snapshot.branch_allowed:
         blockers.append("head_branch_not_allowed")
     if pull.state != "OPEN" or pull.merged:
@@ -333,6 +336,9 @@ class CanonicalMergeEvidenceSource:
             ci_receipt=receipt,
             manifest_digest=manifest_digest,
             feedback_clear=feedback_clear,
+            base_head_sha=self._github.get_branch_head(
+                policy.repository, policy.base_branch
+            ),
         )
 
     def _feedback_clear(self, pull: PullRequestMergeState) -> bool:
@@ -391,6 +397,7 @@ def _snapshot_digest(snapshot: MergeSnapshot, receipt: CIAuditReceipt | None) ->
             "merged": pull.merged,
         },
         "branch_allowed": snapshot.branch_allowed,
+        "base_head_sha": snapshot.base_head_sha,
         "methods": {
             "squash": snapshot.repository_merge_policy.squash,
             "rebase": snapshot.repository_merge_policy.rebase,

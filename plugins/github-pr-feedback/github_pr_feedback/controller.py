@@ -877,6 +877,7 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
             "local pr ci audit",
             "re-audit reconciliation",
             "hygiene-lane receipt follow-up",
+            "independent validation of this audit",
         )
     )
     inherited_marker = "pre-existing" in body and any(
@@ -887,9 +888,17 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
             "base tip",
             "canonical base",
             "branch lineage",
+            "shared-base",
         )
     )
-    routed_separately = "separate repair" in body or "not introduced by this pr" in body
+    routed_separately = any(
+        marker in body
+        for marker in (
+            "separate repair",
+            "not introduced by this pr",
+            "not regressions of this pr",
+        )
+    )
     if audit_marker and inherited_marker and routed_separately:
         return True
     return body.startswith("confirmed ") and "superseded" in body

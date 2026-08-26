@@ -44,6 +44,9 @@ class CanonicalFakeGitHub:
     def get_merge_state(self, repository: str, number: int) -> PullRequestMergeState:
         return self.states.pop(0)
 
+    def get_branch_head(self, repository: str, branch: str) -> str:
+        return BASE_SHA
+
     def repository_is_private(self, repository: str) -> bool:
         return True
 

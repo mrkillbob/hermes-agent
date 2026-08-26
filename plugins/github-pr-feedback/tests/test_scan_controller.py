@@ -1007,6 +1007,15 @@ def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
                 ),
             ),
             feedback(
+                "shared-base-independent-validation",
+                reviewer="owner",
+                body=(
+                    "Independent validation of this audit at the exact receipt head. "
+                    "Reproduction confirmed: the failures are pre-existing shared-base "
+                    "failures, not regressions of this PR."
+                ),
+            ),
+            feedback(
                 "pr-regression",
                 reviewer="owner",
                 body=(
@@ -1022,7 +1031,7 @@ def test_scan_suppresses_base_inherited_self_audits_but_keeps_pr_regressions(
     result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
 
     assert result.created == 1
-    assert result.skipped["self_resolution_receipt"] == 6
+    assert result.skipped["self_resolution_receipt"] == 7
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["pr-regression"]
     ledger.close()
 

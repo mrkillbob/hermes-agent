@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 import subprocess
@@ -40,10 +41,12 @@ def merge_state(
     )
 
 
-def policy(tmp_path: Path, *, report_only: bool = False):
+def policy(
+    tmp_path: Path, *, report_only: bool = False, merge_maintainer: bool = False
+):
     repository = tmp_path / "repo"
     subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
-    return load_policy({
+    raw = {
         "enabled": True,
         "repositories": [
             {
@@ -65,7 +68,20 @@ def policy(tmp_path: Path, *, report_only: bool = False):
             "repositories": ["acme/widgets"],
             "report_only": report_only,
         },
-    })
+    }
+    if merge_maintainer:
+        raw["merge_maintainer"] = {
+            "enabled": True,
+            "assignee": "pr-merge-maintainer",
+            "repository": "acme/widgets",
+            "author_login": "owner",
+            "base_branch": "stable",
+            "merge_methods": ["squash"],
+            "receipt_max_age_seconds": 3600,
+            "report_only": False,
+            "post_merge": {"enabled": False},
+        }
+    return load_policy(raw)
 
 
 def test_repair_triggers_cover_conflicts_changes_requested_and_non_green_actions() -> (
@@ -99,6 +115,40 @@ class GitHub:
 class GitHubWithoutChecks(GitHub):
     def get_check_state(self, repository: str, head_sha: str):
         raise RuntimeError("check state unavailable")
+
+
+class BehindBaseGitHub(GitHub):
+    def get_merge_state(self, repository: str, number: int):
+        return replace(merge_state(), base_branch="stable")
+
+    def get_branch_head(self, repository: str, branch: str):
+        assert (repository, branch) == ("acme/widgets", "stable")
+        return "c" * 40
+
+
+class ManyBehindBaseGitHub(BehindBaseGitHub):
+    def list_open_pull_requests(self, repository: str, owner: str):
+        from github_pr_feedback.policy import PullRequest
+
+        return tuple(
+            PullRequest(
+                number,
+                "OPEN",
+                repository,
+                repository,
+                owner,
+                "codex/fix",
+                str(number % 10) * 40,
+            )
+            for number in (17, 18)
+        )
+
+    def get_merge_state(self, repository: str, number: int):
+        return replace(
+            merge_state(number=number),
+            base_branch="stable",
+            head_sha=str(number % 10) * 40,
+        )
 
 
 class ConcurrentReadGitHub(GitHub):
@@ -159,6 +209,49 @@ def test_repair_controller_dedupes_exact_head_and_preserves_merge_authority(
     assert "Do not merge the pull request" in task.instructions
     assert "Do not force-push" in task.instructions
     assert "Do not weaken" in task.instructions
+    ledger.close()
+
+
+def test_repair_controller_routes_a_stale_pr_base_into_the_refresh_lane(
+    tmp_path: Path,
+) -> None:
+    configured = policy(tmp_path, merge_maintainer=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+
+    result = RepairController(
+        configured,
+        ledger,
+        BehindBaseGitHub(),
+        kanban,
+        LocalGit(),
+    ).scan()
+
+    assert result.created == 1
+    assert kanban.tasks[0].evidence["triggers"] == ["base_refresh_required"]
+    assert "normal merge" in kanban.tasks[0].instructions
+    assert "base_refresh_required" in kanban.tasks[0].instructions
+    ledger.close()
+
+
+def test_repair_controller_dispatches_only_one_base_refresh_per_scan(
+    tmp_path: Path,
+) -> None:
+    configured = policy(tmp_path, merge_maintainer=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+
+    result = RepairController(
+        configured,
+        ledger,
+        ManyBehindBaseGitHub(),
+        kanban,
+        LocalGit(),
+    ).scan()
+
+    assert result.created == 1
+    assert result.skipped["base_refresh_serialized"] == 1
+    assert len(kanban.tasks) == 1
     ledger.close()
 
 

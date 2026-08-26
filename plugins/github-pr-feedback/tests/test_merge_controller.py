@@ -89,6 +89,7 @@ def eligible_snapshot(**overrides: object) -> MergeSnapshot:
         "ci_receipt": ci_receipt(),
         "manifest_digest": "e" * 64,
         "feedback_clear": True,
+        "base_head_sha": BASE_SHA,
     }
     values.update(overrides)
     return MergeSnapshot(**values)
@@ -166,6 +167,24 @@ def test_evaluate_merge_selects_first_configured_repository_enabled_method() -> 
     assert decision.blockers == ()
     assert decision.method == "rebase"
     assert len(decision.snapshot_digest) == 64
+
+
+def test_evaluate_merge_rejects_a_receipt_tested_before_the_live_base_head() -> None:
+    snapshot = eligible_snapshot(base_head_sha=MERGE_SHA)
+
+    decision = evaluate_merge(policy(), snapshot, now=NOW)
+
+    assert decision.eligible is False
+    assert "base_head_changed" in decision.blockers
+
+
+def test_merge_snapshot_digest_binds_the_live_base_head() -> None:
+    current = evaluate_merge(policy(), eligible_snapshot(), now=NOW)
+    advanced = evaluate_merge(
+        policy(), eligible_snapshot(base_head_sha=MERGE_SHA), now=NOW
+    )
+
+    assert current.snapshot_digest != advanced.snapshot_digest
 
 
 def test_evaluate_merge_requires_review_label_for_governed_risk_or_broad_blast() -> None:
