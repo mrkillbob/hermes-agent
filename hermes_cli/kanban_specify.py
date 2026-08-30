@@ -141,6 +141,7 @@ def _profile_author() -> str:
 
 _CONCRETE_OUTCOME_MARKERS = (
     "acceptance criteria",
+    "authoritative local ci failure receipt",
     "deliverable:",
     "if nothing clears the bar",
     "when sources and local evidence agree",
