@@ -2160,7 +2160,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
             context_management=_context_management,
         )
         return _attach_source_provenance_sidecar(
-            agent, _codex_kwargs, sidecar=_source_sidecar
+            agent, _codex_kwargs, api_messages
         )
 
     # ── chat_completions (default) ─────────────────────────────────────
