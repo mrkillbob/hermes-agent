@@ -9,6 +9,7 @@ import pytest
 
 from agent.llm_egress_firewall import EgressBlocked, SanitizedTextRejected
 from agent.llm_egress_runtime import (
+    _restore_source_provenance_sidecar,
     _typed_payload_violation_locations,
     authorize_agent_sdk_kwargs,
     dispatch_authorized_agent_request,
@@ -2899,6 +2900,208 @@ def test_protected_kanban_admits_bounded_codex_function_output(
     assert receipt.allowed
     assert authorized["input"][1]["output"] == kwargs["input"][1]["output"]
     assert receipt.decision.source_segment_count == 0
+
+
+def test_codex_responses_restores_source_metadata_by_call_id_and_hash():
+    """Responses results get only their exact sidecar provenance copy."""
+
+    call_id = "call_read_file_123"
+    result = '{"path":"source.py","content":"1|safe = True"}'
+    sidecar = [
+        {
+            "message_index": 0,
+            "tool_call_id": call_id,
+            "content_sha256": sha256(result.encode("utf-8")).hexdigest(),
+            "request_id": "turn-1:api:1",
+            "source_grant_digests": ["grant-digest"],
+            "presentation_kind": "read_file_json_v1",
+        }
+    ]
+    output = {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": result,
+    }
+    body = {"input": [{"type": "function_call", "call_id": call_id}, output]}
+    original_input = body["input"]
+    sidecar_before = [dict(entry) for entry in sidecar]
+
+    restored = _restore_source_provenance_sidecar(body, sidecar)
+
+    assert restored["input"] is not original_input
+    assert restored["input"][1] is not output
+    assert restored["input"][1]["_source_provenance"] == {
+        "content_sha256": sha256(result.encode("utf-8")).hexdigest(),
+        "request_id": "turn-1:api:1",
+        "source_grant_digests": ["grant-digest"],
+        "presentation_kind": "read_file_json_v1",
+    }
+    assert "_source_provenance" not in output
+    assert body["input"] is original_input
+    assert sidecar == sidecar_before
+
+
+@pytest.mark.parametrize("mutation", ("wrong_call", "wrong_hash"))
+def test_codex_responses_does_not_restore_ambiguous_or_mismatched_metadata(mutation):
+    """A mismatched sidecar never grants a Responses result provenance."""
+
+    result = '{"path":"source.py","content":"1|safe = True"}'
+    call_id = "call_read_file_123"
+    sidecar = [
+        {
+            "message_index": 0,
+            "tool_call_id": "call_other" if mutation == "wrong_call" else call_id,
+            "content_sha256": (
+                "0" * 64
+                if mutation == "wrong_hash"
+                else sha256(result.encode("utf-8")).hexdigest()
+            ),
+            "request_id": "turn-1:api:1",
+            "source_grant_digests": ["grant-digest"],
+            "presentation_kind": "read_file_json_v1",
+        }
+    ]
+    body = {
+        "input": [
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": result,
+            }
+        ]
+    }
+
+    restored = _restore_source_provenance_sidecar(body, sidecar)
+
+    assert "_source_provenance" not in restored["input"][0]
+
+
+def test_codex_responses_does_not_restore_ambiguous_duplicate_result():
+    """One sidecar entry cannot bind more than one identical Responses result."""
+
+    call_id = "call_read_file_123"
+    result = '{"path":"source.py","content":"1|safe = True"}'
+    sidecar = [
+        {
+            "message_index": 0,
+            "tool_call_id": call_id,
+            "content_sha256": sha256(result.encode("utf-8")).hexdigest(),
+            "request_id": "turn-1:api:1",
+            "source_grant_digests": ["grant-digest"],
+            "presentation_kind": "read_file_json_v1",
+        }
+    ]
+    body = {
+        "input": [
+            {"type": "function_call_output", "call_id": call_id, "output": result},
+            {"type": "function_call_output", "call_id": call_id, "output": result},
+        ]
+    }
+
+    restored = _restore_source_provenance_sidecar(body, sidecar)
+
+    assert all("_source_provenance" not in item for item in restored["input"])
+
+
+def test_codex_responses_restores_source_metadata_from_one_input_text_result():
+    """The canonical one-item Responses text array binds to its sidecar."""
+
+    call_id = "call_read_file_123"
+    result = '{"path":"source.py","content":"1|safe = True"}'
+    body = {
+        "input": [
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": [{"type": "input_text", "text": result}],
+            }
+        ]
+    }
+    sidecar = [
+        {
+            "message_index": 0,
+            "tool_call_id": call_id,
+            "content_sha256": sha256(result.encode("utf-8")).hexdigest(),
+            "request_id": "turn-1:api:1",
+            "source_grant_digests": ["grant-digest"],
+            "presentation_kind": "read_file_json_v1",
+        }
+    ]
+
+    restored = _restore_source_provenance_sidecar(body, sidecar)
+
+    assert restored["input"][0]["_source_provenance"]["content_sha256"] == sidecar[0][
+        "content_sha256"
+    ]
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        [],
+        [
+            {"type": "input_text", "text": '{"content":"safe"}'},
+            {"type": "input_text", "text": '{"content":"also safe"}'},
+        ],
+        [{"type": "input_image", "image_url": "https://example.test/image"}],
+        {"type": "input_text", "text": '{"content":"safe"}'},
+        [{"type": "input_text"}],
+        [{"type": "input_text", "text": 1}],
+        [{"type": "output_text", "text": '{"content":"safe"}'}],
+    ),
+)
+def test_codex_responses_does_not_restore_ambiguous_or_malformed_output(output):
+    """Only one exact input_text item is eligible for structured restoration."""
+
+    call_id = "call_read_file_123"
+    result = '{"content":"safe"}'
+    sidecar = [
+        {
+            "message_index": 0,
+            "tool_call_id": call_id,
+            "content_sha256": sha256(result.encode("utf-8")).hexdigest(),
+            "request_id": "turn-1:api:1",
+            "source_grant_digests": ["grant-digest"],
+            "presentation_kind": "read_file_json_v1",
+        }
+    ]
+    body = {
+        "input": [
+            {"type": "function_call_output", "call_id": call_id, "output": output}
+        ]
+    }
+
+    restored = _restore_source_provenance_sidecar(body, sidecar)
+
+    assert "_source_provenance" not in restored["input"][0]
+
+
+def test_source_provenance_sidecar_keeps_chat_restoration_compatible():
+    """Existing Chat results retain their exact content-bound restoration."""
+
+    content = '{"path":"source.py","content":"1|safe = True"}'
+    body = {
+        "messages": [
+            {"role": "tool", "tool_call_id": "call_read_file_123", "content": content}
+        ]
+    }
+    sidecar = [
+        {
+            "message_index": 0,
+            "tool_call_id": "call_read_file_123",
+            "content_sha256": sha256(content.encode("utf-8")).hexdigest(),
+            "request_id": "turn-1:api:1",
+            "source_grant_digests": ["grant-digest"],
+            "presentation_kind": "read_file_json_v1",
+        }
+    ]
+
+    restored = _restore_source_provenance_sidecar(body, sidecar)
+
+    assert restored["messages"][0]["_source_provenance"]["content_sha256"] == sidecar[0][
+        "content_sha256"
+    ]
+    assert "_source_provenance" not in body["messages"][0]
 
 
 def test_real_read_file_wire_result_keeps_exact_source_provenance(

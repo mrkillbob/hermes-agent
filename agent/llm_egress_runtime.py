@@ -2709,10 +2709,11 @@ def _restore_source_provenance_sidecar(
     messages = restored.get("messages")
     if not isinstance(sidecar, list):
         return restored
+    consumed_entries: set[int] = set()
     if isinstance(messages, list):
         copied_messages = list(messages)
         changed = False
-        for entry in sidecar:
+        for entry_index, entry in enumerate(sidecar):
             if not isinstance(entry, Mapping):
                 continue
             index = entry.get("message_index")
@@ -2744,80 +2745,63 @@ def _restore_source_provenance_sidecar(
                 if key in entry
             }
             copied_messages[index] = copied
+            consumed_entries.add(entry_index)
             changed = True
         if changed:
             restored["messages"] = copied_messages
 
-    def _restore_input_items(input_items: Any) -> tuple[Any, bool]:
-        if not isinstance(input_items, list):
-            return input_items, False
-        copied_input = list(input_items)
-        changed = False
-        for entry in sidecar:
-            if not isinstance(entry, Mapping):
+    responses_input = restored.get("input")
+    if not isinstance(responses_input, list):
+        return restored
+    copied_input = list(responses_input)
+    consumed_results: set[int] = set()
+    changed = False
+    for entry_index, entry in enumerate(sidecar):
+        if entry_index in consumed_entries or not isinstance(entry, Mapping):
+            continue
+        tool_call_id = entry.get("tool_call_id")
+        content_sha256 = entry.get("content_sha256")
+        if not isinstance(tool_call_id, str) or not isinstance(content_sha256, str):
+            continue
+        candidates: list[int] = []
+        for index, item in enumerate(responses_input):
+            if index in consumed_results or not isinstance(item, Mapping):
                 continue
-            expected_sha = entry.get("content_sha256")
-            original_call_id = entry.get("tool_call_id")
-            if not isinstance(expected_sha, str) or not isinstance(original_call_id, str):
+            if (
+                item.get("type") != "function_call_output"
+                or item.get("call_id") != tool_call_id
+            ):
                 continue
-            try:
-                from agent.codex_responses_adapter import _clamp_responses_call_id
-
-                expected_call_id = _clamp_responses_call_id(original_call_id)
-            except Exception:
-                expected_call_id = original_call_id
-            candidates: list[int] = []
-            for index, item in enumerate(copied_input):
-                if not isinstance(item, Mapping):
-                    continue
-                output = item.get("output")
-                output_text = (
-                    _structured_tool_output_text(output)
-                    if isinstance(output, (list, Mapping))
-                    else output
-                )
-                if (
-                    item.get("type") == "function_call_output"
-                    and item.get("call_id") == expected_call_id
-                    and isinstance(output_text, str)
-                    and sha256(output_text.encode("utf-8")).hexdigest() == expected_sha
-                ):
-                    candidates.append(index)
-            if len(candidates) != 1:
-                continue
-            index = candidates[0]
-            copied = dict(copied_input[index])
-            copied["_source_provenance"] = {
-                key: entry[key]
-                for key in (
-                    "request_id",
-                    "source_grant_digests",
-                    "content_sha256",
-                    "presentation_kind",
-                )
-                if key in entry
-            }
-            copied_input[index] = copied
-            changed = True
-        return copied_input if changed else input_items, changed
-
-    restored_input, input_changed = _restore_input_items(restored.get("input"))
-    if input_changed:
-        restored["input"] = restored_input
-
-    # The consumer-Codex SDK transform bypass moves the already-normalized
-    # bulk ``input`` under ``extra_body`` immediately before dispatch.  That
-    # remains provider wire data, so bind the same exact call-id/content proof
-    # there as well; no other nested shape is accepted.
-    extra_body = restored.get("extra_body")
-    if isinstance(extra_body, Mapping):
-        restored_extra_input, extra_input_changed = _restore_input_items(
-            extra_body.get("input")
-        )
-        if extra_input_changed:
-            copied_extra_body = dict(extra_body)
-            copied_extra_body["input"] = restored_extra_input
-            restored["extra_body"] = copied_extra_body
+            output = item.get("output")
+            output_text = (
+                output
+                if isinstance(output, str)
+                else _structured_tool_output_text(output)
+            )
+            if (
+                isinstance(output_text, str)
+                and sha256(output_text.encode("utf-8")).hexdigest() == content_sha256
+            ):
+                candidates.append(index)
+        if len(candidates) != 1:
+            continue
+        index = candidates[0]
+        copied = dict(responses_input[index])
+        copied["_source_provenance"] = {
+            key: entry[key]
+            for key in (
+                "request_id",
+                "source_grant_digests",
+                "content_sha256",
+                "presentation_kind",
+            )
+            if key in entry
+        }
+        copied_input[index] = copied
+        consumed_results.add(index)
+        changed = True
+    if changed:
+        restored["input"] = copied_input
     return restored
 
 
