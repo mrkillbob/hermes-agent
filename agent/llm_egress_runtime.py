@@ -2131,6 +2131,9 @@ def _typed_payload(
                 if is_scratch_read_file_tool_result:
                     typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
                     continue
+                if source_metadata is None:
+                    typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+                    continue
                 output_text = _structured_tool_output_text(item)
                 if output_text is None:
                     typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
