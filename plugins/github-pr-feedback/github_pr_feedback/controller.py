@@ -207,6 +207,7 @@ class ScanResult:
     created: int
     skipped: Mapping[str, int]
     degraded: bool = False
+    required_local_ci_backlog: int = 0
 
 
 def _bind_pooled_worktree_task(
@@ -856,8 +857,13 @@ class ScanController:
         skipped: Counter[str] = Counter()
         created = 0
         attempted = 0
+        required_local_ci_backlog = 0
         if not self._policy.enabled or self._policy.not_before is None:
-            return _scan_result(created, skipped)
+            return _scan_result(
+                created,
+                skipped,
+                required_local_ci_backlog=required_local_ci_backlog,
+            )
         for repository in self._policy.targets:
             target = self._policy.targets[repository]
             local_ci_dispatched = 0
@@ -882,6 +888,12 @@ class ScanController:
             # deterministic oldest-first queue so an old failing PR cannot be
             # indefinitely bypassed by newer arrivals.
             pull_requests = tuple(sorted(pull_requests, key=lambda pull: pull.number))
+            required_local_ci_backlog += _required_local_ci_backlog_count(
+                self._policy,
+                self._ledger,
+                target,
+                pull_requests,
+            )
             if (
                 self._policy.local_ci_audit is not None
                 and self._policy.local_ci_audit.applies_to(repository)
@@ -1112,7 +1124,11 @@ class ScanController:
                             local_ci_dispatched += 1
                         else:
                             skipped[audit_error] += 1
-        return _scan_result(created, skipped)
+        return _scan_result(
+            created,
+            skipped,
+            required_local_ci_backlog=required_local_ci_backlog,
+        )
 
     def _read_scan_snapshot(
         self,
@@ -2031,6 +2047,71 @@ def _local_ci_feedback_id(pull_request: PullRequest) -> str:
     return f"{LOCAL_CI_FEEDBACK_ID}:{pull_request.base_sha.casefold()}"
 
 
+def _required_local_ci_backlog_count(
+    policy: PluginPolicy,
+    ledger: FeedbackLedger,
+    target: RepositoryTarget,
+    pull_requests: tuple[PullRequest, ...],
+) -> int:
+    """Count admitted open heads without the merge lane's exact CI evidence.
+
+    This uses the pull-request identities already returned by the primary
+    listing plus local manifest and ledger state. It deliberately performs no
+    additional GitHub reads, and any unavailable or inconsistent local
+    evidence remains backlog so secondary scans fail closed.
+    """
+
+    audit_policy = policy.local_ci_audit
+    if (
+        audit_policy is None
+        or not audit_policy.required_for_open_prs
+        or not audit_policy.applies_to(target.base_repository)
+    ):
+        return 0
+    admitted = tuple(
+        pull
+        for pull in pull_requests
+        if policy.admit_pull_request(pull).admitted
+    )
+    if not admitted:
+        return 0
+    manifest_path = target.local_path / "tests" / "manifests" / "test_lanes.toml"
+    try:
+        manifest_digest = sha256(manifest_path.read_bytes()).hexdigest()
+    except OSError:
+        return len(admitted)
+
+    from .ci_runner import CIAuditReceipt
+
+    missing = 0
+    for pull in admitted:
+        if pull.base_sha is None:
+            missing += 1
+            continue
+        try:
+            receipt = ledger.latest_ci_receipt(
+                pull.base_repository,
+                pull.number,
+                pull.head_sha,
+                manifest_digest=manifest_digest,
+                not_before=datetime.min.replace(tzinfo=UTC),
+            )
+        except (LedgerStateError, TypeError, ValueError):
+            missing += 1
+            continue
+        if (
+            not isinstance(receipt, CIAuditReceipt)
+            or receipt.status != "passed"
+            or receipt.identity.repository != pull.base_repository
+            or receipt.identity.pr_number != pull.number
+            or receipt.identity.base_sha.casefold() != pull.base_sha.casefold()
+            or receipt.identity.head_sha.casefold() != pull.head_sha.casefold()
+            or receipt.manifest_digest != manifest_digest
+        ):
+            missing += 1
+    return missing
+
+
 def _worker_capability_preflight(identity_command: str) -> str:
     """Require concrete tool evidence before a worker reports missing capability."""
 
@@ -2495,7 +2576,17 @@ def _receipt_idempotency_key(receipt: FeedbackReceipt) -> str:
     return f"github-pr-feedback:{sha256(repr(receipt.key).encode('utf-8')).hexdigest()}"
 
 
-def _scan_result(created: int, skipped: Mapping[str, int]) -> ScanResult:
+def _scan_result(
+    created: int,
+    skipped: Mapping[str, int],
+    *,
+    required_local_ci_backlog: int = 0,
+) -> ScanResult:
     values = dict(skipped)
     degraded = any(values.get(reason, 0) > 0 for reason in _DEGRADED_REASONS)
-    return ScanResult(created, values, degraded)
+    return ScanResult(
+        created,
+        values,
+        degraded,
+        required_local_ci_backlog=required_local_ci_backlog,
+    )
