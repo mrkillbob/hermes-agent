@@ -3109,22 +3109,13 @@ def test_source_provenance_sidecar_keeps_chat_restoration_compatible():
 def non_scratch_source_root():
     """Provide a real source root that never matches the scratch-read policy."""
 
-    for candidate in (Path("/private/var/tmp"), Path("/var/tmp"), Path.home()):
-        try:
-            parent = candidate.resolve(strict=True)
-        except OSError:
-            continue
-        if str(parent).startswith(("/tmp/", "/private/tmp/")):
-            continue
-        try:
-            with tempfile.TemporaryDirectory(
-                prefix="hermes-codex-responses-", dir=parent
-            ) as root:
-                yield Path(root)
-                return
-        except OSError:
-            continue
-    raise RuntimeError("no writable non-scratch temporary root")
+    checkout_root = Path.cwd().resolve()
+    with tempfile.TemporaryDirectory(
+        prefix="hermes-codex-responses-", dir=checkout_root
+    ) as root:
+        source_root = Path(root)
+        assert source_root.is_relative_to(checkout_root)
+        yield source_root
 
 
 @pytest.fixture
@@ -3167,13 +3158,19 @@ def _real_codex_read_file_replay(
     monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
     source = source_root / "source.py"
     source.write_text("safe = True\n", encoding="utf-8")
+    try:
+        source_argument = str(source.relative_to(Path.cwd()))
+    except ValueError:
+        source_argument = str(source)
+    if source_root.is_relative_to(Path.cwd()):
+        assert not source_argument.startswith(("/tmp/", "/private/tmp/"))
     agent = _agent(tmp_path / "egress")
     agent.provider = "openai-codex"
     agent.base_url = "https://chatgpt.com/backend-api/codex"
     agent.api_mode = "codex_responses"
     agent._current_api_request_id = "turn-1:api:1"
     with source_provenance_activation(agent, "read_file"):
-        result = read_file_tool(str(source), task_id="codex-responses-read")
+        result = read_file_tool(source_argument, task_id="codex-responses-read")
     metadata = attach_trusted_source_provenance_metadata(
         agent, "read_file", content=result
     )
@@ -3189,7 +3186,7 @@ def _real_codex_read_file_replay(
                     "id": call_id,
                     "function": {
                         "name": "read_file",
-                        "arguments": json.dumps({"path": str(source)}),
+                        "arguments": json.dumps({"path": source_argument}),
                     },
                 }
             ],
