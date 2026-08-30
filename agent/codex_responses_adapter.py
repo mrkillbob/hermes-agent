@@ -376,6 +376,23 @@ def _split_responses_tool_id(raw_id: Any) -> tuple[Optional[str], Optional[str]]
     return value, None
 
 
+def _effective_responses_tool_call_id(raw_tool_call_id: Any) -> Optional[str]:
+    """Return the exact call ID emitted for one replayed tool result."""
+
+    call_id, response_item_id = _split_responses_tool_id(raw_tool_call_id)
+    if not isinstance(call_id, str) or not call_id.strip():
+        call_id = _canonical_call_id_from_fc(response_item_id)
+        if (
+            call_id is None
+            and isinstance(raw_tool_call_id, str)
+            and raw_tool_call_id.strip()
+        ):
+            call_id = raw_tool_call_id.strip()
+    if not isinstance(call_id, str) or not call_id.strip():
+        return None
+    return _clamp_responses_call_id(call_id.strip())
+
+
 def _derive_responses_function_call_id(
     call_id: str,
     response_item_id: Optional[str] = None,
@@ -771,15 +788,8 @@ def _chat_messages_to_responses_input(
 
         if role == "tool":
             raw_tool_call_id = msg.get("tool_call_id")
-            call_id, tool_response_item_id = _split_responses_tool_id(raw_tool_call_id)
-            if not isinstance(call_id, str) or not call_id.strip():
-                # Legacy fc_-only stored ids: canonicalize to the same
-                # ``call_<suffix>`` the assistant branch synthesizes above, so
-                # a >64-char pair clamps to the SAME surrogate on both sides.
-                call_id = _canonical_call_id_from_fc(tool_response_item_id)
-                if call_id is None and isinstance(raw_tool_call_id, str) and raw_tool_call_id.strip():
-                    call_id = raw_tool_call_id.strip()
-            if not isinstance(call_id, str) or not call_id.strip():
+            call_id = _effective_responses_tool_call_id(raw_tool_call_id)
+            if call_id is None:
                 continue
 
             # Multimodal tool result: convert OpenAI-style content list into
@@ -802,7 +812,7 @@ def _chat_messages_to_responses_input(
 
             items.append({
                 "type": "function_call_output",
-                "call_id": _clamp_responses_call_id(call_id),
+                "call_id": call_id,
                 "output": output_value,
             })
             item_sources.append(msg)

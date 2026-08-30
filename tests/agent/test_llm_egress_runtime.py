@@ -3104,6 +3104,179 @@ def test_source_provenance_sidecar_keeps_chat_restoration_compatible():
     assert "_source_provenance" not in body["messages"][0]
 
 
+def _real_codex_read_file_replay(
+    tmp_path, monkeypatch, *, call_id: str, structured_output: bool = False
+):
+    """Build one live-provenance read replay through the real converter."""
+
+    from agent.codex_responses_adapter import _chat_messages_to_responses_input
+    from agent.source_provenance_tools import (
+        attach_trusted_source_provenance_metadata,
+        build_source_provenance_sidecar,
+        source_provenance_activation,
+    )
+    from agent.tool_dispatch_helpers import make_tool_result_message
+    from tools.file_tools import read_file_tool
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    source = tmp_path / "source.py"
+    source.write_text("safe = True\n", encoding="utf-8")
+    agent = _agent(tmp_path / "egress")
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    agent._current_api_request_id = "turn-1:api:1"
+    with source_provenance_activation(agent, "read_file"):
+        result = read_file_tool(str(source), task_id="codex-responses-read")
+    metadata = attach_trusted_source_provenance_metadata(
+        agent, "read_file", content=result
+    )
+    tool_result = make_tool_result_message(
+        "read_file", result, call_id, source_provenance=metadata
+    )
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": str(source)}),
+                    },
+                }
+            ],
+        },
+        tool_result,
+    ]
+    sidecar = build_source_provenance_sidecar(messages)
+    if structured_output:
+        messages = [
+            messages[0],
+            {
+                **tool_result,
+                "content": [{"type": "input_text", "text": result}],
+            },
+        ]
+    input_items = _chat_messages_to_responses_input(messages)
+    agent._current_api_request_id = "turn-1:api:2"
+    return agent, result, input_items, sidecar
+
+
+@pytest.mark.parametrize("mutation", ("stale_request", "forged_grant"))
+def test_protected_codex_responses_rejects_stale_sidecar_before_source_replay(
+    tmp_path, monkeypatch, mutation
+):
+    """A matching hash cannot bypass source validation with a stale envelope."""
+
+    agent, _result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path, monkeypatch, call_id="call_read_file_123"
+    )
+    if mutation == "stale_request":
+        sidecar = [{**sidecar[0], "request_id": "stale-request"}]
+    else:
+        sidecar = [{**sidecar[0], "source_grant_digests": ["forged-grant"]}]
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        authorize_agent_sdk_kwargs(
+            agent,
+            {
+                "model": agent.model,
+                "input": input_items,
+                "_hermes_source_provenance": sidecar,
+            },
+        )
+
+    assert "untrusted_provenance" in exc_info.value.decision.reason_codes
+
+
+def test_protected_codex_responses_replays_one_input_text_read_file_with_source_segment(
+    tmp_path, monkeypatch
+):
+    """One canonical input_text item retains shape after validated replay."""
+
+    agent, result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path,
+        monkeypatch,
+        call_id="call_read_file_123",
+        structured_output=True,
+    )
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": input_items,
+            "_hermes_source_provenance": sidecar,
+        },
+    )
+
+    assert authorized["input"][1]["output"] == [
+        {"type": "input_text", "text": result}
+    ]
+    assert "_source_provenance" not in json.dumps(authorized)
+    assert "_hermes_source_provenance" not in authorized
+    assert receipt.decision.source_grant_count == 1
+    assert receipt.decision.source_segment_count == 1
+
+
+@pytest.mark.parametrize(
+    "call_id",
+    (
+        "codex_mcp__hermes-tools__read_file_exec-" + "0" * 64,
+        "call_read_file_123|fc_responses_item_123",
+    ),
+)
+def test_protected_codex_responses_replays_real_converted_effective_call_id(
+    tmp_path, monkeypatch, call_id
+):
+    """Sidecar identity follows the actual clamped/split Responses call ID."""
+
+    agent, result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path, monkeypatch, call_id=call_id
+    )
+
+    assert input_items[0]["call_id"] == input_items[1]["call_id"]
+    assert input_items[1]["call_id"] != call_id
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": input_items,
+            "_hermes_source_provenance": sidecar,
+        },
+    )
+
+    assert authorized["input"][1]["output"] == result
+    assert "_source_provenance" not in json.dumps(authorized)
+    assert receipt.decision.source_grant_count == 1
+    assert receipt.decision.source_segment_count == 1
+
+
+def test_protected_codex_responses_rejects_duplicate_sidecar_records(
+    tmp_path, monkeypatch
+):
+    """One result with two provenance records fails closed as untrusted."""
+
+    agent, _result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path, monkeypatch, call_id="call_read_file_123"
+    )
+    sidecar = [sidecar[0], {**sidecar[0], "request_id": "stale-request"}]
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        authorize_agent_sdk_kwargs(
+            agent,
+            {
+                "model": agent.model,
+                "input": input_items,
+                "_hermes_source_provenance": sidecar,
+            },
+        )
+
+    assert "untrusted_provenance" in exc_info.value.decision.reason_codes
+
+
 def test_real_read_file_wire_result_keeps_exact_source_provenance(
     tmp_path, monkeypatch
 ):

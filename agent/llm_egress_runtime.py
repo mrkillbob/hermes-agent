@@ -2127,6 +2127,29 @@ def _typed_payload(
             structured_text = (
                 _structured_tool_output_text(item) if is_structured_result else None
             )
+            if is_read_file_projection_tool_result and key == "output":
+                output_text = _structured_tool_output_text(item)
+                if output_text is None:
+                    typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+                    continue
+                presentation = _segment_read_file_presentation(
+                    output_text,
+                    source_metadata,
+                    grant_texts,
+                    used_grants,
+                    registry=registry,
+                    session_id=request_identity[0],
+                    turn_id=request_identity[1],
+                    request_id=request_identity[2],
+                    policy_digest=request_identity[3],
+                )
+                if isinstance(item, list):
+                    typed[key] = [
+                        {"type": LiteralSegment("input_text"), "text": presentation}
+                    ]
+                else:
+                    typed[key] = presentation
+                continue
             if is_kanban_assignees_result and structured_text is not None:
                 projected = _project_kanban_assignees_terminal_result(structured_text)
                 if projected is not None:
@@ -2547,13 +2570,15 @@ def _typed_payload(
 
 
 def _structured_tool_output_text(value: Any) -> str | None:
-    """Return the sole text item from a Responses function output array.
+    """Return a scalar or the sole strict text item from a Responses output.
 
-    Specialized projectors may inspect this exact transport shape.  Mixed,
-    image-bearing, extended, or multi-item outputs stay on the conservative
-    whole-result elision path.
+    Specialized projectors may inspect the existing one-item array form.
+    Mixed, image-bearing, extended, or multi-item outputs stay on the
+    conservative whole-result elision path.
     """
 
+    if isinstance(value, str):
+        return value
     if not isinstance(value, list) or len(value) != 1:
         return None
     item = value[0]
@@ -2753,39 +2778,45 @@ def _restore_source_provenance_sidecar(
     responses_input = restored.get("input")
     if not isinstance(responses_input, list):
         return restored
+    from agent.codex_responses_adapter import _effective_responses_tool_call_id
+
     copied_input = list(responses_input)
-    consumed_results: set[int] = set()
-    changed = False
+    candidates_by_entry: dict[int, list[int]] = {}
+    entries_by_result: dict[int, list[int]] = {}
     for entry_index, entry in enumerate(sidecar):
         if entry_index in consumed_entries or not isinstance(entry, Mapping):
             continue
-        tool_call_id = entry.get("tool_call_id")
+        tool_call_id = _effective_responses_tool_call_id(entry.get("tool_call_id"))
         content_sha256 = entry.get("content_sha256")
-        if not isinstance(tool_call_id, str) or not isinstance(content_sha256, str):
+        if tool_call_id is None or not isinstance(content_sha256, str):
             continue
         candidates: list[int] = []
         for index, item in enumerate(responses_input):
-            if index in consumed_results or not isinstance(item, Mapping):
+            if not isinstance(item, Mapping):
                 continue
             if (
                 item.get("type") != "function_call_output"
                 or item.get("call_id") != tool_call_id
             ):
                 continue
-            output = item.get("output")
-            output_text = (
-                output
-                if isinstance(output, str)
-                else _structured_tool_output_text(output)
-            )
+            output_text = _structured_tool_output_text(item.get("output"))
             if (
                 isinstance(output_text, str)
                 and sha256(output_text.encode("utf-8")).hexdigest() == content_sha256
             ):
                 candidates.append(index)
+                entries_by_result.setdefault(index, []).append(entry_index)
+        candidates_by_entry[entry_index] = candidates
+    changed = False
+    for entry_index, entry in enumerate(sidecar):
+        if entry_index in consumed_entries or not isinstance(entry, Mapping):
+            continue
+        candidates = candidates_by_entry.get(entry_index, [])
         if len(candidates) != 1:
             continue
         index = candidates[0]
+        if len(entries_by_result.get(index, [])) != 1:
+            continue
         copied = dict(responses_input[index])
         copied["_source_provenance"] = {
             key: entry[key]
@@ -2798,7 +2829,6 @@ def _restore_source_provenance_sidecar(
             if key in entry
         }
         copied_input[index] = copied
-        consumed_results.add(index)
         changed = True
     if changed:
         restored["input"] = copied_input
