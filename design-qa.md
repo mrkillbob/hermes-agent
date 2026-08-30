@@ -22,9 +22,9 @@ The real Electron Playwright test passed and captured the building-detail state:
 - Focused UI tests: passed, 6 tests
 - Targeted ESLint: passed
 - Desktop TypeScript checks: passed
-- Production desktop build: passed after the visualizer implementation
+- Production desktop build: passed at commit `cb77643208cef9f786402d4b313098e54ad16d3c`, `dirty: false`, `source: local`
 - Source visual and implementation screenshot were inspected together
 
 ## Follow-up
 
-The next build must be run after committing the implementation so the install stamp records the exact final HEAD with `dirty: false`.
+Keep the live data adapter and profile-derived SOUL metadata as the next integration layer; the current scene uses deterministic fixture data while the interaction model is being established.
