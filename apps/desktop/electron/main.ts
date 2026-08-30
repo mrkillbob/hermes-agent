@@ -88,6 +88,7 @@ import {
 } from './browser-windows'
 import { detectBundleSkew } from './bundle-skew'
 import { applyConnectionChange, teardownSshState } from './connection-apply'
+import { stopDesktopBackgroundServices } from './desktop-background-shutdown'
 import {
   apiRequestRegistryConnectionId,
   authModeFromStatus,
@@ -12190,13 +12191,19 @@ const backendShutdown = createBackendShutdownCoordinator(async () => {
 
   stopBackendChild(primary)
   const pooledStops = stopAllPoolBackends()
+  const backgroundServicesStop = stopDesktopBackgroundServices({
+    resolveBackend: resolveHermesBackend,
+    spawnFn: spawn,
+    env: { ...process.env, HERMES_HOME },
+    onError: message => rememberLog(`[shutdown] ${message}`)
+  })
 
   if (poolIdleReaper) {
     clearInterval(poolIdleReaper)
     poolIdleReaper = null
   }
 
-  await Promise.all([waitForBackendExit(primary), pooledStops])
+  await Promise.all([waitForBackendExit(primary), pooledStops, backgroundServicesStop])
 })
 
 async function exitAfterBackendShutdown(code) {
@@ -17630,7 +17637,7 @@ app.on('window-all-closed', () => {
   // Stop-gap: closing the last window means the user closed Hermes, including
   // on macOS. Enter the normal quit path so the active-work guard runs and the
   // bounded teardown stops app-owned CLI/backend trees, pooled profiles, PTYs,
-  // and the backend-hosted cron scheduler.
+  // and every local supervised gateway that owns cron/Kanban automation.
   if (shouldQuitAfterWindowAllClosed()) {
     app.quit()
   }
