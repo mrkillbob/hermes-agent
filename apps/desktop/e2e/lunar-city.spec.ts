@@ -10,7 +10,9 @@ import { expect, test } from './test'
 let fixture: MockBackendFixture | null = null
 
 test.beforeAll(async () => {
-  fixture = await setupMockBackend()
+  fixture = await setupMockBackend({
+    startGateway: true
+  })
 })
 
 test.afterAll(async () => {
@@ -28,14 +30,24 @@ test('renders the lunar city and opens a building detail view', async ({ page: _
 
   await expect(page.getByRole('heading', { name: 'Lunar City' })).toBeVisible()
   await expect(page.getByAltText(/isometric lunar settlement/i)).toBeVisible()
-  await expect(page.getByText('Library')).toBeVisible()
-  await expect(page.getByText('Research Lab')).toBeVisible()
+  await expect(page.getByRole('button', { name: /Open Library/i })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Open Research Lab/i })).toBeVisible()
+  await expect(page.getByText('Task queue')).toBeVisible()
+  await expect(page.getByRole('button', { name: /Inspect .* worker/ }).first()).toBeVisible()
+  await expect(page.getByText('Worker states')).toHaveCount(0)
+
+  const viewport = page.getByTestId('lunar-city-viewport')
+  await expect(page.getByRole('button', { name: 'Zoom in' })).toBeVisible()
+  await page.getByRole('button', { name: 'Zoom in' }).click()
+  await expect(viewport).toHaveAttribute('data-zoom', '1')
+  await page.getByRole('button', { name: 'Reset camera' }).click()
+  await expect(viewport).toHaveAttribute('data-zoom', '0')
 
   await page.getByRole('button', { name: /Research Lab/i }).click()
   await expect(page.getByText('Enter building')).toBeVisible()
   await page.getByRole('button', { name: 'Enter building' }).click()
-  await expect(page.getByText('Lunabot Research Lab Director')).toBeVisible()
-  await expect(page.getByText('Observatory')).toBeVisible()
+  await expect(page.getByText('Fox Scientist is managing this shift')).toBeVisible()
+  await expect(page.getByText('Observatory', { exact: true })).toBeVisible()
 
   await page.screenshot({ path: testInfo.outputPath('lunar-city-building.png'), fullPage: true })
 })

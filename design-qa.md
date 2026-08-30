@@ -1,6 +1,6 @@
 # Design QA
 
-final result: blocked
+final result: passed
 
 ## Scope
 
@@ -10,23 +10,21 @@ final result: blocked
 
 ## Capture status
 
-No implementation screenshot was captured. The real Electron Playwright test failed before the renderer loaded:
+The real Electron Playwright test passed and captured the building-detail state:
 
-```text
-electron.launch: Process failed to launch
-Electron exited with signal SIGABRT
-```
-
-The failure occurred at test setup (`0ms`) while launching the packaged desktop app with `--disable-gpu --no-sandbox`, so browser-level visual parity and interaction sign-off remain unverified.
+- Screenshot: `/Users/mikedemott/.codex/worktrees/e16d/hermes-agent/apps/desktop/test-results/lunar-city-renders-the-lun-a3de9-pens-a-building-detail-view/lunar-city-building.png`
+- State: Research Lab selected, building detail open, Fox Scientist leader conversation visible, room activity visible
+- Interaction: building selection and `Enter building` both passed in the browser
+- Motion: normal runtime uses the live tick/route animations; the test capture uses reduced motion for deterministic screenshots
 
 ## Supporting evidence
 
-- Focused UI tests: passed, 3 tests
+- Focused UI tests: passed, 6 tests
 - Targeted ESLint: passed
 - Desktop TypeScript checks: passed
-- Production desktop build: passed
-- Clean build stamp: commit `9ba59f07de499218d721128c6dcdcc1bb240a553`, `dirty: false`, `source: local`
+- Production desktop build: passed after the visualizer implementation
+- Source visual and implementation screenshot were inspected together
 
 ## Follow-up
 
-Rerun the Electron route test on a host where the Electron runtime launches successfully, then capture and inspect the Lunar City overview and building detail state before marking this file `final result: passed`.
+The next build must be run after committing the implementation so the install stamp records the exact final HEAD with `dirty: false`.
