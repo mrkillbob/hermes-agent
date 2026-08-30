@@ -4,9 +4,8 @@
  * The test deliberately uses the real desktop shell and mock backend so the
  * screenshot and interaction checks exercise the route as a user sees it.
  */
+import { type MockBackendFixture, setupMockBackend, waitForAppReady } from './fixtures'
 import { expect, test } from './test'
-
-import { setupMockBackend, waitForAppReady, type MockBackendFixture } from './fixtures'
 
 let fixture: MockBackendFixture | null = null
 
@@ -19,7 +18,7 @@ test.afterAll(async () => {
   fixture = null
 })
 
-test('renders the lunar city and opens a building detail view', async ({}, testInfo) => {
+test('renders the lunar city and opens a building detail view', async ({ page: _page }, testInfo) => {
   const page = fixture!.page
 
   await waitForAppReady(fixture!, 120_000)
