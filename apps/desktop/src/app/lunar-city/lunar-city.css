@@ -1,0 +1,71 @@
+.lunar-city-route {
+  position: absolute;
+  height: 2px;
+  border-top: 1px dashed color-mix(in srgb, var(--ui-accent) 62%, transparent);
+  opacity: 0.72;
+  transform-origin: left center;
+}
+
+.lunar-city-route-one {
+  left: 25%;
+  top: 30%;
+  width: 31%;
+  transform: rotate(18deg);
+}
+
+.lunar-city-route-two {
+  left: 46%;
+  top: 53%;
+  width: 27%;
+  border-top-color: color-mix(in srgb, var(--ui-green) 62%, transparent);
+  transform: rotate(33deg);
+}
+
+.lunar-city-worker {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border: 1px solid var(--ui-stroke-tertiary);
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--ui-bg-editor) 88%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-bg-editor) 24%, transparent);
+  backdrop-filter: blur(5px);
+  animation: lunar-city-worker-drift 4.8s ease-in-out infinite;
+}
+
+.lunar-city-worker-one {
+  left: 38%;
+  top: 32%;
+}
+
+.lunar-city-worker-two {
+  left: 58%;
+  top: 59%;
+  animation-delay: -1.6s;
+}
+
+.lunar-city-worker-three {
+  left: 39%;
+  top: 64%;
+  animation-delay: -3.1s;
+}
+
+@keyframes lunar-city-worker-drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  50% {
+    transform: translate3d(1.25rem, -0.5rem, 0) scale(1.06);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lunar-city-worker {
+    animation: none;
+  }
+}
