@@ -8,7 +8,6 @@ import {
   Archive,
   Check,
   Clock,
-  Cpu,
   Eye,
   Layers3,
   Lock,
@@ -60,9 +59,11 @@ interface Task {
 }
 
 interface Worker {
+  design: 'archivist' | 'artist' | 'builder' | 'courier' | 'dispatcher' | 'orbital' | 'verifier'
   id: string
   name: string
   districtId: string
+  soul: string
   taskId: string
   state: WorkerState
   routeClass: string
@@ -78,7 +79,7 @@ const DISTRICTS: District[] = [
     description: 'Context retrieval, source comparison, and quiet conversation with the librarian.',
     accent: 'text-(--ui-purple)',
     icon: 'archive',
-    position: { left: '17%', top: '18%' },
+    position: { left: '22%', top: '21%' },
     rooms: [
       { label: 'Consultation desk', state: 'working', detail: 'The librarian is speaking with a child worker.' },
       { label: 'Stacks', state: 'resource', detail: 'Two workers are waiting for a source bundle.' },
@@ -94,7 +95,7 @@ const DISTRICTS: District[] = [
     description: 'Telescopes, microscopes, and experiment bays turn questions into evidence.',
     accent: 'text-(--ui-cyan)',
     icon: 'research',
-    position: { left: '61%', top: '18%' },
+    position: { left: '57%', top: '16%' },
     rooms: [
       { label: 'Observatory', state: 'working', detail: 'A scout is tracking a new source on the lunar horizon.' },
       { label: 'Microscopy bench', state: 'review', detail: 'A sample is under the scientist’s inspection beam.' },
@@ -110,7 +111,7 @@ const DISTRICTS: District[] = [
     description: 'A warm studio for visual identity, storyboards, and creative experiments.',
     accent: 'text-(--ui-orange)',
     icon: 'paw',
-    position: { left: '31%', top: '36%' },
+    position: { left: '20%', top: '42%' },
     rooms: [
       { label: 'Sketch room', state: 'working', detail: 'The artist is guiding a brush-bot through a new frame.' },
       { label: 'Render chamber', state: 'heartbeat', detail: 'A live render is pulsing through the chamber.' },
@@ -126,7 +127,7 @@ const DISTRICTS: District[] = [
     description: 'A practical workshop for repairs, tests, and safe changes.',
     accent: 'text-(--ui-yellow)',
     icon: 'tools',
-    position: { left: '76%', top: '38%' },
+    position: { left: '20%', top: '64%' },
     rooms: [
       { label: 'Build floor', state: 'working', detail: 'A builder child is assembling a verified patch.' },
       { label: 'Test chamber', state: 'triage', detail: 'One worker is queued for deterministic triage.' },
@@ -142,7 +143,7 @@ const DISTRICTS: District[] = [
     description: 'The civic center where groups align, route work, and resolve dependencies.',
     accent: 'text-(--ui-warm)',
     icon: 'council',
-    position: { left: '50%', top: '43%' },
+    position: { left: '76%', top: '39%' },
     rooms: [
       { label: 'Dispatch floor', state: 'working', detail: 'The coordinator is assigning work to the right group.' },
       { label: 'Resource desk', state: 'resource', detail: 'The council is waiting for a model slot to open.' },
@@ -158,7 +159,7 @@ const DISTRICTS: District[] = [
     description: 'A verification gate where work is checked before it can leave the city.',
     accent: 'text-(--ui-blue)',
     icon: 'tools',
-    position: { left: '68%', top: '52%' },
+    position: { left: '50%', top: '42%' },
     rooms: [
       { label: 'Admission gate', state: 'ready', detail: 'The next completed worker can enter.' },
       { label: 'Verification theater', state: 'review', detail: 'A result is being checked against its contract.' },
@@ -174,7 +175,7 @@ const DISTRICTS: District[] = [
     description: 'Transit, routes, and service support for every other district.',
     accent: 'text-(--ui-green)',
     icon: 'council',
-    position: { left: '20%', top: '62%' },
+    position: { left: '83%', top: '78%' },
     rooms: [
       { label: 'READY bus stop', state: 'ready', detail: 'Three workers are waiting for the next route.' },
       { label: 'Route control', state: 'heartbeat', detail: 'The city heartbeat is synchronizing transit.' },
@@ -190,7 +191,7 @@ const DISTRICTS: District[] = [
     description: 'A receiving hall for durable records, provenance, and long-term care.',
     accent: 'text-(--ui-cyan)',
     icon: 'archive',
-    position: { left: '44%', top: '69%' },
+    position: { left: '70%', top: '67%' },
     rooms: [
       { label: 'Receiving hall', state: 'working', detail: 'A courier is cataloging a new source package.' },
       { label: 'Long-term stacks', state: 'resource', detail: 'Archive shelves are waiting for a storage slot.' },
@@ -295,72 +296,88 @@ const TASKS: Task[] = [
 
 const WORKERS: Worker[] = [
   {
+    design: 'orbital',
     id: 'w-01',
     name: 'Pip',
     districtId: 'research',
+    soul: 'curious scout; confirm before concluding',
     taskId: 'survey-archive',
     state: 'working',
     routeClass: 'route-north',
     delay: 0
   },
   {
+    design: 'archivist',
     id: 'w-02',
     name: 'Kite',
     districtId: 'library',
+    soul: 'patient keeper; preserve provenance',
     taskId: 'index-sources',
     state: 'resource',
     routeClass: 'route-west',
     delay: 1.8
   },
   {
+    design: 'builder',
     id: 'w-03',
     name: 'Mica',
     districtId: 'engineering',
+    soul: 'careful maker; test every joint',
     taskId: 'verify-patch',
     state: 'triage',
     routeClass: 'route-east',
     delay: 3.2
   },
   {
+    design: 'artist',
     id: 'w-04',
     name: 'Nix',
     districtId: 'arts',
+    soul: 'playful maker; make the invisible legible',
     taskId: 'render-storyboard',
     state: 'working',
     routeClass: 'route-south',
     delay: 4.4
   },
   {
+    design: 'dispatcher',
     id: 'w-05',
     name: 'Rook',
     districtId: 'council',
+    soul: 'steady coordinator; unblock the next move',
     taskId: 'resolve-dependency',
     state: 'resource',
     routeClass: 'route-center',
     delay: 2.7
   },
   {
+    design: 'verifier',
     id: 'w-06',
     name: 'Dew',
     districtId: 'release',
+    soul: 'skeptical guardian; trust evidence',
     taskId: 'admit-release',
     state: 'review',
     routeClass: 'route-gate',
     delay: 5.7
   },
   {
+    design: 'courier',
     id: 'w-07',
     name: 'Sol',
     districtId: 'operations',
+    soul: 'reliable carrier; arrive with the right resource',
     taskId: 'route-workers',
     state: 'ready',
     routeClass: 'route-transit',
     delay: 1.1
   },
   {
+    design: 'archivist',
     id: 'w-08',
     name: 'Tock',
     districtId: 'archive',
+    soul: 'quiet gardener; leave a durable trail',
     taskId: 'preserve-lineage',
     state: 'done',
     routeClass: 'route-south',
@@ -410,6 +427,93 @@ function districtIcon(icon: District['icon']) {
   }
 
   return PawPrint
+}
+
+const LEADER_PALETTE: Record<string, { accent: string; face: string; shadow: string }> = {
+  Badger: { accent: '#f5c86b', face: '#817f86', shadow: '#45434b' },
+  Crane: { accent: '#79d8f2', face: '#e9edf1', shadow: '#a4aeb8' },
+  Fox: { accent: '#ff9a58', face: '#d86f3e', shadow: '#8a3b2d' },
+  Moth: { accent: '#d69bff', face: '#ae72d8', shadow: '#573d89' },
+  Owl: { accent: '#bd9cff', face: '#8c6b56', shadow: '#43354d' },
+  Otter: { accent: '#7be1ba', face: '#8b624d', shadow: '#4b393c' },
+  Stag: { accent: '#f1c779', face: '#a7744e', shadow: '#533b35' },
+  Tortoise: { accent: '#63d8d0', face: '#718f78', shadow: '#354c4e' }
+}
+
+function AnimalLeader({ species }: { species: string }) {
+  const palette = LEADER_PALETTE[species] ?? LEADER_PALETTE.Owl!
+
+  const ears =
+    species === 'Owl'
+      ? 'M17 24 L17 8 L29 17 L35 12 L47 8 L47 24'
+      : species === 'Stag'
+        ? 'M17 24 L12 11 L19 15 L17 5 M47 24 L52 11 L45 15 L47 5'
+        : species === 'Crane'
+          ? 'M18 24 L22 11 L28 17 M45 24 L42 13 L37 18'
+          : 'M17 24 L20 12 L29 18 M47 24 L44 12 L35 18'
+
+  return (
+    <svg aria-hidden="true" className="lunar-city-leader-svg" viewBox="0 0 64 64">
+      <path d={ears} fill="none" stroke={palette.shadow} strokeLinecap="round" strokeLinejoin="round" strokeWidth="5" />
+      <path d="M17 29 Q32 16 47 29 L45 46 Q32 56 19 46 Z" fill={palette.face} stroke={palette.shadow} strokeWidth="2" />
+      <path d="M24 44 Q32 49 40 44" fill="none" stroke={palette.shadow} strokeLinecap="round" strokeWidth="2" />
+      <circle cx="25" cy="32" fill="#f4fbff" r="5" />
+      <circle cx="39" cy="32" fill="#f4fbff" r="5" />
+      <circle cx="25" cy="32" fill="#111827" r="2" />
+      <circle cx="39" cy="32" fill="#111827" r="2" />
+      <path
+        d={species === 'Crane' ? 'M44 36 L58 40 L44 43' : 'M29 38 Q32 41 35 38'}
+        fill={palette.accent}
+        stroke={palette.shadow}
+        strokeWidth="1.5"
+      />
+      <path d="M22 49 Q32 56 42 49 L45 61 L19 61 Z" fill={palette.shadow} />
+      <circle cx="50" cy="18" fill={palette.accent} r="4" />
+    </svg>
+  )
+}
+
+function RobotChild({ design }: { design: Worker['design'] }) {
+  const tool =
+    design === 'builder'
+      ? 'M47 39 L57 29 M53 29 L58 34 M48 27 L56 27'
+      : design === 'artist'
+        ? 'M45 43 Q54 33 59 24'
+        : design === 'archivist'
+          ? 'M47 36 L58 36 L58 46 L47 46 Z'
+          : design === 'courier'
+            ? 'M46 38 L57 42 L50 48 L43 44 Z'
+            : design === 'verifier'
+              ? 'M46 39 L51 44 L59 31'
+              : design === 'dispatcher'
+                ? 'M46 40 Q55 31 58 40 M53 33 L53 49'
+                : 'M49 39 Q55 29 59 24'
+
+  return (
+    <svg aria-hidden="true" className="lunar-city-worker-svg" viewBox="0 0 64 64">
+      <path
+        d="M30 17 L31 7 L36 12 L42 7 L43 20"
+        fill="none"
+        stroke="#80d8e7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="3"
+      />
+      <rect fill="#d9e5ec" height="27" rx="12" stroke="#324353" strokeWidth="2" width="32" x="16" y="17" />
+      <rect fill="#172332" height="12" rx="6" width="24" x="20" y="23" />
+      <circle cx="28" cy="29" fill="#73ecff" r="2.5" />
+      <circle cx="36" cy="29" fill="#73ecff" r="2.5" />
+      <path
+        d="M22 42 L18 54 L27 48 L32 57 L37 48 L46 54 L42 42"
+        fill="#91a9b8"
+        stroke="#324353"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+      <path d={tool} fill="none" stroke="#f6c96b" strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" />
+      <circle cx="32" cy="18" fill="#f6c96b" r="3" />
+    </svg>
+  )
 }
 
 function taskSnapshot(task: Task, tick: number) {
@@ -491,8 +595,8 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
         !playing && 'is-paused'
       )}
     >
-      <header className="relative z-20 flex shrink-0 items-center justify-between gap-4 border-b border-(--ui-stroke-tertiary) bg-(--ui-bg-editor)/95 px-4 py-3 backdrop-blur-md sm:px-6">
-        <div className="flex min-w-0 items-center gap-3">
+      <header className="lunar-city-hud pointer-events-none absolute inset-x-0 top-0 z-50 flex items-center justify-between gap-4 px-4 py-3 sm:px-6">
+        <div className="pointer-events-auto flex min-w-0 items-center gap-3">
           <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-(--ui-accent)/12 text-(--ui-accent)">
             <Moon aria-hidden="true" size={18} />
           </div>
@@ -508,7 +612,7 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
             </p>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">
           <span className="hidden rounded-full border border-(--ui-stroke-tertiary) px-2 py-1 text-[0.62rem] tabular-nums text-muted-foreground sm:inline">
             CYCLE {String(tick + 1).padStart(3, '0')}
           </span>
@@ -540,7 +644,7 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
           <img
             alt="Isometric lunar settlement with Hermes buildings, leaders, and helper workers"
             className="lunar-city-terrain absolute inset-0 size-full object-cover object-center"
-            src="./lunar-city/moon-settlement.png"
+            src="./lunar-city/moon-settlement-board.png"
           />
           <div aria-hidden="true" className="lunar-city-atmosphere absolute inset-0" />
           <div aria-hidden="true" className="lunar-city-grid absolute inset-0" />
@@ -575,6 +679,21 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
                       {district.name}
                     </span>
                   </button>
+                  <button
+                    aria-label={`Inspect ${district.leader}`}
+                    className="lunar-city-leader pointer-events-auto absolute -right-14 -top-12"
+                    data-character-kind="leader"
+                    onClick={() => {
+                      setSelectedId(district.id)
+                      setInside(true)
+                    }}
+                    title={`${district.leader}: sentient leader`}
+                  >
+                    <span className="lunar-city-leader-figure">
+                      <AnimalLeader species={district.species} />
+                    </span>
+                    <span className="lunar-city-leader-name">{district.species}</span>
+                  </button>
                   <span aria-hidden="true" className="lunar-city-building-shadow" />
                   <span aria-hidden="true" className="lunar-city-building-signal" />
                 </div>
@@ -593,6 +712,7 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
                     `lunar-city-worker-state-${worker.state}`
                   )}
                   data-state={worker.state}
+                  data-worker-design={worker.design}
                   key={worker.id}
                   onClick={() => {
                     setSelectedId(worker.districtId)
@@ -602,8 +722,9 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
                   title={`${worker.name}: ${worker.task.label} (${worker.task.progress}%)`}
                 >
                   <span className="lunar-city-worker-body">
-                    <Cpu aria-hidden="true" size={13} />
+                    <RobotChild design={worker.design} />
                   </span>
+                  <span className="lunar-city-worker-name">{worker.name}</span>
                   <span aria-hidden="true" className="lunar-city-worker-light" />
                 </button>
               )
@@ -662,7 +783,7 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
             </div>
           </div>
 
-          <div className="pointer-events-auto absolute bottom-3 left-3 max-w-[min(22rem,calc(100%-1.5rem))] rounded-xl border border-(--ui-stroke-tertiary) bg-background/88 p-3 shadow-lg backdrop-blur-md sm:bottom-5 sm:left-5">
+          <div className="lunar-city-inspector pointer-events-auto absolute bottom-3 left-3 max-w-[min(22rem,calc(100%-1.5rem))] rounded-xl border border-(--ui-stroke-tertiary) bg-background/88 p-3 shadow-lg backdrop-blur-md sm:bottom-5 sm:left-5">
             <div className="flex items-center gap-2">
               <div className="flex size-8 items-center justify-center rounded-lg bg-(--ui-accent)/12 text-(--ui-accent)">
                 <LeaderIcon aria-hidden="true" size={16} />
@@ -703,11 +824,11 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
             </div>
           </div>
 
-          <div className="pointer-events-auto absolute bottom-3 right-3 w-[min(18rem,calc(100%-1.5rem))] rounded-xl border border-(--ui-stroke-tertiary) bg-background/88 p-3 shadow-lg backdrop-blur-md sm:bottom-5 sm:right-5">
+          <div className="lunar-city-task-queue pointer-events-auto absolute bottom-3 right-3 w-[min(18rem,calc(100%-1.5rem))] rounded-xl border border-(--ui-stroke-tertiary) bg-background/88 p-3 shadow-lg backdrop-blur-md sm:bottom-5 sm:right-5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Layers3 aria-hidden="true" className="text-(--ui-accent)" size={15} />
-                <p className="text-[0.7rem] font-semibold text-foreground">Task queue</p>
+                <p className="text-[0.7rem] font-semibold tracking-[0.16em] text-foreground">MISSIONS</p>
               </div>
               <span className="text-[0.62rem] tabular-nums text-muted-foreground">
                 {selectedTasks.length} local · {cityProgress}%
@@ -737,8 +858,8 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
                     />
                   </div>
                   <div className="mt-1 flex items-center justify-between gap-2 text-[0.58rem] text-muted-foreground">
-                    <span className="truncate">{task.detail}</span>
-                    <span className="shrink-0">{task.eta}</span>
+                    <span className="truncate uppercase tracking-[0.12em]">{task.state}</span>
+                    <span className="shrink-0 tabular-nums">ETA {task.eta}</span>
                   </div>
                 </div>
               ))}
@@ -746,7 +867,7 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
           </div>
 
           {inside ? (
-            <div className="pointer-events-auto absolute inset-y-3 right-3 z-30 flex w-[min(23rem,calc(100%-1.5rem))] flex-col overflow-hidden rounded-xl border border-(--ui-stroke-tertiary) bg-background/95 shadow-xl backdrop-blur-xl sm:inset-y-5 sm:right-5">
+            <div className="lunar-city-room-panel pointer-events-auto absolute inset-y-3 right-3 z-30 flex w-[min(23rem,calc(100%-1.5rem))] flex-col overflow-hidden rounded-xl border border-(--ui-stroke-tertiary) bg-background/95 shadow-xl backdrop-blur-xl sm:inset-y-5 sm:right-5">
               <div className="flex items-start justify-between gap-3 border-b border-(--ui-stroke-tertiary) px-4 py-3">
                 <div>
                   <p className="text-sm font-semibold text-foreground">Inside {selected.name}</p>

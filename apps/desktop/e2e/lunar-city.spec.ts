@@ -32,7 +32,7 @@ test('renders the lunar city and opens a building detail view', async ({ page: _
   await expect(page.getByAltText(/isometric lunar settlement/i)).toBeVisible()
   await expect(page.getByRole('button', { name: /Open Library/i })).toBeVisible()
   await expect(page.getByRole('button', { name: /Open Research Lab/i })).toBeVisible()
-  await expect(page.getByText('Task queue')).toBeVisible()
+  await expect(page.getByText('MISSIONS')).toBeVisible()
   await expect(page.getByRole('button', { name: /Inspect .* worker/ }).first()).toBeVisible()
   await expect(page.getByText('Worker states')).toHaveCount(0)
 
@@ -42,6 +42,7 @@ test('renders the lunar city and opens a building detail view', async ({ page: _
   await expect(viewport).toHaveAttribute('data-zoom', '1')
   await page.getByRole('button', { name: 'Reset camera' }).click()
   await expect(viewport).toHaveAttribute('data-zoom', '0')
+  await page.screenshot({ path: testInfo.outputPath('lunar-city-overview.png'), fullPage: true })
 
   await page.getByRole('button', { name: /Research Lab/i }).click()
   await expect(page.getByText('Enter building')).toBeVisible()

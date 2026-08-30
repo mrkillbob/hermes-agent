@@ -1,14 +1,46 @@
+.lunar-city {
+  background: #070a10;
+  color: #edf3ff;
+}
+
+.lunar-city-hud {
+  background: linear-gradient(180deg, rgb(5 8 14 / 88%), rgb(5 8 14 / 42%) 72%, transparent);
+  border: 0;
+  backdrop-filter: blur(2px);
+}
+
+.lunar-city-hud h2,
+.lunar-city-hud p {
+  color: #edf3ff !important;
+}
+
+.lunar-city-hud p {
+  opacity: 0.62;
+}
+
 .lunar-city-viewport {
-  perspective: 1100px;
-  perspective-origin: 50% 48%;
   background: #151922;
   isolation: isolate;
 }
 
 .lunar-city-world {
+  perspective: 1100px;
+  perspective-origin: 50% 48%;
   transform: rotateX(6deg) rotateY(-2deg) scale(1.03);
   transform-style: preserve-3d;
   transition: transform 900ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.lunar-city-world::after {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background:
+    linear-gradient(180deg, rgb(5 8 14 / 28%), transparent 23%, transparent 77%, rgb(5 8 14 / 40%)),
+    radial-gradient(circle at center, transparent 47%, rgb(3 6 11 / 32%) 100%);
+  content: '';
+  pointer-events: none;
+  transform: translateZ(2px);
 }
 
 .lunar-city-camera-controls {
@@ -35,13 +67,17 @@
 }
 
 .lunar-city-grid {
-  opacity: 0.18;
+  opacity: 0.24;
   background-image:
-    linear-gradient(color-mix(in srgb, var(--ui-cyan) 18%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--ui-cyan) 18%, transparent) 1px, transparent 1px);
-  background-size: 5rem 5rem;
-  mask-image: linear-gradient(180deg, transparent 2%, black 30%, black 86%, transparent 100%);
-  transform: translateZ(-2px) rotateX(1deg);
+    linear-gradient(30deg, color-mix(in srgb, var(--ui-cyan) 14%, transparent) 1px, transparent 1px),
+    linear-gradient(150deg, color-mix(in srgb, var(--ui-cyan) 14%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--ui-cyan) 9%, transparent) 1px, transparent 1px);
+  background-size:
+    7rem 4rem,
+    7rem 4rem,
+    7rem 4rem;
+  mask-image: linear-gradient(180deg, transparent 2%, black 24%, black 86%, transparent 100%);
+  transform: translateZ(-2px) rotateX(1deg) rotateZ(-1deg);
   pointer-events: none;
 }
 
@@ -79,15 +115,21 @@
 }
 
 .lunar-city-building {
+  z-index: 12;
   transform-style: preserve-3d;
   transition: filter 200ms ease;
 }
 
 .lunar-city-building-button {
+  width: 2.2rem !important;
+  height: 2.2rem !important;
   transform: translateZ(25px);
+  border-radius: 0.7rem !important;
+  border-color: rgb(224 236 255 / 52%) !important;
+  background: rgb(7 13 23 / 80%) !important;
   box-shadow:
-    0 12px 18px rgb(0 0 0 / 28%),
-    0 0 0 4px color-mix(in srgb, var(--ui-bg-editor) 18%, transparent);
+    0 10px 16px rgb(0 0 0 / 38%),
+    0 0 0 2px rgb(157 204 255 / 18%);
   transform-style: preserve-3d;
 }
 
@@ -124,16 +166,72 @@
   pointer-events: none;
 }
 
+.lunar-city-leader {
+  z-index: 2;
+  display: flex;
+  width: 3.6rem;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  color: #edf3ff;
+  filter: drop-shadow(0 9px 5px rgb(0 0 0 / 42%));
+  transition:
+    filter 180ms ease,
+    transform 180ms ease;
+}
+
+.lunar-city-leader:hover,
+.lunar-city-leader:focus-visible {
+  z-index: 20;
+  filter: drop-shadow(0 13px 7px rgb(0 0 0 / 52%)) brightness(1.18);
+  outline: none;
+  transform: translateY(-0.2rem) scale(1.08);
+}
+
+.lunar-city-leader-figure {
+  display: block;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 1rem 1rem 0.75rem 0.75rem;
+  background: linear-gradient(145deg, rgb(19 33 52 / 95%), rgb(7 13 23 / 92%));
+  box-shadow:
+    0 0 0 1px rgb(218 237 255 / 35%),
+    inset 0 1px 0 rgb(255 255 255 / 20%),
+    0 0 18px rgb(87 185 255 / 18%);
+  transform: translateZ(38px);
+}
+
+.lunar-city-leader-svg,
+.lunar-city-worker-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.lunar-city-leader-name {
+  max-width: 4.8rem;
+  overflow: hidden;
+  border-radius: 0.25rem;
+  background: rgb(4 9 17 / 78%);
+  padding: 0.1rem 0.25rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgb(238 245 255 / 82%);
+  font-size: 0.5rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .lunar-city-worker {
   position: absolute;
   z-index: 30;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 1.65rem;
-  height: 1.65rem;
+  width: 2.4rem;
+  height: 2.4rem;
   border: 0;
-  border-radius: 9999px;
+  border-radius: 0.9rem;
   background: transparent;
   color: var(--ui-accent);
   filter: drop-shadow(0 9px 6px rgb(0 0 0 / 30%));
@@ -157,27 +255,72 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 1.25rem;
-  height: 1.25rem;
-  border: 1px solid currentColor;
-  border-radius: 0.35rem 0.35rem 0.55rem 0.55rem;
-  background: color-mix(in srgb, var(--ui-bg-editor) 94%, currentColor 6%);
+  width: 2.15rem;
+  height: 2.15rem;
+  border-radius: 0.55rem;
+  background: linear-gradient(145deg, rgb(19 35 52 / 96%), rgb(8 15 25 / 96%));
   box-shadow:
-    inset 0 -3px 0 color-mix(in srgb, currentColor 22%, transparent),
-    0 0 0 3px color-mix(in srgb, currentColor 13%, transparent);
-  transform: translateZ(25px);
+    0 0 0 1px color-mix(in srgb, currentColor 74%, transparent),
+    0 0 0 4px color-mix(in srgb, currentColor 13%, transparent),
+    inset 0 -4px 0 rgb(0 0 0 / 28%);
+  transform: translateZ(34px);
+}
+
+.lunar-city-worker-name {
+  position: absolute;
+  bottom: -0.95rem;
+  left: 50%;
+  max-width: 3.5rem;
+  overflow: hidden;
+  border-radius: 0.22rem;
+  background: rgb(4 9 17 / 74%);
+  padding: 0.08rem 0.22rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgb(238 245 255 / 78%);
+  font-size: 0.48rem;
+  letter-spacing: 0.09em;
+  opacity: 0;
+  text-transform: uppercase;
+  transform: translateX(-50%);
+  transition: opacity 180ms ease;
+}
+
+.lunar-city-worker:hover .lunar-city-worker-name,
+.lunar-city-worker:focus-visible .lunar-city-worker-name {
+  opacity: 1;
 }
 
 .lunar-city-worker-light {
   position: absolute;
-  right: 0.1rem;
-  top: 0.05rem;
+  right: 0.05rem;
+  top: 0.08rem;
   width: 0.34rem;
   height: 0.34rem;
   border-radius: 9999px;
   background: currentColor;
   box-shadow: 0 0 8px currentColor;
   transform: translateZ(31px);
+}
+
+.lunar-city-worker-state-working .lunar-city-worker-body {
+  background: linear-gradient(145deg, rgb(21 54 66 / 98%), rgb(7 19 29 / 98%));
+}
+
+.lunar-city-worker-state-review .lunar-city-worker-body {
+  background: linear-gradient(145deg, rgb(26 42 78 / 98%), rgb(8 15 30 / 98%));
+}
+
+.lunar-city-worker-state-triage .lunar-city-worker-body {
+  background: linear-gradient(145deg, rgb(74 58 28 / 98%), rgb(25 20 12 / 98%));
+}
+
+.lunar-city-worker-state-resource .lunar-city-worker-body {
+  background: linear-gradient(145deg, rgb(76 45 25 / 98%), rgb(27 17 12 / 98%));
+}
+
+.lunar-city-worker-state-ready .lunar-city-worker-body {
+  background: linear-gradient(145deg, rgb(24 67 50 / 98%), rgb(7 24 21 / 98%));
 }
 
 .lunar-city-worker-state-done {
@@ -241,13 +384,66 @@
   gap: 0.375rem;
   border: 1px solid var(--ui-stroke-tertiary);
   border-radius: 9999px;
-  background: color-mix(in srgb, var(--ui-bg-editor) 84%, transparent);
+  background: rgb(7 13 23 / 78%);
   padding: 0.375rem 0.625rem;
   box-shadow: 0 5px 14px rgb(0 0 0 / 16%);
   color: var(--ui-text-secondary);
   font-size: 0.63rem;
   line-height: 1;
   backdrop-filter: blur(8px);
+}
+
+.lunar-city-inspector,
+.lunar-city-task-queue,
+.lunar-city-room-panel {
+  border-color: rgb(177 203 236 / 28%) !important;
+  background: rgb(7 13 23 / 88%) !important;
+  box-shadow:
+    0 18px 38px rgb(0 0 0 / 42%),
+    inset 0 1px 0 rgb(255 255 255 / 8%);
+  color: #edf3ff;
+}
+
+.lunar-city-inspector {
+  position: fixed !important;
+  left: 1rem !important;
+  width: min(22rem, calc(100% - 2rem)) !important;
+  max-width: none !important;
+}
+
+.lunar-city-inspector .text-foreground,
+.lunar-city-task-queue .text-foreground,
+.lunar-city-room-panel .text-foreground {
+  color: #edf3ff !important;
+}
+
+.lunar-city-inspector .text-muted-foreground,
+.lunar-city-task-queue .text-muted-foreground,
+.lunar-city-room-panel .text-muted-foreground {
+  color: rgb(214 226 245 / 62%) !important;
+}
+
+.lunar-city-task-queue {
+  right: 50% !important;
+  bottom: 0.9rem !important;
+  width: min(34rem, calc(100% - 25rem)) !important;
+  min-width: 18rem;
+  padding: 0.75rem 1rem !important;
+  transform: translateX(50%);
+}
+
+.lunar-city-task-queue > div:last-child {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem 1rem;
+}
+
+.lunar-city-task-queue > div:last-child > div {
+  min-width: 0;
+}
+
+.lunar-city-room-panel {
+  background: rgb(5 10 18 / 94%) !important;
 }
 
 .is-paused .lunar-city-worker,
@@ -377,5 +573,12 @@
   }
   .lunar-city-counter span {
     display: none;
+  }
+  .lunar-city-leader {
+    transform: scale(0.85);
+    transform-origin: bottom center;
+  }
+  .lunar-city-worker {
+    transform: scale(0.88);
   }
 }

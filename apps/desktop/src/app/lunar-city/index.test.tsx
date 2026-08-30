@@ -12,9 +12,12 @@ describe('LunarCity', () => {
 
     expect(screen.getByRole('heading', { name: 'Lunar City' })).toBeTruthy()
     expect(screen.getByAltText(/isometric lunar settlement/i).getAttribute('src')).toBe(
-      './lunar-city/moon-settlement.png'
+      './lunar-city/moon-settlement-board.png'
     )
     expect(screen.getByRole('button', { name: /Open Research Lab/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Inspect Fox Scientist' }).getAttribute('data-character-kind')).toBe(
+      'leader'
+    )
     expect(screen.getByText('SIMULATION')).toBeTruthy()
   })
 
@@ -42,9 +45,12 @@ describe('LunarCity', () => {
   it('shows live task progress and moving workers without a state legend', () => {
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
 
-    expect(screen.getByText('Task queue')).toBeTruthy()
+    expect(screen.getByText('MISSIONS')).toBeTruthy()
     expect(screen.getByRole('progressbar', { name: 'Survey the archive' })).toBeTruthy()
     expect(screen.getAllByRole('button', { name: /Inspect .* worker/ }).length).toBeGreaterThanOrEqual(5)
+    expect(screen.getByRole('button', { name: /Inspect Pip worker/ }).getAttribute('data-worker-design')).toBe(
+      'orbital'
+    )
     expect(screen.queryByText('Worker states')).toBeNull()
     expect(screen.getByTestId('lunar-city-viewport').getAttribute('data-camera')).toBe('isometric')
   })

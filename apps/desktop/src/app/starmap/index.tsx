@@ -40,7 +40,7 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
   const shown = imported ?? graph
 
   return (
-    <Panel closeLabel={t.starmap.close} contentClassName="px-0 pb-0" onClose={onClose}>
+    <Panel closeLabel={t.starmap.close} contentClassName="px-0 pb-0" fullBleed onClose={onClose}>
       {!showMemoryGraph ? (
         <LunarCity onOpenMemoryGraph={() => setShowMemoryGraph(true)} />
       ) : error ? (
@@ -59,10 +59,7 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
       ) : null}
       {showMemoryGraph ? (
         <div className="absolute left-4 top-3 z-30">
-          <button
-            className="text-xs text-(--ui-accent) hover:underline"
-            onClick={() => setShowMemoryGraph(false)}
-          >
+          <button className="text-xs text-(--ui-accent) hover:underline" onClick={() => setShowMemoryGraph(false)}>
             ← Lunar City
           </button>
         </div>
