@@ -1471,7 +1471,7 @@ def test_protected_codex_projects_structured_github_pr_identity_fields(
         "API_TOKEN=not-a-real-secret-token-123456789",
     ),
 )
-def test_protected_codex_elides_structured_terminal_output(
+def test_structured_terminal_replay_remains_outcome_only(
     tmp_path, monkeypatch, payload
 ):
     """Responses API output arrays receive the same terminal replay policy."""
@@ -3191,7 +3191,7 @@ def test_protected_codex_responses_rejects_stale_sidecar_before_source_replay(
     assert "untrusted_provenance" in exc_info.value.decision.reason_codes
 
 
-def test_protected_codex_responses_replays_one_input_text_read_file_with_source_segment(
+def test_real_read_file_responses_replays_one_input_text_with_source_segment(
     tmp_path, monkeypatch
 ):
     """One canonical input_text item retains shape after validated replay."""
@@ -3228,7 +3228,7 @@ def test_protected_codex_responses_replays_one_input_text_read_file_with_source_
         "call_read_file_123|fc_responses_item_123",
     ),
 )
-def test_protected_codex_responses_replays_real_converted_effective_call_id(
+def test_real_read_file_responses_replays_real_converted_effective_call_id(
     tmp_path, monkeypatch, call_id
 ):
     """Sidecar identity follows the actual clamped/split Responses call ID."""
@@ -3275,6 +3275,212 @@ def test_protected_codex_responses_rejects_duplicate_sidecar_records(
         )
 
     assert "untrusted_provenance" in exc_info.value.decision.reason_codes
+
+
+def test_responses_read_file_fails_closed_on_policy_mismatch(tmp_path, monkeypatch):
+    """An exact prior-policy read cannot cross a later egress policy boundary."""
+
+    agent, _result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path, monkeypatch, call_id="call_read_file_123"
+    )
+    agent._llm_egress_policy_digest = sha256(b"policy-2").hexdigest()
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        authorize_agent_sdk_kwargs(
+            agent,
+            {
+                "model": agent.model,
+                "input": input_items,
+                "_hermes_source_provenance": sidecar,
+            },
+        )
+
+    assert "grant_binding_mismatch" in exc_info.value.decision.reason_codes
+
+
+def test_responses_read_file_fails_closed_for_scratch_call(tmp_path, monkeypatch):
+    """A scratch-path Responses call cannot replay a previously granted source."""
+
+    agent, result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path, monkeypatch, call_id="call_read_file_123"
+    )
+    input_items[0]["arguments"] = json.dumps({"path": "/private/tmp/scratch.py"})
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": input_items,
+            "_hermes_source_provenance": sidecar,
+        },
+    )
+
+    assert receipt.allowed
+    assert authorized["input"][1]["output"] == (
+        "read_file completed locally, but its raw content cannot be replayed on "
+        "this protected route. Request only the needed narrow range again."
+    )
+    assert result not in json.dumps(authorized)
+    assert receipt.decision.source_segment_count == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_sidecar",
+        "wrong_call",
+        "wrong_hash",
+        "duplicate_result",
+        "changed_content",
+        "changed_line_numbering",
+        "truncated_json",
+    ),
+)
+def test_responses_read_file_fails_closed_for_unbound_or_changed_presentations(
+    tmp_path, monkeypatch, mutation
+):
+    """Only the original bound source presentation may reach the Responses wire."""
+
+    agent, result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path, monkeypatch, call_id="call_read_file_123"
+    )
+    if mutation == "missing_sidecar":
+        sidecar = []
+    elif mutation == "wrong_call":
+        sidecar = [{**sidecar[0], "tool_call_id": "call_other"}]
+    elif mutation == "wrong_hash":
+        sidecar = [{**sidecar[0], "content_sha256": "0" * 64}]
+    elif mutation == "duplicate_result":
+        input_items.append(dict(input_items[1]))
+    else:
+        changed = json.loads(result)
+        if mutation == "changed_content":
+            changed["content"] = "1|changed = True\n2|"
+            output = json.dumps(changed)
+        elif mutation == "changed_line_numbering":
+            changed["content"] = "2|safe = True\n3|"
+            output = json.dumps(changed)
+        else:
+            output = result[:-1]
+        input_items[1] = {**input_items[1], "output": output}
+        sidecar = [
+            {
+                **sidecar[0],
+                "content_sha256": sha256(output.encode("utf-8")).hexdigest(),
+            }
+        ]
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        authorize_agent_sdk_kwargs(
+            agent,
+            {
+                "model": agent.model,
+                "input": input_items,
+                "_hermes_source_provenance": sidecar,
+            },
+        )
+
+    assert "untrusted_provenance" in exc_info.value.decision.reason_codes
+
+
+def test_responses_read_file_fails_closed_after_sidecar_is_consumed(
+    tmp_path, monkeypatch
+):
+    """A sidecar record cannot authorize both a Chat and a Responses result."""
+
+    agent, result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path, monkeypatch, call_id="call_read_file_123"
+    )
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        authorize_agent_sdk_kwargs(
+            agent,
+            {
+                "model": agent.model,
+                "messages": [
+                    {"role": "assistant", "content": ""},
+                    {
+                        "role": "tool",
+                        "tool_call_id": sidecar[0]["tool_call_id"],
+                        "content": result,
+                    }
+                ],
+                "input": input_items,
+                "_hermes_source_provenance": sidecar,
+            },
+        )
+
+    assert "untrusted_provenance" in exc_info.value.decision.reason_codes
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        lambda result: [
+            {"type": "input_text", "text": result},
+            {"type": "input_text", "text": "second item"},
+        ],
+        lambda result: [
+            {"type": "input_text", "text": result},
+            {"type": "input_image", "image_url": "https://example.test/image"},
+        ],
+        lambda _result: [{"type": "input_text"}],
+    ),
+)
+def test_responses_read_file_fails_closed_for_malformed_or_media_output(
+    tmp_path, monkeypatch, output
+):
+    """Composite, media-bearing, and malformed Responses output stays elided."""
+
+    agent, result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path, monkeypatch, call_id="call_read_file_123"
+    )
+    input_items[1] = {**input_items[1], "output": output(result)}
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": input_items,
+            "_hermes_source_provenance": sidecar,
+        },
+    )
+
+    assert receipt.allowed
+    assert authorized["input"][1]["output"] == (
+        "read_file completed locally, but its raw content cannot be replayed on "
+        "this protected route. Request only the needed narrow range again."
+    )
+    assert result not in json.dumps(authorized)
+    assert receipt.decision.source_segment_count == 0
+
+
+def test_responses_source_metadata_is_internal_and_audit_is_content_free(
+    tmp_path, monkeypatch
+):
+    """Exact source reaches only the provider payload, never private metadata or audit."""
+
+    agent, result, input_items, sidecar = _real_codex_read_file_replay(
+        tmp_path, monkeypatch, call_id="call_read_file_123"
+    )
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": input_items,
+            "_hermes_source_provenance": sidecar,
+        },
+    )
+
+    assert authorized["input"][1]["output"] == result
+    assert "_source_provenance" not in json.dumps(authorized)
+    assert "_hermes_source_provenance" not in authorized
+    audit = (agent._llm_egress_state_dir / "llm-egress-receipts.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert result not in audit
+    assert "safe = True" not in audit
 
 
 def test_real_read_file_wire_result_keeps_exact_source_provenance(

@@ -2128,6 +2128,9 @@ def _typed_payload(
                 _structured_tool_output_text(item) if is_structured_result else None
             )
             if is_read_file_projection_tool_result and key == "output":
+                if is_scratch_read_file_tool_result:
+                    typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+                    continue
                 output_text = _structured_tool_output_text(item)
                 if output_text is None:
                     typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
@@ -2863,6 +2866,11 @@ def authorize_agent_sdk_kwargs(
         for key, value in kwargs.items()
         if key not in controls and key not in _INTERNAL_EGRESS_KEYS
     }
+    scratch_read_file_tool_call_ids = (
+        _scratch_read_file_tool_call_ids(body)
+        if protected_kanban_remote and protected_provider_route
+        else frozenset()
+    )
     if protected_kanban_remote:
         body = _sanitize_protected_kanban_body(body)
     body = _restore_source_provenance_sidecar(body, sidecar)
@@ -2946,11 +2954,7 @@ def authorize_agent_sdk_kwargs(
             if protected_kanban_remote and protected_provider_route
             else frozenset()
         ),
-        scratch_read_file_tool_call_ids=(
-            _scratch_read_file_tool_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
-            else frozenset()
-        ),
+        scratch_read_file_tool_call_ids=scratch_read_file_tool_call_ids,
         git_workspace_diagnostic_call_ids=(
             _git_workspace_diagnostic_call_ids(body)
             if protected_kanban_remote and protected_provider_route
