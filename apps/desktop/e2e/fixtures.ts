@@ -338,6 +338,32 @@ export interface MockBackendFixture {
   cleanup: () => Promise<void>
 }
 
+function createMockDispatcherReadinessPath(sandbox: Sandbox): string {
+  const shimDir = path.join(sandbox.root, 'mock-dispatcher-readiness')
+
+  fs.mkdirSync(shimDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(shimDir, 'sitecustomize.py'),
+    `from hermes_cli import kanban
+
+
+def _mock_dispatcher_readiness(*, hermes_home=None):
+    return {
+        "status": "ready",
+        "ready": True,
+        "gateway_pid": None,
+        "message": "mock dispatcher readiness for isolated desktop E2E",
+    }
+
+
+kanban._dispatcher_readiness = _mock_dispatcher_readiness
+`,
+    'utf8'
+  )
+
+  return shimDir
+}
+
 export interface MockBackendOptions {
   /**
    * Optional YAML lines to inject under the `display:` section of the
@@ -351,6 +377,11 @@ export interface MockBackendOptions {
   modelContextLength?: number
   /** Additional process environment overrides for an isolated backend boot. */
   extraEnv?: Record<string, string>
+  /**
+   * Reply ready to the desktop's dispatcher-readiness probe without launching
+   * a gateway. This is confined to the spawned mock backend's Python path.
+   */
+  mockDispatcherReadiness?: boolean
   mockServer?: MockServerOptions
 }
 
@@ -377,7 +408,13 @@ export async function setupMockBackend(options: MockBackendOptions = {}): Promis
   writeEnvFile(sandbox.hermesHome)
 
   // 3. Build env + launch
-  const env = buildAppEnv(sandbox, options.extraEnv)
+  const dispatcherShimPath = options.mockDispatcherReadiness ? createMockDispatcherReadinessPath(sandbox) : null
+  const env = buildAppEnv(sandbox, {
+    ...options.extraEnv,
+    ...(dispatcherShimPath
+      ? { PYTHONPATH: [dispatcherShimPath, options.extraEnv?.PYTHONPATH].filter(Boolean).join(path.delimiter) }
+      : {})
+  })
   const { app, page } = await launchDesktop(env)
 
   return {
