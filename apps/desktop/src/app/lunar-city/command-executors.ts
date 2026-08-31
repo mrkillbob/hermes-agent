@@ -13,6 +13,7 @@ import {
 import type { InspectorSessionTarget } from './components/entity-inspector'
 
 const KANBAN_LOG_TAIL_BYTES = 65_536
+const LIVE_SUBAGENT_STATUSES = new Set(['queued', 'running'])
 
 const KANBAN_NON_RUNNING_TASK_STATES = new Set([
   'archived',
@@ -147,7 +148,7 @@ function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecu
     async currentAuthority(plan) {
       const identity = plan.identity
 
-      if (identity.kind !== 'session') {
+      if (identity.kind !== 'session' && identity.kind !== 'subagent') {
         return null
       }
 
@@ -166,6 +167,25 @@ function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecu
 
       if (matches.length !== 1) {
         return null
+      }
+
+      if (identity.kind === 'subagent') {
+        const statusResponse = await requestForSessionProfile<unknown>(
+          plan.owner,
+          rejectAmbientRequest,
+          'subagent.status',
+          { session_id: liveRuntimeId, subagent_id: identity.subagentId }
+        )
+        const statusEnvelope = record(statusResponse)
+        const subagent = record(statusEnvelope.subagent)
+
+        if (
+          statusEnvelope.found !== true ||
+          identifier(subagent.subagent_id) !== identity.subagentId ||
+          !LIVE_SUBAGENT_STATUSES.has(text(subagent.status) ?? '')
+        ) {
+          return null
+        }
       }
 
       return currentAuthority(plan)

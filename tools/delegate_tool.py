@@ -263,7 +263,53 @@ def _close_subagent_steering(subagent_id: str, agent: Any) -> Optional[str]:
         return pending if isinstance(pending, str) and pending.strip() else None
 
 
-def interrupt_subagent(subagent_id: str) -> bool:
+def _record_matches_live_owner(
+    record: Dict[str, Any],
+    *,
+    owner_session_id: Optional[str],
+    owner_transport: Any,
+    owner_session_record: Any,
+) -> bool:
+    return (
+        record.get("owner_session_id") == owner_session_id
+        and owner_transport is not None
+        and record.get("owner_transport") is owner_transport
+        and owner_session_record is not None
+        and record.get("owner_session_record") is owner_session_record
+    )
+
+
+def owned_subagent_status(
+    subagent_id: str,
+    *,
+    owner_session_id: str,
+    owner_transport: Any,
+    owner_session_record: Any,
+) -> Optional[Dict[str, Any]]:
+    """Return a bounded live-child receipt only for the exact gateway owner."""
+    with _active_subagents_lock:
+        record = _active_subagents.get(subagent_id)
+        if not record or not _record_matches_live_owner(
+            record,
+            owner_session_id=owner_session_id,
+            owner_transport=owner_transport,
+            owner_session_record=owner_session_record,
+        ):
+            return None
+        return {
+            "subagent_id": str(record.get("subagent_id") or ""),
+            "parent_id": record.get("parent_id"),
+            "status": str(record.get("status") or ""),
+        }
+
+
+def interrupt_subagent(
+    subagent_id: str,
+    *,
+    owner_session_id: Optional[str] = None,
+    owner_transport: Any = None,
+    owner_session_record: Any = None,
+) -> bool:
     """Request that a single running subagent stop at its next iteration boundary.
 
     Does not hard-kill the worker thread (Python can't); sets the child's
@@ -273,11 +319,22 @@ def interrupt_subagent(subagent_id: str) -> bool:
     """
     with _active_subagents_lock:
         record = _active_subagents.get(subagent_id)
-    if not record:
-        return False
-    agent = record.get("agent")
-    if agent is None:
-        return False
+        if not record:
+            return False
+        if owner_session_id is not None and not _record_matches_live_owner(
+            record,
+            owner_session_id=owner_session_id,
+            owner_transport=owner_transport,
+            owner_session_record=owner_session_record,
+        ):
+            return False
+        agent = record.get("agent")
+        if agent is None:
+            return False
+
+    # The exact agent object captured under the registry lock cannot be
+    # redirected by a later id recycle. Release before recursing into the
+    # agent's interrupt path, which may itself stop descendant subagents.
     try:
         if not request_hard_interrupt(agent, f"Interrupted via TUI ({subagent_id})"):
             return False
@@ -317,12 +374,11 @@ def steer_subagent(
         if not record or not record.get("accepting_steer", False):
             return False
         if owner_session_id is not None:
-            if (
-                record.get("owner_session_id") != owner_session_id
-                or owner_transport is None
-                or record.get("owner_transport") is not owner_transport
-                or owner_session_record is None
-                or record.get("owner_session_record") is not owner_session_record
+            if not _record_matches_live_owner(
+                record,
+                owner_session_id=owner_session_id,
+                owner_transport=owner_transport,
+                owner_session_record=owner_session_record,
             ):
                 return False
         agent = record.get("agent")

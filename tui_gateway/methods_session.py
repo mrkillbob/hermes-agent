@@ -3627,6 +3627,31 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"paused": set_spawn_paused(paused)})
 
 
+@method("subagent.status")
+def _(rid, params: dict) -> dict:
+    from tools.delegate_tool import owned_subagent_status
+
+    subagent_id = str(params.get("subagent_id") or "").strip()
+    if not subagent_id:
+        return _err(rid, 4000, "subagent_id required")
+    _invoking_session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    invoking_session_id = str(params.get("session_id") or "").strip()
+    invoking_transport, invoking_session = _current_session_steer_authority(
+        invoking_session_id
+    )
+    status = None
+    if invoking_transport is not None and invoking_session is not None:
+        status = owned_subagent_status(
+            subagent_id,
+            owner_session_id=invoking_session_id,
+            owner_transport=invoking_transport,
+            owner_session_record=invoking_session,
+        )
+    return _ok(rid, {"found": status is not None, "subagent": status})
+
+
 @method("subagent.interrupt")
 def _(rid, params: dict) -> dict:
     from tools.delegate_tool import interrupt_subagent
@@ -3634,7 +3659,21 @@ def _(rid, params: dict) -> dict:
     subagent_id = str(params.get("subagent_id") or "").strip()
     if not subagent_id:
         return _err(rid, 4000, "subagent_id required")
-    ok = interrupt_subagent(subagent_id)
+    _invoking_session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    invoking_session_id = str(params.get("session_id") or "").strip()
+    invoking_transport, invoking_session = _current_session_steer_authority(
+        invoking_session_id
+    )
+    ok = False
+    if invoking_transport is not None and invoking_session is not None:
+        ok = interrupt_subagent(
+            subagent_id,
+            owner_session_id=invoking_session_id,
+            owner_transport=invoking_transport,
+            owner_session_record=invoking_session,
+        )
     return _ok(rid, {"found": ok, "subagent_id": subagent_id})
 
 

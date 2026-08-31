@@ -198,6 +198,197 @@ describe('createLunarCityCommandExecutors', () => {
     }
   })
 
+  it.each([
+    ['send-guidance', false, 'subagent.steer'],
+    ['interrupt-subagent', true, 'subagent.interrupt']
+  ] as const)('proves the exact live child before %s reaches the production route', async (kind, confirmed, method) => {
+    requestForSessionProfile
+      .mockResolvedValueOnce({ sessions: [{ id: 'parent-session' }] })
+      .mockResolvedValueOnce({
+        found: true,
+        subagent: { status: 'running', subagent_id: 'child-same' }
+      })
+      .mockResolvedValueOnce({ found: true, status: 'queued', subagent_id: 'child-same' })
+    const identity = {
+      connectionId: 'source-b',
+      kind: 'subagent',
+      profile: 'builder',
+      sessionId: 'parent-session',
+      subagentId: 'child-same'
+    } as const
+    const base = planning(identity)
+    const snapshot: CommandPlanningSnapshot = {
+      ...base,
+      targets: new Map([
+        [
+          entityKey(identity),
+          {
+            ...base.targets.get(entityKey(identity))!,
+            availableOperations: [kind],
+            readbackCapabilities: ['subagent']
+          }
+        ]
+      ])
+    }
+    const plan = planCommand(
+      kind === 'send-guidance'
+        ? { entityKey: entityKey(identity), kind, text: 'Check the exact child.' }
+        : { entityKey: entityKey(identity), kind },
+      snapshot
+    )
+    const receipt = await executeCommand(
+      plan,
+      createLunarCityCommandExecutors({ resolveLiveRuntime: () => 'parent-runtime-b' }),
+      { confirmed, latestSnapshot: () => snapshot }
+    )
+
+    expect(receipt.verification).toBe('verification_required')
+    expect(requestForSessionProfile.mock.calls.map(call => call[2])).toEqual([
+      'session.list',
+      'subagent.status',
+      method
+    ])
+    expect(requestForSessionProfile.mock.calls[1]?.[0]).toEqual({ connectionId: 'source-b', profile: 'builder' })
+    expect(requestForSessionProfile.mock.calls[1]?.[3]).toEqual({
+      session_id: 'parent-runtime-b',
+      subagent_id: 'child-same'
+    })
+    expect(requestForSessionProfile.mock.calls[2]?.[3]).toMatchObject({
+      session_id: 'parent-runtime-b',
+      subagent_id: 'child-same'
+    })
+  })
+
+  it.each([
+    ['missing child', { found: false, subagent: null }],
+    ['foreign child', { found: true, subagent: { status: 'running', subagent_id: 'child-on-other-connection' } }],
+    ['stale child', { found: true, subagent: { status: 'completed', subagent_id: 'child-same' } }]
+  ])('rejects a %s before any production subagent mutation is sent', async (_label, childStatus) => {
+    requestForSessionProfile
+      .mockResolvedValueOnce({ sessions: [{ id: 'parent-session' }] })
+      .mockResolvedValueOnce(childStatus)
+    const identity = {
+      connectionId: 'source-b',
+      kind: 'subagent',
+      profile: 'builder',
+      sessionId: 'parent-session',
+      subagentId: 'child-same'
+    } as const
+    const base = planning(identity)
+    const snapshot: CommandPlanningSnapshot = {
+      ...base,
+      targets: new Map([
+        [
+          entityKey(identity),
+          {
+            ...base.targets.get(entityKey(identity))!,
+            availableOperations: ['send-guidance'],
+            readbackCapabilities: ['subagent']
+          }
+        ]
+      ])
+    }
+    const plan = planCommand(
+      { entityKey: entityKey(identity), kind: 'send-guidance', text: 'Do not misroute.' },
+      snapshot
+    )
+    const receipt = await executeCommand(
+      plan,
+      createLunarCityCommandExecutors({ resolveLiveRuntime: () => 'parent-runtime-b' }),
+      { latestSnapshot: () => snapshot }
+    )
+
+    expect(receipt.verification).toBe('rejected')
+    expect(requestForSessionProfile.mock.calls.map(call => call[2])).toEqual(['session.list', 'subagent.status'])
+  })
+
+  it('rejects an unreachable exact child authority source before send', async () => {
+    requestForSessionProfile
+      .mockResolvedValueOnce({ sessions: [{ id: 'parent-session' }] })
+      .mockRejectedValueOnce(new Error('child authority unreachable'))
+    const identity = {
+      connectionId: 'source-b',
+      kind: 'subagent',
+      profile: 'builder',
+      sessionId: 'parent-session',
+      subagentId: 'child-same'
+    } as const
+    const base = planning(identity)
+    const snapshot: CommandPlanningSnapshot = {
+      ...base,
+      targets: new Map([
+        [
+          entityKey(identity),
+          {
+            ...base.targets.get(entityKey(identity))!,
+            availableOperations: ['send-guidance'],
+            readbackCapabilities: ['subagent']
+          }
+        ]
+      ])
+    }
+    const plan = planCommand({ entityKey: entityKey(identity), kind: 'send-guidance', text: 'Do not send.' }, snapshot)
+    const receipt = await executeCommand(
+      plan,
+      createLunarCityCommandExecutors({ resolveLiveRuntime: () => 'parent-runtime-b' }),
+      { latestSnapshot: () => snapshot }
+    )
+
+    expect(receipt.verification).toBe('rejected')
+    expect(requestForSessionProfile.mock.calls.map(call => call[2])).toEqual(['session.list', 'subagent.status'])
+  })
+
+  it('does not let a duplicate child id on another connection satisfy exact-owner authority', async () => {
+    requestForSessionProfile.mockImplementation(async (owner, _ambient, method) => {
+      if (method === 'session.list') {
+        return { sessions: [{ id: 'parent-session' }] }
+      }
+
+      if (method === 'subagent.status' && owner.connectionId === 'source-a') {
+        return { found: true, subagent: { status: 'running', subagent_id: 'child-same' } }
+      }
+
+      return { found: false, subagent: null }
+    })
+    const identity = {
+      connectionId: 'source-b',
+      kind: 'subagent',
+      profile: 'builder',
+      sessionId: 'parent-session',
+      subagentId: 'child-same'
+    } as const
+    const base = planning(identity)
+    const snapshot: CommandPlanningSnapshot = {
+      ...base,
+      targets: new Map([
+        [
+          entityKey(identity),
+          {
+            ...base.targets.get(entityKey(identity))!,
+            availableOperations: ['send-guidance'],
+            readbackCapabilities: ['subagent']
+          }
+        ]
+      ])
+    }
+    const plan = planCommand(
+      { entityKey: entityKey(identity), kind: 'send-guidance', text: 'Stay isolated.' },
+      snapshot
+    )
+    const receipt = await executeCommand(
+      plan,
+      createLunarCityCommandExecutors({ resolveLiveRuntime: () => 'parent-runtime-b' }),
+      { latestSnapshot: () => snapshot }
+    )
+
+    expect(receipt.verification).toBe('rejected')
+    expect(requestForSessionProfile).toHaveBeenCalledTimes(2)
+    expect(requestForSessionProfile.mock.calls.map(call => call[0])).toEqual([
+      { connectionId: 'source-b', profile: 'builder' },
+      { connectionId: 'source-b', profile: 'builder' }
+    ])
+  })
+
   it('does not send a stored DB id when no exact-owner live runtime is authoritative', async () => {
     const identity = {
       connectionId: 'source-b',

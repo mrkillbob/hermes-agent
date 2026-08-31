@@ -22,7 +22,11 @@ class _StubAgent:
     def __init__(self, accept: bool = True, boom: bool = False):
         self.accept = accept
         self.boom = boom
+        self.interrupted: list[str] = []
         self.steered: list[str] = []
+
+    def interrupt(self, message: str) -> None:
+        self.interrupted.append(message)
 
     def steer(self, text: str) -> bool:
         if self.boom:
@@ -357,7 +361,14 @@ class TestSubagentSteerRPC:
         def close(self) -> None:
             return None
 
-    def _call(self, params: dict, *, transport=None, session_record=None) -> dict:
+    def _call(
+        self,
+        params: dict,
+        *,
+        method: str = "subagent.steer",
+        transport=None,
+        session_record=None,
+    ) -> dict:
         import tui_gateway.server as srv
 
         session_id = params.get("session_id")
@@ -369,7 +380,7 @@ class TestSubagentSteerRPC:
             }
         try:
             return srv.dispatch(
-                {"id": 1, "method": "subagent.steer", "params": params},
+                {"id": 1, "method": method, "params": params},
                 transport=transport,
             )
         finally:
@@ -417,6 +428,103 @@ class TestSubagentSteerRPC:
             assert agent.steered == ["check the edge cases"]
         finally:
             _unregister_subagent("sid-rpc-2")
+
+    def test_status_and_interrupt_require_exact_live_owner_artifacts(self):
+        owner_transport = self._Transport()
+        foreign_transport = self._Transport()
+        owner_record = {
+            "session_key": "owner-session",
+            "history": [],
+            "transport": owner_transport,
+        }
+        agent = _StubAgent()
+        _with_registered(
+            "sid-rpc-authority",
+            agent,
+            owner_session_id="owner-session",
+            owner_transport=owner_transport,
+            owner_session_record=owner_record,
+        )
+        try:
+            exact = self._call(
+                {
+                    "session_id": "owner-session",
+                    "subagent_id": "sid-rpc-authority",
+                },
+                method="subagent.status",
+                transport=owner_transport,
+                session_record=owner_record,
+            )
+            assert exact["result"] == {
+                "found": True,
+                "subagent": {
+                    "parent_id": "root",
+                    "status": "running",
+                    "subagent_id": "sid-rpc-authority",
+                },
+            }
+
+            foreign = self._call(
+                {
+                    "session_id": "owner-session",
+                    "subagent_id": "sid-rpc-authority",
+                },
+                method="subagent.status",
+                transport=foreign_transport,
+                session_record=owner_record,
+            )
+            assert foreign["result"] == {"found": False, "subagent": None}
+
+            rejected_interrupt = self._call(
+                {
+                    "session_id": "owner-session",
+                    "subagent_id": "sid-rpc-authority",
+                },
+                method="subagent.interrupt",
+                transport=foreign_transport,
+                session_record=owner_record,
+            )
+            assert rejected_interrupt["result"]["found"] is False
+            assert agent.interrupted == []
+
+            accepted_interrupt = self._call(
+                {
+                    "session_id": "owner-session",
+                    "subagent_id": "sid-rpc-authority",
+                },
+                method="subagent.interrupt",
+                transport=owner_transport,
+                session_record=owner_record,
+            )
+            assert accepted_interrupt["result"] == {
+                "found": True,
+                "subagent_id": "sid-rpc-authority",
+            }
+            assert len(agent.interrupted) == 1
+        finally:
+            _unregister_subagent("sid-rpc-authority")
+
+    def test_status_rejects_an_id_recycled_onto_another_owner(self):
+        old_transport = self._Transport()
+        old_record = {"session_key": "old-owner", "history": [], "transport": old_transport}
+        replacement = _StubAgent()
+        _with_registered(
+            "sid-rpc-recycled-status",
+            replacement,
+            owner_session_id="new-owner",
+            owner_transport=self._Transport(),
+            owner_session_record={"session_key": "new-owner"},
+        )
+        try:
+            envelope = self._call(
+                {"session_id": "old-owner", "subagent_id": "sid-rpc-recycled-status"},
+                method="subagent.status",
+                transport=old_transport,
+                session_record=old_record,
+            )
+            assert envelope["result"] == {"found": False, "subagent": None}
+        finally:
+            _unregister_subagent("sid-rpc-recycled-status", agent=replacement)
 
     def test_run_single_child_binds_exact_runtime_owner_artifacts(self):
         from gateway.session_context import clear_session_vars, set_session_vars
