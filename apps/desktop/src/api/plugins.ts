@@ -73,6 +73,8 @@ export interface PluginRestOptions {
 }
 
 export interface PluginSocketOptions {
+  /** Called only after an already-open socket reconnects. */
+  onReconnect?: () => void
   /** Pin this socket, including every reconnect, to one registered backend. */
   scope?: PluginSourceScope
 }
@@ -157,6 +159,7 @@ export function pluginSocket(
   let socket: null | WebSocket = null
   let disposed = false
   let attempt = 0
+  let openedOnce = false
   let retryTimer: number | null = null
 
   const connect = async () => {
@@ -175,6 +178,18 @@ export function pluginSocket(
     socket = new WebSocket(
       `${base}/api/plugins/${pluginId}${suffix}${join}token=${encodeURIComponent(connection.token)}`
     )
+
+    socket.onopen = () => {
+      if (disposed) {
+        return
+      }
+
+      if (openedOnce) {
+        opts.onReconnect?.()
+      } else {
+        openedOnce = true
+      }
+    }
 
     socket.onmessage = event => {
       if (disposed) {

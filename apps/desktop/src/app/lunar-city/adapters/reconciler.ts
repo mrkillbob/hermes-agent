@@ -44,6 +44,11 @@ export interface FleetRefreshResult {
   status?: 'failed' | 'partial' | 'refreshed' | 'retained'
 }
 
+export interface LunarCityOptionalSource {
+  read: () => Promise<ReconcileReadResult>
+  start?: (listener: () => void) => () => void
+}
+
 export interface LunarCityReconcilerOptions {
   freshnessMs?: number
   now?: () => number
@@ -65,6 +70,7 @@ export interface LunarCityLiveSources {
   onEvent?: (listener: (event: unknown) => void) => () => void
   onFocus?: (listener: () => void) => () => void
   onRegistryChange?: (listener: () => void) => () => void
+  optionalSources?: readonly LunarCityOptionalSource[]
   refreshFleet: (options: { force: boolean }) => Promise<FleetRefreshResult | void>
   sessionRows?: () => readonly SessionInfo[]
   sessionStores?: readonly ReadableAtom<readonly SessionInfo[]>[]
@@ -73,6 +79,7 @@ export interface LunarCityLiveSources {
 export interface StartLunarCityReconcilerOptions {
   freshnessMs?: number
   now?: () => number
+  optionalSources?: readonly LunarCityOptionalSource[]
   sources?: LunarCityLiveSources
 }
 
@@ -143,7 +150,7 @@ function healthSourceFor(entity: LunarEntity): string {
       return `session:${entity.identity.connectionId}`
 
     case 'kanban':
-      return `kanban:${entity.identity.connectionId}`
+      return `kanban:${encodeURIComponent(entity.identity.connectionId)}:${encodeURIComponent(entity.identity.profile)}`
   }
 }
 
@@ -494,6 +501,7 @@ function eventCursor(event: unknown): { scope: SequenceScope; sequence?: number;
  */
 export function startLunarCityReconciler(options: StartLunarCityReconcilerOptions = {}): () => void {
   const sources = options.sources ?? defaultLiveSources()
+  const optionalSources = options.optionalSources ?? sources.optionalSources ?? []
   const now = options.now ?? Date.now
   const sessionRows = sources.sessionRows ?? (() => sources.$sessions?.get() ?? [])
   const sessionStores = sources.sessionStores ?? (sources.$sessions ? [sources.$sessions] : [])
@@ -562,18 +570,46 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       })
 
       const subagents = normalizeSubagents(sources.$subagentsBySession.get(), sessions.entities, { observedAt: now() })
+      const optionalReads: ReconcileReadResult[] = []
+
+      for (const source of optionalSources) {
+        try {
+          optionalReads.push(await source.read())
+        } catch {
+          optionalReads.push({ authoritative: false, entities: [], sources: [] })
+        }
+      }
+
+      const previousEntities = [...$lunarCitySnapshot.get().entities.values()]
+
+      const optionalEntities = optionalReads.flatMap(read => {
+        if (read.authoritative !== false) {
+          return read.entities
+        }
+
+        const ownedSources = new Set(read.sources.map(source => source.source))
+
+        return previousEntities.filter(entity => ownedSources.has(healthSourceFor(entity))).map(staleEntity)
+      })
+
+      const optionalReplacementSources = optionalReads
+        .filter(read => read.authoritative !== false)
+        .flatMap(read => read.sources.map(source => source.source))
+
+      const authoritativeFleetSources = fleet.sources
+        .filter(source => source.authority === 'authoritative')
+        .map(source => source.source)
 
       return {
         authoritative: !fleetReadPartial,
-        entities: [...fleet.entities, ...sessions.entities, ...subagents.entities],
-        replacementSources: fleet.sources
-          .filter(source => source.authority === 'authoritative')
-          .map(source => source.source),
+        entities: [...fleet.entities, ...sessions.entities, ...subagents.entities, ...optionalEntities],
+        replacementSources: [...authoritativeFleetSources, ...optionalReplacementSources],
         sources: [
           ...fleet.sources.map(source =>
             fleetReadFailed ? { ...source, error: fleetError ?? 'Fleet refresh failed' } : source
           ),
-          ...sessions.sources
+          ...sessions.sources,
+          ...optionalReads.flatMap(read => [...read.sources])
         ]
       }
     }
@@ -621,6 +657,12 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         reconciler.acceptEvent(cursor)
       })
     )
+  }
+
+  for (const source of optionalSources) {
+    if (source.start) {
+      disposers.push(source.start(() => reconciler.invalidate('optional-source')))
+    }
   }
 
   const stop = reconciler.start()

@@ -1,6 +1,7 @@
 import type { EntityIdentity, EntityKey } from './model'
 
-type FieldName = 'board' | 'connection' | 'kind' | 'profile' | 'run' | 'session' | 'subagent' | 'task' | 'worker'
+type FieldName =
+  'board' | 'connection' | 'kind' | 'profile' | 'project' | 'run' | 'session' | 'subagent' | 'task' | 'worker'
 
 function required(name: FieldName, value: string): string {
   if (value.trim().length === 0) {
@@ -22,6 +23,12 @@ function optionalField(name: FieldName, value: string | undefined): string {
   }
 
   return field(name, value)
+}
+
+/** Stable project-compound identity. Projects are shared per connection, not
+ * per display label or active profile; encoded fields avoid delimiter aliases. */
+export function projectCompoundKey(connectionId: string, projectId: string): string {
+  return `compound:${field('connection', required('connection', connectionId))}:${field('project', required('project', projectId))}`
 }
 
 /**
@@ -56,6 +63,7 @@ export function entityKey(identity: EntityIdentity): EntityKey {
 
   return [
     ...common,
+    field('profile', required('profile', identity.profile)),
     field('board', required('board', identity.board)),
     field('task', required('task', identity.taskId)),
     optionalField('run', identity.runId),

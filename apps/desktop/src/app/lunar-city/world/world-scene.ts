@@ -1,3 +1,4 @@
+import { projectCompoundKey } from '../identity'
 import type {
   BabylonImportResultLike,
   BabylonMeshLike,
@@ -92,6 +93,56 @@ function navigationPointKey(point: Vec3): string {
 
 function samePoint(left: Vec3 | undefined, right: Vec3 | undefined): boolean {
   return left?.x === right?.x && left?.y === right?.y && left?.z === right?.z
+}
+
+export interface ProjectCompoundAnchor {
+  connectionId: string
+  key: string
+  position: Vec3
+  projectId: string
+}
+
+/**
+ * Project anchors are derived only from exact Kanban identities with a
+ * manifest-assigned position. Overflow and ambiguous input stay unplaced;
+ * this helper never invents a city coordinate from a task title or path.
+ */
+export function projectCompoundsForSnapshot(snapshot: LunarCitySnapshot): readonly ProjectCompoundAnchor[] {
+  const compounds = new Map<string, ProjectCompoundAnchor>()
+  const conflicted = new Set<string>()
+
+  for (const entity of snapshot.entities.values()) {
+    if (entity.identity.kind !== 'kanban' || !entity.position) {
+      continue
+    }
+
+    const projectId = entity.projectId?.trim()
+
+    if (!projectId) {
+      continue
+    }
+
+    const key = projectCompoundKey(entity.identity.connectionId, projectId)
+    const prior = compounds.get(key)
+
+    if (prior && !samePoint(prior.position, entity.position)) {
+      conflicted.add(key)
+      compounds.delete(key)
+
+      continue
+    }
+
+    if (!prior && !conflicted.has(key)) {
+      compounds.set(key, {
+        connectionId: entity.identity.connectionId,
+        key,
+        position: { ...entity.position },
+        projectId
+      })
+    }
+  }
+
+  return [...compounds.values()].sort((left, right) => left.key.localeCompare(right.key))
 }
 
 /**
@@ -1129,6 +1180,7 @@ export async function createWorldScene(
   let navigation: ReturnType<typeof createNavigationController> | undefined
   let entityRegistry: ReturnType<typeof createEntityRegistry> | undefined
   let occlusion: ReturnType<typeof createOcclusionController> | undefined
+  const projectCompoundNodes = new Map<string, BabylonNodeLike>()
 
   const disposeWorld = (): void => {
     if (disposed) {
@@ -1140,6 +1192,12 @@ export async function createWorldScene(
     entityRegistry?.dispose()
     occlusion?.clear()
     navigation?.dispose()
+
+    for (const node of projectCompoundNodes.values()) {
+      node.dispose?.()
+    }
+
+    projectCompoundNodes.clear()
     scene.dispose()
   }
 
@@ -1241,6 +1299,47 @@ export async function createWorldScene(
     })
 
     navigation = navigationController
+
+    let projectCompoundRevision = 0
+
+    const reconcileProjectCompounds = (snapshot: LunarCitySnapshot): void => {
+      const anchors = projectCompoundsForSnapshot(snapshot)
+      const desired = new Map(anchors.map(anchor => [anchor.key, anchor]))
+      let changed = false
+
+      for (const [key, node] of projectCompoundNodes) {
+        if (!desired.has(key)) {
+          node.dispose?.()
+          projectCompoundNodes.delete(key)
+          changed = true
+        }
+      }
+
+      for (const anchor of anchors) {
+        const existing = projectCompoundNodes.get(anchor.key)
+
+        if (existing) {
+          continue
+        }
+
+        const node = new modules.TransformNode(`lunar-city:compound:${anchor.key}`, scene)
+        setNodePosition(node, anchor.position)
+        tagNode(node, {
+          connectionId: anchor.connectionId,
+          key: anchor.key,
+          kind: 'project-compound',
+          projectId: anchor.projectId,
+          selectable: false
+        })
+        projectCompoundNodes.set(anchor.key, node)
+        changed = true
+      }
+
+      if (changed) {
+        projectCompoundRevision += 1
+        navigationController.setWalkabilityRevision(projectCompoundRevision)
+      }
+    }
 
     const destinationByEntity = new Map<EntityKey, string>()
     const authoritativeOriginByEntity = new Map<EntityKey, Vec3>()
@@ -1344,8 +1443,13 @@ export async function createWorldScene(
       leaderStateClips,
       applySnapshot(snapshot) {
         if (!disposed) {
+          reconcileProjectCompounds(snapshot)
+
           const dynamicEntities = new Map(
-            [...snapshot.entities].filter(([, entity]) => entity.identity.kind !== 'profile')
+            [...snapshot.entities].filter(
+              ([, entity]) =>
+                entity.identity.kind !== 'profile' && !(entity.identity.kind === 'kanban' && !entity.position)
+            )
           )
 
           for (const key of destinationByEntity.keys()) {

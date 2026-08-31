@@ -19,6 +19,7 @@ describe('entityKey', () => {
       {
         kind: 'kanban',
         connectionId: 'local',
+        profile: 'worker',
         board: 'default',
         taskId: 'same-session',
         workerId: 'child'
@@ -28,11 +29,28 @@ describe('entityKey', () => {
     expect(new Set(identities.map(entityKey)).size).toBe(identities.length)
   })
 
+  it('includes the Kanban profile owner when a connection serves multiple profiles', () => {
+    const defaultProfile = {
+      board: 'default',
+      connectionId: 'shared-gateway',
+      kind: 'kanban',
+      profile: 'default',
+      taskId: 'same-task'
+    } as unknown as EntityIdentity
+    const researchProfile = {
+      ...defaultProfile,
+      profile: 'research'
+    } as unknown as EntityIdentity
+
+    expect(entityKey(defaultProfile)).not.toBe(entityKey(researchProfile))
+  })
+
   it('uses tagged escaped fields so delimiters, unicode, and optional empty identifiers cannot create a collision', () => {
     const special = entityKey({
       kind: 'kanban',
       connectionId: 'a:b/% ✓',
       board: 'board:one',
+      profile: 'worker',
       taskId: 'task/one',
       runId: '',
       workerId: ''
@@ -41,6 +59,7 @@ describe('entityKey', () => {
       kind: 'kanban',
       connectionId: 'a',
       board: 'b/% ✓:board',
+      profile: 'worker',
       taskId: 'one:task/one',
       runId: undefined,
       workerId: undefined
@@ -63,6 +82,7 @@ describe('entityKey', () => {
       board: 'board:=/✓',
       connectionId: 'connection:=/✓',
       kind: 'kanban' as const,
+      profile: 'worker',
       taskId: 'task:=/✓'
     }
     const keys = [

@@ -512,4 +512,184 @@ describe('Lunar City reconciler', () => {
       }
     }
   })
+
+  it('keeps optional Kanban source failures isolated from session entities and releases the source subscription', async () => {
+    const sessions = atom([
+      {
+        connection_id: 'source-a',
+        ended_at: null,
+        id: 'session-a',
+        is_active: true,
+        profile: 'worker'
+      } as never
+    ])
+    const optionalStop = vi.fn()
+    let optionalInvalidate!: () => void
+    const optionalSource = {
+      read: vi.fn(async () => ({
+        authoritative: false,
+        entities: [],
+        sources: [
+          {
+            authority: 'unknown' as const,
+            error: 'Kanban plugin unavailable',
+            observedAt: 700,
+            source: 'kanban:source-a'
+          }
+        ]
+      })),
+      start: vi.fn((listener: () => void) => {
+        optionalInvalidate = listener
+
+        return optionalStop
+      })
+    }
+    const stop = startLunarCityReconciler({
+      now: () => 700,
+      sources: {
+        $fleetRoster: atom(null),
+        $sessions: sessions,
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        optionalSources: [optionalSource],
+        refreshFleet: async () => ({ error: 'Fleet roster bridge unavailable', status: 'failed' })
+      }
+    })
+
+    await flush()
+
+    const snapshot = $lunarCitySnapshot.get()
+    const sessionEntity = [...snapshot.entities.values()].find(entity => entity.identity.kind === 'session')
+
+    expect(sessionEntity).toMatchObject({
+      authority: 'authoritative',
+      identity: { connectionId: 'source-a', profile: 'worker', sessionId: 'session-a' }
+    })
+    expect(snapshot.sources).toEqual([
+      {
+        authority: 'unknown',
+        error: 'Kanban plugin unavailable',
+        observedAt: 700,
+        source: 'kanban:source-a'
+      },
+      { authority: 'authoritative', observedAt: 700, source: 'session:source-a' }
+    ])
+
+    optionalInvalidate()
+    await flush()
+    expect(optionalSource.read).toHaveBeenCalledTimes(2)
+
+    stop()
+    expect(optionalStop).toHaveBeenCalledOnce()
+  })
+
+  it('lets an optional Kanban failure retain only its own stale rows while core sessions keep reconciling', async () => {
+    const firstSession = {
+      connection_id: 'source-a',
+      ended_at: null,
+      id: 'session-one',
+      is_active: true,
+      profile: 'worker'
+    } as never
+    const secondSession = {
+      connection_id: 'source-a',
+      ended_at: null,
+      id: 'session-two',
+      is_active: true,
+      profile: 'worker'
+    } as never
+    const sessions = atom([firstSession])
+    const kanbanIdentity = {
+      board: 'main',
+      connectionId: 'source-a',
+      kind: 'kanban' as const,
+      profile: 'default',
+      taskId: 'task-one'
+    }
+    const kanbanEntity = {
+      animation: 'work',
+      authority: 'authoritative' as const,
+      destination: 'project' as const,
+      identity: kanbanIdentity,
+      key: entityKey(kanbanIdentity),
+      observedAt: 900
+    }
+    let mode: 'authoritative' | 'unavailable' | 'empty' = 'authoritative'
+    let invalidateOptional!: () => void
+    const optionalSource = {
+      read: async () => {
+        if (mode === 'authoritative') {
+          return {
+            authoritative: true,
+            entities: [kanbanEntity],
+            sources: [{ authority: 'authoritative' as const, observedAt: 900, source: 'kanban:source-a:default' }]
+          }
+        }
+
+        if (mode === 'unavailable') {
+          return {
+            authoritative: false,
+            entities: [],
+            sources: [
+              {
+                authority: 'unknown' as const,
+                error: 'Kanban plugin unavailable',
+                observedAt: 901,
+                source: 'kanban:source-a:default'
+              }
+            ]
+          }
+        }
+
+        return {
+          authoritative: true,
+          entities: [],
+          sources: [{ authority: 'authoritative' as const, observedAt: 902, source: 'kanban:source-a:default' }]
+        }
+      },
+      start: (listener: () => void) => {
+        invalidateOptional = listener
+
+        return () => undefined
+      }
+    }
+    const stop = startLunarCityReconciler({
+      now: () => 900,
+      sources: {
+        $fleetRoster: atom(null),
+        $sessions: sessions,
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        optionalSources: [optionalSource],
+        refreshFleet: async () => ({ status: 'retained' })
+      }
+    })
+
+    await flush()
+    expect($lunarCitySnapshot.get().entities.has(entityKey(kanbanIdentity))).toBe(true)
+
+    mode = 'unavailable'
+    sessions.set([secondSession])
+    await flush()
+
+    const unavailableSnapshot = $lunarCitySnapshot.get()
+    expect([...unavailableSnapshot.entities.values()].map(entity => entity.identity)).toContainEqual(
+      expect.objectContaining({ kind: 'session', sessionId: 'session-two' })
+    )
+    expect([...unavailableSnapshot.entities.values()].map(entity => entity.identity)).not.toContainEqual(
+      expect.objectContaining({ kind: 'session', sessionId: 'session-one' })
+    )
+    expect(unavailableSnapshot.entities.get(entityKey(kanbanIdentity))).toMatchObject({
+      animation: 'unavailable',
+      authority: 'stale',
+      destination: 'unknown'
+    })
+
+    mode = 'empty'
+    invalidateOptional()
+    await flush()
+
+    expect($lunarCitySnapshot.get().entities.has(entityKey(kanbanIdentity))).toBe(false)
+    stop()
+  })
 })

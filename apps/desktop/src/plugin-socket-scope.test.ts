@@ -122,6 +122,7 @@ describe('pluginSocket active-backend scoping (#73044)', () => {
 class FakePluginWebSocket {
   static instances: FakePluginWebSocket[] = []
   readonly url: string
+  onopen: (() => void) | null = null
   onmessage: ((event: { data: string }) => void) | null = null
   onclose: (() => void) | null = null
   closed = false
@@ -142,6 +143,10 @@ class FakePluginWebSocket {
 
   drop(): void {
     this.onclose?.()
+  }
+
+  open(): void {
+    this.onopen?.()
   }
 }
 
@@ -200,6 +205,28 @@ describe('pluginSocket explicit source scope', () => {
     await vi.waitFor(() => expect(getConnectionFor).toHaveBeenCalledTimes(2), { timeout: 2_000 })
     expect(getConnectionFor).toHaveBeenNthCalledWith(1, { connectionId: 'source-a', profile: 'default' })
     expect(getConnectionFor).toHaveBeenNthCalledWith(2, { connectionId: 'source-a', profile: 'default' })
+    dispose()
+  })
+
+  it('reports only a completed reconnect after the initial scoped socket has opened', async () => {
+    const source = scopedConn('source-a', 'default')
+    const reconnected = vi.fn()
+    getConnectionFor.mockResolvedValue(source)
+
+    const dispose = pluginSocket('kanban', '/events', () => {}, {
+      onReconnect: reconnected,
+      scope: { connectionId: 'source-a', profile: 'default' }
+    })
+
+    await vi.waitFor(() => expect(FakePluginWebSocket.instances).toHaveLength(1))
+    FakePluginWebSocket.instances[0]?.open()
+    expect(reconnected).not.toHaveBeenCalled()
+
+    FakePluginWebSocket.instances[0]?.drop()
+    await vi.waitFor(() => expect(FakePluginWebSocket.instances).toHaveLength(2), { timeout: 2_000 })
+    FakePluginWebSocket.instances[1]?.open()
+
+    expect(reconnected).toHaveBeenCalledOnce()
     dispose()
   })
 

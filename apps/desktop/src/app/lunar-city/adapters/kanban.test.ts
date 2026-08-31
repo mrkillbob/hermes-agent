@@ -1,0 +1,634 @@
+import { describe, expect, it, vi } from 'vitest'
+
+import actualManifest from '../../../../public/lunar-city/v2/world-manifest.v2.json'
+
+import type { PluginSourceScope } from '@/api/plugins'
+
+import { entityKey } from '../identity'
+import { parseWorldManifest } from '../manifest'
+import type { ProjectSlotManifestEntry, WorldManifestV2 } from '../model'
+
+import {
+  allocateProjectCompounds,
+  compoundKey,
+  createKanbanCitySource,
+  projectSlotContractIssues,
+  type KanbanRest,
+  type KanbanSocket
+} from './kanban'
+
+const scopeA: PluginSourceScope = { connectionId: 'source-a', profile: 'default' }
+const scopeB: PluginSourceScope = { connectionId: 'source-b', profile: 'default' }
+const scopeAResearch: PluginSourceScope = { connectionId: 'source-a', profile: 'research' }
+
+function manifest(): WorldManifestV2 {
+  return parseWorldManifest(structuredClone(actualManifest))
+}
+
+function httpError(status: number): Error & { status: number } {
+  return Object.assign(new Error(`HTTP ${status}`), { status })
+}
+
+function restFrom(responses: Record<string, unknown | Error>): ReturnType<typeof vi.fn> & KanbanRest {
+  return vi.fn(async (path: string, _options) => {
+    const response = responses[path]
+
+    if (response instanceof Error) {
+      throw response
+    }
+
+    if (response === undefined) {
+      throw new Error(`unexpected request ${path}`)
+    }
+
+    return response as never
+  })
+}
+
+function boardFixtures(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    '/boards': {
+      boards: [{ is_current: true, project_id: 'project-alpha', slug: 'main' }],
+      current: 'main'
+    },
+    '/board?board=main': {
+      columns: [
+        {
+          name: 'running',
+          tasks: [
+            {
+              current_run_id: 7,
+              id: 'task-1',
+              project_id: 'project-alpha',
+              status: 'running',
+              title: 'Build approved city'
+            }
+          ]
+        }
+      ],
+      latest_event_id: 8,
+      now: 12_345
+    },
+    '/workers/active?board=main': {
+      checked_at: 12_345,
+      count: 1,
+      workers: [
+        {
+          run_id: 7,
+          task_id: 'task-1',
+          task_assignee: 'display-assignee',
+          task_status: 'running',
+          task_title: 'Build approved city',
+          worker_pid: 4242
+        }
+      ]
+    },
+    ...overrides
+  }
+}
+
+describe('Kanban Lunar City optional source', () => {
+  it('fails closed when the optional Kanban plugin API is unavailable', async () => {
+    const rest = restFrom({ '/boards': httpError(404) })
+    const source = createKanbanCitySource({ manifest: manifest(), now: () => 100, rest, scope: scopeA })
+
+    const result = await source.read()
+
+    expect(result.authoritative).toBe(false)
+    expect(result.health).toBe('unavailable')
+    expect(result.entities).toEqual([])
+    expect(result.compounds).toEqual([])
+    expect(result.sources).toEqual([
+      { authority: 'unknown', error: 'Kanban plugin unavailable', observedAt: 100, source: 'kanban:source-a:default' }
+    ])
+  })
+
+  it('does not turn a malformed bounded worker response into an authoritative empty board', async () => {
+    const source = createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 101,
+      rest: restFrom(boardFixtures({ '/workers/active?board=main': { checked_at: 101 } })),
+      scope: scopeA
+    })
+
+    await expect(source.read()).resolves.toMatchObject({
+      authoritative: false,
+      entities: [],
+      health: 'malformed',
+      sources: [
+        {
+          authority: 'unknown',
+          error: 'Kanban response malformed',
+          observedAt: 101,
+          source: 'kanban:source-a:default'
+        }
+      ]
+    })
+  })
+
+  it('performs only the bounded board and active-worker reads on initial load', async () => {
+    const rest = restFrom(boardFixtures())
+    const source = createKanbanCitySource({ manifest: manifest(), now: () => 200, rest, scope: scopeA })
+
+    const result = await source.read()
+
+    expect(rest.mock.calls.map(call => call[0])).toEqual(['/boards', '/board?board=main', '/workers/active?board=main'])
+    expect(rest.mock.calls.every(call => call[1]?.method === 'GET')).toBe(true)
+    expect(rest.mock.calls.every(call => call[1]?.scope.connectionId === 'source-a')).toBe(true)
+    expect(rest.mock.calls.every(call => call[1]?.scope.profile === 'default')).toBe(true)
+    expect(result.authoritative).toBe(true)
+    expect(result.selectedBoard).toBe('main')
+    expect(result.sources).toEqual([{ authority: 'authoritative', observedAt: 200, source: 'kanban:source-a:default' }])
+
+    const task = result.entities.find(
+      entity => entity.identity.kind === 'kanban' && entity.identity.taskId === 'task-1' && !entity.identity.workerId
+    )
+    const worker = result.entities.find(
+      entity => entity.identity.kind === 'kanban' && entity.identity.taskId === 'task-1' && entity.identity.workerId
+    )
+
+    expect(task).toMatchObject({
+      animation: 'work',
+      authority: 'authoritative',
+      destination: 'project',
+      identity: { board: 'main', connectionId: 'source-a', runId: '7', taskId: 'task-1' },
+      observedAt: 200,
+      position: manifest().projectSlots[0]!.position,
+      projectId: 'project-alpha'
+    })
+    expect(worker).toMatchObject({
+      animation: 'work',
+      authority: 'authoritative',
+      destination: 'project',
+      identity: {
+        board: 'main',
+        connectionId: 'source-a',
+        runId: '7',
+        taskId: 'task-1',
+        workerId: 'pid:4242'
+      },
+      projectId: 'project-alpha'
+    })
+  })
+
+  it('fetches selected task detail only for the selected task', async () => {
+    const rest = restFrom({
+      ...boardFixtures(),
+      '/tasks/task-1?board=main': {
+        comments: [{ body: 'bounded detail', id: 1 }],
+        events: [{ id: 9, kind: 'claimed' }],
+        task: { id: 'task-1' }
+      }
+    })
+    const source = createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 300,
+      rest,
+      scope: scopeA,
+      selectedTaskId: () => 'task-1'
+    })
+
+    const result = await source.read()
+
+    expect(rest.mock.calls.map(call => call[0])).toEqual([
+      '/boards',
+      '/board?board=main',
+      '/workers/active?board=main',
+      '/tasks/task-1?board=main'
+    ])
+    expect(result.details.get('task-1')).toMatchObject({ task: { id: 'task-1' } })
+  })
+
+  it('dedupes concurrent selected-task reconciliation so detail stays bounded', async () => {
+    const rest = restFrom({
+      ...boardFixtures(),
+      '/tasks/task-1?board=main': { task: { id: 'task-1' } }
+    })
+    const source = createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 301,
+      rest,
+      scope: scopeA,
+      selectedTaskId: () => 'task-1'
+    })
+
+    const [first, second] = await Promise.all([source.read(), source.read()])
+
+    expect(first).toBe(second)
+    expect(rest.mock.calls.map(call => call[0])).toEqual([
+      '/boards',
+      '/board?board=main',
+      '/workers/active?board=main',
+      '/tasks/task-1?board=main'
+    ])
+  })
+
+  it('drops an in-flight REST result when the route disposes its source', async () => {
+    let resolveBoards: ((value: unknown) => void) | undefined
+    const rest = vi.fn((path: string) => {
+      if (path === '/boards') {
+        return new Promise<unknown>(resolve => {
+          resolveBoards = resolve
+        })
+      }
+
+      throw new Error(`unexpected request after disposal ${path}`)
+    }) as ReturnType<typeof vi.fn> & KanbanRest
+    const source = createKanbanCitySource({ manifest: manifest(), now: () => 301, rest, scope: scopeA })
+    const pending = source.read()
+    const stop = source.start(vi.fn())
+
+    stop()
+    resolveBoards?.({ boards: [{ is_current: true, slug: 'main' }], current: 'main' })
+
+    await expect(pending).resolves.toMatchObject({
+      authoritative: false,
+      entities: [],
+      health: 'unavailable',
+      sources: [
+        {
+          error: 'Kanban source disposed',
+          source: 'kanban:source-a:default'
+        }
+      ]
+    })
+    expect(rest).toHaveBeenCalledOnce()
+  })
+
+  it('retains selected detail until its task receives a socket invalidation', async () => {
+    const rest = restFrom({
+      ...boardFixtures(),
+      '/tasks/task-1?board=main': { task: { id: 'task-1' } }
+    })
+    const source = createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 302,
+      rest,
+      scope: scopeA,
+      selectedTaskId: () => 'task-1'
+    })
+
+    await source.read()
+    await source.read()
+
+    expect(rest.mock.calls.map(call => call[0])).toEqual([
+      '/boards',
+      '/board?board=main',
+      '/workers/active?board=main',
+      '/tasks/task-1?board=main',
+      '/boards',
+      '/board?board=main',
+      '/workers/active?board=main'
+    ])
+  })
+
+  it('keeps same task and run IDs separate across explicit connections', async () => {
+    const first = await createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 400,
+      rest: restFrom(boardFixtures()),
+      scope: scopeA
+    }).read()
+    const second = await createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 400,
+      rest: restFrom(boardFixtures()),
+      scope: scopeB
+    }).read()
+
+    const keys = new Set([...first.entities, ...second.entities].map(entity => entity.key))
+
+    expect(keys.size).toBe(first.entities.length + second.entities.length)
+    expect([...keys]).toContain(
+      entityKey({
+        board: 'main',
+        connectionId: 'source-a',
+        kind: 'kanban',
+        profile: 'default',
+        runId: '7',
+        taskId: 'task-1'
+      })
+    )
+    expect([...keys]).toContain(
+      entityKey({
+        board: 'main',
+        connectionId: 'source-b',
+        kind: 'kanban',
+        profile: 'default',
+        runId: '7',
+        taskId: 'task-1'
+      })
+    )
+  })
+
+  it('keeps same task and run IDs separate across explicit profile owners on one connection', async () => {
+    const first = await createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 400,
+      rest: restFrom(boardFixtures()),
+      scope: scopeA
+    }).read()
+    const second = await createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 400,
+      rest: restFrom(boardFixtures()),
+      scope: scopeAResearch
+    }).read()
+
+    const keys = new Set([...first.entities, ...second.entities].map(entity => entity.key))
+
+    expect(keys.size).toBe(first.entities.length + second.entities.length)
+    expect(first.sources[0]?.source).not.toBe(second.sources[0]?.source)
+  })
+
+  it('keeps unmatched active workers partial instead of attaching by title or assignee', async () => {
+    const rest = restFrom(
+      boardFixtures({
+        '/workers/active?board=main': {
+          checked_at: 12_345,
+          count: 1,
+          workers: [
+            {
+              run_id: 99,
+              task_assignee: 'display-assignee',
+              task_id: 'missing-task',
+              task_status: 'running',
+              task_title: 'Build approved city',
+              worker_pid: 777
+            }
+          ]
+        }
+      })
+    )
+    const result = await createKanbanCitySource({ manifest: manifest(), now: () => 500, rest, scope: scopeA }).read()
+
+    const worker = result.entities.find(
+      entity => entity.identity.kind === 'kanban' && entity.identity.workerId === 'pid:777'
+    )
+
+    expect(worker).toMatchObject({
+      animation: 'unavailable',
+      authority: 'partial',
+      destination: 'unknown',
+      identity: { board: 'main', runId: '99', taskId: 'missing-task', workerId: 'pid:777' }
+    })
+    expect(worker?.projectId).toBeUndefined()
+  })
+
+  it('treats socket frames as board-local invalidation hints and never as status authority', async () => {
+    let socketListener: ((message: unknown) => void) | undefined
+    const disposeSocket = vi.fn()
+    const socket = vi.fn((path: string, onMessage: (message: unknown) => void) => {
+      socketListener = onMessage
+
+      return disposeSocket
+    }) satisfies KanbanSocket
+    const invalidated = vi.fn()
+    const source = createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 600,
+      rest: restFrom(boardFixtures()),
+      socket,
+      scope: scopeA
+    })
+
+    await source.read()
+    const stop = source.start(invalidated)
+
+    expect(socket).toHaveBeenCalledWith(
+      '/events?board=main&since=8',
+      expect.any(Function),
+      expect.objectContaining({ onReconnect: expect.any(Function) })
+    )
+    expect(source.onFrame({ cursor: 8, events: [{ id: 8, kind: 'completed', task_id: 'task-1' }] })).toEqual({
+      accepted: false,
+      dirtyTaskIds: [],
+      needsReconcile: false
+    })
+    expect(source.onFrame({ cursor: 9, events: [{ id: 9, kind: 'completed', task_id: 'task-1' }] })).toEqual({
+      accepted: true,
+      dirtyTaskIds: ['task-1'],
+      needsReconcile: false
+    })
+    expect(source.onFrame({ cursor: 11, events: [{ id: 11, kind: 'completed', task_id: 'task-1' }] })).toEqual({
+      accepted: true,
+      dirtyTaskIds: ['task-1'],
+      needsReconcile: true
+    })
+
+    socketListener?.({ cursor: 12, events: [{ id: 12, task_id: 'task-1' }] })
+    stop()
+    socketListener?.({ cursor: 13, events: [{ id: 13, task_id: 'task-1' }] })
+
+    expect(invalidated).toHaveBeenCalledOnce()
+    expect(disposeSocket).toHaveBeenCalledOnce()
+  })
+
+  it('turns a reconnected socket into one REST-rebaseline hint without accepting socket status', async () => {
+    let reconnect: (() => void) | undefined
+    const socket = vi.fn((...args: unknown[]) => {
+      reconnect = (args[2] as { onReconnect?: () => void } | undefined)?.onReconnect
+
+      return vi.fn()
+    }) as unknown as KanbanSocket
+    const invalidated = vi.fn()
+    const source = createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 600,
+      rest: restFrom(boardFixtures()),
+      socket,
+      scope: scopeA
+    })
+
+    await source.read()
+    source.start(invalidated)
+
+    expect(reconnect).toEqual(expect.any(Function))
+    reconnect?.()
+
+    expect(invalidated).toHaveBeenCalledOnce()
+    expect(invalidated).toHaveBeenCalledWith({ accepted: true, dirtyTaskIds: [], needsReconcile: true })
+  })
+
+  it('rebaselines a board switch and ignores a late frame from the disposed board socket', async () => {
+    let board = 'main'
+    const rest = vi.fn(async (path: string, _options) => {
+      if (path === '/boards') {
+        return {
+          boards: [{ is_current: true, project_id: `project-${board}`, slug: board }],
+          current: board
+        } as never
+      }
+
+      if (path === '/board?board=main') {
+        return { columns: [], latest_event_id: 8 } as never
+      }
+
+      if (path === '/workers/active?board=main') {
+        return { workers: [] } as never
+      }
+
+      if (path === '/board?board=second') {
+        return { columns: [], latest_event_id: 20 } as never
+      }
+
+      if (path === '/workers/active?board=second') {
+        return { workers: [] } as never
+      }
+
+      throw new Error(`unexpected request ${path}`)
+    }) as ReturnType<typeof vi.fn> & KanbanRest
+    const listeners = new Map<string, (message: unknown) => void>()
+    const socket = vi.fn((path: string, onMessage: (message: unknown) => void) => {
+      listeners.set(path, onMessage)
+
+      return vi.fn()
+    }) satisfies KanbanSocket
+    const invalidated = vi.fn()
+    const source = createKanbanCitySource({ manifest: manifest(), now: () => 601, rest, scope: scopeA, socket })
+
+    await source.read()
+    source.start(invalidated)
+    board = 'second'
+    await source.read()
+
+    const mainPath = '/events?board=main&since=8'
+    const secondPath = '/events?board=second&since=20'
+    expect(socket.mock.calls.map(call => call[0])).toEqual([mainPath, secondPath])
+
+    listeners.get(mainPath)?.({ cursor: 900, events: [{ id: 900, task_id: 'stale-main' }] })
+    listeners.get(secondPath)?.({ cursor: 21, events: [{ id: 21, task_id: 'live-second' }] })
+
+    expect(invalidated).toHaveBeenCalledTimes(1)
+    expect(invalidated).toHaveBeenCalledWith({ accepted: true, dirtyTaskIds: ['live-second'], needsReconcile: false })
+  })
+
+  it('uses delimiter-safe compound keys and deterministic finite project slots', () => {
+    const slots = manifest().projectSlots
+    const forward = allocateProjectCompounds(
+      [
+        { connectionId: 'source-a', projectId: 'project-z', taskCount: 1 },
+        { connectionId: 'source-a', projectId: 'project-a', taskCount: 2 },
+        { connectionId: 'source-a', projectId: 'project-overflow', taskCount: 3 },
+        { connectionId: 'source-a', projectId: 'project-extra', taskCount: 4 }
+      ],
+      slots
+    )
+    const reverse = allocateProjectCompounds(
+      [
+        { connectionId: 'source-a', projectId: 'project-extra', taskCount: 4 },
+        { connectionId: 'source-a', projectId: 'project-overflow', taskCount: 3 },
+        { connectionId: 'source-a', projectId: 'project-a', taskCount: 2 },
+        { connectionId: 'source-a', projectId: 'project-z', taskCount: 1 }
+      ],
+      slots
+    )
+
+    expect(compoundKey('a::b', 'c')).not.toBe(compoundKey('a', 'b::c'))
+    expect(forward.map(placement => placement.slotId)).toEqual(reverse.map(placement => placement.slotId))
+    expect(forward.map(placement => placement.projectId)).toEqual([
+      'project-a',
+      'project-extra',
+      'project-overflow',
+      'project-z'
+    ])
+    expect(forward.map(placement => placement.slotId)).toEqual([
+      'compound-inner-1',
+      'compound-inner-2',
+      'compound-outer-1',
+      undefined
+    ])
+    expect(forward.at(-1)).toMatchObject({ taskCount: 1, unplaced: true })
+  })
+
+  it('retains existing compound slots when an unrelated canonical project appears', () => {
+    const slots = manifest().projectSlots
+    const initial = allocateProjectCompounds(
+      [
+        { connectionId: 'source-a', projectId: 'project-b', taskCount: 1 },
+        { connectionId: 'source-a', projectId: 'project-c', taskCount: 1 }
+      ],
+      slots
+    )
+    const updated = allocateProjectCompounds(
+      [
+        { connectionId: 'source-a', projectId: 'project-a', taskCount: 1 },
+        { connectionId: 'source-a', projectId: 'project-b', taskCount: 1 },
+        { connectionId: 'source-a', projectId: 'project-c', taskCount: 1 }
+      ],
+      slots,
+      initial
+    )
+
+    expect(updated.find(placement => placement.projectId === 'project-b')?.slotId).toBe(
+      initial.find(placement => placement.projectId === 'project-b')?.slotId
+    )
+    expect(updated.find(placement => placement.projectId === 'project-c')?.slotId).toBe(
+      initial.find(placement => placement.projectId === 'project-c')?.slotId
+    )
+    expect(updated.find(placement => placement.projectId === 'project-a')?.slotId).toBe('compound-outer-1')
+  })
+
+  it('retains live compound placement across later bounded REST reconciliations', async () => {
+    let includeEarlierProject = false
+    const rest = vi.fn(async (path: string, _options) => {
+      if (path === '/boards') {
+        return { boards: [{ is_current: true, slug: 'main' }], current: 'main' } as never
+      }
+
+      if (path === '/board?board=main') {
+        const projects = includeEarlierProject ? ['project-a', 'project-b', 'project-c'] : ['project-b', 'project-c']
+
+        return {
+          columns: [
+            {
+              name: 'running',
+              tasks: projects.map((projectId, index) => ({
+                id: `task-${index}`,
+                project_id: projectId,
+                status: 'running'
+              }))
+            }
+          ],
+          latest_event_id: includeEarlierProject ? 2 : 1
+        } as never
+      }
+
+      if (path === '/workers/active?board=main') {
+        return { workers: [] } as never
+      }
+
+      throw new Error(`unexpected request ${path}`)
+    }) as ReturnType<typeof vi.fn> & KanbanRest
+    const source = createKanbanCitySource({ manifest: manifest(), now: () => 603, rest, scope: scopeA })
+
+    const initial = await source.read()
+    includeEarlierProject = true
+    const updated = await source.read()
+
+    expect(updated.compounds.find(placement => placement.projectId === 'project-b')?.slotId).toBe(
+      initial.compounds.find(placement => placement.projectId === 'project-b')?.slotId
+    )
+    expect(updated.compounds.find(placement => placement.projectId === 'project-c')?.slotId).toBe(
+      initial.compounds.find(placement => placement.projectId === 'project-c')?.slotId
+    )
+  })
+
+  it('proves declared project slots are inside the world, non-overlapping, and graph-linked', () => {
+    const parsed = manifest()
+
+    expect(projectSlotContractIssues(parsed)).toEqual([])
+
+    const [first, second] = parsed.projectSlots
+    const overlapping: ProjectSlotManifestEntry = {
+      ...second!,
+      id: 'compound-overlap',
+      bounds: first!.bounds,
+      position: first!.position
+    }
+
+    expect(projectSlotContractIssues({ ...parsed, projectSlots: [first!, overlapping] })).toContain(
+      'projectSlots[compound-inner-1] overlaps projectSlots[compound-overlap]'
+    )
+  })
+})

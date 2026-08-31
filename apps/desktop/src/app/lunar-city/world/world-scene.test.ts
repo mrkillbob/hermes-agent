@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type {
   BabylonImportResultLike,
   BabylonNodeLike,
+  LunarCitySnapshot,
   LunarCityWorldModules,
   LunarEntity,
   ModelManifestEntry,
@@ -16,6 +17,7 @@ import {
   createManifestNavigationQuery,
   createBabylonEntityFactory,
   createRouteNavigationQuery,
+  projectCompoundsForSnapshot,
   transformManifestPoint,
   worldBoundsFromModel
 } from './world-scene'
@@ -236,6 +238,84 @@ describe('manifest navigation query', () => {
 
     query.dispose?.()
     expect(destroy).toHaveBeenCalledOnce()
+  })
+})
+
+describe('retained project compounds', () => {
+  it('retains one declared-position compound per canonical connection/project and excludes unplaced work', () => {
+    const snapshot: LunarCitySnapshot = {
+      entities: new Map([
+        [
+          'kanban:one' as never,
+          {
+            animation: 'work',
+            authority: 'authoritative',
+            destination: 'project',
+            identity: {
+              board: 'main',
+              connectionId: 'source-a',
+              kind: 'kanban',
+              profile: 'default',
+              taskId: 'task-one'
+            },
+            key: 'kanban:one' as never,
+            observedAt: 1,
+            position: { x: 16, y: 0, z: 38 },
+            projectId: 'project-alpha'
+          }
+        ],
+        [
+          'kanban:two' as never,
+          {
+            animation: 'work',
+            authority: 'authoritative',
+            destination: 'project',
+            identity: {
+              board: 'main',
+              connectionId: 'source-a',
+              kind: 'kanban',
+              profile: 'research',
+              runId: 'run-two',
+              taskId: 'task-two'
+            },
+            key: 'kanban:two' as never,
+            observedAt: 1,
+            position: { x: 16, y: 0, z: 38 },
+            projectId: 'project-alpha'
+          }
+        ],
+        [
+          'kanban:overflow' as never,
+          {
+            animation: 'unavailable',
+            authority: 'partial',
+            destination: 'unknown',
+            identity: {
+              board: 'main',
+              connectionId: 'source-a',
+              kind: 'kanban',
+              profile: 'default',
+              taskId: 'task-overflow'
+            },
+            key: 'kanban:overflow' as never,
+            observedAt: 1,
+            projectId: 'project-overflow'
+          }
+        ]
+      ]),
+      observedAt: 1,
+      revision: 1,
+      sources: []
+    }
+
+    expect(projectCompoundsForSnapshot(snapshot)).toEqual([
+      {
+        connectionId: 'source-a',
+        key: 'compound:connection:string:8:source-a:project:string:13:project-alpha',
+        position: { x: 16, y: 0, z: 38 },
+        projectId: 'project-alpha'
+      }
+    ])
   })
 })
 

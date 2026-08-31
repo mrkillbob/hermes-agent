@@ -15,6 +15,7 @@ import type {
 import { createLunarCityWorld } from './create-world'
 
 interface FakeNode {
+  dispose: ReturnType<typeof vi.fn>
   name: string
   metadata?: Record<string, unknown>
   parent?: FakeNode | null
@@ -37,6 +38,7 @@ const leaderStateClips = (leaderId: string): LeaderStateClipMap => ({
 
 function fakeNode(name: string, metadata?: Record<string, unknown>): FakeNode {
   return {
+    dispose: vi.fn(),
     name,
     metadata,
     position: { set: vi.fn() },
@@ -140,6 +142,7 @@ function fakeRuntime({
   }
 
   class FakeTransformNode implements FakeNode {
+    dispose = vi.fn()
     metadata?: Record<string, unknown>
     parent?: FakeNode | null
     position = { set: vi.fn() }
@@ -296,6 +299,39 @@ function workerSnapshot(authority: 'authoritative' | 'stale' = 'authoritative'):
   }
 }
 
+function kanbanSnapshot(position: { x: number; y: number; z: number }): LunarCitySnapshot {
+  const key = 'kanban:connection=source-a:profile=default:board=main:task=task-1:run=run-1:worker=worker-1' as EntityKey
+
+  return {
+    entities: new Map([
+      [
+        key,
+        {
+          animation: 'walk',
+          authority: 'authoritative',
+          destination: 'bus',
+          identity: {
+            kind: 'kanban',
+            board: 'main',
+            connectionId: 'source-a',
+            profile: 'default',
+            runId: 'run-1',
+            taskId: 'task-1',
+            workerId: 'worker-1'
+          },
+          key,
+          observedAt: 1,
+          position,
+          projectId: 'project-alpha'
+        }
+      ]
+    ]),
+    observedAt: 1,
+    revision: 1,
+    sources: []
+  }
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -410,6 +446,36 @@ describe('createLunarCityWorld', () => {
     handle.applySnapshot(workerSnapshot('stale'))
     handle.dispatchCamera({ kind: 'focus', entityKey: key, follow: true })
     expect(handle.getCameraState()).toEqual({ focusedEntityKey: undefined, following: false })
+    expect(runtime.scenes).toHaveLength(1)
+    handle.destroy()
+  })
+
+  it('retains each Kanban project compound at its declared slot without rebuilding the world', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    const slot = manifest.projectSlots[0]!
+
+    handle.applySnapshot(kanbanSnapshot(slot.position))
+
+    const compound = runtime.placements.get(
+      'lunar-city:compound:compound:connection:string:8:source-a:project:string:13:project-alpha'
+    )
+
+    expect(compound?.position.set).toHaveBeenCalledWith(slot.position.x, slot.position.y, slot.position.z)
+    expect(compound?.metadata).toEqual({
+      lunarCity: {
+        connectionId: 'source-a',
+        key: 'compound:connection:string:8:source-a:project:string:13:project-alpha',
+        kind: 'project-compound',
+        projectId: 'project-alpha',
+        selectable: false
+      }
+    })
+    expect(runtime.scenes).toHaveLength(1)
+
+    handle.applySnapshot({ entities: new Map(), observedAt: 2, revision: 2, sources: [] })
+
+    expect(compound?.dispose).toHaveBeenCalledOnce()
     expect(runtime.scenes).toHaveLength(1)
     handle.destroy()
   })

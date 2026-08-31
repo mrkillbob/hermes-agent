@@ -24,7 +24,15 @@ export type EntityIdentity =
   | { kind: 'profile'; connectionId: string; profile: string }
   | { kind: 'session'; connectionId: string; profile: string; sessionId: string }
   | { kind: 'subagent'; connectionId: string; profile: string; sessionId: string; subagentId: string }
-  | { kind: 'kanban'; connectionId: string; board: string; taskId: string; runId?: string; workerId?: string }
+  | {
+      kind: 'kanban'
+      connectionId: string
+      profile: string
+      board: string
+      taskId: string
+      runId?: string
+      workerId?: string
+    }
 
 export interface SourceHealth {
   source: string
@@ -228,6 +236,15 @@ export interface LunarCityWorkerPickMetadata {
   variant?: string
 }
 
+/** Stable, non-interactive anchor for a manifest-slotted Kanban project compound. */
+export interface LunarCityProjectCompoundMetadata {
+  connectionId: string
+  key: string
+  kind: 'project-compound'
+  projectId: string
+  selectable: false
+}
+
 export interface LunarCitySharedLeaderSurfaceMetadata {
   cameraAnchor: Vec3
   focusEntityKey: EntityKey
@@ -241,6 +258,7 @@ export type LunarCityNodeMetadata =
   | LunarCityLandmarkMetadata
   | LunarCityLeaderPickMetadata
   | LunarCityLodMetadata
+  | LunarCityProjectCompoundMetadata
   | LunarCitySharedLeaderSurfaceMetadata
   | LunarCityWorkerPickMetadata
 

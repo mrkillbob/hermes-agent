@@ -2,38 +2,77 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { LOCAL_CONNECTION_ID } from '@hermes/shared'
+
+import { $lunarCitySnapshot, createLunarCitySnapshot } from './store'
 import { LunarCity } from './index'
 
-const { createWorld, destroyWorld, dispatchCamera, getCameraState, loadManifest, worldDeferred } = vi.hoisted(() => {
-  let resolveWorld!: (handle: { destroy: () => void }) => void
-
-  const deferred = new Promise<{ destroy: () => void }>(resolve => {
-    resolveWorld = resolve
-  })
-
+const {
+  applySnapshot,
+  createKanbanCitySource,
+  createWorld,
+  destroyWorld,
+  dispatchCamera,
+  getCameraState,
+  kanbanSource,
+  loadManifest,
+  startReconciler,
+  stopReconciler,
+  worldHandle,
+  worldDeferred
+} = vi.hoisted(() => {
+  const apply = vi.fn()
   const destroy = vi.fn()
   const dispatch = vi.fn()
   const readCameraState = vi.fn(() => ({ focusedEntityKey: undefined, following: false }))
+  const setQuality = vi.fn()
+  type TestWorldHandle = {
+    applySnapshot: typeof apply
+    destroy: typeof destroy
+    dispatchCamera: typeof dispatch
+    getCameraState: typeof readCameraState
+    setQuality: typeof setQuality
+  }
+  const handle: TestWorldHandle = {
+    applySnapshot: apply,
+    destroy,
+    dispatchCamera: dispatch,
+    getCameraState: readCameraState,
+    setQuality
+  }
+  let resolveWorld!: (handle: TestWorldHandle) => void
+  const deferred = new Promise<TestWorldHandle>(resolve => {
+    resolveWorld = resolve
+  })
+  const source = { onFrame: vi.fn(), read: vi.fn(), start: vi.fn() }
+  const stopLive = vi.fn()
 
-  const create = vi.fn((_canvas: unknown): Promise<{ destroy: () => void }> =>
-    Promise.resolve({ destroy, dispatchCamera: dispatch, getCameraState: readCameraState })
-  )
+  const create = vi.fn((_canvas: unknown) => Promise.resolve(handle))
 
   return {
+    applySnapshot: apply,
+    createKanbanCitySource: vi.fn(() => source),
     createWorld: create,
     dispatchCamera: dispatch,
     destroyWorld: destroy,
     getCameraState: readCameraState,
+    kanbanSource: source,
     loadManifest: vi.fn(async () => ({ models: [] })),
+    startReconciler: vi.fn(() => stopLive),
+    stopReconciler: stopLive,
+    worldHandle: handle,
     worldDeferred: { promise: deferred, resolve: resolveWorld }
   }
 })
 
 vi.mock('./manifest', () => ({ loadWorldManifest: loadManifest }))
+vi.mock('./adapters/kanban', () => ({ createKanbanCitySource }))
+vi.mock('./adapters/reconciler', () => ({ startLunarCityReconciler: startReconciler }))
 vi.mock('./world/create-world', () => ({ createLunarCityWorld: createWorld }))
 
 afterEach(() => {
   cleanup()
+  $lunarCitySnapshot.set(createLunarCitySnapshot())
   vi.clearAllMocks()
 })
 
@@ -54,6 +93,38 @@ describe('LunarCity', () => {
     expect(screen.getByText('SIMULATION')).toBeTruthy()
   })
 
+  it('starts the live writer only inside the Lunar City route with an explicit Kanban source scope', async () => {
+    const { unmount } = render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+
+    await waitFor(() =>
+      expect(createKanbanCitySource).toHaveBeenCalledWith(
+        expect.objectContaining({
+          manifest: { models: [] },
+          scope: { connectionId: LOCAL_CONNECTION_ID, profile: 'default' }
+        })
+      )
+    )
+    expect(startReconciler).toHaveBeenCalledWith({ optionalSources: [kanbanSource] })
+
+    unmount()
+    expect(stopReconciler).toHaveBeenCalledOnce()
+  })
+
+  it('applies live snapshot publications to the ready 3D world', async () => {
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+
+    const next = createLunarCitySnapshot({ observedAt: 800, revision: 2 })
+
+    await act(async () => {
+      $lunarCitySnapshot.set(next)
+    })
+
+    await waitFor(() => expect(applySnapshot).toHaveBeenLastCalledWith(next))
+  })
+
   it('destroys a world that finishes creating after the route unmounts', async () => {
     createWorld.mockReturnValueOnce(worldDeferred.promise)
     const { unmount } = render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
@@ -63,7 +134,7 @@ describe('LunarCity', () => {
     })
     unmount()
     await act(async () => {
-      worldDeferred.resolve({ destroy: destroyWorld })
+      worldDeferred.resolve(worldHandle)
       await worldDeferred.promise
     })
 

@@ -1,5 +1,7 @@
 import './lunar-city.css'
 
+import { LOCAL_CONNECTION_ID } from '@hermes/shared'
+import { useStore } from '@nanostores/react'
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -23,10 +25,15 @@ import {
   X
 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
+import { $connection } from '@/store/session'
 
+import { createKanbanCitySource } from './adapters/kanban'
+import { startLunarCityReconciler } from './adapters/reconciler'
 import { CameraControls } from './components/camera-controls'
 import { loadWorldManifest } from './manifest'
-import type { CameraControlState, CameraIntent, LunarCityWorldHandle } from './model'
+import type { CameraControlState, CameraIntent, LunarCityWorldHandle, WorldManifestV2 } from './model'
+import { $lunarCitySnapshot } from './store'
 import { createLunarCityWorld } from './world/create-world'
 
 const LUNAR_CITY_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
@@ -455,17 +462,49 @@ function roomSnapshot(room: Room, task: Task, tick: number) {
 
 export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const activeGatewayProfile = useStore($activeGatewayProfile)
+  const connection = useStore($connection)
+  const snapshot = useStore($lunarCitySnapshot)
   const [selectedId, setSelectedId] = useState('research')
   const [inside, setInside] = useState(false)
   const [playing, setPlaying] = useState(true)
   const [tick, setTick] = useState(0)
   const [cameraState, setCameraState] = useState<CameraControlState>({ focusedEntityKey: undefined, following: false })
+  const [worldManifest, setWorldManifest] = useState<WorldManifestV2 | undefined>(undefined)
   const [worldHandle, setWorldHandle] = useState<LunarCityWorldHandle | undefined>(undefined)
+
+  const kanbanScope = useMemo(() => {
+    const connectionId =
+      connection?.connectionId?.trim() || (connection?.mode === 'remote' ? undefined : LOCAL_CONNECTION_ID)
+
+    return connectionId
+      ? {
+          connectionId,
+          profile: normalizeProfileKey(activeGatewayProfile)
+        }
+      : undefined
+  }, [activeGatewayProfile, connection?.connectionId, connection?.mode])
 
   const dispatchCamera = (intent: CameraIntent): void => {
     worldHandle?.dispatchCamera(intent)
     setCameraState(worldHandle?.getCameraState() ?? { focusedEntityKey: undefined, following: false })
   }
+
+  useEffect(() => {
+    if (!worldManifest) {
+      return
+    }
+
+    const kanbanSource = kanbanScope
+      ? createKanbanCitySource({ manifest: worldManifest, scope: kanbanScope })
+      : undefined
+
+    return startLunarCityReconciler({ optionalSources: kanbanSource ? [kanbanSource] : [] })
+  }, [kanbanScope, worldManifest])
+
+  useEffect(() => {
+    worldHandle?.applySnapshot(snapshot)
+  }, [snapshot, worldHandle])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -501,6 +540,7 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
           created.destroy()
         } else {
           world = created
+          setWorldManifest(manifest)
           setWorldHandle(created)
           canvas.dataset.worldStatus = 'ready'
         }
