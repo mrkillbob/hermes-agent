@@ -11711,8 +11711,19 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
 
     try:
-        from hermes_cli.web_server import should_require_dashboard_auth
-        if not should_require_dashboard_auth(host):
+        from hermes_cli.web_server import (
+            is_desktop_local_backend,
+            should_require_dashboard_auth,
+        )
+        desktop_local = is_desktop_local_backend(
+            host,
+            int(getattr(args, "port", 9119)),
+            bool(getattr(args, "headless_backend", False)),
+        )
+        if not should_require_dashboard_auth(
+            host,
+            desktop_local=desktop_local,
+        ):
             return  # local-only bind and URL — gate does not engage
     except Exception:
         return  # if we can't tell, defer to start_server's own gate
