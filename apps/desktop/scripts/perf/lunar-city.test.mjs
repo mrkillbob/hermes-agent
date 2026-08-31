@@ -190,6 +190,34 @@ test('binds exact 100-active and 250-lod population invariants', () => {
   assert.match(lod.errors.join('\n'), /250-lod.*LOD|lodMix|population/i)
 })
 
+test('requires truthful 250-lod near/far aggregation', () => {
+  const valid = validateReceipt(
+    receipt({
+      scenario: '250-lod',
+      population: { observed: 250, active: 100, lodMix: { near: 50, far: 200 }, source: 'fake-backend' }
+    })
+  )
+  assert.equal(valid.ok, true, valid.errors.join('; '))
+
+  for (const [label, lodMix, pattern] of [
+    ['unknown key', { near: 50, far: 199, bogus: 1 }, /not an allowed LOD key/i],
+    ['all near', { near: 250 }, /requires LOD level far|positive far/i],
+    ['missing near', { far: 250 }, /requires LOD level near|positive near/i],
+    ['sum mismatch', { near: 50, far: 199 }, /LOD total 250|total 249/i],
+    ['fractional', { near: 50.5, far: 199.5 }, /near.*nonnegative integer|LOD total/i],
+    ['negative', { near: -1, far: 251 }, /near.*nonnegative integer/i]
+  ]) {
+    const result = validateReceipt(
+      receipt({
+        scenario: '250-lod',
+        population: { observed: 250, active: 100, lodMix, source: 'fake-backend' }
+      })
+    )
+    assert.equal(result.ok, false, `${label} unexpectedly passed`)
+    assert.match(result.errors.join('\n'), pattern, label)
+  }
+})
+
 test('requires a typed build stamp tied to git SHA and evidence cleanliness', () => {
   const stringStamp = validateReceipt(receipt({ buildStamp: 'arbitrary' }))
   assert.match(stringStamp.errors.join('\n'), /buildStamp.*object|schema|commit/i)

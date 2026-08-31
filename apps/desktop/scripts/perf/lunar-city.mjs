@@ -47,6 +47,7 @@ const RAW_FIELDS = Object.freeze([
 
 const SIGNED_RAW_FIELDS = new Set(['cpuDeltaPp', 'gpuMemoryDeltaMiB'])
 const NON_NEGATIVE_RAW_FIELDS = new Set(RAW_FIELDS.filter(field => !SIGNED_RAW_FIELDS.has(field)))
+const ALLOWED_LOD_KEYS = new Set(['near', 'far'])
 const MONOTONIC_FIELDS = Object.freeze([
   ['entities', 'entities'],
   ['textures', 'textures'],
@@ -150,15 +151,16 @@ const SCENARIO_PROFILE_DEFINITIONS = {
     cpuLimit: 18,
     p95FrameLimit: 33.3,
     expectedObserved: 250,
-    expectedActive: 250,
     requiredQuality: 'Balanced',
     requiredCamera: 'overview',
     requiredDialogue: 'idle',
     lodTotal: 250,
+    requiredLodKeys: ['near', 'far'],
+    requiredPositiveLodKeys: ['near', 'far'],
     maxCadenceMs: 10_000,
     populationMode: 'exact',
     minObserved: 250,
-    minActive: 250,
+    minActive: 0,
     lodRequired: true
   },
   'balanced-overview': {
@@ -677,11 +679,15 @@ function validatePopulation(population, errors) {
       errors.push(`population.${field} must be a nonnegative integer`)
     }
   }
+  if (Number.isInteger(population.observed) && Number.isInteger(population.active)) {
+    if (population.active > population.observed) errors.push('population.active must not exceed observed')
+  }
   if ('lodMix' in population && !isRecord(population.lodMix)) errors.push('population.lodMix must be an object')
   if ('source' in population && typeof population.source !== 'string') errors.push('population.source must be a string')
   if (isRecord(population.lodMix)) {
     let total = 0
     for (const [lod, count] of Object.entries(population.lodMix)) {
+      if (!ALLOWED_LOD_KEYS.has(lod)) errors.push(`population.lodMix.${lod} is not an allowed LOD key`)
       if (!Number.isInteger(count) || count < 0) errors.push(`population.lodMix.${lod} must be a nonnegative integer`)
       else total += count
     }
@@ -819,9 +825,26 @@ function validateScenarioInvariants(receipt, profile, scenario, errors) {
   }
   if (!profile.dormant && receipt.renderFrames === 0) errors.push(`${scenario} requires measured render frames`)
   if (!profile.dormant && profile.lodTotal !== undefined) {
+    const lodMix = receipt.population?.lodMix
     let total = 0
-    for (const count of Object.values(receipt.population?.lodMix ?? {})) total += count
+    for (const count of Object.values(lodMix ?? {})) {
+      if (Number.isInteger(count) && count >= 0) total += count
+    }
     if (total !== profile.lodTotal) errors.push(`${scenario} requires LOD total ${profile.lodTotal}`)
+  }
+  if (profile.requiredLodKeys) {
+    const lodMix = isRecord(receipt.population?.lodMix) ? receipt.population.lodMix : {}
+    for (const lod of profile.requiredLodKeys) {
+      if (!Object.hasOwn(lodMix, lod)) errors.push(`${scenario} requires LOD level ${lod}`)
+    }
+  }
+  if (profile.requiredPositiveLodKeys) {
+    const lodMix = isRecord(receipt.population?.lodMix) ? receipt.population.lodMix : {}
+    for (const lod of profile.requiredPositiveLodKeys) {
+      if (!Number.isInteger(lodMix[lod]) || lodMix[lod] <= 0) {
+        errors.push(`${scenario} requires a positive ${lod} LOD representation`)
+      }
+    }
   }
 }
 
