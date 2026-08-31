@@ -206,7 +206,7 @@ describe('createLunarCityCommandExecutors', () => {
       .mockResolvedValueOnce({ sessions: [{ id: 'parent-session' }] })
       .mockResolvedValueOnce({
         found: true,
-        subagent: { status: 'running', subagent_id: 'child-same' }
+        subagent: { generation: 'generation-1', status: 'running', subagent_id: 'child-same' }
       })
       .mockResolvedValueOnce({ found: true, status: 'queued', subagent_id: 'child-same' })
     const identity = {
@@ -254,6 +254,7 @@ describe('createLunarCityCommandExecutors', () => {
       subagent_id: 'child-same'
     })
     expect(requestForSessionProfile.mock.calls[2]?.[3]).toMatchObject({
+      expected_generation: 'generation-1',
       session_id: 'parent-runtime-b',
       subagent_id: 'child-same'
     })

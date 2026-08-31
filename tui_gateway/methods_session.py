@@ -3666,13 +3666,19 @@ def _(rid, params: dict) -> dict:
     invoking_transport, invoking_session = _current_session_steer_authority(
         invoking_session_id
     )
+    expected_generation = str(params.get("expected_generation") or "").strip()
     ok = False
-    if invoking_transport is not None and invoking_session is not None:
+    if (
+        expected_generation
+        and invoking_transport is not None
+        and invoking_session is not None
+    ):
         ok = interrupt_subagent(
             subagent_id,
             owner_session_id=invoking_session_id,
             owner_transport=invoking_transport,
             owner_session_record=invoking_session,
+            expected_generation=expected_generation,
         )
     return _ok(rid, {"found": ok, "subagent_id": subagent_id})
 
@@ -3704,14 +3710,20 @@ def _(rid, params: dict) -> dict:
     invoking_transport, invoking_session = _current_session_steer_authority(
         invoking_session_id
     )
+    expected_generation = str(params.get("expected_generation") or "").strip()
     queued = False
-    if invoking_transport is not None and invoking_session is not None:
+    if (
+        expected_generation
+        and invoking_transport is not None
+        and invoking_session is not None
+    ):
         queued = steer_subagent(
             subagent_id,
             text,
             owner_session_id=invoking_session_id,
             owner_transport=invoking_transport,
             owner_session_record=invoking_session,
+            expected_generation=expected_generation,
         )
     return _ok(
         rid,

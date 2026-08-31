@@ -142,6 +142,7 @@ function defaultLiveRuntime(
 
 function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecutor {
   const localReceipts = new Set<string>()
+  const subagentGenerations = new Map<string, string>()
   const resolveLiveRuntime = options.resolveLiveRuntime ?? defaultLiveRuntime
 
   return {
@@ -178,13 +179,25 @@ function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecu
         )
         const statusEnvelope = record(statusResponse)
         const subagent = record(statusEnvelope.subagent)
+        const generation = text(subagent.generation)
 
         if (
           statusEnvelope.found !== true ||
           identifier(subagent.subagent_id) !== identity.subagentId ||
+          !generation ||
           !LIVE_SUBAGENT_STATUSES.has(text(subagent.status) ?? '')
         ) {
           return null
+        }
+
+        subagentGenerations.set(plan.digest, generation)
+
+        if (subagentGenerations.size > 64) {
+          const oldestDigest = subagentGenerations.keys().next().value
+
+          if (oldestDigest) {
+            subagentGenerations.delete(oldestDigest)
+          }
         }
       }
 
@@ -236,8 +249,20 @@ function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecu
         throw new Error('The exact-owner live runtime is unavailable; no session command was sent.')
       }
 
+      const identity = plan.identity
+      const expectedGeneration = identity.kind === 'subagent' ? subagentGenerations.get(plan.digest) : undefined
+
+      if (identity.kind === 'subagent') {
+        subagentGenerations.delete(plan.digest)
+
+        if (!expectedGeneration) {
+          throw new Error('The exact live subagent generation is unavailable; no subagent command was sent.')
+        }
+      }
+
       const response = await requestForSessionProfile<unknown>(plan.owner, rejectAmbientRequest, plan.method, {
         ...plan.params,
+        ...(expectedGeneration ? { expected_generation: expectedGeneration } : {}),
         session_id: liveRuntimeId
       })
 

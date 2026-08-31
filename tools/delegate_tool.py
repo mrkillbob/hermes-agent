@@ -22,6 +22,7 @@ import contextvars
 import json
 import logging
 import re
+import secrets
 
 logger = logging.getLogger(__name__)
 import os
@@ -212,8 +213,9 @@ def _register_subagent(record: Dict[str, Any]) -> None:
     sid = record.get("subagent_id")
     if not sid:
         return
-    record.setdefault("accepting_steer", True)
     with _active_subagents_lock:
+        record.setdefault("accepting_steer", True)
+        record["_authority_generation"] = secrets.token_urlsafe(18)
         _active_subagents[sid] = record
 
 
@@ -297,6 +299,7 @@ def owned_subagent_status(
         ):
             return None
         return {
+            "generation": str(record.get("_authority_generation") or ""),
             "subagent_id": str(record.get("subagent_id") or ""),
             "parent_id": record.get("parent_id"),
             "status": str(record.get("status") or ""),
@@ -309,13 +312,15 @@ def interrupt_subagent(
     owner_session_id: Optional[str] = None,
     owner_transport: Any = None,
     owner_session_record: Any = None,
+    expected_generation: Optional[str] = None,
 ) -> bool:
     """Request that a single running subagent stop at its next iteration boundary.
 
     Does not hard-kill the worker thread (Python can't); sets the child's
     interrupt flag which propagates to in-flight tools and recurses into
-    grandchildren via AIAgent.interrupt().  Returns True if a matching
-    subagent was found.
+    grandchildren via AIAgent.interrupt(). Returns True if a matching
+    subagent was found. Gateway callers pass ``expected_generation``; legacy
+    in-process callers may omit it because they already hold agent authority.
     """
     with _active_subagents_lock:
         record = _active_subagents.get(subagent_id)
@@ -327,6 +332,8 @@ def interrupt_subagent(
             owner_transport=owner_transport,
             owner_session_record=owner_session_record,
         ):
+            return False
+        if expected_generation is not None and record.get("_authority_generation") != expected_generation:
             return False
         agent = record.get("agent")
         if agent is None:
@@ -351,6 +358,7 @@ def steer_subagent(
     owner_session_id: Optional[str] = None,
     owner_transport: Any = None,
     owner_session_record: Any = None,
+    expected_generation: Optional[str] = None,
 ) -> bool:
     """Queue steering text into a single running subagent without stopping it.
 
@@ -361,7 +369,8 @@ def steer_subagent(
     QUEUED the text while the child was still accepting work; False for an
     unknown/closed id, an ownership mismatch, a record with no live agent, or
     empty text. ``owner_session_id=None`` deliberately preserves the internal
-    in-process helper contract; gateway callers must pass exact authority.
+    in-process helper contract; gateway callers pass exact authority plus the
+    generation returned by ``owned_subagent_status``.
 
     Acceptance and completion are linearized by the registry lock. If
     acceptance wins but no delivery boundary remains, ``_run_single_child``
@@ -381,6 +390,8 @@ def steer_subagent(
                 owner_session_record=owner_session_record,
             ):
                 return False
+        if expected_generation is not None and record.get("_authority_generation") != expected_generation:
+            return False
         agent = record.get("agent")
         if agent is None:
             return False
@@ -427,6 +438,7 @@ def list_active_subagents() -> List[Dict[str, Any]]:
                     "owner_transport",
                     "owner_session_record",
                     "accepting_steer",
+                    "_authority_generation",
                 }
             }
             for r in _active_subagents.values()
