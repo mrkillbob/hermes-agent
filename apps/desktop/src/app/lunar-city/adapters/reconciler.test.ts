@@ -422,6 +422,13 @@ describe('Lunar City reconciler', () => {
           profile: 'worker'
         },
         {
+          connectionId: 'local',
+          connectionKind: 'local',
+          connectionLabel: 'this Mac',
+          handle: '@scout-local',
+          profile: 'scout'
+        },
+        {
           connectionId: 'ssh-1',
           connectionKind: 'ssh',
           connectionLabel: 'moon relay',
@@ -457,6 +464,7 @@ describe('Lunar City reconciler', () => {
     desktopWindow.hermesDesktop = { getAgentRoster } as unknown as Window['hermesDesktop']
     let stop: (() => void) | undefined
     const localKey = entityKey({ connectionId: 'local', kind: 'profile', profile: 'worker' })
+    const removedLocalKey = entityKey({ connectionId: 'local', kind: 'profile', profile: 'scout' })
     const unreachableKey = entityKey({ connectionId: 'ssh-1', kind: 'profile', profile: 'worker' })
     const erroredKey = entityKey({ connectionId: 'ssh-2', kind: 'profile', profile: 'worker' })
 
@@ -477,6 +485,7 @@ describe('Lunar City reconciler', () => {
         authority: 'authoritative',
         observedAt: 60_043
       })
+      expect($lunarCitySnapshot.get().entities.has(removedLocalKey)).toBe(false)
       expect($lunarCitySnapshot.get().entities.get(unreachableKey)).toMatchObject({
         animation: 'unavailable',
         authority: 'stale',

@@ -16,6 +16,8 @@ export interface ReconcileReadResult {
   /** False means the read is partial and therefore cannot remove prior rows. */
   authoritative?: boolean
   entities: readonly LunarEntity[]
+  /** Source-owned rows this read may replace while another source is partial. */
+  replacementSources?: readonly string[]
   sources: readonly SourceHealth[]
 }
 
@@ -283,6 +285,14 @@ export class LunarCityReconciler {
     for (const [key, entity] of candidates) {
       if (stalePartialSources.has(healthSourceFor(entity))) {
         candidates.set(key, staleEntity(entity))
+      }
+    }
+
+    for (const source of result.replacementSources ?? []) {
+      for (const [key, entity] of candidates) {
+        if (healthSourceFor(entity) === source) {
+          candidates.delete(key)
+        }
       }
     }
 
@@ -556,6 +566,9 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       return {
         authoritative: !fleetReadPartial,
         entities: [...fleet.entities, ...sessions.entities, ...subagents.entities],
+        replacementSources: fleet.sources
+          .filter(source => source.authority === 'authoritative')
+          .map(source => source.source),
         sources: [
           ...fleet.sources.map(source =>
             fleetReadFailed ? { ...source, error: fleetError ?? 'Fleet refresh failed' } : source
