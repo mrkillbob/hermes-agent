@@ -68,6 +68,27 @@ const SPECIALIST_DETAIL_FLOORS = {
 const SPECIALIST_IDS = ['library', 'research-lab', 'depot', 'review-office', 'council']
 const LEADER_IDS = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag']
 const LEADER_STATES = ['idle', 'listening', 'talking', 'thinking', 'acknowledging', 'unavailable']
+const HERMES_GROUPS = [
+  'Acceptance & Release',
+  'Archive and Acquisition',
+  'Arts Studio',
+  'CI Repair Triage',
+  'Community Intake',
+  'Content Studio',
+  'Control Plane Incidents',
+  'Core Runtime & UX Repairs',
+  'Data & Performance Repairs',
+  'Editorial Desk',
+  'Engineering Guild',
+  'Federation Council',
+  'Knowledge Commons',
+  'Memory Stewardship',
+  'Operations and Release',
+  'PR Merge Train',
+  'Research Lab',
+  'Research Review Board',
+  'Upstream Hermes Maintenance'
+]
 
 let firstRoot
 let secondRoot
@@ -423,6 +444,54 @@ test('exports seven exclusive selectable worker role variants with physical acce
   )
 })
 
+test('exports one distinct physical kit for every Hermes group without multiplying worker resources', async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL('../../public/lunar-city/v2/world-manifest.v2.json', import.meta.url), 'utf8')
+  )
+  const root = (await new NodeIO().read(join(firstRoot, 'models', 'workers.glb'))).getRoot()
+  const kitNodes = new Map(
+    root
+      .listNodes()
+      .filter(node => /^worker:group-kit:[^:]+$/.test(node.getName()))
+      .map(node => [node.getExtras().group, node])
+  )
+
+  assert.deepEqual([...kitNodes.keys()].toSorted(), HERMES_GROUPS.toSorted())
+  assert.equal(root.listSkins().length, 1, 'group diversity must reuse the one worker skin')
+  assert.ok(root.listMaterials().length <= 4, 'group diversity must reuse shared materials')
+  assert.equal(root.listTextures().length, 0, 'group diversity must not allocate per-kit textures')
+
+  const signatures = new Set()
+  for (const groupName of HERMES_GROUPS) {
+    const kit = kitNodes.get(groupName)
+    assert.equal(kit.getExtras().exclusiveGroup, 'worker-group-kit')
+    const physicalParts = descendantsWithMeshes(root, kit)
+    assert.ok(physicalParts.length > 0, `${groupName} kit has no physical silhouette geometry`)
+    signatures.add(
+      physicalParts
+        .map(
+          node =>
+            `${node.getTranslation().map(value => value.toFixed(2))}:${node.getScale().map(value => value.toFixed(2))}`
+        )
+        .toSorted()
+        .join('|')
+    )
+  }
+  assert.equal(signatures.size, HERMES_GROUPS.length, 'Hermes groups must not share full physical kit signatures')
+})
+
+test('exports deterministic near, reduced mid, and static far character LOD nodes', async () => {
+  const io = new NodeIO()
+  for (const id of ['leaders', 'workers']) {
+    const root = (await io.read(join(firstRoot, 'models', `${id}.glb`))).getRoot()
+    for (const suffix of ['near', 'mid', 'far']) {
+      const lod = root.listNodes().find(node => node.getName() === `${id}:lod:${suffix}`)
+      assert.ok(lod, `${id} missing ${suffix} LOD`)
+      assert.ok(descendantsWithMeshes(root, lod).length > 0, `${id} ${suffix} LOD has no geometry`)
+    }
+  }
+})
+
 test('targets genuine worker skin joints with materially distinct motion clips', async () => {
   const root = (await new NodeIO().read(join(firstRoot, 'models', 'workers.glb'))).getRoot()
   const skin = root.listSkins()[0]
@@ -475,6 +544,10 @@ test('exports identity-qualified leader states without cross-wired character cha
   assert.equal(leaderRoot.getExtras().defaultLeader, 'owl')
   for (const id of LEADER_IDS) {
     const leader = root.listNodes().find(node => node.getName() === `leader:${id}`)
+    assert.equal(leader.getExtras().leaderId, id)
+    assert.equal(leader.getExtras().species, id)
+    assert.equal(leader.getExtras().visualId, `${id}-leader-v1`)
+    assert.equal(leader.getExtras().silhouetteId, `${id}-silhouette-v1`)
     const stateClips = leader.getExtras().stateClips
     assert.deepEqual(Object.keys(stateClips).toSorted(), LEADER_STATES.toSorted())
     for (const state of LEADER_STATES) {

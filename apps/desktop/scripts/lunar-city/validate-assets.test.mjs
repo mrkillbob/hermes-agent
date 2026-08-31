@@ -6,9 +6,82 @@ import { test } from 'node:test'
 
 import { Document } from '@gltf-transform/core'
 
-import { APPROVED_SHA, validateAssetContract, validateAssetContractFiles, validateAssetPack } from './validate-assets.mjs'
+import {
+  APPROVED_SHA,
+  validateAssetContract,
+  validateAssetContractFiles,
+  validateAssetPack
+} from './validate-assets.mjs'
 
 const APPROVED_SOURCE_URI = '../moon-settlement-approved.jpg'
+
+const HERMES_GROUPS = Object.freeze([
+  'Acceptance & Release',
+  'Archive and Acquisition',
+  'Arts Studio',
+  'CI Repair Triage',
+  'Community Intake',
+  'Content Studio',
+  'Control Plane Incidents',
+  'Core Runtime & UX Repairs',
+  'Data & Performance Repairs',
+  'Editorial Desk',
+  'Engineering Guild',
+  'Federation Council',
+  'Knowledge Commons',
+  'Memory Stewardship',
+  'Operations and Release',
+  'PR Merge Train',
+  'Research Lab',
+  'Research Review Board',
+  'Upstream Hermes Maintenance'
+])
+
+function characterAssetsFixture(overrides = {}) {
+  const accessories = HERMES_GROUPS.map((_, index) => `accessory-${index + 1}`)
+  const emblems = HERMES_GROUPS.map((_, index) => `emblem-${index + 1}`)
+  return {
+    fleetIdentityFloor: 128,
+    leaders: ['owl', 'fox', 'badger', 'otter', 'bird', 'stag'].map(id => ({
+      id,
+      species: id,
+      silhouetteId: `${id}-silhouette`,
+      visualId: `${id}-visual`
+    })),
+    workerVocabulary: {
+      bodies: ['compact', 'standard'],
+      heads: ['orb', 'visor'],
+      silhouetteAccessories: accessories,
+      palettes: ['rust', 'bone'],
+      emblems
+    },
+    groupKits: HERMES_GROUPS.map((group, index) => ({
+      group,
+      kitId: `kit-${index + 1}`,
+      signature: {
+        body: index % 2 ? 'compact' : 'standard',
+        head: index % 2 ? 'visor' : 'orb',
+        silhouetteAccessory: accessories[index],
+        palette: index % 2 ? 'bone' : 'rust',
+        emblem: emblems[index]
+      }
+    })),
+    sharedResourceStrategy: {
+      rig: 'worker:shared-rig',
+      gpuBuffers: 'shared',
+      animationClips: 'shared',
+      materials: 'shared',
+      textureAtlas: 'textures/approved-palette.png',
+      perProfile: { skeletons: 0, meshes: 0, materials: 0, textures: 0 }
+    },
+    lodRepresentations: [
+      { id: 'near', animated: true, representation: 'full' },
+      { id: 'mid', animated: false, representation: 'reduced' },
+      { id: 'far', animated: false, representation: 'static-or-aggregate' }
+    ],
+    ...overrides
+  }
+}
 
 function modelFixture(overrides = {}) {
   return {
@@ -42,6 +115,7 @@ function fixture(overrides = {}) {
     version: 2,
     assetVersion: '2.0.0',
     source: { sha256: APPROVED_SHA },
+    characterAssets: characterAssetsFixture(),
     materials: [{ id: 'structural' }],
     models: [modelFixture()],
     camera: {
@@ -220,12 +294,22 @@ test('returns structured errors for malformed file-level declarations', async ()
   const cases = [
     { expected: /models must be an array/, root: fixture({ models: {} }) },
     { expected: /terrain model URI must be a GLB/, root: fixture({ models: [modelFixture({ uri: null })] }) },
-    { expected: /navigation mesh URI must be a GLB/, root: fixture({ navigation: { ...fixture().navigation, meshUri: null } }) },
-    { expected: /approved source URI mismatch/, root: fixture(), sourceReference: { ...sourceReference, source: { ...sourceReference.source, uri: null } } }
+    {
+      expected: /navigation mesh URI must be a GLB/,
+      root: fixture({ navigation: { ...fixture().navigation, meshUri: null } })
+    },
+    {
+      expected: /approved source URI mismatch/,
+      root: fixture(),
+      sourceReference: { ...sourceReference, source: { ...sourceReference.source, uri: null } }
+    }
   ]
 
   for (const testCase of cases) {
-    const { directory, manifestPath } = await writeContractFiles(testCase.root, testCase.sourceReference ?? sourceReference)
+    const { directory, manifestPath } = await writeContractFiles(
+      testCase.root,
+      testCase.sourceReference ?? sourceReference
+    )
     try {
       const result = await validateAssetContractFiles(manifestPath, fakeIo)
       assert.equal(result.ok, false)
@@ -299,13 +383,104 @@ test('enforces the balanced overview and focused-worker quality ceilings', async
   assert.match(result.errors.join('\n'), /balanced worker focus exceeds 256 MiB GPU memory/)
 })
 
+test('rejects reused leader visual, species, or silhouette identities', async () => {
+  const characterAssets = characterAssetsFixture()
+  characterAssets.leaders[1] = {
+    ...characterAssets.leaders[1],
+    species: characterAssets.leaders[0].species,
+    silhouetteId: characterAssets.leaders[0].silhouetteId,
+    visualId: characterAssets.leaders[0].visualId
+  }
+
+  const result = await validateAssetPack(fixture({ characterAssets }), fakeIo)
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /leader species owl is reused/)
+  assert.match(result.errors.join('\n'), /leader silhouette owl-silhouette is reused/)
+  assert.match(result.errors.join('\n'), /leader visual owl-visual is reused/)
+})
+
+test('requires one physically distinct worker kit for every declared Hermes group', async () => {
+  const characterAssets = characterAssetsFixture()
+  characterAssets.groupKits.pop()
+  characterAssets.groupKits[1] = {
+    ...characterAssets.groupKits[1],
+    kitId: characterAssets.groupKits[0].kitId
+  }
+
+  const result = await validateAssetPack(fixture({ characterAssets }), fakeIo)
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /worker kits must cover exactly 19 Hermes groups/)
+  assert.match(result.errors.join('\n'), /worker kit kit-1 is reused/)
+  assert.match(result.errors.join('\n'), /missing worker kit for Upstream Hermes Maintenance/)
+})
+
+test('rejects worker signature collisions and vocabulary references that cannot be rendered', async () => {
+  const characterAssets = characterAssetsFixture()
+  characterAssets.groupKits[1] = {
+    ...characterAssets.groupKits[1],
+    signature: { ...characterAssets.groupKits[0].signature }
+  }
+  characterAssets.groupKits[2] = {
+    ...characterAssets.groupKits[2],
+    signature: { ...characterAssets.groupKits[2].signature, head: 'missing-head' }
+  }
+
+  const result = await validateAssetPack(fixture({ characterAssets }), fakeIo)
+
+  assert.equal(result.ok, false)
+  assert.match(
+    result.errors.join('\n'),
+    /worker signature collision between Acceptance & Release and Archive and Acquisition/
+  )
+  assert.match(result.errors.join('\n'), /Arts Studio worker signature head missing-head is not declared/)
+})
+
+test('rejects per-profile GPU resources and an identity vocabulary below the fleet floor', async () => {
+  const characterAssets = characterAssetsFixture({
+    fleetIdentityFloor: 10_000,
+    sharedResourceStrategy: {
+      ...characterAssetsFixture().sharedResourceStrategy,
+      perProfile: { skeletons: 1, meshes: 1, materials: 1, textures: 1 }
+    }
+  })
+
+  const result = await validateAssetPack(fixture({ characterAssets }), fakeIo)
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /worker signature vocabulary capacity .* is below fleet floor 10000/)
+  assert.match(result.errors.join('\n'), /per-profile skeletons must be zero/)
+  assert.match(result.errors.join('\n'), /per-profile meshes must be zero/)
+  assert.match(result.errors.join('\n'), /per-profile materials must be zero/)
+  assert.match(result.errors.join('\n'), /per-profile textures must be zero/)
+})
+
+test('requires near, mid, and far low-power character representations', async () => {
+  const characterAssets = characterAssetsFixture({
+    lodRepresentations: [
+      { id: 'near', animated: true, representation: 'full' },
+      { id: 'far', animated: true, representation: 'full' }
+    ]
+  })
+
+  const result = await validateAssetPack(fixture({ characterAssets }), fakeIo)
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /character LODs must declare near, mid, and far representations/)
+  assert.match(result.errors.join('\n'), /far character LOD must be static-or-aggregate/)
+})
+
 test('rejects missing or inconsistent runtime manifest declarations', async () => {
   const result = await validateAssetPack(
     fixture({
       models: [
         modelFixture({
           maxDrawCalls: undefined,
-          lods: [{ distance: 10, node: 'terrain:lod:near' }, { distance: 5, node: 'terrain:lod:far' }],
+          lods: [
+            { distance: 10, node: 'terrain:lod:near' },
+            { distance: 5, node: 'terrain:lod:far' }
+          ],
           transform: { position: [0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
           bounds: { min: [2, 0, 0], max: [1, 1, 1] },
           anchors: { foot: [0, 0, 0] },

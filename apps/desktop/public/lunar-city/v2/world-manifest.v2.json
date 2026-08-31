@@ -4,6 +4,345 @@
     "sha256": "248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590"
   },
   "assetVersion": "2.0.0",
+  "characterAssets": {
+    "fleetIdentityFloor": 128,
+    "leaders": [
+      {
+        "id": "owl",
+        "species": "owl",
+        "silhouetteId": "owl-silhouette-v1",
+        "visualId": "owl-leader-v1"
+      },
+      {
+        "id": "fox",
+        "species": "fox",
+        "silhouetteId": "fox-silhouette-v1",
+        "visualId": "fox-leader-v1"
+      },
+      {
+        "id": "badger",
+        "species": "badger",
+        "silhouetteId": "badger-silhouette-v1",
+        "visualId": "badger-leader-v1"
+      },
+      {
+        "id": "otter",
+        "species": "otter",
+        "silhouetteId": "otter-silhouette-v1",
+        "visualId": "otter-leader-v1"
+      },
+      {
+        "id": "bird",
+        "species": "bird",
+        "silhouetteId": "bird-silhouette-v1",
+        "visualId": "bird-leader-v1"
+      },
+      {
+        "id": "stag",
+        "species": "stag",
+        "silhouetteId": "stag-silhouette-v1",
+        "visualId": "stag-leader-v1"
+      }
+    ],
+    "workerVocabulary": {
+      "bodies": [
+        "compact",
+        "standard"
+      ],
+      "heads": [
+        "orb",
+        "visor"
+      ],
+      "silhouetteAccessories": [
+        "acceptance-gate",
+        "archive-satchel",
+        "artist-palette",
+        "ci-wrench",
+        "intake-beacon",
+        "content-quill",
+        "incident-siren",
+        "runtime-console",
+        "performance-meter",
+        "editorial-pen",
+        "engineering-hammer",
+        "federation-standard",
+        "knowledge-lantern",
+        "memory-vault",
+        "operations-baton",
+        "merge-rail",
+        "research-scope",
+        "review-lens",
+        "upstream-antenna"
+      ],
+      "palettes": [
+        "rust-bone",
+        "violet-cyan"
+      ],
+      "emblems": [
+        "acceptance-check",
+        "archive-box",
+        "arts-star",
+        "ci-loop",
+        "community-door",
+        "content-page",
+        "control-shield",
+        "core-gear",
+        "data-pulse",
+        "editorial-mark",
+        "engineering-bridge",
+        "federation-orbit",
+        "knowledge-book",
+        "memory-crystal",
+        "operations-route",
+        "pr-merge",
+        "research-flask",
+        "review-eye",
+        "upstream-arrow"
+      ]
+    },
+    "groupKits": [
+      {
+        "group": "Acceptance & Release",
+        "kitId": "acceptance-release",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "acceptance-gate",
+          "palette": "rust-bone",
+          "emblem": "acceptance-check"
+        }
+      },
+      {
+        "group": "Archive and Acquisition",
+        "kitId": "archive-acquisition",
+        "signature": {
+          "body": "compact",
+          "head": "visor",
+          "silhouetteAccessory": "archive-satchel",
+          "palette": "violet-cyan",
+          "emblem": "archive-box"
+        }
+      },
+      {
+        "group": "Arts Studio",
+        "kitId": "arts-studio",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "artist-palette",
+          "palette": "rust-bone",
+          "emblem": "arts-star"
+        }
+      },
+      {
+        "group": "CI Repair Triage",
+        "kitId": "ci-repair-triage",
+        "signature": {
+          "body": "compact",
+          "head": "visor",
+          "silhouetteAccessory": "ci-wrench",
+          "palette": "violet-cyan",
+          "emblem": "ci-loop"
+        }
+      },
+      {
+        "group": "Community Intake",
+        "kitId": "community-intake",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "intake-beacon",
+          "palette": "rust-bone",
+          "emblem": "community-door"
+        }
+      },
+      {
+        "group": "Content Studio",
+        "kitId": "content-studio",
+        "signature": {
+          "body": "compact",
+          "head": "visor",
+          "silhouetteAccessory": "content-quill",
+          "palette": "violet-cyan",
+          "emblem": "content-page"
+        }
+      },
+      {
+        "group": "Control Plane Incidents",
+        "kitId": "control-plane-incidents",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "incident-siren",
+          "palette": "rust-bone",
+          "emblem": "control-shield"
+        }
+      },
+      {
+        "group": "Core Runtime & UX Repairs",
+        "kitId": "core-runtime-ux-repairs",
+        "signature": {
+          "body": "compact",
+          "head": "visor",
+          "silhouetteAccessory": "runtime-console",
+          "palette": "violet-cyan",
+          "emblem": "core-gear"
+        }
+      },
+      {
+        "group": "Data & Performance Repairs",
+        "kitId": "data-performance-repairs",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "performance-meter",
+          "palette": "rust-bone",
+          "emblem": "data-pulse"
+        }
+      },
+      {
+        "group": "Editorial Desk",
+        "kitId": "editorial-desk",
+        "signature": {
+          "body": "compact",
+          "head": "visor",
+          "silhouetteAccessory": "editorial-pen",
+          "palette": "violet-cyan",
+          "emblem": "editorial-mark"
+        }
+      },
+      {
+        "group": "Engineering Guild",
+        "kitId": "engineering-guild",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "engineering-hammer",
+          "palette": "rust-bone",
+          "emblem": "engineering-bridge"
+        }
+      },
+      {
+        "group": "Federation Council",
+        "kitId": "federation-council",
+        "signature": {
+          "body": "compact",
+          "head": "visor",
+          "silhouetteAccessory": "federation-standard",
+          "palette": "violet-cyan",
+          "emblem": "federation-orbit"
+        }
+      },
+      {
+        "group": "Knowledge Commons",
+        "kitId": "knowledge-commons",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "knowledge-lantern",
+          "palette": "rust-bone",
+          "emblem": "knowledge-book"
+        }
+      },
+      {
+        "group": "Memory Stewardship",
+        "kitId": "memory-stewardship",
+        "signature": {
+          "body": "compact",
+          "head": "visor",
+          "silhouetteAccessory": "memory-vault",
+          "palette": "violet-cyan",
+          "emblem": "memory-crystal"
+        }
+      },
+      {
+        "group": "Operations and Release",
+        "kitId": "operations-release",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "operations-baton",
+          "palette": "rust-bone",
+          "emblem": "operations-route"
+        }
+      },
+      {
+        "group": "PR Merge Train",
+        "kitId": "pr-merge-train",
+        "signature": {
+          "body": "compact",
+          "head": "visor",
+          "silhouetteAccessory": "merge-rail",
+          "palette": "violet-cyan",
+          "emblem": "pr-merge"
+        }
+      },
+      {
+        "group": "Research Lab",
+        "kitId": "research-lab",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "research-scope",
+          "palette": "rust-bone",
+          "emblem": "research-flask"
+        }
+      },
+      {
+        "group": "Research Review Board",
+        "kitId": "research-review-board",
+        "signature": {
+          "body": "compact",
+          "head": "visor",
+          "silhouetteAccessory": "review-lens",
+          "palette": "violet-cyan",
+          "emblem": "review-eye"
+        }
+      },
+      {
+        "group": "Upstream Hermes Maintenance",
+        "kitId": "upstream-hermes-maintenance",
+        "signature": {
+          "body": "standard",
+          "head": "orb",
+          "silhouetteAccessory": "upstream-antenna",
+          "palette": "rust-bone",
+          "emblem": "upstream-arrow"
+        }
+      }
+    ],
+    "sharedResourceStrategy": {
+      "rig": "worker:shared-rig",
+      "gpuBuffers": "shared",
+      "animationClips": "shared",
+      "materials": "shared",
+      "textureAtlas": "textures/approved-palette.png",
+      "perProfile": {
+        "skeletons": 0,
+        "meshes": 0,
+        "materials": 0,
+        "textures": 0
+      }
+    },
+    "lodRepresentations": [
+      {
+        "id": "near",
+        "animated": true,
+        "representation": "full"
+      },
+      {
+        "id": "mid",
+        "animated": false,
+        "representation": "reduced"
+      },
+      {
+        "id": "far",
+        "animated": false,
+        "representation": "static-or-aggregate"
+      }
+    ],
+    "runtimeIntegration": "pending-task-11d-b"
+  },
   "materials": [
     {
       "id": "lunar-rust",
@@ -1166,6 +1505,7 @@
         "leader:bird",
         "leader:stag",
         "leaders:lod:near",
+        "leaders:lod:mid",
         "leaders:lod:far"
       ],
       "requiredClips": [
@@ -1180,6 +1520,10 @@
         {
           "distance": 0,
           "node": "leaders:lod:near"
+        },
+        {
+          "distance": 18,
+          "node": "leaders:lod:mid"
         },
         {
           "distance": 34,
@@ -1309,9 +1653,9 @@
         "drawCalls": 10,
         "materials": 4,
         "meshes": 10,
-        "nodes": 31,
+        "nodes": 43,
         "textures": 0,
-        "triangles": 13418,
+        "triangles": 11522,
         "budget": {
           "maxDrawCalls": 10,
           "maxGpuMiB": 14,
@@ -1319,14 +1663,14 @@
           "maxTextures": 4,
           "maxTriangles": 36000
         },
-        "bytes": 408368,
+        "bytes": 361440,
         "extent": [
           28.9478,
-          7.7221,
+          7.6481,
           10.7553
         ],
-        "gpuMiB": 0.3895,
-        "sha256": "8f16689ab0e6a24184cf0955d7ad4d19dabfe489e470a0c9d1de8d2cfb85eb0d"
+        "gpuMiB": 0.3447,
+        "sha256": "47b865fde88351ddcfa81e1e01b8629e6d15d69fa26e386de1aefa55f6507aff"
       }
     },
     {
@@ -1342,8 +1686,29 @@
         "worker:body",
         "worker:head",
         "workers:lod:near",
+        "workers:lod:mid",
         "workers:lod:far",
-        "worker:attachment"
+        "worker:attachment",
+        "worker:group-kits",
+        "worker:group-kit:acceptance-release",
+        "worker:group-kit:archive-acquisition",
+        "worker:group-kit:arts-studio",
+        "worker:group-kit:ci-repair-triage",
+        "worker:group-kit:community-intake",
+        "worker:group-kit:content-studio",
+        "worker:group-kit:control-plane-incidents",
+        "worker:group-kit:core-runtime-ux-repairs",
+        "worker:group-kit:data-performance-repairs",
+        "worker:group-kit:editorial-desk",
+        "worker:group-kit:engineering-guild",
+        "worker:group-kit:federation-council",
+        "worker:group-kit:knowledge-commons",
+        "worker:group-kit:memory-stewardship",
+        "worker:group-kit:operations-release",
+        "worker:group-kit:pr-merge-train",
+        "worker:group-kit:research-lab",
+        "worker:group-kit:research-review-board",
+        "worker:group-kit:upstream-hermes-maintenance"
       ],
       "requiredClips": [
         "idle",
@@ -1368,6 +1733,10 @@
         {
           "distance": 0,
           "node": "workers:lod:near"
+        },
+        {
+          "distance": 14,
+          "node": "workers:lod:mid"
         },
         {
           "distance": 28,
@@ -1474,9 +1843,9 @@
         "drawCalls": 6,
         "materials": 3,
         "meshes": 6,
-        "nodes": 46,
+        "nodes": 107,
         "textures": 0,
-        "triangles": 3240,
+        "triangles": 2984,
         "budget": {
           "maxDrawCalls": 6,
           "maxGpuMiB": 8,
@@ -1484,14 +1853,14 @@
           "maxTextures": 3,
           "maxTriangles": 18000
         },
-        "bytes": 183752,
+        "bytes": 190072,
         "extent": [
           1.6298,
-          2.9399,
-          1.12
+          2.975,
+          1.0915
         ],
-        "gpuMiB": 0.1752,
-        "sha256": "b5563a308ee3f47ec9ce90b19ee6682001e52a7a80402f3060c73365fd25dc21"
+        "gpuMiB": 0.1813,
+        "sha256": "e409e3d2b7678473cb522390b14eeb4dbdd8e00aadb78b16609e9f565d26980b"
       }
     }
   ],
