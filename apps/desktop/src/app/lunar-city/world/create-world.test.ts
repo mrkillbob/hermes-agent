@@ -572,7 +572,10 @@ describe('createLunarCityWorld', () => {
   it('releases world-stage scheduler, navigation, registry, and occlusion resources if readiness rejects after Recast initializes', async () => {
     const runtime = fakeRuntime({ rejectWhenReady: true })
     const configurationDestroy = vi.fn()
+    const navMeshBuild = vi.fn()
+    const navMeshCreate = vi.fn()
     const navMeshDestroy = vi.fn()
+    const documentAdd = vi.spyOn(document, 'addEventListener')
     const documentRemove = vi.spyOn(document, 'removeEventListener')
 
     class FakeConfiguration {
@@ -582,9 +585,13 @@ describe('createLunarCityWorld', () => {
     }
 
     class FakeNavMesh {
-      build = vi.fn()
+      build = navMeshBuild
       computePath = vi.fn()
       destroy = navMeshDestroy
+
+      constructor() {
+        navMeshCreate()
+      }
     }
 
     class FakeVector3 {
@@ -595,7 +602,7 @@ describe('createLunarCityWorld', () => {
       ) {}
     }
 
-    runtime.modules.createRecastNavigation = vi.fn(
+    const createRecastNavigation = vi.fn(
       async () =>
         ({
           NavMesh: FakeNavMesh,
@@ -604,17 +611,40 @@ describe('createLunarCityWorld', () => {
         }) as unknown as Awaited<ReturnType<NonNullable<LunarCityWorldModules['createRecastNavigation']>>>
     )
 
+    runtime.modules.createRecastNavigation = createRecastNavigation
+
     await expect(
       createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
     ).rejects.toThrow(/scene readiness rejected/)
 
+    const navigationImports = runtime.ImportMeshAsync.mock.calls.filter(([url]) =>
+      url.endsWith('/models/navigation.glb')
+    )
+
+    const visibilityAdds = documentAdd.mock.calls.filter(([event]) => event === 'visibilitychange')
+    const visibilityRemovals = documentRemove.mock.calls.filter(([event]) => event === 'visibilitychange')
+    const visibilityListener = visibilityAdds[0]?.[1]
+
+    expect(navigationImports).toHaveLength(1)
+    expect(createRecastNavigation).toHaveBeenCalledOnce()
+    expect(navMeshCreate).toHaveBeenCalledOnce()
+    expect(navMeshBuild).toHaveBeenCalledOnce()
+    expect(runtime.scenes[0]?.whenReadyAsync).toHaveBeenCalledOnce()
+    expect(createRecastNavigation.mock.invocationCallOrder[0]).toBeLessThan(
+      runtime.scenes[0]!.whenReadyAsync.mock.invocationCallOrder[0]!
+    )
+    expect(navMeshBuild.mock.invocationCallOrder[0]).toBeLessThan(
+      runtime.scenes[0]!.whenReadyAsync.mock.invocationCallOrder[0]!
+    )
     expect(configurationDestroy).toHaveBeenCalledOnce()
     expect(navMeshDestroy).toHaveBeenCalledOnce()
-    expect(documentRemove).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+    expect(visibilityAdds).toHaveLength(1)
+    expect(visibilityListener).toEqual(expect.any(Function))
+    expect(visibilityRemovals).toEqual([['visibilitychange', visibilityListener]])
     expect(runtime.scenes[0]?.dispose).toHaveBeenCalledOnce()
-    const rendersAfterRejection = runtime.scenes[0]!.render.mock.calls.length
+    expect(runtime.scenes[0]?.render).not.toHaveBeenCalled()
     document.dispatchEvent(new Event('visibilitychange'))
-    expect(runtime.scenes[0]?.render).toHaveBeenCalledTimes(rendersAfterRejection)
+    expect(runtime.scenes[0]?.render).not.toHaveBeenCalled()
   })
 
   it('rejects a forged runtime manifest even when the caller bypasses the parser', async () => {
