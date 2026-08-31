@@ -532,8 +532,10 @@ function validateRawProvenance(receipt, errors) {
   const mountKey = entry => `${entry.sceneMount.id}:${entry.sceneMount.generation}:${entry.sceneMount.startedAtMs}`
   const unchangedMount = trace.every(entry => mountKey(entry) === mountKey(trace[0]))
   if (receipt.scenario === 'context-loss-recovery') {
-    const lastLoss = trace.findLastIndex(entry => entry.state === 'contextLost')
-    const lastRecovery = trace.findLastIndex(entry => entry.state === 'recovered')
+    const contextAction = claims.scenarioExecution?.actions?.find(entry => entry.action === 'context-loss-restore')
+    const actionTrace = contextAction?.result?.lifecycleTrace
+    const lastLoss = Array.isArray(actionTrace) ? actionTrace.lastIndexOf('contextLost') : -1
+    const lastRecovery = Array.isArray(actionTrace) ? actionTrace.lastIndexOf('recovered') : -1
     if (
       claims.lifecycleState !== 'recovered' ||
       receipt.recovery !== 'recovered' ||

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 
+// @ts-expect-error The production Node provenance validator is an untyped ESM module exercised here with runtime output.
+import { deriveRawSamplesFromProvenance } from '../../../scripts/perf/lib/lunar-city-provenance.mjs'
+
 import { entityKey } from './identity'
 import type { EntityKey, LunarCitySnapshot, LunarEntity } from './model'
 import { createLunarCityPerfRuntime } from './perf-runtime'
@@ -114,8 +117,9 @@ describe('Lunar City route-local packaged metrics runtime', () => {
         source: 'lunar-city-snapshot-v1'
       },
       populationSourceMix: { 'source-a': 1, 'source-b': 1 },
-      qualityTier: 'balanced',
+      qualityTier: 'Balanced',
       renderFrames: 2,
+      scenarioTargets: { leaderId: expect.any(String), workerEntityKey: worker.key },
       sceneMount: { generation: 1 },
       worldGeneration: 4,
       targetFps: 30,
@@ -128,6 +132,117 @@ describe('Lunar City route-local packaged metrics runtime', () => {
     expect(disposed).toMatchObject({ lifecycleState: 'disposed', renderFrames: 0 })
     runtime.dispose?.()
     expect(release).toHaveBeenCalledOnce()
+  })
+
+  it('feeds the actual terminal disposal snapshot through the v3 provenance validator', async () => {
+    let request!: (action: string, payload: unknown) => Promise<unknown>
+
+    const runtime = createLunarCityPerfRuntime({
+      onRequest: callback => {
+        request = callback
+
+        return vi.fn()
+      }
+    })
+
+    const canvas = document.createElement('canvas')
+
+    const enrich = (snapshot: unknown) => ({
+      ...(snapshot as Record<string, unknown>),
+      gpuEnabled: true,
+      gpuMemoryMiB: 40,
+      gpuMemorySource: 'chromium-memory-infra-v1',
+      rendererPid: 20,
+      rendererStartedAtMs: 1_000
+    })
+
+    const processMetrics = [
+      {
+        cpu: { percentCPUUsage: 1 },
+        memory: { workingSetSize: 102_400 },
+        pid: 20,
+        type: 'Tab'
+      }
+    ]
+
+    const baseline = enrich(await request('snapshot', undefined))
+
+    runtime.registerRoute!({
+      canvas,
+      getCameraPose: () => ({ alpha: 1, beta: 1, radius: 10 }),
+      getCameraState: () => ({ focusedEntityKey: undefined, following: false }),
+      getCitySnapshot: () => city,
+      getDialogueState: () => 'idle',
+      getInteriorState: () => false,
+      getQuality: () => ({ internalRenderScale: 1, qualityTier: 'balanced' }),
+      getWorldGeneration: () => 1,
+      getWorldMetrics: () => ({
+        activeAnimations: 1,
+        drawCalls: 1,
+        entities: 2,
+        frameMs: 1,
+        frameTimestampsMs: [1],
+        listeners: 1,
+        rafs: 1,
+        renderFrames: 1,
+        targetFps: 30,
+        textures: 1,
+        timers: 1,
+        visibleTriangles: 1,
+        worldUpdateMs: 1,
+        worldUpdateTimestampsMs: [1]
+      }),
+      performLeaderDialogue: vi.fn(),
+      setInterior: vi.fn(),
+      setQuality: vi.fn(),
+      worldAction: vi.fn()
+    })
+
+    const firstMounted = enrich(await request('snapshot', undefined))
+    const secondMounted = enrich(await request('snapshot', undefined))
+    expect(await request('scenario-action', { action: 'dispose', payload: {} })).toEqual({
+      action: 'dispose',
+      proof: 1
+    })
+    const terminal = enrich(await request('snapshot', undefined))
+
+    const phase = (
+      name: string,
+      samples: Array<{ rendererMetrics: Record<string, unknown>; timestampMs: number }>
+    ) => ({
+      envelopeVersion: 3,
+      phase: name,
+      rendererIdentity: { pid: 20, startedAtMs: 1_000 },
+      samples: samples.map(sample => ({ ...sample, processMetrics })),
+      warmupDurationMs: 30_000
+    })
+
+    const provenance = {
+      baselineShell: phase('baseline-shell', [
+        { rendererMetrics: baseline, timestampMs: 0 },
+        { rendererMetrics: baseline, timestampMs: 1 }
+      ]),
+      mountedCity: {
+        ...phase('mounted-city', [
+          { rendererMetrics: firstMounted, timestampMs: 0 },
+          { rendererMetrics: secondMounted, timestampMs: 1 },
+          { rendererMetrics: terminal, timestampMs: 2 }
+        ]),
+        scenarioExecution: {
+          actions: [{ action: 'dispose', result: { action: 'dispose', proof: 1 } }],
+          scenario: 'disposal'
+        }
+      },
+      provenanceVersion: 3
+    }
+
+    expect(() => deriveRawSamplesFromProvenance(provenance, { scenario: 'disposal' })).not.toThrow()
+    expect((terminal as Record<string, unknown>).population).toEqual({
+      active: 0,
+      lodMix: {},
+      observed: 0,
+      source: 'route-unmounted'
+    })
   })
 
   it('executes only bounded scenario actions and returns causal proof counters', async () => {
@@ -202,6 +317,7 @@ describe('Lunar City route-local packaged metrics runtime', () => {
       proof: 1
     })
     expect(setQuality).toHaveBeenCalledWith('efficient')
+    expect(await request('snapshot', undefined)).toMatchObject({ qualityTier: 'Efficient' })
     expect(
       await request('scenario-action', { action: 'orbit', payload: { deltaAlpha: 0.5, deltaBeta: 0.1 } })
     ).toMatchObject({
@@ -210,10 +326,13 @@ describe('Lunar City route-local packaged metrics runtime', () => {
     })
     expect(worldAction).toHaveBeenCalledWith({ kind: 'orbit', deltaAlpha: 0.5, deltaBeta: 0.1 })
     expect(await request('scenario-action', { action: 'zoom', payload: { delta: 2 } })).toMatchObject({ proof: 1 })
+    expect(await request('snapshot', undefined)).toMatchObject({ cameraState: 'orbit-zoom' })
     expect(await request('scenario-action', { action: 'focus', payload: { entityKey: worker.key } })).toMatchObject({
       proof: 1
     })
+    expect(await request('snapshot', undefined)).toMatchObject({ cameraState: 'worker-focus' })
     expect(await request('scenario-action', { action: 'interior', payload: {} })).toMatchObject({ proof: 1 })
+    expect(await request('snapshot', undefined)).toMatchObject({ cameraState: 'indoor' })
     expect(await request('scenario-action', { action: 'leader-dialogue', payload: { leaderId: 'owl' } })).toMatchObject(
       {
         action: 'leader-dialogue',

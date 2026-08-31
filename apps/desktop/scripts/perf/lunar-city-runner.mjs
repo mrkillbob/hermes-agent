@@ -240,6 +240,52 @@ async function defaultProcessProbe(cdp) {
   return result
 }
 
+function scenarioActionPlan(scenario, metrics) {
+  const workerEntityKey = metrics?.scenarioTargets?.workerEntityKey
+  const leaderId = metrics?.scenarioTargets?.leaderId
+  const plans = {
+    'balanced-worker-focus': [['focus', { entityKey: workerEntityKey }]],
+    'continuous-orbit-zoom': [
+      ['orbit', { deltaAlpha: 0.5, deltaBeta: 0.1 }],
+      ['zoom', { delta: -2 }]
+    ],
+    'context-loss-recovery': [['context-loss-restore', {}]],
+    'dialogue-camera': [
+      ['orbit', { deltaAlpha: 0.5, deltaBeta: 0.1 }],
+      ['zoom', { delta: -2 }],
+      ['leader-dialogue', { leaderId }]
+    ],
+    disposal: [['dispose', {}]],
+    'indoor-occlusion': [['interior', {}]],
+    'tier-detailed': [['quality', { tier: 'detailed' }]],
+    'tier-efficient': [['quality', { tier: 'efficient' }]]
+  }
+
+  return plans[scenario] ?? []
+}
+
+export async function runScenarioThroughBridge(cdp, scenario, metrics) {
+  const actions = []
+
+  for (const [action, payload] of scenarioActionPlan(scenario, metrics)) {
+    const result = await cdp.eval(`(() => {
+      const probe = window.__LUNAR_CITY_PERF__
+      if (!probe || typeof probe.runAction !== 'function') {
+        return Promise.reject(new Error('probe-unavailable'))
+      }
+      return probe.runAction(${JSON.stringify(action)}, ${JSON.stringify(payload)})
+    })()`)
+
+    if (!result || result.action !== action || !Number.isInteger(result.proof) || result.proof <= 0) {
+      throw new Error(`Lunar City scenario action ${action} did not return causal proof`)
+    }
+
+    actions.push({ action, result })
+  }
+
+  return { actions, scenario }
+}
+
 const defaultClock = {
   now: () => Date.now(),
   sleep: milliseconds => new Promise(resolveSleep => setTimeout(resolveSleep, milliseconds))
@@ -297,7 +343,9 @@ async function capturePhase({
   sampleIntervalMs,
   processProbe,
   rendererProbe,
-  clock
+  clock,
+  scenarioExecution,
+  terminalAction
 }) {
   const firstRenderer = await rendererProbe(cdp)
   const rendererIdentity = { pid: firstRenderer.rendererPid, startedAtMs: firstRenderer.rendererStartedAtMs }
@@ -309,12 +357,32 @@ async function capturePhase({
     samples.push({ timestampMs: clock.now() - startedAt, processMetrics, rendererMetrics })
     if (index + 1 < sampleCount) await clock.sleep(sampleIntervalMs)
   }
+
+  let execution = scenarioExecution
+
+  if (terminalAction) {
+    execution = await terminalAction(firstRenderer)
+    const elapsed = clock.now() - startedAt
+    const lastTimestamp = samples.at(-1)?.timestampMs ?? -1
+
+    if (elapsed <= lastTimestamp) {
+      await clock.sleep(lastTimestamp - elapsed + 1)
+    }
+
+    samples.push({
+      timestampMs: clock.now() - startedAt,
+      processMetrics: await processProbe(cdp),
+      rendererMetrics: await rendererProbe(cdp)
+    })
+  }
+
   return {
     envelopeVersion: LUNAR_CITY_PHASE_ENVELOPE_VERSION,
     phase,
     warmupDurationMs,
     rendererIdentity,
-    samples
+    samples,
+    ...(execution ? { scenarioExecution: execution } : {})
   }
 }
 
@@ -333,6 +401,7 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     preparePhase: defaultPreparePhase,
     processProbe: defaultProcessProbe,
     rendererProbe: defaultRendererProbe,
+    runScenario: runScenarioThroughBridge,
     clock: defaultClock,
     cleanup: cleanupIsolatedRun,
     ...injected
@@ -382,6 +451,12 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     })
     await deps.preparePhase(cdp, 'mounted-city')
     if (warmupDurationMs > 0) await deps.clock.sleep(warmupDurationMs)
+    let scenarioExecution
+
+    if (options.scenario && options.scenario !== 'disposal') {
+      scenarioExecution = await deps.runScenario(cdp, options.scenario, await deps.rendererProbe(cdp))
+    }
+
     const mountedCity = await capturePhase({
       cdp,
       phase: 'mounted-city',
@@ -390,7 +465,12 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
       sampleIntervalMs,
       processProbe: deps.processProbe,
       rendererProbe: deps.rendererProbe,
-      clock: deps.clock
+      clock: deps.clock,
+      scenarioExecution,
+      terminalAction:
+        options.scenario === 'disposal'
+          ? firstRenderer => deps.runScenario(cdp, options.scenario, firstRenderer)
+          : undefined
     })
     const rawProvenance = { provenanceVersion: LUNAR_CITY_PROVENANCE_VERSION, baselineShell, mountedCity }
     const derived = deriveRawSamplesFromProvenance(rawProvenance, { scenario: options.scenario })

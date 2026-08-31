@@ -407,7 +407,10 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   const rawProvenance = {
     provenanceVersion: 3,
     baselineShell: phase('baseline-shell', 3, 40, [200, 200, 200, 200, 200]),
-    mountedCity: phase('mounted-city', 6, 50, rawSamples.residentMemoryMiB),
+    mountedCity: {
+      ...phase('mounted-city', 6, 50, rawSamples.residentMemoryMiB),
+      scenarioExecution: { actions: [], scenario: 'balanced-overview' }
+    },
     bridgeHandshake: {
       bridgeVersion: 1,
       launchNonce: 'nonce-7',
@@ -500,8 +503,10 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
       /qualityTier.*raw mounted|quality.*raw/i
     ]
   ]) {
+    const scenarioProvenance = structuredClone(rawProvenance)
+    scenarioProvenance.mountedCity.scenarioExecution = { actions: [], scenario: patch.scenario }
     const result = validateReceipt(
-      receipt({ evidenceClass: 'fake-backend-packaged', rawSamples, rawProvenance, ...patch })
+      receipt({ evidenceClass: 'fake-backend-packaged', rawSamples, rawProvenance: scenarioProvenance, ...patch })
     )
     assert.equal(result.packagedPerformanceEligible, false, label)
     assert.match(result.errors.join('\n'), pattern, label)
@@ -515,6 +520,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
     sourceMix: { 'fake-backend': 100 }
   }
   const stabilityProvenance = structuredClone(rawProvenance)
+  stabilityProvenance.mountedCity.scenarioExecution = { actions: [], scenario: '30-minute-stability' }
   const stabilityTimestamps = [0, 450_000, 900_000, 1_350_000, 1_800_000]
   stabilityProvenance.mountedCity.samples.forEach((sample, index) => {
     sample.timestampMs = stabilityTimestamps[index]
@@ -540,6 +546,15 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   assert.match(stability.errors.join('\n'), /stability.*scene mount|disposal|resource.*continuity|counter.*reset/i)
 
   const recoveredThenLost = structuredClone(rawProvenance)
+  recoveredThenLost.mountedCity.scenarioExecution = {
+    actions: [
+      {
+        action: 'context-loss-restore',
+        result: { action: 'context-loss-restore', proof: 1 }
+      }
+    ],
+    scenario: 'context-loss-recovery'
+  }
   recoveredThenLost.mountedCity.samples.forEach((sample, index) => {
     sample.rendererMetrics.lifecycleActions.contextLosses = index === 0 ? 0 : index < 3 ? 1 : 2
     sample.rendererMetrics.lifecycleActions.recoveries = index < 2 ? 0 : 1
@@ -559,6 +574,10 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   assert.match(recovered.errors.join('\n'), /final.*recovered|later context loss|lifecycle/i)
 
   const truthfulDisposal = structuredClone(rawProvenance)
+  truthfulDisposal.mountedCity.scenarioExecution = {
+    actions: [{ action: 'dispose', result: { action: 'dispose', proof: 1 } }],
+    scenario: 'disposal'
+  }
   const terminal = truthfulDisposal.mountedCity.samples.at(-1).rendererMetrics
   terminal.lifecycleActions.disposals = 1
   terminal.lifecycleState = 'disposed'
@@ -582,6 +601,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   assert.equal(truthfulDisposed.packagedPerformanceEligible, true, truthfulDisposed.errors.join('; '))
 
   const disposedThenRemounted = structuredClone(rawProvenance)
+  disposedThenRemounted.mountedCity.scenarioExecution = structuredClone(truthfulDisposal.mountedCity.scenarioExecution)
   disposedThenRemounted.mountedCity.samples.forEach((sample, index) => {
     sample.rendererMetrics.lifecycleActions.disposals = index === 4 ? 1 : 0
     sample.rendererMetrics.lifecycleState = index === 4 ? 'disposed' : 'mounted'

@@ -1,3 +1,4 @@
+import { leaderModelIdForOwner, leaderOwnerForProfile } from './leader-runtime'
 import type { CameraControlState, CameraIntent, EntityKey, LeaderId, LunarCitySnapshot, QualityTier } from './model'
 import { lunarCityPerfRuntimeEndpoint } from './perf-runtime-channel'
 
@@ -194,15 +195,24 @@ export function createLunarCityPerfRuntime(
   const snapshot = () => {
     const activeRoute = route && !route.disposed ? route : undefined
     const world = activeRoute?.registration.getWorldMetrics() ?? emptyWorldMetrics()
+    const citySnapshot = activeRoute?.registration.getCitySnapshot()
 
     const exact = activeRoute
-      ? population(activeRoute.registration.getCitySnapshot())
+      ? population(citySnapshot!)
       : {
           activeLeaderAnimations: 0,
           activeWorkerAnimations: 0,
-          population: { active: 0, lodMix: { far: 0, mid: 0, near: 0 }, observed: 0, source: 'route-unmounted-v1' },
+          population: { active: 0, lodMix: {}, observed: 0, source: 'route-unmounted' },
           populationSourceMix: {}
         }
+
+    const workerTarget = citySnapshot
+      ? [...citySnapshot.entities.values()].find(entity => entity.identity.kind !== 'profile')
+      : undefined
+
+    const leaderTarget = citySnapshot
+      ? [...citySnapshot.entities.values()].map(leaderOwnerForProfile).find(owner => owner !== undefined)
+      : undefined
 
     const quality = activeRoute?.registration.getQuality() ?? {
       internalRenderScale: 1,
@@ -211,12 +221,22 @@ export function createLunarCityPerfRuntime(
 
     const camera = activeRoute?.registration.getCameraState()
 
+    const cameraState = activeRoute?.registration.getInteriorState()
+      ? 'indoor'
+      : camera?.focusedEntityKey
+        ? 'worker-focus'
+        : counters.cameraActions.orbit > 0 && counters.cameraActions.zoom > 0
+          ? 'orbit-zoom'
+          : 'overview'
+
+    const qualityTier = `${quality.qualityTier.charAt(0).toUpperCase()}${quality.qualityTier.slice(1)}`
+
     return {
       ...world,
       ...exact,
       activeAnimations: finite(world.activeAnimations),
       cameraActions: structuredClone(counters.cameraActions),
-      cameraState: camera?.focusedEntityKey ? 'worker-focus' : 'overview',
+      cameraState,
       dialogueActions: structuredClone(counters.dialogueActions),
       dialogueState: activeRoute?.registration.getDialogueState() ?? 'idle',
       environment: {
@@ -226,7 +246,11 @@ export function createLunarCityPerfRuntime(
       internalRenderScale: quality.internalRenderScale,
       lifecycleActions: structuredClone(counters.lifecycleActions),
       lifecycleState,
-      qualityTier: quality.qualityTier,
+      qualityTier,
+      scenarioTargets: {
+        ...(leaderTarget ? { leaderId: leaderModelIdForOwner(leaderTarget) } : {}),
+        ...(workerTarget ? { workerEntityKey: workerTarget.key } : {})
+      },
       sceneMount: structuredClone(lastMount),
       worldGeneration: activeRoute?.registration.getWorldGeneration() ?? 0
     }
@@ -390,7 +414,12 @@ export function createLunarCityPerfRuntime(
           counters.lifecycleActions.recoveries += 1
           lifecycleState = 'recovered'
 
-          return { action: request.action, proof: counters.lifecycleActions.recoveries }
+          return {
+            action: request.action,
+            lifecycleActions: structuredClone(counters.lifecycleActions),
+            lifecycleTrace: ['contextLost', 'recovered'],
+            proof: counters.lifecycleActions.recoveries
+          }
         } finally {
           if (!restoreAttempted) {
             try {

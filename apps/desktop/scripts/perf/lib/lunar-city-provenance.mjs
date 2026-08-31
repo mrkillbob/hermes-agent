@@ -135,6 +135,25 @@ function validateRendererMetrics(metrics, identity, label, allowEmpty) {
     fail(`${label} lifecycle state is unavailable`)
 }
 
+function validateScenarioExecution(execution, scenario) {
+  if (!isRecord(execution) || execution.scenario !== scenario || !Array.isArray(execution.actions)) {
+    fail('mounted-city scenario execution is unavailable or mismatched')
+  }
+
+  for (const [index, entry] of execution.actions.entries()) {
+    if (
+      !isRecord(entry) ||
+      typeof entry.action !== 'string' ||
+      !isRecord(entry.result) ||
+      entry.result.action !== entry.action ||
+      !Number.isInteger(entry.result.proof) ||
+      entry.result.proof <= 0
+    ) {
+      fail(`mounted-city scenario action ${index} lacks exact causal proof`)
+    }
+  }
+}
+
 function validatePhase(envelope, expectedPhase, scenario) {
   if (!isRecord(envelope)) fail(`${expectedPhase} envelope is unavailable`)
   if (envelope.envelopeVersion !== LUNAR_CITY_PHASE_ENVELOPE_VERSION) {
@@ -146,6 +165,7 @@ function validatePhase(envelope, expectedPhase, scenario) {
     fail(`${expectedPhase} warmup duration is unavailable`)
   if (!Array.isArray(envelope.samples) || envelope.samples.length === 0)
     fail(`${expectedPhase} samples are unavailable`)
+  if (expectedPhase === 'mounted-city' && scenario) validateScenarioExecution(envelope.scenarioExecution, scenario)
 
   let previousTimestamp = -1
   const terminalDisposal = expectedPhase === 'mounted-city' && scenario === 'disposal'
@@ -301,6 +321,7 @@ export function deriveRawSamplesFromProvenance(provenance, { scenario } = {}) {
         residentMemoryMiB
       },
       environment: structuredClone(claimMetrics.environment),
+      scenarioExecution: structuredClone(provenance.mountedCity.scenarioExecution),
       rendererIdentity: { ...identity }
     },
     resourceDeltas: {

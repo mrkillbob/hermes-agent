@@ -7,6 +7,7 @@ import {
   inspectPackagedTarget,
   reserveUniqueDebugPort,
   runPackagedLunarCityMeasurement,
+  runScenarioThroughBridge,
   validateBridgeHandshake
 } from './lunar-city-runner.mjs'
 import { deriveRawSamplesFromProvenance } from './lib/lunar-city-provenance.mjs'
@@ -311,6 +312,28 @@ test('requires an exact versioned packaged bridge handshake bound to nonce, buil
   }
 })
 
+test('executes and awaits one real non-disposal bridge action exactly once', async () => {
+  const evaluations = []
+  const result = await runScenarioThroughBridge(
+    {
+      eval: async expression => {
+        evaluations.push(expression)
+
+        return { action: 'quality', proof: 1, tier: 'efficient' }
+      }
+    },
+    'tier-efficient',
+    rendererMetrics()
+  )
+
+  assert.equal(evaluations.length, 1)
+  assert.match(evaluations[0], /probe[.]runAction\("quality",\s*\{"tier":"efficient"\}\)/u)
+  assert.deepEqual(result, {
+    actions: [{ action: 'quality', result: { action: 'quality', proof: 1, tier: 'efficient' } }],
+    scenario: 'tier-efficient'
+  })
+})
+
 test('derives CPU, renderer RSS, and GPU deltas from retained baseline and city samples', () => {
   const derived = deriveRawSamplesFromProvenance(provenance())
 
@@ -379,13 +402,16 @@ test('refuses an empty city, disabled GPU, and unavailable required metrics', ()
 test('orchestrates injected packaged launcher, CDP, process, renderer, and clock probes', async () => {
   const launches = []
   const phases = []
+  const scenarioRuns = []
   let now = 0
+  let qualityTier = 'Balanced'
   const result = await runPackagedLunarCityMeasurement(
     {
       binaryPath: BINARY,
       expectedGitSha: SHA,
       sampleCount: 2,
       sampleIntervalMs: 1_000,
+      scenario: 'tier-efficient',
       warmupDurationMs: 0
     },
     {
@@ -412,7 +438,16 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
       }),
       preparePhase: async (_cdp, name) => phases.push(name),
       processProbe: async () => processRows(20, phases.length === 1 ? 1 : 2),
-      rendererProbe: async () => rendererMetrics({ gpuMemoryMiB: phases.length === 1 ? 40 : 50 }),
+      rendererProbe: async () => rendererMetrics({ gpuMemoryMiB: phases.length === 1 ? 40 : 50, qualityTier }),
+      runScenario: async (_cdp, scenario) => {
+        scenarioRuns.push(scenario)
+        qualityTier = 'Efficient'
+
+        return {
+          actions: [{ action: 'quality', result: { action: 'quality', proof: 1, tier: 'efficient' } }],
+          scenario
+        }
+      },
       clock: {
         now: () => now,
         sleep: async milliseconds => {
@@ -427,11 +462,118 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
   assert.equal(launches[0].env.HERMES_LUNAR_CITY_PERF_NONCE, 'nonce-7')
   assert.equal(launches[0].env.HERMES_LUNAR_CITY_PERF_ACCEPTANCE, '1')
   assert.deepEqual(phases, ['baseline-shell', 'mounted-city'])
+  assert.deepEqual(scenarioRuns, ['tier-efficient'])
+  assert.deepEqual(result.rawProvenance.mountedCity.scenarioExecution, {
+    actions: [{ action: 'quality', result: { action: 'quality', proof: 1, tier: 'efficient' } }],
+    scenario: 'tier-efficient'
+  })
+  assert.equal(result.rawProvenance.mountedCity.samples.length, 2)
+  assert.equal(
+    result.rawProvenance.mountedCity.samples.every(sample => sample.rendererMetrics.qualityTier === 'Efficient'),
+    true
+  )
   assert.equal(result.rawProvenance.provenanceVersion, 3)
   assert.deepEqual(result.rawSamples.cpuDeltaPp, [3, 3])
   assert.equal(result.buildStamp.commit, SHA)
   assert.equal(result.packagedPerformanceEligible, false)
   assert.equal(result.evidenceClass, 'deterministic')
+})
+
+test('captures mounted disposal samples followed by exactly one truthful terminal sample', async () => {
+  let now = 0
+  let phaseName = 'baseline-shell'
+  let disposed = false
+  let mountedRendererProbes = 0
+  let scenarioRuns = 0
+
+  const result = await runPackagedLunarCityMeasurement(
+    {
+      binaryPath: BINARY,
+      expectedGitSha: SHA,
+      sampleCount: 2,
+      sampleIntervalMs: 1_000,
+      scenario: 'disposal',
+      warmupDurationMs: 0
+    },
+    {
+      inspectTarget: () => ({ binaryPath: BINARY, buildStamp: cleanStamp() }),
+      makeTempRoot: () => '/private/tmp/lunar-city-disposal',
+      makeLaunchNonce: () => 'nonce-7',
+      reserveDebugPort: async () => ({ port: 49321, release: async () => {} }),
+      launch: () => ({ pid: 999, kill() {} }),
+      connectCdp: async ({ port }) => ({
+        cdp: { port, close() {} },
+        handshake: {
+          bridgeVersion: 1,
+          launchNonce: 'nonce-7',
+          buildSha: SHA,
+          packaged: true,
+          mainPid: 999,
+          rendererIdentity: { pid: 20, startedAtMs: 1_000 },
+          supportedPhases: ['baseline-shell', 'mounted-city'],
+          processMetricsSource: 'electron.app.getAppMetrics'
+        }
+      }),
+      preparePhase: async (_cdp, name) => {
+        phaseName = name
+      },
+      processProbe: async () => processRows(20, phaseName === 'baseline-shell' ? 1 : 2),
+      rendererProbe: async () => {
+        if (phaseName === 'mounted-city') mountedRendererProbes += 1
+
+        return disposed
+          ? rendererMetrics({
+              activeAnimations: 0,
+              drawCalls: 0,
+              entities: 0,
+              frameMs: 0,
+              lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 1 },
+              lifecycleState: 'disposed',
+              listeners: 0,
+              population: { observed: 0, active: 0, lodMix: {}, source: 'route-unmounted' },
+              populationSourceMix: {},
+              renderFrames: 0,
+              textures: 0,
+              timers: 0,
+              visibleTriangles: 0,
+              worldUpdateMs: 0
+            })
+          : rendererMetrics({ gpuMemoryMiB: phaseName === 'baseline-shell' ? 40 : 50 })
+      },
+      runScenario: async (_cdp, scenario) => {
+        scenarioRuns += 1
+        disposed = true
+
+        return { actions: [{ action: 'dispose', result: { action: 'dispose', proof: 1 } }], scenario }
+      },
+      clock: {
+        now: () => now,
+        sleep: async milliseconds => {
+          now += milliseconds
+        }
+      },
+      cleanup: async () => {}
+    }
+  )
+
+  const samples = result.rawProvenance.mountedCity.samples
+  assert.equal(scenarioRuns, 1)
+  assert.equal(mountedRendererProbes, 3)
+  assert.equal(samples.length, 3)
+  assert.deepEqual(
+    samples.map(sample => sample.rendererMetrics.lifecycleState),
+    ['mounted', 'mounted', 'disposed']
+  )
+  assert.deepEqual(samples.at(-1).rendererMetrics.population, {
+    observed: 0,
+    active: 0,
+    lodMix: {},
+    source: 'route-unmounted'
+  })
+  assert.deepEqual(result.rawProvenance.mountedCity.scenarioExecution, {
+    actions: [{ action: 'dispose', result: { action: 'dispose', proof: 1 } }],
+    scenario: 'disposal'
+  })
 })
 
 test('cleanup attempts close, terminate, wait, kill, and removal despite earlier failures', async () => {
