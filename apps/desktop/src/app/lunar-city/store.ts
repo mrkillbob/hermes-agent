@@ -21,10 +21,19 @@ function freezeVec3(value: Vec3): Vec3 {
 
 function freezeEntity(entity: LunarEntity): LunarEntity {
   const identity = Object.freeze({ ...entity.identity }) as LunarEntity['identity']
+  const presentation = entity.presentation
+    ? Object.freeze({
+        ...entity.presentation,
+        groups: Object.freeze(entity.presentation.groups.map(group => Object.freeze({ ...group }))),
+        metadata: Object.freeze({ ...entity.presentation.metadata }),
+        placement: Object.freeze({ ...entity.presentation.placement })
+      })
+    : undefined
 
   return Object.freeze({
     ...entity,
     identity,
+    ...(presentation ? { presentation } : {}),
     ...(entity.position ? { position: freezeVec3(entity.position) } : {})
   })
 }

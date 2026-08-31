@@ -164,6 +164,35 @@ export interface LunarEntity {
   projectId?: string
   /** Declared worker colour/accessory variant, never a display-name identity. */
   variant?: string
+  /** Bounded presentation metadata. It never participates in identity or command authority. */
+  presentation?: LunarEntityPresentation
+}
+
+export interface LunarGroupMembership {
+  id: string
+  name: string
+}
+
+export interface LunarEntityPlacement {
+  lodHint: number
+  overflow: boolean
+  primaryGroupId?: string
+  slot: number
+}
+
+export interface LunarEntityPresentation {
+  configuredTitle?: string
+  groups: readonly LunarGroupMembership[]
+  metadata: LunarPresentationMetadata
+  placement: LunarEntityPlacement
+  profileHandle?: string
+  sourceLabel?: string
+}
+
+export interface LunarPresentationMetadata {
+  observedAt?: number
+  source: string
+  state: 'fresh' | 'stale' | 'unavailable'
 }
 
 export interface LunarCitySnapshot {

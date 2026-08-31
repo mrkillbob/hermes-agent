@@ -90,6 +90,7 @@ interface RetainedEntity {
   animation: string
   authority: AuthorityState
   entity: LunarEntity
+  lodFloor: number
   lodIndex: number
   moving: boolean
   nearby: boolean
@@ -279,7 +280,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
 
       for (const record of records.values()) {
         const nextIndex = Math.max(
-          0,
+          record.lodFloor,
           Math.floor(resolveIndex(record.entity.key, record.position, record.entity.key === selected))
         )
 
@@ -397,16 +398,23 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
           animation: entity.animation,
           authority: entity.authority,
           entity,
-          lodIndex: 0,
+          lodFloor: entity.presentation?.placement.lodHint ?? 0,
+          lodIndex: entity.presentation?.placement.lodHint ?? 0,
           moving: false,
           nearby: false,
           position: copied(entity.position),
           visual: undefined
         }
 
+        const previousLodFloor = record.lodFloor
         record.entity = entity
         record.animation = entity.animation
         record.authority = entity.authority
+        record.lodFloor = entity.presentation?.placement.lodHint ?? 0
+
+        if (record.lodIndex === previousLodFloor || record.lodIndex < record.lodFloor) {
+          record.lodIndex = record.lodFloor
+        }
         record.position = copied(entity.position ?? record.position)
         record.moving ||= entity.animation === 'walk'
         records.set(entity.key, record)

@@ -1,7 +1,7 @@
 import type { SessionOwnerRoute } from '@/store/session-request-router'
 
 import type { CommandEvidenceKind } from '../command-broker'
-import type { EntityIdentity, SourceHealth } from '../model'
+import type { EntityIdentity, LunarEntityPresentation, SourceHealth } from '../model'
 
 export interface InspectorTaskEvidence {
   id: string
@@ -79,6 +79,7 @@ export interface EntityInspectorData {
   identity: EntityIdentity
   logTail?: InspectorLogEvidence
   owningSession?: InspectorSessionTarget
+  presentation?: LunarEntityPresentation
   run?: InspectorRunEvidence
   source: SourceHealth
   subagent?: InspectorSubagentEvidence
@@ -199,6 +200,61 @@ export function EntityInspector({ data, onInspectEvidence, onOpenSession }: Enti
           ) : null}
         </dl>
       </Region>
+
+      {data.presentation ? (
+        <Region name="Bot profile">
+          <dl>
+            {data.presentation.configuredTitle ? (
+              <>
+                <dt>Configured title</dt>
+                <dd>{data.presentation.configuredTitle}</dd>
+              </>
+            ) : null}
+            {data.presentation.profileHandle ? (
+              <>
+                <dt>Profile handle</dt>
+                <dd>{data.presentation.profileHandle}</dd>
+              </>
+            ) : null}
+            {data.presentation.sourceLabel ? (
+              <>
+                <dt>Source position</dt>
+                <dd>{data.presentation.sourceLabel}</dd>
+              </>
+            ) : null}
+            <dt>Status</dt>
+            <dd>{data.source.authority === 'authoritative' ? 'Ready' : 'Unavailable'}</dd>
+            <dt>Profile metadata</dt>
+            <dd>{label(data.presentation.metadata.state)}</dd>
+            <dt>Metadata source</dt>
+            <dd>{data.presentation.metadata.source}</dd>
+            {data.presentation.metadata.observedAt !== undefined ? (
+              <>
+                <dt>Metadata observed</dt>
+                <dd>
+                  <time dateTime={new Date(data.presentation.metadata.observedAt).toISOString()}>
+                    {new Date(data.presentation.metadata.observedAt).toLocaleString()}
+                  </time>
+                </dd>
+              </>
+            ) : null}
+            <dt>Groups</dt>
+            <dd>
+              {data.presentation.groups.length > 0 ? (
+                <ul>
+                  {data.presentation.groups.map(group => (
+                    <li key={group.id}>{group.name}</li>
+                  ))}
+                </ul>
+              ) : (
+                'None'
+              )}
+            </dd>
+            <dt>District detail</dt>
+            <dd>{data.presentation.placement.overflow ? 'Aggregate LOD' : 'Individual'}</dd>
+          </dl>
+        </Region>
+      ) : null}
 
       {data.task ? (
         <Region name="Task">

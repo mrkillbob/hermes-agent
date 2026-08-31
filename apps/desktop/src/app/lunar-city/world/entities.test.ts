@@ -103,6 +103,41 @@ describe('EntityRegistry', () => {
     expect(presentationFactory.groups.get('worker:idle')?.dispose).toHaveBeenCalledOnce()
   })
 
+  it('starts bounded district overflow at its declared aggregate LOD without per-frame promotion work', () => {
+    const presentationFactory = factory()
+    const overflow = entity(1, {
+      presentation: {
+        groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+        metadata: { source: 'profiles:connection-1', state: 'fresh' },
+        placement: { lodHint: 1, overflow: true, primaryGroupId: 'engineering', slot: 24 }
+      }
+    })
+    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
+
+    registry.reconcile(snapshot(overflow))
+
+    expect(registry.instancedGroup('worker:idle:lod:1')?.count).toBe(1)
+    expect(presentationFactory.animated).not.toHaveBeenCalled()
+  })
+
+  it('moves a retained worker to aggregate LOD when a later roster makes its stable district rank overflow', () => {
+    const presentationFactory = factory()
+    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
+    const near = entity(1)
+    const overflow = entity(1, {
+      presentation: {
+        groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+        metadata: { source: 'profiles:connection-1', state: 'fresh' },
+        placement: { lodHint: 1, overflow: true, primaryGroupId: 'engineering', slot: 24 }
+      }
+    })
+
+    registry.reconcile(snapshot(near))
+    registry.reconcile(snapshot(overflow))
+
+    expect(registry.instancedGroup('worker:idle:lod:1')?.count).toBe(1)
+  })
+
   it('releases removed presentation resources once without disturbing unrelated entities', () => {
     const presentationFactory = factory()
     const first = entity(1, { animation: 'walk' })

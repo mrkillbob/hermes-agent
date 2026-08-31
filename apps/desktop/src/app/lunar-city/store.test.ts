@@ -23,7 +23,12 @@ describe('Lunar City snapshot store', () => {
           destination: 'garden',
           identity,
           key,
-          observedAt: 42
+          observedAt: 42,
+          presentation: {
+            groups: [{ id: 'research-lab', name: 'Research Lab' }],
+            metadata: { observedAt: 42, source: 'profiles:local', state: 'fresh' },
+            placement: { lodHint: 0, overflow: false, primaryGroupId: 'research-lab', slot: 2 }
+          }
         }
       ]
     })
@@ -34,6 +39,11 @@ describe('Lunar City snapshot store', () => {
     expect(Object.isFrozen(after)).toBe(true)
     expect(Object.isFrozen(after.entities)).toBe(true)
     expect(Object.isFrozen(after.entities.get(key)!)).toBe(true)
+    expect(Object.isFrozen(after.entities.get(key)!.presentation)).toBe(true)
+    expect(Object.isFrozen(after.entities.get(key)!.presentation!.groups)).toBe(true)
+    expect(Object.isFrozen(after.entities.get(key)!.presentation!.groups[0])).toBe(true)
+    expect(Object.isFrozen(after.entities.get(key)!.presentation!.metadata)).toBe(true)
+    expect(Object.isFrozen(after.entities.get(key)!.presentation!.placement)).toBe(true)
     expect(Object.isFrozen(after.sources[0]!)).toBe(true)
   })
 

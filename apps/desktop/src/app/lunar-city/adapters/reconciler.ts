@@ -2,13 +2,15 @@ import { onGatewayEvent } from '@/contrib/events'
 import type { DesktopAgentRoster } from '@/global'
 import { $connectionsRegistry, hasRegistryTopology } from '@/store/connection-registry-state'
 import { $fleetRoster, refreshFleetRoster } from '@/store/fleet-roster'
+import { requestGatewayForAgent } from '@/store/gateway'
 import { $connection, $cronSessions, $messagingSessions, $sessions, ownerLookupSessionRows } from '@/store/session'
 import { $subagentsBySession, type SubagentProgress } from '@/store/subagents'
 import type { SessionInfo } from '@/types/hermes'
 
-import type { LunarEntity, SourceHealth } from '../model'
+import type { LunarEntity, LunarPresentationMetadata, SourceHealth } from '../model'
 import { $lunarCitySnapshot, applyLunarDelta, freezeLunarDelta, type LunarDelta } from '../store'
 
+import { enrichBotRosterEntities, type ScopedProfilesListRequest } from './bot-roster-details'
 import { normalizeRoster } from './fleet'
 import { normalizeSessions, normalizeSubagents } from './sessions'
 
@@ -67,6 +69,7 @@ export interface LunarCityLiveSources {
   $subagentsBySession: ReadableAtom<Readonly<Record<string, readonly SubagentProgress[]>>>
   legacyConnectionId?: () => string | undefined
   legacySingleBackend: () => boolean
+  readProfileRoster?: ScopedProfilesListRequest
   onEvent?: (listener: (event: unknown) => void) => () => void
   onFocus?: (listener: () => void) => () => void
   onRegistryChange?: (listener: () => void) => () => void
@@ -99,6 +102,7 @@ function sameEntity(left: LunarEntity, right: LunarEntity): boolean {
     left.animation === right.animation &&
     left.projectId === right.projectId &&
     left.variant === right.variant &&
+    JSON.stringify(left.presentation) === JSON.stringify(right.presentation) &&
     left.identity.kind === right.identity.kind &&
     left.identity.connectionId === right.identity.connectionId &&
     JSON.stringify(left.identity) === JSON.stringify(right.identity) &&
@@ -435,6 +439,7 @@ function defaultLiveSources(): LunarCityLiveSources {
     $subagentsBySession,
     legacyConnectionId: () => $connection.get()?.connectionId,
     legacySingleBackend: () => !hasRegistryTopology() && $connection.get()?.connectionId === 'local',
+    readProfileRoster: (connectionId, profile) => requestGatewayForAgent(connectionId, profile, 'profiles.list', {}),
     onEvent: listener => onGatewayEvent('*', listener as never),
     onFocus: listener => {
       const onVisibility = () => {
@@ -508,7 +513,66 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   let fleetReference = sources.$fleetRoster.get()
   let fleetObservedAt = 0
   let forceFleetRefresh = true
+  let refreshBotMetadata = true
+  let refreshingFleet = false
   let disposed = false
+  const botMetadataCache = new Map<string, { observedAt: number; payload: unknown; representativeProfile: string }>()
+  const botMetadataProvenance = new Map<string, LunarPresentationMetadata>()
+  let enrichedFleetCache:
+    { base: readonly LunarEntity[]; entities: readonly LunarEntity[]; roster: DesktopAgentRoster } | undefined
+
+  const sameFleetBase = (left: readonly LunarEntity[], right: readonly LunarEntity[]): boolean => {
+    if (left.length !== right.length) {
+      return false
+    }
+
+    return left.every((entity, index) => {
+      const candidate = right[index]
+
+      return (
+        candidate?.key === entity.key &&
+        candidate.authority === entity.authority &&
+        candidate.animation === entity.animation &&
+        candidate.destination === entity.destination &&
+        candidate.observedAt === entity.observedAt
+      )
+    })
+  }
+
+  const readBotMetadata: ScopedProfilesListRequest = async (connectionId, representativeProfile) => {
+    const cached = botMetadataCache.get(connectionId)
+
+    if (!refreshBotMetadata && cached?.representativeProfile === representativeProfile) {
+      return cached.payload
+    }
+
+    try {
+      const payload = await sources.readProfileRoster!(connectionId, representativeProfile)
+      const observedAt = now()
+      botMetadataCache.set(connectionId, { observedAt, payload, representativeProfile })
+      botMetadataProvenance.set(connectionId, {
+        observedAt,
+        source: `profiles:${connectionId}`,
+        state: 'fresh'
+      })
+
+      return payload
+    } catch (error) {
+      if (cached?.representativeProfile === representativeProfile) {
+        botMetadataProvenance.set(connectionId, {
+          observedAt: cached.observedAt,
+          source: `profiles:${connectionId}`,
+          state: 'stale'
+        })
+
+        return cached.payload
+      }
+
+      botMetadataProvenance.set(connectionId, { source: `profiles:${connectionId}`, state: 'unavailable' })
+
+      throw error
+    }
+  }
 
   const reconciler = createLunarCityReconciler({
     freshnessMs: options.freshnessMs,
@@ -520,6 +584,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       let fleetError: string | undefined
 
       try {
+        refreshingFleet = true
         const result = await sources.refreshFleet({ force })
         fleetReadFailed = result?.status === 'failed' || result?.status === 'partial'
         fleetError = result?.error
@@ -532,6 +597,8 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         // its last successful observation timestamp and become stale below.
         fleetReadFailed = true
         fleetError = 'Fleet refresh failed'
+      } finally {
+        refreshingFleet = false
       }
 
       const roster = sources.$fleetRoster.get()
@@ -555,13 +622,43 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         ])
       )
 
-      const fleet = roster
+      const normalizedFleet = roster
         ? normalizeRoster(roster, {
             fresh: !fleetReadFailed && fleetObservedAt > 0,
             observedAt: fleetObservedAt,
             sourceObservedAt: fleetSourceObservedAt
           })
         : { entities: [], sources: [] as readonly SourceHealth[] }
+      let fleet = normalizedFleet
+
+      if (roster && sources.readProfileRoster) {
+        if (
+          !refreshBotMetadata &&
+          enrichedFleetCache?.roster === roster &&
+          sameFleetBase(enrichedFleetCache.base, normalizedFleet.entities)
+        ) {
+          fleet = { ...normalizedFleet, entities: enrichedFleetCache.entities }
+        } else {
+          const entities = await enrichBotRosterEntities(
+            roster,
+            normalizedFleet.entities,
+            readBotMetadata,
+            botMetadataProvenance
+          )
+          fleet = { ...normalizedFleet, entities }
+          enrichedFleetCache = { base: normalizedFleet.entities, entities, roster }
+          refreshBotMetadata = false
+        }
+
+        const currentSources = new Set(roster.sources.map(source => source.connectionId))
+
+        for (const connectionId of botMetadataCache.keys()) {
+          if (!currentSources.has(connectionId)) {
+            botMetadataCache.delete(connectionId)
+            botMetadataProvenance.delete(connectionId)
+          }
+        }
+      }
 
       const sessions = normalizeSessions(sessionRows(), {
         legacyConnectionId: sources.legacyConnectionId?.(),
@@ -621,6 +718,11 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       if (roster !== fleetReference) {
         fleetReference = roster
         fleetObservedAt = now()
+        refreshBotMetadata = true
+
+        if (!refreshingFleet) {
+          reconciler.invalidate('fleet')
+        }
       }
     })
   )
@@ -631,13 +733,19 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   }
 
   if (sources.onFocus) {
-    disposers.push(sources.onFocus(() => reconciler.invalidate('focus')))
+    disposers.push(
+      sources.onFocus(() => {
+        refreshBotMetadata = true
+        reconciler.invalidate('focus')
+      })
+    )
   }
 
   if (sources.onRegistryChange) {
     disposers.push(
       sources.onRegistryChange(() => {
         forceFleetRefresh = true
+        refreshBotMetadata = true
         reconciler.invalidate('registry')
       })
     )
@@ -651,7 +759,10 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
 
         if (type === 'gateway.ready') {
           forceFleetRefresh = true
+          refreshBotMetadata = true
           reconciler.resetSequences(cursor.scope)
+        } else if (type === 'profile.changed' || type === 'profiles.changed' || type === 'profile.ui_meta.changed') {
+          refreshBotMetadata = true
         }
 
         reconciler.acceptEvent(cursor)

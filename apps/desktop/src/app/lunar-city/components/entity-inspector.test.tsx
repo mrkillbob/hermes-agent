@@ -80,6 +80,39 @@ describe('EntityInspector', () => {
     expect(screen.getByRole('region', { name: 'Comments' })).not.toBeNull()
   })
 
+  it('shows the configured title, handle, all groups, source position, and unavailable status as presentation evidence', () => {
+    render(
+      <EntityInspector
+        data={data({
+          identity: { connectionId: 'desktop-source', kind: 'profile', profile: 'test-contract-steward' },
+          presentation: {
+            configuredTitle: 'Test Contract Steward',
+            groups: [
+              { id: 'engineering', name: 'Engineering Guild' },
+              { id: 'release', name: 'Acceptance & Release' }
+            ],
+            metadata: { observedAt: 42, source: 'profiles:desktop-source', state: 'stale' },
+            placement: { lodHint: 1, overflow: true, primaryGroupId: 'engineering', slot: 27 },
+            profileHandle: '@test-contract-steward',
+            sourceLabel: 'Hermes Desktop'
+          },
+          source: { authority: 'stale', observedAt: 42, source: 'fleet:desktop-source' }
+        })}
+      />
+    )
+
+    const region = screen.getByRole('region', { name: 'Bot profile' })
+    expect(region.textContent).toContain('Test Contract Steward')
+    expect(region.textContent).toContain('@test-contract-steward')
+    expect(region.textContent).toContain('Engineering Guild')
+    expect(region.textContent).toContain('Acceptance & Release')
+    expect(region.textContent).toContain('Hermes Desktop')
+    expect(region.textContent).toContain('Unavailable')
+    expect(region.textContent).toContain('Stale')
+    expect(region.textContent).toContain('profiles:desktop-source')
+    expect(region.textContent).toContain('Aggregate LOD')
+  })
+
   it('keeps task, run, diagnostics, comments, events, log, attachments, subagent, files, and blocker evidence separate', () => {
     render(<EntityInspector data={data()} />)
 

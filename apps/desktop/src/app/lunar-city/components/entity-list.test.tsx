@@ -113,4 +113,32 @@ describe('EntityList', () => {
     expect(onSelect).toHaveBeenCalledWith(right)
     expect(onSelect).not.toHaveBeenCalledWith(left)
   })
+
+  it('exposes configured title, handle, every group, source position, and unavailable status', () => {
+    const worker = entity('worker', 'unavailable', {
+      animation: 'unavailable',
+      authority: 'stale',
+      identity: { connectionId: 'desktop-source', kind: 'profile', profile: 'test-contract-steward' },
+      presentation: {
+        configuredTitle: 'Test Contract Steward',
+        groups: [
+          { id: 'engineering', name: 'Engineering Guild' },
+          { id: 'release', name: 'Acceptance & Release' }
+        ],
+        metadata: { source: 'profiles:desktop-source', state: 'unavailable' },
+        placement: { lodHint: 0, overflow: false, primaryGroupId: 'engineering', slot: 1 },
+        profileHandle: '@test-contract-steward',
+        sourceLabel: 'Hermes Desktop'
+      }
+    })
+
+    render(<EntityList onSelect={vi.fn()} snapshot={snapshot([worker])} />)
+
+    const button = screen.getByRole('button', { name: /Test Contract Steward.*@test-contract-steward/i })
+    expect(button.getAttribute('aria-label')).toContain('Groups: Engineering Guild, Acceptance & Release')
+    expect(button.getAttribute('aria-label')).toContain('Source: Hermes Desktop')
+    expect(button.getAttribute('aria-label')).toContain('Profile metadata: Unavailable')
+    expect(button.getAttribute('aria-label')).toContain('connectionId desktop-source')
+    expect(button.getAttribute('aria-label')).toContain('Unavailable')
+  })
 })

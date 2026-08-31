@@ -62,7 +62,7 @@ function identityLabel(entity: LunarEntity): string {
   const identity = entity.identity
 
   if (identity.kind === 'profile') {
-    return `Profile ${titleCase(identity.profile)}`
+    return entity.presentation?.configuredTitle ?? `Profile ${titleCase(identity.profile)}`
   }
 
   if (identity.kind === 'session') {
@@ -78,6 +78,23 @@ function identityLabel(entity: LunarEntity): string {
   }
 
   return `Task ${titleCase(identity.taskId)}`
+}
+
+function presentationDetails(entity: LunarEntity): string[] {
+  const presentation = entity.presentation
+
+  if (!presentation) {
+    return []
+  }
+
+  return [
+    ...(presentation.profileHandle ? [`Handle: ${presentation.profileHandle}`] : []),
+    ...(presentation.sourceLabel ? [`Source: ${presentation.sourceLabel}`] : []),
+    `Groups: ${presentation.groups.length > 0 ? presentation.groups.map(group => group.name).join(', ') : 'None'}`,
+    `Profile metadata: ${titleCase(presentation.metadata.state)}`,
+    `Metadata source: ${presentation.metadata.source}`,
+    ...(presentation.placement.overflow ? ['District detail: aggregate LOD'] : [])
+  ]
 }
 
 /**
@@ -164,7 +181,8 @@ export function EntityList({ districtOrder, onSelect, selectedEntityKey, snapsho
             const descriptionId = `lunar-city-entity-${entity.key.replace(/[^a-z0-9_-]/giu, '-')}`
             const description = `${state}; ${destination}; ${authority}`
             const identity = identityDetails(entity)
-            const accessibleDescription = `${description}; Identity: ${identity}; Entity key ${entity.key}`
+            const presentation = presentationDetails(entity)
+            const accessibleDescription = `${description}; ${presentation.length > 0 ? `${presentation.join('; ')}; ` : ''}Identity: ${identity}; Entity key ${entity.key}`
 
             return (
               <li key={entity.key}>

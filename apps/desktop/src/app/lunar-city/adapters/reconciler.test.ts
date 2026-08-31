@@ -340,6 +340,147 @@ describe('Lunar City reconciler', () => {
     stop()
   })
 
+  it('hydrates presentation through one exact-source profiles.list route without an active-profile fallback', async () => {
+    const fleet = atom({
+      agents: [
+        {
+          connectionId: 'remote-a',
+          connectionKind: 'ssh' as const,
+          connectionLabel: 'Moon Relay',
+          handle: '@scientific-validator',
+          profile: 'scientific-validator'
+        }
+      ],
+      sources: [{ connectionId: 'remote-a', kind: 'ssh' as const, label: 'Moon Relay', reachable: true }]
+    })
+    const readProfileRoster = vi.fn(async (connectionId: string, profileName: string) => ({
+      profiles: [
+        {
+          name: profileName,
+          ui_meta: { 'hermes-bots': { groups: ['Research Lab'], title: 'Scientific Validator' } }
+        }
+      ],
+      source: connectionId
+    }))
+    const sessions = atom([])
+    let emit!: (event: unknown) => void
+    const stop = startLunarCityReconciler({
+      now: () => 42,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: sessions,
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        onEvent: listener => {
+          emit = listener
+
+          return () => undefined
+        },
+        readProfileRoster,
+        refreshFleet: async () => ({ observedAt: 42, status: 'refreshed' })
+      }
+    })
+    await flush()
+    await flush()
+
+    expect(readProfileRoster).toHaveBeenCalledOnce()
+    expect(readProfileRoster).toHaveBeenCalledWith('remote-a', 'scientific-validator')
+    expect([...$lunarCitySnapshot.get().entities.values()][0]).toMatchObject({
+      destination: 'lab',
+      identity: { connectionId: 'remote-a', profile: 'scientific-validator' },
+      presentation: {
+        configuredTitle: 'Scientific Validator',
+        profileHandle: '@scientific-validator',
+        sourceLabel: 'Moon Relay'
+      }
+    })
+
+    sessions.set([{ id: 'unrelated-session' }] as never)
+    await flush()
+    await flush()
+    emit({
+      connectionId: 'remote-a',
+      profile: 'scientific-validator',
+      seq: 1,
+      session_id: 'unrelated-session',
+      type: 'session.changed'
+    })
+    await flush()
+    await flush()
+    expect(readProfileRoster).toHaveBeenCalledOnce()
+
+    emit({ connectionId: 'remote-a', profile: 'scientific-validator', type: 'gateway.ready' })
+    await flush()
+    await flush()
+    expect(readProfileRoster).toHaveBeenCalledTimes(2)
+
+    fleet.set({ ...fleet.get() })
+    await flush()
+    await flush()
+    expect(readProfileRoster).toHaveBeenCalledTimes(3)
+    stop()
+  })
+
+  it('retains last-known bot presentation when a metadata refresh fails without changing fleet authority', async () => {
+    const fleet = atom({
+      agents: [
+        {
+          connectionId: 'local',
+          connectionKind: 'local' as const,
+          connectionLabel: 'This device',
+          handle: '@worker',
+          profile: 'worker'
+        }
+      ],
+      sources: [{ connectionId: 'local', kind: 'local' as const, label: 'This device', reachable: true }]
+    })
+    let emit!: (event: unknown) => void
+    const readProfileRoster = vi
+      .fn()
+      .mockResolvedValueOnce({
+        profiles: [
+          {
+            name: 'worker',
+            ui_meta: { 'hermes-bots': { groups: ['Engineering Guild'], title: 'Builder' } }
+          }
+        ]
+      })
+      .mockRejectedValueOnce(new Error('metadata offline'))
+    const stop = startLunarCityReconciler({
+      now: () => 42,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        onEvent: listener => {
+          emit = listener
+
+          return () => undefined
+        },
+        readProfileRoster,
+        refreshFleet: async () => ({ observedAt: 42, status: 'refreshed' })
+      }
+    })
+    await flush()
+    await flush()
+    emit({ connectionId: 'local', profile: 'worker', type: 'gateway.ready' })
+    await flush()
+    await flush()
+
+    expect(readProfileRoster).toHaveBeenCalledTimes(2)
+    expect([...$lunarCitySnapshot.get().entities.values()][0]).toMatchObject({
+      authority: 'authoritative',
+      destination: 'project',
+      presentation: {
+        configuredTitle: 'Builder',
+        groups: [{ name: 'Engineering Guild' }],
+        metadata: { observedAt: 42, source: 'profiles:local', state: 'stale' }
+      }
+    })
+    stop()
+  })
+
   it('marks retained roster data stale when the real fleet refresh helper catches an enumeration rejection', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(42)
