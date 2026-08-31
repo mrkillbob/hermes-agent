@@ -261,6 +261,29 @@ test('canonical fixture verifies v3 bytes, digest, source mix, and authenticated
   assert.throws(() => validateCanonicalFixture({ bytes: bytes.replace('subagent-key', 'tampered'), proof }), /digest/i)
   assert.throws(() => validateCanonicalFixture({ bytes, proof: { ...proof, authenticated: false } }), /authenticated/i)
   assert.throws(() => validateCanonicalFixture({ bytes, proof: { ...proof, entityKeys: [] } }), /subagent/i)
+  assert.throws(
+    () => validateCanonicalFixture({ bytes, proof: { ...proof, entityKeys: 'subagent-key' } }),
+    /entity|subagent/i
+  )
+  assert.throws(
+    () => validateCanonicalFixture({ bytes, proof: { ...proof, entityKeys: ['subagent-key', 'spoofed-key'] } }),
+    /entity|canonical|observed/i
+  )
+  assert.throws(
+    () => validateCanonicalFixture({ bytes, proof: { ...proof, entityKeys: ['subagent-key', 'subagent-key'] } }),
+    /entity|duplicate|observed/i
+  )
+  const withoutSubagent = {
+    ...unsigned,
+    entities: unsigned.entities.map(entity => ({ ...entity, kind: 'profile' })),
+    entitiesByKind: { profile: 25, session: 0, subagent: 0, task: 0, worker: 0 }
+  }
+  const zeroSubagentBytes = `${JSON.stringify(
+    { ...withoutSubagent, digest: createHash('sha256').update(canonicalJson(withoutSubagent)).digest('hex') },
+    null,
+    2
+  )}\n`
+  assert.throws(() => validateCanonicalFixture({ bytes: zeroSubagentBytes, proof }), /subagent/i)
   for (const [label, mutate] of [
     ['duplicate pid', value => (value.gatewayProcesses[1].pid = value.gatewayProcesses[0].pid)],
     ['foreign parent', value => (value.gatewayProcesses[0].parentPid = 1)],
@@ -381,6 +404,133 @@ test('owned lifecycle rejects nonexistent, foreign, duplicate, dead, and untermi
     }
   )
   await assert.rejects(() => lifecycle.stop(), /terminate|still alive|exited/i)
+})
+
+test('identity rejection cleans every returned handle, including the newest failing child, and surfaces teardown failures', async () => {
+  const sources = ['local', 'remote-lab', 'remote-archive']
+  for (const [label, failingIndex, failedObservation, pattern] of [
+    ['first missing', 0, undefined, /missing/i],
+    ['second missing', 1, undefined, /missing/i],
+    [
+      'first foreign uid',
+      0,
+      { alive: true, parentPid: process.pid, startToken: 's-101', uid: process.getuid() + 1 },
+      /uid/i
+    ],
+    [
+      'second foreign parent',
+      1,
+      { alive: true, parentPid: 1, startToken: 's-102', uid: process.getuid() },
+      /parent|child/i
+    ],
+    ['second dead', 1, { alive: false, parentPid: process.pid, startToken: 's-102', uid: process.getuid() }, /alive/i],
+    ['second no token', 1, { alive: true, parentPid: process.pid, startToken: '', uid: process.getuid() }, /token/i]
+  ]) {
+    const returned = []
+    const terminated = []
+    const waited = []
+    const cleanupInspected = []
+    const inspectCounts = new Map()
+    await assert.rejects(
+      () =>
+        createOwnedGatewayLifecycle(
+          { runNonce: 'nonce', sourceIds: sources },
+          {
+            inspectProcess: async pid => {
+              inspectCounts.set(pid, (inspectCounts.get(pid) ?? 0) + 1)
+              if ((inspectCounts.get(pid) ?? 0) > 1) cleanupInspected.push(pid)
+              if (pid === 101 + failingIndex) return failedObservation
+              return { alive: true, parentPid: process.pid, startToken: `s-${pid}`, uid: process.getuid() }
+            },
+            probePopulation: async () => ({
+              authenticated: true,
+              entityKeys: [],
+              observedPopulation: 0,
+              sourceMix: {}
+            }),
+            spawnGateway: async source => {
+              const handle = { pid: 101 + sources.indexOf(source), sourceId: source }
+              returned.push(handle.pid)
+              return handle
+            },
+            terminateGateway: async handle => void terminated.push(handle.pid),
+            waitGateway: async handle => {
+              waited.push(handle.pid)
+              return { exited: true }
+            }
+          }
+        ),
+      pattern,
+      label
+    )
+    assert.deepEqual(terminated.sort(), returned.sort(), `${label}: terminate every returned handle`)
+    assert.deepEqual(waited.sort(), returned.sort(), `${label}: wait every returned handle`)
+    assert.deepEqual(cleanupInspected.sort(), returned.sort(), `${label}: inspect every returned handle during cleanup`)
+  }
+
+  const terminated = []
+  const waited = []
+  await assert.rejects(
+    () =>
+      createOwnedGatewayLifecycle(
+        { runNonce: 'nonce', sourceIds: sources },
+        {
+          inspectProcess: async pid =>
+            pid === 102
+              ? { alive: true, parentPid: 1, startToken: 's-102', uid: process.getuid() }
+              : { alive: true, parentPid: process.pid, startToken: `s-${pid}`, uid: process.getuid() },
+          probePopulation: async () => ({ authenticated: true, entityKeys: [], observedPopulation: 0, sourceMix: {} }),
+          spawnGateway: async source => ({ pid: 101 + sources.indexOf(source), sourceId: source }),
+          terminateGateway: async handle => {
+            terminated.push(handle.pid)
+            if (handle.pid === 101) throw new Error('teardown terminate failed')
+          },
+          waitGateway: async handle => {
+            waited.push(handle.pid)
+            return { exited: true }
+          }
+        }
+      ),
+    error => {
+      assert.match(String(error), /parent|child/i)
+      assert.match(String(error), /teardown|terminate failed/i)
+      return true
+    }
+  )
+  assert.deepEqual(terminated.sort(), [101, 102])
+  assert.deepEqual(waited.sort(), [101, 102])
+
+  const livenessTerminated = []
+  const livenessWaited = []
+  const livenessInspections = new Map()
+  await assert.rejects(
+    () =>
+      createOwnedGatewayLifecycle(
+        { runNonce: 'nonce', sourceIds: sources },
+        {
+          inspectProcess: async pid => {
+            const count = (livenessInspections.get(pid) ?? 0) + 1
+            livenessInspections.set(pid, count)
+            return {
+              alive: !(pid === 102 && count === 2),
+              parentPid: process.pid,
+              startToken: `s-${pid}`,
+              uid: process.getuid()
+            }
+          },
+          probePopulation: async () => ({ authenticated: true, entityKeys: [], observedPopulation: 0, sourceMix: {} }),
+          spawnGateway: async source => ({ pid: 101 + sources.indexOf(source), sourceId: source }),
+          terminateGateway: async handle => void livenessTerminated.push(handle.pid),
+          waitGateway: async handle => {
+            livenessWaited.push(handle.pid)
+            return { exited: true }
+          }
+        }
+      ),
+    /liveness|identity/i
+  )
+  assert.deepEqual(livenessTerminated.sort(), [101, 102, 103])
+  assert.deepEqual(livenessWaited.sort(), [101, 102, 103])
 })
 
 test('fixture isolation rejects broad, real-home, and symlinked paths and requires a run-owned sentinel', () => {

@@ -900,6 +900,8 @@ function validateArtifactProvenance(receipt, errors) {
     const subagentKeys = Array.isArray(contract?.entities)
       ? contract.entities.filter(entity => entity.kind === 'subagent').map(entity => entity.exactKey)
       : []
+    const contractEntityKeys = Array.isArray(contract?.entities) ? contract.entities.map(entity => entity.exactKey) : []
+    const observedEntityKeys = fixture.proof?.entityKeys
     const proofRows = fixture.proof?.gatewayProcesses
     const proofPids = Array.isArray(proofRows) ? proofRows.map(row => row?.pid) : []
     const proofSourceIds = Array.isArray(proofRows) ? proofRows.map(row => row?.sourceId).sort() : []
@@ -911,7 +913,10 @@ function validateArtifactProvenance(receipt, errors) {
       contract?.digest !== fixture.contractDigest ||
       canonicalDigest !== fixture.contractDigest ||
       contract?.population !== fixture.expectedPopulation ||
-      canonicalJson(expectedSourceMix) !== canonicalJson(fixture.sourceMix)
+      canonicalJson(expectedSourceMix) !== canonicalJson(fixture.sourceMix) ||
+      contractEntityKeys.some(key => typeof key !== 'string' || key.length === 0) ||
+      new Set(contractEntityKeys).size !== contractEntityKeys.length ||
+      subagentKeys.length === 0
     )
       errors.push('fixture canonical bytes/digest/population/source mix mismatch')
     if (
@@ -946,7 +951,11 @@ function validateArtifactProvenance(receipt, errors) {
           (row.termination.exitCode !== null && !Number.isInteger(row.termination.exitCode)) ||
           (row.termination.signal !== null && typeof row.termination.signal !== 'string')
       ) ||
-      subagentKeys.some(key => !fixture.proof.entityKeys?.includes(key))
+      !Array.isArray(observedEntityKeys) ||
+      observedEntityKeys.some(key => typeof key !== 'string' || key.length === 0) ||
+      new Set(observedEntityKeys).size !== observedEntityKeys.length ||
+      observedEntityKeys.some(key => !contractEntityKeys.includes(key)) ||
+      subagentKeys.some(key => !observedEntityKeys.includes(key))
     )
       errors.push('fixture authenticated subagent/gateway proof mismatch')
     if (

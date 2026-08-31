@@ -137,18 +137,44 @@ export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps)
     if (typeof deps?.[name] !== 'function') throw new Error(`gateway lifecycle ${name} boundary is unavailable`)
   }
   const uid = currentUid()
-  const handles = []
+  const spawnedHandles = []
+  const acceptedHandles = []
   const identities = []
-  const cleanupSpawned = async () => {
-    await Promise.allSettled(handles.map(handle => deps.terminateGateway(handle)))
-    await Promise.allSettled(handles.map(handle => deps.waitGateway(handle)))
+  const throwAfterCleanup = async primaryError => {
+    const terminateResults = await Promise.allSettled(spawnedHandles.map(handle => deps.terminateGateway(handle)))
+    const waitResults = await Promise.allSettled(spawnedHandles.map(handle => deps.waitGateway(handle)))
+    const inspectResults = await Promise.allSettled(spawnedHandles.map(handle => deps.inspectProcess(handle.pid)))
+    const teardownFailures = []
+    for (const [index, handle] of spawnedHandles.entries()) {
+      const terminateResult = terminateResults[index]
+      const waitResult = waitResults[index]
+      const inspectResult = inspectResults[index]
+      if (terminateResult.status === 'rejected') teardownFailures.push(terminateResult.reason)
+      if (waitResult.status === 'rejected') teardownFailures.push(waitResult.reason)
+      else if (waitResult.value?.exited !== true)
+        teardownFailures.push(new Error(`gateway child process ${handle.pid} cleanup wait was unverified`))
+      if (inspectResult.status === 'rejected') teardownFailures.push(inspectResult.reason)
+      else if (inspectResult.value?.alive === true)
+        teardownFailures.push(new Error(`gateway child process ${handle.pid} remained alive after cleanup`))
+    }
+    if (teardownFailures.length > 0) {
+      const detail = teardownFailures.map(error => (error instanceof Error ? error.message : String(error))).join('; ')
+      throw new AggregateError(
+        [primaryError, ...teardownFailures],
+        `${primaryError instanceof Error ? primaryError.message : String(primaryError)}; teardown failures: ${detail}`,
+        { cause: primaryError }
+      )
+    }
+    throw primaryError
   }
   try {
     for (const sourceId of sourceIds) {
       const handle = await deps.spawnGateway(sourceId, { runNonce })
       const pid = handle?.pid
+      const spawnedHandle = { ...handle, pid, sourceId }
+      spawnedHandles.push(spawnedHandle)
       if (!Number.isInteger(pid) || pid <= 0) throw new Error(`gateway ${sourceId} has no positive child PID`)
-      if (handles.some(existing => existing.pid === pid)) throw new Error('gateway child PID is duplicated')
+      if (acceptedHandles.some(existing => existing.pid === pid)) throw new Error('gateway child PID is duplicated')
       const observed = await deps.inspectProcess(pid)
       if (!observed) throw new Error(`gateway child process ${pid} is missing`)
       if (observed.alive !== true) throw new Error(`gateway child process ${pid} is not alive`)
@@ -156,12 +182,11 @@ export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps)
       if (observed.uid !== uid) throw new Error(`gateway process ${pid} does not match current uid`)
       if (typeof observed.startToken !== 'string' || observed.startToken.length === 0)
         throw new Error(`gateway process ${pid} start token is unavailable`)
-      handles.push({ ...handle, pid, sourceId })
+      acceptedHandles.push(spawnedHandle)
       identities.push({ pid, sourceId, parentPid: observed.parentPid, startToken: observed.startToken, uid })
     }
   } catch (error) {
-    await cleanupSpawned()
-    throw error
+    await throwAfterCleanup(error)
   }
 
   const inspectIdentity = async identity => {
@@ -177,16 +202,20 @@ export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps)
     const statuses = await Promise.all(identities.map(inspectIdentity))
     if (statuses.some(alive => !alive)) throw new Error('owned gateway child identity/liveness changed before capture')
   }
-  await assertLive()
-  const observation = await deps.probePopulation(handles, { runNonce })
-  if (
-    observation?.authenticated !== true ||
-    !Number.isInteger(observation.observedPopulation) ||
-    !observation.sourceMix ||
-    !Array.isArray(observation.entityKeys)
-  ) {
-    await cleanupSpawned()
-    throw new Error('owned gateways did not return authenticated population observation')
+  let observation
+  try {
+    await assertLive()
+    observation = await deps.probePopulation(acceptedHandles, { runNonce })
+    if (
+      observation?.authenticated !== true ||
+      !Number.isInteger(observation.observedPopulation) ||
+      !observation.sourceMix ||
+      !Array.isArray(observation.entityKeys)
+    ) {
+      throw new Error('owned gateways did not return authenticated population observation')
+    }
+  } catch (error) {
+    await throwAfterCleanup(error)
   }
   let stopPromise
   return {
@@ -194,10 +223,10 @@ export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps)
     async stop() {
       stopPromise ??= (async () => {
         const livenessResults = await Promise.allSettled(identities.map(inspectIdentity))
-        const terminateResults = await Promise.allSettled(handles.map(handle => deps.terminateGateway(handle)))
-        const waitResults = await Promise.allSettled(handles.map(handle => deps.waitGateway(handle)))
-        const inspections = await Promise.allSettled(handles.map(handle => deps.inspectProcess(handle.pid)))
-        const terminations = handles.map((handle, index) => {
+        const terminateResults = await Promise.allSettled(acceptedHandles.map(handle => deps.terminateGateway(handle)))
+        const waitResults = await Promise.allSettled(acceptedHandles.map(handle => deps.waitGateway(handle)))
+        const inspections = await Promise.allSettled(acceptedHandles.map(handle => deps.inspectProcess(handle.pid)))
+        const terminations = acceptedHandles.map((handle, index) => {
           const terminateResult = terminateResults[index]
           const waitResult = waitResults[index]
           const inspection = inspections[index]
@@ -269,13 +298,21 @@ function parseCanonicalFixture(bytes) {
     .filter(entity => entity.kind === 'subagent')
     .map(entity => entity.exactKey)
     .sort()
+  const entityKeys = contract.entities.map(entity => entity.exactKey).sort()
+  if (
+    entityKeys.some(key => typeof key !== 'string' || key.length === 0) ||
+    new Set(entityKeys).size !== entityKeys.length
+  ) {
+    throw new Error('canonical fixture entity keys must be unique nonempty strings')
+  }
+  if (subagentKeys.length === 0) throw new Error('canonical fixture requires at least one subagent entity')
   const sourceIds = Object.keys(sourceMix)
   if (sourceIds.length !== 3) throw new Error('canonical fixture requires exactly three gateway sources')
-  return { contract, digest, sourceIds, sourceMix, subagentKeys }
+  return { contract, digest, entityKeys, sourceIds, sourceMix, subagentKeys }
 }
 
 export function validateCanonicalFixture({ bytes, proof }) {
-  const { contract, digest, sourceIds, sourceMix, subagentKeys } = parseCanonicalFixture(bytes)
+  const { contract, digest, entityKeys, sourceIds, sourceMix, subagentKeys } = parseCanonicalFixture(bytes)
   if (
     proof?.authenticated !== true ||
     proof?.source !== 'owned-authenticated-gateways-v2' ||
@@ -313,9 +350,15 @@ export function validateCanonicalFixture({ bytes, proof }) {
     )
   )
     throw new Error('canonical fixture requires fully observed owned and terminated gateway child processes')
-  const observedKeys = Array.isArray(proof.entityKeys) ? [...proof.entityKeys].sort() : []
-  if (subagentKeys.length === 0 || subagentKeys.some(key => !observedKeys.includes(key))) {
-    throw new Error('canonical fixture lacks authenticated observed subagent evidence')
+  if (!Array.isArray(proof.entityKeys)) throw new Error('canonical fixture observed entity keys must be an array')
+  const observedKeys = [...proof.entityKeys].sort()
+  if (
+    observedKeys.some(key => typeof key !== 'string' || key.length === 0) ||
+    new Set(observedKeys).size !== observedKeys.length ||
+    observedKeys.some(key => !entityKeys.includes(key)) ||
+    subagentKeys.some(key => !observedKeys.includes(key))
+  ) {
+    throw new Error('canonical fixture observed entity-key set lacks exact authenticated subagent evidence')
   }
   return Object.freeze({
     bytesSha256: sha256(bytes),
