@@ -18,9 +18,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { RosterRow } from './types'
 
-const { openBotCanonicalChat, prepareBotSource } = vi.hoisted(() => ({
+const { openBotCanonicalChat, prepareBotSource, reconcileBotProfileSessions } = vi.hoisted(() => ({
   openBotCanonicalChat: vi.fn(),
-  prepareBotSource: vi.fn()
+  prepareBotSource: vi.fn(),
+  reconcileBotProfileSessions: vi.fn()
 }))
 
 vi.mock('./canonical-chat', () => ({
@@ -30,6 +31,8 @@ vi.mock('./canonical-chat', () => ({
   prepareBotSource,
   PROFILE_SESSION_LIST_LIMIT: 200
 }))
+
+vi.mock('./session-sweep', () => ({ reconcileBotProfileSessions }))
 
 const { host } = await import('@hermes/plugin-sdk')
 const { $openBotChat, $selectedBot } = await import('./bot-state')
@@ -63,6 +66,7 @@ function withFocusApi(impl: null | (() => null | string)) {
 beforeEach(() => {
   vi.clearAllMocks()
   prepareBotSource.mockResolvedValue(undefined)
+  reconcileBotProfileSessions.mockResolvedValue(undefined)
   openBotCanonicalChat.mockResolvedValue({ openedId: 'bot-chat', registryId: 'bot-chat' })
   $openBotChat.set(null)
   $selectedBot.set('')
@@ -80,6 +84,7 @@ describe('a row click returns to the tabs the bot already has open', () => {
       expect(openBotCanonicalChat).not.toHaveBeenCalled()
       // Open tabs need no source activation either — the bot is already live.
       expect(prepareBotSource).not.toHaveBeenCalled()
+      expect(reconcileBotProfileSessions).toHaveBeenCalledWith(bot)
     } finally {
       restore()
     }
@@ -110,6 +115,7 @@ describe('the canonical chat still opens when it is what was asked for', () => {
       await expect(openRosterBot(bot)).resolves.toBe(true)
 
       expect(openBotCanonicalChat).toHaveBeenCalled()
+      expect(reconcileBotProfileSessions).toHaveBeenCalledWith(bot)
       expect($openBotChat.get()?.openedRegistryId).toBe('bot-chat')
     } finally {
       restore()
