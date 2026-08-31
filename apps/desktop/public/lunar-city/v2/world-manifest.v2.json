@@ -75,13 +75,17 @@
   },
   "navigation": {
     "meshUri": "models/navigation.glb",
+    "areas": ["walkable", "library", "research", "depot", "review", "triage", "garden", "council", "transit"],
     "links": [
       { "from": [-28, 0, -18], "to": [0, 0, -1], "bidirectional": true },
       { "from": [25, 0, -22], "to": [0, 0, -1], "bidirectional": true },
       { "from": [-31, 0, 12], "to": [-8, 0, 34], "bidirectional": true },
       { "from": [33, 0, 10], "to": [4, 0, 25], "bidirectional": true },
       { "from": [4, 0, 25], "to": [-8, 0, 34], "bidirectional": true },
-      { "from": [27, 0, 31], "to": [4, 0, 25], "bidirectional": true }
+      { "from": [27, 0, 31], "to": [4, 0, 25], "bidirectional": true },
+      { "from": [16, 0, 30], "to": [4, 0, 25], "bidirectional": true },
+      { "from": [30, 0, 30], "to": [27, 0, 31], "bidirectional": true },
+      { "from": [-32, 0, 34], "to": [-8, 0, 34], "bidirectional": true }
     ]
   },
   "destinations": { "bus": [0, 0, -1], "project": [18, 0, 38], "depot": [-31, 0, 12], "review": [33, 0, 10], "triage": [4, 0, 25], "garden": [-8, 0, 34], "council": [27, 0, 31], "unavailable": [0, 0, 0] },
