@@ -109,8 +109,8 @@ def _resolve_auto_decompose_settings(
     return enabled, per_tick
 
 
-def _kanban_dispatch_allowed() -> bool:
-    """Return False while the global emergency stop (`hermes pause`) is engaged.
+def _kanban_dispatch_allowed(runner: Any = None) -> bool:
+    """Return False while the gateway is draining or Hermes is paused.
 
     Checked every dispatcher tick BEFORE spawning new workers so a pause takes
     effect on the next tick without a gateway restart. In-flight workers are
@@ -118,6 +118,11 @@ def _kanban_dispatch_allowed() -> bool:
     module is unimportable, dispatch proceeds (the sentinel gate must not
     become a new crash surface for the dispatcher).
     """
+    if runner is not None and (
+        getattr(runner, "_draining", False)
+        or getattr(runner, "_external_drain_active", False)
+    ):
+        return False
     try:
         from agent.estop import check_paused
     except ImportError:
@@ -2191,7 +2196,7 @@ class GatewayKanbanWatchersMixin:
                 # Global emergency stop (`hermes pause`): skip auto-decompose
                 # and dispatch entirely — no new workers while paused. Running
                 # workers finish naturally; zombie reaping above still runs.
-                if not _kanban_dispatch_allowed():
+                if not _kanban_dispatch_allowed(self):
                     ready_pending = False
                     bad_ticks = 0
                 else:

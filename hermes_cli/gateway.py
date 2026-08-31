@@ -5,6 +5,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
 
 import asyncio
+import atexit
 from hermes_cli.cli_output import line_input
 import json
 import logging
@@ -8495,6 +8496,21 @@ def _gateway_command_inner(args):
 
         stop_all = getattr(args, "all", False)
         system = getattr(args, "system", False)
+
+        if getattr(args, "drain", False):
+            if not stop_all:
+                print_error("`gateway stop --drain` requires `--all` so no profile can launch duplicate work.")
+                sys.exit(2)
+            from gateway.drain_control import clear_drain_request
+            from hermes_cli.gateway_desktop_drain import (
+                desktop_profile_homes,
+                drain_all_desktop_work,
+            )
+
+            drain_homes = desktop_profile_homes()
+            for drain_home in drain_homes:
+                atexit.register(clear_drain_request, home=drain_home)
+            drain_all_desktop_work()
 
         # Phase 4: inside a container with s6, dispatch via the service
         # manager. ``--all`` iterates every registered profile gateway
