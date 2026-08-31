@@ -6,10 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type * as SessionRequestRouter from '@/store/session-request-router'
 
+import { entityKey } from './identity'
 import { leaderModelIdForOwner } from './leader-runtime'
 import type * as LeaderSessions from './leader-sessions'
-import type { LunarCityWorldHandle } from './model'
-import { $lunarCitySnapshot, createLunarCitySnapshot } from './store'
+import type { LunarCityIntent, LunarCityWorldHandle } from './model'
+import { $lunarCitySnapshot, applyLunarDelta, createLunarCitySnapshot } from './store'
 
 import { disposeLunarCityRuntime, LunarCity } from './index'
 
@@ -19,6 +20,7 @@ const {
   createWorld,
   destroyWorld,
   dispatchCamera,
+  emitWorldIntent,
   getCameraState,
   kanbanSource,
   leaderAnimation,
@@ -63,7 +65,13 @@ const {
   const source = { onFrame: vi.fn(), read: vi.fn(), start: vi.fn() }
   const stopLive = vi.fn()
 
-  const create = vi.fn((_canvas: unknown) => Promise.resolve(handle))
+  let worldIntent: (intent: LunarCityIntent) => void = () => undefined
+
+  const create = vi.fn((_canvas: unknown, _manifest: unknown, onIntent: (intent: LunarCityIntent) => void) => {
+    worldIntent = onIntent
+
+    return Promise.resolve(handle)
+  })
 
   return {
     applySnapshot: apply,
@@ -71,6 +79,7 @@ const {
     createWorld: create,
     dispatchCamera: dispatch,
     destroyWorld: destroy,
+    emitWorldIntent: (intent: LunarCityIntent) => worldIntent(intent),
     getCameraState: readCameraState,
     kanbanSource: source,
     leaderAnimation: setLeaderAnimation,
@@ -118,6 +127,37 @@ describe('LunarCity', () => {
       'leader'
     )
     expect(screen.getByText('SIMULATION')).toBeTruthy()
+  })
+
+  it('opens exact worker controls from the Babylon entity pick without replacing the city canvas', async () => {
+    const identity = { connectionId: 'source-b', kind: 'session', profile: 'builder', sessionId: 'session-9' } as const
+    const key = entityKey(identity)
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+
+    act(() => {
+      applyLunarDelta({
+        observedAt: 100,
+        removals: [],
+        revision: 1,
+        sources: [{ authority: 'authoritative', observedAt: 100, source: 'session:source-b' }],
+        upserts: [
+          {
+            animation: 'working',
+            authority: 'authoritative',
+            destination: 'project',
+            identity,
+            key,
+            observedAt: 100
+          }
+        ]
+      })
+      emitWorldIntent({ entityKey: key, kind: 'select-focus' })
+    })
+
+    expect(screen.getByRole('region', { name: 'Lunar City worker controls' })).toBeTruthy()
+    expect(screen.getByText('source-b')).toBeTruthy()
+    expect(screen.getAllByLabelText('Interactive 3D Lunar City')).toHaveLength(1)
   })
 
   it('starts the live writer only inside the Lunar City route with an explicit Kanban source scope', async () => {

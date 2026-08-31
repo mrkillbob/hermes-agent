@@ -7,6 +7,7 @@ import { registry } from '@/contrib/registry'
 import type { Contribution } from '@/contrib/types'
 import { setSessionOwnerHint } from '@/store/session'
 
+import type { InspectorSessionTarget } from './components/entity-inspector'
 import type { LeaderOwner } from './leader-sessions'
 
 const LazyLunarCity = lazy(async () => ({ default: (await import('./index')).LunarCity }))
@@ -30,11 +31,20 @@ export function openLeaderFullChat(
   openSession(storedId, navigate, 'main')
 }
 
+export function openEntitySession(target: InspectorSessionTarget, navigate: ReturnType<typeof useNavigate>): void {
+  const storedId = target.storedSessionId ?? target.sessionId
+  const owner = Object.freeze({ connectionId: target.connectionId, profile: target.profile })
+
+  setSessionOwnerHint(storedId, owner)
+  openSession(storedId, navigate, 'main')
+}
+
 export function LunarCityRoute() {
   const navigate = useNavigate()
 
   return (
     <LazyLunarCity
+      onOpenEntitySession={target => openEntitySession(target, navigate)}
       onOpenFullChat={(storedId, owner) => openLeaderFullChat(storedId, owner, navigate)}
       onOpenMemoryGraph={() => navigate(STARMAP_ROUTE)}
     />

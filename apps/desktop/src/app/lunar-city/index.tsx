@@ -30,7 +30,9 @@ import { $connection } from '@/store/session'
 
 import { createKanbanCitySource } from './adapters/kanban'
 import { startLunarCityReconciler } from './adapters/reconciler'
+import { LunarCityCommandRuntime } from './command-runtime'
 import { CameraControls } from './components/camera-controls'
+import type { InspectorSessionTarget } from './components/entity-inspector'
 import { LeaderDialogueRuntime } from './components/leader-dialogue-runtime'
 import {
   leaderModelFocusKeyForOwner,
@@ -40,7 +42,15 @@ import {
 } from './leader-runtime'
 import { type LeaderOwner, leaderOwnerKey, type LeaderSession, resolveLeaderSession } from './leader-sessions'
 import { loadWorldManifest } from './manifest'
-import type { CameraControlState, CameraIntent, LunarCityWorldHandle, LunarEntity, WorldManifestV2 } from './model'
+import type {
+  CameraControlState,
+  CameraIntent,
+  EntityKey,
+  LunarCityIntent,
+  LunarCityWorldHandle,
+  LunarEntity,
+  WorldManifestV2
+} from './model'
 import { $lunarCitySnapshot } from './store'
 import { createLunarCityWorld } from './world/create-world'
 
@@ -479,6 +489,7 @@ export function disposeLunarCityRuntime(
 }
 
 export interface LunarCityProps {
+  onOpenEntitySession?: (target: InspectorSessionTarget) => void
   onOpenFullChat?: (storedId: string, owner: LeaderOwner) => Promise<void> | void
   onOpenMemoryGraph: () => void
 }
@@ -487,7 +498,7 @@ function sameProfileLeaderList(left: readonly LunarEntity[], right: readonly Lun
   return left.length === right.length && left.every((entity, index) => entity.key === right[index]?.key)
 }
 
-export function LunarCity({ onOpenFullChat, onOpenMemoryGraph }: LunarCityProps) {
+export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGraph }: LunarCityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const activeGatewayProfile = useStore($activeGatewayProfile)
   const connection = useStore($connection)
@@ -496,6 +507,7 @@ export function LunarCity({ onOpenFullChat, onOpenMemoryGraph }: LunarCityProps)
   const [playing, setPlaying] = useState(true)
   const [tick, setTick] = useState(0)
   const [cameraState, setCameraState] = useState<CameraControlState>({ focusedEntityKey: undefined, following: false })
+  const [selectedEntityKey, setSelectedEntityKey] = useState<EntityKey | undefined>(undefined)
   const [worldManifest, setWorldManifest] = useState<WorldManifestV2 | undefined>(undefined)
 
   const [profileLeaderEntities, setProfileLeaderEntities] = useState(() =>
@@ -693,9 +705,13 @@ export function LunarCity({ onOpenFullChat, onOpenMemoryGraph }: LunarCityProps)
     let world: LunarCityWorldHandle | undefined
     let stopSnapshot: (() => void) | undefined
 
-    const handleWorldIntent = (intent: { kind: string; state?: CameraControlState }): void => {
+    const handleWorldIntent = (intent: LunarCityIntent): void => {
       if (intent.kind === 'camera-state' && intent.state) {
         setCameraState(intent.state)
+      } else if (intent.kind === 'select-focus') {
+        setSelectedEntityKey(intent.entityKey)
+      } else if (intent.kind === 'clear-selection') {
+        setSelectedEntityKey(undefined)
       }
     }
     void (async () => {
@@ -922,6 +938,10 @@ export function LunarCity({ onOpenFullChat, onOpenMemoryGraph }: LunarCityProps)
         </div>
 
         <div className="pointer-events-none absolute inset-0 z-20">
+          {selectedEntityKey ? (
+            <LunarCityCommandRuntime onOpenSession={onOpenEntitySession} selectedEntityKey={selectedEntityKey} />
+          ) : null}
+
           <div className="pointer-events-auto absolute left-3 top-20 flex items-center gap-1.5 sm:left-5 sm:top-24">
             <CameraControls dispatch={dispatchCamera} state={cameraState} />
           </div>

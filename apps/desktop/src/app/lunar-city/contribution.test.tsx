@@ -29,6 +29,7 @@ import {
   LUNAR_CITY_NAV_ORDER,
   LUNAR_CITY_ROUTE,
   LunarCityRoute,
+  openEntitySession,
   openLeaderFullChat
 } from './contribution'
 
@@ -82,6 +83,25 @@ describe('Lunar City route contribution', () => {
 
     expect(mocks.setSessionOwnerHint).toHaveBeenCalledWith('stored-owl', owner)
     expect(mocks.openSession).toHaveBeenCalledWith('stored-owl', navigate, 'main')
+  })
+
+  it('opens an inspected worker session on its complete exact owner route', () => {
+    const navigate = vi.fn()
+
+    const target = {
+      connectionId: 'source-b',
+      profile: 'builder',
+      sessionId: 'runtime-9',
+      storedSessionId: 'stored-9'
+    }
+
+    openEntitySession(target, navigate)
+
+    expect(mocks.setSessionOwnerHint).toHaveBeenCalledWith('stored-9', {
+      connectionId: 'source-b',
+      profile: 'builder'
+    })
+    expect(mocks.openSession).toHaveBeenCalledWith('stored-9', navigate, 'main')
   })
 
   it('registers its dedicated destination directly after the order-50 Kanban entry', () => {
