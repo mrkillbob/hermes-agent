@@ -386,24 +386,56 @@ describe('LunarCity', () => {
     expect(screen.getByRole('status', { name: 'Camera position' }).textContent).not.toContain(String(workerKey))
   })
 
-  it('synchronously retires a lost world and restores exactly once from the latest immutable snapshot', async () => {
+  it('retires a lost world immediately but waits for the matching restored context before one rebuild', async () => {
     const { workerKey } = publishAccessibleEntities()
+    const attempts: Array<(handle: typeof worldHandle) => void> = []
+    const contextStates: string[] = []
+    let contextState = 'available'
+
+    const replacement = {
+      ...worldHandle,
+      applySnapshot: vi.fn(),
+      destroy: vi.fn()
+    } as typeof worldHandle
+
+    const deferredCreation = () =>
+      new Promise<typeof worldHandle>(resolve => {
+        contextStates.push(contextState)
+        attempts.push(resolve)
+      })
+
+    createWorld.mockImplementationOnce(deferredCreation).mockImplementationOnce(deferredCreation)
+
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
     const canvas = screen.getByLabelText('Interactive 3D Lunar City')
+    await waitFor(() => expect(attempts).toHaveLength(1))
+    await act(async () => attempts.shift()!(worldHandle))
     await waitFor(() => expect(canvas.dataset.worldStatus).toBe('ready'))
 
     const latest = { ...$lunarCitySnapshot.get(), observedAt: 900, revision: 9 }
-    $lunarCitySnapshot.set(latest)
+    act(() => $lunarCitySnapshot.set(latest))
     const lost = new Event('webglcontextlost', { cancelable: true })
+    contextState = 'lost'
     fireEvent(canvas, lost)
 
     expect(lost.defaultPrevented).toBe(true)
     expect(destroyWorld).toHaveBeenCalledOnce()
-    await waitFor(() => expect(createWorld).toHaveBeenCalledTimes(2))
+    expect(createWorld).toHaveBeenCalledOnce()
+    expect(canvas.dataset.worldStatus).toBe('restoring')
+
+    contextState = 'restored'
+    fireEvent(canvas, new Event('webglcontextrestored'))
+    await waitFor(() => expect(attempts).toHaveLength(1))
+    expect(createWorld).toHaveBeenCalledTimes(2)
+    fireEvent(canvas, new Event('webglcontextrestored'))
+    expect(createWorld).toHaveBeenCalledTimes(2)
+    await act(async () => attempts.shift()!(replacement))
     await waitFor(() => expect(canvas.dataset.worldStatus).toBe('ready'))
-    expect(applySnapshot).toHaveBeenLastCalledWith(latest)
+    expect(replacement.applySnapshot).toHaveBeenLastCalledWith(latest)
+    expect(contextStates).toEqual(['available', 'restored'])
     expect(startReconciler).toHaveBeenCalledOnce()
 
+    contextState = 'lost'
     fireEvent(canvas, new Event('webglcontextlost', { cancelable: true }))
     await act(async () => Promise.resolve())
     expect(createWorld).toHaveBeenCalledTimes(2)
@@ -420,6 +452,9 @@ describe('LunarCity', () => {
     createWorld.mockRejectedValueOnce(new Error('replacement engine unavailable'))
 
     fireEvent(canvas, new Event('webglcontextlost', { cancelable: true }))
+    expect(createWorld).toHaveBeenCalledOnce()
+    expect(canvas.dataset.worldStatus).toBe('restoring')
+    fireEvent(canvas, new Event('webglcontextrestored'))
 
     await waitFor(() => expect(screen.getByText(/3D world renderer unavailable/i)).toBeTruthy())
     expect(screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab/i })).toBeTruthy()
@@ -451,6 +486,7 @@ describe('LunarCity', () => {
     createWorld.mockReturnValueOnce(replacementPromise as never)
 
     fireEvent(canvas, new Event('webglcontextlost', { cancelable: true }))
+    fireEvent(canvas, new Event('webglcontextrestored'))
     unmount()
     resolveReplacement(replacement)
     await act(async () => replacementPromise)
@@ -460,12 +496,31 @@ describe('LunarCity', () => {
     expect(stopReconciler).toHaveBeenCalledOnce()
   })
 
-  it('applies reduced-motion presentation to the world while retaining selection and leader conversation', async () => {
+  it('ignores a late context-restored publication after route teardown', async () => {
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+    const canvas = screen.getByLabelText('Interactive 3D Lunar City')
+    await waitFor(() => expect(canvas.dataset.worldStatus).toBe('ready'))
+
+    fireEvent(canvas, new Event('webglcontextlost', { cancelable: true }))
+    expect(createWorld).toHaveBeenCalledOnce()
+
+    cleanup()
+    fireEvent(canvas, new Event('webglcontextrestored'))
+    await act(async () => Promise.resolve())
+
+    expect(createWorld).toHaveBeenCalledOnce()
+    expect(stopReconciler).toHaveBeenCalledOnce()
+  })
+
+  it('applies live reduced-motion preference changes while retaining selection and leader conversation', async () => {
     publishAccessibleEntities()
+    let changeListener: ((event: MediaQueryListEvent) => void) | undefined
 
     const media = {
-      addEventListener: vi.fn(),
-      matches: true,
+      addEventListener: vi.fn((_type: string, listener: (event: MediaQueryListEvent) => void) => {
+        changeListener = listener
+      }),
+      matches: false,
       media: '(prefers-reduced-motion: reduce)',
       onchange: null,
       removeEventListener: vi.fn(),
@@ -481,12 +536,18 @@ describe('LunarCity', () => {
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
 
     await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
-    expect(setReducedMotion).toHaveBeenCalledWith(true)
-    expect(screen.getByText(/Reduced motion: destinations snap into place/i)).toBeTruthy()
+    expect(setReducedMotion).toHaveBeenCalledWith(false)
+    act(() => changeListener?.({ matches: true } as MediaQueryListEvent))
+    await waitFor(() => expect(setReducedMotion).toHaveBeenLastCalledWith(true))
+    await waitFor(() => expect(screen.getByText(/Reduced motion: destinations snap into place/i)).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab/i }))
     expect(screen.getByRole('region', { name: 'Lunar City worker controls' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Talk to fox-scientist leader' }))
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'fox-scientist leader conversation' })).toBeTruthy())
+
+    act(() => changeListener?.({ matches: false } as MediaQueryListEvent))
+    await waitFor(() => expect(setReducedMotion).toHaveBeenLastCalledWith(false))
+    await waitFor(() => expect(screen.queryByText(/Reduced motion: destinations snap into place/i)).toBeNull())
   })
 
   it('opens one exact profile-owned leader session without changing the city camera surface', async () => {

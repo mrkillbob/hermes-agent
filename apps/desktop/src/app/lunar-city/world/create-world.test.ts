@@ -599,7 +599,7 @@ describe('createLunarCityWorld', () => {
     handle.destroy()
   })
 
-  it('stops looping leader clips and snaps worker navigation and camera transitions under reduced motion', async () => {
+  it('restores the desired continuous leader loop when reduced motion is disabled without another dialogue event', async () => {
     const runtime = fakeRuntime()
     const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
     const thinking = runtime.leaderAnimationGroups.get('leader:fox:thinking')!
@@ -610,9 +610,27 @@ describe('createLunarCityWorld', () => {
 
     handle.setReducedMotion(true)
     expect(thinking.stop).toHaveBeenCalledOnce()
+    expect(thinking.isPlaying).toBe(false)
 
-    handle.setLeaderAnimation('fox', 'thinking')
-    expect(thinking.start).toHaveBeenLastCalledWith(false)
+    handle.setReducedMotion(false)
+    expect(thinking.start).toHaveBeenCalledTimes(2)
+    expect(thinking.start).toHaveBeenLastCalledWith(true)
+    expect(thinking.isPlaying).toBe(true)
+    handle.destroy()
+  })
+
+  it('does not replay a finite leader state when reduced motion is disabled', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    const acknowledging = runtime.leaderAnimationGroups.get('leader:fox:acknowledging')!
+
+    handle.setReducedMotion(true)
+    handle.setLeaderAnimation('fox', 'acknowledging')
+    expect(acknowledging.start).toHaveBeenCalledOnce()
+    expect(acknowledging.start).toHaveBeenLastCalledWith(false)
+
+    handle.setReducedMotion(false)
+    expect(acknowledging.start).toHaveBeenCalledOnce()
     handle.destroy()
   })
 

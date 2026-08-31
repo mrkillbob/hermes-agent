@@ -1188,6 +1188,7 @@ export async function createWorldScene(
   let occlusion: ReturnType<typeof createOcclusionController> | undefined
   const projectCompoundNodes = new Map<string, BabylonNodeLike>()
   const activeLeaderAnimations = new Map<LeaderId, BabylonAnimationGroupLike>()
+  const desiredLeaderStates = new Map<LeaderId, LeaderAnimationState>()
 
   const stopLeaderAnimations = (): void => {
     for (const group of activeLeaderAnimations.values()) {
@@ -1195,6 +1196,7 @@ export async function createWorldScene(
     }
 
     activeLeaderAnimations.clear()
+    desiredLeaderStates.clear()
   }
 
   const disposeWorld = (): void => {
@@ -1597,6 +1599,7 @@ export async function createWorldScene(
           return
         }
 
+        desiredLeaderStates.set(leaderId, state)
         const active = activeLeaderAnimations.get(leaderId)
 
         // Idle deliberately parks the world after one dirty render. The GLB's
@@ -1667,6 +1670,31 @@ export async function createWorldScene(
           }
 
           entityRegistryController.syncMotion()
+        } else {
+          for (const [leaderId, state] of desiredLeaderStates) {
+            if (!CONTINUOUS_LEADER_STATES.has(state)) {
+              continue
+            }
+
+            const next = leaderAnimationGroups.get(leaderId)?.get(state)
+
+            if (!next) {
+              continue
+            }
+
+            const active = activeLeaderAnimations.get(leaderId)
+
+            if (active && active !== next) {
+              active.stop?.()
+            }
+
+            if (next.isPlaying === true) {
+              next.stop?.()
+            }
+
+            activeLeaderAnimations.set(leaderId, next)
+            next.start?.(true)
+          }
         }
 
         schedulerController.requestRender()

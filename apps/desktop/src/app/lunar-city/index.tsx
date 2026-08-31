@@ -810,6 +810,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
     let disposed = false
     let generation = 0
     let manifest: WorldManifestV2 | undefined
+    let restorationArmedGeneration: number | undefined
     let restorationAttempted = false
     let world: LunarCityWorldHandle | undefined
     let stopSnapshot: (() => void) | undefined
@@ -908,23 +909,39 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
         return
       }
 
+      if (restorationArmedGeneration !== undefined) {
+        return
+      }
+
       canvas.dataset.worldStatus = 'restoring'
       setRendererStatus('degraded')
+      generation += 1
       retireWorld()
 
       if (restorationAttempted) {
-        generation += 1
         canvas.dataset.worldStatus = 'unavailable'
         setRendererStatus('unavailable')
 
         return
       }
 
+      restorationArmedGeneration = generation
+    }
+
+    const onContextRestored = (): void => {
+      const armedGeneration = restorationArmedGeneration
+
+      if (disposed || armedGeneration === undefined || armedGeneration !== generation || restorationAttempted) {
+        return
+      }
+
+      restorationArmedGeneration = undefined
       restorationAttempted = true
       void createWorldGeneration()
     }
 
     canvas.addEventListener('webglcontextlost', onContextLost)
+    canvas.addEventListener('webglcontextrestored', onContextRestored)
     void createWorldGeneration()
 
     return () => {
@@ -932,6 +949,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
       generation += 1
       abortController.abort()
       canvas.removeEventListener('webglcontextlost', onContextLost)
+      canvas.removeEventListener('webglcontextrestored', onContextRestored)
       disposeLunarCityRuntime(stopReconcilerRef.current, stopSnapshot, world)
       stopSnapshot = undefined
       worldHandleRef.current = undefined
