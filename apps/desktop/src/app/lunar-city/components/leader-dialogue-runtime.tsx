@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useVoiceConversation } from '@/app/chat/composer/hooks/use-voice-conversation'
 import { blobToDataUrl } from '@/app/session/hooks/use-prompt-actions/utils'
 import type { ClientSessionState } from '@/app/types'
 import { transcribeAudio } from '@/hermes'
 import { chatMessageText } from '@/lib/chat-messages'
-import { transcribeAudioClientDirect } from '@/lib/voice-client-direct'
+import { transcribeAudioClientDirect, type VoiceClientScope } from '@/lib/voice-client-direct'
 import { requestForSessionProfile } from '@/store/session-request-router'
 import { $sessionStates } from '@/store/session-states'
 
 import { leaderAnimationForConversation } from '../leader-runtime'
-import type { LeaderOwner, LeaderSession } from '../leader-sessions'
+import { leaderOwnerKey, type LeaderOwner, type LeaderSession } from '../leader-sessions'
 import type { LeaderAnimationState, LeaderStateClipMap } from '../model'
 
 import { LeaderDialogue, type LeaderVoiceBridge } from './leader-dialogue'
@@ -90,6 +90,10 @@ function assistantVoiceResponse(messages: LeaderSessionState['messages'], consum
   return null
 }
 
+function staleVoiceRouteError(): Error {
+  return new Error('Leader voice route changed during transcription')
+}
+
 /**
  * The narrow bridge from a profile-owned leader to the normal Desktop session
  * transport. It owns no transcript, recorder, audio socket, or ambient route:
@@ -110,6 +114,25 @@ export function LeaderDialogueRuntime({
   const [voiceError, setVoiceError] = useState<string | undefined>(undefined)
   const consumedVoiceResponsesRef = useRef<Set<string>>(new Set())
   const pendingVoiceResponseRef = useRef<string | null>(null)
+  const voiceAbortRef = useRef<AbortController | undefined>(undefined)
+  const voiceEpochRef = useRef(0)
+  const voiceScope = useMemo<VoiceClientScope>(
+    () => Object.freeze({ connectionId: owner.connectionId.trim(), profile: owner.profile.trim() }),
+    [owner.connectionId, owner.profile]
+  )
+  const voiceRouteKey = `${leaderOwnerKey(owner)}::${session.runtimeId}::${voiceAvailable ? 'available' : 'unavailable'}`
+
+  useEffect(() => {
+    voiceEpochRef.current += 1
+    voiceAbortRef.current?.abort()
+    voiceAbortRef.current = undefined
+
+    return () => {
+      voiceEpochRef.current += 1
+      voiceAbortRef.current?.abort()
+      voiceAbortRef.current = undefined
+    }
+  }, [voiceRouteKey])
 
   useEffect(() => {
     if (!voiceAvailable) {
@@ -137,17 +160,34 @@ export function LeaderDialogueRuntime({
         throw new Error('Voice is unavailable because this leader is no longer the active exact desktop route')
       }
 
+      voiceAbortRef.current?.abort()
+      const controller = new AbortController()
+      const epoch = voiceEpochRef.current + 1
+      voiceEpochRef.current = epoch
+      voiceAbortRef.current = controller
+      const assertCurrentVoiceRoute = (): void => {
+        if (voiceEpochRef.current !== epoch || controller.signal.aborted) {
+          throw staleVoiceRouteError()
+        }
+      }
+
       // Same client-direct then gateway-relay ladder as the standard composer;
       // this component does not create a recorder, WebSocket, or private audio path.
-      const direct = await transcribeAudioClientDirect(audio)
+      const direct = await transcribeAudioClientDirect(audio, voiceScope, controller.signal)
+      assertCurrentVoiceRoute()
 
       if (direct !== null) {
         return direct
       }
 
-      return (await transcribeAudio(await blobToDataUrl(audio), audio.type)).transcript
+      const dataUrl = await blobToDataUrl(audio)
+      assertCurrentVoiceRoute()
+      const result = await transcribeAudio(dataUrl, audio.type, voiceScope)
+      assertCurrentVoiceRoute()
+
+      return result.transcript
     },
-    [voiceAvailable]
+    [voiceAvailable, voiceScope]
   )
 
   const pendingResponse = useCallback(() => {

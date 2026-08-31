@@ -433,6 +433,7 @@ interface BabylonQuaternion {
 interface BabylonAnimationGroupLike {
   clone?(name: string, targetConverter?: (target: unknown) => unknown): BabylonAnimationGroupLike | null
   dispose?(): void
+  isPlaying?: boolean
   name: string
   start?(loop?: boolean, speedRatio?: number, from?: number, to?: number): void
   stop?(): void
@@ -1182,6 +1183,15 @@ export async function createWorldScene(
   let entityRegistry: ReturnType<typeof createEntityRegistry> | undefined
   let occlusion: ReturnType<typeof createOcclusionController> | undefined
   const projectCompoundNodes = new Map<string, BabylonNodeLike>()
+  const activeLeaderAnimations = new Map<LeaderId, BabylonAnimationGroupLike>()
+
+  const stopLeaderAnimations = (): void => {
+    for (const group of activeLeaderAnimations.values()) {
+      group.stop?.()
+    }
+
+    activeLeaderAnimations.clear()
+  }
 
   const disposeWorld = (): void => {
     if (disposed) {
@@ -1189,6 +1199,7 @@ export async function createWorldScene(
     }
 
     disposed = true
+    stopLeaderAnimations()
     scheduler?.dispose()
     entityRegistry?.dispose()
     occlusion?.clear()
@@ -1220,7 +1231,6 @@ export async function createWorldScene(
 
     const leaderStateClips = new Map<string, LeaderStateClipMap>()
     const leaderAnimationGroups = new Map<LeaderId, ReadonlyMap<LeaderAnimationState, BabylonAnimationGroupLike>>()
-    const activeLeaderAnimations = new Map<LeaderId, BabylonAnimationGroupLike>()
     const camera = scene.activeCamera as CameraLike
     const focusAnchors = new Map<EntityKey, () => Vec3 | undefined>()
     const focusMetadata = new Map<EntityKey, () => EntityFocusMetadata | undefined>()
@@ -1373,6 +1383,20 @@ export async function createWorldScene(
       occlusionController.update({ position: cameraPosition(camera) }, selection)
     }
 
+    const hasActiveLeaderAnimation = (): boolean => {
+      let active = false
+
+      for (const [leaderId, group] of activeLeaderAnimations) {
+        if (group.isPlaying === true) {
+          active = true
+        } else {
+          activeLeaderAnimations.delete(leaderId)
+        }
+      }
+
+      return active
+    }
+
     const schedulerController = createFrameScheduler({
       onFrame(frame) {
         const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
@@ -1435,6 +1459,7 @@ export async function createWorldScene(
 
         applyOcclusion()
         scene.render()
+        const leaderAnimationActive = hasActiveLeaderAnimation()
         const finishedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
 
         if (
@@ -1448,7 +1473,8 @@ export async function createWorldScene(
           activeNavigation.size > 0 ||
           cameraController.isTransitioning() ||
           cameraState.following ||
-          entityRegistryController.hasActiveAnimations()
+          entityRegistryController.hasActiveAnimations() ||
+          leaderAnimationActive
         )
       },
       renderer: engine
@@ -1545,6 +1571,18 @@ export async function createWorldScene(
           return
         }
 
+        const active = activeLeaderAnimations.get(leaderId)
+
+        // Idle deliberately parks the world after one dirty render. The GLB's
+        // rest pose is retained without spending a continuing frame budget.
+        if (state === 'idle') {
+          active?.stop?.()
+          activeLeaderAnimations.delete(leaderId)
+          schedulerController.requestRender()
+
+          return
+        }
+
         // State is selected by the exact profile-owned dialogue, while this
         // map is sourced only from the corresponding GLB stateClips metadata.
         // A missing declared animation is a visual no-op, never a guessed or
@@ -1555,15 +1593,15 @@ export async function createWorldScene(
           return
         }
 
-        const active = activeLeaderAnimations.get(leaderId)
-
-        if (active === next) {
-          return
+        if (active !== next) {
+          active?.stop?.()
+          activeLeaderAnimations.set(leaderId, next)
         }
 
-        active?.stop?.()
-        activeLeaderAnimations.set(leaderId, next)
-        next.start?.(true)
+        if (active !== next || next.isPlaying !== true) {
+          next.start?.(true)
+        }
+
         schedulerController.requestRender()
       },
       pick(clientX, clientY) {

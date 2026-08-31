@@ -1,4 +1,4 @@
-import { profileScoped } from '@/api/client'
+import { capabilityScoped, profileScoped } from '@/api/client'
 import { getApiRequestConnection, getApiRequestProfile, hermesApi } from '@/hermes'
 
 /**
@@ -50,6 +50,16 @@ export interface VoiceClientConfig {
   tts: DirectTtsConfig | RelayConfig
 }
 
+/**
+ * An immutable backend identity for voice configuration and provider-direct
+ * requests. Voice captures owned by a session must never follow the ambient
+ * Desktop selection after the microphone has opened.
+ */
+export interface VoiceClientScope {
+  connectionId: string
+  profile: string
+}
+
 // ---------------------------------------------------------------------------
 // Config fetch + cache. Keyed by (connection, profile) so a profile/backend
 // switch never reuses another scope's credentials; TTL'd so a config change
@@ -61,7 +71,24 @@ const CONFIG_TTL_MS = 60_000
 let cached: { key: string; at: number; config: VoiceClientConfig } | null = null
 let inflight: { key: string; promise: Promise<null | VoiceClientConfig> } | null = null
 
-function scopeKey(): string {
+function canonicalScope(scope: VoiceClientScope): VoiceClientScope {
+  const connectionId = scope.connectionId.trim()
+  const profile = scope.profile.trim()
+
+  if (!connectionId || !profile) {
+    throw new Error('Voice client scope requires an exact connectionId and profile')
+  }
+
+  return { connectionId, profile }
+}
+
+function scopeKey(scope?: VoiceClientScope): string {
+  if (scope) {
+    const owner = canonicalScope(scope)
+
+    return `${owner.connectionId}::${owner.profile}`
+  }
+
   return `${getApiRequestConnection() ?? 'local'}::${getApiRequestProfile() ?? 'default'}`
 }
 
@@ -71,8 +98,9 @@ export function clearVoiceClientConfigCache(): void {
   inflight = null
 }
 
-export async function fetchVoiceClientConfig(): Promise<null | VoiceClientConfig> {
-  const key = scopeKey()
+export async function fetchVoiceClientConfig(scope?: VoiceClientScope): Promise<null | VoiceClientConfig> {
+  const owner = scope ? canonicalScope(scope) : undefined
+  const key = scopeKey(owner)
 
   if (cached && cached.key === key && Date.now() - cached.at < CONFIG_TTL_MS) {
     return cached.config
@@ -88,7 +116,7 @@ export async function fetchVoiceClientConfig(): Promise<null | VoiceClientConfig
       // profile — the same routing every relay audio call uses, so the
       // config comes from the backend the user is actually talking to.
       const response = await hermesApi<{ ok: boolean } & VoiceClientConfig>({
-        ...profileScoped(),
+        ...(owner ? capabilityScoped(owner) : profileScoped()),
         path: '/api/audio/voice-config'
       })
 
@@ -104,7 +132,9 @@ export async function fetchVoiceClientConfig(): Promise<null | VoiceClientConfig
       // Older backend without the endpoint / transient failure → relay.
       return null
     } finally {
-      inflight = null
+      if (inflight?.promise === promise) {
+        inflight = null
+      }
     }
   })()
 
@@ -177,8 +207,19 @@ export function transcriptFromOpenAiMultipartBody(body: string): string {
  * re-running the same request through the gateway would just fail again
  * slower and hide the real error.
  */
-export async function transcribeAudioClientDirect(audio: Blob): Promise<null | string> {
-  const config = await fetchVoiceClientConfig()
+function throwIfVoiceRequestAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error('Voice transcription was aborted')
+  }
+}
+
+export async function transcribeAudioClientDirect(
+  audio: Blob,
+  scope?: VoiceClientScope,
+  signal?: AbortSignal
+): Promise<null | string> {
+  const config = await fetchVoiceClientConfig(scope)
+  throwIfVoiceRequestAborted(signal)
   const stt = config?.stt
 
   if (!stt || stt.mode !== 'direct') {
@@ -202,7 +243,8 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
     const response = await fetch(`${stt.base_url.replace(/\/+$/, '')}/audio/transcriptions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${stt.api_key}` },
-      body: form
+      body: form,
+      signal
     })
 
     if (!response.ok) {
@@ -224,7 +266,8 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
     const response = await fetch(`${stt.base_url.replace(/\/+$/, '')}/stt`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${stt.api_key}` },
-      body: form
+      body: form,
+      signal
     })
 
     if (!response.ok) {
@@ -251,7 +294,8 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
     const response = await fetch(`${stt.base_url.replace(/\/+$/, '')}/speech-to-text`, {
       method: 'POST',
       headers: { 'xi-api-key': stt.api_key },
-      body: form
+      body: form,
+      signal
     })
 
     if (!response.ok) {

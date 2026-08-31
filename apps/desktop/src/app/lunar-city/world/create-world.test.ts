@@ -28,6 +28,7 @@ interface FakeNode {
 }
 
 interface FakeAnimationGroup {
+  isPlaying: boolean
   name: string
   start: ReturnType<typeof vi.fn>
   stop: ReturnType<typeof vi.fn>
@@ -232,7 +233,18 @@ function fakeRuntime({
         transformNodes.push(leaderNode, leaderChild)
 
         for (const clip of Object.values(leaderStateClips(leaderId))) {
-          leaderAnimationGroups.set(clip, { name: clip, start: vi.fn(), stop: vi.fn() })
+          const group: FakeAnimationGroup = {
+            isPlaying: false,
+            name: clip,
+            start: vi.fn(() => {
+              group.isPlaying = true
+            }),
+            stop: vi.fn(() => {
+              group.isPlaying = false
+            })
+          }
+
+          leaderAnimationGroups.set(clip, group)
         }
       }
     }
@@ -345,6 +357,8 @@ function kanbanSnapshot(position: { x: number; y: number; z: number }): LunarCit
 }
 
 afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
 
@@ -519,6 +533,143 @@ describe('createLunarCityWorld', () => {
     expect(owlThinking.start).not.toHaveBeenCalled()
     expect(runtime.scenes).toHaveLength(1)
     handle.destroy()
+  })
+
+  it.each(['listening', 'thinking', 'talking'] as const)(
+    'keeps the unified scheduler alive while an actual %s leader group is playing and parks after idle',
+    async state => {
+      vi.useFakeTimers()
+      let now = 0
+      const requestedFrames: FrameRequestCallback[] = []
+      vi.spyOn(performance, 'now').mockImplementation(() => now)
+      vi.stubGlobal(
+        'requestAnimationFrame',
+        vi.fn((callback: FrameRequestCallback) => {
+          requestedFrames.push(callback)
+
+          return requestedFrames.length
+        })
+      )
+      vi.stubGlobal('cancelAnimationFrame', vi.fn())
+
+      const runtime = fakeRuntime()
+      const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+      const scene = runtime.scenes[0]!
+      const active = runtime.leaderAnimationGroups.get(`leader:fox:${state}`)!
+      const idle = runtime.leaderAnimationGroups.get('leader:fox:idle')!
+
+      // Drain the one inert callback scheduled by initial world construction.
+      requestedFrames.shift()?.(now)
+      scene.render.mockClear()
+
+      handle.setLeaderAnimation('fox', state)
+      now = 100
+      requestedFrames.shift()?.(now)
+
+      for (const next of [167, 234]) {
+        now = next
+        await vi.advanceTimersByTimeAsync(67)
+        requestedFrames.shift()?.(now)
+      }
+
+      expect(active.isPlaying).toBe(true)
+      expect(scene.render).toHaveBeenCalledTimes(3)
+
+      handle.setLeaderAnimation('fox', 'idle')
+      expect(active.stop).toHaveBeenCalledOnce()
+      expect(idle.start).not.toHaveBeenCalled()
+
+      now = 301
+      await vi.advanceTimersByTimeAsync(67)
+      requestedFrames.shift()?.(now)
+      const rendersAfterIdle = scene.render.mock.calls.length
+
+      now = 1_000
+      await vi.advanceTimersByTimeAsync(1_000)
+      while (requestedFrames.length > 0) {
+        requestedFrames.shift()?.(now)
+      }
+
+      expect(scene.render).toHaveBeenCalledTimes(rendersAfterIdle)
+      handle.destroy()
+    }
+  )
+
+  it('parks the unified scheduler when a finite leader group reports completion', async () => {
+    vi.useFakeTimers()
+    let now = 0
+    const requestedFrames: FrameRequestCallback[] = []
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        requestedFrames.push(callback)
+
+        return requestedFrames.length
+      })
+    )
+
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    const scene = runtime.scenes[0]!
+    const acknowledging = runtime.leaderAnimationGroups.get('leader:fox:acknowledging')!
+
+    requestedFrames.shift()?.(now)
+    scene.render.mockClear()
+    handle.setLeaderAnimation('fox', 'acknowledging')
+
+    now = 100
+    requestedFrames.shift()?.(now)
+    acknowledging.isPlaying = false
+
+    now = 167
+    await vi.advanceTimersByTimeAsync(67)
+    requestedFrames.shift()?.(now)
+    const rendersAfterCompletion = scene.render.mock.calls.length
+
+    now = 1_000
+    await vi.advanceTimersByTimeAsync(1_000)
+    while (requestedFrames.length > 0) {
+      requestedFrames.shift()?.(now)
+    }
+
+    expect(scene.render).toHaveBeenCalledTimes(rendersAfterCompletion)
+    handle.destroy()
+  })
+
+  it('cancels leader animation scheduler work on route destruction without a late frame', async () => {
+    vi.useFakeTimers()
+    let now = 0
+    const requestedFrames: FrameRequestCallback[] = []
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        requestedFrames.push(callback)
+
+        return requestedFrames.length
+      })
+    )
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    const scene = runtime.scenes[0]!
+    const thinking = runtime.leaderAnimationGroups.get('leader:fox:thinking')!
+
+    requestedFrames.shift()?.(now)
+    scene.render.mockClear()
+    handle.setLeaderAnimation('fox', 'thinking')
+    handle.destroy()
+
+    now = 100
+    while (requestedFrames.length > 0) {
+      requestedFrames.shift()?.(now)
+    }
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(thinking.stop).toHaveBeenCalledOnce()
+    expect(scene.render).not.toHaveBeenCalled()
   })
 
   it('applies camera intents on the existing world scene and restores the exact approved overview', async () => {

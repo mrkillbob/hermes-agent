@@ -77,6 +77,20 @@ describe('fetchVoiceClientConfig', () => {
     expect(api).toHaveBeenCalledTimes(2)
   })
 
+  it('pins voice configuration to an explicit owner even after the ambient desktop scope changes', async () => {
+    const api = mockDesktopApi({ ok: true, stt: directStt, tts: relay })
+    setApiRequestConnection('newly-active')
+    setApiRequestProfile('new-profile')
+
+    await fetchVoiceClientConfig({ connectionId: 'leader-source', profile: 'owl' })
+
+    expect(api).toHaveBeenCalledWith({
+      connectionId: 'leader-source',
+      path: '/api/audio/voice-config',
+      profile: 'owl'
+    })
+  })
+
   it('resolves null on an older backend without the endpoint', async () => {
     Object.defineProperty(window, 'hermesDesktop', {
       configurable: true,
