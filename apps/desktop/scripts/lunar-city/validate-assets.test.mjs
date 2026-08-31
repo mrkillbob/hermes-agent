@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { Document } from '@gltf-transform/core'
 
-import { APPROVED_SHA, validateAssetContract, validateAssetPack } from './validate-assets.mjs'
+import { APPROVED_SHA, validateAssetContract, validateAssetContractFiles, validateAssetPack } from './validate-assets.mjs'
 
 const APPROVED_SOURCE_URI = '../moon-settlement-approved.jpg'
 
@@ -38,6 +40,7 @@ function modelFixture(overrides = {}) {
 function fixture(overrides = {}) {
   return {
     version: 2,
+    assetVersion: '2.0.0',
     source: { sha256: APPROVED_SHA },
     materials: [{ id: 'structural' }],
     models: [modelFixture()],
@@ -114,6 +117,14 @@ function fakeIoFor(statsByUri = {}) {
 
 const fakeIo = fakeIoFor()
 
+async function writeContractFiles(root, sourceReference) {
+  const directory = await mkdtemp(join(tmpdir(), 'lunar-city-contract-'))
+  const manifestPath = join(directory, 'world-manifest.v2.json')
+  await writeFile(manifestPath, JSON.stringify(root))
+  await writeFile(join(directory, 'source-reference.v2.json'), JSON.stringify(sourceReference))
+  return { directory, manifestPath }
+}
+
 test('rejects the approved JPG as runtime geometry or texture', async () => {
   const result = await validateAssetPack(
     fixture({
@@ -181,6 +192,48 @@ test('requires at least one runtime model', async () => {
 
   assert.equal(result.ok, false)
   assert.match(result.errors.join('\n'), /at least one runtime model is required/)
+})
+
+test('requires an exact asset version and unique stable model IDs', async () => {
+  const result = await validateAssetPack(
+    fixture({
+      assetVersion: '2.0',
+      models: [modelFixture({ id: '' }), modelFixture({ id: 'terrain' }), modelFixture({ id: 'terrain' })]
+    }),
+    fakeIo
+  )
+
+  assert.match(result.errors.join('\n'), /asset version must equal 2\.0\.0/)
+  assert.match(result.errors.join('\n'), /model id is required/)
+  assert.match(result.errors.join('\n'), /duplicate model id terrain/)
+})
+
+test('returns structured errors for malformed file-level declarations', async () => {
+  const sourceReference = {
+    version: 2,
+    source: {
+      uri: APPROVED_SOURCE_URI,
+      sha256: APPROVED_SHA,
+      dimensions: { width: 1280, height: 910 }
+    }
+  }
+  const cases = [
+    { expected: /models must be an array/, root: fixture({ models: {} }) },
+    { expected: /terrain model URI must be a GLB/, root: fixture({ models: [modelFixture({ uri: null })] }) },
+    { expected: /navigation mesh URI must be a GLB/, root: fixture({ navigation: { ...fixture().navigation, meshUri: null } }) },
+    { expected: /approved source URI mismatch/, root: fixture(), sourceReference: { ...sourceReference, source: { ...sourceReference.source, uri: null } } }
+  ]
+
+  for (const testCase of cases) {
+    const { directory, manifestPath } = await writeContractFiles(testCase.root, testCase.sourceReference ?? sourceReference)
+    try {
+      const result = await validateAssetContractFiles(manifestPath, fakeIo)
+      assert.equal(result.ok, false)
+      assert.match(result.errors.join('\n'), testCase.expected)
+    } finally {
+      await rm(directory, { force: true, recursive: true })
+    }
+  }
 })
 
 test('requires every declared node, animation clip, and LOD node', async () => {
@@ -316,6 +369,7 @@ test('ships source and manifest records that preserve provenance without a runti
   assert.ok(source.districtLandmarks.length >= 8)
   assert.ok(source.silhouettes.leaders.length >= 6)
   assert.equal(manifest.source.sha256, source.source.sha256)
+  assert.equal(manifest.assetVersion, '2.0.0')
   assert.ok(manifest.models.length >= 11)
   assert.ok(manifest.models.every(model => !/moon-settlement-approved\.jpg$/i.test(model.uri)))
   assert.ok(manifest.models.every(model => model.requiredNodes.length > 0 && model.lods.length > 0))

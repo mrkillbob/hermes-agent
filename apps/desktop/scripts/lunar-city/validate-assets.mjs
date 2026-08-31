@@ -9,6 +9,7 @@ import { ALL_EXTENSIONS } from '@gltf-transform/extensions'
 export const APPROVED_SHA = '248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590'
 export const APPROVED_DIMENSIONS = Object.freeze({ width: 1280, height: 910 })
 export const APPROVED_SOURCE_URI = '../moon-settlement-approved.jpg'
+export const ASSET_VERSION = '2.0.0'
 
 const TRIANGLES = 4
 const QUALITY_CEILINGS = Object.freeze({
@@ -33,6 +34,10 @@ function isApprovedSourceUri(uri) {
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0
+}
+
+function isRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isVec3(value) {
@@ -114,7 +119,7 @@ function validateModelShape(model, root, errors) {
   if (!Array.isArray(model?.materialSlots) || model.materialSlots.length === 0) {
     errors.push(`${id} requires material slots`)
   } else {
-    const materialIds = new Set((root.materials ?? []).map(material => material.id))
+    const materialIds = new Set((Array.isArray(root.materials) ? root.materials : []).map(material => material.id))
     for (const materialId of model.materialSlots) if (!materialIds.has(materialId)) errors.push(`${id} material slot ${materialId} is not declared`)
   }
 }
@@ -144,8 +149,27 @@ export function validateNavigation(navigation, errors) {
 }
 
 function validateMaterials(root, errors) {
-  const ids = (root.materials ?? []).map(material => material.id)
-  if (!Array.isArray(root.materials) || ids.length === 0 || !ids.every(isNonEmptyString) || new Set(ids).size !== ids.length) errors.push('materials are invalid')
+  const materials = Array.isArray(root?.materials) ? root.materials : []
+  const ids = materials.map(material => material?.id)
+  if (!Array.isArray(root?.materials) || ids.length === 0 || !ids.every(isNonEmptyString) || new Set(ids).size !== ids.length) errors.push('materials are invalid')
+}
+
+function validateModelIds(root, errors) {
+  if (!Array.isArray(root?.models)) {
+    errors.push('models must be an array')
+    return []
+  }
+  if (root.models.length === 0) errors.push('at least one runtime model is required')
+  const ids = new Set()
+  for (const model of root.models) {
+    if (!isNonEmptyString(model?.id)) {
+      errors.push('model id is required')
+      continue
+    }
+    if (ids.has(model.id)) errors.push(`duplicate model id ${model.id}`)
+    ids.add(model.id)
+  }
+  return root.models
 }
 
 function validateDestinations(root, errors) {
@@ -183,7 +207,7 @@ function validateQualityBudgets(root, errors) {
 }
 
 function validateRuntimeTextures(root, errors) {
-  for (const texture of root.textures ?? []) if (isApprovedSourceUri(texture.uri)) errors.push('approved source cannot be a runtime asset')
+  for (const texture of Array.isArray(root?.textures) ? root.textures : []) if (isApprovedSourceUri(texture?.uri)) errors.push('approved source cannot be a runtime asset')
 }
 
 function validateModelTextures(model, stats, errors) {
@@ -193,6 +217,7 @@ function validateModelTextures(model, stats, errors) {
 export async function validateAssetPack(root, io) {
   const errors = []
   if (root?.version !== 2) errors.push('version must equal 2')
+  if (root?.assetVersion !== ASSET_VERSION) errors.push(`asset version must equal ${ASSET_VERSION}`)
   if (root?.source?.sha256 !== APPROVED_SHA) errors.push('approved source digest mismatch')
   validateMaterials(root ?? {}, errors)
   validateCameraLandmarks(root?.camera, errors)
@@ -200,15 +225,15 @@ export async function validateAssetPack(root, io) {
   validateDestinations(root ?? {}, errors)
   validateProjectSlots(root ?? {}, errors)
   validateQualityBudgets(root ?? {}, errors)
-  if (!Array.isArray(root?.models) || root.models.length === 0) errors.push('at least one runtime model is required')
-  for (const model of root?.models ?? []) {
+  const models = validateModelIds(root, errors)
+  for (const model of models) {
     const id = model?.id ?? 'model'
     validateModelShape(model, root ?? {}, errors)
-    if (isApprovedSourceUri(model.uri)) {
+    if (isApprovedSourceUri(model?.uri)) {
       errors.push('approved source cannot be a runtime asset')
       continue
     }
-    if (typeof model.uri !== 'string' || !model.uri.endsWith('.glb')) {
+    if (typeof model?.uri !== 'string' || !model.uri.endsWith('.glb')) {
       errors.push(`${id} model URI must be a GLB`)
       continue
     }
@@ -239,11 +264,15 @@ export function inspectJpegDimensions(bytes) {
   throw new Error('approved source dimensions are unavailable')
 }
 
-export function validateSourceReference(sourceReference, sourceBytes, errors) {
+function validateSourceReferenceDeclaration(sourceReference, errors) {
   if (sourceReference?.version !== 2) errors.push('source reference version must equal 2')
   if (sourceReference?.source?.uri !== APPROVED_SOURCE_URI) errors.push('approved source URI mismatch')
   if (sourceReference?.source?.sha256 !== APPROVED_SHA) errors.push('approved source digest mismatch')
   if (sourceReference?.source?.dimensions?.width !== APPROVED_DIMENSIONS.width || sourceReference?.source?.dimensions?.height !== APPROVED_DIMENSIONS.height) errors.push('approved source dimensions mismatch')
+}
+
+export function validateSourceReference(sourceReference, sourceBytes, errors) {
+  validateSourceReferenceDeclaration(sourceReference, errors)
   if (createHash('sha256').update(sourceBytes).digest('hex') !== APPROVED_SHA) errors.push('approved source file digest mismatch')
   try {
     const dimensions = inspectJpegDimensions(sourceBytes)
@@ -259,6 +288,7 @@ export async function validateAssetContract({ root, io, sourcePath, sourceRefere
   try {
     validateSourceReference(sourceReference, await readFile(sourcePath), errors)
   } catch {
+    validateSourceReferenceDeclaration(sourceReference, errors)
     errors.push('approved source file cannot be read')
   }
   if (root?.source?.sha256 !== sourceReference?.source?.sha256) errors.push('manifest and source reference digest mismatch')
@@ -271,12 +301,16 @@ export async function validateAssetContractFiles(manifestPath, io = new NodeIO()
   const sourceReferencePath = resolve(dirname(absoluteManifestPath), 'source-reference.v2.json')
   const sourceReference = JSON.parse(await readFile(sourceReferencePath, 'utf8'))
   const baseDirectory = dirname(absoluteManifestPath)
-  const resolvedRoot = {
-    ...root,
-    models: root.models?.map(model => ({ ...model, uri: resolve(baseDirectory, model.uri) })),
-    navigation: { ...root.navigation, meshUri: resolve(baseDirectory, root.navigation?.meshUri) }
-  }
-  return validateAssetContract({ root: resolvedRoot, io, sourcePath: resolve(dirname(sourceReferencePath), sourceReference.source.uri), sourceReference })
+  const resolvedModels = Array.isArray(root?.models)
+    ? root.models.map(model => (isRecord(model) && isNonEmptyString(model.uri) ? { ...model, uri: resolve(baseDirectory, model.uri) } : model))
+    : root?.models
+  const resolvedNavigation = isRecord(root?.navigation) && isNonEmptyString(root.navigation.meshUri)
+    ? { ...root.navigation, meshUri: resolve(baseDirectory, root.navigation.meshUri) }
+    : root?.navigation
+  const resolvedRoot = isRecord(root) ? { ...root, models: resolvedModels, navigation: resolvedNavigation } : root
+  const sourceUri = sourceReference?.source?.uri
+  const sourcePath = isNonEmptyString(sourceUri) ? resolve(dirname(sourceReferencePath), sourceUri) : undefined
+  return validateAssetContract({ root: resolvedRoot, io, sourcePath, sourceReference })
 }
 
 async function main() {
