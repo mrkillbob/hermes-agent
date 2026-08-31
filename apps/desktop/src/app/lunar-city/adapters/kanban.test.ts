@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import actualManifest from '../../../../public/lunar-city/v2/world-manifest.v2.json'
-
 import type { PluginSourceScope } from '@/api/plugins'
 
+import actualManifest from '../../../../public/lunar-city/v2/world-manifest.v2.json'
 import { entityKey } from '../identity'
 import { parseWorldManifest } from '../manifest'
 import type { ProjectSlotManifestEntry, WorldManifestV2 } from '../model'
@@ -12,9 +11,9 @@ import {
   allocateProjectCompounds,
   compoundKey,
   createKanbanCitySource,
-  projectSlotContractIssues,
   type KanbanRest,
-  type KanbanSocket
+  type KanbanSocket,
+  projectSlotContractIssues
 } from './kanban'
 
 const scopeA: PluginSourceScope = { connectionId: 'source-a', profile: 'default' }
@@ -126,6 +125,84 @@ describe('Kanban Lunar City optional source', () => {
     })
   })
 
+  it.each([
+    [
+      'an object in place of the columns array',
+      boardFixtures({ '/board?board=main': { columns: {}, latest_event_id: 8 } })
+    ],
+    [
+      'more than the bounded number of columns',
+      boardFixtures({
+        '/board?board=main': {
+          columns: Array.from({ length: 65 }, (_, index) => ({ name: `column-${index}`, tasks: [] })),
+          latest_event_id: 8
+        }
+      })
+    ],
+    [
+      'an object in place of a column task array',
+      boardFixtures({ '/board?board=main': { columns: [{ name: 'running', tasks: {} }], latest_event_id: 8 } })
+    ],
+    [
+      'a task with a non-string ID',
+      boardFixtures({
+        '/board?board=main': {
+          columns: [{ name: 'running', tasks: [{ id: 7, status: 'running' }] }],
+          latest_event_id: 8
+        }
+      })
+    ],
+    [
+      'more than the bounded number of task rows',
+      boardFixtures({
+        '/board?board=main': {
+          columns: [
+            {
+              name: 'running',
+              tasks: Array.from({ length: 513 }, (_, index) => ({ id: `task-${index}`, status: 'running' }))
+            }
+          ],
+          latest_event_id: 8
+        }
+      })
+    ],
+    [
+      'a worker with a non-string task ID',
+      boardFixtures({
+        '/workers/active?board=main': {
+          workers: [{ run_id: 7, task_id: 1, task_status: 'running', worker_pid: 4242 }]
+        }
+      })
+    ],
+    [
+      'more than the bounded number of worker rows',
+      boardFixtures({
+        '/workers/active?board=main': {
+          workers: Array.from({ length: 513 }, (_, index) => ({
+            run_id: index,
+            task_id: `task-${index}`,
+            task_status: 'running',
+            worker_pid: index + 1
+          }))
+        }
+      })
+    ]
+  ])('fails closed for %s instead of authoritatively replacing prior Kanban rows', async (_label, responses) => {
+    const source = createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 102,
+      rest: restFrom(responses),
+      scope: scopeA
+    })
+
+    await expect(source.read()).resolves.toMatchObject({
+      authoritative: false,
+      entities: [],
+      health: 'malformed',
+      sources: [expect.objectContaining({ authority: 'unknown', error: 'Kanban response malformed' })]
+    })
+  })
+
   it('performs only the bounded board and active-worker reads on initial load', async () => {
     const rest = restFrom(boardFixtures())
     const source = createKanbanCitySource({ manifest: manifest(), now: () => 200, rest, scope: scopeA })
@@ -197,6 +274,85 @@ describe('Kanban Lunar City optional source', () => {
       '/tasks/task-1?board=main'
     ])
     expect(result.details.get('task-1')).toMatchObject({ task: { id: 'task-1' } })
+  })
+
+  it('retains authoritative board workers when selected detail becomes unavailable, with explicit degraded cache health', async () => {
+    let detail: unknown = { comments: [], events: [], runs: [], task: { id: 'task-1' } }
+    const responses = boardFixtures()
+    const rest = vi.fn(async (path: string) => {
+      const response = path === '/tasks/task-1?board=main' ? detail : responses[path]
+
+      if (response instanceof Error) {
+        throw response
+      }
+
+      if (response === undefined) {
+        throw new Error(`unexpected request ${path}`)
+      }
+
+      return response as never
+    }) as ReturnType<typeof vi.fn> & KanbanRest
+    const source = createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 300,
+      rest,
+      scope: scopeA,
+      selectedTaskId: () => 'task-1'
+    })
+
+    const initial = await source.read()
+    detail = httpError(503)
+    source.onFrame({ cursor: 9, events: [{ id: 9, task_id: 'task-1' }] })
+    const recovered = await source.read()
+
+    expect(initial.details.get('task-1')).toEqual({ comments: [], events: [], runs: [], task: { id: 'task-1' } })
+    expect(recovered.authoritative).toBe(true)
+    expect(recovered.health).toBe('authoritative')
+    expect(recovered.entities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          authority: 'authoritative',
+          identity: expect.objectContaining({ taskId: 'task-1' })
+        }),
+        expect.objectContaining({
+          authority: 'authoritative',
+          identity: expect.objectContaining({ workerId: 'pid:4242' })
+        })
+      ])
+    )
+    expect(recovered.details.get('task-1')).toEqual(initial.details.get('task-1'))
+    expect(recovered).toMatchObject({
+      detailHealth: {
+        cached: true,
+        error: 'Kanban selected detail unavailable',
+        health: 'degraded',
+        taskId: 'task-1'
+      }
+    })
+  })
+
+  it.each([
+    ['not bounded array data', {}],
+    ['more than the bounded number of run rows', Array.from({ length: 513 }, (_, id) => ({ id }))]
+  ])('fails closed to degraded selected-detail health when nested runs contain %s', async (_label, runs) => {
+    const source = createKanbanCitySource({
+      manifest: manifest(),
+      now: () => 303,
+      rest: restFrom({ ...boardFixtures(), '/tasks/task-1?board=main': { runs, task: { id: 'task-1' } } }),
+      scope: scopeA,
+      selectedTaskId: () => 'task-1'
+    })
+
+    await expect(source.read()).resolves.toMatchObject({
+      authoritative: true,
+      detailHealth: {
+        cached: false,
+        error: 'Kanban selected detail unavailable',
+        health: 'degraded',
+        taskId: 'task-1'
+      },
+      health: 'authoritative'
+    })
   })
 
   it('dedupes concurrent selected-task reconciliation so detail stays bounded', async () => {
@@ -422,6 +578,35 @@ describe('Kanban Lunar City optional source', () => {
 
     expect(invalidated).toHaveBeenCalledOnce()
     expect(disposeSocket).toHaveBeenCalledOnce()
+  })
+
+  it('never lowers a same-board event cursor from an older REST snapshot', async () => {
+    const socket = vi.fn((_path: string, _onMessage: (message: unknown) => void) => vi.fn()) satisfies KanbanSocket
+    const rest = restFrom(boardFixtures())
+    const source = createKanbanCitySource({ manifest: manifest(), now: () => 600, rest, scope: scopeA, socket })
+
+    await source.read()
+    source.start(vi.fn())
+
+    expect(source.onFrame({ cursor: 9, events: [{ id: 9, task_id: 'task-1' }] })).toEqual({
+      accepted: true,
+      dirtyTaskIds: ['task-1'],
+      needsReconcile: false
+    })
+
+    await source.read()
+
+    const readsBeforeDuplicate = rest.mock.calls.length
+    expect(source.onFrame({ cursor: 9, events: [{ id: 9, task_id: 'task-1' }] })).toEqual({
+      accepted: false,
+      dirtyTaskIds: [],
+      needsReconcile: false
+    })
+    expect(rest).toHaveBeenCalledTimes(readsBeforeDuplicate)
+    expect(socket.mock.calls.map(([path]) => path)).toEqual([
+      '/events?board=main&since=8',
+      '/events?board=main&since=9'
+    ])
   })
 
   it('turns a reconnected socket into one REST-rebaseline hint without accepting socket status', async () => {

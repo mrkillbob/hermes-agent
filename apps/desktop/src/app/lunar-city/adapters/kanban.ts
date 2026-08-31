@@ -37,6 +37,13 @@ export interface KanbanFrameResult {
   needsReconcile: boolean
 }
 
+export interface KanbanDetailHealth {
+  cached: boolean
+  error?: string
+  health: 'authoritative' | 'degraded'
+  taskId: string
+}
+
 export interface ProjectCompoundInput {
   connectionId: string
   projectId: string
@@ -54,6 +61,7 @@ export interface ProjectCompoundPlacement extends ProjectCompoundInput {
 export interface KanbanReadResult {
   authoritative: boolean
   compounds: readonly ProjectCompoundPlacement[]
+  detailHealth?: KanbanDetailHealth
   details: ReadonlyMap<string, unknown>
   entities: readonly LunarEntity[]
   health: KanbanSourceHealth
@@ -125,6 +133,59 @@ function optionalId(value: unknown): string | undefined {
 
 function natural(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
+const MAX_KANBAN_COLUMNS = 64
+const MAX_KANBAN_DETAIL_RUNS = 512
+const MAX_KANBAN_TASKS = 512
+const MAX_KANBAN_WORKERS = 512
+
+function malformedKanban(label: string): never {
+  throw new Error(`malformed Kanban ${label}`)
+}
+
+function requiredRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return malformedKanban(label)
+  }
+
+  return value as Record<string, unknown>
+}
+
+function boundedArray(value: unknown, label: string, limit: number): readonly unknown[] {
+  if (!Array.isArray(value) || value.length > limit) {
+    return malformedKanban(label)
+  }
+
+  return value
+}
+
+function requiredString(value: unknown, label: string): string {
+  const normalized = optionalString(value)
+
+  return normalized ?? malformedKanban(label)
+}
+
+function optionalFieldString(row: Record<string, unknown>, field: string, label: string): string | undefined {
+  const value = row[field]
+
+  if (value === undefined || value === null) {
+    return undefined
+  }
+
+  return requiredString(value, label)
+}
+
+function optionalFieldId(row: Record<string, unknown>, field: string, label: string): string | undefined {
+  const value = row[field]
+
+  if (value === undefined || value === null) {
+    return undefined
+  }
+
+  const id = optionalId(value)
+
+  return id ?? malformedKanban(label)
 }
 
 function scopeCopy(scope: PluginSourceScope): PluginSourceScope {
@@ -307,87 +368,140 @@ export function projectSlotContractIssues(
 }
 
 function boardRows(response: unknown): readonly BoardRow[] {
-  return array(record(response).boards).flatMap(item => {
-    const row = record(item)
-    const slug = optionalString(row.slug)
+  const payload = requiredRecord(response, 'board list')
+  const rows = boundedArray(payload.boards, 'board list', MAX_KANBAN_COLUMNS)
+  const slugs = new Set<string>()
 
-    if (!slug) {
-      return []
+  return rows.map((item, index) => {
+    const row = requiredRecord(item, `board list row ${index}`)
+    const slug = requiredString(row.slug, `board list row ${index} slug`)
+
+    if (slugs.has(slug)) {
+      return malformedKanban(`board list duplicate slug ${slug}`)
     }
 
-    return [
-      {
-        isCurrent: row.is_current === true,
-        ...(optionalString(row.project_id) ? { projectId: optionalString(row.project_id) } : {}),
-        slug
-      }
-    ]
+    slugs.add(slug)
+    const isCurrent = row.is_current
+
+    if (isCurrent !== undefined && typeof isCurrent !== 'boolean') {
+      return malformedKanban(`board list row ${index} is_current`)
+    }
+
+    const projectId = optionalFieldString(row, 'project_id', `board list row ${index} project_id`)
+
+    return {
+      isCurrent: isCurrent === true,
+      ...(projectId ? { projectId } : {}),
+      slug
+    }
   })
 }
 
 function selectedBoard(response: unknown): BoardRow | undefined {
   const rows = boardRows(response)
-  const current = optionalString(record(response).current)
+  const current = optionalFieldString(requiredRecord(response, 'board list'), 'current', 'board list current')
 
   return rows.find(row => row.slug === current) ?? rows.find(row => row.isCurrent) ?? rows[0]
 }
 
 function taskRows(response: unknown, board: BoardRow): readonly TaskRow[] {
-  return array(record(response).columns).flatMap(column => {
-    const columnRecord = record(column)
-    const columnStatus = optionalString(columnRecord.name) ?? 'unknown'
+  const payload = requiredRecord(response, 'board response')
+  const columns = boundedArray(payload.columns, 'board columns', MAX_KANBAN_COLUMNS)
+  const tasks: TaskRow[] = []
+  const taskIds = new Set<string>()
 
-    return array(columnRecord.tasks).flatMap(item => {
-      const row = record(item)
-      const id = optionalString(row.id)
+  for (const [columnIndex, column] of columns.entries()) {
+    const columnRecord = requiredRecord(column, `board column ${columnIndex}`)
+    const columnStatus = requiredString(columnRecord.name, `board column ${columnIndex} name`)
+    const columnTasks = boundedArray(columnRecord.tasks, `board column ${columnIndex} tasks`, MAX_KANBAN_TASKS)
 
-      if (!id) {
-        return []
+    for (const [taskIndex, item] of columnTasks.entries()) {
+      const row = requiredRecord(item, `board column ${columnIndex} task ${taskIndex}`)
+      const id = requiredString(row.id, `board column ${columnIndex} task ${taskIndex} id`)
+
+      if (taskIds.has(id) || tasks.length >= MAX_KANBAN_TASKS) {
+        return malformedKanban(`board task ${id} is duplicate or exceeds the bounded row limit`)
       }
 
-      return [
-        {
-          currentRunId: optionalId(row.current_run_id ?? row.run_id),
-          id,
-          projectId: optionalString(row.project_id) ?? board.projectId,
-          status: optionalString(row.status) ?? columnStatus
-        }
-      ]
-    })
-  })
+      taskIds.add(id)
+      const projectId = optionalFieldString(row, 'project_id', `board task ${id} project_id`)
+      const status = optionalFieldString(row, 'status', `board task ${id} status`)
+
+      tasks.push({
+        currentRunId:
+          optionalFieldId(row, 'current_run_id', `board task ${id} current_run_id`) ??
+          optionalFieldId(row, 'run_id', `board task ${id} run_id`),
+        id,
+        projectId: projectId ?? board.projectId,
+        status: status ?? columnStatus
+      })
+    }
+  }
+
+  return tasks
 }
 
-function workerId(row: Record<string, unknown>): string | undefined {
-  const pid = optionalId(row.worker_pid)
+function workerId(row: Record<string, unknown>, label: string): string {
+  const workerPid = row.worker_pid
 
-  if (pid) {
+  if (workerPid !== undefined && workerPid !== null) {
+    const pid = natural(workerPid)
+
+    if (pid === undefined) {
+      return malformedKanban(`${label} worker_pid`)
+    }
+
     return `pid:${pid}`
   }
 
-  const claim = optionalString(row.claim_lock)
+  const claim = optionalFieldString(row, 'claim_lock', `${label} claim_lock`)
 
-  return claim ? `claim:${claim}` : undefined
+  return claim ? `claim:${claim}` : malformedKanban(`${label} worker identifier`)
 }
 
 function workerRows(response: unknown): readonly WorkerRow[] {
-  return array(record(response).workers).flatMap(item => {
-    const row = record(item)
-    const taskId = optionalString(row.task_id)
-    const worker = workerId(row)
+  const payload = requiredRecord(response, 'active workers response')
+  const workers = boundedArray(payload.workers, 'active workers', MAX_KANBAN_WORKERS)
 
-    if (!taskId || !worker) {
-      return []
+  return workers.map((item, index) => {
+    const label = `active worker ${index}`
+    const row = requiredRecord(item, label)
+    const taskId = requiredString(row.task_id, `${label} task_id`)
+    const taskStatus = optionalFieldString(row, 'task_status', `${label} task_status`)
+    const status = optionalFieldString(row, 'status', `${label} status`)
+
+    return {
+      runId: optionalFieldId(row, 'run_id', `${label} run_id`),
+      status: taskStatus ?? status ?? 'unknown',
+      taskId,
+      workerId: workerId(row, label)
     }
-
-    return [
-      {
-        runId: optionalId(row.run_id),
-        status: optionalString(row.task_status) ?? optionalString(row.status) ?? 'unknown',
-        taskId,
-        workerId: worker
-      }
-    ]
   })
+}
+
+function validatedSelectedDetail(value: unknown, selectedTask: string): unknown {
+  const payload = requiredRecord(value, 'selected detail')
+  const task = requiredRecord(payload.task, 'selected detail task')
+
+  if (requiredString(task.id, 'selected detail task id') !== selectedTask) {
+    return malformedKanban('selected detail task id')
+  }
+
+  if (payload.runs === undefined) {
+    return value
+  }
+
+  const runs = boundedArray(payload.runs, 'selected detail runs', MAX_KANBAN_DETAIL_RUNS)
+
+  for (const [index, run] of runs.entries()) {
+    const row = requiredRecord(run, `selected detail run ${index}`)
+
+    if (optionalFieldId(row, 'id', `selected detail run ${index} id`) === undefined) {
+      return malformedKanban(`selected detail run ${index} id`)
+    }
+  }
+
+  return value
 }
 
 function projectInputs(scope: PluginSourceScope, tasks: readonly TaskRow[]): readonly ProjectCompoundInput[] {
@@ -454,6 +568,7 @@ function result(
   return {
     authoritative: health === 'authoritative',
     compounds: fields.compounds ?? [],
+    ...(fields.detailHealth ? { detailHealth: fields.detailHealth } : {}),
     details: fields.details ?? freezeDetails(new Map()),
     entities: fields.entities ?? [],
     health,
@@ -485,6 +600,10 @@ function failure(scope: PluginSourceScope, observedAt: number, error: unknown): 
       : 'Kanban source read failed'
 
   return result(scope, observedAt, message === 'Kanban response malformed' ? 'malformed' : 'error', { error: message })
+}
+
+function selectedDetailFailure(_error: unknown): string {
+  return 'Kanban selected detail unavailable'
 }
 
 function normalizeEntities(
@@ -580,7 +699,7 @@ export function createKanbanCitySource(options: KanbanCitySourceOptions): Kanban
   let invalidate: ((result: KanbanFrameResult) => void) | undefined
   let inFlight: Promise<KanbanReadResult> | undefined
   let retainedCompounds: readonly ProjectCompoundPlacement[] = []
-  let selectedDetail: { board: string; dirty: boolean; taskId: string; value: unknown } | undefined
+  let selectedDetail: { board: string; dirty: boolean; error?: string; taskId: string; value?: unknown } | undefined
 
   const closeSocket = (): void => {
     socketDispose?.()
@@ -688,15 +807,21 @@ export function createKanbanCitySource(options: KanbanCitySourceOptions): Kanban
       const latestEventId = natural(record(boardPayload).latest_event_id) ?? 0
       const details = new Map<string, unknown>()
       const selectedTask = options.selectedTaskId?.()?.trim()
+      let detailHealth: KanbanDetailHealth | undefined
 
-      if (selected && selected !== board.slug) {
+      const boardChanged = selected !== board.slug
+
+      if (selected && boardChanged) {
         cursorByBoard.delete(selected)
         selectedDetail = undefined
         closeSocket()
       }
 
       selected = board.slug
-      cursorByBoard.set(board.slug, latestEventId)
+      cursorByBoard.set(
+        board.slug,
+        boardChanged ? latestEventId : Math.max(cursorByBoard.get(board.slug) ?? 0, latestEventId)
+      )
 
       if (selectedTask && tasks.some(task => task.id === selectedTask)) {
         if (
@@ -705,14 +830,29 @@ export function createKanbanCitySource(options: KanbanCitySourceOptions): Kanban
           selectedDetail.taskId !== selectedTask ||
           selectedDetail.dirty
         ) {
-          selectedDetail = {
-            board: board.slug,
-            dirty: false,
-            taskId: selectedTask,
-            value: await rest(
+          const cachedDetail =
+            selectedDetail?.board === board.slug && selectedDetail.taskId === selectedTask ? selectedDetail : undefined
+
+          try {
+            const detail = await rest(
               pathWithBoard(`/tasks/${encodeURIComponent(selectedTask)}`, board.slug),
               getOptions(scope, options.timeoutMs)
             )
+
+            selectedDetail = {
+              board: board.slug,
+              dirty: false,
+              taskId: selectedTask,
+              value: validatedSelectedDetail(detail, selectedTask)
+            }
+          } catch (error) {
+            selectedDetail = {
+              board: board.slug,
+              dirty: true,
+              ...(cachedDetail?.value === undefined ? {} : { value: cachedDetail.value }),
+              error: selectedDetailFailure(error),
+              taskId: selectedTask
+            }
           }
 
           if (disposed) {
@@ -720,7 +860,17 @@ export function createKanbanCitySource(options: KanbanCitySourceOptions): Kanban
           }
         }
 
-        details.set(selectedTask, selectedDetail.value)
+        if (selectedDetail?.value !== undefined) {
+          details.set(selectedTask, selectedDetail.value)
+        }
+
+        detailHealth = {
+          cached: selectedDetail?.value !== undefined,
+          ...(selectedDetail?.error
+            ? { error: selectedDetail.error, health: 'degraded' as const }
+            : { health: 'authoritative' as const }),
+          taskId: selectedTask
+        }
       }
 
       openSocket()
@@ -728,6 +878,7 @@ export function createKanbanCitySource(options: KanbanCitySourceOptions): Kanban
 
       return result(scope, observedAt, 'authoritative', {
         compounds,
+        ...(detailHealth ? { detailHealth } : {}),
         details: freezeDetails(details),
         entities,
         selectedBoard: board.slug

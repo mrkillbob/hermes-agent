@@ -460,18 +460,28 @@ function roomSnapshot(room: Room, task: Task, tick: number) {
   }
 }
 
+export function disposeLunarCityRuntime(
+  stopReconciler: (() => void) | undefined,
+  stopSnapshot: (() => void) | undefined,
+  world: LunarCityWorldHandle | undefined
+): void {
+  stopReconciler?.()
+  stopSnapshot?.()
+  world?.destroy()
+}
+
 export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const activeGatewayProfile = useStore($activeGatewayProfile)
   const connection = useStore($connection)
-  const snapshot = useStore($lunarCitySnapshot)
   const [selectedId, setSelectedId] = useState('research')
   const [inside, setInside] = useState(false)
   const [playing, setPlaying] = useState(true)
   const [tick, setTick] = useState(0)
   const [cameraState, setCameraState] = useState<CameraControlState>({ focusedEntityKey: undefined, following: false })
   const [worldManifest, setWorldManifest] = useState<WorldManifestV2 | undefined>(undefined)
-  const [worldHandle, setWorldHandle] = useState<LunarCityWorldHandle | undefined>(undefined)
+  const worldHandleRef = useRef<LunarCityWorldHandle | undefined>(undefined)
+  const stopReconcilerRef = useRef<(() => void) | undefined>(undefined)
 
   const kanbanScope = useMemo(() => {
     const connectionId =
@@ -486,10 +496,14 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
   }, [activeGatewayProfile, connection?.connectionId, connection?.mode])
 
   const dispatchCamera = (intent: CameraIntent): void => {
-    worldHandle?.dispatchCamera(intent)
-    setCameraState(worldHandle?.getCameraState() ?? { focusedEntityKey: undefined, following: false })
+    const world = worldHandleRef.current
+
+    world?.dispatchCamera(intent)
+    setCameraState(world?.getCameraState() ?? { focusedEntityKey: undefined, following: false })
   }
 
+  // The reconciler is imperative route lifetime state, so the world cleanup can stop it before disposal.
+  // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
     if (!worldManifest) {
       return
@@ -499,13 +513,30 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
       ? createKanbanCitySource({ manifest: worldManifest, scope: kanbanScope })
       : undefined
 
-    return startLunarCityReconciler({ optionalSources: kanbanSource ? [kanbanSource] : [] })
+    const stop = startLunarCityReconciler({ optionalSources: kanbanSource ? [kanbanSource] : [] })
+    let stopped = false
+
+    const stopOnce = (): void => {
+      if (stopped) {
+        return
+      }
+
+      stopped = true
+
+      if (stopReconcilerRef.current === stopOnce) {
+        stopReconcilerRef.current = undefined
+      }
+
+      stop()
+    }
+
+    stopReconcilerRef.current = stopOnce
+
+    return stopOnce
   }, [kanbanScope, worldManifest])
 
-  useEffect(() => {
-    worldHandle?.applySnapshot(snapshot)
-  }, [snapshot, worldHandle])
-
+  // The Babylon handle is imperative runtime state, not a mirror of reactive route data.
+  // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
     const canvas = canvasRef.current
 
@@ -518,6 +549,7 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
     const abortController = new AbortController()
     let disposed = false
     let world: LunarCityWorldHandle | undefined
+    let stopSnapshot: (() => void) | undefined
 
     const handleWorldIntent = (intent: { kind: string; state?: CameraControlState }): void => {
       if (intent.kind === 'camera-state' && intent.state) {
@@ -540,8 +572,14 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
           created.destroy()
         } else {
           world = created
+          worldHandleRef.current = created
+          created.applySnapshot($lunarCitySnapshot.get())
+          stopSnapshot = $lunarCitySnapshot.listen(snapshot => {
+            if (!disposed && worldHandleRef.current === created) {
+              created.applySnapshot(snapshot)
+            }
+          })
           setWorldManifest(manifest)
-          setWorldHandle(created)
           canvas.dataset.worldStatus = 'ready'
         }
       } catch (error) {
@@ -554,7 +592,13 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
     return () => {
       disposed = true
       abortController.abort()
-      world?.destroy()
+      disposeLunarCityRuntime(stopReconcilerRef.current, stopSnapshot, world)
+      stopSnapshot = undefined
+
+      if (worldHandleRef.current === world) {
+        worldHandleRef.current = undefined
+      }
+
       world = undefined
     }
   }, [])

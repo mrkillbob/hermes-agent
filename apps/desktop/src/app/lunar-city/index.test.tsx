@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
+import { LOCAL_CONNECTION_ID } from '@hermes/shared'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { Profiler } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { LOCAL_CONNECTION_ID } from '@hermes/shared'
-
+import type { LunarCityWorldHandle } from './model'
 import { $lunarCitySnapshot, createLunarCitySnapshot } from './store'
-import { LunarCity } from './index'
+
+import { disposeLunarCityRuntime, LunarCity } from './index'
 
 const {
   applySnapshot,
@@ -112,17 +114,48 @@ describe('LunarCity', () => {
     expect(stopReconciler).toHaveBeenCalledOnce()
   })
 
-  it('applies live snapshot publications to the ready 3D world', async () => {
-    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+  it('applies many live snapshot publications to the ready world without recreating or rerendering the route', async () => {
+    const commits = vi.fn()
+    render(
+      <Profiler id="lunar-city" onRender={commits}>
+        <LunarCity onOpenMemoryGraph={vi.fn()} />
+      </Profiler>
+    )
     await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
-
-    const next = createLunarCitySnapshot({ observedAt: 800, revision: 2 })
-
+    await waitFor(() => expect(startReconciler).toHaveBeenCalledOnce())
     await act(async () => {
-      $lunarCitySnapshot.set(next)
+      await Promise.resolve()
+      await Promise.resolve()
     })
 
-    await waitFor(() => expect(applySnapshot).toHaveBeenLastCalledWith(next))
+    const rendersBeforePublications = commits.mock.calls.length
+    const applicationsBeforePublications = applySnapshot.mock.calls.length
+    const publications = Array.from({ length: 8 }, (_, index) =>
+      createLunarCitySnapshot({ observedAt: 800 + index, revision: 2 + index })
+    )
+
+    await act(async () => {
+      for (const next of publications) {
+        $lunarCitySnapshot.set(next)
+      }
+    })
+
+    expect(applySnapshot.mock.calls.slice(applicationsBeforePublications).map(([next]) => next)).toEqual(publications)
+    expect(createWorld).toHaveBeenCalledOnce()
+    expect(commits).toHaveBeenCalledTimes(rendersBeforePublications)
+  })
+
+  it('stops the reconciler, unsubscribes snapshots, then destroys the ready world', () => {
+    const order: string[] = []
+    const world = { destroy: () => order.push('world destroy') } as unknown as LunarCityWorldHandle
+
+    disposeLunarCityRuntime(
+      () => order.push('reconciler stop'),
+      () => order.push('snapshot unsubscribe'),
+      world
+    )
+
+    expect(order).toEqual(['reconciler stop', 'snapshot unsubscribe', 'world destroy'])
   })
 
   it('destroys a world that finishes creating after the route unmounts', async () => {
