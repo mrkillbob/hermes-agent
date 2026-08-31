@@ -5285,6 +5285,23 @@ def reclaim_task(
     termination = _terminate_reclaimed_worker(
         row["worker_pid"], prev_lock, signal_fn=signal_fn,
     )
+    # Manual reclaim is an external stop operation. Never release a live
+    # claim unless its host-local worker is proven gone; otherwise the next
+    # dispatch can start a duplicate while the old process continues unseen.
+    if (
+        row["status"] == "running"
+        and row["claim_lock"] is not None
+        and not termination.get("terminated")
+    ):
+        _defer_reclaim_for_live_worker(
+            conn,
+            task_id,
+            prev_lock,
+            int(time.time()),
+            termination,
+            reason="manual_reclaim_termination_unverified",
+        )
+        return False
     with write_txn(conn):
         retry_status = _retry_status_for_run(conn, task_id)
         cur = conn.execute(
@@ -7839,12 +7856,33 @@ def decompose_triage_task(
 
 
 def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute(
+        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["status"] == "archived":
+        return False
+    termination: Optional[dict[str, Any]] = None
+    if row["status"] == "running":
+        termination = _terminate_reclaimed_worker(
+            row["worker_pid"], row["claim_lock"]
+        )
+        if not termination.get("terminated"):
+            _defer_reclaim_for_live_worker(
+                conn,
+                task_id,
+                row["claim_lock"],
+                int(time.time()),
+                termination,
+                reason="archive_termination_unverified",
+            )
+            return False
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "
             "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status != 'archived'",
-            (task_id,),
+            "WHERE id = ? AND status != 'archived' AND claim_lock IS ?",
+            (task_id, row["claim_lock"]),
         )
         if cur.rowcount != 1:
             return False
@@ -7855,6 +7893,7 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
             conn, task_id,
             outcome="reclaimed", status="reclaimed",
             summary="task archived with run still active",
+            metadata=termination,
         )
         _append_event(conn, task_id, "archived", None, run_id=run_id)
     # ``archived`` parents no longer block children, same as ``done``.

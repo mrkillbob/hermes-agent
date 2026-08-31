@@ -2493,12 +2493,35 @@ def _cmd_block(args: argparse.Namespace) -> int:
         for tid in ids:
             if reason:
                 kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
+            expected_run_id = _worker_run_id_for(tid)
+            task = kb.get_task(conn, tid)
+            # A worker blocks itself through the model tool and must remain
+            # alive long enough to receive that tool result. An operator CLI
+            # block is different: it is an external stop request. Reclaim the
+            # live worker first and refuse to hide the card if termination
+            # cannot be verified, otherwise the process becomes an orphan.
+            if (
+                task is not None
+                and task.status == "running"
+                and expected_run_id is None
+                and not kb.reclaim_task(
+                    conn,
+                    tid,
+                    reason=reason or "operator block",
+                )
+            ):
+                failed.append(tid)
+                print(
+                    f"cannot block {tid}: worker termination was not verified",
+                    file=sys.stderr,
+                )
+                continue
             if not kb.block_task(
                 conn,
                 tid,
                 reason=reason,
                 kind=kind,
-                expected_run_id=_worker_run_id_for(tid),
+                expected_run_id=expected_run_id,
             ):
                 failed.append(tid)
                 print(f"cannot block {tid}", file=sys.stderr)
