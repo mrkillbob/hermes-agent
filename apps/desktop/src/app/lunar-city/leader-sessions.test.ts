@@ -160,6 +160,45 @@ describe('leader session ownership', () => {
     expect(test.persisted).toEqual(mapping(OWL, 's-created'))
   })
 
+  it.each([
+    ['a rejected missing-session error', new Error('4001: session not found')],
+    ['an explicit missing-session result', { error: 'Stored session not found', status: 'error' }]
+  ])('recreates after %s races the verified row read', async (_label, missingResult) => {
+    const test = harness(mapping(OWL))
+
+    test.request.mockImplementation(async (_owner, method) => {
+      if (method === 'session.resume') {
+        if (missingResult instanceof Error) {
+          throw missingResult
+        }
+
+        return missingResult
+      }
+
+      return { session_id: 'r-recreated', stored_session_id: 's-recreated' }
+    })
+    const resolveLeaderSession = createLeaderSessionResolver(test.dependencies)
+
+    await expect(resolveLeaderSession(OWL)).resolves.toEqual({
+      runtimeId: 'r-recreated',
+      storedId: 's-recreated'
+    })
+    expect(test.request.mock.calls.map(([, method]) => method)).toEqual(['session.resume', 'session.create'])
+    expect(test.persisted).toEqual(mapping(OWL, 's-recreated'))
+  })
+
+  it('propagates an explicit resume authorization error without creating or replacing the mapping', async () => {
+    const test = harness(mapping(OWL))
+    test.request.mockResolvedValue({ error: '403: unauthorized for owl', status: 'error' })
+    const resolveLeaderSession = createLeaderSessionResolver(test.dependencies)
+
+    await expect(resolveLeaderSession(OWL)).rejects.toThrow('403: unauthorized for owl')
+
+    expect(test.request.mock.calls.map(([, method]) => method)).toEqual(['session.resume'])
+    expect(test.writePersistence).not.toHaveBeenCalled()
+    expect(test.persisted).toEqual(mapping(OWL))
+  })
+
   it('persists only the durable id after successful exact-owner resolution', async () => {
     const test = harness(mapping(OWL))
     const resolveLeaderSession = createLeaderSessionResolver(test.dependencies)

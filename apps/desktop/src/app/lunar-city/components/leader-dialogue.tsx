@@ -2,7 +2,7 @@ import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from 
 
 import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 
-import type { LeaderOwner, LeaderSession } from '../leader-sessions'
+import { type LeaderOwner, leaderOwnerKey, type LeaderSession } from '../leader-sessions'
 
 export type LeaderVoiceStatus = 'idle' | 'listening' | 'speaking' | 'thinking' | 'transcribing'
 
@@ -95,6 +95,22 @@ function visibleTranscript(messages: readonly ChatMessage[]) {
   })
 }
 
+function dialogueLifecycleKey(owner: LeaderOwner, session: LeaderSession): string {
+  return `${leaderOwnerKey(owner)}::${encodeURIComponent(session.storedId)}::${encodeURIComponent(session.runtimeId)}`
+}
+
+interface DialogueLocalState {
+  actionError: string | null
+  draft: string
+  lifecycleGeneration: number
+  lifecycleKey: string
+  submitting: boolean
+}
+
+function initialLocalState(lifecycleKey: string, lifecycleGeneration = 0): DialogueLocalState {
+  return { actionError: null, draft: '', lifecycleGeneration, lifecycleKey, submitting: false }
+}
+
 export function LeaderDialogue({
   cameraControls,
   leaderLabel,
@@ -109,18 +125,34 @@ export function LeaderDialogue({
   sessionState,
   voice
 }: LeaderDialogueProps) {
-  const [draft, setDraft] = useState('')
-  const [actionError, setActionError] = useState<string | null>(null)
-  const [submitting, setSubmitting] = useState(false)
+  const lifecycleKey = dialogueLifecycleKey(owner, session)
+  const [localState, setLocalState] = useState<DialogueLocalState>(() => initialLocalState(lifecycleKey))
+
+  if (localState.lifecycleKey !== lifecycleKey) {
+    setLocalState(initialLocalState(lifecycleKey, localState.lifecycleGeneration + 1))
+  }
 
   const returnFocusRef = useRef<HTMLElement | null>(
     typeof document !== 'undefined' && document.activeElement instanceof HTMLElement ? document.activeElement : null
   )
 
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+
+  const { actionError, draft, submitting } = localState
   const endVoice = voice.end
   const status = displayState(sessionAvailable, sessionError, sessionState, voice)
   const transcript = visibleTranscript(sessionState.messages)
+
+  const turnCanInterrupt =
+    sessionState.busy ||
+    sessionState.awaitingResponse ||
+    (voice.active && (voice.status === 'thinking' || voice.status === 'speaking'))
+
   const voiceActive = voice.active
+
+  useEffect(() => {
+    textareaRef.current?.focus()
+  }, [lifecycleKey])
 
   useEffect(() => {
     if (!voiceActive) {
@@ -130,11 +162,28 @@ export function LeaderDialogue({
     return () => {
       void Promise.resolve(endVoice()).catch(() => undefined)
     }
-  }, [endVoice, session.runtimeId, voiceActive])
+  }, [endVoice, lifecycleKey, voiceActive])
+
+  const updateIfCurrent = (
+    startedFor: string,
+    startedGeneration: number,
+    update: (current: DialogueLocalState) => DialogueLocalState
+  ) => {
+    setLocalState(current =>
+      current.lifecycleGeneration === startedGeneration && current.lifecycleKey === startedFor
+        ? update(current)
+        : current
+    )
+  }
 
   const runAction = (action: () => Promise<void> | void) => {
-    setActionError(null)
-    void Promise.resolve(action()).catch(error => setActionError(errorText(error)))
+    const startedFor = lifecycleKey
+    const startedGeneration = localState.lifecycleGeneration
+
+    updateIfCurrent(startedFor, startedGeneration, current => ({ ...current, actionError: null }))
+    void Promise.resolve(action()).catch(error => {
+      updateIfCurrent(startedFor, startedGeneration, current => ({ ...current, actionError: errorText(error) }))
+    })
   }
 
   const close = () => {
@@ -149,16 +198,22 @@ export function LeaderDialogue({
       return
     }
 
-    setActionError(null)
-    setSubmitting(true)
+    setLocalState(current =>
+      current.lifecycleKey === lifecycleKey ? { ...current, actionError: null, submitting: true } : current
+    )
+    const startedFor = lifecycleKey
+    const startedGeneration = localState.lifecycleGeneration
 
     try {
       await onSubmit(text, session, owner)
-      setDraft(current => (current.trim() === text ? '' : current))
+
+      updateIfCurrent(startedFor, startedGeneration, current =>
+        current.draft.trim() === text ? { ...current, draft: '' } : current
+      )
     } catch (error) {
-      setActionError(errorText(error))
+      updateIfCurrent(startedFor, startedGeneration, current => ({ ...current, actionError: errorText(error) }))
     } finally {
-      setSubmitting(false)
+      updateIfCurrent(startedFor, startedGeneration, current => ({ ...current, submitting: false }))
     }
   }
 
@@ -221,8 +276,15 @@ export function LeaderDialogue({
           <textarea
             aria-label={`Message ${leaderLabel}`}
             disabled={submitting}
-            onChange={event => setDraft(event.currentTarget.value)}
+            onChange={event => {
+              const nextDraft = event.currentTarget.value
+
+              setLocalState(current =>
+                current.lifecycleKey === lifecycleKey ? { ...current, draft: nextDraft } : current
+              )
+            }}
             onKeyDown={onComposerKeyDown}
+            ref={textareaRef}
             value={draft}
           />
         </label>
@@ -234,7 +296,11 @@ export function LeaderDialogue({
             Open Full Chat
           </button>
           {voice.available ? (
-            <button onClick={() => runAction(() => (voice.active ? voice.end() : voice.start()))} type="button">
+            <button
+              disabled={!voice.active && !sessionAvailable}
+              onClick={() => runAction(() => (voice.active ? voice.end() : voice.start()))}
+              type="button"
+            >
               {voice.active ? 'End voice' : 'Start voice'}
             </button>
           ) : (
@@ -247,7 +313,7 @@ export function LeaderDialogue({
               Finish speaking
             </button>
           ) : null}
-          {voice.active && (voice.status === 'thinking' || voice.status === 'speaking') ? (
+          {turnCanInterrupt ? (
             <button onClick={() => runAction(() => onInterrupt(session, owner))} type="button">
               Interrupt response
             </button>

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -17,6 +17,18 @@ import {
 
 const OWNER: LeaderOwner = { connectionId: 'a', profile: 'owl' }
 const SESSION: LeaderSession = { runtimeId: 'runtime-owl', storedId: 'stored-owl' }
+
+function deferred<T>() {
+  let reject!: (error: unknown) => void
+  let resolve!: (value: T) => void
+
+  const promise = new Promise<T>((done, fail) => {
+    reject = fail
+    resolve = done
+  })
+
+  return { promise, reject, resolve }
+}
 
 function message(
   id: string,
@@ -168,6 +180,42 @@ describe('LeaderDialogue', () => {
     expect(bridge.end).toHaveBeenCalledTimes(1)
   })
 
+  it('disables voice startup while the exact session is unavailable', () => {
+    const bridge = voice({ active: false, available: true })
+
+    render(<LeaderDialogue {...props({ sessionAvailable: false, voice: bridge })} />)
+
+    const startVoice = screen.getByRole('button', { name: 'Start voice' }) as HTMLButtonElement
+
+    expect(startVoice.disabled).toBe(true)
+    fireEvent.click(startVoice)
+    expect(bridge.start).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['busy', { busy: true }],
+    ['awaiting response', { awaitingResponse: true }]
+  ])(
+    'exposes exact-owner interruption for a standard text turn that is %s while voice is inactive',
+    async (_label, state) => {
+      const onInterrupt = vi.fn().mockResolvedValue(undefined)
+
+      render(
+        <LeaderDialogue
+          {...props({
+            onInterrupt,
+            sessionState: sessionState(state),
+            voice: voice({ active: false, status: 'idle' })
+          })}
+        />
+      )
+
+      fireEvent.click(screen.getByRole('button', { name: 'Interrupt response' }))
+
+      await waitFor(() => expect(onInterrupt).toHaveBeenCalledWith(SESSION, OWNER))
+    }
+  )
+
   it('ends the existing voice bridge when the leader session changes or the overlay unmounts', () => {
     const owlVoice = voice({ active: true, status: 'listening' })
     const foxVoice = voice({ active: true, status: 'listening' })
@@ -189,6 +237,88 @@ describe('LeaderDialogue', () => {
 
     view.unmount()
     expect(foxVoice.end).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['resolve', 'reject'] as const)(
+    'keys local state, voice cleanup, focus, and stale submit %s to the exact owner-session tuple',
+    async outcome => {
+      const submit = deferred<void>()
+      const onSubmit = vi.fn(() => submit.promise)
+      const sharedVoice = voice({ active: true, status: 'listening' })
+      const view = render(<LeaderDialogue {...props({ onSubmit, voice: sharedVoice })} />)
+      const owlTextbox = screen.getByRole('textbox', { name: 'Message Owl leader' }) as HTMLTextAreaElement
+
+      fireEvent.change(owlTextbox, { target: { value: 'Old owl draft' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+      expect(owlTextbox.disabled).toBe(true)
+
+      view.rerender(
+        <LeaderDialogue
+          {...props({
+            leaderLabel: 'Fox leader',
+            onSubmit,
+            owner: { connectionId: 'b', profile: 'fox' },
+            session: SESSION,
+            voice: sharedVoice
+          })}
+        />
+      )
+
+      const foxTextbox = screen.getByRole('textbox', { name: 'Message Fox leader' }) as HTMLTextAreaElement
+
+      expect(sharedVoice.end).toHaveBeenCalledTimes(1)
+      expect(foxTextbox.value).toBe('')
+      expect(foxTextbox.disabled).toBe(false)
+      expect(globalThis.document.activeElement).toBe(foxTextbox)
+
+      fireEvent.change(foxTextbox, { target: { value: 'New fox draft' } })
+
+      if (outcome === 'resolve') {
+        submit.resolve(undefined)
+      } else {
+        submit.reject(new Error('Old owner submit failed'))
+      }
+
+      await waitFor(() => expect(foxTextbox.value).toBe('New fox draft'))
+      expect(screen.queryByText('Old owner submit failed')).toBeNull()
+      expect(foxTextbox.disabled).toBe(false)
+
+      view.unmount()
+    }
+  )
+
+  it('invalidates stale submit completion after an owner-session tuple changes away and back', async () => {
+    const submit = deferred<void>()
+    const onSubmit = vi.fn(() => submit.promise)
+    const view = render(<LeaderDialogue {...props({ onSubmit })} />)
+    const originalTextbox = screen.getByRole('textbox', { name: 'Message Owl leader' })
+
+    fireEvent.change(originalTextbox, { target: { value: 'Original owl draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    view.rerender(
+      <LeaderDialogue
+        {...props({
+          leaderLabel: 'Fox leader',
+          onSubmit,
+          owner: { connectionId: 'b', profile: 'fox' },
+          session: SESSION
+        })}
+      />
+    )
+    view.rerender(<LeaderDialogue {...props({ onSubmit })} />)
+
+    const freshTextbox = screen.getByRole('textbox', { name: 'Message Owl leader' }) as HTMLTextAreaElement
+
+    fireEvent.change(freshTextbox, { target: { value: 'Fresh owl draft' } })
+
+    await act(async () => {
+      submit.reject(new Error('Superseded owl submit failed'))
+      await submit.promise.catch(() => undefined)
+    })
+
+    expect(freshTextbox.value).toBe('Fresh owl draft')
+    expect(screen.queryByText('Superseded owl submit failed')).toBeNull()
   })
 
   it('opens the same durable standard session on its exact owner route', () => {
@@ -273,12 +403,13 @@ describe('LeaderDialogue', () => {
     fireEvent.click(launcher)
 
     const textbox = screen.getByRole('textbox', { name: 'Message Owl leader' })
+    expect(globalThis.document.activeElement).toBe(textbox)
     fireEvent.change(textbox, { target: { value: 'Keyboard hello' } })
     fireEvent.keyDown(textbox, { key: 'Enter' })
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith('Keyboard hello', SESSION, OWNER))
 
     expect(bridge.start).not.toHaveBeenCalled()
-    fireEvent.keyDown(screen.getByRole('dialog', { name: 'Owl leader conversation' }), { key: 'Escape' })
+    fireEvent.keyDown(textbox, { key: 'Escape' })
 
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(globalThis.document.activeElement).toBe(launcher)

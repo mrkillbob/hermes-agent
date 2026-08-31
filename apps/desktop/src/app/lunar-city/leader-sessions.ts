@@ -190,12 +190,32 @@ async function resolveOnOwner(dependencies: LeaderSessionDependencies, rawOwner:
     return createOnOwner(dependencies, owner)
   }
 
-  const resumed = await dependencies.request(owner, 'session.resume', {
-    cols: 96,
-    profile: owner.profile,
-    session_id: storedId,
-    source: 'desktop'
-  })
+  let resumed: unknown
+
+  try {
+    resumed = await dependencies.request(owner, 'session.resume', {
+      cols: 96,
+      profile: owner.profile,
+      session_id: storedId,
+      source: 'desktop'
+    })
+  } catch (error) {
+    if (isMissingStoredSession(error)) {
+      return createOnOwner(dependencies, owner)
+    }
+
+    throw error
+  }
+
+  const resumeError = responseString(resumed, 'error')
+
+  if (resumeError) {
+    if (isMissingStoredSession(resumeError)) {
+      return createOnOwner(dependencies, owner)
+    }
+
+    throw new Error(resumeError)
+  }
 
   const runtimeId = responseString(resumed, 'session_id')
 
