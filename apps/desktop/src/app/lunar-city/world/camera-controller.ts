@@ -29,6 +29,7 @@ export interface CameraController {
   dispatch(intent: CameraIntent): void
   getState(): CameraControlState
   isTransitioning(): boolean
+  setReducedMotion(reduced: boolean): void
   update(elapsedMs: number): void
 }
 
@@ -146,6 +147,7 @@ export function createCameraController(
   let following = false
   let transition: FocusTransition | undefined
   let lastFollowAnchor: Vec3 | undefined
+  let reducedMotion = false
 
   const applyBounds = (): void => {
     camera.alpha = normalizeAngle(camera.alpha)
@@ -167,6 +169,14 @@ export function createCameraController(
             target: clampTarget(anchor, bounds)
           }
         : { ...from, target: clampTarget(anchor, bounds) }
+
+    if (reducedMotion) {
+      writePose(camera, to)
+      applyBounds()
+      transition = undefined
+
+      return
+    }
 
     transition = { elapsedMs: 0, from, to }
   }
@@ -240,6 +250,15 @@ export function createCameraController(
     },
     isTransitioning() {
       return transition !== undefined
+    },
+    setReducedMotion(reduced) {
+      reducedMotion = reduced
+
+      if (reduced && transition) {
+        writePose(camera, transition.to)
+        applyBounds()
+        transition = undefined
+      }
     },
     update(elapsedMs) {
       if (following && focusedEntityKey) {

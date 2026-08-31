@@ -1,6 +1,7 @@
 import type { DestinationId, EntityKey, LunarCitySnapshot, LunarEntity } from '../model'
 
 export interface EntityListProps {
+  cameraOrder?: readonly EntityKey[]
   snapshot: LunarCitySnapshot
   selectedEntityKey?: EntityKey
   onSelect(entity: LunarEntity): void
@@ -58,7 +59,7 @@ function titleCase(value: string): string {
   return value.replace(/[_-]+/gu, ' ').replace(/\b\w/gu, character => character.toUpperCase())
 }
 
-function identityLabel(entity: LunarEntity): string {
+export function entityFriendlyLabel(entity: LunarEntity): string {
   const identity = entity.identity
 
   if (identity.kind === 'profile') {
@@ -153,18 +154,24 @@ function districtRank(destination: string, districtOrder: readonly string[]): nu
  */
 export function orderedEntities(
   snapshot: LunarCitySnapshot,
-  districtOrder: readonly string[] = MANIFEST_DISTRICT_ORDER
+  districtOrder: readonly string[] = MANIFEST_DISTRICT_ORDER,
+  cameraOrder: readonly EntityKey[] = []
 ): readonly LunarEntity[] {
+  const cameraRanks = new Map(cameraOrder.map((key, index) => [key, index]))
+
   return [...snapshot.entities.values()].sort((left, right) => {
     const districtComparison =
       districtRank(left.destination, districtOrder) - districtRank(right.destination, districtOrder)
 
-    return districtComparison || left.key.localeCompare(right.key)
+    const cameraComparison =
+      (cameraRanks.get(left.key) ?? Number.MAX_SAFE_INTEGER) - (cameraRanks.get(right.key) ?? Number.MAX_SAFE_INTEGER)
+
+    return districtComparison || cameraComparison || left.key.localeCompare(right.key)
   })
 }
 
-export function EntityList({ districtOrder, onSelect, selectedEntityKey, snapshot }: EntityListProps) {
-  const entities = orderedEntities(snapshot, districtOrder)
+export function EntityList({ cameraOrder, districtOrder, onSelect, selectedEntityKey, snapshot }: EntityListProps) {
+  const entities = orderedEntities(snapshot, districtOrder, cameraOrder)
 
   return (
     <section aria-label="Lunar City entities" className="lunar-city-entity-list">
@@ -174,7 +181,7 @@ export function EntityList({ districtOrder, onSelect, selectedEntityKey, snapsho
       ) : (
         <ul>
           {entities.map(entity => {
-            const name = identityLabel(entity)
+            const name = entityFriendlyLabel(entity)
             const state = stateLabel(entity.animation)
             const destination = destinationLabel(entity.destination)
             const authority = AUTHORITY_LABELS[entity.authority]

@@ -89,6 +89,79 @@
   white-space: nowrap;
 }
 
+.lunar-city-accessible-operations {
+  position: absolute;
+  top: 20.5rem;
+  left: 1.25rem;
+  z-index: 35;
+  display: grid;
+  width: min(18rem, calc(100vw - 2rem));
+  max-height: min(22rem, calc(100vh - 23rem));
+  gap: 0.55rem;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--ui-stroke-tertiary) 88%, transparent);
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, var(--ui-bg-editor) 94%, transparent);
+  padding: 0.65rem;
+  box-shadow: 0 12px 26px rgb(0 0 0 / 28%);
+  color: var(--ui-text-primary);
+  font-size: 0.65rem;
+  pointer-events: auto;
+  backdrop-filter: blur(0.75rem);
+}
+
+.lunar-city-accessible-operations h2 {
+  margin-bottom: 0.3rem;
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.lunar-city-renderer-fallback {
+  border: 1px solid color-mix(in srgb, var(--ui-red) 42%, transparent);
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, var(--ui-red) 9%, transparent);
+  padding: 0.45rem;
+}
+
+.lunar-city-motion-status,
+.lunar-city-entity-details,
+.lunar-city-source-health li span {
+  color: var(--ui-text-secondary);
+}
+
+.lunar-city-quality-control,
+.lunar-city-source-health li,
+.lunar-city-entity-list li {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.lunar-city-quality-control select,
+.lunar-city-entity-list button {
+  border: 1px solid var(--ui-stroke-tertiary);
+  border-radius: 0.3rem;
+  background: var(--ui-bg-quaternary);
+  padding: 0.3rem 0.4rem;
+  color: var(--ui-text-primary);
+  text-align: left;
+}
+
+.lunar-city-quality-control select:focus-visible,
+.lunar-city-entity-list button:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 1px;
+}
+
+.lunar-city-source-health ul,
+.lunar-city-entity-list ul {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.lunar-city-entity-list button[aria-pressed='true'] {
+  border-color: var(--ui-accent);
+}
+
 .lunar-city-terrain {
   display: block;
   width: 100%;

@@ -116,6 +116,9 @@ export async function createLunarCityWorld(
       dispatchCamera(intent) {
         world?.dispatchCamera(intent)
       },
+      getEntityCameraOrder() {
+        return world?.getEntityCameraOrder() ?? []
+      },
       getCameraState() {
         return world?.getCameraState() ?? { focusedEntityKey: undefined, following: false }
       },
@@ -124,6 +127,9 @@ export async function createLunarCityWorld(
       },
       setQuality(tier) {
         world?.setQuality(tier)
+      },
+      setReducedMotion(reduced) {
+        world?.setReducedMotion(reduced)
       },
       destroy() {
         if (destroyed) {

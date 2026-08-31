@@ -68,11 +68,13 @@ export interface LunarCitySceneHandle {
   readonly leaderStateClips: ReadonlyMap<string, LeaderStateClipMap>
   applySnapshot(snapshot: LunarCitySnapshot): void
   dispatchCamera(intent: CameraIntent): void
+  getEntityCameraOrder(): readonly EntityKey[]
   getCameraState(): CameraControlState
   pick(clientX: number, clientY: number): CameraPickTarget | undefined
   setLeaderAnimation(leaderId: LeaderId, state: LeaderAnimationState): void
   setVisible(visible: boolean): void
   setQuality(tier: QualityTier): void
+  setReducedMotion(reduced: boolean): void
   render(): void
   dispose(): void
 }
@@ -1377,6 +1379,8 @@ export async function createWorldScene(
     const destinationByEntity = new Map<EntityKey, string>()
     const authoritativeOriginByEntity = new Map<EntityKey, Vec3>()
     const activeNavigation = new Set<EntityKey>()
+    let currentEntityKeys: readonly EntityKey[] = []
+    let reducedMotion = false
 
     const applyOcclusion = (): void => {
       const focusedEntityKey = cameraController.getState().focusedEntityKey
@@ -1501,6 +1505,8 @@ export async function createWorldScene(
             )
           )
 
+          currentEntityKeys = [...dynamicEntities.keys()]
+
           for (const key of destinationByEntity.keys()) {
             if (!dynamicEntities.has(key)) {
               navigationController.cancel(key)
@@ -1568,6 +1574,24 @@ export async function createWorldScene(
       getCameraState() {
         return cameraController.getState()
       },
+      getEntityCameraOrder() {
+        const position = cameraPosition(camera)
+
+        return [...currentEntityKeys].sort((left, right) => {
+          const leftPosition = entityRegistryController.entity(left)?.position
+          const rightPosition = entityRegistryController.entity(right)?.position
+
+          const leftDistance = leftPosition
+            ? Math.hypot(leftPosition.x - position.x, leftPosition.y - position.y, leftPosition.z - position.z)
+            : Number.POSITIVE_INFINITY
+
+          const rightDistance = rightPosition
+            ? Math.hypot(rightPosition.x - position.x, rightPosition.y - position.y, rightPosition.z - position.z)
+            : Number.POSITIVE_INFINITY
+
+          return leftDistance - rightDistance || left.localeCompare(right)
+        })
+      },
       setLeaderAnimation(leaderId, state) {
         if (disposed) {
           return
@@ -1601,7 +1625,7 @@ export async function createWorldScene(
         }
 
         if (active !== next || next.isPlaying !== true) {
-          next.start?.(CONTINUOUS_LEADER_STATES.has(state))
+          next.start?.(!reducedMotion && CONTINUOUS_LEADER_STATES.has(state))
         }
 
         schedulerController.requestRender()
@@ -1620,6 +1644,31 @@ export async function createWorldScene(
       setQuality(tier) {
         quality.setTier(tier)
         applyRuntimeQuality()
+        schedulerController.requestRender()
+      },
+      setReducedMotion(reduced) {
+        if (disposed || reducedMotion === reduced) {
+          return
+        }
+
+        reducedMotion = reduced
+        cameraController.setReducedMotion(reduced)
+        navigationController.setReducedMotion(reduced)
+
+        if (reduced) {
+          for (const [leaderId, group] of [...activeLeaderAnimations]) {
+            group.stop?.()
+            activeLeaderAnimations.delete(leaderId)
+          }
+
+          for (const key of [...activeNavigation]) {
+            activeNavigation.delete(key)
+            entityRegistryController.setMoving(key, false)
+          }
+
+          entityRegistryController.syncMotion()
+        }
+
         schedulerController.requestRender()
       },
       setVisible(visible) {

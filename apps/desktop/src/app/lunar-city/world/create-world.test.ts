@@ -494,6 +494,52 @@ describe('createLunarCityWorld', () => {
     handle.destroy()
   })
 
+  it('orders exact live entity keys nearest-first from the current camera position', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    const near = 'session:near' as EntityKey
+    const far = 'session:far' as EntityKey
+
+    const snapshot: LunarCitySnapshot = {
+      entities: new Map([
+        [
+          far,
+          {
+            animation: 'idle',
+            authority: 'authoritative',
+            destination: 'unknown',
+            identity: { connectionId: 'local', kind: 'session', profile: 'default', sessionId: 'far' },
+            key: far,
+            observedAt: 1,
+            position: { x: 50, y: 0, z: 0 }
+          }
+        ],
+        [
+          near,
+          {
+            animation: 'idle',
+            authority: 'authoritative',
+            destination: 'unknown',
+            identity: { connectionId: 'local', kind: 'session', profile: 'default', sessionId: 'near' },
+            key: near,
+            observedAt: 1,
+            position: { x: 0, y: 0, z: 0 }
+          }
+        ]
+      ]),
+      observedAt: 1,
+      revision: 1,
+      sources: []
+    }
+
+    handle.applySnapshot(snapshot)
+    expect(handle.getEntityCameraOrder()).toEqual([near, far])
+
+    handle.dispatchCamera({ deltaX: 50, deltaZ: 0, kind: 'pan' })
+    expect(handle.getEntityCameraOrder()).toEqual([far, near])
+    handle.destroy()
+  })
+
   it('retains each Kanban project compound at its declared slot without rebuilding the world', async () => {
     const runtime = fakeRuntime()
     const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
@@ -550,6 +596,23 @@ describe('createLunarCityWorld', () => {
     expect(foxTalking.start).toHaveBeenCalledWith(true)
     expect(owlThinking.start).not.toHaveBeenCalled()
     expect(runtime.scenes).toHaveLength(1)
+    handle.destroy()
+  })
+
+  it('stops looping leader clips and snaps worker navigation and camera transitions under reduced motion', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    const thinking = runtime.leaderAnimationGroups.get('leader:fox:thinking')!
+
+    handle.applySnapshot(workerSnapshot())
+    handle.setLeaderAnimation('fox', 'thinking')
+    expect(thinking.start).toHaveBeenLastCalledWith(true)
+
+    handle.setReducedMotion(true)
+    expect(thinking.stop).toHaveBeenCalledOnce()
+
+    handle.setLeaderAnimation('fox', 'thinking')
+    expect(thinking.start).toHaveBeenLastCalledWith(false)
     handle.destroy()
   })
 

@@ -297,10 +297,12 @@ export interface LunarCityWorldHandle {
   readonly leaderStateClips: ReadonlyMap<string, LeaderStateClipMap>
   applySnapshot(snapshot: LunarCitySnapshot): void
   dispatchCamera(intent: CameraIntent): void
+  getEntityCameraOrder(): readonly EntityKey[]
   getCameraState(): CameraControlState
   /** Plays only a state clip declared by the selected leader's GLB metadata. */
   setLeaderAnimation(leaderId: LeaderId, state: LeaderAnimationState): void
   setQuality(tier: QualityTier): void
+  setReducedMotion(reduced: boolean): void
   destroy(): void
 }
 

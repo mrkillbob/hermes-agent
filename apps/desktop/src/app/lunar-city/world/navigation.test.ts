@@ -29,11 +29,13 @@ const destinations = { review: { x: 9, y: 0, z: 2 } }
 describe('NavigationController', () => {
   it('computes from the entity’s actual position, uses the declared walk clip, and advances only on ticks', () => {
     const navQuery = query()
+
     const controller = createNavigationController({
       destinations,
       query: navQuery,
       workerClips: new Set(['idle', 'walk'])
     })
+
     const entity = worker()
 
     expect(controller.move(entity, 'review')).toBe(true)
@@ -49,11 +51,13 @@ describe('NavigationController', () => {
 
   it('does not recompute an unchanged origin, destination, and walkability revision', () => {
     const navQuery = query()
+
     const controller = createNavigationController({
       destinations,
       query: navQuery,
       workerClips: new Set(['idle', 'walk'])
     })
+
     const entity = worker()
 
     controller.move(entity, 'review')
@@ -78,12 +82,14 @@ describe('NavigationController', () => {
     ]
   ])('fails closed for %s and never falls back to a straight line', (_name, targetDestinations, navQuery) => {
     const diagnostic = vi.fn()
+
     const controller = createNavigationController({
       destinations: targetDestinations,
       query: navQuery,
       workerClips: new Set(['idle', 'walk']),
       diagnostic
     })
+
     const entity = worker()
 
     expect(controller.move(entity, 'review')).toBe(false)
@@ -96,6 +102,7 @@ describe('NavigationController', () => {
 
   it('uses the manifest static pose and exact destination under reduced motion', () => {
     const navQuery = query()
+
     const controller = createNavigationController({
       destinations,
       query: navQuery,
@@ -103,6 +110,7 @@ describe('NavigationController', () => {
       staticPose: 'rest',
       workerClips: new Set(['idle', 'walk', 'rest'])
     })
+
     const entity = worker()
 
     expect(controller.move(entity, 'review')).toBe(true)
@@ -111,8 +119,32 @@ describe('NavigationController', () => {
     expect(navQuery.computePath).not.toHaveBeenCalled()
   })
 
+  it('snaps every active route to its destination when reduced motion becomes active', () => {
+    const navQuery = query()
+
+    const controller = createNavigationController({
+      destinations,
+      query: navQuery,
+      staticPose: 'idle',
+      workerClips: new Set(['idle', 'walk'])
+    })
+
+    const entity = worker()
+
+    controller.move(entity, 'review')
+    controller.tick(250)
+    expect(entity.position.x).toBeGreaterThan(1)
+    expect(entity.position.x).toBeLessThan(9)
+
+    controller.setReducedMotion(true)
+    expect(entity.position).toEqual(destinations.review)
+    expect(entity.animation).toBe('idle')
+    expect(controller.isMoving(workerKey)).toBe(false)
+  })
+
   it('disposes its navigation query once and ignores later work', () => {
     const navQuery = query()
+
     const controller = createNavigationController({
       destinations,
       query: navQuery,
@@ -131,12 +163,14 @@ describe('NavigationController', () => {
       { x: 4, y: 0, z: 2 },
       { x: 9, y: 0, z: 2 }
     ])
+
     const controller = createNavigationController({
       destinations,
       query: navQuery,
       speedUnitsPerSecond: 100,
       workerClips: new Set(['idle', 'walk', 'work', 'review'])
     })
+
     const entity = worker()
 
     expect(controller.move(entity, 'review', 'work')).toBe(true)
@@ -154,11 +188,13 @@ describe('NavigationController', () => {
 
   it('cancels a removed entity path without changing its presentation after reconciliation releases it', () => {
     const navQuery = query()
+
     const controller = createNavigationController({
       destinations,
       query: navQuery,
       workerClips: new Set(['idle', 'walk'])
     })
+
     const entity = worker()
 
     controller.move(entity, 'review')
@@ -173,6 +209,7 @@ describe('NavigationController', () => {
 describe('Recast NavigationQuery adapter', () => {
   it('reads an actual Recast path and disposes the underlying navmesh once', () => {
     const destroy = vi.fn()
+
     const navMesh = {
       computePath: vi.fn(() => ({
         getPoint: (index: number) =>
@@ -184,6 +221,7 @@ describe('Recast NavigationQuery adapter', () => {
       })),
       destroy
     }
+
     const query = createRecastNavigationQuery(navMesh, (x, y, z) => ({ x, y, z }))
 
     expect(query.computePath({ x: 1, y: 0, z: 2 }, { x: 9, y: 0, z: 2 })).toEqual([
@@ -200,11 +238,13 @@ describe('Recast NavigationQuery adapter', () => {
     const end = { destroy: vi.fn(), x: 9, y: 0, z: 2 }
     const validPoint = { destroy: vi.fn(), x: 1, y: 0, z: 2 }
     const invalidPoint = { destroy: vi.fn(), x: Number.NaN, y: 0, z: 2 }
+
     const path = {
       destroy: vi.fn(),
       getPoint: (index: number) => [validPoint, invalidPoint][index],
       getPointCount: () => 2
     }
+
     const query = createRecastNavigationQuery({ computePath: vi.fn(() => path) }, (x, y, z) => (x === 1 ? start : end))
 
     expect(query.computePath({ x: 1, y: 0, z: 2 }, { x: 9, y: 0, z: 2 })).toBeUndefined()
@@ -218,6 +258,7 @@ describe('Recast NavigationQuery adapter', () => {
 
   it('releases the first owned vector when construction of the second vector fails', () => {
     const start = { destroy: vi.fn(), x: 1, y: 0, z: 2 }
+
     const query = createRecastNavigationQuery({ computePath: vi.fn() }, x => {
       if (x === 9) {
         throw new Error('out of WASM memory')

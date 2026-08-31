@@ -2,6 +2,7 @@ import type { CameraControlState, CameraIntent } from '../model'
 
 export interface CameraControlsProps {
   dispatch(intent: CameraIntent): void
+  focusedEntityLabel?: string
   state: CameraControlState
 }
 
@@ -23,19 +24,21 @@ const CAMERA_CONTROLS: readonly Control[] = [
   { label: 'Zoom Out', intent: { kind: 'zoom', delta: 6 } }
 ]
 
-function cameraStatus(state: CameraControlState): string {
+function cameraStatus(state: CameraControlState, focusedEntityLabel?: string): string {
+  const entity = focusedEntityLabel?.trim() || 'selected entity'
+
   if (state.following && state.focusedEntityKey) {
-    return `Following ${state.focusedEntityKey}`
+    return `Following ${entity}`
   }
 
   if (state.focusedEntityKey) {
-    return `Focused on ${state.focusedEntityKey}`
+    return `Focused on ${entity}`
   }
 
   return 'City overview'
 }
 
-export function CameraControls({ dispatch, state }: CameraControlsProps) {
+export function CameraControls({ dispatch, focusedEntityLabel, state }: CameraControlsProps) {
   return (
     <section aria-label="Lunar City camera controls" className="lunar-city-camera-controls">
       <div className="grid grid-cols-2 gap-1">
@@ -59,8 +62,8 @@ export function CameraControls({ dispatch, state }: CameraControlsProps) {
           Return to City
         </button>
       </div>
-      <output aria-atomic="true" aria-live="polite" role="status">
-        {cameraStatus(state)}
+      <output aria-atomic="true" aria-label="Camera position" aria-live="polite" role="status">
+        {cameraStatus(state, focusedEntityLabel)}
       </output>
     </section>
   )

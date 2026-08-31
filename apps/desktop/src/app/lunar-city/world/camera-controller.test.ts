@@ -110,6 +110,29 @@ describe('createCameraController', () => {
     expect(controller.getState()).toEqual({ focusedEntityKey: workerKey, following: true })
   })
 
+  it('finishes an active focus immediately and snaps later focus intents when reduced motion is enabled', () => {
+    const workerKey = key('session:local:worker:session-1')
+    const camera = fakeCamera()
+
+    const controller = createCameraController(camera, overview, bounds, {
+      focusAnchors: new Map([[workerKey, () => ({ x: 8, y: 0, z: 4 })]]),
+      transitionMs: 1_000
+    })
+
+    controller.dispatch({ kind: 'focus', entityKey: workerKey, follow: false })
+    controller.update(100)
+    expect(camera.target.x).toBeLessThan(8)
+
+    controller.setReducedMotion(true)
+    expect(camera.target).toMatchObject({ x: 8, y: 0, z: 4 })
+    expect(controller.isTransitioning()).toBe(false)
+
+    camera.target.set?.(0, 5, 0)
+    controller.dispatch({ kind: 'focus', entityKey: workerKey, follow: false })
+    expect(camera.target).toMatchObject({ x: 8, y: 0, z: 4 })
+    expect(controller.isTransitioning()).toBe(false)
+  })
+
   it('uses the manifest follow offset while keeping the followed anchor as the camera target', () => {
     const workerKey = key('session:local:worker:session-1')
     const camera = fakeCamera()

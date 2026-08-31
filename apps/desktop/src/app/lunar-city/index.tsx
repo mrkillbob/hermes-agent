@@ -33,7 +33,11 @@ import { startLunarCityReconciler } from './adapters/reconciler'
 import { LunarCityCommandRuntime } from './command-runtime'
 import { CameraControls } from './components/camera-controls'
 import type { InspectorSessionTarget } from './components/entity-inspector'
+import { entityFriendlyLabel, EntityList } from './components/entity-list'
 import { LeaderDialogueRuntime } from './components/leader-dialogue-runtime'
+import { QualityControl, type RendererStatus } from './components/quality-control'
+import { reducedMotionPresentation } from './components/reduced-motion'
+import { SourceHealthPanel } from './components/source-health'
 import {
   leaderModelFocusKeyForOwner,
   leaderModelIdForOwner,
@@ -49,6 +53,7 @@ import type {
   LunarCityIntent,
   LunarCityWorldHandle,
   LunarEntity,
+  QualityTier,
   WorldManifestV2
 } from './model'
 import { $lunarCitySnapshot } from './store'
@@ -498,6 +503,56 @@ function sameProfileLeaderList(left: readonly LunarEntity[], right: readonly Lun
   return left.length === right.length && left.every((entity, index) => entity.key === right[index]?.key)
 }
 
+interface LunarCityOperationsProps {
+  getCameraOrder(): readonly EntityKey[]
+  onQualityChange(tier: QualityTier): void
+  onSelect(entity: LunarEntity): void
+  qualityTier: QualityTier
+  reducedMotion: boolean
+  rendererStatus: RendererStatus
+  selectedEntityKey?: EntityKey
+}
+
+/**
+ * The text-first operational surface owns its narrow store subscription so
+ * high-frequency world publications never re-render the route or canvas.
+ */
+function LunarCityOperations({
+  getCameraOrder,
+  onQualityChange,
+  onSelect,
+  qualityTier,
+  reducedMotion,
+  rendererStatus,
+  selectedEntityKey
+}: LunarCityOperationsProps) {
+  const snapshot = useStore($lunarCitySnapshot)
+  const motion = reducedMotionPresentation(reducedMotion)
+
+  return (
+    <aside aria-label="Lunar City accessible operations" className="lunar-city-accessible-operations">
+      {rendererStatus === 'unavailable' ? (
+        <p className="lunar-city-renderer-fallback" role="status">
+          3D world renderer unavailable. Live Hermes operations remain available below.
+        </p>
+      ) : null}
+      <p className="lunar-city-motion-status">
+        {motion.snapToDestination
+          ? 'Reduced motion: destinations snap into place; camera easing and looping clips are stopped.'
+          : 'Motion: camera easing and worker travel are enabled.'}
+      </p>
+      <QualityControl onTierChange={onQualityChange} rendererStatus={rendererStatus} tier={qualityTier} />
+      <SourceHealthPanel sources={snapshot.sources} />
+      <EntityList
+        cameraOrder={getCameraOrder()}
+        onSelect={onSelect}
+        selectedEntityKey={selectedEntityKey}
+        snapshot={snapshot}
+      />
+    </aside>
+  )
+}
+
 export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGraph }: LunarCityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const activeGatewayProfile = useStore($activeGatewayProfile)
@@ -508,6 +563,16 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   const [tick, setTick] = useState(0)
   const [cameraState, setCameraState] = useState<CameraControlState>({ focusedEntityKey: undefined, following: false })
   const [selectedEntityKey, setSelectedEntityKey] = useState<EntityKey | undefined>(undefined)
+  const [focusedEntityLabel, setFocusedEntityLabel] = useState<string | undefined>(undefined)
+  const [qualityTier, setQualityTier] = useState<QualityTier>('efficient')
+  const [rendererStatus, setRendererStatus] = useState<RendererStatus>('degraded')
+  const [operationsReady, setOperationsReady] = useState(false)
+
+  const [reducedMotion, setReducedMotion] = useState(
+    () =>
+      typeof globalThis.matchMedia === 'function' && globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches
+  )
+
   const [worldManifest, setWorldManifest] = useState<WorldManifestV2 | undefined>(undefined)
 
   const [profileLeaderEntities, setProfileLeaderEntities] = useState(() =>
@@ -518,6 +583,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   const [leaderSession, setLeaderSession] = useState<LeaderSession | undefined>(undefined)
   const [leaderSessionError, setLeaderSessionError] = useState<string | undefined>(undefined)
   const worldHandleRef = useRef<LunarCityWorldHandle | undefined>(undefined)
+  const qualityTierRef = useRef(qualityTier)
   const profileLeaderEntitiesRef = useRef(profileLeaderEntities)
   const stopReconcilerRef = useRef<(() => void) | undefined>(undefined)
 
@@ -537,8 +603,47 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
     const world = worldHandleRef.current
 
     world?.dispatchCamera(intent)
-    setCameraState(world?.getCameraState() ?? { focusedEntityKey: undefined, following: false })
+    const state = world?.getCameraState() ?? { focusedEntityKey: undefined, following: false }
+    setCameraState(state)
+
+    if (!state.focusedEntityKey) {
+      setFocusedEntityLabel(undefined)
+    } else {
+      const entity = $lunarCitySnapshot.get().entities.get(state.focusedEntityKey)
+      setFocusedEntityLabel(entity ? entityFriendlyLabel(entity) : 'selected entity')
+    }
   }
+
+  const selectEntity = (entity: LunarEntity): void => {
+    setSelectedEntityKey(entity.key)
+    dispatchCamera({ kind: 'focus', entityKey: entity.key, follow: false })
+    setFocusedEntityLabel(entityFriendlyLabel(entity))
+  }
+
+  const changeQuality = (tier: QualityTier): void => {
+    qualityTierRef.current = tier
+    setQualityTier(tier)
+    worldHandleRef.current?.setQuality(tier)
+  }
+
+  useEffect(() => {
+    if (typeof globalThis.matchMedia !== 'function') {
+      return
+    }
+
+    const query = globalThis.matchMedia('(prefers-reduced-motion: reduce)')
+
+    const applyPreference = (matches: boolean): void => {
+      setReducedMotion(matches)
+      worldHandleRef.current?.setReducedMotion(matches)
+    }
+
+    const onChange = (event: MediaQueryListEvent): void => applyPreference(event.matches)
+    applyPreference(query.matches)
+    query.addEventListener?.('change', onChange)
+
+    return () => query.removeEventListener?.('change', onChange)
+  }, [])
 
   const selectedLeaderKey = selectedLeaderOwner ? leaderOwnerKey(selectedLeaderOwner) : undefined
 
@@ -576,6 +681,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
     setLeaderSession(undefined)
     setLeaderSessionError(undefined)
     dispatchCamera({ kind: 'focus', entityKey: leaderModelFocusKeyForOwner(owner), follow: false })
+    setFocusedEntityLabel(`${owner.profile} leader`)
   }
 
   // Profile entities change far less often than workers. Keep this compact
@@ -702,21 +808,57 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
 
     const abortController = new AbortController()
     let disposed = false
+    let generation = 0
+    let manifest: WorldManifestV2 | undefined
+    let restorationAttempted = false
     let world: LunarCityWorldHandle | undefined
     let stopSnapshot: (() => void) | undefined
 
     const handleWorldIntent = (intent: LunarCityIntent): void => {
       if (intent.kind === 'camera-state' && intent.state) {
         setCameraState(intent.state)
+
+        const focused = intent.state.focusedEntityKey
+          ? $lunarCitySnapshot.get().entities.get(intent.state.focusedEntityKey)
+          : undefined
+
+        setFocusedEntityLabel(
+          intent.state.focusedEntityKey ? (focused ? entityFriendlyLabel(focused) : 'selected entity') : undefined
+        )
       } else if (intent.kind === 'select-focus') {
         setSelectedEntityKey(intent.entityKey)
+        const entity = $lunarCitySnapshot.get().entities.get(intent.entityKey)
+        setFocusedEntityLabel(entity ? entityFriendlyLabel(entity) : 'selected entity')
       } else if (intent.kind === 'clear-selection') {
         setSelectedEntityKey(undefined)
+        setFocusedEntityLabel(undefined)
       }
     }
-    void (async () => {
+
+    const retireWorld = (): void => {
+      stopSnapshot?.()
+      stopSnapshot = undefined
+      const retired = world
+      world = undefined
+
+      if (worldHandleRef.current === retired) {
+        worldHandleRef.current = undefined
+      }
+
+      retired?.destroy()
+    }
+
+    const createWorldGeneration = async (): Promise<void> => {
+      const ownGeneration = ++generation
+
       try {
-        const manifest = await loadWorldManifest(LUNAR_CITY_MANIFEST_URL, abortController.signal)
+        manifest ??= await loadWorldManifest(LUNAR_CITY_MANIFEST_URL, abortController.signal)
+
+        if (disposed || ownGeneration !== generation) {
+          return
+        }
+
+        setWorldManifest(manifest)
 
         const created = await createLunarCityWorld(
           canvas,
@@ -726,37 +868,73 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
           LUNAR_CITY_MANIFEST_URL
         )
 
-        if (disposed) {
+        if (disposed || ownGeneration !== generation) {
           created.destroy()
         } else {
           world = created
           worldHandleRef.current = created
+          created.setQuality(qualityTierRef.current)
+          created.setReducedMotion(
+            typeof globalThis.matchMedia === 'function' &&
+              globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches
+          )
           created.applySnapshot($lunarCitySnapshot.get())
           stopSnapshot = $lunarCitySnapshot.listen(snapshot => {
-            if (!disposed && worldHandleRef.current === created) {
+            if (!disposed && ownGeneration === generation && worldHandleRef.current === created) {
               created.applySnapshot(snapshot)
             }
           })
-          setWorldManifest(manifest)
           canvas.dataset.worldStatus = 'ready'
+          setRendererStatus('ready')
+          setOperationsReady(true)
         }
       } catch (error) {
-        if (!disposed && !(error instanceof DOMException && error.name === 'AbortError')) {
+        if (
+          !disposed &&
+          ownGeneration === generation &&
+          !(error instanceof DOMException && error.name === 'AbortError')
+        ) {
           canvas.dataset.worldStatus = 'unavailable'
+          setRendererStatus('unavailable')
+          setOperationsReady(true)
         }
       }
-    })()
+    }
+
+    const onContextLost = (event: Event): void => {
+      event.preventDefault()
+
+      if (disposed) {
+        return
+      }
+
+      canvas.dataset.worldStatus = 'restoring'
+      setRendererStatus('degraded')
+      retireWorld()
+
+      if (restorationAttempted) {
+        generation += 1
+        canvas.dataset.worldStatus = 'unavailable'
+        setRendererStatus('unavailable')
+
+        return
+      }
+
+      restorationAttempted = true
+      void createWorldGeneration()
+    }
+
+    canvas.addEventListener('webglcontextlost', onContextLost)
+    void createWorldGeneration()
 
     return () => {
       disposed = true
+      generation += 1
       abortController.abort()
+      canvas.removeEventListener('webglcontextlost', onContextLost)
       disposeLunarCityRuntime(stopReconcilerRef.current, stopSnapshot, world)
       stopSnapshot = undefined
-
-      if (worldHandleRef.current === world) {
-        worldHandleRef.current = undefined
-      }
-
+      worldHandleRef.current = undefined
       world = undefined
     }
   }, [])
@@ -942,8 +1120,24 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
             <LunarCityCommandRuntime onOpenSession={onOpenEntitySession} selectedEntityKey={selectedEntityKey} />
           ) : null}
 
+          {operationsReady ? (
+            <LunarCityOperations
+              getCameraOrder={() => {
+                const world = worldHandleRef.current
+
+                return typeof world?.getEntityCameraOrder === 'function' ? world.getEntityCameraOrder() : []
+              }}
+              onQualityChange={changeQuality}
+              onSelect={selectEntity}
+              qualityTier={qualityTier}
+              reducedMotion={reducedMotion}
+              rendererStatus={rendererStatus}
+              selectedEntityKey={selectedEntityKey}
+            />
+          ) : null}
+
           <div className="pointer-events-auto absolute left-3 top-20 flex items-center gap-1.5 sm:left-5 sm:top-24">
-            <CameraControls dispatch={dispatchCamera} state={cameraState} />
+            <CameraControls dispatch={dispatchCamera} focusedEntityLabel={focusedEntityLabel} state={cameraState} />
           </div>
 
           {profileLeaderEntities.length > 0 ? (

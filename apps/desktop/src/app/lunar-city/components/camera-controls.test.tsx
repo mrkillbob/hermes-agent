@@ -54,19 +54,25 @@ describe('CameraControls', () => {
 
   it('reports focus and follow changes through one polite live region, not per animation frame', () => {
     const { rerender } = render(
-      <CameraControls dispatch={vi.fn()} state={{ focusedEntityKey: key('session:local:worker:1'), following: true }} />
+      <CameraControls
+        dispatch={vi.fn()}
+        focusedEntityLabel="Pip, research worker"
+        state={{ focusedEntityKey: key('session:local:worker:1'), following: true }}
+      />
     )
 
-    const status = screen.getByRole('status')
+    const status = screen.getByRole('status', { name: 'Camera position' })
     expect(status.getAttribute('aria-live')).toBe('polite')
-    expect(status.textContent).toContain('Following session:local:worker:1')
+    expect(status.textContent).toBe('Following Pip, research worker')
+    expect(status.textContent).not.toContain('session:local:worker:1')
 
     rerender(
       <CameraControls
         dispatch={vi.fn()}
+        focusedEntityLabel="Pip, research worker"
         state={{ focusedEntityKey: key('session:local:worker:1'), following: false }}
       />
     )
-    expect(status.textContent).toContain('Focused on session:local:worker:1')
+    expect(status.textContent).toBe('Focused on Pip, research worker')
   })
 })

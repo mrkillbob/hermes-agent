@@ -161,6 +161,7 @@ export function createNavigationController(options: NavigationControllerOptions)
   const speedUnitsPerSecond = options.speedUnitsPerSecond ?? 4
   let walkabilityRevision = 0
   let disposed = false
+  let reducedMotion = options.reducedMotion ?? false
 
   const diagnoseOnce = (code: string): void => {
     if (!diagnostics.has(code)) {
@@ -205,7 +206,7 @@ export function createNavigationController(options: NavigationControllerOptions)
         return failClosed(entity, `navigation destination missing: ${destination}`)
       }
 
-      if (options.reducedMotion) {
+      if (reducedMotion) {
         active.delete(entity.key)
         entity.position = copied(target)
         entity.animation = options.workerClips.has(staticPose) ? staticPose : 'unavailable'
@@ -255,6 +256,28 @@ export function createNavigationController(options: NavigationControllerOptions)
         for (const entry of [...active.values()]) {
           this.move(entry.entity, entry.destination, entry.arrivalAnimation)
         }
+      }
+    },
+    setReducedMotion(reduced: boolean): void {
+      if (disposed || reducedMotion === reduced) {
+        return
+      }
+
+      reducedMotion = reduced
+
+      if (!reduced) {
+        return
+      }
+
+      for (const entry of [...active.values()]) {
+        const target = options.destinations[entry.destination]
+
+        if (target) {
+          entry.entity.position = copied(target)
+          entry.entity.animation = options.workerClips.has(staticPose) ? staticPose : 'unavailable'
+        }
+
+        active.delete(entry.entity.key)
       }
     },
     tick(elapsedMs: number): boolean {

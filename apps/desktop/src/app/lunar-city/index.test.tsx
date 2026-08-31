@@ -27,6 +27,8 @@ const {
   loadManifest,
   requestForSessionProfile,
   resolveLeaderSession,
+  setQuality,
+  setReducedMotion,
   startReconciler,
   stopReconciler,
   worldHandle,
@@ -36,15 +38,19 @@ const {
   const destroy = vi.fn()
   const dispatch = vi.fn()
   const readCameraState = vi.fn(() => ({ focusedEntityKey: undefined, following: false }))
+  const readEntityCameraOrder = vi.fn(() => [] as never[])
   const setLeaderAnimation = vi.fn()
   const setQuality = vi.fn()
+  const setReducedMotion = vi.fn()
   type TestWorldHandle = {
     applySnapshot: typeof apply
     destroy: typeof destroy
     dispatchCamera: typeof dispatch
     getCameraState: typeof readCameraState
+    getEntityCameraOrder: typeof readEntityCameraOrder
     setLeaderAnimation: typeof setLeaderAnimation
     setQuality: typeof setQuality
+    setReducedMotion: typeof setReducedMotion
   }
 
   const handle: TestWorldHandle = {
@@ -52,8 +58,10 @@ const {
     destroy,
     dispatchCamera: dispatch,
     getCameraState: readCameraState,
+    getEntityCameraOrder: readEntityCameraOrder,
     setLeaderAnimation,
-    setQuality
+    setQuality,
+    setReducedMotion
   }
 
   let resolveWorld!: (handle: TestWorldHandle) => void
@@ -81,11 +89,14 @@ const {
     destroyWorld: destroy,
     emitWorldIntent: (intent: LunarCityIntent) => worldIntent(intent),
     getCameraState: readCameraState,
+    getEntityCameraOrder: readEntityCameraOrder,
     kanbanSource: source,
     leaderAnimation: setLeaderAnimation,
     loadManifest: vi.fn(async () => ({ models: [] })),
     requestForSessionProfile: vi.fn(async () => ({ status: 'queued' })),
     resolveLeaderSession: vi.fn(async () => ({ runtimeId: 'runtime-owl', storedId: 'stored-owl' })),
+    setQuality,
+    setReducedMotion,
     startReconciler: vi.fn(() => stopLive),
     stopReconciler: stopLive,
     worldHandle: handle,
@@ -110,7 +121,62 @@ afterEach(() => {
   cleanup()
   $lunarCitySnapshot.set(createLunarCitySnapshot())
   vi.clearAllMocks()
+  vi.unstubAllGlobals()
 })
+
+function publishAccessibleEntities(): { leaderKey: never; workerKey: never } {
+  const workerIdentity = {
+    connectionId: 'source-a',
+    kind: 'session' as const,
+    profile: 'research',
+    sessionId: 'pip'
+  }
+
+  const leaderIdentity = { connectionId: 'source-a', kind: 'profile' as const, profile: 'fox-scientist' }
+  const workerKey = entityKey(workerIdentity)
+  const leaderKey = entityKey(leaderIdentity)
+
+  $lunarCitySnapshot.set({
+    entities: new Map([
+      [
+        workerKey,
+        {
+          animation: 'work' as const,
+          authority: 'authoritative' as const,
+          destination: 'lab' as const,
+          identity: workerIdentity,
+          key: workerKey,
+          observedAt: 42
+        }
+      ],
+      [
+        leaderKey,
+        {
+          animation: 'rest' as const,
+          authority: 'authoritative' as const,
+          destination: 'lab' as const,
+          identity: leaderIdentity,
+          key: leaderKey,
+          observedAt: 42,
+          presentation: {
+            configuredTitle: 'Fox Scientist',
+            groups: [{ id: 'research', name: 'Research Lab' }],
+            metadata: { observedAt: 42, source: 'profiles:source-a', state: 'fresh' as const },
+            placement: { lodHint: 0, overflow: false, primaryGroupId: 'research', slot: 0 }
+          }
+        }
+      ]
+    ]),
+    observedAt: 42,
+    revision: 3,
+    sources: [
+      { authority: 'authoritative', observedAt: 42, source: 'profiles:source-a' },
+      { authority: 'authoritative', observedAt: 42, source: 'session:source-a' }
+    ]
+  })
+
+  return { leaderKey: leaderKey as never, workerKey: workerKey as never }
+}
 
 describe('LunarCity', () => {
   it('opens the world with one ready 3D canvas and no runtime source-art image', async () => {
@@ -208,7 +274,9 @@ describe('LunarCity', () => {
 
     expect(applySnapshot.mock.calls.slice(applicationsBeforePublications).map(([next]) => next)).toEqual(publications)
     expect(createWorld).toHaveBeenCalledOnce()
-    expect(commits).toHaveBeenCalledTimes(rendersBeforePublications)
+    // The route and canvas remain stable. The isolated semantic entity list
+    // coalesces the batch into one React commit instead of one per source publication.
+    expect(commits.mock.calls.length - rendersBeforePublications).toBeLessThanOrEqual(1)
   })
 
   it('stops the reconciler, unsubscribes snapshots, then destroys the ready world', () => {
@@ -294,6 +362,131 @@ describe('LunarCity', () => {
     expect(dispatchCamera).toHaveBeenCalledWith({ kind: 'orbit', deltaAlpha: -0.22, deltaBeta: 0 })
     expect(dispatchCamera).toHaveBeenCalledWith({ kind: 'return-to-city' })
     expect(createWorld).toHaveBeenCalledOnce()
+  })
+
+  it('mounts text-first entity, source, quality, and camera controls over the same world authority', async () => {
+    const { workerKey } = publishAccessibleEntities()
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+    const pip = screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab.*Authoritative/i })
+
+    fireEvent.click(pip)
+    expect(dispatchCamera).toHaveBeenCalledWith({ entityKey: workerKey, follow: false, kind: 'focus' })
+    expect(screen.getByRole('region', { name: 'Lunar City worker controls' })).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'Source health' }).textContent).toMatch(/Authoritative.*Healthy/i)
+
+    const quality = screen.getByRole('combobox', { name: /3D quality/i })
+    expect((quality as HTMLSelectElement).value).toBe('efficient')
+    fireEvent.change(quality, { target: { value: 'balanced' } })
+    expect(setQuality).toHaveBeenCalledWith('balanced')
+
+    act(() => emitWorldIntent({ kind: 'camera-state', state: { focusedEntityKey: workerKey, following: false } }))
+    expect(screen.getByRole('status', { name: 'Camera position' }).textContent).toBe('Focused on Session Pip')
+    expect(screen.getByRole('status', { name: 'Camera position' }).textContent).not.toContain(String(workerKey))
+  })
+
+  it('synchronously retires a lost world and restores exactly once from the latest immutable snapshot', async () => {
+    const { workerKey } = publishAccessibleEntities()
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+    const canvas = screen.getByLabelText('Interactive 3D Lunar City')
+    await waitFor(() => expect(canvas.dataset.worldStatus).toBe('ready'))
+
+    const latest = { ...$lunarCitySnapshot.get(), observedAt: 900, revision: 9 }
+    $lunarCitySnapshot.set(latest)
+    const lost = new Event('webglcontextlost', { cancelable: true })
+    fireEvent(canvas, lost)
+
+    expect(lost.defaultPrevented).toBe(true)
+    expect(destroyWorld).toHaveBeenCalledOnce()
+    await waitFor(() => expect(createWorld).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(canvas.dataset.worldStatus).toBe('ready'))
+    expect(applySnapshot).toHaveBeenLastCalledWith(latest)
+    expect(startReconciler).toHaveBeenCalledOnce()
+
+    fireEvent(canvas, new Event('webglcontextlost', { cancelable: true }))
+    await act(async () => Promise.resolve())
+    expect(createWorld).toHaveBeenCalledTimes(2)
+    expect(
+      screen.getByRole('button', { name: new RegExp(String(workerKey).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')) })
+    ).toBeTruthy()
+  })
+
+  it('keeps exact leader chat, entities, quality, and authorized controls usable when restoration fails', async () => {
+    publishAccessibleEntities()
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+    const canvas = screen.getByLabelText('Interactive 3D Lunar City')
+    await waitFor(() => expect(canvas.dataset.worldStatus).toBe('ready'))
+    createWorld.mockRejectedValueOnce(new Error('replacement engine unavailable'))
+
+    fireEvent(canvas, new Event('webglcontextlost', { cancelable: true }))
+
+    await waitFor(() => expect(screen.getByText(/3D world renderer unavailable/i)).toBeTruthy())
+    expect(screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab/i })).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: /3D quality/i })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Talk to fox-scientist leader' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'fox-scientist leader conversation' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab/i }))
+    expect(screen.getByRole('region', { name: 'Lunar City worker controls' })).toBeTruthy()
+    expect(createWorld).toHaveBeenCalledTimes(2)
+  })
+
+  it('destroys a late replacement and publishes nothing after route teardown', async () => {
+    publishAccessibleEntities()
+    let resolveReplacement!: (handle: LunarCityWorldHandle) => void
+
+    const replacementPromise = new Promise<LunarCityWorldHandle>(resolve => {
+      resolveReplacement = resolve
+    })
+
+    const replacement = {
+      ...worldHandle,
+      applySnapshot: vi.fn(),
+      destroy: vi.fn()
+    } as unknown as LunarCityWorldHandle
+
+    const { unmount } = render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+    const canvas = screen.getByLabelText('Interactive 3D Lunar City')
+    await waitFor(() => expect(canvas.dataset.worldStatus).toBe('ready'))
+    createWorld.mockReturnValueOnce(replacementPromise as never)
+
+    fireEvent(canvas, new Event('webglcontextlost', { cancelable: true }))
+    unmount()
+    resolveReplacement(replacement)
+    await act(async () => replacementPromise)
+
+    expect(replacement.destroy).toHaveBeenCalledOnce()
+    expect(replacement.applySnapshot).not.toHaveBeenCalled()
+    expect(stopReconciler).toHaveBeenCalledOnce()
+  })
+
+  it('applies reduced-motion presentation to the world while retaining selection and leader conversation', async () => {
+    publishAccessibleEntities()
+
+    const media = {
+      addEventListener: vi.fn(),
+      matches: true,
+      media: '(prefers-reduced-motion: reduce)',
+      onchange: null,
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn()
+    }
+
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+    expect(setReducedMotion).toHaveBeenCalledWith(true)
+    expect(screen.getByText(/Reduced motion: destinations snap into place/i)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab/i }))
+    expect(screen.getByRole('region', { name: 'Lunar City worker controls' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Talk to fox-scientist leader' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'fox-scientist leader conversation' })).toBeTruthy())
   })
 
   it('opens one exact profile-owned leader session without changing the city camera surface', async () => {

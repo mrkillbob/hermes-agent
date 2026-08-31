@@ -53,6 +53,16 @@ describe('EntityList', () => {
     ])
   })
 
+  it('uses current camera order inside each manifest district without changing exact entity keys', () => {
+    const behind = entity('behind', 'project')
+    const ahead = entity('ahead', 'project')
+    const garden = entity('garden', 'garden')
+
+    expect(
+      orderedEntities(snapshot([behind, garden, ahead]), undefined, [behind.key, ahead.key]).map(value => value.key)
+    ).toEqual([behind.key, ahead.key, garden.key])
+  })
+
   it('uses native buttons with exact entity identity and readable state, destination, and authority', () => {
     const pip = entity('pip', 'lab', { animation: 'work' })
     const onSelect = vi.fn()
