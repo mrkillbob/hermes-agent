@@ -173,6 +173,84 @@ describe('EntityRegistry', () => {
     expect(registry.instancedGroup('worker:walk:lod:1')?.count).toBe(1)
   })
 
+  it('caps mixed profile, session, subagent, and Kanban workers at 24 animated visuals globally across districts', () => {
+    const presentationFactory = factory()
+    const workers = Array.from({ length: 32 }, (_, index) => {
+      const base = entity(index, { animation: 'walk', destination: index % 2 ? 'lab' : 'project' })
+
+      if (index < 8) {
+        return {
+          ...base,
+          identity: { kind: 'profile' as const, connectionId: `profile-${index}`, profile: 'worker' }
+        }
+      }
+
+      if (index < 16) {
+        return base
+      }
+
+      if (index < 24) {
+        return {
+          ...base,
+          identity: {
+            kind: 'subagent' as const,
+            connectionId: `connection-${index}`,
+            profile: 'worker',
+            sessionId: `session-${index}`,
+            subagentId: `subagent-${index}`
+          }
+        }
+      }
+
+      return {
+        ...base,
+        identity: {
+          kind: 'kanban' as const,
+          board: 'delivery',
+          connectionId: `connection-${index}`,
+          profile: 'worker',
+          taskId: `task-${index}`
+        }
+      }
+    })
+    const selected = workers[31]!
+    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
+
+    registry.reconcile(snapshot(...workers))
+    expect(
+      presentationFactory.animated.mock.results.filter(result => !result.value.dispose.mock.calls.length)
+    ).toHaveLength(24)
+    expect(registry.entity(selected.key)?.visual).toBeUndefined()
+
+    registry.setSelection(selected.key)
+    const activeVisuals = presentationFactory.animated.mock.results
+      .map(result => result.value)
+      .filter(visual => !visual.dispose.mock.calls.length)
+
+    expect(activeVisuals).toHaveLength(24)
+    expect(registry.entity(selected.key)?.visual).toBeDefined()
+  })
+
+  it('does not rerank or rescan the population for constant-time status queries and per-frame LOD updates', () => {
+    const presentationFactory = factory()
+    const workers = Array.from({ length: 100 }, (_, index) => entity(index, { animation: 'walk' }))
+    const sort = vi.spyOn(Array.prototype, 'sort')
+    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
+
+    registry.reconcile(snapshot(...workers))
+    sort.mockClear()
+    registry.applyLodPolicy(
+      () => 0,
+      () => true
+    )
+    registry.hasActiveAnimations()
+    registry.instancedGroup('worker:walk')
+    registry.instancedGroup('worker:walk:lod:1')
+
+    expect(sort).not.toHaveBeenCalled()
+    sort.mockRestore()
+  })
+
   it('releases removed presentation resources once without disturbing unrelated entities', () => {
     const presentationFactory = factory()
     const first = entity(1, { animation: 'walk' })

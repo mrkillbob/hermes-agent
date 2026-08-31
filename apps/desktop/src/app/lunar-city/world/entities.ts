@@ -98,6 +98,8 @@ interface RetainedEntity {
   visual: EntityVisual | undefined
 }
 
+const MAX_ANIMATED_WORKERS = 24
+
 export interface AggregatePopulation {
   animations: Readonly<Record<string, number>>
   total: number
@@ -125,49 +127,25 @@ function isOverflow(record: RetainedEntity): boolean {
   return record.entity.presentation?.placement.overflow === true
 }
 
-function displacedNearKey(records: ReadonlyMap<EntityKey, RetainedEntity>, selection: EntityKey | undefined) {
-  const selected = selection ? records.get(selection) : undefined
-
-  if (!selected || !isOverflow(selected)) {
-    return undefined
-  }
-
-  return [...records.values()]
-    .filter(
-      record =>
-        record.entity.destination === selected.entity.destination &&
-        record.entity.key !== selection &&
-        !isOverflow(record)
-    )
-    .sort((left, right) => right.entity.key.localeCompare(left.entity.key))[0]?.entity.key
+function wantsIndividualVisual(record: RetainedEntity, selection: EntityKey | undefined): boolean {
+  return (
+    record.entity.key === selection ||
+    (!isOverflow(record) && (record.moving || record.nearby || record.animation === 'walk'))
+  )
 }
 
 function effectiveLodIndex(
   record: RetainedEntity,
   selection: EntityKey | undefined,
-  displaced: EntityKey | undefined
+  activeKeys: ReadonlySet<EntityKey>
 ): number {
   if (record.entity.key === selection) {
     return 0
   }
 
-  return record.entity.key === displaced ? Math.max(1, record.lodIndex) : record.lodIndex
-}
-
-function isIndividuallyAnimated(
-  record: RetainedEntity,
-  selection: EntityKey | undefined,
-  displaced: EntityKey | undefined
-): boolean {
-  if (record.entity.key === selection) {
-    return true
-  }
-
-  if (record.entity.key === displaced || isOverflow(record)) {
-    return false
-  }
-
-  return record.moving || record.nearby || record.animation === 'walk'
+  return wantsIndividualVisual(record, selection) && !activeKeys.has(record.entity.key)
+    ? Math.max(1, record.lodIndex)
+    : record.lodIndex
 }
 
 function presentedAnimation(record: RetainedEntity): string {
@@ -206,7 +184,47 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
   const focusAnchors = options.focusAnchors
   const focusMetadata = options.focusMetadata
   let selected: EntityKey | undefined
+  let rankedKeys: readonly EntityKey[] = []
+  let activeKeys = new Set<EntityKey>()
+  let nextActiveKeys = new Set<EntityKey>()
+  const groupCounts = new Map<string, number>()
   let disposed = false
+
+  const refreshActiveKeys = (): boolean => {
+    nextActiveKeys.clear()
+
+    if (selected && records.has(selected)) {
+      nextActiveKeys.add(selected)
+    }
+
+    for (const key of rankedKeys) {
+      if (nextActiveKeys.size >= MAX_ANIMATED_WORKERS) {
+        break
+      }
+
+      const record = records.get(key)
+
+      if (record && key !== selected && wantsIndividualVisual(record, selected)) {
+        nextActiveKeys.add(key)
+      }
+    }
+
+    let changed = activeKeys.size !== nextActiveKeys.size
+
+    if (!changed) {
+      for (const key of activeKeys) {
+        if (!nextActiveKeys.has(key)) {
+          changed = true
+          break
+        }
+      }
+    }
+    const previous = activeKeys
+    activeKeys = nextActiveKeys
+    nextActiveKeys = previous
+
+    return changed
+  }
 
   const diagnoseOnce = (message: string): void => {
     if (!diagnostics.has(message)) {
@@ -244,7 +262,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
 
     const nextGroups = new Map<string, InstancedEntityMember[]>()
     const nextAggregates = new Map<DestinationId, { animations: Map<string, number>; total: number }>()
-    const displaced = displacedNearKey(records, selected)
+    groupCounts.clear()
 
     for (const record of records.values()) {
       const aggregate = nextAggregates.get(record.entity.destination) ?? {
@@ -256,9 +274,9 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       aggregate.animations.set(record.animation, (aggregate.animations.get(record.animation) ?? 0) + 1)
       nextAggregates.set(record.entity.destination, aggregate)
 
-      const lodIndex = effectiveLodIndex(record, selected, displaced)
+      const lodIndex = effectiveLodIndex(record, selected, activeKeys)
 
-      if (isIndividuallyAnimated(record, selected, displaced)) {
+      if (activeKeys.has(record.entity.key)) {
         if (!record.visual) {
           record.visual = options.factory.createAnimated(record.entity, record.entity.variant)
         }
@@ -281,6 +299,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       record.visual?.dispose?.()
       record.visual = undefined
       const key = groupKey(record, lodIndex)
+      groupCounts.set(key, (groupCounts.get(key) ?? 0) + 1)
       const members = nextGroups.get(key) ?? []
       members.push({
         animation: record.animation,
@@ -325,8 +344,6 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       }
 
       let changed = false
-      const displaced = displacedNearKey(records, selected)
-
       for (const record of records.values()) {
         const nextIndex = Math.max(
           record.lodFloor,
@@ -338,10 +355,9 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
           changed = true
         }
 
-        const nextNearby =
-          record.entity.key !== displaced && !isOverflow(record)
-            ? (isNearby?.(record.entity.key, record.position, record.entity.key === selected) ?? false)
-            : false
+        const nextNearby = !isOverflow(record)
+          ? (isNearby?.(record.entity.key, record.position, record.entity.key === selected) ?? false)
+          : false
 
         if (record.nearby !== nextNearby) {
           record.nearby = nextNearby
@@ -349,7 +365,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
         }
       }
 
-      if (changed) {
+      if (refreshActiveKeys() || changed) {
         syncPresentation()
       }
     },
@@ -370,15 +386,14 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
 
       records.clear()
       groups.clear()
+      groupCounts.clear()
       aggregates.clear()
     },
     entity(key: EntityKey): Readonly<RetainedEntity> | undefined {
       return records.get(key)
     },
     hasActiveAnimations(): boolean {
-      const displaced = displacedNearKey(records, selected)
-
-      return [...records.values()].some(record => isIndividuallyAnimated(record, selected, displaced))
+      return activeKeys.size > 0
     },
     instancedGroup(key: string): { count: number } | undefined {
       const group = groups.get(key)
@@ -387,23 +402,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
         return undefined
       }
 
-      let count = 0
-      const originalSync = group.sync
-      const displaced = displacedNearKey(records, selected)
-
-      // Group implementations are deliberately opaque.  Registry ownership
-      // retains the truthful count instead of reading renderer-private state.
-      for (const record of records.values()) {
-        const lodIndex = effectiveLodIndex(record, selected, displaced)
-
-        if (!isIndividuallyAnimated(record, selected, displaced) && groupKey(record, lodIndex) === key) {
-          count += 1
-        }
-      }
-
-      void originalSync
-
-      return { count }
+      return { count: groupCounts.get(key) ?? 0 }
     },
     navigationEntity(key: EntityKey): NavigationPresentationEntity | undefined {
       const record = records.get(key)
@@ -482,6 +481,8 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
         selected = undefined
       }
 
+      rankedKeys = [...records.keys()].sort()
+      refreshActiveKeys()
       syncPresentation()
     },
     setMoving(key: EntityKey, moving: boolean): void {
@@ -492,6 +493,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       }
 
       record.moving = moving
+      refreshActiveKeys()
       syncPresentation()
     },
     setPosition(key: EntityKey, position: Vec3): void {
@@ -506,6 +508,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
     },
     setSelection(key: EntityKey | undefined): void {
       selected = key
+      refreshActiveKeys()
       syncPresentation()
     },
     syncMotion(): void {

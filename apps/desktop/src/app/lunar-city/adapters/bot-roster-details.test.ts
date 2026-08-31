@@ -200,13 +200,52 @@ describe('complete Hermes Bots roster details', () => {
     const result = await enrichBotRosterEntities(source, entities(source), async () => ({
       profiles: profiles.map(name => ({ name }))
     }))
-    const bySlot = new Map(result.map(entity => [entity.presentation!.placement.slot, entity.position]))
-
     expect(new Set(result.map(entity => entity.presentation?.placement.slot)).size).toBe(320)
     expect(new Set(result.map(entity => JSON.stringify(entity.position))).size).toBe(320)
-    expect(bySlot.get(228)).not.toEqual(bySlot.get(240))
-    expect(bySlot.get(255)).not.toEqual(bySlot.get(256))
-    expect(bySlot.get(319)).toBeDefined()
+    expect(result[228]?.position).not.toEqual(result[240]?.position)
+    expect(result[255]?.position).not.toEqual(result[256]?.position)
+    expect(result[319]?.presentation?.placement.slot).toBeDefined()
+  })
+
+  it('keeps exact-identity placement stable when an earlier key is inserted and bounds a maximum source roster', async () => {
+    const originalProfiles = Array.from(
+      { length: 320 },
+      (_, index) => `worker-${(index + 100).toString().padStart(4, '0')}`
+    )
+    const originalRoster = roster(originalProfiles)
+    const original = await enrichBotRosterEntities(originalRoster, entities(originalRoster), async () => ({
+      profiles: originalProfiles.map(name => ({ name }))
+    }))
+    const insertedProfiles = ['aaa-earlier-worker', ...originalProfiles]
+    const insertedRoster = roster(insertedProfiles)
+    const inserted = await enrichBotRosterEntities(insertedRoster, entities(insertedRoster), async () => ({
+      profiles: insertedProfiles.map(name => ({ name }))
+    }))
+    const originalByKey = new Map(original.map(entity => [entity.key, entity]))
+
+    expect(
+      inserted
+        .filter(entity => entity.identity.profile !== 'aaa-earlier-worker')
+        .every(entity => JSON.stringify(entity.position) === JSON.stringify(originalByKey.get(entity.key)?.position))
+    ).toBe(true)
+
+    const maximumProfiles = Array.from({ length: 2048 }, (_, index) => `maximum-${index.toString().padStart(4, '0')}`)
+    const maximumRoster = roster(maximumProfiles)
+    const maximum = await enrichBotRosterEntities(maximumRoster, entities(maximumRoster), async () => ({
+      profiles: maximumProfiles.map(name => ({ name }))
+    }))
+
+    expect(new Set(maximum.map(entity => JSON.stringify(entity.position))).size).toBe(2048)
+    expect(
+      maximum.every(
+        entity =>
+          entity.position !== undefined &&
+          entity.position.x >= -60 &&
+          entity.position.x <= 60 &&
+          entity.position.z >= -60 &&
+          entity.position.z <= 60
+      )
+    ).toBe(true)
   })
 
   it('does not bind unscoped projected members to another exact connection', async () => {

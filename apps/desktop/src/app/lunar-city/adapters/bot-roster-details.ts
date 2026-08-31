@@ -45,6 +45,9 @@ const MAX_PROJECTED_ROOMS = 128
 const MAX_ROOM_MEMBERS = 512
 const MAX_PRESENTATION_CHARS = 160
 const NEAR_WORKER_BUDGET = 24
+const DISTRICT_LATTICE_SIDE = 512
+const DISTRICT_LATTICE_CAPACITY = DISTRICT_LATTICE_SIDE * DISTRICT_LATTICE_SIDE
+const DISTRICT_PLACEMENT_SPAN = 0.5
 
 /**
  * Binding table approved from the live Hermes Bots group inventory. Matching
@@ -273,19 +276,34 @@ function hash(value: string): number {
 }
 
 function stableSlots(keys: readonly EntityKey[]): ReadonlyMap<EntityKey, number> {
-  return new Map([...keys].sort().map((key, index) => [key, index]))
+  const slots = new Map<EntityKey, number>()
+  const occupied = new Uint8Array(DISTRICT_LATTICE_CAPACITY)
+
+  for (const key of [...keys].sort()) {
+    let slot = hash(key) % DISTRICT_LATTICE_CAPACITY
+    const step = (hash(`probe:${key}`) | 1) % DISTRICT_LATTICE_CAPACITY || 1
+
+    while (occupied[slot]) {
+      slot = (slot + step) % DISTRICT_LATTICE_CAPACITY
+    }
+
+    occupied[slot] = 1
+    slots.set(key, slot)
+  }
+
+  return slots
 }
 
 function positionFor(destination: DestinationId, slot: number): Vec3 {
   const anchor = DISTRICT_ANCHORS[destination]
-  const ring = Math.floor(slot / 12) + 1
-  const angle = ((slot % 12) / 12) * Math.PI * 2
-  const radius = 1.5 + ring * 0.55
+  const column = slot % DISTRICT_LATTICE_SIDE
+  const row = Math.floor(slot / DISTRICT_LATTICE_SIDE)
+  const scale = DISTRICT_PLACEMENT_SPAN / (DISTRICT_LATTICE_SIDE - 1)
 
   return {
-    x: Number((anchor.x + Math.cos(angle) * radius).toFixed(4)),
+    x: Number((anchor.x + column * scale - DISTRICT_PLACEMENT_SPAN / 2).toFixed(4)),
     y: anchor.y,
-    z: Number((anchor.z + Math.sin(angle) * radius).toFixed(4))
+    z: Number((anchor.z + row * scale - DISTRICT_PLACEMENT_SPAN / 2).toFixed(4))
   }
 }
 
@@ -378,7 +396,13 @@ export async function enrichBotRosterEntities(
     return { entity, destination, presentation, primary }
   })
   const slotsByDestination = new Map<DestinationId, ReadonlyMap<EntityKey, number>>()
-  const ranksByDestination = new Map<DestinationId, ReadonlyMap<EntityKey, number>>()
+  const globalRanks = new Map(
+    staged
+      .filter(value => value.presentation !== undefined)
+      .map(value => value.entity.key)
+      .sort()
+      .map((key, index) => [key, index])
+  )
 
   for (const destination of new Set(staged.map(value => value.destination))) {
     const keys = staged
@@ -386,7 +410,6 @@ export async function enrichBotRosterEntities(
       .map(value => value.entity.key)
       .sort()
     slotsByDestination.set(destination, stableSlots(keys))
-    ranksByDestination.set(destination, new Map(keys.map((key, index) => [key, index])))
   }
 
   return staged.map(value => {
@@ -395,7 +418,7 @@ export async function enrichBotRosterEntities(
     }
 
     const slot = slotsByDestination.get(value.destination)?.get(value.entity.key) ?? 0
-    const overflow = (ranksByDestination.get(value.destination)?.get(value.entity.key) ?? 0) >= NEAR_WORKER_BUDGET
+    const overflow = (globalRanks.get(value.entity.key) ?? 0) >= NEAR_WORKER_BUDGET
     const placement = {
       lodHint: overflow ? 1 : 0,
       overflow,
