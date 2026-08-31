@@ -179,7 +179,8 @@ export interface LunarEntityPlacement {
   lodHint: number
   overflow: boolean
   primaryGroupId?: string
-  slot: number
+  /** Physical lattice slot; absent when bounded capacity is exhausted and the row is aggregate-only. */
+  slot?: number
 }
 
 export interface LunarEntityPresentation {

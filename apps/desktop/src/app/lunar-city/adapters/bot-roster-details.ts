@@ -13,6 +13,11 @@ import type {
 export type ScopedProfilesListRequest = (connectionId: string, representativeProfile: string) => Promise<unknown>
 export type BotMetadataProvenance = ReadonlyMap<string, LunarPresentationMetadata>
 
+export interface BotRosterPlacementOptions {
+  /** Power-of-two test seam; production always uses the declared 512-square lattice. */
+  latticeSide?: number
+}
+
 interface RichProfileRow {
   displayName?: string
   groups: readonly LunarGroupMembership[]
@@ -275,16 +280,35 @@ function hash(value: string): number {
   return result >>> 0
 }
 
-function stableSlots(keys: readonly EntityKey[]): ReadonlyMap<EntityKey, number> {
-  const slots = new Map<EntityKey, number>()
-  const occupied = new Uint8Array(DISTRICT_LATTICE_CAPACITY)
+export function assignStablePlacementSlots(
+  keys: readonly EntityKey[],
+  capacity = DISTRICT_LATTICE_CAPACITY
+): ReadonlyMap<EntityKey, number | undefined> {
+  if (
+    !Number.isSafeInteger(capacity) ||
+    capacity <= 0 ||
+    capacity > DISTRICT_LATTICE_CAPACITY ||
+    (capacity & (capacity - 1)) !== 0
+  ) {
+    throw new Error('placement lattice capacity must be a positive power of two')
+  }
+
+  const slots = new Map<EntityKey, number | undefined>()
+  const occupied = new Uint8Array(capacity)
 
   for (const key of [...keys].sort()) {
-    let slot = hash(key) % DISTRICT_LATTICE_CAPACITY
-    const step = (hash(`probe:${key}`) | 1) % DISTRICT_LATTICE_CAPACITY || 1
+    let slot = hash(key) % capacity
+    const step = capacity === 1 ? 1 : (hash(`probe:${key}`) % capacity) | 1
+    let probes = 0
 
-    while (occupied[slot]) {
-      slot = (slot + step) % DISTRICT_LATTICE_CAPACITY
+    while (probes < capacity && occupied[slot]) {
+      slot = (slot + step) % capacity
+      probes += 1
+    }
+
+    if (probes === capacity) {
+      slots.set(key, undefined)
+      continue
     }
 
     occupied[slot] = 1
@@ -294,11 +318,11 @@ function stableSlots(keys: readonly EntityKey[]): ReadonlyMap<EntityKey, number>
   return slots
 }
 
-function positionFor(destination: DestinationId, slot: number): Vec3 {
+function positionFor(destination: DestinationId, slot: number, latticeSide: number): Vec3 {
   const anchor = DISTRICT_ANCHORS[destination]
-  const column = slot % DISTRICT_LATTICE_SIDE
-  const row = Math.floor(slot / DISTRICT_LATTICE_SIDE)
-  const scale = DISTRICT_PLACEMENT_SPAN / (DISTRICT_LATTICE_SIDE - 1)
+  const column = slot % latticeSide
+  const row = Math.floor(slot / latticeSide)
+  const scale = latticeSide === 1 ? 0 : DISTRICT_PLACEMENT_SPAN / (latticeSide - 1)
 
   return {
     x: Number((anchor.x + column * scale - DISTRICT_PLACEMENT_SPAN / 2).toFixed(4)),
@@ -345,8 +369,18 @@ export async function enrichBotRosterEntities(
   roster: DesktopAgentRoster,
   entities: readonly LunarEntity[],
   request: ScopedProfilesListRequest,
-  provenance: BotMetadataProvenance = new Map()
+  provenance: BotMetadataProvenance = new Map(),
+  options: BotRosterPlacementOptions = {}
 ): Promise<readonly LunarEntity[]> {
+  const latticeSide =
+    options.latticeSide !== undefined &&
+    Number.isSafeInteger(options.latticeSide) &&
+    options.latticeSide > 0 &&
+    options.latticeSide <= DISTRICT_LATTICE_SIDE &&
+    (options.latticeSide & (options.latticeSide - 1)) === 0
+      ? options.latticeSide
+      : DISTRICT_LATTICE_SIDE
+  const latticeCapacity = latticeSide * latticeSide
   const representatives = new Map<string, string>()
 
   for (const agent of [...roster.agents].sort(
@@ -395,7 +429,7 @@ export async function enrichBotRosterEntities(
 
     return { entity, destination, presentation, primary }
   })
-  const slotsByDestination = new Map<DestinationId, ReadonlyMap<EntityKey, number>>()
+  const slotsByDestination = new Map<DestinationId, ReadonlyMap<EntityKey, number | undefined>>()
   const globalRanks = new Map(
     staged
       .filter(value => value.presentation !== undefined)
@@ -409,7 +443,7 @@ export async function enrichBotRosterEntities(
       .filter(value => value.presentation !== undefined && value.destination === destination)
       .map(value => value.entity.key)
       .sort()
-    slotsByDestination.set(destination, stableSlots(keys))
+    slotsByDestination.set(destination, assignStablePlacementSlots(keys, latticeCapacity))
   }
 
   return staged.map(value => {
@@ -417,19 +451,19 @@ export async function enrichBotRosterEntities(
       return value.entity
     }
 
-    const slot = slotsByDestination.get(value.destination)?.get(value.entity.key) ?? 0
-    const overflow = (globalRanks.get(value.entity.key) ?? 0) >= NEAR_WORKER_BUDGET
+    const slot = slotsByDestination.get(value.destination)?.get(value.entity.key)
+    const overflow = slot === undefined || (globalRanks.get(value.entity.key) ?? 0) >= NEAR_WORKER_BUDGET
     const placement = {
       lodHint: overflow ? 1 : 0,
       overflow,
       ...(value.primary.group ? { primaryGroupId: value.primary.group.id } : {}),
-      slot
+      ...(slot === undefined ? {} : { slot })
     }
 
     return {
       ...value.entity,
       destination: value.destination,
-      position: positionFor(value.destination, slot),
+      position: slot === undefined ? undefined : positionFor(value.destination, slot, latticeSide),
       presentation: { ...value.presentation, placement }
     }
   })

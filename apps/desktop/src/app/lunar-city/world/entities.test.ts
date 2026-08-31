@@ -121,6 +121,28 @@ describe('EntityRegistry', () => {
     expect(presentationFactory.animated).not.toHaveBeenCalled()
   })
 
+  it('counts a capacity-exhausted profile without inventing an origin render or navigation slot', () => {
+    const presentationFactory = factory()
+    const aggregateOnly = entity(1, {
+      identity: { kind: 'profile', connectionId: 'local', profile: 'aggregate-only' },
+      position: undefined,
+      presentation: {
+        groups: [],
+        metadata: { source: 'profiles:local', state: 'fresh' },
+        placement: { lodHint: 1, overflow: true }
+      }
+    })
+    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
+
+    registry.reconcile(snapshot(aggregateOnly))
+    registry.setSelection(aggregateOnly.key)
+
+    expect(registry.aggregate('garden')).toEqual({ animations: { idle: 1 }, total: 1 })
+    expect(registry.instancedGroup('worker:idle:lod:1')).toBeUndefined()
+    expect(registry.navigationEntity(aggregateOnly.key)).toBeUndefined()
+    expect(presentationFactory.animated).not.toHaveBeenCalled()
+  })
+
   it('moves a retained worker to aggregate LOD when a later roster makes its stable district rank overflow', () => {
     const presentationFactory = factory()
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })

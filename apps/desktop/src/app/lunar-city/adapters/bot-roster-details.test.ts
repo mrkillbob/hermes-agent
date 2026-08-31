@@ -4,7 +4,7 @@ import type { DesktopAgentRoster } from '@/global'
 
 import type { LunarEntity } from '../model'
 
-import { enrichBotRosterEntities } from './bot-roster-details'
+import { assignStablePlacementSlots, enrichBotRosterEntities } from './bot-roster-details'
 import { normalizeRoster } from './fleet'
 
 function roster(profiles: readonly string[], connectionId = 'local'): DesktopAgentRoster {
@@ -246,6 +246,93 @@ describe('complete Hermes Bots roster details', () => {
           entity.position.z <= 60
       )
     ).toBe(true)
+  })
+
+  it('keeps the concrete signed-step collision pair unique and stable under reverse insertion', async () => {
+    const profiles = ['worker-000729', 'worker-004592']
+    const source = roster(profiles)
+    const forward = await enrichBotRosterEntities(source, entities(source), async () => ({
+      profiles: profiles.map(name => ({ name }))
+    }))
+    const reversedRoster = roster([...profiles].reverse())
+    const reverse = await enrichBotRosterEntities(reversedRoster, entities(reversedRoster), async () => ({
+      profiles: [...profiles].reverse().map(name => ({ name }))
+    }))
+    const forwardByKey = new Map(forward.map(entity => [entity.key, entity]))
+
+    expect(new Set(forward.map(entity => JSON.stringify(entity.position))).size).toBe(2)
+    expect(
+      forward.every(entity => {
+        const slot = entity.presentation?.placement.slot
+
+        return slot !== undefined && slot >= 0 && slot < 512 * 512
+      })
+    ).toBe(true)
+    expect(
+      reverse.every(
+        entity => JSON.stringify(entity.position) === JSON.stringify(forwardByKey.get(entity.key)?.position)
+      )
+    ).toBe(true)
+  })
+
+  it('keeps the generated negative-step cohort physically unique', async () => {
+    const profiles = Array.from({ length: 8192 }, (_, index) => `worker-${index.toString().padStart(6, '0')}`)
+    const source = roster(profiles)
+    const result = await enrichBotRosterEntities(source, entities(source), async () => ({ profiles: [] }))
+
+    expect(new Set(result.map(entity => entity.presentation?.placement.slot)).size).toBe(8192)
+    expect(new Set(result.map(entity => JSON.stringify(entity.position))).size).toBe(8192)
+    expect(
+      result.every(entity => {
+        const slot = entity.presentation?.placement.slot
+
+        return slot !== undefined && slot >= 0 && slot < 512 * 512
+      })
+    ).toBe(true)
+  })
+
+  it('uses every slot exactly once under a large generated collision load', () => {
+    const keys = Array.from(
+      { length: 3000 },
+      (_, index) => `profile:connection=collision:profile=worker-${index}` as LunarEntity['key']
+    )
+    const slots = assignStablePlacementSlots(keys, 4096)
+    const assigned = [...slots.values()].filter((slot): slot is number => slot !== undefined)
+
+    expect(assigned).toHaveLength(3000)
+    expect(new Set(assigned).size).toBe(3000)
+    expect(assigned.every(slot => slot >= 0 && slot < 4096)).toBe(true)
+  })
+
+  it('fails boundedly into aggregate-only placement when a test lattice is exhausted', async () => {
+    const profiles = ['alpha', 'beta', 'gamma', 'delta', 'epsilon']
+    const source = roster(profiles)
+    const result = await enrichBotRosterEntities(
+      source,
+      entities(source),
+      async () => ({ profiles: profiles.map(name => ({ name })) }),
+      new Map(),
+      { latticeSide: 2 }
+    )
+    const physicallyPlaced = result.filter(entity => entity.position !== undefined)
+    const aggregateOnly = result.filter(entity => entity.position === undefined)
+    const reversedRoster = roster([...profiles].reverse())
+    const reversed = await enrichBotRosterEntities(
+      reversedRoster,
+      entities(reversedRoster),
+      async () => ({ profiles: [...profiles].reverse().map(name => ({ name })) }),
+      new Map(),
+      { latticeSide: 2 }
+    )
+    const reversedAggregateOnly = reversed.filter(entity => entity.position === undefined)
+
+    expect(physicallyPlaced).toHaveLength(4)
+    expect(new Set(physicallyPlaced.map(entity => entity.presentation?.placement.slot)).size).toBe(4)
+    expect(aggregateOnly).toHaveLength(1)
+    expect(aggregateOnly[0]?.presentation?.placement).toMatchObject({ lodHint: 1, overflow: true })
+    expect(aggregateOnly[0]?.presentation?.placement.slot).toBeUndefined()
+    expect(reversedAggregateOnly.map(entity => entity.key)).toEqual(aggregateOnly.map(entity => entity.key))
+    expect(result).toHaveLength(5)
   })
 
   it('does not bind unscoped projected members to another exact connection', async () => {

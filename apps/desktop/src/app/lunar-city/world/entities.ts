@@ -127,10 +127,17 @@ function isOverflow(record: RetainedEntity): boolean {
   return record.entity.presentation?.placement.overflow === true
 }
 
+function hasPhysicalPlacement(record: RetainedEntity): boolean {
+  const placement = record.entity.presentation?.placement
+
+  return placement === undefined || placement.slot !== undefined
+}
+
 function wantsIndividualVisual(record: RetainedEntity, selection: EntityKey | undefined): boolean {
   return (
-    record.entity.key === selection ||
-    (!isOverflow(record) && (record.moving || record.nearby || record.animation === 'walk'))
+    hasPhysicalPlacement(record) &&
+    (record.entity.key === selection ||
+      (!isOverflow(record) && (record.moving || record.nearby || record.animation === 'walk')))
   )
 }
 
@@ -242,10 +249,10 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
 
   const publishAnchor = (record: RetainedEntity): void => {
     focusAnchors?.set(record.entity.key, () =>
-      record.authority === 'authoritative' ? copied(record.position) : undefined
+      record.authority === 'authoritative' && hasPhysicalPlacement(record) ? copied(record.position) : undefined
     )
     focusMetadata?.set(record.entity.key, () =>
-      record.authority === 'authoritative'
+      record.authority === 'authoritative' && hasPhysicalPlacement(record)
         ? {
             cameraAnchor: copied(record.position),
             focusEntityKey: record.entity.key,
@@ -273,6 +280,12 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       aggregate.total += 1
       aggregate.animations.set(record.animation, (aggregate.animations.get(record.animation) ?? 0) + 1)
       nextAggregates.set(record.entity.destination, aggregate)
+
+      if (!hasPhysicalPlacement(record)) {
+        record.visual?.dispose?.()
+        record.visual = undefined
+        continue
+      }
 
       const lodIndex = effectiveLodIndex(record, selected, activeKeys)
 
@@ -407,7 +420,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
     navigationEntity(key: EntityKey): NavigationPresentationEntity | undefined {
       const record = records.get(key)
 
-      if (!record) {
+      if (!record || !hasPhysicalPlacement(record)) {
         return undefined
       }
 
