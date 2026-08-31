@@ -18,10 +18,13 @@ import {
 } from './bot-roster-details'
 import { normalizeRoster } from './fleet'
 import {
+  delegationSourceName,
   normalizeOwnedSubagents,
   normalizeSessions,
   normalizeSubagents,
   type OwnedSubagentRows,
+  ownerObservationKey,
+  sessionSourceName,
   type SessionSourceObservation
 } from './sessions'
 
@@ -162,9 +165,9 @@ function healthSourceFor(entity: LunarEntity): string {
       return `fleet:${entity.identity.connectionId}`
 
     case 'session':
-
+      return sessionSourceName(entity.identity.connectionId, entity.identity.profile)
     case 'subagent':
-      return `session:${entity.identity.connectionId}`
+      return delegationSourceName(entity.identity.connectionId, entity.identity.profile)
 
     case 'kanban':
       return `kanban:${encodeURIComponent(entity.identity.connectionId)}:${encodeURIComponent(entity.identity.profile)}`
@@ -534,13 +537,16 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   let refreshingFleet = false
   let disposed = false
   let sessionSourceGeneration = 0
-  const sessionSourceObservations = new Map<string, Omit<SessionSourceObservation, 'fresh'>>()
+  const sessionOwnerObservations = new Map<string, Omit<SessionSourceObservation, 'fresh'>>()
   const sessionOwnerCache = new Map<
     string,
     { connectionId: string; observedAt: number; profile: string; rows: SessionInfo[] }
   >()
-  const delegationOwnerCache = new Map<string, readonly OwnedSubagentRows[]>()
+  const delegationOwnerCache = new Map<string, { batches: readonly OwnedSubagentRows[]; observedAt: number }>()
   const dirtySessionOwners = new Set<string>()
+  const dirtyDelegationOwners = new Set<string>()
+  const failedSessionOwners = new Set<string>()
+  const failedDelegationOwners = new Set<string>()
   const registeredSessionOwners = new Map<string, { connectionId: string; profile: string }>()
   const retiredSessionOwners = new Map<string, { connectionId: string; profile: string }>()
   const botMetadataCache = new Map<string, { observedAt: number; payload: unknown; representativeProfile: string }>()
@@ -574,7 +580,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
     return Boolean(roster && source?.reachable && !source.error)
   }
 
-  const ownerKey = (connectionId: string, profile: string): string => JSON.stringify([connectionId, profile])
+  const ownerKey = ownerObservationKey
 
   const runBounded = async <T>(jobs: readonly (() => Promise<T>)[], concurrency = 4): Promise<T[]> => {
     const results = new Array<T>(jobs.length)
@@ -757,12 +763,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
 
       const sessionNow = now()
       const freshnessMs = options.freshnessMs ?? 60_000
-      const priorSessionSources = new Map(
-        $lunarCitySnapshot
-          .get()
-          .sources.filter(source => source.source.startsWith('session:'))
-          .map(source => [source.source.slice('session:'.length), source])
-      )
+      const priorSources = new Map($lunarCitySnapshot.get().sources.map(source => [source.source, source]))
       const reachableConnections = new Map(
         roster?.sources.map(source => [source.connectionId, source.reachable && !source.error]) ?? []
       )
@@ -818,93 +819,121 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       }
 
       const ownerSetBounded = registeredOwners.size <= 256
-      const failedOwners = new Set<string>()
-
       for (const key of registeredOwners.keys()) {
         if (!sessionOwnerCache.has(key)) {
           dirtySessionOwners.add(key)
+          dirtyDelegationOwners.add(key)
         }
       }
 
       if (sources.readSessionList && ownerSetBounded) {
         const jobs = [...registeredOwners].flatMap(([key, owner]) => {
-          if (!dirtySessionOwners.has(key) || !sessionConnectionReachable(owner.connectionId)) {
+          if (
+            (!dirtySessionOwners.has(key) && !dirtyDelegationOwners.has(key)) ||
+            !sessionConnectionReachable(owner.connectionId)
+          ) {
             return []
           }
 
           return [
             async () => {
-              try {
-                const payload = record(await sources.readSessionList!(owner.connectionId, owner.profile))
-                const rawRows =
-                  Array.isArray(payload.sessions) && payload.sessions.length <= 200 ? payload.sessions : null
+              let rows = sessionOwnerCache.get(key)?.rows
 
-                if (!rawRows) {
-                  throw new Error('malformed session list')
+              if (dirtySessionOwners.has(key)) {
+                try {
+                  const payload = record(await sources.readSessionList!(owner.connectionId, owner.profile))
+                  const rawRows =
+                    Array.isArray(payload.sessions) && payload.sessions.length <= 200 ? payload.sessions : null
+
+                  if (!rawRows) {
+                    throw new Error('malformed session list')
+                  }
+
+                  rows = rawRows.flatMap(row => {
+                    const id = optionalString(record(row).id)
+
+                    return id
+                      ? [
+                          {
+                            ...(row as SessionInfo),
+                            connection_id: owner.connectionId,
+                            id,
+                            profile: owner.profile
+                          }
+                        ]
+                      : []
+                  })
+
+                  if (rows.length !== rawRows.length || new Set(rows.map(row => row.id)).size !== rows.length) {
+                    throw new Error('malformed session identities')
+                  }
+
+                  sessionSourceGeneration += 1
+                  sessionOwnerCache.set(key, { ...owner, observedAt: sessionNow, rows })
+                  sessionOwnerObservations.set(key, { generation: sessionSourceGeneration, observedAt: sessionNow })
+                  failedSessionOwners.delete(key)
+
+                  const currentParents = new Set(rows.map(row => row.id))
+                  const cachedDelegation = delegationOwnerCache.get(key)
+
+                  if (cachedDelegation) {
+                    delegationOwnerCache.set(key, {
+                      ...cachedDelegation,
+                      batches: cachedDelegation.batches.filter(batch => currentParents.has(batch.owner.sessionId))
+                    })
+                  }
+                } catch {
+                  failedSessionOwners.add(key)
+                  failedDelegationOwners.add(key)
+                  dirtyDelegationOwners.delete(key)
+                  return
+                } finally {
+                  dirtySessionOwners.delete(key)
                 }
+              }
 
-                const rows = rawRows.flatMap(row => {
-                  const id = optionalString(record(row).id)
+              if (sources.readDelegationStatus && dirtyDelegationOwners.has(key) && rows) {
+                try {
+                  const delegation = record(await sources.readDelegationStatus(owner.connectionId, owner.profile))
+                  const active =
+                    Array.isArray(delegation.active) && delegation.active.length <= 512 ? delegation.active : null
 
-                  return id
-                    ? [
-                        {
-                          ...(row as SessionInfo),
-                          connection_id: owner.connectionId,
-                          id,
-                          profile: owner.profile
-                        }
-                      ]
-                    : []
-                })
+                  if (!active) {
+                    throw new Error('malformed delegation status')
+                  }
 
-                if (rows.length !== rawRows.length || new Set(rows.map(row => row.id)).size !== rows.length) {
-                  throw new Error('malformed session identities')
-                }
+                  const sessionsById = new Set(rows.map(row => row.id))
+                  const batches = new Map<string, OwnedSubagentRows>()
 
-                sessionOwnerCache.set(key, { ...owner, observedAt: sessionNow, rows })
+                  for (const value of active) {
+                    const raw = record(value)
+                    const parentSessionId = optionalString(raw.owner_agent_session_id)
+                    const progress = subagentProgress(raw)
 
-                if (sources.readDelegationStatus) {
-                  try {
-                    const delegation = record(await sources.readDelegationStatus(owner.connectionId, owner.profile))
-                    const active =
-                      Array.isArray(delegation.active) && delegation.active.length <= 512 ? delegation.active : []
-                    const sessionsById = new Map(rows.map(row => [row.id, row]))
-                    const batches = new Map<string, OwnedSubagentRows>()
-
-                    for (const value of active) {
-                      const raw = record(value)
-                      const parentSessionId = optionalString(raw.owner_agent_session_id)
-                      const progress = subagentProgress(raw)
-
-                      if (!parentSessionId || !progress || !sessionsById.has(parentSessionId)) {
-                        continue
-                      }
-
-                      const ownerIdentity = {
-                        connectionId: owner.connectionId,
-                        kind: 'session' as const,
-                        profile: owner.profile,
-                        sessionId: parentSessionId
-                      }
-                      const batch = batches.get(parentSessionId) ?? { owner: ownerIdentity, rows: [] }
-                      batches.set(parentSessionId, {
-                        owner: batch.owner,
-                        rows: [...batch.rows, { ...progress, parentId: parentSessionId }]
-                      })
+                    if (!parentSessionId || !progress || !sessionsById.has(parentSessionId)) {
+                      continue
                     }
 
-                    delegationOwnerCache.set(key, [...batches.values()])
-                  } catch {
-                    // A missing/older delegation reader must not downgrade an
-                    // otherwise authoritative session list. Retain any prior
-                    // active-child projection until its session source expires.
+                    const ownerIdentity = {
+                      connectionId: owner.connectionId,
+                      kind: 'session' as const,
+                      profile: owner.profile,
+                      sessionId: parentSessionId
+                    }
+                    const batch = batches.get(parentSessionId) ?? { owner: ownerIdentity, rows: [] }
+                    batches.set(parentSessionId, {
+                      owner: batch.owner,
+                      rows: [...batch.rows, { ...progress, parentId: parentSessionId }]
+                    })
                   }
+
+                  delegationOwnerCache.set(key, { batches: [...batches.values()], observedAt: sessionNow })
+                  failedDelegationOwners.delete(key)
+                } catch {
+                  failedDelegationOwners.add(key)
+                } finally {
+                  dirtyDelegationOwners.delete(key)
                 }
-              } catch {
-                failedOwners.add(key)
-              } finally {
-                dirtySessionOwners.delete(key)
               }
             }
           ]
@@ -913,59 +942,76 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         await runBounded(jobs)
       }
 
-      const currentOwnersByConnection = new Map<string, string[]>()
-
-      for (const [key, owner] of registeredOwners) {
-        currentOwnersByConnection.set(owner.connectionId, [
-          ...(currentOwnersByConnection.get(owner.connectionId) ?? []),
-          key
-        ])
-      }
-
-      const authoritativeConnections = new Set<string>()
-      const retiredConnections = new Set([...retiredSessionOwners.values()].map(owner => owner.connectionId))
-
-      for (const [connectionId, ownerKeys] of currentOwnersByConnection) {
-        const observations = ownerKeys.map(key => sessionOwnerCache.get(key)?.observedAt).filter(Number.isFinite)
-
-        if (
-          ownerSetBounded &&
-          !retiredConnections.has(connectionId) &&
-          reachableConnections.get(connectionId) === true &&
-          ownerKeys.every(key => sessionOwnerCache.has(key) && !failedOwners.has(key)) &&
-          observations.length === ownerKeys.length
-        ) {
-          sessionSourceGeneration += 1
-          sessionSourceObservations.set(connectionId, {
-            generation: sessionSourceGeneration,
-            observedAt: Math.min(...(observations as number[]))
-          })
-          authoritativeConnections.add(connectionId)
-        }
-      }
-
       const effectiveSessionRows = [...registeredOwners].flatMap(([key, owner]) => {
         const cached = sessionOwnerCache.get(key)
 
         return cached?.rows ?? owner.rows
       })
-      const observedSessionConnections = new Set([...sessionSourceObservations.keys(), ...priorSessionSources.keys()])
       const currentSessionObservations = new Map<string, SessionSourceObservation>()
+      const currentDelegationObservations = new Map<string, SessionSourceObservation>()
+      const sessionHealth: SourceHealth[] = []
+      const delegationHealth: SourceHealth[] = []
+      const authoritativeSessionSources: string[] = []
+      const authoritativeDelegationSources: string[] = []
+      const parentFilteredDelegationSources: string[] = []
 
-      for (const connectionId of observedSessionConnections) {
-        const observed = sessionSourceObservations.get(connectionId)
-        const prior = priorSessionSources.get(connectionId)
-        const observedAt = observed?.observedAt ?? prior?.observedAt ?? 0
-        const reachable = reachableConnections.get(connectionId) === true
-        const fresh = Boolean(
-          observed && reachable && authoritativeConnections.has(connectionId) && observedAt + freshnessMs > sessionNow
+      for (const [key, owner] of registeredOwners) {
+        const reachable = reachableConnections.get(owner.connectionId) === true
+        const sessionObserved = sessionOwnerObservations.get(key)
+        const priorSession = priorSources.get(sessionSourceName(owner.connectionId, owner.profile))
+        const sessionObservedAt = sessionObserved?.observedAt ?? priorSession?.observedAt ?? 0
+        const sessionFresh = Boolean(
+          ownerSetBounded &&
+          reachable &&
+          sessionObserved &&
+          !failedSessionOwners.has(key) &&
+          sessionObservedAt + freshnessMs > sessionNow
         )
-
-        currentSessionObservations.set(connectionId, {
-          fresh,
-          generation: observed?.generation ?? 0,
-          observedAt
+        currentSessionObservations.set(key, {
+          fresh: sessionFresh,
+          generation: sessionObserved?.generation ?? 0,
+          observedAt: sessionObservedAt
         })
+        const sessionName = sessionSourceName(owner.connectionId, owner.profile)
+        sessionHealth.push({
+          authority: sessionFresh ? 'authoritative' : sessionObservedAt > 0 ? 'stale' : 'unknown',
+          ...(failedSessionOwners.has(key) ? { error: 'Session refresh failed' } : {}),
+          observedAt: sessionObservedAt,
+          source: sessionName
+        })
+        if (sessionFresh) {
+          authoritativeSessionSources.push(sessionName)
+        }
+
+        const delegationCached = delegationOwnerCache.get(key)
+        const priorDelegation = priorSources.get(delegationSourceName(owner.connectionId, owner.profile))
+        const delegationObservedAt = delegationCached?.observedAt ?? priorDelegation?.observedAt ?? 0
+        const delegationFresh = Boolean(
+          ownerSetBounded &&
+          reachable &&
+          delegationCached &&
+          !failedDelegationOwners.has(key) &&
+          delegationObservedAt + freshnessMs > sessionNow
+        )
+        currentDelegationObservations.set(key, {
+          fresh: delegationFresh,
+          generation: 0,
+          observedAt: delegationObservedAt
+        })
+        if (sources.readDelegationStatus) {
+          const delegationName = delegationSourceName(owner.connectionId, owner.profile)
+          delegationHealth.push({
+            authority: delegationFresh ? 'authoritative' : delegationObservedAt > 0 ? 'stale' : 'unknown',
+            ...(failedDelegationOwners.has(key) ? { error: 'Delegation refresh failed' } : {}),
+            observedAt: delegationObservedAt,
+            source: delegationName
+          })
+          if (delegationFresh) {
+            authoritativeDelegationSources.push(delegationName)
+          } else if (sessionFresh && delegationCached) {
+            parentFilteredDelegationSources.push(delegationName)
+          }
+        }
       }
 
       const sessions = normalizeSessions(effectiveSessionRows, {
@@ -979,13 +1025,16 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       const legacySubagents = normalizeSubagents(sources.$subagentsBySession.get(), sessions.entities, {
         fresh: false,
         observedAt: 0,
-        sourceObservations: currentSessionObservations
+        sourceObservations: sources.readDelegationStatus ? currentDelegationObservations : currentSessionObservations
       })
-      const ownedSubagents = normalizeOwnedSubagents([...delegationOwnerCache.values()].flat(), {
-        fresh: false,
-        observedAt: 0,
-        sourceObservations: currentSessionObservations
-      })
+      const ownedSubagents = normalizeOwnedSubagents(
+        [...delegationOwnerCache.values()].flatMap(entry => entry.batches),
+        {
+          fresh: false,
+          observedAt: 0,
+          sourceObservations: currentDelegationObservations
+        }
+      )
       const subagents = {
         entities: [
           ...new Map(
@@ -1029,25 +1078,24 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       const authoritativeFleetSources = fleet.sources
         .filter(source => source.authority === 'authoritative')
         .map(source => source.source)
-      const retiredSessionSources = [...retiredConnections].flatMap(connectionId => {
-        const prior = priorSessionSources.get(connectionId)
+      const retiredSessionSources = [...retiredSessionOwners.values()].flatMap(owner => {
+        const names = [
+          sessionSourceName(owner.connectionId, owner.profile),
+          ...(sources.readDelegationStatus ? [delegationSourceName(owner.connectionId, owner.profile)] : [])
+        ]
 
-        return prior
-          ? [
-              {
-                ...prior,
-                authority: 'stale' as const,
-                error: 'Registered session owner removed'
-              }
-            ]
-          : []
+        return names.flatMap(source => {
+          const prior = priorSources.get(source)
+          return prior ? [{ ...prior, authority: 'stale' as const, error: 'Registered session owner removed' }] : []
+        })
       })
 
       const sessionReadPartial =
         Boolean(sources.readSessionList) &&
         (!ownerSetBounded ||
           retiredSessionOwners.size > 0 ||
-          authoritativeConnections.size !== currentOwnersByConnection.size)
+          authoritativeSessionSources.length !== registeredOwners.size ||
+          (Boolean(sources.readDelegationStatus) && authoritativeDelegationSources.length !== registeredOwners.size))
 
       return {
         authoritative:
@@ -1055,14 +1103,17 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         entities: [...fleet.entities, ...sessions.entities, ...subagents.entities, ...optionalEntities],
         replacementSources: [
           ...authoritativeFleetSources,
-          ...[...authoritativeConnections].map(connectionId => `session:${connectionId}`),
+          ...authoritativeSessionSources,
+          ...authoritativeDelegationSources,
+          ...parentFilteredDelegationSources,
           ...optionalReplacementSources
         ],
         sources: [
           ...fleet.sources.map(source =>
             fleetReadFailed ? { ...source, error: fleetError ?? 'Fleet refresh failed' } : source
           ),
-          ...sessions.sources,
+          ...(sources.readSessionList ? sessionHealth : sessions.sources),
+          ...delegationHealth,
           ...retiredSessionSources,
           ...optionalReads.flatMap(read => [...read.sources])
         ]
@@ -1080,20 +1131,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
 
         for (const key of sessionOwnerCache.keys()) {
           dirtySessionOwners.add(key)
-        }
-
-        const currentConnections = new Set((roster?.sources ?? []).map(source => source.connectionId))
-
-        for (const connectionId of sessionSourceObservations.keys()) {
-          if (!currentConnections.has(connectionId)) {
-            sessionSourceObservations.delete(connectionId)
-          }
-        }
-
-        for (const source of roster?.sources ?? []) {
-          if (!source.reachable || source.error) {
-            sessionSourceObservations.delete(source.connectionId)
-          }
+          dirtyDelegationOwners.add(key)
         }
 
         if (!refreshingFleet) {
@@ -1109,6 +1147,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       sources.onFocus(() => {
         for (const key of sessionOwnerCache.keys()) {
           dirtySessionOwners.add(key)
+          dirtyDelegationOwners.add(key)
         }
         requestedBotMetadataGeneration += 1
         reconciler.invalidate('focus')
@@ -1121,6 +1160,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       sources.onRegistryChange(() => {
         for (const key of sessionOwnerCache.keys()) {
           dirtySessionOwners.add(key)
+          dirtyDelegationOwners.add(key)
         }
         forceFleetRefresh = true
         requestedBotMetadataGeneration += 1
@@ -1138,7 +1178,9 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         const profile = optionalString(record(event).profile)
 
         if (connectionId && profile) {
-          dirtySessionOwners.add(ownerKey(connectionId, profile))
+          const key = ownerKey(connectionId, profile)
+          dirtySessionOwners.add(key)
+          dirtyDelegationOwners.add(key)
         }
 
         if (type === 'gateway.ready') {

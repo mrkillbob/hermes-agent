@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { normalizeOwnedSubagents, normalizeSessions, normalizeSubagents } from './sessions'
+import { normalizeOwnedSubagents, normalizeSessions, normalizeSubagents, ownerObservationKey } from './sessions'
 
 const session = (overrides: Record<string, unknown> = {}) => ({
   archived: false,
@@ -42,8 +42,8 @@ describe('session live adapter', () => {
       {
         observedAt: 999,
         sourceObservations: new Map([
-          ['local', { fresh: true, generation: 4, observedAt: 80 }],
-          ['ssh-1', { fresh: false, generation: 2, observedAt: 40 }]
+          [ownerObservationKey('local', 'worker'), { fresh: true, generation: 4, observedAt: 80 }],
+          [ownerObservationKey('ssh-1', 'worker'), { fresh: false, generation: 2, observedAt: 40 }]
         ])
       }
     )
@@ -55,8 +55,8 @@ describe('session live adapter', () => {
       ['ssh-1', 'stale', 40]
     ])
     expect(normalized.sources).toEqual([
-      { authority: 'authoritative', observedAt: 80, source: 'session:local' },
-      { authority: 'stale', observedAt: 40, source: 'session:ssh-1' }
+      { authority: 'authoritative', observedAt: 80, source: 'session:local:worker' },
+      { authority: 'stale', observedAt: 40, source: 'session:ssh-1:worker' }
     ])
   })
 
@@ -189,8 +189,8 @@ describe('session live adapter', () => {
       {
         observedAt: 0,
         sourceObservations: new Map([
-          ['local', { fresh: true, generation: 3, observedAt: 80 }],
-          ['ssh-1', { fresh: false, generation: 1, observedAt: 30 }]
+          [ownerObservationKey('local', 'worker'), { fresh: true, generation: 3, observedAt: 80 }],
+          [ownerObservationKey('ssh-1', 'worker'), { fresh: false, generation: 1, observedAt: 30 }]
         ])
       }
     )

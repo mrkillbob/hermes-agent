@@ -223,6 +223,11 @@ function sourceName(scope: PluginSourceScope): string {
   return `kanban:${encodeURIComponent(scope.connectionId)}:${encodeURIComponent(scope.profile)}`
 }
 
+/** Collision-safe selected-detail identity across every registered owner. */
+export function kanbanDetailKey(scope: PluginSourceScope, board: string, taskId: string): string {
+  return JSON.stringify([scope.connectionId, scope.profile, board, taskId])
+}
+
 function getOptions(scope: PluginSourceScope, timeoutMs: number | undefined): KanbanRestOptions {
   return { method: 'GET', scope, ...(timeoutMs === undefined ? {} : { timeoutMs }) }
 }
@@ -1023,7 +1028,10 @@ export function createKanbanCitySource(options: KanbanCitySourceOptions): Kanban
 export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySourceOptions): KanbanCitySource {
   const makeSource = options.createSource ?? createKanbanCitySource
   const now = options.now ?? Date.now
-  const entries = new Map<string, { scope: PluginSourceScope; source: KanbanCitySource; stop?: () => void }>()
+  const entries = new Map<
+    string,
+    { cached?: KanbanReadResult; dirty: boolean; scope: PluginSourceScope; source: KanbanCitySource; stop?: () => void }
+  >()
   const retiredSources = new Set<string>()
   let active = false
   let invalidate: ((result: KanbanFrameResult) => void) | undefined
@@ -1078,34 +1086,78 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
         selectedTaskId: options.selectedTaskId,
         timeoutMs: options.timeoutMs
       })
-      const entry = { scope, source, ...(active && invalidate ? { stop: source.start(invalidate) } : {}) }
+      const entry: {
+        cached?: KanbanReadResult
+        dirty: boolean
+        scope: PluginSourceScope
+        source: KanbanCitySource
+        stop?: () => void
+      } = { dirty: true, scope, source }
+      if (active && invalidate) {
+        entry.stop = source.start(result => {
+          entry.dirty = true
+          invalidate?.(result)
+        })
+      }
       entries.set(key, entry)
     }
   }
 
+  const readBounded = async (
+    pending: readonly {
+      cached?: KanbanReadResult
+      dirty: boolean
+      scope: PluginSourceScope
+      source: KanbanCitySource
+    }[],
+    concurrency = 4
+  ): Promise<void> => {
+    let next = 0
+
+    const worker = async (): Promise<void> => {
+      while (next < pending.length) {
+        const index = next
+        next += 1
+        const entry = pending[index]!
+        entry.cached = await entry.source.read()
+        entry.dirty = false
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, () => worker()))
+  }
+
   const read = async (): Promise<KanbanReadResult> => {
     sync()
-    const pending = [...entries.values()].map(entry => entry.source.read())
-    const reads = await Promise.all(pending)
+    const pending = [...entries.values()].filter(entry => entry.dirty || !entry.cached)
+    await readBounded(pending)
+    const reads = [...entries.values()].flatMap(entry => (entry.cached ? [{ entry, result: entry.cached }] : []))
     const successfulSources = reads
-      .filter(result => result.authoritative)
-      .flatMap(result => result.sources.map(source => source.source))
+      .filter(({ result }) => result.authoritative)
+      .flatMap(({ result }) => result.sources.map(source => source.source))
     const removed = [...retiredSources].sort().map(source => ({
       authority: 'unknown' as const,
       error: 'Registered Kanban owner removed',
       observedAt: now(),
       source
     }))
-    const authoritative = retiredSources.size === 0 && reads.every(result => result.authoritative)
+    const authoritative = retiredSources.size === 0 && reads.every(({ result }) => result.authoritative)
 
     return {
       authoritative,
-      compounds: reads.flatMap(result => result.compounds),
-      details: new Map(reads.flatMap(result => [...result.details])),
-      entities: reads.flatMap(result => result.entities),
+      compounds: reads.flatMap(({ result }) => result.compounds),
+      details: new Map(
+        reads.flatMap(({ entry, result }) =>
+          [...result.details].map(([taskId, detail]) => [
+            kanbanDetailKey(entry.scope, result.selectedBoard ?? '', taskId),
+            detail
+          ])
+        )
+      ),
+      entities: reads.flatMap(({ result }) => result.entities),
       health: authoritative ? 'authoritative' : 'unavailable',
       replacementSources: successfulSources,
-      sources: [...reads.flatMap(result => result.sources), ...removed]
+      sources: [...reads.flatMap(({ result }) => result.sources), ...removed]
     }
   }
 
@@ -1120,6 +1172,14 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
       active = true
       invalidate = onInvalidate
       sync()
+      for (const entry of entries.values()) {
+        if (!entry.stop) {
+          entry.stop = entry.source.start(result => {
+            entry.dirty = true
+            invalidate?.(result)
+          })
+        }
+      }
       stopRoster = options.roster.listen(() => {
         sync()
         onInvalidate({ accepted: true, dirtyTaskIds: [], needsReconcile: true })

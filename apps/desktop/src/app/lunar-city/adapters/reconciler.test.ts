@@ -126,7 +126,7 @@ describe('Lunar City reconciler', () => {
         entities: [profile, sessionEntity],
         sources: [
           { authority: 'authoritative' as const, observedAt: 0, source: 'fleet:local' },
-          { authority: 'authoritative' as const, observedAt: 50, source: 'session:ssh-1' }
+          { authority: 'authoritative' as const, observedAt: 50, source: 'session:ssh-1:worker' }
         ]
       })
     })
@@ -140,7 +140,7 @@ describe('Lunar City reconciler', () => {
     expect($lunarCitySnapshot.get().entities.get(sessionEntity.key)).toMatchObject({ authority: 'authoritative' })
     expect($lunarCitySnapshot.get().sources).toEqual([
       expect.objectContaining({ authority: 'stale', source: 'fleet:local' }),
-      expect.objectContaining({ authority: 'authoritative', source: 'session:ssh-1' })
+      expect.objectContaining({ authority: 'authoritative', source: 'session:ssh-1:worker' })
     ])
 
     now = 100
@@ -790,7 +790,7 @@ describe('Lunar City reconciler', () => {
         authority: 'stale',
         observedAt: 42
       })
-      expect($lunarCitySnapshot.get().sources).toEqual([
+      expect($lunarCitySnapshot.get().sources.filter(source => source.source.startsWith('fleet:'))).toEqual([
         { authority: 'authoritative', observedAt: 60_043, source: 'fleet:local' },
         { authority: 'stale', observedAt: 42, source: 'fleet:ssh-1' },
         { authority: 'stale', error: 'degraded', observedAt: 42, source: 'fleet:ssh-2' }
@@ -866,7 +866,7 @@ describe('Lunar City reconciler', () => {
         observedAt: 700,
         source: 'kanban:source-a'
       },
-      { authority: 'stale', observedAt: 0, source: 'session:source-a' }
+      { authority: 'stale', observedAt: 0, source: 'session:source-a:worker' }
     ])
 
     optionalInvalidate()
@@ -1322,6 +1322,13 @@ describe('Lunar City reconciler', () => {
     await flush()
     await flush()
     expect(sessionReads.mock.calls.map(call => call[0])).toEqual(['source-a', 'source-b', 'source-b', 'source-a'])
+    expect(
+      $lunarCitySnapshot
+        .get()
+        .entities.get(
+          entityKey({ connectionId: 'source-b', kind: 'session', profile: 'worker', sessionId: 'shared-session' })
+        )
+    ).toMatchObject({ authority: 'stale' })
 
     remoteFails = false
     emit({ connectionId: 'source-b', profile: 'worker', type: 'gateway.ready' })
@@ -1356,6 +1363,177 @@ describe('Lunar City reconciler', () => {
         )
     ).toMatchObject({ authority: 'stale' })
     expect(sessionReads.mock.calls.filter(call => call[0] === 'source-b')).toHaveLength(3)
+    stop()
+  })
+
+  it('replaces a healthy sibling profile while retaining the failed sibling stale on one connection', async () => {
+    const fleet = atom<DesktopAgentRoster>({
+      agents: ['scout', 'worker'].map(profileName => ({
+        connectionId: 'source-a',
+        connectionKind: 'local' as const,
+        connectionLabel: 'source a',
+        handle: `@${profileName}`,
+        profile: profileName
+      })),
+      sources: [{ connectionId: 'source-a', kind: 'local', label: 'source a', reachable: true }]
+    })
+    let emit!: (event: unknown) => void
+    let scoutFails = false
+    let workerRevision = 1
+    const reads = vi.fn(async (_connectionId: string, profileName: string) => {
+      if (profileName === 'scout' && scoutFails) {
+        throw new Error('scout unavailable')
+      }
+
+      return {
+        sessions: [
+          {
+            ended_at: null,
+            id: 'shared-session',
+            is_active: true,
+            profile: profileName,
+            title: profileName === 'worker' ? `worker-${workerRevision}` : 'scout'
+          }
+        ]
+      }
+    })
+    const stop = startLunarCityReconciler({
+      now: () => 700 + workerRevision,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        onEvent: listener => {
+          emit = listener
+          return () => undefined
+        },
+        readSessionList: reads,
+        refreshFleet: async () => ({ observedAt: 700, status: 'refreshed' })
+      }
+    })
+    await flush()
+    await flush()
+
+    scoutFails = true
+    emit({ connectionId: 'source-a', profile: 'scout', session_id: 'shared-session', type: 'session.changed' })
+    await flush()
+    workerRevision = 2
+    emit({ connectionId: 'source-a', profile: 'worker', session_id: 'shared-session', type: 'session.changed' })
+    await flush()
+
+    const snapshot = $lunarCitySnapshot.get()
+    expect(
+      snapshot.entities.get(
+        entityKey({ connectionId: 'source-a', kind: 'session', profile: 'scout', sessionId: 'shared-session' })
+      )
+    ).toMatchObject({ authority: 'stale' })
+    expect(
+      snapshot.entities.get(
+        entityKey({ connectionId: 'source-a', kind: 'session', profile: 'worker', sessionId: 'shared-session' })
+      )
+    ).toMatchObject({ authority: 'authoritative', observedAt: 702 })
+    expect(snapshot.sources).toContainEqual(
+      expect.objectContaining({
+        authority: 'stale',
+        observedAt: 701,
+        source: 'session:source-a:scout'
+      })
+    )
+    expect(snapshot.sources).toContainEqual({
+      authority: 'authoritative',
+      observedAt: 702,
+      source: 'session:source-a:worker'
+    })
+    stop()
+  })
+
+  it('keeps delegation failure stale independently and purges children whose exact parent disappears', async () => {
+    const fleet = atom<DesktopAgentRoster>({
+      agents: [
+        {
+          connectionId: 'source-a',
+          connectionKind: 'local',
+          connectionLabel: 'source a',
+          handle: '@worker',
+          profile: 'worker'
+        }
+      ],
+      sources: [{ connectionId: 'source-a', kind: 'local', label: 'source a', reachable: true }]
+    })
+    let now = 800
+    let emit!: (event: unknown) => void
+    let sessionExists = true
+    let delegationFails = false
+    const stop = startLunarCityReconciler({
+      now: () => now,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        onEvent: listener => {
+          emit = listener
+          return () => undefined
+        },
+        readDelegationStatus: async () => {
+          if (delegationFails) {
+            throw new Error('delegation unavailable')
+          }
+
+          return {
+            active: sessionExists
+              ? [
+                  {
+                    goal: 'child',
+                    owner_agent_session_id: 'parent',
+                    started_at: 1,
+                    status: 'running',
+                    subagent_id: 'child',
+                    tool_count: 0
+                  }
+                ]
+              : []
+          }
+        },
+        readSessionList: async () => ({
+          sessions: sessionExists ? [{ ended_at: null, id: 'parent', is_active: true, profile: 'worker' }] : []
+        }),
+        refreshFleet: async () => ({ observedAt: now, status: 'refreshed' })
+      }
+    })
+    await flush()
+    await flush()
+    const childKey = entityKey({
+      connectionId: 'source-a',
+      kind: 'subagent',
+      profile: 'worker',
+      sessionId: 'parent',
+      subagentId: 'child'
+    })
+    expect($lunarCitySnapshot.get().entities.get(childKey)).toMatchObject({
+      authority: 'authoritative',
+      observedAt: 800
+    })
+
+    now = 810
+    delegationFails = true
+    emit({ connectionId: 'source-a', profile: 'worker', session_id: 'parent', type: 'subagent.progress' })
+    await flush()
+    expect($lunarCitySnapshot.get().entities.get(childKey)).toMatchObject({ authority: 'stale', observedAt: 800 })
+    expect($lunarCitySnapshot.get().sources).toContainEqual(
+      expect.objectContaining({
+        authority: 'stale',
+        observedAt: 800,
+        source: 'delegation:source-a:worker'
+      })
+    )
+
+    now = 820
+    sessionExists = false
+    emit({ connectionId: 'source-a', profile: 'worker', session_id: 'parent', type: 'session.changed' })
+    await flush()
+    expect($lunarCitySnapshot.get().entities.has(childKey)).toBe(false)
     stop()
   })
 })

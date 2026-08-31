@@ -36,11 +36,24 @@ function isFresh(observation: SessionObservation): boolean {
 
 function sourceObservation(
   connectionId: string,
+  profile: string,
   observation: Pick<SessionObservation, 'fresh' | 'observedAt' | 'sourceObservations'>
 ): Pick<SessionSourceObservation, 'fresh' | 'observedAt'> {
-  const source = observation.sourceObservations?.get(connectionId)
+  const source = observation.sourceObservations?.get(ownerObservationKey(connectionId, profile))
 
   return source ?? { fresh: observation.fresh !== false, observedAt: observation.observedAt }
+}
+
+export function ownerObservationKey(connectionId: string, profile: string): string {
+  return JSON.stringify([connectionId, profile])
+}
+
+export function sessionSourceName(connectionId: string, profile: string): string {
+  return `session:${encodeURIComponent(connectionId)}:${encodeURIComponent(profile)}`
+}
+
+export function delegationSourceName(connectionId: string, profile: string): string {
+  return `delegation:${encodeURIComponent(connectionId)}:${encodeURIComponent(profile)}`
 }
 
 function exactSessionOwner(
@@ -72,7 +85,7 @@ function sourceRows(entities: readonly LunarEntity[]): readonly SourceHealth[] {
   const sources = new Map<string, SourceHealth>()
 
   for (const entity of entities) {
-    const source = `session:${entity.identity.connectionId}`
+    const source = sessionSourceName(entity.identity.connectionId, entity.identity.profile)
     const prior = sources.get(source)
 
     if (prior && (prior.authority !== entity.authority || prior.observedAt !== entity.observedAt)) {
@@ -112,7 +125,7 @@ export function normalizeSessions(rows: readonly SessionInfo[], observation: Ses
         sessionId: row.id
       }
 
-      const source = sourceObservation(owner.connectionId, observation)
+      const source = sourceObservation(owner.connectionId, owner.profile, observation)
       const state = mapObservedState({ fresh: isFresh(source), source: 'session', status: sessionStatus(row) })
 
       return [
@@ -208,7 +221,7 @@ export function normalizeOwnedSubagents(
   const entities = new Map<string, LunarEntity>()
 
   for (const batch of batches) {
-    const source = sourceObservation(batch.owner.connectionId, observation)
+    const source = sourceObservation(batch.owner.connectionId, batch.owner.profile, observation)
 
     for (const row of batch.rows) {
       if (row.parentId !== null && row.parentId !== batch.owner.sessionId) {
@@ -268,7 +281,7 @@ export function normalizeSubagents(
       }
 
       const owner = candidates[0]!
-      const source = sourceObservation(owner.connectionId, observation)
+      const source = sourceObservation(owner.connectionId, owner.profile, observation)
 
       return rows.flatMap(row => {
         if (row.parentId !== null && row.parentId !== parentSessionId) {

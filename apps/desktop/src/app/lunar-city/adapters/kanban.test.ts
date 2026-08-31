@@ -14,6 +14,7 @@ import {
   compoundKey,
   createKanbanCitySource,
   createRegisteredKanbanCitySource,
+  kanbanDetailKey,
   type KanbanRest,
   type KanbanSocket,
   projectSlotContractIssues
@@ -986,5 +987,127 @@ describe('registered Kanban Lunar City source', () => {
     expect(createSource).toHaveBeenCalledTimes(2)
     stop()
     expect(stops.get('source-a')).toHaveBeenCalledOnce()
+  })
+
+  it('rereads only the exact dirty owner and retains collision-safe detail entries', async () => {
+    const roster = atom<DesktopAgentRoster>({
+      agents: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        connectionKind: 'local' as const,
+        connectionLabel: connectionId,
+        handle: `@worker-${connectionId}`,
+        profile: 'worker'
+      })),
+      sources: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        kind: 'local' as const,
+        label: connectionId,
+        reachable: true
+      }))
+    })
+    const invalidators = new Map<string, () => void>()
+    const reads = new Map<string, ReturnType<typeof vi.fn>>()
+    const createSource = (options: { scope: PluginSourceScope }) => {
+      const read = vi.fn(async () => ({
+        authoritative: true,
+        compounds: [],
+        details: new Map([['shared-task', { owner: options.scope.connectionId }]]),
+        entities: [],
+        health: 'authoritative' as const,
+        selectedBoard: 'main',
+        sources: [
+          {
+            authority: 'authoritative' as const,
+            observedAt: 42,
+            source: `kanban:${options.scope.connectionId}:worker`
+          }
+        ]
+      }))
+      reads.set(options.scope.connectionId, read)
+
+      return {
+        onFrame: vi.fn(),
+        read,
+        start: (listener: () => void) => {
+          invalidators.set(options.scope.connectionId, listener)
+          return () => undefined
+        }
+      }
+    }
+    const source = createRegisteredKanbanCitySource({
+      createSource: createSource as never,
+      manifest: manifest(),
+      roster
+    })
+    source.start(vi.fn())
+    const initial = await source.read()
+    expect(reads.get('source-a')).toHaveBeenCalledOnce()
+    expect(reads.get('source-b')).toHaveBeenCalledOnce()
+    expect(initial.details.get(kanbanDetailKey({ ...scopeA, profile: 'worker' }, 'main', 'shared-task'))).toEqual({
+      owner: 'source-a'
+    })
+    expect(initial.details.get(kanbanDetailKey({ ...scopeB, profile: 'worker' }, 'main', 'shared-task'))).toEqual({
+      owner: 'source-b'
+    })
+
+    invalidators.get('source-b')!()
+    await source.read()
+    expect(reads.get('source-a')).toHaveBeenCalledOnce()
+    expect(reads.get('source-b')).toHaveBeenCalledTimes(2)
+  })
+
+  it('bounds initial registered-owner reads to four concurrent requests', async () => {
+    const connectionIds = Array.from({ length: 12 }, (_, index) => `source-${index}`)
+    const roster = atom<DesktopAgentRoster>({
+      agents: connectionIds.map(connectionId => ({
+        connectionId,
+        connectionKind: 'local' as const,
+        connectionLabel: connectionId,
+        handle: `@worker-${connectionId}`,
+        profile: 'worker'
+      })),
+      sources: connectionIds.map(connectionId => ({
+        connectionId,
+        kind: 'local' as const,
+        label: connectionId,
+        reachable: true
+      }))
+    })
+    let active = 0
+    let maxActive = 0
+    const createSource = (options: { scope: PluginSourceScope }) => ({
+      onFrame: vi.fn(),
+      read: async () => {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        await new Promise(resolve => setTimeout(resolve, 0))
+        active -= 1
+
+        return {
+          authoritative: true,
+          compounds: [],
+          details: new Map(),
+          entities: [],
+          health: 'authoritative' as const,
+          sources: [
+            {
+              authority: 'authoritative' as const,
+              observedAt: 42,
+              source: `kanban:${options.scope.connectionId}:worker`
+            }
+          ]
+        }
+      },
+      start: () => () => undefined
+    })
+    const source = createRegisteredKanbanCitySource({
+      createSource: createSource as never,
+      manifest: manifest(),
+      roster
+    })
+    source.start(vi.fn())
+    await source.read()
+
+    expect(maxActive).toBe(4)
   })
 })
