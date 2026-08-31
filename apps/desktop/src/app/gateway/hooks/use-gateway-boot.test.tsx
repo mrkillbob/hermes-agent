@@ -45,7 +45,7 @@ import { $sessionTiles, $workingSessionIds, clearAllSessionStates, publishSessio
 import { deferred } from '../../../test/deferred'
 
 import { takeGatewaySurvivor } from './gateway-hmr-survivor'
-import { primaryRuntimeConnectionId, useGatewayBoot } from './use-gateway-boot'
+import { isLunarCityBrowserPreview, primaryRuntimeConnectionId, useGatewayBoot } from './use-gateway-boot'
 
 vi.mock(import('@/store/notifications'), async importOriginal => ({
   ...(await importOriginal()),
@@ -78,6 +78,40 @@ describe('primaryRuntimeConnectionId', () => {
 
   it('returns null for an unknown remote identity so the caller falls back to live-connection scoping', () => {
     expect(primaryRuntimeConnectionId({ mode: 'remote' })).toBeNull()
+  })
+})
+
+describe('isLunarCityBrowserPreview', () => {
+  it('recognizes a direct browser renderer when the native bridge is absent', () => {
+    const originalHash = window.location.hash
+    const originalBridge = window.hermesDesktop
+
+    try {
+      Reflect.deleteProperty(window, 'hermesDesktop')
+      window.location.hash = '#/lunar-city'
+      expect(isLunarCityBrowserPreview()).toBe(true)
+
+      window.location.hash = '#/sessions'
+      expect(isLunarCityBrowserPreview()).toBe(true)
+    } finally {
+      window.location.hash = originalHash
+      Object.defineProperty(window, 'hermesDesktop', {
+        configurable: true,
+        value: originalBridge,
+        writable: true
+      })
+    }
+  })
+
+  it('never opts an Electron window into preview mode', () => {
+    const originalHash = window.location.hash
+
+    try {
+      window.location.hash = '#/lunar-city'
+      expect(isLunarCityBrowserPreview()).toBe(false)
+    } finally {
+      window.location.hash = originalHash
+    }
   })
 })
 

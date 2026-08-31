@@ -43,6 +43,10 @@ import { $lunarCitySnapshot } from './store'
 import { createLunarCityWorld } from './world/create-world'
 
 const LUNAR_CITY_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
+// A renderer must never leave the route in an unbounded STARTING state. This
+// is deliberately generous for a cold Electron asset load while still giving
+// browser previews and low-power machines a deterministic degraded surface.
+const RENDERER_START_TIMEOUT_MS = 10_000
 
 export function disposeLunarCityRuntime(
   stopReconciler: (() => void) | undefined,
@@ -455,6 +459,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
     let world: LunarCityWorldHandle | undefined
     let perfRoute: { dispose(): void } | undefined
     let stopSnapshot: (() => void) | undefined
+    let rendererStartTimeout: number | undefined
 
     const handleWorldIntent = (intent: LunarCityIntent): void => {
       if (intent.kind === 'camera-state' && intent.state) {
@@ -623,6 +628,10 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
               created.applySnapshot(snapshot)
             }
           })
+          if (rendererStartTimeout !== undefined) {
+            window.clearTimeout(rendererStartTimeout)
+            rendererStartTimeout = undefined
+          }
           canvas.dataset.worldStatus = 'ready'
           setRendererStatus('ready')
           setOperationsReady(true)
@@ -680,6 +689,19 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
 
     canvas.addEventListener('webglcontextlost', onContextLost)
     canvas.addEventListener('webglcontextrestored', onContextRestored)
+    rendererStartTimeout = window.setTimeout(() => {
+      if (disposed || generation === 0 || worldHandleRef.current || canvas.dataset.worldStatus !== 'loading') {
+        return
+      }
+
+      // Invalidate the pending generation so a late Babylon import cannot
+      // attach a half-created world after we have surfaced the fallback.
+      generation += 1
+      abortController.abort()
+      canvas.dataset.worldStatus = 'unavailable'
+      setRendererStatus('unavailable')
+      setOperationsReady(true)
+    }, RENDERER_START_TIMEOUT_MS)
     void createWorldGeneration()
 
     return () => {
@@ -691,6 +713,10 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
       disposeLunarCityRuntime(stopReconcilerRef.current, stopSnapshot, world)
       perfRoute?.dispose()
       perfRoute = undefined
+      if (rendererStartTimeout !== undefined) {
+        window.clearTimeout(rendererStartTimeout)
+        rendererStartTimeout = undefined
+      }
       stopSnapshot = undefined
       worldHandleRef.current = undefined
       world = undefined

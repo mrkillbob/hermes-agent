@@ -90,6 +90,14 @@ export function refreshProfiles(): Promise<ProfileInfo[]> {
     return refreshInFlight
   }
 
+  // A direct browser preview has no Electron preload bridge.  Keep the
+  // currently known cache and avoid starting a retry loop against an API that
+  // cannot exist in this topology; the native desktop path still performs the
+  // authoritative gateway read below.
+  if (!window.hermesDesktop?.api) {
+    return Promise.resolve($profiles.get())
+  }
+
   const flight = (async () => {
     const epoch = profileListEpoch
     const MAX_RETRIES = 2

@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useRef, useState } from 'react'
 
+import { isLunarCityBrowserPreview } from '@/app/gateway/hooks/use-gateway-boot'
 import { DecodeText } from '@/components/ui/decode-text'
 import { prefersReducedMotion } from '@/hooks/use-media-query'
 import { cn } from '@/lib/utils'
@@ -47,6 +48,7 @@ export function GatewayConnectingOverlay() {
   // the instant the gateway opens. E2E screenshots rely on this to avoid
   // catching the overlay mid-fade.
   const [phase, setPhase] = useState<Phase>('live')
+  const browserPreview = isLunarCityBrowserPreview()
   // Once cold boot has completed once, never resurrect the fullscreen overlay
   // — soft gateway switches keep the shell and reskeleton the sidebar instead.
   const coldBootDoneRef = useRef(false)
@@ -63,7 +65,12 @@ export function GatewayConnectingOverlay() {
   const initialBootActive = boot.visible || boot.running || boot.progress < 100
 
   const connecting =
-    !coldBootDoneRef.current && !gatewaySwitching && gatewayState !== 'open' && !boot.error && initialBootActive
+    !browserPreview &&
+    !coldBootDoneRef.current &&
+    !gatewaySwitching &&
+    gatewayState !== 'open' &&
+    !boot.error &&
+    initialBootActive
 
   // Latches once we've actually shown the overlay, so the brief frame where
   // gatewayState flips to "open" (connecting -> false) before the exit phase
@@ -118,7 +125,7 @@ export function GatewayConnectingOverlay() {
   }, [phase, previewing])
 
   // Boot failed — BootFailureOverlay owns the screen; don't linger behind it.
-  if (boot.error && !previewing) {
+  if ((boot.error || browserPreview) && !previewing) {
     return null
   }
 

@@ -135,6 +135,27 @@ export function primaryRuntimeConnectionId(connection: Pick<HermesConnection, 'c
   return connection.mode === 'local' ? 'local' : null
 }
 
+/**
+ * A direct Vite browser load (for example in Safari) has no Electron preload
+ * bridge.  Treat it as a read-only renderer preview instead of starting a
+ * gateway boot loop that can never succeed.  The native Electron path is
+ * unchanged because its real getConnection bridge is present.
+ */
+export function isLunarCityBrowserPreview(): boolean {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  // Keep this route-scoped so jsdom/unit renders (which also have no preload
+  // bridge) still exercise the normal recovery overlays. Safari/Vite previews
+  // enter through one of these renderer routes, while native Electron keeps a
+  // real getConnection bridge and never opts into preview mode.
+  const route = window.location.hash
+  const previewRoute = route === '#/lunar-city' || route === '#/sessions'
+
+  return previewRoute && typeof window.hermesDesktop?.getConnection !== 'function'
+}
+
 interface GatewayBootOptions {
   beforeConnectionSwitch: () => void
   handleGatewayEvent: (event: RpcEvent) => void
@@ -191,6 +212,13 @@ export function useGatewayBoot({
     }
 
     if (!desktop) {
+      if (isLunarCityBrowserPreview()) {
+        setSessionsLoading(false)
+        completeDesktopBoot('Lunar City browser preview')
+
+        return () => void (cancelled = true)
+      }
+
       failDesktopBoot('Desktop IPC bridge is unavailable.')
       setSessionsLoading(false)
 
