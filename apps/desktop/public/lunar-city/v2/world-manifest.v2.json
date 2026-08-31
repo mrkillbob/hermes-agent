@@ -1,58 +1,20 @@
 {
   "version": 2,
-  "source": {
-    "sha256": "248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590"
-  },
+  "source": { "sha256": "248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590" },
   "assetVersion": "2.0.0",
   "characterAssets": {
     "fleetIdentityFloor": 128,
     "leaders": [
-      {
-        "id": "owl",
-        "species": "owl",
-        "silhouetteId": "owl-silhouette-v1",
-        "visualId": "owl-leader-v1"
-      },
-      {
-        "id": "fox",
-        "species": "fox",
-        "silhouetteId": "fox-silhouette-v1",
-        "visualId": "fox-leader-v1"
-      },
-      {
-        "id": "badger",
-        "species": "badger",
-        "silhouetteId": "badger-silhouette-v1",
-        "visualId": "badger-leader-v1"
-      },
-      {
-        "id": "otter",
-        "species": "otter",
-        "silhouetteId": "otter-silhouette-v1",
-        "visualId": "otter-leader-v1"
-      },
-      {
-        "id": "bird",
-        "species": "bird",
-        "silhouetteId": "bird-silhouette-v1",
-        "visualId": "bird-leader-v1"
-      },
-      {
-        "id": "stag",
-        "species": "stag",
-        "silhouetteId": "stag-silhouette-v1",
-        "visualId": "stag-leader-v1"
-      }
+      { "id": "owl", "species": "owl", "silhouetteId": "owl-silhouette-v1", "visualId": "owl-leader-v1" },
+      { "id": "fox", "species": "fox", "silhouetteId": "fox-silhouette-v1", "visualId": "fox-leader-v1" },
+      { "id": "badger", "species": "badger", "silhouetteId": "badger-silhouette-v1", "visualId": "badger-leader-v1" },
+      { "id": "otter", "species": "otter", "silhouetteId": "otter-silhouette-v1", "visualId": "otter-leader-v1" },
+      { "id": "bird", "species": "bird", "silhouetteId": "bird-silhouette-v1", "visualId": "bird-leader-v1" },
+      { "id": "stag", "species": "stag", "silhouetteId": "stag-silhouette-v1", "visualId": "stag-leader-v1" }
     ],
     "workerVocabulary": {
-      "bodies": [
-        "compact",
-        "standard"
-      ],
-      "heads": [
-        "orb",
-        "visor"
-      ],
+      "bodies": ["compact", "standard"],
+      "heads": ["orb", "visor"],
       "silhouetteAccessories": [
         "acceptance-gate",
         "archive-satchel",
@@ -74,10 +36,7 @@
         "review-lens",
         "upstream-antenna"
       ],
-      "palettes": [
-        "rust-bone",
-        "violet-cyan"
-      ],
+      "palettes": ["rust-bone", "violet-cyan"],
       "emblems": [
         "acceptance-check",
         "archive-box",
@@ -317,58 +276,31 @@
       "animationClips": "shared",
       "materials": "shared",
       "textureAtlas": "textures/approved-palette.png",
-      "perProfile": {
-        "skeletons": 0,
-        "meshes": 0,
-        "materials": 0,
-        "textures": 0
+      "perProfile": { "skeletons": 0, "meshes": 0, "materials": 0, "textures": 0 }
+    },
+    "physicalVariantRoots": {
+      "body": { "compact": "worker:body-variant:compact", "standard": "worker:body-variant:standard" },
+      "head": { "orb": "worker:head-variant:orb", "visor": "worker:head-variant:visor" },
+      "palette": { "rust-bone": "worker:palette:rust-bone", "violet-cyan": "worker:palette:violet-cyan" },
+      "groupKit": {
+        "emblemSuffix": "emblem",
+        "identityAccentSuffix": "identity-accent",
+        "silhouetteSuffix": "silhouette"
       }
     },
     "lodRepresentations": [
-      {
-        "id": "near",
-        "animated": true,
-        "representation": "full"
-      },
-      {
-        "id": "mid",
-        "animated": false,
-        "representation": "reduced"
-      },
-      {
-        "id": "far",
-        "animated": false,
-        "representation": "static-or-aggregate"
-      }
+      { "id": "near", "animated": true, "representation": "full" },
+      { "id": "mid", "animated": false, "representation": "reduced" },
+      { "id": "far", "animated": false, "representation": "static-or-aggregate" }
     ],
     "runtimeIntegration": "pending-task-11d-b"
   },
   "materials": [
-    {
-      "id": "lunar-rust",
-      "palette": "lunar-rust",
-      "maxTextures": 1
-    },
-    {
-      "id": "charcoal-structure",
-      "palette": "charcoal-structure",
-      "maxTextures": 1
-    },
-    {
-      "id": "bone-metal",
-      "palette": "bone-metal",
-      "maxTextures": 1
-    },
-    {
-      "id": "signal-emissive",
-      "palette": "cyan-signal",
-      "maxTextures": 1
-    },
-    {
-      "id": "archive-emissive",
-      "palette": "violet-archive",
-      "maxTextures": 1
-    }
+    { "id": "lunar-rust", "palette": "lunar-rust", "maxTextures": 1 },
+    { "id": "charcoal-structure", "palette": "charcoal-structure", "maxTextures": 1 },
+    { "id": "bone-metal", "palette": "bone-metal", "maxTextures": 1 },
+    { "id": "signal-emissive", "palette": "cyan-signal", "maxTextures": 1 },
+    { "id": "archive-emissive", "palette": "violet-archive", "maxTextures": 1 }
   ],
   "models": [
     {
@@ -379,105 +311,34 @@
       "maxMaterials": 4,
       "maxTextures": 4,
       "maxGpuMiB": 20,
-      "requiredNodes": [
-        "terrain:root",
-        "terrain:lod:near",
-        "terrain:lod:far",
-        "terrain:walkways"
-      ],
+      "requiredNodes": ["terrain:root", "terrain:lod:near", "terrain:lod:far", "terrain:walkways"],
       "requiredClips": [],
       "lods": [
-        {
-          "distance": 0,
-          "node": "terrain:lod:near"
-        },
-        {
-          "distance": 96,
-          "node": "terrain:lod:far"
-        }
+        { "distance": 0, "node": "terrain:lod:near" },
+        { "distance": 96, "node": "terrain:lod:far" }
       ],
-      "transform": {
-        "position": [
-          0,
-          0,
-          0
-        ],
-        "rotation": [
-          0,
-          0,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -56,
-          -8,
-          -52
-        ],
-        "max": [
-          56,
-          18,
-          52
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "camera": [
-          0,
-          8,
-          0
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        8,
-        0
-      ],
+      "transform": { "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-56, -8, -52], "max": [56, 18, 52] },
+      "anchors": { "foot": [0, 0, 0], "camera": [0, 8, 0] },
+      "cameraAnchor": [0, 8, 0],
       "occlusionGroup": "terrain",
-      "collision": {
-        "kind": "mesh",
-        "navigationArea": "walkable"
-      },
-      "materialSlots": [
-        "lunar-rust",
-        "charcoal-structure"
-      ],
+      "collision": { "kind": "mesh", "navigationArea": "walkable" },
+      "materialSlots": ["lunar-rust", "charcoal-structure"],
       "statistics": {
+        "accessorBytes": 58200,
         "animationClips": [],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 22,
+        "gpuBytes": 58200,
         "textures": 0,
         "triangles": 1532,
-        "budget": {
-          "maxDrawCalls": 14,
-          "maxGpuMiB": 20,
-          "maxMaterials": 4,
-          "maxTextures": 4,
-          "maxTriangles": 90000
-        },
+        "gpuMiB": 0.0555,
+        "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 4, "maxTextures": 4, "maxTriangles": 90000 },
         "bytes": 81616,
-        "extent": [
-          101.564,
-          12.425,
-          84.6786
-        ],
-        "gpuMiB": 0.0778,
+        "extent": [101.564, 12.425, 84.6786],
         "sha256": "042c92dae91e29c819f8fcf877a9c47b6248a3a090ce28ae9500dd709f6864e0"
       }
     },
@@ -497,114 +358,33 @@
         "library:entrance",
         "library:camera"
       ],
-      "requiredClips": [
-        "lights-idle"
-      ],
+      "requiredClips": ["lights-idle"],
       "lods": [
-        {
-          "distance": 0,
-          "node": "library:lod:near"
-        },
-        {
-          "distance": 48,
-          "node": "library:lod:far"
-        }
+        { "distance": 0, "node": "library:lod:near" },
+        { "distance": 48, "node": "library:lod:far" }
       ],
-      "transform": {
-        "position": [
-          -28,
-          4,
-          -18
-        ],
-        "rotation": [
-          0,
-          0.28,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -12,
-          0,
-          -10
-        ],
-        "max": [
-          12,
-          16,
-          10
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "interaction": [
-          0,
-          5,
-          0
-        ],
-        "camera": [
-          0,
-          8,
-          14
-        ],
-        "dialogue": [
-          -2,
-          1,
-          2
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        8,
-        14
-      ],
+      "transform": { "position": [-28, 4, -18], "rotation": [0, 0.28, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-12, 0, -10], "max": [12, 16, 10] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 5, 0], "camera": [0, 8, 14], "dialogue": [-2, 1, 2] },
+      "cameraAnchor": [0, 8, 14],
       "occlusionGroup": "library-roof",
-      "collision": {
-        "kind": "box",
-        "navigationArea": "library"
-      },
-      "materialSlots": [
-        "charcoal-structure",
-        "bone-metal",
-        "archive-emissive"
-      ],
+      "collision": { "kind": "box", "navigationArea": "library" },
+      "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "animationClips": [
-          "lights-idle"
-        ],
+        "accessorBytes": 128232,
+        "animationClips": ["lights-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 22,
+        "gpuBytes": 128232,
         "textures": 0,
         "triangles": 3914,
-        "budget": {
-          "maxDrawCalls": 8,
-          "maxGpuMiB": 10,
-          "maxMaterials": 4,
-          "maxTextures": 3,
-          "maxTriangles": 28000
-        },
+        "gpuMiB": 0.1223,
+        "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 28000 },
         "bytes": 170820,
-        "extent": [
-          16.7884,
-          11.505,
-          14.44
-        ],
-        "gpuMiB": 0.1629,
+        "extent": [16.7884, 11.505, 14.44],
         "sha256": "2ad6ca9d63445160a5cf8237414f440bcad5ca439da9ea5daf69a01d07b22eb2"
       }
     },
@@ -625,117 +405,33 @@
         "research-lab:camera",
         "research-lab:telescope"
       ],
-      "requiredClips": [
-        "lights-idle",
-        "telescope-scan"
-      ],
+      "requiredClips": ["lights-idle", "telescope-scan"],
       "lods": [
-        {
-          "distance": 0,
-          "node": "research-lab:lod:near"
-        },
-        {
-          "distance": 52,
-          "node": "research-lab:lod:far"
-        }
+        { "distance": 0, "node": "research-lab:lod:near" },
+        { "distance": 52, "node": "research-lab:lod:far" }
       ],
-      "transform": {
-        "position": [
-          25,
-          5,
-          -22
-        ],
-        "rotation": [
-          0,
-          -0.2,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -14,
-          0,
-          -12
-        ],
-        "max": [
-          14,
-          17,
-          12
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "interaction": [
-          0,
-          5,
-          0
-        ],
-        "camera": [
-          0,
-          9,
-          15
-        ],
-        "dialogue": [
-          2,
-          1,
-          0
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        9,
-        15
-      ],
+      "transform": { "position": [25, 5, -22], "rotation": [0, -0.2, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-14, 0, -12], "max": [14, 17, 12] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 5, 0], "camera": [0, 9, 15], "dialogue": [2, 1, 0] },
+      "cameraAnchor": [0, 9, 15],
       "occlusionGroup": "research-roof",
-      "collision": {
-        "kind": "box",
-        "navigationArea": "research"
-      },
-      "materialSlots": [
-        "charcoal-structure",
-        "bone-metal",
-        "signal-emissive"
-      ],
+      "collision": { "kind": "box", "navigationArea": "research" },
+      "materialSlots": ["charcoal-structure", "bone-metal", "signal-emissive"],
       "statistics": {
-        "animationClips": [
-          "lights-idle",
-          "telescope-scan",
-          "workbench-cycle"
-        ],
+        "accessorBytes": 84720,
+        "animationClips": ["lights-idle", "telescope-scan", "workbench-cycle"],
         "drawCalls": 7,
         "materials": 5,
         "meshes": 7,
         "nodes": 25,
+        "gpuBytes": 84720,
         "textures": 0,
         "triangles": 2342,
-        "budget": {
-          "maxDrawCalls": 9,
-          "maxGpuMiB": 12,
-          "maxMaterials": 5,
-          "maxTextures": 4,
-          "maxTriangles": 32000
-        },
+        "gpuMiB": 0.0808,
+        "budget": { "maxDrawCalls": 9, "maxGpuMiB": 12, "maxMaterials": 5, "maxTextures": 4, "maxTriangles": 32000 },
         "bytes": 118340,
-        "extent": [
-          21.4805,
-          13.33,
-          16.29
-        ],
-        "gpuMiB": 0.1129,
+        "extent": [21.4805, 13.33, 16.29],
         "sha256": "9dd409f1b733cfdbf6af122d8c52b19a3582403a64c6eac53a090d4f9502f5da"
       }
     },
@@ -755,115 +451,33 @@
         "depot:entrance",
         "depot:camera"
       ],
-      "requiredClips": [
-        "lights-idle"
-      ],
+      "requiredClips": ["lights-idle"],
       "lods": [
-        {
-          "distance": 0,
-          "node": "depot:lod:near"
-        },
-        {
-          "distance": 44,
-          "node": "depot:lod:far"
-        }
+        { "distance": 0, "node": "depot:lod:near" },
+        { "distance": 44, "node": "depot:lod:far" }
       ],
-      "transform": {
-        "position": [
-          -31,
-          2,
-          12
-        ],
-        "rotation": [
-          0,
-          0.18,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -12,
-          0,
-          -10
-        ],
-        "max": [
-          12,
-          14,
-          10
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "interaction": [
-          0,
-          4,
-          0
-        ],
-        "camera": [
-          0,
-          7,
-          13
-        ],
-        "dialogue": [
-          -1,
-          1,
-          2
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        7,
-        13
-      ],
+      "transform": { "position": [-31, 2, 12], "rotation": [0, 0.18, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-12, 0, -10], "max": [12, 14, 10] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [-1, 1, 2] },
+      "cameraAnchor": [0, 7, 13],
       "occlusionGroup": "depot-roof",
-      "collision": {
-        "kind": "box",
-        "navigationArea": "depot"
-      },
-      "materialSlots": [
-        "charcoal-structure",
-        "bone-metal",
-        "signal-emissive"
-      ],
+      "collision": { "kind": "box", "navigationArea": "depot" },
+      "materialSlots": ["charcoal-structure", "bone-metal", "signal-emissive"],
       "statistics": {
-        "animationClips": [
-          "lights-idle",
-          "workbench-cycle"
-        ],
+        "accessorBytes": 64032,
+        "animationClips": ["lights-idle", "workbench-cycle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 21,
+        "gpuBytes": 64032,
         "textures": 0,
         "triangles": 1276,
-        "budget": {
-          "maxDrawCalls": 7,
-          "maxGpuMiB": 9,
-          "maxMaterials": 4,
-          "maxTextures": 3,
-          "maxTriangles": 24000
-        },
+        "gpuMiB": 0.0611,
+        "budget": { "maxDrawCalls": 7, "maxGpuMiB": 9, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 24000 },
         "bytes": 90652,
-        "extent": [
-          17,
-          11.4233,
-          13.34
-        ],
-        "gpuMiB": 0.0865,
+        "extent": [17, 11.4233, 13.34],
         "sha256": "f8ee2f075f9385b6840824c46bea2be9bd70ff0678bba68047ab3e8328f0f0d4"
       }
     },
@@ -883,116 +497,33 @@
         "review-office:portal",
         "review-office:camera"
       ],
-      "requiredClips": [
-        "portal-idle",
-        "lights-idle"
-      ],
+      "requiredClips": ["portal-idle", "lights-idle"],
       "lods": [
-        {
-          "distance": 0,
-          "node": "review-office:lod:near"
-        },
-        {
-          "distance": 48,
-          "node": "review-office:lod:far"
-        }
+        { "distance": 0, "node": "review-office:lod:near" },
+        { "distance": 48, "node": "review-office:lod:far" }
       ],
-      "transform": {
-        "position": [
-          33,
-          3,
-          10
-        ],
-        "rotation": [
-          0,
-          -0.26,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -13,
-          0,
-          -10
-        ],
-        "max": [
-          13,
-          15,
-          10
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "interaction": [
-          0,
-          4,
-          0
-        ],
-        "camera": [
-          0,
-          8,
-          14
-        ],
-        "dialogue": [
-          0,
-          1,
-          1
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        8,
-        14
-      ],
+      "transform": { "position": [33, 3, 10], "rotation": [0, -0.26, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-13, 0, -10], "max": [13, 15, 10] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 8, 14], "dialogue": [0, 1, 1] },
+      "cameraAnchor": [0, 8, 14],
       "occlusionGroup": "review-roof",
-      "collision": {
-        "kind": "box",
-        "navigationArea": "review"
-      },
-      "materialSlots": [
-        "charcoal-structure",
-        "bone-metal",
-        "archive-emissive"
-      ],
+      "collision": { "kind": "box", "navigationArea": "review" },
+      "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "animationClips": [
-          "lights-idle",
-          "portal-idle"
-        ],
+        "accessorBytes": 109320,
+        "animationClips": ["lights-idle", "portal-idle"],
         "drawCalls": 7,
         "materials": 4,
         "meshes": 7,
         "nodes": 22,
+        "gpuBytes": 109320,
         "textures": 0,
         "triangles": 4488,
-        "budget": {
-          "maxDrawCalls": 8,
-          "maxGpuMiB": 10,
-          "maxMaterials": 4,
-          "maxTextures": 3,
-          "maxTriangles": 26000
-        },
+        "gpuMiB": 0.1043,
+        "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 26000 },
         "bytes": 145748,
-        "extent": [
-          17.2596,
-          10.9,
-          19.8
-        ],
-        "gpuMiB": 0.139,
+        "extent": [17.2596, 10.9, 19.8],
         "sha256": "28bd0fa0b73cba10dc126de2a127b3a1fe9811e62ca2938597f1ad1c4295ce12"
       }
     },
@@ -1004,118 +535,34 @@
       "maxMaterials": 3,
       "maxTextures": 2,
       "maxGpuMiB": 5,
-      "requiredNodes": [
-        "triage:root",
-        "triage:lod:near",
-        "triage:lod:far",
-        "triage:door",
-        "triage:camera"
-      ],
-      "requiredClips": [
-        "door-open",
-        "lights-idle"
-      ],
+      "requiredNodes": ["triage:root", "triage:lod:near", "triage:lod:far", "triage:door", "triage:camera"],
+      "requiredClips": ["door-open", "lights-idle"],
       "lods": [
-        {
-          "distance": 0,
-          "node": "triage:lod:near"
-        },
-        {
-          "distance": 36,
-          "node": "triage:lod:far"
-        }
+        { "distance": 0, "node": "triage:lod:near" },
+        { "distance": 36, "node": "triage:lod:far" }
       ],
-      "transform": {
-        "position": [
-          4,
-          1,
-          25
-        ],
-        "rotation": [
-          0,
-          0,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -7,
-          0,
-          -6
-        ],
-        "max": [
-          7,
-          9,
-          6
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "interaction": [
-          0,
-          3,
-          0
-        ],
-        "camera": [
-          0,
-          6,
-          10
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        6,
-        10
-      ],
+      "transform": { "position": [4, 1, 25], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-7, 0, -6], "max": [7, 9, 6] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 3, 0], "camera": [0, 6, 10] },
+      "cameraAnchor": [0, 6, 10],
       "occlusionGroup": "triage-shell",
-      "collision": {
-        "kind": "box",
-        "navigationArea": "triage"
-      },
-      "materialSlots": [
-        "lunar-rust",
-        "bone-metal"
-      ],
+      "collision": { "kind": "box", "navigationArea": "triage" },
+      "materialSlots": ["lunar-rust", "bone-metal"],
       "statistics": {
-        "animationClips": [
-          "door-open",
-          "lights-idle",
-          "triage-station-idle"
-        ],
+        "accessorBytes": 31956,
+        "animationClips": ["door-open", "lights-idle", "triage-station-idle"],
         "drawCalls": 5,
         "materials": 3,
         "meshes": 5,
         "nodes": 16,
+        "gpuBytes": 31956,
         "textures": 0,
         "triangles": 704,
-        "budget": {
-          "maxDrawCalls": 5,
-          "maxGpuMiB": 5,
-          "maxMaterials": 3,
-          "maxTextures": 2,
-          "maxTriangles": 12000
-        },
+        "gpuMiB": 0.0305,
+        "budget": { "maxDrawCalls": 5, "maxGpuMiB": 5, "maxMaterials": 3, "maxTextures": 2, "maxTriangles": 12000 },
         "bytes": 48032,
-        "extent": [
-          9.5,
-          5.28,
-          8.07
-        ],
-        "gpuMiB": 0.0458,
+        "extent": [9.5, 5.28, 8.07],
         "sha256": "3fcd9d550b46704356d5a1bbb6211fb2e8932f700123e0d1f3683c18662fb2fd"
       }
     },
@@ -1127,114 +574,34 @@
       "maxMaterials": 4,
       "maxTextures": 3,
       "maxGpuMiB": 7,
-      "requiredNodes": [
-        "garden:root",
-        "garden:lod:near",
-        "garden:lod:far",
-        "garden:camera"
-      ],
-      "requiredClips": [
-        "garden-idle"
-      ],
+      "requiredNodes": ["garden:root", "garden:lod:near", "garden:lod:far", "garden:camera"],
+      "requiredClips": ["garden-idle"],
       "lods": [
-        {
-          "distance": 0,
-          "node": "garden:lod:near"
-        },
-        {
-          "distance": 42,
-          "node": "garden:lod:far"
-        }
+        { "distance": 0, "node": "garden:lod:near" },
+        { "distance": 42, "node": "garden:lod:far" }
       ],
-      "transform": {
-        "position": [
-          -8,
-          0,
-          34
-        ],
-        "rotation": [
-          0,
-          0.14,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -14,
-          0,
-          -12
-        ],
-        "max": [
-          14,
-          5,
-          12
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "interaction": [
-          0,
-          1,
-          0
-        ],
-        "camera": [
-          0,
-          6,
-          15
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        6,
-        15
-      ],
+      "transform": { "position": [-8, 0, 34], "rotation": [0, 0.14, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-14, 0, -12], "max": [14, 5, 12] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 1, 0], "camera": [0, 6, 15] },
+      "cameraAnchor": [0, 6, 15],
       "occlusionGroup": "garden",
-      "collision": {
-        "kind": "mesh",
-        "navigationArea": "garden"
-      },
-      "materialSlots": [
-        "lunar-rust",
-        "signal-emissive"
-      ],
+      "collision": { "kind": "mesh", "navigationArea": "garden" },
+      "materialSlots": ["lunar-rust", "signal-emissive"],
       "statistics": {
-        "animationClips": [
-          "garden-idle"
-        ],
+        "accessorBytes": 59604,
+        "animationClips": ["garden-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 14,
+        "gpuBytes": 59604,
         "textures": 0,
         "triangles": 2244,
-        "budget": {
-          "maxDrawCalls": 6,
-          "maxGpuMiB": 7,
-          "maxMaterials": 4,
-          "maxTextures": 3,
-          "maxTriangles": 18000
-        },
+        "gpuMiB": 0.0568,
+        "budget": { "maxDrawCalls": 6, "maxGpuMiB": 7, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 18000 },
         "bytes": 81772,
-        "extent": [
-          19,
-          3.055,
-          19
-        ],
-        "gpuMiB": 0.078,
+        "extent": [19, 3.055, 19],
         "sha256": "f46e9301063a9fe869482694124e2729aa498c7a45d94e46d1369b64f0a3d96e"
       }
     },
@@ -1246,121 +613,34 @@
       "maxMaterials": 4,
       "maxTextures": 3,
       "maxGpuMiB": 8,
-      "requiredNodes": [
-        "council:root",
-        "council:lod:near",
-        "council:lod:far",
-        "council:roof",
-        "council:camera"
-      ],
-      "requiredClips": [
-        "lights-idle"
-      ],
+      "requiredNodes": ["council:root", "council:lod:near", "council:lod:far", "council:roof", "council:camera"],
+      "requiredClips": ["lights-idle"],
       "lods": [
-        {
-          "distance": 0,
-          "node": "council:lod:near"
-        },
-        {
-          "distance": 46,
-          "node": "council:lod:far"
-        }
+        { "distance": 0, "node": "council:lod:near" },
+        { "distance": 46, "node": "council:lod:far" }
       ],
-      "transform": {
-        "position": [
-          27,
-          1,
-          31
-        ],
-        "rotation": [
-          0,
-          -0.18,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -11,
-          0,
-          -9
-        ],
-        "max": [
-          11,
-          14,
-          9
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "interaction": [
-          0,
-          4,
-          0
-        ],
-        "camera": [
-          0,
-          7,
-          13
-        ],
-        "dialogue": [
-          0,
-          1,
-          1
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        7,
-        13
-      ],
+      "transform": { "position": [27, 1, 31], "rotation": [0, -0.18, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-11, 0, -9], "max": [11, 14, 9] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [0, 1, 1] },
+      "cameraAnchor": [0, 7, 13],
       "occlusionGroup": "council-roof",
-      "collision": {
-        "kind": "box",
-        "navigationArea": "council"
-      },
-      "materialSlots": [
-        "charcoal-structure",
-        "bone-metal",
-        "archive-emissive"
-      ],
+      "collision": { "kind": "box", "navigationArea": "council" },
+      "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "animationClips": [
-          "lights-idle"
-        ],
+        "accessorBytes": 132576,
+        "animationClips": ["lights-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 21,
+        "gpuBytes": 132576,
         "textures": 0,
         "triangles": 5730,
-        "budget": {
-          "maxDrawCalls": 7,
-          "maxGpuMiB": 8,
-          "maxMaterials": 4,
-          "maxTextures": 3,
-          "maxTriangles": 22000
-        },
+        "gpuMiB": 0.1264,
+        "budget": { "maxDrawCalls": 7, "maxGpuMiB": 8, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 22000 },
         "bytes": 172940,
-        "extent": [
-          16.4,
-          15.22,
-          16.4
-        ],
-        "gpuMiB": 0.1649,
+        "extent": [16.4, 15.22, 16.4],
         "sha256": "bd7fea9a37dfbf783f61ccd99f8712ddb2ddb2b2365ae276eb25faaf71896c5f"
       }
     },
@@ -1372,119 +652,34 @@
       "maxMaterials": 3,
       "maxTextures": 2,
       "maxGpuMiB": 4,
-      "requiredNodes": [
-        "bus:root",
-        "bus:lod:near",
-        "bus:lod:far",
-        "bus:camera"
-      ],
-      "requiredClips": [
-        "idle",
-        "arrive",
-        "depart"
-      ],
+      "requiredNodes": ["bus:root", "bus:lod:near", "bus:lod:far", "bus:camera"],
+      "requiredClips": ["idle", "arrive", "depart"],
       "lods": [
-        {
-          "distance": 0,
-          "node": "bus:lod:near"
-        },
-        {
-          "distance": 40,
-          "node": "bus:lod:far"
-        }
+        { "distance": 0, "node": "bus:lod:near" },
+        { "distance": 40, "node": "bus:lod:far" }
       ],
-      "transform": {
-        "position": [
-          0,
-          2,
-          -1
-        ],
-        "rotation": [
-          0,
-          0.2,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -5,
-          0,
-          -3
-        ],
-        "max": [
-          5,
-          4,
-          3
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "interaction": [
-          0,
-          2,
-          0
-        ],
-        "camera": [
-          0,
-          5,
-          9
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        5,
-        9
-      ],
+      "transform": { "position": [0, 2, -1], "rotation": [0, 0.2, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-5, 0, -3], "max": [5, 4, 3] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 2, 0], "camera": [0, 5, 9] },
+      "cameraAnchor": [0, 5, 9],
       "occlusionGroup": "vehicles",
-      "collision": {
-        "kind": "box",
-        "navigationArea": "transit"
-      },
-      "materialSlots": [
-        "lunar-rust",
-        "bone-metal",
-        "signal-emissive"
-      ],
+      "collision": { "kind": "box", "navigationArea": "transit" },
+      "materialSlots": ["lunar-rust", "bone-metal", "signal-emissive"],
       "statistics": {
-        "animationClips": [
-          "arrive",
-          "depart",
-          "idle"
-        ],
+        "accessorBytes": 8484,
+        "animationClips": ["arrive", "depart", "idle"],
         "drawCalls": 4,
         "materials": 3,
         "meshes": 4,
         "nodes": 11,
+        "gpuBytes": 8484,
         "textures": 0,
         "triangles": 200,
-        "budget": {
-          "maxDrawCalls": 4,
-          "maxGpuMiB": 4,
-          "maxMaterials": 3,
-          "maxTextures": 2,
-          "maxTriangles": 9000
-        },
+        "gpuMiB": 0.0081,
+        "budget": { "maxDrawCalls": 4, "maxGpuMiB": 4, "maxMaterials": 3, "maxTextures": 2, "maxTriangles": 9000 },
         "bytes": 16408,
-        "extent": [
-          6.8,
-          2.615,
-          2.92
-        ],
-        "gpuMiB": 0.0156,
+        "extent": [6.8, 2.615, 2.92],
         "sha256": "35564954a655c7b91a42651a86bd542162b2edcb963d7d2460a505b02134e760"
       }
     },
@@ -1492,7 +687,7 @@
       "id": "leaders",
       "uri": "models/leaders.glb",
       "maxTriangles": 36000,
-      "maxDrawCalls": 10,
+      "maxDrawCalls": 12,
       "maxMaterials": 6,
       "maxTextures": 4,
       "maxGpuMiB": 14,
@@ -1508,100 +703,22 @@
         "leaders:lod:mid",
         "leaders:lod:far"
       ],
-      "requiredClips": [
-        "idle",
-        "listening",
-        "talking",
-        "thinking",
-        "acknowledging",
-        "unavailable"
-      ],
+      "requiredClips": ["idle", "listening", "talking", "thinking", "acknowledging", "unavailable"],
       "lods": [
-        {
-          "distance": 0,
-          "node": "leaders:lod:near"
-        },
-        {
-          "distance": 18,
-          "node": "leaders:lod:mid"
-        },
-        {
-          "distance": 34,
-          "node": "leaders:lod:far"
-        }
+        { "distance": 0, "node": "leaders:lod:near" },
+        { "distance": 18, "node": "leaders:lod:mid" },
+        { "distance": 34, "node": "leaders:lod:far" }
       ],
-      "transform": {
-        "position": [
-          0,
-          0,
-          0
-        ],
-        "rotation": [
-          0,
-          0,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -44,
-          0,
-          -34
-        ],
-        "max": [
-          44,
-          14,
-          38
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "attachment": [
-          0,
-          1,
-          0
-        ],
-        "camera": [
-          0,
-          4,
-          8
-        ],
-        "dialogue": [
-          0,
-          1,
-          1
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        4,
-        8
-      ],
+      "transform": { "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-44, 0, -34], "max": [44, 14, 38] },
+      "anchors": { "foot": [0, 0, 0], "attachment": [0, 1, 0], "camera": [0, 4, 8], "dialogue": [0, 1, 1] },
+      "cameraAnchor": [0, 4, 8],
       "occlusionGroup": "leaders",
-      "collision": {
-        "kind": "capsule",
-        "navigationArea": "walkable"
-      },
-      "materialSlots": [
-        "bone-metal",
-        "archive-emissive",
-        "signal-emissive"
-      ],
+      "collision": { "kind": "capsule", "navigationArea": "walkable" },
+      "materialSlots": ["bone-metal", "archive-emissive", "signal-emissive"],
       "statistics": {
+        "accessorBytes": 270444,
         "animationClips": [
           "acknowledge",
           "acknowledging",
@@ -1650,27 +767,18 @@
           "thinking",
           "unavailable"
         ],
-        "drawCalls": 10,
+        "drawCalls": 11,
         "materials": 4,
-        "meshes": 10,
-        "nodes": 43,
+        "meshes": 11,
+        "nodes": 33,
+        "gpuBytes": 270444,
         "textures": 0,
-        "triangles": 11522,
-        "budget": {
-          "maxDrawCalls": 10,
-          "maxGpuMiB": 14,
-          "maxMaterials": 6,
-          "maxTextures": 4,
-          "maxTriangles": 36000
-        },
-        "bytes": 361440,
-        "extent": [
-          28.9478,
-          7.6481,
-          10.7553
-        ],
-        "gpuMiB": 0.3447,
-        "sha256": "47b865fde88351ddcfa81e1e01b8629e6d15d69fa26e386de1aefa55f6507aff"
+        "triangles": 12386,
+        "gpuMiB": 0.2579,
+        "budget": { "maxDrawCalls": 12, "maxGpuMiB": 14, "maxMaterials": 6, "maxTextures": 4, "maxTriangles": 36000 },
+        "bytes": 384928,
+        "extent": [28.9478, 7.9677, 10.7553],
+        "sha256": "4cce68bfe4b8a15e937565b6d40014716a888ba4b31667783b78c6be8ec4c268"
       }
     },
     {
@@ -1730,97 +838,24 @@
         "done"
       ],
       "lods": [
-        {
-          "distance": 0,
-          "node": "workers:lod:near"
-        },
-        {
-          "distance": 14,
-          "node": "workers:lod:mid"
-        },
-        {
-          "distance": 28,
-          "node": "workers:lod:far"
-        }
+        { "distance": 0, "node": "workers:lod:near" },
+        { "distance": 14, "node": "workers:lod:mid" },
+        { "distance": 28, "node": "workers:lod:far" }
       ],
-      "transform": {
-        "position": [
-          0,
-          0,
-          0
-        ],
-        "rotation": [
-          0,
-          0,
-          0
-        ],
-        "scale": [
-          1,
-          1,
-          1
-        ]
-      },
-      "pivot": [
-        0,
-        0,
-        0
-      ],
-      "bounds": {
-        "min": [
-          -2,
-          0,
-          -2
-        ],
-        "max": [
-          2,
-          3,
-          2
-        ]
-      },
-      "anchors": {
-        "foot": [
-          0,
-          0,
-          0
-        ],
-        "attachment": [
-          0,
-          1,
-          0
-        ],
-        "camera": [
-          0,
-          2,
-          5
-        ]
-      },
-      "cameraAnchor": [
-        0,
-        2,
-        5
-      ],
+      "transform": { "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-2, 0, -2], "max": [2, 3, 2] },
+      "anchors": { "foot": [0, 0, 0], "attachment": [0, 1, 0], "camera": [0, 2, 5] },
+      "cameraAnchor": [0, 2, 5],
       "occlusionGroup": "workers",
-      "collision": {
-        "kind": "capsule",
-        "navigationArea": "walkable"
-      },
+      "collision": { "kind": "capsule", "navigationArea": "walkable" },
       "instancing": {
         "eligible": true,
-        "variants": [
-          "orbital",
-          "archivist",
-          "builder",
-          "artist",
-          "dispatcher",
-          "verifier",
-          "courier"
-        ]
+        "variants": ["orbital", "archivist", "builder", "artist", "dispatcher", "verifier", "courier"]
       },
-      "materialSlots": [
-        "bone-metal",
-        "signal-emissive"
-      ],
+      "materialSlots": ["bone-metal", "signal-emissive"],
       "statistics": {
+        "accessorBytes": 105472,
         "animationClips": [
           "blocked",
           "carry",
@@ -1843,24 +878,15 @@
         "drawCalls": 6,
         "materials": 3,
         "meshes": 6,
-        "nodes": 107,
+        "nodes": 155,
+        "gpuBytes": 105472,
         "textures": 0,
-        "triangles": 2984,
-        "budget": {
-          "maxDrawCalls": 6,
-          "maxGpuMiB": 8,
-          "maxMaterials": 4,
-          "maxTextures": 3,
-          "maxTriangles": 18000
-        },
-        "bytes": 190072,
-        "extent": [
-          1.6298,
-          2.975,
-          1.0915
-        ],
-        "gpuMiB": 0.1813,
-        "sha256": "e409e3d2b7678473cb522390b14eeb4dbdd8e00aadb78b16609e9f565d26980b"
+        "triangles": 3092,
+        "gpuMiB": 0.1006,
+        "budget": { "maxDrawCalls": 6, "maxGpuMiB": 8, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 18000 },
+        "bytes": 202468,
+        "extent": [1.6298, 3, 1.1],
+        "sha256": "aa4dc917f94d24529cb33b57de3fede6cd6d49e5dd529c39d324c769f6a0e63f"
       }
     }
   ],
@@ -1870,321 +896,63 @@
       "alpha": -0.78,
       "beta": 1.02,
       "radius": 54,
-      "target": [
-        0,
-        5,
-        0
-      ],
+      "target": [0, 5, 0],
       "minBeta": 0.72,
       "maxBeta": 1.3,
       "minRadius": 18,
       "maxRadius": 96
     },
-    "bounds": {
-      "min": [
-        -60,
-        -12,
-        -60
-      ],
-      "max": [
-        60,
-        36,
-        60
-      ]
-    },
-    "followOffset": [
-      0,
-      5,
-      -8
-    ]
+    "bounds": { "min": [-60, -12, -60], "max": [60, 36, 60] },
+    "followOffset": [0, 5, -8]
   },
   "navigation": {
     "meshUri": "models/navigation.glb",
-    "areas": [
-      "walkable",
-      "library",
-      "research",
-      "depot",
-      "review",
-      "triage",
-      "garden",
-      "council",
-      "transit"
-    ],
+    "areas": ["walkable", "library", "research", "depot", "review", "triage", "garden", "council", "transit"],
     "links": [
-      {
-        "from": [
-          -28,
-          0,
-          -18
-        ],
-        "to": [
-          0,
-          0,
-          -1
-        ],
-        "bidirectional": true
-      },
-      {
-        "from": [
-          25,
-          0,
-          -22
-        ],
-        "to": [
-          0,
-          0,
-          -1
-        ],
-        "bidirectional": true
-      },
-      {
-        "from": [
-          -31,
-          0,
-          12
-        ],
-        "to": [
-          -8,
-          0,
-          34
-        ],
-        "bidirectional": true
-      },
-      {
-        "from": [
-          33,
-          0,
-          10
-        ],
-        "to": [
-          4,
-          0,
-          25
-        ],
-        "bidirectional": true
-      },
-      {
-        "from": [
-          4,
-          0,
-          25
-        ],
-        "to": [
-          -8,
-          0,
-          34
-        ],
-        "bidirectional": true
-      },
-      {
-        "from": [
-          27,
-          0,
-          31
-        ],
-        "to": [
-          4,
-          0,
-          25
-        ],
-        "bidirectional": true
-      },
-      {
-        "from": [
-          16,
-          0,
-          30
-        ],
-        "to": [
-          4,
-          0,
-          25
-        ],
-        "bidirectional": true
-      },
-      {
-        "from": [
-          30,
-          0,
-          30
-        ],
-        "to": [
-          27,
-          0,
-          31
-        ],
-        "bidirectional": true
-      },
-      {
-        "from": [
-          -32,
-          0,
-          34
-        ],
-        "to": [
-          -8,
-          0,
-          34
-        ],
-        "bidirectional": true
-      }
+      { "from": [-28, 0, -18], "to": [0, 0, -1], "bidirectional": true },
+      { "from": [25, 0, -22], "to": [0, 0, -1], "bidirectional": true },
+      { "from": [-31, 0, 12], "to": [-8, 0, 34], "bidirectional": true },
+      { "from": [33, 0, 10], "to": [4, 0, 25], "bidirectional": true },
+      { "from": [4, 0, 25], "to": [-8, 0, 34], "bidirectional": true },
+      { "from": [27, 0, 31], "to": [4, 0, 25], "bidirectional": true },
+      { "from": [16, 0, 30], "to": [4, 0, 25], "bidirectional": true },
+      { "from": [30, 0, 30], "to": [27, 0, 31], "bidirectional": true },
+      { "from": [-32, 0, 34], "to": [-8, 0, 34], "bidirectional": true }
     ]
   },
   "destinations": {
-    "bus": [
-      0,
-      0,
-      -1
-    ],
-    "project": [
-      18,
-      0,
-      38
-    ],
-    "depot": [
-      -31,
-      0,
-      12
-    ],
-    "review": [
-      33,
-      0,
-      10
-    ],
-    "triage": [
-      4,
-      0,
-      25
-    ],
-    "garden": [
-      -8,
-      0,
-      34
-    ],
-    "council": [
-      27,
-      0,
-      31
-    ],
-    "unavailable": [
-      0,
-      0,
-      0
-    ]
+    "bus": [0, 0, -1],
+    "project": [18, 0, 38],
+    "depot": [-31, 0, 12],
+    "review": [33, 0, 10],
+    "triage": [4, 0, 25],
+    "garden": [-8, 0, 34],
+    "council": [27, 0, 31],
+    "unavailable": [0, 0, 0]
   },
   "projectSlots": [
     {
       "id": "compound-inner-1",
-      "position": [
-        16,
-        0,
-        38
-      ],
-      "bounds": {
-        "min": [
-          8,
-          0,
-          30
-        ],
-        "max": [
-          24,
-          12,
-          46
-        ]
-      },
-      "navigationLink": {
-        "from": [
-          16,
-          0,
-          30
-        ],
-        "to": [
-          4,
-          0,
-          25
-        ],
-        "bidirectional": true
-      }
+      "position": [16, 0, 38],
+      "bounds": { "min": [8, 0, 30], "max": [24, 12, 46] },
+      "navigationLink": { "from": [16, 0, 30], "to": [4, 0, 25], "bidirectional": true }
     },
     {
       "id": "compound-inner-2",
-      "position": [
-        38,
-        0,
-        30
-      ],
-      "bounds": {
-        "min": [
-          30,
-          0,
-          22
-        ],
-        "max": [
-          46,
-          12,
-          38
-        ]
-      },
-      "navigationLink": {
-        "from": [
-          30,
-          0,
-          30
-        ],
-        "to": [
-          27,
-          0,
-          31
-        ],
-        "bidirectional": true
-      }
+      "position": [38, 0, 30],
+      "bounds": { "min": [30, 0, 22], "max": [46, 12, 38] },
+      "navigationLink": { "from": [30, 0, 30], "to": [27, 0, 31], "bidirectional": true }
     },
     {
       "id": "compound-outer-1",
-      "position": [
-        -42,
-        0,
-        34
-      ],
-      "bounds": {
-        "min": [
-          -52,
-          0,
-          24
-        ],
-        "max": [
-          -32,
-          12,
-          44
-        ]
-      },
-      "navigationLink": {
-        "from": [
-          -32,
-          0,
-          34
-        ],
-        "to": [
-          -8,
-          0,
-          34
-        ],
-        "bidirectional": true
-      }
+      "position": [-42, 0, 34],
+      "bounds": { "min": [-52, 0, 24], "max": [-32, 12, 44] },
+      "navigationLink": { "from": [-32, 0, 34], "to": [-8, 0, 34], "bidirectional": true }
     }
   ],
   "qualityBudgets": {
-    "balancedOverview": {
-      "drawCalls": 180,
-      "visibleTriangles": 1500000,
-      "gpuMiB": 256
-    },
-    "balancedWorkerFocus": {
-      "drawCalls": 220,
-      "visibleTriangles": 2000000,
-      "gpuMiB": 256
-    }
+    "balancedOverview": { "drawCalls": 180, "visibleTriangles": 1500000, "gpuMiB": 256 },
+    "balancedWorkerFocus": { "drawCalls": 220, "visibleTriangles": 2000000, "gpuMiB": 256 }
   },
   "textures": [
     {
@@ -2198,27 +966,19 @@
     "builder": "babylonjs-null-engine",
     "engineVersion": "9.21.2",
     "navigation": {
+      "accessorBytes": 14016,
       "animationClips": [],
       "drawCalls": 1,
       "materials": 1,
       "meshes": 1,
       "nodes": 11,
+      "gpuBytes": 14016,
       "textures": 0,
       "triangles": 352,
-      "budget": {
-        "maxDrawCalls": 4,
-        "maxGpuMiB": 4,
-        "maxMaterials": 1,
-        "maxTextures": 0,
-        "maxTriangles": 12000
-      },
+      "gpuMiB": 0.0134,
+      "budget": { "maxDrawCalls": 4, "maxGpuMiB": 4, "maxMaterials": 1, "maxTextures": 0, "maxTriangles": 12000 },
       "bytes": 20084,
-      "extent": [
-        77,
-        1.01,
-        69
-      ],
-      "gpuMiB": 0.0192,
+      "extent": [77, 1.01, 69],
       "sha256": "65b359f1f02bc77b777536918ab701d8a22f096e4b0ce442dedf4b951a78534d"
     },
     "sourceSha256": "248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590"

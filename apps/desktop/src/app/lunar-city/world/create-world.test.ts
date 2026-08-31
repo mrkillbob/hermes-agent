@@ -197,13 +197,16 @@ function fakeRuntime({
     }
 
     const root = fakeNode(`${modelId}:root`)
-    const near = fakeNode(`${modelId}:lod:near`)
-    const far = fakeNode(`${modelId}:lod:far`)
+    const model = actualManifest.models.find(candidate => candidate.id === modelId)
+    const modelLods = model?.lods ?? []
     roots.set(modelId, root)
-    lodNodes.set(near.name, near)
-    lodNodes.set(far.name, far)
+    const lods = modelLods.map(lod => {
+      const node = fakeNode(lod.node)
+      lodNodes.set(node.name, node)
+      return node
+    })
 
-    const transformNodes: FakeNode[] = [root, near, far]
+    const transformNodes: FakeNode[] = [root, ...lods]
 
     if (modelId === 'garden') {
       const plants = fakeNode('garden:plants', { gltf: { extras: { semantic: 'garden:plants' } } })

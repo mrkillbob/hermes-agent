@@ -166,6 +166,7 @@ function addWorkerGroupKits(scene, attachment, pieceTemplate) {
       mesh.scaling.set(...scale)
       mesh.isPickable = false
       mesh.metadata = { ...(mesh.metadata ?? {}), keepSeparate: true }
+      return mesh
     }
     createPiece(
       'silhouette',
@@ -173,14 +174,84 @@ function addWorkerGroupKits(scene, attachment, pieceTemplate) {
       [0.08 + index * 0.008, 0.38 + row * 0.07, 0.08 + column * 0.012],
       [0, 0, -0.62 + index * 0.07]
     )
-    createPiece(
+    const emblem = createPiece(
       'emblem',
       [0.18 - column * 0.04, -0.24 + row * 0.05, -0.08],
       [0.14 + column * 0.025, 0.08 + index * 0.006, 0.05],
       [0.08 * row, 0, 0.12 * column]
     )
+    const accent = group(scene, `${kit.name}:identity-accent`, emblem)
+    accent.metadata = {
+      gltf: {
+        extras: {
+          colorChannel: 'worker:instance-color',
+          semantic: 'worker-profile-identity-accent',
+          sharedResource: 'worker:profile-template'
+        }
+      }
+    }
+    const accentMesh = pieceTemplate.createInstance(`${kit.name}:identity-accent:geometry`)
+    accentMesh.parent = accent
+    accentMesh.position.set(0.03, 0.08, -0.03)
+    accentMesh.scaling.set(0.28, 0.28, 0.28)
+    accentMesh.isPickable = false
+    accentMesh.metadata = { ...(accentMesh.metadata ?? {}), keepSeparate: true }
   }
   return kits
+}
+
+function addWorkerProfileVariants(scene, root, pieceTemplate) {
+  const createVariant = (name, { active, position, scale }) => {
+    const variant = group(scene, name, root)
+    variant.metadata = {
+      gltf: {
+        extras: {
+          colorChannel: 'worker:instance-color',
+          defaultActive: active,
+          semantic: 'worker-shared-profile-variant',
+          sharedResource: 'worker:profile-template'
+        }
+      }
+    }
+    if (!active) variant.scaling.set(0, 0, 0)
+    const mesh = pieceTemplate.createInstance(`${name}:geometry`)
+    mesh.parent = variant
+    mesh.position.set(...position)
+    mesh.scaling.set(...scale)
+    mesh.isPickable = false
+    mesh.metadata = { ...(mesh.metadata ?? {}), keepSeparate: true }
+  }
+
+  createVariant('worker:body-variant:compact', {
+    active: true,
+    position: [0, 1.02, -0.45],
+    scale: [0.32, 0.18, 0.08]
+  })
+  createVariant('worker:body-variant:standard', {
+    active: false,
+    position: [0, 1.02, -0.47],
+    scale: [0.54, 0.25, 0.09]
+  })
+  createVariant('worker:head-variant:orb', {
+    active: true,
+    position: [0, 2.05, -0.55],
+    scale: [0.22, 0.22, 0.12]
+  })
+  createVariant('worker:head-variant:visor', {
+    active: false,
+    position: [0, 2.05, -0.57],
+    scale: [0.48, 0.16, 0.1]
+  })
+  createVariant('worker:palette:rust-bone', {
+    active: true,
+    position: [0.32, 1.45, -0.46],
+    scale: [0.12, 0.36, 0.08]
+  })
+  createVariant('worker:palette:violet-cyan', {
+    active: false,
+    position: [-0.32, 1.45, -0.46],
+    scale: [0.12, 0.36, 0.08]
+  })
 }
 
 function buildWorkerClips(scene, rig) {
@@ -402,6 +473,7 @@ export function buildWorker(scene) {
   const rightLeg = addRobotLimb(scene, 'worker:limb:right-leg', root, [0.23, 0.52, 0], [0, 0, -0.02])
   const attachment = group(scene, 'worker:attachment', root, { position: [0.64, 1.42, 0] })
   const { pieceTemplate } = addWorkerVariantAccessories(scene, attachment)
+  addWorkerProfileVariants(scene, root, pieceTemplate)
   addWorkerGroupKits(scene, attachment, pieceTemplate)
   const rig = { attachment, body, head, leftArm, leftLeg, rightArm, rightLeg }
   const { boneIndex, skeleton } = createRobotSkeleton(scene, rig)
@@ -418,6 +490,24 @@ export function buildWorkers(scene) {
   const root = group(scene, 'workers:root')
   const near = group(scene, 'workers:lod:near', root)
   buildWorker(scene).root.parent = near
+  const mid = group(scene, 'workers:lod:mid', root)
+  capsule(scene, 'workers:mid:silhouette', {
+    height: 2.3,
+    material: 'bone-metal',
+    parent: mid,
+    position: [0, 1.15, 0],
+    radius: 0.46,
+    tessellation: 8
+  })
+  box(scene, 'workers:mid:face', {
+    depth: 0.2,
+    height: 0.46,
+    material: 'bone-metal',
+    parent: mid,
+    position: [0, 1.92, -0.44],
+    width: 0.7
+  })
+
   const far = group(scene, 'workers:lod:far', root)
   const farSilhouette = capsule(scene, 'workers:far:silhouette', {
     height: 2.25,
@@ -430,19 +520,11 @@ export function buildWorkers(scene) {
   const farFace = box(scene, 'workers:far:face', {
     depth: 0.18,
     height: 0.42,
-    material: 'signal-emissive',
+    material: 'bone-metal',
     parent: far,
     position: [0, 1.9, -0.42],
     width: 0.65
   })
-  farSilhouette.metadata = { ...(farSilhouette.metadata ?? {}), keepSeparate: true }
-  farFace.metadata = { ...(farFace.metadata ?? {}), keepSeparate: true }
-  const mid = group(scene, 'workers:lod:mid', root)
-  const midSilhouette = farSilhouette.createInstance('workers:mid:silhouette')
-  midSilhouette.parent = mid
-  midSilhouette.scaling.set(1, 1, 1)
-  const midFace = farFace.createInstance('workers:mid:face')
-  midFace.parent = mid
   return root
 }
 
@@ -781,8 +863,8 @@ export function buildLeaders(scene) {
   badger.leaderRig.headMesh.metadata = { keepSeparate: true }
   stag.leaderRig.headMesh.metadata = { ...(stag.leaderRig.headMesh.metadata ?? {}), keepSeparate: true }
 
-  const far = group(scene, 'leaders:lod:far', root)
   const mid = group(scene, 'leaders:lod:mid', root)
+  const far = group(scene, 'leaders:lod:far', root)
   const positions = [
     [-7.5, 1.5, -2.2],
     [-4.4, 1.55, 2.1],
@@ -791,27 +873,25 @@ export function buildLeaders(scene) {
     [4.7, 1.55, -2],
     [7.7, 1.7, 2.1]
   ]
-  let farTemplate = null
   positions.forEach((position, index) => {
-    const farLeader = farTemplate
-      ? farTemplate.createInstance(`leaders:far:silhouette:${index}`)
-      : capsule(scene, 'leaders:far:silhouette:0', {
-          height: 2.5 + (index % 3) * 0.2,
-          material: 'charcoal-structure',
-          parent: far,
-          position,
-          radius: 0.7,
-          tessellation: 6
-        })
-    farTemplate ??= farLeader
-    farLeader.parent = far
-    farLeader.position.set(...position)
-    farLeader.scaling.set(1 + (index % 3) * 0.06, 1, 1)
-    farLeader.metadata = { ...(farLeader.metadata ?? {}), keepSeparate: true }
-    const midLeader = farTemplate.createInstance(`leaders:mid:silhouette:${index}`)
-    midLeader.parent = mid
-    midLeader.position.set(...position)
+    const midLeader = capsule(scene, `leaders:mid:silhouette:${index}`, {
+      height: 2.7 + (index % 3) * 0.22,
+      material: 'charcoal-structure',
+      parent: mid,
+      position,
+      radius: 0.74,
+      tessellation: 8
+    })
     midLeader.scaling.set(1.08 + (index % 3) * 0.06, 1.08, 1.08)
+    const farLeader = capsule(scene, `leaders:far:silhouette:${index}`, {
+      height: 2.5 + (index % 3) * 0.2,
+      material: 'charcoal-structure',
+      parent: far,
+      position,
+      radius: 0.7,
+      tessellation: 5
+    })
+    farLeader.scaling.set(1 + (index % 3) * 0.06, 1, 1)
   })
   const leaders = { badger, bird, fox, otter, owl, stag }
   const parts = {

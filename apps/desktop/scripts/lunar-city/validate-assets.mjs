@@ -98,9 +98,34 @@ function countTriangles(primitive) {
   return primitive.getAttribute?.('POSITION')?.getCount?.() / 3 || 0
 }
 
+function bytesOf(value) {
+  return value?.byteLength ?? value?.length ?? 0
+}
+
+function isDescendantOf(node, ancestor) {
+  for (let cursor = node; cursor; cursor = cursor.getParentNode?.() ?? cursor.getParent?.())
+    if (cursor === ancestor) return true
+  return false
+}
+
+async function readGlbBytes(io, uri) {
+  try {
+    return io.readBytes ? await io.readBytes(uri) : await readFile(uri)
+  } catch {
+    // Unit-level structure validation can use an in-memory Document, which has no artifact bytes to attest.
+    return undefined
+  }
+}
+
 export async function inspectGlb(io, uri) {
   const root = (await io.read(uri)).getRoot()
+  const primitives = root.listMeshes().flatMap(mesh => mesh.listPrimitives())
+  const bytes = await readGlbBytes(io, uri)
+  const accessorBytes = root.listAccessors().reduce((total, accessor) => total + bytesOf(accessor.getArray?.()), 0)
+  const textureBytes = root.listTextures().reduce((total, texture) => total + bytesOf(texture.getImage?.()), 0)
   return {
+    accessorBytes,
+    bytes: bytes?.byteLength,
     clips: new Set(
       root
         .listAnimations()
@@ -119,11 +144,39 @@ export async function inspectGlb(io, uri) {
         .map(texture => texture.getURI?.())
         .filter(Boolean)
     ),
-    triangles: root
-      .listMeshes()
-      .flatMap(mesh => mesh.listPrimitives())
-      .reduce((total, primitive) => total + countTriangles(primitive), 0)
+    drawCalls: primitives.length,
+    gpuBytes: accessorBytes + textureBytes,
+    gpuMiB: Number(((accessorBytes + textureBytes) / (1024 * 1024)).toFixed(4)),
+    materials: root.listMaterials().length,
+    sha256: bytes ? createHash('sha256').update(bytes).digest('hex') : undefined,
+    skins: root.listSkins().length,
+    textures: root.listTextures().length,
+    triangles: primitives.reduce((total, primitive) => total + countTriangles(primitive), 0),
+    root
   }
+}
+
+function inspectTierCosts(root, model) {
+  const animations = root.listAnimations()
+  const nodes = root.listNodes()
+  return Object.fromEntries(
+    (model.lods ?? []).map(lod => {
+      const lodRoot = nodes.find(node => node.getName() === lod.node)
+      const descendants = lodRoot ? nodes.filter(node => node.getMesh?.() && isDescendantOf(node, lodRoot)) : []
+      const primitives = descendants.flatMap(node => node.getMesh().listPrimitives())
+      return [
+        lod.node,
+        {
+          animationChannels: animations
+            .flatMap(animation => animation.listChannels?.() ?? [])
+            .filter(channel => isDescendantOf(channel.getTargetNode?.(), lodRoot)).length,
+          drawCalls: primitives.length,
+          skinnedNodes: descendants.filter(node => node.getSkin?.()).length,
+          triangles: primitives.reduce((total, primitive) => total + countTriangles(primitive), 0)
+        }
+      ]
+    })
+  )
 }
 
 export function requireNamedNodes(model, stats, errors) {
@@ -429,6 +482,27 @@ function validateCharacterLods(characterAssets, errors) {
   }
 }
 
+function validatePhysicalVariantRoots(characterAssets, errors) {
+  const variants = characterAssets?.physicalVariantRoots
+  const vocabulary = characterAssets?.workerVocabulary
+  for (const [field, collection] of [
+    ['body', 'bodies'],
+    ['head', 'heads'],
+    ['palette', 'palettes']
+  ]) {
+    const declared = variants?.[field]
+    if (
+      !isRecord(declared) ||
+      !vocabulary?.[collection]?.every(value => isNonEmptyString(declared[value])) ||
+      Object.keys(declared).length !== vocabulary?.[collection]?.length
+    )
+      errors.push(`worker physical ${field} variants are invalid`)
+  }
+  const groupKit = variants?.groupKit
+  if (!['silhouetteSuffix', 'emblemSuffix', 'identityAccentSuffix'].every(key => isNonEmptyString(groupKit?.[key])))
+    errors.push('worker physical group-kit variants are invalid')
+}
+
 export function validateCharacterAssets(characterAssets, errors) {
   if (!isRecord(characterAssets)) {
     errors.push('character asset contract is required')
@@ -439,6 +513,7 @@ export function validateCharacterAssets(characterAssets, errors) {
   validateWorkerKits(characterAssets, vocabulary, errors)
   validateSharedCharacterResources(characterAssets, errors)
   validateCharacterLods(characterAssets, errors)
+  validatePhysicalVariantRoots(characterAssets, errors)
 }
 
 function validateRuntimeTextures(root, errors) {
@@ -449,6 +524,79 @@ function validateRuntimeTextures(root, errors) {
 function validateModelTextures(model, stats, errors) {
   for (const uri of [...(model.textures ?? []), ...stats.textureUris])
     if (isApprovedSourceUri(uri)) errors.push('approved source cannot be a runtime asset')
+}
+
+function validateActualModelCosts(model, stats, errors) {
+  for (const [budget, actual, label] of [
+    ['maxTriangles', stats.triangles, 'triangles'],
+    ['maxDrawCalls', stats.drawCalls, 'draw calls'],
+    ['maxMaterials', stats.materials, 'materials'],
+    ['maxTextures', stats.textures, 'textures'],
+    ['maxGpuMiB', stats.gpuMiB, 'GPU MiB']
+  ]) {
+    if (Number.isFinite(model[budget]) && actual > model[budget])
+      errors.push(`${model.id} exceeds ${model[budget]} ${label}`)
+  }
+
+  const declared = model.statistics
+  if (!isRecord(declared)) return
+  for (const [key, actual] of Object.entries({
+    bytes: stats.bytes,
+    drawCalls: stats.drawCalls,
+    gpuBytes: stats.gpuBytes,
+    gpuMiB: stats.gpuMiB,
+    materials: stats.materials,
+    textures: stats.textures,
+    triangles: stats.triangles
+  })) {
+    if (Number.isFinite(declared[key]) && declared[key] !== actual)
+      errors.push(`${model.id} generated ${key} does not match its actual GLB`)
+  }
+  if (isNonEmptyString(declared.sha256) && stats.sha256 && declared.sha256 !== stats.sha256)
+    errors.push(`${model.id} artifact digest does not match its generated statistics`)
+}
+
+function validateCharacterModelResources(model, characterAssets, stats, errors) {
+  if (model.id !== 'workers' && model.id !== 'leaders') return
+  if (model.id === 'workers' && stats.skins !== 1)
+    errors.push(`workers must contain exactly one shared skin, found ${stats.skins}`)
+  if (model.id === 'leaders' && stats.skins !== 0) errors.push(`leaders must not contain skins, found ${stats.skins}`)
+
+  const costs = inspectTierCosts(stats.root, model)
+  const near = costs[`${model.id}:lod:near`]
+  const mid = costs[`${model.id}:lod:mid`]
+  const far = costs[`${model.id}:lod:far`]
+  if (!near || !mid || !far) return
+  if (!(near.triangles > mid.triangles && mid.triangles > far.triangles))
+    errors.push(`${model.id} LOD geometry must strictly decrease near > mid > far`)
+  if (mid.skinnedNodes !== 0 || mid.animationChannels !== 0)
+    errors.push(`${model.id} mid LOD must be static and unskinned`)
+  if (far.skinnedNodes !== 0 || far.animationChannels !== 0)
+    errors.push(`${model.id} far LOD must not contain animation channels or skins`)
+
+  if (model.id !== 'workers') return
+  const nodes = stats.root.listNodes()
+  const nodeByName = new Map(nodes.map(node => [node.getName(), node]))
+  const hasPhysicalDescendant = name => {
+    const node = nodeByName.get(name)
+    return Boolean(node && nodes.some(candidate => candidate.getMesh?.() && isDescendantOf(candidate, node)))
+  }
+  const variants = characterAssets?.physicalVariantRoots
+  for (const field of ['body', 'head', 'palette'])
+    for (const name of Object.values(variants?.[field] ?? {}))
+      if (!hasPhysicalDescendant(name)) errors.push(`workers missing physical ${field} variant ${name}`)
+  for (const kit of characterAssets?.groupKits ?? []) {
+    const prefix = `worker:group-kit:${kit.kitId}`
+    const emblem = `${prefix}:${variants?.groupKit?.emblemSuffix}`
+    const accent = `${prefix}:${variants?.groupKit?.identityAccentSuffix}`
+    const silhouette = `${prefix}:${variants?.groupKit?.silhouetteSuffix}`
+    if (!hasPhysicalDescendant(silhouette)) errors.push(`workers missing physical group-kit silhouette ${silhouette}`)
+    if (!hasPhysicalDescendant(emblem)) errors.push(`workers missing physical group-kit emblem ${emblem}`)
+    const accentNode = nodeByName.get(accent)
+    const accentParent = accentNode?.getParentNode?.() ?? accentNode?.getParent?.()
+    if (!accentNode || accentParent?.getName() !== emblem || !hasPhysicalDescendant(accent))
+      errors.push(`workers missing physical group-kit identity accent ${accent}`)
+  }
 }
 
 export async function validateAssetPack(root, io) {
@@ -477,8 +625,8 @@ export async function validateAssetPack(root, io) {
     }
     const stats = await inspectGlb(io, model.uri)
     validateModelTextures(model, stats, errors)
-    if (Number.isFinite(model.maxTriangles) && stats.triangles > model.maxTriangles)
-      errors.push(`${id} exceeds ${model.maxTriangles} triangles`)
+    validateActualModelCosts(model, stats, errors)
+    validateCharacterModelResources(model, root?.characterAssets, stats, errors)
     requireNamedNodes(model, stats, errors)
     requireClips(model, stats, errors)
     requireLods(model, stats, errors)

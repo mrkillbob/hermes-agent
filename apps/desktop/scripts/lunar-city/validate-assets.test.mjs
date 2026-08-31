@@ -74,6 +74,12 @@ function characterAssetsFixture(overrides = {}) {
       textureAtlas: 'textures/approved-palette.png',
       perProfile: { skeletons: 0, meshes: 0, materials: 0, textures: 0 }
     },
+    physicalVariantRoots: {
+      body: { compact: 'worker:body-variant:compact', standard: 'worker:body-variant:standard' },
+      head: { orb: 'worker:head-variant:orb', visor: 'worker:head-variant:visor' },
+      palette: { bone: 'worker:palette:violet-cyan', rust: 'worker:palette:rust-bone' },
+      groupKit: { emblemSuffix: 'emblem', identityAccentSuffix: 'identity-accent', silhouetteSuffix: 'silhouette' }
+    },
     lodRepresentations: [
       { id: 'near', animated: true, representation: 'full' },
       { id: 'mid', animated: false, representation: 'reduced' },
@@ -154,37 +160,51 @@ function fixture(overrides = {}) {
   }
 }
 
-function fakeDocument({ triangles = 1200, nodes, clips, textureUris } = {}) {
+function fakeDocument({
+  triangles = 1200,
+  nodes,
+  clips,
+  textureUris,
+  primitiveCount = 1,
+  materialCount = 1,
+  skinCount = 0,
+  gpuBytes = 1024
+} = {}) {
   const nodeNames = nodes ?? ['terrain:root', 'terrain:lod:near', 'terrain:lod:far']
+  const primitive = {
+    getIndices: () => ({ getCount: () => triangles * 3 }),
+    getMode: () => 4
+  }
 
   return {
     getRoot() {
       return {
         listAnimations: () => (clips ?? []).map(name => ({ getName: () => name })),
+        listAccessors: () => [{ getArray: () => ({ byteLength: gpuBytes }) }],
+        listMaterials: () => Array.from({ length: materialCount }, () => ({})),
         listMeshes: () => [
           {
-            listPrimitives: () => [
-              {
-                getIndices: () => ({ getCount: () => triangles * 3 }),
-                getMode: () => 4
-              }
-            ]
+            listPrimitives: () => Array.from({ length: primitiveCount }, () => primitive)
           }
         ],
         listNodes: () => nodeNames.map(name => ({ getName: () => name })),
+        listSkins: () => Array.from({ length: skinCount }, () => ({})),
         listTextures: () => (textureUris ?? []).map(uri => ({ getURI: () => uri }))
       }
     }
   }
 }
 
-function fakeIoFor(statsByUri = {}) {
+function fakeIoFor(statsByUri = {}, bytesByUri = {}) {
   return {
     async read(uri) {
       return fakeDocument(statsByUri[uri])
     },
+    async readBytes(uri) {
+      return bytesByUri[uri] ?? Buffer.from(`fixture:${uri}`)
+    },
     withTriangles(uri, triangles) {
-      return fakeIoFor({ ...statsByUri, [uri]: { ...statsByUri[uri], triangles } })
+      return fakeIoFor({ ...statsByUri, [uri]: { ...statsByUri[uri], triangles } }, bytesByUri)
     }
   }
 }
@@ -247,6 +267,147 @@ test('rejects a model above its declared triangle budget', async () => {
   )
 
   assert.match(result.errors.join('\n'), /worker exceeds 1200 triangles/)
+})
+
+test('measures actual draw, material, texture, GPU, and hash costs instead of trusting the manifest', async () => {
+  const uri = 'models/replaced.glb'
+  const result = await validateAssetPack(
+    fixture({
+      models: [
+        modelFixture({
+          id: 'replaced',
+          uri,
+          maxTriangles: 1000,
+          maxDrawCalls: 6,
+          maxMaterials: 4,
+          maxTextures: 1,
+          maxGpuMiB: 0.001,
+          statistics: { sha256: '0'.repeat(64) }
+        })
+      ]
+    }),
+    fakeIoFor(
+      {
+        [uri]: {
+          triangles: 1,
+          primitiveCount: 20,
+          materialCount: 23,
+          textureUris: ['atlas-a.png', 'atlas-b.png'],
+          gpuBytes: 2048
+        }
+      },
+      { [uri]: Buffer.from('replacement glb bytes') }
+    )
+  )
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /replaced exceeds 6 draw calls/)
+  assert.match(result.errors.join('\n'), /replaced exceeds 4 materials/)
+  assert.match(result.errors.join('\n'), /replaced exceeds 1 textures/)
+  assert.match(result.errors.join('\n'), /replaced exceeds 0.001 GPU MiB/)
+  assert.match(result.errors.join('\n'), /replaced artifact digest does not match its generated statistics/)
+})
+
+test('rejects multiple worker skins even when the manifest claims zero per-profile resources', async () => {
+  const uri = 'models/workers.glb'
+  const result = await validateAssetPack(
+    fixture({
+      models: [
+        modelFixture({
+          id: 'workers',
+          uri,
+          maxTriangles: 10_000,
+          requiredNodes: ['workers:root', 'workers:lod:near', 'workers:lod:mid', 'workers:lod:far'],
+          lods: [
+            { distance: 0, node: 'workers:lod:near' },
+            { distance: 14, node: 'workers:lod:mid' },
+            { distance: 28, node: 'workers:lod:far' }
+          ]
+        })
+      ]
+    }),
+    fakeIoFor({
+      [uri]: {
+        nodes: ['workers:root', 'workers:lod:near', 'workers:lod:mid', 'workers:lod:far'],
+        skinCount: 2
+      }
+    })
+  )
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /workers must contain exactly one shared skin, found 2/)
+})
+
+test('measures character LOD graph costs instead of accepting equal or animated far tiers', async () => {
+  const uri = 'models/workers.glb'
+  const root = { getName: () => 'workers:root', getParent: () => null, getMesh: () => null, getSkin: () => null }
+  const lod = suffix => ({
+    getName: () => `workers:lod:${suffix}`,
+    getParent: () => root,
+    getMesh: () => null,
+    getSkin: () => null
+  })
+  const primitive = triangles => ({
+    getIndices: () => ({ getCount: () => triangles * 3 }),
+    getMode: () => 4
+  })
+  const near = lod('near')
+  const mid = lod('mid')
+  const far = lod('far')
+  const meshNode = (name, parent, triangles) => ({
+    getName: () => name,
+    getParent: () => parent,
+    getMesh: () => ({ listPrimitives: () => [primitive(triangles)] }),
+    getSkin: () => null
+  })
+  const farMesh = meshNode('workers:far:mesh', far, 30)
+  const document = {
+    getRoot: () => ({
+      listAccessors: () => [],
+      listAnimations: () => [
+        { getName: () => 'invalid-far-animation', listChannels: () => [{ getTargetNode: () => farMesh }] }
+      ],
+      listMaterials: () => [{}],
+      listMeshes: () => [
+        meshNode('workers:near:mesh', near, 100).getMesh(),
+        meshNode('workers:mid:mesh', mid, 30).getMesh(),
+        farMesh.getMesh()
+      ],
+      listNodes: () => [
+        root,
+        near,
+        meshNode('workers:near:mesh', near, 100),
+        mid,
+        meshNode('workers:mid:mesh', mid, 30),
+        far,
+        farMesh
+      ],
+      listSkins: () => [{}],
+      listTextures: () => []
+    })
+  }
+
+  const result = await validateAssetPack(
+    fixture({
+      models: [
+        modelFixture({
+          id: 'workers',
+          uri,
+          requiredNodes: ['workers:root', 'workers:lod:near', 'workers:lod:mid', 'workers:lod:far'],
+          lods: [
+            { distance: 0, node: 'workers:lod:near' },
+            { distance: 14, node: 'workers:lod:mid' },
+            { distance: 28, node: 'workers:lod:far' }
+          ]
+        })
+      ]
+    }),
+    { read: async () => document, readBytes: async () => Buffer.from('worker graph') }
+  )
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /workers LOD geometry must strictly decrease near > mid > far/)
+  assert.match(result.errors.join('\n'), /workers far LOD must not contain animation channels/)
 })
 
 test('requires a measurable triangle budget for every runtime model', async () => {

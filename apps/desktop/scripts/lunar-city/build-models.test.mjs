@@ -218,6 +218,21 @@ function descendantsWithMeshes(root, ancestor) {
   return root.listNodes().filter(node => node.getMesh() && isDescendantOf(node, ancestor))
 }
 
+function tierCost(root, id, suffix) {
+  const lod = root.listNodes().find(node => node.getName() === `${id}:lod:${suffix}`)
+  assert.ok(lod, `${id} missing ${suffix} LOD`)
+  const nodes = descendantsWithMeshes(root, lod)
+  return {
+    animatedChannels: root
+      .listAnimations()
+      .flatMap(animation => animation.listChannels())
+      .filter(channel => isDescendantOf(channel.getTargetNode(), lod)).length,
+    primitives: nodes.reduce((total, node) => total + node.getMesh().listPrimitives().length, 0),
+    skinnedNodes: nodes.filter(node => node.getSkin()).length,
+    triangles: worldTriangles(root, `${id}:lod:${suffix}`).length
+  }
+}
+
 before(async () => {
   firstRoot = await mkdtemp(join(tmpdir(), 'lunar-city-assets-a-'))
   secondRoot = await mkdtemp(join(tmpdir(), 'lunar-city-assets-b-'))
@@ -480,15 +495,57 @@ test('exports one distinct physical kit for every Hermes group without multiplyi
   assert.equal(signatures.size, HERMES_GROUPS.length, 'Hermes groups must not share full physical kit signatures')
 })
 
-test('exports deterministic near, reduced mid, and static far character LOD nodes', async () => {
+test('exports shared physical worker profile controls and collision-free kit accents', async () => {
+  const root = (await new NodeIO().read(join(firstRoot, 'models', 'workers.glb'))).getRoot()
+  const nodes = root.listNodes()
+  const byName = new Map(nodes.map(node => [node.getName(), node]))
+  const physicalMeshes = name => {
+    const node = byName.get(name)
+    assert.ok(node, `missing worker profile node ${name}`)
+    const meshes = descendantsWithMeshes(root, node).map(child => child.getMesh())
+    assert.ok(meshes.length > 0, `${name} has no physical geometry`)
+    return meshes
+  }
+  const profileRoots = [
+    'worker:body-variant:compact',
+    'worker:body-variant:standard',
+    'worker:head-variant:orb',
+    'worker:head-variant:visor',
+    'worker:palette:rust-bone',
+    'worker:palette:violet-cyan'
+  ]
+  const profileMeshes = profileRoots.flatMap(physicalMeshes)
+  assert.equal(new Set(profileMeshes).size, 1, 'profile controls must reuse one shared mesh resource')
+
+  const manifest = JSON.parse(
+    await readFile(new URL('../../public/lunar-city/v2/world-manifest.v2.json', import.meta.url), 'utf8')
+  )
+  const kits = manifest.characterAssets.groupKits
+  const accentMeshes = []
+  for (const { kitId } of kits) {
+    const prefix = `worker:group-kit:${kitId}`
+    physicalMeshes(`${prefix}:silhouette`)
+    const emblem = byName.get(`${prefix}:emblem`)
+    assert.ok(emblem, `${kitId} is missing its physical emblem`)
+    const accent = byName.get(`${prefix}:identity-accent`)
+    assert.equal(accent?.getParentNode(), emblem, `${kitId} identity accent must remain under its emblem`)
+    accentMeshes.push(...physicalMeshes(`${prefix}:identity-accent`))
+  }
+  assert.equal(new Set(accentMeshes).size, 1, 'kit accents must reuse one shared mesh resource')
+})
+
+test('exports deterministic near, strictly reduced mid, and cheaper static far character LODs', async () => {
   const io = new NodeIO()
   for (const id of ['leaders', 'workers']) {
     const root = (await io.read(join(firstRoot, 'models', `${id}.glb`))).getRoot()
-    for (const suffix of ['near', 'mid', 'far']) {
-      const lod = root.listNodes().find(node => node.getName() === `${id}:lod:${suffix}`)
-      assert.ok(lod, `${id} missing ${suffix} LOD`)
-      assert.ok(descendantsWithMeshes(root, lod).length > 0, `${id} ${suffix} LOD has no geometry`)
-    }
+    const near = tierCost(root, id, 'near')
+    const mid = tierCost(root, id, 'mid')
+    const far = tierCost(root, id, 'far')
+    assert.ok(near.triangles > mid.triangles, `${id} mid LOD is not cheaper than near`)
+    assert.ok(mid.triangles > far.triangles, `${id} far LOD is not cheaper than mid`)
+    assert.equal(mid.skinnedNodes, 0, `${id} mid LOD must not carry a skin`)
+    assert.equal(far.skinnedNodes, 0, `${id} far LOD must not carry a skin`)
+    assert.equal(far.animatedChannels, 0, `${id} far LOD must be static`)
   }
 })
 
