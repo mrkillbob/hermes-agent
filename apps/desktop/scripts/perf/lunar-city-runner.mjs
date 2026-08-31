@@ -288,7 +288,16 @@ export async function cleanupIsolatedRun({ cdp, child, tempRoot }, injected = {}
   if (errors.length) throw new AggregateError(errors, 'cleanup failed')
 }
 
-async function capturePhase({ cdp, phase, sampleCount, sampleIntervalMs, processProbe, rendererProbe, clock }) {
+async function capturePhase({
+  cdp,
+  phase,
+  warmupDurationMs,
+  sampleCount,
+  sampleIntervalMs,
+  processProbe,
+  rendererProbe,
+  clock
+}) {
   const firstRenderer = await rendererProbe(cdp)
   const rendererIdentity = { pid: firstRenderer.rendererPid, startedAtMs: firstRenderer.rendererStartedAtMs }
   const startedAt = clock.now()
@@ -299,7 +308,13 @@ async function capturePhase({ cdp, phase, sampleCount, sampleIntervalMs, process
     samples.push({ timestampMs: clock.now() - startedAt, processMetrics, rendererMetrics })
     if (index + 1 < sampleCount) await clock.sleep(sampleIntervalMs)
   }
-  return { envelopeVersion: LUNAR_CITY_PHASE_ENVELOPE_VERSION, phase, rendererIdentity, samples }
+  return {
+    envelopeVersion: LUNAR_CITY_PHASE_ENVELOPE_VERSION,
+    phase,
+    warmupDurationMs,
+    rendererIdentity,
+    samples
+  }
 }
 
 /**
@@ -357,6 +372,7 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     const baselineShell = await capturePhase({
       cdp,
       phase: 'baseline-shell',
+      warmupDurationMs,
       sampleCount,
       sampleIntervalMs,
       processProbe: deps.processProbe,
@@ -368,6 +384,7 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     const mountedCity = await capturePhase({
       cdp,
       phase: 'mounted-city',
+      warmupDurationMs,
       sampleCount,
       sampleIntervalMs,
       processProbe: deps.processProbe,

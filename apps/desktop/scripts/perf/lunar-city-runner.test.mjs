@@ -62,10 +62,15 @@ function rendererMetrics(overrides = {}) {
     listeners: 12,
     timers: 2,
     population: { observed: 100, active: 100, lodMix: { near: 100 }, source: 'fake-backend' },
+    populationSourceMix: { 'fake-backend': 100 },
     qualityTier: 'Balanced',
     internalRenderScale: 1,
     cameraState: 'overview',
+    cameraActions: { overview: 1, focus: 0, orbit: 0, zoom: 0, indoor: 0 },
     dialogueState: 'idle',
+    dialogueActions: { opened: 0, messagesSent: 0, responsesReceived: 0 },
+    lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 0 },
+    environment: { electronMode: 'packaged', gpuEnabled: true },
     gpuEnabled: true,
     ...overrides
   }
@@ -73,8 +78,9 @@ function rendererMetrics(overrides = {}) {
 
 function phase(name, points) {
   return {
-    envelopeVersion: 1,
+    envelopeVersion: 2,
     phase: name,
+    warmupDurationMs: 30_000,
     rendererIdentity: { pid: 20, startedAtMs: 1_000 },
     samples: points.map((point, index) => ({
       timestampMs: index * 1_000,
@@ -86,7 +92,7 @@ function phase(name, points) {
 
 function provenance() {
   return {
-    provenanceVersion: 1,
+    provenanceVersion: 2,
     baselineShell: phase('baseline-shell', [
       { cpu: 1, rssKiB: 204_800, renderer: { gpuMemoryMiB: 40 } },
       { cpu: 1, rssKiB: 205_824, renderer: { gpuMemoryMiB: 42 } }
@@ -334,6 +340,7 @@ test('allows an empty baseline shell but requires a consistent exact mounted pop
   const raw = provenance()
   for (const sample of raw.baselineShell.samples) {
     sample.rendererMetrics.population = { observed: 0, active: 0, lodMix: {}, source: 'unmounted' }
+    sample.rendererMetrics.populationSourceMix = {}
   }
   assert.doesNotThrow(() => deriveRawSamplesFromProvenance(raw))
   raw.mountedCity.samples[1].rendererMetrics.population.observed = 99
@@ -408,7 +415,7 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
 
   assert.equal(launches.length, 1)
   assert.deepEqual(phases, ['baseline-shell', 'mounted-city'])
-  assert.equal(result.rawProvenance.provenanceVersion, 1)
+  assert.equal(result.rawProvenance.provenanceVersion, 2)
   assert.deepEqual(result.rawSamples.cpuDeltaPp, [3, 3])
   assert.equal(result.buildStamp.commit, SHA)
   assert.equal(result.packagedPerformanceEligible, false)

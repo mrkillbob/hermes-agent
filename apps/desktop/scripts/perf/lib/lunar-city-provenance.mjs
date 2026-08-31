@@ -1,5 +1,5 @@
-export const LUNAR_CITY_PROVENANCE_VERSION = 1
-export const LUNAR_CITY_PHASE_ENVELOPE_VERSION = 1
+export const LUNAR_CITY_PROVENANCE_VERSION = 2
+export const LUNAR_CITY_PHASE_ENVELOPE_VERSION = 2
 
 const RAW_RENDERER_FIELDS = Object.freeze([
   'frameMs',
@@ -89,6 +89,34 @@ function validateRendererMetrics(metrics, identity, label, allowEmpty) {
     if (!isFiniteNumber(metrics[field]) || metrics[field] < 0) fail(`${label} required metric ${field} is unavailable`)
   }
   validatePopulation(metrics.population, label, allowEmpty)
+  if (!isRecord(metrics.populationSourceMix)) fail(`${label} population source distribution is unavailable`)
+  const sourceTotal = Object.values(metrics.populationSourceMix).reduce(
+    (sum, count) => sum + (Number.isInteger(count) && count >= 0 ? count : Number.NaN),
+    0
+  )
+  if (!Number.isFinite(sourceTotal) || sourceTotal !== metrics.population.observed)
+    fail(`${label} population source distribution is not exact`)
+  if (typeof metrics.qualityTier !== 'string' || !isFiniteNumber(metrics.internalRenderScale))
+    fail(`${label} quality state is unavailable`)
+  for (const [field, keys] of [
+    ['cameraActions', ['overview', 'focus', 'orbit', 'zoom', 'indoor']],
+    ['dialogueActions', ['opened', 'messagesSent', 'responsesReceived']],
+    ['lifecycleActions', ['contextLosses', 'recoveries', 'disposals']]
+  ]) {
+    if (
+      !isRecord(metrics[field]) ||
+      keys.some(key => !Number.isInteger(metrics[field][key]) || metrics[field][key] < 0)
+    )
+      fail(`${label} ${field} are unavailable`)
+  }
+  if (typeof metrics.cameraState !== 'string' || typeof metrics.dialogueState !== 'string')
+    fail(`${label} camera/dialogue state is unavailable`)
+  if (
+    !isRecord(metrics.environment) ||
+    metrics.environment.electronMode !== 'packaged' ||
+    metrics.environment.gpuEnabled !== true
+  )
+    fail(`${label} packaged environment/GPU state is unavailable`)
 }
 
 function validatePhase(envelope, expectedPhase) {
@@ -98,6 +126,8 @@ function validatePhase(envelope, expectedPhase) {
   }
   if (envelope.phase !== expectedPhase) fail(`${expectedPhase} envelope has the wrong phase`)
   validateIdentity(envelope.rendererIdentity, expectedPhase)
+  if (!isFiniteNumber(envelope.warmupDurationMs) || envelope.warmupDurationMs < 0)
+    fail(`${expectedPhase} warmup duration is unavailable`)
   if (!Array.isArray(envelope.samples) || envelope.samples.length === 0)
     fail(`${expectedPhase} samples are unavailable`)
 
@@ -124,6 +154,11 @@ function validatePhase(envelope, expectedPhase) {
     const expected = JSON.stringify(envelope.samples[0].rendererMetrics.population)
     if (envelope.samples.some(sample => JSON.stringify(sample.rendererMetrics.population) !== expected)) {
       fail('mounted-city exact population must remain consistent across samples')
+    }
+    for (const field of ['qualityTier', 'internalRenderScale', 'populationSourceMix', 'environment']) {
+      const first = JSON.stringify(envelope.samples[0].rendererMetrics[field])
+      if (envelope.samples.some(sample => JSON.stringify(sample.rendererMetrics[field]) !== first))
+        fail(`mounted-city ${field} must remain consistent across samples`)
     }
   }
 }
@@ -167,10 +202,26 @@ export function deriveRawSamplesFromProvenance(provenance) {
   const cpuDeltaPp = city.map(sample => totalCpu(sample.processMetrics) - baselineCpu)
   const gpuMemoryDeltaMiB = city.map(sample => sample.rendererMetrics.gpuMemoryMiB - baselineGpu)
   const residentMemoryMiB = city.map(sample => rendererRssMiB(sample, identity.pid))
+  const lastMetrics = city.at(-1).rendererMetrics
 
   return {
     rendererIdentity: { ...identity },
     sampleTimestampsMs: city.map(sample => sample.timestampMs),
+    mountedClaims: {
+      durationMs: city.at(-1).timestampMs - city[0].timestampMs,
+      warmupDurationMs: provenance.mountedCity.warmupDurationMs,
+      population: structuredClone(lastMetrics.population),
+      populationSourceMix: structuredClone(lastMetrics.populationSourceMix),
+      qualityTier: lastMetrics.qualityTier,
+      internalRenderScale: lastMetrics.internalRenderScale,
+      cameraState: lastMetrics.cameraState,
+      cameraActions: structuredClone(lastMetrics.cameraActions),
+      dialogueState: lastMetrics.dialogueState,
+      dialogueActions: structuredClone(lastMetrics.dialogueActions),
+      lifecycleActions: structuredClone(lastMetrics.lifecycleActions),
+      environment: structuredClone(lastMetrics.environment),
+      rendererIdentity: { ...identity }
+    },
     resourceDeltas: {
       cpuDeltaPp,
       gpuMemoryDeltaMiB,

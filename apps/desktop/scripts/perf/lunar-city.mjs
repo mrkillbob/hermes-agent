@@ -49,7 +49,7 @@ const RAW_FIELDS = Object.freeze([
 
 const SIGNED_RAW_FIELDS = new Set(['cpuDeltaPp', 'gpuMemoryDeltaMiB'])
 const NON_NEGATIVE_RAW_FIELDS = new Set(RAW_FIELDS.filter(field => !SIGNED_RAW_FIELDS.has(field)))
-const ALLOWED_LOD_KEYS = new Set(['near', 'far'])
+const ALLOWED_LOD_KEYS = new Set(['near', 'mid', 'far'])
 const MONOTONIC_FIELDS = Object.freeze([
   ['entities', 'entities'],
   ['textures', 'textures'],
@@ -467,6 +467,65 @@ function validateRawProvenance(receipt, errors) {
   ) {
     errors.push('rawProvenance bridge renderer lifetime does not match sampled renderer identity')
   }
+  const claims = derived.mountedClaims
+  const timestamps = receipt.measurement?.sampleTimestampsMs
+  if (!Array.isArray(timestamps) || JSON.stringify(timestamps) !== JSON.stringify(derived.sampleTimestampsMs))
+    errors.push('measurement timestamps do not match raw mounted sample timestamps')
+  if (receipt.measurement?.durationMs !== claims.durationMs)
+    errors.push(`measurement duration does not match raw mounted duration ${claims.durationMs}`)
+  if (receipt.warmupDurationMs !== claims.warmupDurationMs)
+    errors.push('warmup duration does not match raw mounted warmup')
+  const receiptPopulationCore = isRecord(receipt.population)
+    ? {
+        observed: receipt.population.observed,
+        active: receipt.population.active,
+        lodMix: receipt.population.lodMix,
+        source: receipt.population.source
+      }
+    : receipt.population
+  if (JSON.stringify(receiptPopulationCore) !== JSON.stringify(claims.population))
+    errors.push('top-level population does not match raw mounted population')
+  const packagedClass = receipt.evidenceClass === 'fake-backend-packaged' || receipt.evidenceClass === 'supervised-live'
+  if (packagedClass && JSON.stringify(receipt.population?.sourceMix) !== JSON.stringify(claims.populationSourceMix))
+    errors.push('top-level population source does not match raw source distribution')
+  for (const field of ['qualityTier', 'internalRenderScale', 'cameraState', 'dialogueState']) {
+    if (receipt[field] !== claims[field]) errors.push(`${field} does not match raw mounted state`)
+  }
+  if (receipt.environment?.gpuEnabled !== claims.environment.gpuEnabled)
+    errors.push('environment GPU state does not match raw mounted state')
+  if (receipt.environment?.electronMode !== claims.environment.electronMode)
+    errors.push('environment Electron mode does not match raw mounted state')
+  if (receipt.environment?.cityPopulated !== claims.population.observed > 0)
+    errors.push('environment city population state does not match raw mounted population')
+
+  const requireAction = (condition, message) => {
+    if (!condition) errors.push(message)
+  }
+  if (receipt.scenario === 'balanced-overview')
+    requireAction(claims.cameraActions.overview > 0, 'balanced overview requires raw overview action evidence')
+  if (receipt.scenario === 'balanced-worker-focus')
+    requireAction(claims.cameraActions.focus > 0, 'worker focus requires raw focus action evidence')
+  if (receipt.scenario === 'continuous-orbit-zoom')
+    requireAction(
+      claims.cameraActions.orbit > 0 && claims.cameraActions.zoom > 0,
+      'continuous orbit zoom requires raw orbit and zoom action evidence'
+    )
+  if (receipt.scenario === 'indoor-occlusion')
+    requireAction(claims.cameraActions.indoor > 0, 'indoor occlusion requires raw indoor action evidence')
+  if (receipt.scenario === 'dialogue-camera')
+    requireAction(
+      claims.dialogueActions.opened > 0 &&
+        claims.dialogueActions.messagesSent > 0 &&
+        claims.dialogueActions.responsesReceived > 0,
+      'dialogue camera requires raw dialogue action evidence'
+    )
+  if (receipt.scenario === 'context-loss-recovery')
+    requireAction(
+      claims.lifecycleActions.contextLosses > 0 && claims.lifecycleActions.recoveries > 0,
+      'context loss recovery requires raw context recovery action evidence'
+    )
+  if (receipt.scenario === 'disposal')
+    requireAction(claims.lifecycleActions.disposals > 0, 'disposal requires raw disposal action evidence')
   if (!isRecord(receipt.rawSamples)) return
   for (const field of RAW_FIELDS) {
     const retained = receipt.rawSamples[field]

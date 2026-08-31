@@ -352,8 +352,9 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   })
   const rendererIdentity = { pid: 20, startedAtMs: 1_000 }
   const phase = (name, cpu, gpu, residentMemoryMiB) => ({
-    envelopeVersion: 1,
+    envelopeVersion: 2,
     phase: name,
+    warmupDurationMs: 30_000,
     rendererIdentity,
     samples: rawSamples.frameMs.map((frameMs, index) => ({
       timestampMs: index * 7_500,
@@ -387,14 +388,33 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
         textures: rawSamples.textures[index],
         listeners: rawSamples.listeners[index],
         timers: rawSamples.timers[index],
-        population: { observed: 100, active: 100, lodMix: { near: 100 }, source: 'fake-backend' }
+        population: { observed: 100, active: 100, lodMix: { near: 100 }, source: 'fake-backend' },
+        populationSourceMix: { 'fake-backend': 100 },
+        qualityTier: 'Balanced',
+        internalRenderScale: 1,
+        cameraState: 'overview',
+        cameraActions: { overview: 1, focus: 0, orbit: 0, zoom: 0, indoor: 0 },
+        dialogueState: 'idle',
+        dialogueActions: { opened: 0, messagesSent: 0, responsesReceived: 0 },
+        lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 0 },
+        environment: { electronMode: 'packaged', gpuEnabled: true }
       }
     }))
   })
   const rawProvenance = {
-    provenanceVersion: 1,
+    provenanceVersion: 2,
     baselineShell: phase('baseline-shell', 3, 40, [200, 200, 200, 200, 200]),
-    mountedCity: phase('mounted-city', 6, 50, rawSamples.residentMemoryMiB)
+    mountedCity: phase('mounted-city', 6, 50, rawSamples.residentMemoryMiB),
+    bridgeHandshake: {
+      bridgeVersion: 1,
+      launchNonce: 'nonce-7',
+      buildSha: SHA,
+      packaged: true,
+      mainPid: 999,
+      rendererIdentity,
+      supportedPhases: ['baseline-shell', 'mounted-city'],
+      processMetricsSource: 'electron.app.getAppMetrics'
+    }
   }
   const valid = validateReceipt(receipt({ rawSamples, rawProvenance }))
   assert.equal(valid.ok, true, valid.errors.join('; '))
@@ -403,6 +423,82 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   const forged = validateReceipt(receipt({ rawSamples: forgedRaw, rawProvenance }))
   assert.equal(forged.ok, false)
   assert.match(forged.errors.join('\n'), /raw provenance.*cpuDeltaPp|cpuDeltaPp.*provenance/i)
+
+  const packaged = validateReceipt(
+    receipt({
+      evidenceClass: 'fake-backend-packaged',
+      rawSamples,
+      rawProvenance,
+      population: {
+        observed: 100,
+        active: 100,
+        lodMix: { near: 100 },
+        source: 'fake-backend',
+        sourceMix: { 'fake-backend': 100 }
+      }
+    })
+  )
+  assert.equal(packaged.packagedPerformanceEligible, true, packaged.errors.join('; '))
+
+  for (const [label, patch, pattern] of [
+    [
+      '25-active population mismatch',
+      {
+        scenario: '25-active',
+        population: { observed: 25, active: 25, lodMix: { near: 25 }, source: 'fake-backend' }
+      },
+      /raw.*population|mounted.*population/i
+    ],
+    [
+      '100-active population mismatch',
+      {
+        scenario: '100-active',
+        population: { observed: 100, active: 100, lodMix: { near: 100 }, source: 'different-source' }
+      },
+      /raw.*population|source.*distribution/i
+    ],
+    [
+      '250-lod population mismatch',
+      {
+        scenario: '250-lod',
+        population: { observed: 250, active: 100, lodMix: { near: 50, far: 200 }, source: 'fake-backend' }
+      },
+      /raw.*population|mounted.*population/i
+    ],
+    ['short stability', { scenario: '30-minute-stability' }, /raw.*duration|mounted.*1800000|continuity/i],
+    [
+      'worker focus without action',
+      { scenario: 'balanced-worker-focus', cameraState: 'worker-focus' },
+      /focus.*action|raw.*camera/i
+    ],
+    [
+      'orbit without action',
+      { scenario: 'continuous-orbit-zoom', cameraState: 'orbit-zoom' },
+      /orbit.*zoom.*action|raw.*camera/i
+    ],
+    [
+      'dialogue without action',
+      { scenario: 'dialogue-camera', cameraState: 'orbit-zoom', dialogueState: 'active' },
+      /dialogue.*action|raw.*dialogue/i
+    ],
+    [
+      'recovery without action',
+      { scenario: 'context-loss-recovery', recovery: 'recovered' },
+      /context.*recovery.*action|raw.*recovery/i
+    ],
+    ['disposal without action', { scenario: 'disposal', disposal: 'disposed' }, /disposal.*action|raw.*disposal/i],
+    [
+      'quality mismatch',
+      { scenario: 'tier-efficient', qualityTier: 'Efficient' },
+      /qualityTier.*raw mounted|quality.*raw/i
+    ]
+  ]) {
+    const result = validateReceipt(
+      receipt({ evidenceClass: 'fake-backend-packaged', rawSamples, rawProvenance, ...patch })
+    )
+    assert.equal(result.packagedPerformanceEligible, false, label)
+    assert.match(result.errors.join('\n'), pattern, label)
+  }
 })
 
 test('reports balanced overview draw calls over the hard limit', () => {
