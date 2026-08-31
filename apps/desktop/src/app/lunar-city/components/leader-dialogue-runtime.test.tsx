@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useLayoutEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
+import type * as HermesModule from '@/hermes'
 import { $sessionStates } from '@/store/session-states'
 
 import type { LeaderStateClipMap } from '../model'
@@ -34,7 +36,7 @@ vi.mock('@/app/chat/composer/hooks/use-voice-conversation', () => ({
   }
 }))
 vi.mock('@/hermes', async importOriginal => ({
-  ...(await importOriginal<typeof import('@/hermes')>()),
+  ...(await importOriginal<typeof HermesModule>()),
   transcribeAudio
 }))
 vi.mock('@/lib/voice-client-direct', () => ({ transcribeAudioClientDirect }))
@@ -61,12 +63,42 @@ function sessionState(overrides: Partial<ClientSessionState> = {}): ClientSessio
 function deferred<T>() {
   let reject!: (error: unknown) => void
   let resolve!: (value: T) => void
+
   const promise = new Promise<T>((done, fail) => {
     reject = fail
     resolve = done
   })
 
   return { promise, reject, resolve }
+}
+
+interface LeaderDialogueRuntimeHarnessProps {
+  onRouteLayout?(): void
+  owner: { connectionId: string; profile: string }
+  session: { runtimeId: string; storedId: string }
+}
+
+/**
+ * Resolves a prior capture from the parent layout phase. Child passive effects
+ * have not run yet, so this models an owner change racing an audio completion.
+ */
+function LeaderDialogueRuntimeHarness({ onRouteLayout, owner, session }: LeaderDialogueRuntimeHarnessProps) {
+  useLayoutEffect(() => {
+    onRouteLayout?.()
+  }, [onRouteLayout, owner.connectionId, owner.profile, session.runtimeId, session.storedId])
+
+  return (
+    <LeaderDialogueRuntime
+      clips={clips}
+      leaderLabel={`${owner.profile} leader`}
+      onClose={vi.fn()}
+      onLeaderStateChange={vi.fn()}
+      onOpenFullChat={vi.fn()}
+      owner={owner}
+      session={session}
+      voiceAvailable
+    />
+  )
 }
 
 afterEach(() => {
@@ -224,6 +256,71 @@ describe('LeaderDialogueRuntime', () => {
     )
     relay.resolve({ transcript: 'old audio must not reach fox' })
 
+    await expect(pending).rejects.toThrow(/leader voice route changed/i)
+  })
+
+  it('rejects a direct capture that completes during an owner-change layout phase before passive effects flush', async () => {
+    const direct = deferred<null | string>()
+    transcribeAudioClientDirect.mockReturnValue(direct.promise)
+    $sessionStates.set({ shared: sessionState() })
+
+    const view = render(
+      <LeaderDialogueRuntimeHarness
+        owner={{ connectionId: 'source-a', profile: 'owl' }}
+        session={{ runtimeId: 'shared', storedId: 'stored-owl' }}
+      />
+    )
+
+    const pending = voiceHook.onTranscribeAudio!(new Blob(['audio'], { type: 'audio/webm' }))
+    const oldSignal = transcribeAudioClientDirect.mock.calls[0]?.[2] as AbortSignal
+    const signalAtOwnerCommit = vi.fn()
+
+    view.rerender(
+      <LeaderDialogueRuntimeHarness
+        onRouteLayout={() => {
+          signalAtOwnerCommit(oldSignal.aborted)
+          direct.resolve(null)
+        }}
+        owner={{ connectionId: 'source-b', profile: 'fox' }}
+        session={{ runtimeId: 'shared', storedId: 'stored-fox' }}
+      />
+    )
+
+    expect(signalAtOwnerCommit).toHaveBeenCalledWith(true)
+    await expect(pending).rejects.toThrow(/leader voice route changed/i)
+    expect(transcribeAudio).not.toHaveBeenCalled()
+  })
+
+  it('rejects a relay transcript that completes during an owner-change layout phase before passive effects flush', async () => {
+    const relay = deferred<{ transcript: string }>()
+    transcribeAudioClientDirect.mockResolvedValue(null)
+    transcribeAudio.mockReturnValue(relay.promise)
+    $sessionStates.set({ shared: sessionState() })
+
+    const view = render(
+      <LeaderDialogueRuntimeHarness
+        owner={{ connectionId: 'source-a', profile: 'owl' }}
+        session={{ runtimeId: 'shared', storedId: 'stored-owl' }}
+      />
+    )
+
+    const pending = voiceHook.onTranscribeAudio!(new Blob(['audio'], { type: 'audio/webm' }))
+
+    await waitFor(() => expect(transcribeAudio).toHaveBeenCalledOnce())
+    const oldSignal = transcribeAudioClientDirect.mock.calls[0]?.[2] as AbortSignal
+    const signalAtOwnerCommit = vi.fn()
+    view.rerender(
+      <LeaderDialogueRuntimeHarness
+        onRouteLayout={() => {
+          signalAtOwnerCommit(oldSignal.aborted)
+          relay.resolve({ transcript: 'stale audio' })
+        }}
+        owner={{ connectionId: 'source-b', profile: 'fox' }}
+        session={{ runtimeId: 'shared', storedId: 'stored-fox' }}
+      />
+    )
+
+    expect(signalAtOwnerCommit).toHaveBeenCalledWith(true)
     await expect(pending).rejects.toThrow(/leader voice route changed/i)
   })
 })

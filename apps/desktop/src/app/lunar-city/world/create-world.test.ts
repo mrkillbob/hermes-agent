@@ -28,10 +28,13 @@ interface FakeNode {
 }
 
 interface FakeAnimationGroup {
+  advance(): void
   isPlaying: boolean
+  loop: boolean
   name: string
-  start: ReturnType<typeof vi.fn>
-  stop: ReturnType<typeof vi.fn>
+  remainingFrames: number
+  start(loop?: boolean): void
+  stop(): void
 }
 
 const leaderStateClips = (leaderId: string): LeaderStateClipMap => ({
@@ -101,7 +104,11 @@ function fakeRuntime({
     materials: Array<{ freeze: ReturnType<typeof vi.fn>; modelId: string }> = []
     dispose = vi.fn()
     pick = vi.fn()
-    render = vi.fn()
+    render = vi.fn(() => {
+      for (const group of leaderAnimationGroups.values()) {
+        group.advance()
+      }
+    })
     whenReadyAsync = vi.fn(async () => {
       if (rejectWhenReady) {
         throw new Error('scene readiness rejected')
@@ -234,13 +241,24 @@ function fakeRuntime({
 
         for (const clip of Object.values(leaderStateClips(leaderId))) {
           const group: FakeAnimationGroup = {
+            advance: vi.fn(() => {
+              if (group.isPlaying && !group.loop) {
+                group.remainingFrames -= 1
+                group.isPlaying = group.remainingFrames > 0
+              }
+            }),
             isPlaying: false,
+            loop: false,
             name: clip,
-            start: vi.fn(() => {
+            remainingFrames: 0,
+            start: vi.fn((loop = false) => {
               group.isPlaying = true
+              group.loop = loop
+              group.remainingFrames = loop ? Number.POSITIVE_INFINITY : 2
             }),
             stop: vi.fn(() => {
               group.isPlaying = false
+              group.remainingFrames = 0
             })
           }
 
@@ -586,6 +604,7 @@ describe('createLunarCityWorld', () => {
 
       now = 1_000
       await vi.advanceTimersByTimeAsync(1_000)
+
       while (requestedFrames.length > 0) {
         requestedFrames.shift()?.(now)
       }
@@ -617,18 +636,21 @@ describe('createLunarCityWorld', () => {
     requestedFrames.shift()?.(now)
     scene.render.mockClear()
     handle.setLeaderAnimation('fox', 'acknowledging')
+    expect(acknowledging.start).toHaveBeenCalledWith(false)
 
     now = 100
     requestedFrames.shift()?.(now)
-    acknowledging.isPlaying = false
+    expect(acknowledging.isPlaying).toBe(true)
 
     now = 167
     await vi.advanceTimersByTimeAsync(67)
     requestedFrames.shift()?.(now)
+    expect(acknowledging.isPlaying).toBe(false)
     const rendersAfterCompletion = scene.render.mock.calls.length
 
     now = 1_000
     await vi.advanceTimersByTimeAsync(1_000)
+
     while (requestedFrames.length > 0) {
       requestedFrames.shift()?.(now)
     }
@@ -663,9 +685,11 @@ describe('createLunarCityWorld', () => {
     handle.destroy()
 
     now = 100
+
     while (requestedFrames.length > 0) {
       requestedFrames.shift()?.(now)
     }
+
     await vi.advanceTimersByTimeAsync(1_000)
 
     expect(thinking.stop).toHaveBeenCalledOnce()

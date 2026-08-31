@@ -150,3 +150,63 @@ npm run test:ui --workspace apps/desktop -- \
   Task 10 WIP in `command-broker.test.ts`, which this task did not modify.
 - Desktop production build passed at dirty checkout `438faec7098d`; it remains
   build evidence only, not clean packaged acceptance.
+
+## Fix round 2 — finite clips and synchronous owner-change revocation
+
+The second review round keeps all leader animation demand inside the existing
+Task 6 scheduler and makes owner/session capture revocation synchronous with
+the React commit.
+
+- The world has an explicit playback policy: `listening`, `thinking`, and
+  `talking` start looping; finite states, including `acknowledging`, start
+  non-looping. The existing scheduler continues only while Babylon reports an
+  active group and parks after natural finite completion, idle, or disposal.
+- The world fake now follows the requested loop flag. Acknowledging completes
+  over multiple rendered frames without a test mutating `isPlaying` itself.
+- Each leader voice capture holds a frozen owner/session route token with a
+  unique generation. Route cleanup moved from a passive effect to the layout
+  commit phase, aborting the old capture before a parent can observe a newly
+  committed owner/session. Every direct and relay await boundary verifies that
+  immutable token and the active capture identity; stale audio cannot begin a
+  relay or return text under a replacement owner.
+- The client-direct configuration in-flight cleanup now uses a pre-created
+  symbol token instead of closing over a not-yet-initialized promise.
+
+### Fix-round-2 TDD evidence
+
+Observed RED before the corresponding minimal changes:
+
+- The finite acknowledging regression expected `start(false)` but the prior
+  playback path called `start(true)`.
+- Direct and relay owner-switch layout tests observed the old abort signal as
+  `false`; a passive effect had not run yet. They now observe `true`, reject
+  the stale completion, and prove the direct path never starts relay STT.
+
+### Fix-round-2 verification receipts
+
+```text
+npm run test:ui --workspace apps/desktop -- \
+  src/app/lunar-city/leader-sessions.test.ts \
+  src/app/lunar-city/components/leader-dialogue.test.tsx \
+  src/app/lunar-city/leader-runtime.test.ts \
+  src/app/lunar-city/components/leader-dialogue-runtime.test.tsx \
+  src/app/lunar-city/contribution.test.tsx \
+  src/app/lunar-city/index.test.tsx \
+  src/app/lunar-city/world/create-world.test.ts \
+  src/app/lunar-city/world/scheduler.test.ts \
+  src/app/lunar-city/world/world-scene.test.ts \
+  src/app/chat/composer/hooks/use-voice-conversation.test.tsx \
+  src/app/chat/composer/hooks/use-voice-conversation-rearm.test.tsx \
+  src/lib/voice-client-direct.test.ts \
+  src/hermes-profile-scope.test.ts
+```
+
+Result: **13 files / 144 tests passed**. Exact Task 9 files pass ESLint with
+`--max-warnings=0`, Prettier check, and `git diff --check`.
+
+`npm run build --workspace apps/desktop` also passed at dirty checkout
+`b07f1edd5b28`; this is build-only evidence, not a clean packaged or live
+acceptance receipt. Full desktop typecheck and full lint were attempted but
+are blocked by concurrent Task 10/11C WIP outside this task (notably
+untracked `adapters/bot-roster-details.ts` type errors and Electron lint
+errors); no Task 9 error remained in those commands.

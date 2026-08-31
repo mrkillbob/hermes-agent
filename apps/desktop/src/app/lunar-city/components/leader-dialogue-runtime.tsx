@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { useVoiceConversation } from '@/app/chat/composer/hooks/use-voice-conversation'
 import { blobToDataUrl } from '@/app/session/hooks/use-prompt-actions/utils'
@@ -10,7 +10,7 @@ import { requestForSessionProfile } from '@/store/session-request-router'
 import { $sessionStates } from '@/store/session-states'
 
 import { leaderAnimationForConversation } from '../leader-runtime'
-import { leaderOwnerKey, type LeaderOwner, type LeaderSession } from '../leader-sessions'
+import type { LeaderOwner, LeaderSession } from '../leader-sessions'
 import type { LeaderAnimationState, LeaderStateClipMap } from '../model'
 
 import { LeaderDialogue, type LeaderVoiceBridge } from './leader-dialogue'
@@ -94,6 +94,17 @@ function staleVoiceRouteError(): Error {
   return new Error('Leader voice route changed during transcription')
 }
 
+interface LeaderVoiceRouteToken {
+  readonly generation: symbol
+  readonly owner: VoiceClientScope
+  readonly session: Readonly<Pick<LeaderSession, 'runtimeId' | 'storedId'>>
+}
+
+interface LeaderVoiceCaptureToken {
+  readonly controller: AbortController
+  readonly route: LeaderVoiceRouteToken
+}
+
 /**
  * The narrow bridge from a profile-owned leader to the normal Desktop session
  * transport. It owns no transcript, recorder, audio socket, or ambient route:
@@ -114,25 +125,38 @@ export function LeaderDialogueRuntime({
   const [voiceError, setVoiceError] = useState<string | undefined>(undefined)
   const consumedVoiceResponsesRef = useRef<Set<string>>(new Set())
   const pendingVoiceResponseRef = useRef<string | null>(null)
-  const voiceAbortRef = useRef<AbortController | undefined>(undefined)
-  const voiceEpochRef = useRef(0)
-  const voiceScope = useMemo<VoiceClientScope>(
-    () => Object.freeze({ connectionId: owner.connectionId.trim(), profile: owner.profile.trim() }),
-    [owner.connectionId, owner.profile]
-  )
-  const voiceRouteKey = `${leaderOwnerKey(owner)}::${session.runtimeId}::${voiceAvailable ? 'available' : 'unavailable'}`
+  const activeVoiceRouteRef = useRef<LeaderVoiceRouteToken | undefined>(undefined)
+  const activeVoiceCaptureRef = useRef<LeaderVoiceCaptureToken | undefined>(undefined)
 
-  useEffect(() => {
-    voiceEpochRef.current += 1
-    voiceAbortRef.current?.abort()
-    voiceAbortRef.current = undefined
+  const voiceRoute = useMemo<LeaderVoiceRouteToken>(
+    () =>
+      Object.freeze({
+        generation: Symbol('leader-voice-route'),
+        owner: Object.freeze({ connectionId: owner.connectionId.trim(), profile: owner.profile.trim() }),
+        session: Object.freeze({ runtimeId: session.runtimeId, storedId: session.storedId })
+      }),
+    [owner.connectionId, owner.profile, session.runtimeId, session.storedId]
+  )
+
+  // A changed route must revoke the prior capture in the synchronous commit
+  // phase. Passive effects leave a window where an already-resolved direct
+  // request could start the relay against a newly selected leader.
+  useLayoutEffect(() => {
+    activeVoiceRouteRef.current = voiceRoute
 
     return () => {
-      voiceEpochRef.current += 1
-      voiceAbortRef.current?.abort()
-      voiceAbortRef.current = undefined
+      const capture = activeVoiceCaptureRef.current
+
+      if (capture?.route === voiceRoute) {
+        capture.controller.abort()
+        activeVoiceCaptureRef.current = undefined
+      }
+
+      if (activeVoiceRouteRef.current === voiceRoute) {
+        activeVoiceRouteRef.current = undefined
+      }
     }
-  }, [voiceRouteKey])
+  }, [voiceRoute])
 
   useEffect(() => {
     if (!voiceAvailable) {
@@ -156,24 +180,28 @@ export function LeaderDialogueRuntime({
 
   const transcribe = useCallback(
     async (audio: Blob) => {
-      if (!voiceAvailable) {
+      if (!voiceAvailable || activeVoiceRouteRef.current !== voiceRoute) {
         throw new Error('Voice is unavailable because this leader is no longer the active exact desktop route')
       }
 
-      voiceAbortRef.current?.abort()
+      activeVoiceCaptureRef.current?.controller.abort()
       const controller = new AbortController()
-      const epoch = voiceEpochRef.current + 1
-      voiceEpochRef.current = epoch
-      voiceAbortRef.current = controller
+      const capture: LeaderVoiceCaptureToken = Object.freeze({ controller, route: voiceRoute })
+      activeVoiceCaptureRef.current = capture
+
       const assertCurrentVoiceRoute = (): void => {
-        if (voiceEpochRef.current !== epoch || controller.signal.aborted) {
+        if (
+          activeVoiceRouteRef.current !== capture.route ||
+          activeVoiceCaptureRef.current !== capture ||
+          capture.controller.signal.aborted
+        ) {
           throw staleVoiceRouteError()
         }
       }
 
       // Same client-direct then gateway-relay ladder as the standard composer;
       // this component does not create a recorder, WebSocket, or private audio path.
-      const direct = await transcribeAudioClientDirect(audio, voiceScope, controller.signal)
+      const direct = await transcribeAudioClientDirect(audio, capture.route.owner, capture.controller.signal)
       assertCurrentVoiceRoute()
 
       if (direct !== null) {
@@ -182,12 +210,12 @@ export function LeaderDialogueRuntime({
 
       const dataUrl = await blobToDataUrl(audio)
       assertCurrentVoiceRoute()
-      const result = await transcribeAudio(dataUrl, audio.type, voiceScope)
+      const result = await transcribeAudio(dataUrl, audio.type, capture.route.owner)
       assertCurrentVoiceRoute()
 
       return result.transcript
     },
-    [voiceAvailable, voiceScope]
+    [voiceAvailable, voiceRoute]
   )
 
   const pendingResponse = useCallback(() => {

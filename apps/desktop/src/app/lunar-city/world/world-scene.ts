@@ -60,6 +60,8 @@ const LEADER_STATES: readonly LeaderAnimationState[] = [
   'unavailable'
 ]
 
+const CONTINUOUS_LEADER_STATES = new Set<LeaderAnimationState>(['listening', 'talking', 'thinking'])
+
 const LEADER_IDS = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag'] as const satisfies readonly LeaderId[]
 
 export interface LunarCitySceneHandle {
@@ -1599,7 +1601,7 @@ export async function createWorldScene(
         }
 
         if (active !== next || next.isPlaying !== true) {
-          next.start?.(true)
+          next.start?.(CONTINUOUS_LEADER_STATES.has(state))
         }
 
         schedulerController.requestRender()

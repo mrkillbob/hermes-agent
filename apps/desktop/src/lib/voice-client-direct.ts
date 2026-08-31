@@ -69,7 +69,7 @@ export interface VoiceClientScope {
 const CONFIG_TTL_MS = 60_000
 
 let cached: { key: string; at: number; config: VoiceClientConfig } | null = null
-let inflight: { key: string; promise: Promise<null | VoiceClientConfig> } | null = null
+let inflight: { key: string; promise: Promise<null | VoiceClientConfig>; token: symbol } | null = null
 
 function canonicalScope(scope: VoiceClientScope): VoiceClientScope {
   const connectionId = scope.connectionId.trim()
@@ -110,6 +110,8 @@ export async function fetchVoiceClientConfig(scope?: VoiceClientScope): Promise<
     return inflight.promise
   }
 
+  const token = Symbol('voice-client-config')
+
   const promise = (async () => {
     try {
       // hermesApi carries connectionScoped(); profileScoped() adds the
@@ -132,13 +134,13 @@ export async function fetchVoiceClientConfig(scope?: VoiceClientScope): Promise<
       // Older backend without the endpoint / transient failure → relay.
       return null
     } finally {
-      if (inflight?.promise === promise) {
+      if (inflight?.token === token) {
         inflight = null
       }
     }
   })()
 
-  inflight = { key, promise }
+  inflight = { key, promise, token }
 
   return promise
 }
