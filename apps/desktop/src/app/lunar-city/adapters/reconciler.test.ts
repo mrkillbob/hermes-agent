@@ -1,8 +1,12 @@
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import type { DesktopAgentRoster } from '@/global'
+import { _resetFleetRosterForTests } from '@/store/fleet-roster'
+
 import { entityKey } from '../identity'
 import { $lunarCitySnapshot, createLunarCitySnapshot, type LunarDelta } from '../store'
+
 import { createLunarCityReconciler, shouldReconcile, startLunarCityReconciler } from './reconciler'
 
 const profileIdentity = { connectionId: 'local', kind: 'profile' as const, profile: 'worker' }
@@ -335,4 +339,71 @@ describe('Lunar City reconciler', () => {
     expect($lunarCitySnapshot.get().entities.get(profile.key)).toMatchObject({ authority: 'stale' })
     stop()
   })
+
+  it('marks retained roster data stale when the real fleet refresh helper catches an enumeration rejection', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(42)
+    _resetFleetRosterForTests()
+    const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDesktop'] }
+    const priorDesktop = desktopWindow.hermesDesktop
+    const roster: DesktopAgentRoster = {
+      agents: [
+        {
+          connectionId: 'local',
+          connectionKind: 'local',
+          connectionLabel: 'this Mac',
+          handle: '@worker-local',
+          profile: 'worker'
+        }
+      ],
+      sources: [{ connectionId: 'local', kind: 'local', label: 'this Mac', reachable: true }]
+    }
+    const getAgentRoster = vi
+      .fn<() => Promise<DesktopAgentRoster>>()
+      .mockResolvedValueOnce(roster)
+      .mockRejectedValueOnce(new Error('gateway asleep'))
+    desktopWindow.hermesDesktop = { getAgentRoster } as unknown as Window['hermesDesktop']
+    let stop: (() => void) | undefined
+
+    try {
+      stop = startLunarCityReconciler()
+      await flush()
+      await flush()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(getAgentRoster).toHaveBeenCalledTimes(1)
+      expect($lunarCitySnapshot.get().sources).toContainEqual({
+        authority: 'authoritative',
+        observedAt: 42,
+        source: 'fleet:local'
+      })
+
+      // Expire the fleet helper's cache without advancing the reconciler
+      // freshness timer. The focus read now crosses the production helper's
+      // rejection-catching path rather than an injected test seam.
+      vi.setSystemTime(60_043)
+      window.dispatchEvent(new Event('focus'))
+      await flush()
+      await flush()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(getAgentRoster).toHaveBeenCalledTimes(2)
+      expect($lunarCitySnapshot.get().sources).toContainEqual({
+        authority: 'stale',
+        error: 'Fleet roster refresh failed',
+        observedAt: 42,
+        source: 'fleet:local'
+      })
+      expect($lunarCitySnapshot.get().entities.get(entityKey(profileIdentity))).toMatchObject({ authority: 'stale' })
+    } finally {
+      stop?.()
+      _resetFleetRosterForTests()
+
+      if (priorDesktop) {
+        desktopWindow.hermesDesktop = priorDesktop
+      } else {
+        delete desktopWindow.hermesDesktop
+      }
+    }
+  })
+
 })

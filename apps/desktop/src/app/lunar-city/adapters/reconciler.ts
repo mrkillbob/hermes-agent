@@ -38,6 +38,7 @@ export interface SequenceScope {
 
 export interface FleetRefreshResult {
   error?: string
+  observedAt?: number
   status?: 'failed' | 'partial' | 'refreshed' | 'retained'
 }
 
@@ -430,36 +431,7 @@ function defaultLiveSources(): LunarCityLiveSources {
         offBridge?.()
       }
     },
-    refreshFleet: async options => {
-      if (!options.force) {
-        const before = $fleetRoster.get()
-        await refreshFleetRoster(options)
-        const roster = $fleetRoster.get()
-
-        if (roster?.sources.some(source => !source.reachable || Boolean(source.error))) {
-          return { status: 'partial' }
-        }
-
-        return { status: roster === before ? 'retained' : 'refreshed' }
-      }
-
-      const readFleet = window.hermesDesktop?.getAgentRoster
-
-      if (!readFleet) {
-        return { error: 'Fleet roster bridge unavailable', status: 'failed' }
-      }
-
-      try {
-        const roster = await readFleet()
-        $fleetRoster.set(roster)
-
-        return roster.sources.some(source => !source.reachable || Boolean(source.error))
-          ? { status: 'partial' }
-          : { status: 'refreshed' }
-      } catch {
-        return { error: 'Fleet refresh failed', status: 'failed' }
-      }
-    },
+    refreshFleet: refreshFleetRoster,
     sessionRows: ownerLookupSessionRows,
     sessionStores: [$sessions, $cronSessions, $messagingSessions]
   }
@@ -521,6 +493,10 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         const result = await sources.refreshFleet({ force })
         fleetReadFailed = result?.status === 'failed' || result?.status === 'partial'
         fleetError = result?.error
+
+        if (result?.status === 'refreshed' && result.observedAt !== undefined) {
+          fleetObservedAt = result.observedAt
+        }
       } catch {
         // The existing roster remains valuable evidence, but it must retain
         // its last successful observation timestamp and become stale below.
