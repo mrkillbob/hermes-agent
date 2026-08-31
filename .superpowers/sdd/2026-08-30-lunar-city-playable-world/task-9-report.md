@@ -145,7 +145,8 @@ npm run test:ui --workspace apps/desktop -- \
   group scheduler case also passed in `world/create-world.test.ts` (21 tests).
 - Full Desktop typecheck passed: renderer, Electron, and E2E TypeScript
   projects.
-- Full Desktop ESLint passed with `--max-warnings=0`; full Desktop Prettier
-  check passed.
+- Full Desktop ESLint passed with `--max-warnings=0`; the exact Task 9B
+  Prettier check passed. The broad formatter check still reports concurrent
+  Task 10 WIP in `command-broker.test.ts`, which this task did not modify.
 - Desktop production build passed at dirty checkout `438faec7098d`; it remains
   build evidence only, not clean packaged acceptance.
