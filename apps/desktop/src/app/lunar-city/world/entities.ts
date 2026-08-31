@@ -367,6 +367,17 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
   }
 
   return {
+    activeAnimationCount(): number {
+      let count = 0
+
+      for (const record of records.values()) {
+        if (record.visual && (record.moving || CONTINUOUS_WORKER_ANIMATIONS.has(presentedAnimation(record)))) {
+          count += 1
+        }
+      }
+
+      return count
+    },
     aggregate(destination: DestinationId): AggregatePopulation | undefined {
       return aggregates.get(destination)
     },
@@ -445,15 +456,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       return records.get(key)
     },
     hasActiveAnimations(): boolean {
-      for (const key of activeKeys) {
-        const record = records.get(key)
-
-        if (record && (record.moving || CONTINUOUS_WORKER_ANIMATIONS.has(presentedAnimation(record)))) {
-          return true
-        }
-      }
-
-      return false
+      return this.activeAnimationCount() > 0
     },
     instancedGroup(key: string): { count: number } | undefined {
       const group = groups.get(key)

@@ -35,7 +35,7 @@ function fakeIpc(bootstrap: unknown) {
       }
     },
     send: (channel: string, ...values: unknown[]) => sent.push({ channel, values }),
-    sendSync: () => bootstrap,
+    sendSync: (channel: string) => (channel === 'hermes:lunar-city-perf:bootstrap' ? bootstrap : true),
     sent,
     on: (channel: string, listener: (...args: unknown[]) => void) => listeners.set(channel, listener)
   }
@@ -53,14 +53,23 @@ test('handshake rejects the wrong nonce or bridge version and returns an immutab
 
   const first = bridge.surface.handshake({ bridgeVersion: 1, launchNonce: 'nonce-0123456789abcdef-unique' })!
   first.rendererIdentity.pid = 999
-  assert.equal(
-    bridge.surface.handshake({ bridgeVersion: 1, launchNonce: 'nonce-0123456789abcdef-unique' })!.rendererIdentity.pid,
-    82
-  )
+  assert.equal(handshake.rendererIdentity.pid, 82)
+  assert.equal(bridge.surface.handshake({ bridgeVersion: 1, launchNonce: handshake.launchNonce }), null)
+})
+
+test('all capabilities stay blocked until the exact one-shot handshake succeeds', async () => {
+  const bridge = createLunarCityPerfPreload(fakeIpc(handshake))!
+
+  assert.throws(() => bridge.surface.snapshot(), /handshake/u)
+  assert.throws(() => bridge.surface.processMetrics(), /handshake/u)
+  assert.equal(bridge.surface.handshake({ bridgeVersion: 1, launchNonce: 'wrong' }), null)
+  assert.ok(bridge.surface.handshake({ bridgeVersion: 1, launchNonce: handshake.launchNonce }))
+  assert.equal(bridge.surface.handshake({ bridgeVersion: 1, launchNonce: handshake.launchNonce }), null)
 })
 
 test('surface exposes only bounded read and scenario operations', async () => {
   const bridge = createLunarCityPerfPreload(fakeIpc(handshake))!
+  assert.ok(bridge.surface.handshake({ bridgeVersion: 1, launchNonce: handshake.launchNonce }))
 
   assert.deepEqual(await bridge.surface.processMetrics(), {
     channel: 'hermes:lunar-city-perf:process-metrics',
@@ -88,13 +97,41 @@ test('renderer endpoint replies to bound requests and removes its listener on te
   const ipc = fakeIpc(handshake)
   const bridge = createLunarCityPerfPreload(ipc)!
   const release = bridge.renderer.onRequest(async (action, payload) => ({ action, payload, proof: 1 }))
+  assert.throws(() => bridge.renderer.onRequest(async () => undefined), /already registered/u)
+  assert.ok(bridge.surface.handshake({ bridgeVersion: 1, launchNonce: handshake.launchNonce }))
   const listener = ipc.listeners.get('hermes:lunar-city-perf:request')!
 
-  await listener({}, { action: 'snapshot', payload: { exact: true }, requestId: '7:82:1' })
+  const identity = {
+    bridgeVersion: 1,
+    buildSha: handshake.buildSha,
+    frameId: 3,
+    launchNonce: handshake.launchNonce,
+    mainPid: handshake.mainPid,
+    rendererGeneration: 1,
+    rendererPid: handshake.rendererIdentity.pid,
+    rendererStartedAtMs: handshake.rendererIdentity.startedAtMs,
+    senderId: 7
+  }
+
+  await listener({}, { action: 'snapshot', identity, payload: { exact: true }, requestId: '7:82:1:1' })
   assert.deepEqual(ipc.sent, [
     {
       channel: 'hermes:lunar-city-perf:response',
-      values: ['7:82:1', { action: 'snapshot', payload: { exact: true }, proof: 1 }]
+      values: [
+        {
+          action: 'snapshot',
+          identity,
+          requestId: '7:82:1:1',
+          value: {
+            action: 'snapshot',
+            payload: { exact: true },
+            proof: 1,
+            rendererGeneration: 1,
+            rendererPid: 82,
+            rendererStartedAtMs: 1234
+          }
+        }
+      ]
     }
   ])
 

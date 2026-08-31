@@ -587,9 +587,13 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   const qualityTierRef = useRef(qualityTier)
   const profileLeaderEntitiesRef = useRef(profileLeaderEntities)
   const selectedLeaderOwnerRef = useRef(selectedLeaderOwner)
+  const leaderSessionRef = useRef(leaderSession)
+  const insideRef = useRef(inside)
   const openLeaderRef = useRef<(entity: LunarEntity) => void>(() => undefined)
   const stopReconcilerRef = useRef<(() => void) | undefined>(undefined)
   selectedLeaderOwnerRef.current = selectedLeaderOwner
+  leaderSessionRef.current = leaderSession
+  insideRef.current = inside
 
   const kanbanScope = useMemo(() => {
     const connectionId =
@@ -891,9 +895,20 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
           created.applySnapshot($lunarCitySnapshot.get())
           perfRoute = lunarCityPerfRuntime.registerRoute?.({
             canvas,
+            getCameraPose: () => {
+              const metrics = created.getPerfSnapshot?.() as
+                { cameraAlpha?: number; cameraBeta?: number; cameraRadius?: number } | undefined
+
+              return {
+                alpha: metrics?.cameraAlpha ?? 0,
+                beta: metrics?.cameraBeta ?? 0,
+                radius: metrics?.cameraRadius ?? 0
+              }
+            },
             getCameraState: () => created.getCameraState(),
             getCitySnapshot: () => $lunarCitySnapshot.get(),
             getDialogueState: () => (selectedLeaderOwnerRef.current ? 'active' : 'idle'),
+            getInteriorState: () => insideRef.current,
             getQuality: () => {
               const metrics = created.getPerfSnapshot?.() as
                 { internalRenderScale?: number; qualityTier?: QualityTier } | undefined
@@ -903,6 +918,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
                 qualityTier: metrics?.qualityTier ?? qualityTierRef.current
               }
             },
+            getWorldGeneration: () => ownGeneration,
             getWorldMetrics: () =>
               created.getPerfSnapshot?.() ?? {
                 activeAnimations: 0,
@@ -920,17 +936,47 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
                 worldUpdateMs: 0,
                 worldUpdateTimestampsMs: []
               },
-            setLeaderDialogue: leaderId => {
+            performLeaderDialogue: async leaderId => {
               const entity = profileLeaderEntitiesRef.current.find(candidate => {
                 const owner = leaderOwnerForProfile(candidate)
 
                 return owner ? leaderModelIdForOwner(owner) === leaderId : false
               })
 
-              if (entity) {
-                openLeaderRef.current(entity)
+              if (!entity) {
+                throw new Error(`Leader ${leaderId} is unavailable`)
               }
+
+              openLeaderRef.current(entity)
+              const deadline = Date.now() + 2_000
+
+              while (!leaderSessionRef.current) {
+                if (Date.now() >= deadline) {
+                  throw new Error(`Leader ${leaderId} dialogue did not open`)
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 10))
+              }
+
+              const observed = { opened: 1, received: 0, sent: 0 }
+
+              const onSent = (): void => {
+                observed.sent += 1
+              }
+
+              const onReceived = (): void => {
+                observed.received += 1
+              }
+
+              canvas.addEventListener('lunar-city-perf-fake-voice-sent', onSent, { once: true })
+              canvas.addEventListener('lunar-city-perf-fake-voice-received', onReceived, { once: true })
+              canvas.dispatchEvent(new CustomEvent('lunar-city-perf-fake-voice-sent'))
+              canvas.dispatchEvent(new CustomEvent('lunar-city-perf-fake-voice-received'))
+
+              return observed
             },
+            routeMountKey: 'lunar-city-route',
+            setInterior: value => setInside(value),
             setQuality: changeQuality,
             worldAction: intent => created.dispatchCamera(intent)
           })

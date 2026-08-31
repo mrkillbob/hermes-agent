@@ -1466,15 +1466,25 @@ const lunarCityPerfController = lunarCityPerfLaunch
     })
   : undefined
 
+const lunarCityPerfEvent = event => ({ frameId: event.senderFrame?.routingId ?? -1, sender: event.sender })
+
 ipcMain.on('hermes:lunar-city-perf:bootstrap', event => {
-  event.returnValue = lunarCityPerfController?.bootstrap(event)
+  event.returnValue = lunarCityPerfController?.bootstrap(lunarCityPerfEvent(event))
 })
-ipcMain.handle('hermes:lunar-city-perf:process-metrics', event => lunarCityPerfController?.processMetrics(event))
-ipcMain.handle('hermes:lunar-city-perf:renderer-request', (event, action, payload) =>
-  lunarCityPerfController?.requestRenderer(event, action, payload)
+ipcMain.on('hermes:lunar-city-perf:register-responder', (event, handshake) => {
+  event.returnValue = lunarCityPerfController?.registerResponder(lunarCityPerfEvent(event), handshake) === true
+})
+ipcMain.on('hermes:lunar-city-perf:activate', (event, handshake) => {
+  event.returnValue = lunarCityPerfController?.activate(lunarCityPerfEvent(event), handshake) === true
+})
+ipcMain.handle('hermes:lunar-city-perf:process-metrics', event =>
+  lunarCityPerfController?.processMetrics(lunarCityPerfEvent(event))
 )
-ipcMain.on('hermes:lunar-city-perf:response', (event, requestId, result) => {
-  lunarCityPerfController?.resolveRendererResponse(event, requestId, result)
+ipcMain.handle('hermes:lunar-city-perf:renderer-request', (event, action, payload) =>
+  lunarCityPerfController?.requestRenderer(lunarCityPerfEvent(event), action, payload)
+)
+ipcMain.on('hermes:lunar-city-perf:response', (event, response) => {
+  lunarCityPerfController?.resolveRendererResponse(lunarCityPerfEvent(event), response)
 })
 
 const backendConnectionState = createBackendConnectionState<ReturnType<typeof spawn>, any>()
@@ -14076,6 +14086,18 @@ function createWindow() {
   })
 
   const createdMainWindow = mainWindow
+
+  createdMainWindow.webContents.on('did-start-navigation', (_event, _url, _isInPlace, isMainFrame) => {
+    if (isMainFrame && !_isInPlace) {
+      lunarCityPerfController?.invalidateRenderer(createdMainWindow.webContents, 'navigation')
+    }
+  })
+  createdMainWindow.webContents.on('render-process-gone', () => {
+    lunarCityPerfController?.invalidateRenderer(createdMainWindow.webContents, 'render-process-gone')
+  })
+  createdMainWindow.webContents.on('destroyed', () => {
+    lunarCityPerfController?.invalidateRenderer(createdMainWindow.webContents, 'destroyed')
+  })
 
   // Chat-surface registration: see applyWindowTranslucency.
   translucencyBackedWindows.add(mainWindow)

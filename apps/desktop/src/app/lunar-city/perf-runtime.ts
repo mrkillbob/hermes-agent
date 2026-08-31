@@ -19,12 +19,17 @@ export interface LunarCityWorldPerfMetrics {
 
 export interface LunarCityPerfRouteRegistration {
   canvas: HTMLCanvasElement
+  getCameraPose(): { alpha: number; beta: number; radius: number }
   getCameraState(): CameraControlState
   getCitySnapshot(): LunarCitySnapshot
   getDialogueState(): string
+  getInteriorState(): boolean
   getQuality(): { internalRenderScale: number; qualityTier: QualityTier }
+  getWorldGeneration(): number
   getWorldMetrics(): LunarCityWorldPerfMetrics
-  setLeaderDialogue(leaderId: LeaderId): void
+  performLeaderDialogue(leaderId: LeaderId): Promise<{ opened: number; received: number; sent: number }>
+  routeMountKey?: string
+  setInterior(value: boolean): void
   setQuality(tier: QualityTier): void
   worldAction(intent: CameraIntent): void
 }
@@ -52,6 +57,10 @@ const QUALITY_TIERS = new Set<QualityTier>(['efficient', 'balanced', 'detailed']
 
 function finite(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback
+}
+
+function signedFinite(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function lodFor(entity: LunarCitySnapshot['entities'] extends ReadonlyMap<EntityKey, infer E> ? E : never) {
@@ -128,13 +137,14 @@ function emptyWorldMetrics(): LunarCityWorldPerfMetrics {
 
 export function createLunarCityPerfRuntime(
   endpoint: LunarCityPerfEndpoint | undefined,
-  options: { navigate?: (path: '/' | '/lunar-city') => void; now?: () => number } = {}
+  options: { actionTimeoutMs?: number; navigate?: (path: '/' | '/lunar-city') => void; now?: () => number } = {}
 ) {
   if (!endpoint) {
     return { enabled: false as const, registerRoute: undefined }
   }
 
   const now = options.now ?? (() => performance.timeOrigin + performance.now())
+  const actionTimeoutMs = options.actionTimeoutMs ?? 5_000
 
   const navigate =
     options.navigate ??
@@ -153,6 +163,18 @@ export function createLunarCityPerfRuntime(
   let route: RouteState | undefined
   let lastMount = { generation: 1, id: 'lunar-city-scene:unmounted', startedAtMs: now() }
   let runtimeDisposed = false
+
+  const waitFor = async (predicate: () => boolean, label: string): Promise<void> => {
+    const deadline = Date.now() + actionTimeoutMs
+
+    while (!predicate()) {
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out observing Lunar City ${label}`)
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+  }
 
   const disposeRoute = (state: RouteState): void => {
     if (state.disposed) {
@@ -204,7 +226,8 @@ export function createLunarCityPerfRuntime(
       lifecycleActions: structuredClone(counters.lifecycleActions),
       lifecycleState,
       qualityTier: quality.qualityTier,
-      sceneMount: structuredClone(lastMount)
+      sceneMount: structuredClone(lastMount),
+      worldGeneration: activeRoute?.registration.getWorldGeneration() ?? 0
     }
   }
 
@@ -234,22 +257,41 @@ export function createLunarCityPerfRuntime(
         }
 
         registration.setQuality(tier as QualityTier)
+        await waitFor(() => registration.getQuality().qualityTier === tier, 'quality transition')
 
         return { action: request.action, proof: 1, tier }
       }
 
       case 'orbit': {
-        const deltaAlpha = finite(payload.deltaAlpha)
-        const deltaBeta = finite(payload.deltaBeta)
+        const deltaAlpha = signedFinite(payload.deltaAlpha)
+        const deltaBeta = signedFinite(payload.deltaBeta)
+
+        if (deltaAlpha === undefined || deltaBeta === undefined || (deltaAlpha === 0 && deltaBeta === 0)) {
+          throw new Error('Orbit requires a nonzero finite camera delta')
+        }
+
+        const before = registration.getCameraPose()
         registration.worldAction({ deltaAlpha, deltaBeta, kind: 'orbit' })
+        await waitFor(() => {
+          const after = registration.getCameraPose()
+
+          return after.alpha !== before.alpha || after.beta !== before.beta
+        }, 'orbit camera delta')
         counters.cameraActions.orbit += 1
 
         return { action: request.action, proof: counters.cameraActions.orbit }
       }
 
       case 'zoom': {
-        const delta = finite(payload.delta)
+        const delta = signedFinite(payload.delta)
+
+        if (delta === undefined || delta === 0) {
+          throw new Error('Zoom requires a nonzero finite camera delta')
+        }
+
+        const before = registration.getCameraPose().radius
         registration.worldAction({ delta, kind: 'zoom' })
+        await waitFor(() => registration.getCameraPose().radius !== before, 'zoom camera delta')
         counters.cameraActions.zoom += 1
 
         return { action: request.action, proof: counters.cameraActions.zoom }
@@ -260,14 +302,29 @@ export function createLunarCityPerfRuntime(
           throw new Error('Exact focus entityKey is required')
         }
 
+        const entity = registration.getCitySnapshot().entities.get(payload.entityKey as EntityKey)
+
+        if (!entity || entity.identity.kind === 'profile') {
+          throw new Error('Focus requires an existing exact worker entityKey')
+        }
+
         registration.worldAction({ entityKey: payload.entityKey as EntityKey, follow: true, kind: 'focus' })
+        await waitFor(
+          () => registration.getCameraState().focusedEntityKey === payload.entityKey,
+          'exact worker focus transition'
+        )
         counters.cameraActions.focus += 1
 
         return { action: request.action, entityKey: payload.entityKey, proof: counters.cameraActions.focus }
       }
 
       case 'interior': {
-        registration.worldAction({ kind: 'return-to-city' })
+        if (registration.getInteriorState()) {
+          throw new Error('Lunar City is already in an interior')
+        }
+
+        registration.setInterior(true)
+        await waitFor(() => registration.getInteriorState(), 'interior transition')
         counters.cameraActions.indoor += 1
 
         return { action: request.action, proof: counters.cameraActions.indoor }
@@ -280,10 +337,15 @@ export function createLunarCityPerfRuntime(
           throw new Error('Exact leaderId is required')
         }
 
-        registration.setLeaderDialogue(leaderId as LeaderId)
-        counters.dialogueActions.opened += 1
-        counters.dialogueActions.messagesSent += 1
-        counters.dialogueActions.responsesReceived += 1
+        const observed = await registration.performLeaderDialogue(leaderId as LeaderId)
+
+        if (observed.opened <= 0 || observed.sent <= 0 || observed.received <= 0) {
+          throw new Error('Leader dialogue did not complete opened, sent, and received events')
+        }
+
+        counters.dialogueActions.opened += observed.opened
+        counters.dialogueActions.messagesSent += observed.sent
+        counters.dialogueActions.responsesReceived += observed.received
 
         return { action: request.action, leaderId, proof: counters.dialogueActions.responsesReceived }
       }
@@ -296,10 +358,30 @@ export function createLunarCityPerfRuntime(
           throw new Error('WEBGL_lose_context is unavailable')
         }
 
+        const beforeGeneration = registration.getWorldGeneration()
+        let lost = false
+        let restored = false
+
+        const onLost = (): void => {
+          lost = true
+        }
+
+        const onRestored = (): void => {
+          restored = true
+        }
+
+        registration.canvas.addEventListener('webglcontextlost', onLost, { once: true })
+        registration.canvas.addEventListener('webglcontextrestored', onRestored, { once: true })
         extension.loseContext()
+        await waitFor(() => lost, 'WEBGL context loss event')
         counters.lifecycleActions.contextLosses += 1
         lifecycleState = 'contextLost'
         extension.restoreContext()
+        await waitFor(() => restored, 'WEBGL context restore event')
+        await waitFor(
+          () => (route?.registration.getWorldGeneration() ?? 0) > beforeGeneration,
+          'restored world generation'
+        )
         counters.lifecycleActions.recoveries += 1
         lifecycleState = 'recovered'
 
@@ -365,12 +447,18 @@ export function createLunarCityPerfRuntime(
     registerRoute(registration: LunarCityPerfRouteRegistration) {
       generation += 1
 
+      const sameRouteMount = registration.routeMountKey && lastMount.id.startsWith(`${registration.routeMountKey}:`)
+      const mountGeneration = sameRouteMount ? lastMount.generation : generation
+      const mountStartedAt = sameRouteMount ? lastMount.startedAtMs : now()
+
       const state: RouteState = {
         disposed: false,
-        generation,
-        mountId: `lunar-city-scene:${generation}:${Math.round(now())}`,
+        generation: mountGeneration,
+        mountId: sameRouteMount
+          ? lastMount.id
+          : `${registration.routeMountKey ?? 'lunar-city-scene'}:${mountGeneration}:${Math.round(mountStartedAt)}`,
         registration,
-        startedAtMs: now()
+        startedAtMs: mountStartedAt
       }
 
       route = state

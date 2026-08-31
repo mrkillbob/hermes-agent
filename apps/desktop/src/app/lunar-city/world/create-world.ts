@@ -1,7 +1,7 @@
 import { assertWorldManifestRuntimeAssets } from '../manifest'
 import type { LunarCityIntent, LunarCityWorldHandle, LunarCityWorldModules, WorldManifestV2 } from '../model'
 
-import { bindCameraInput } from './camera-controller'
+import { bindCameraInput, type CameraInputRelease } from './camera-controller'
 import { createWorldScene } from './world-scene'
 
 const DEFAULT_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
@@ -77,9 +77,10 @@ export async function createLunarCityWorld(
   let world: Awaited<ReturnType<typeof createWorldScene>> | undefined
   let observer: ResizeObserver | undefined
   let resizeListener: (() => void) | undefined
-  let releaseCameraInput: (() => void) | undefined
+  let releaseCameraInput: CameraInputRelease | undefined
   let contextLostListener: ((event: Event) => void) | undefined
   let contextRestoredListener: (() => void) | undefined
+  let ownedListenerCount = 0
   let destroyed = false
 
   try {
@@ -101,6 +102,7 @@ export async function createLunarCityWorld(
     contextRestoredListener = () => world?.setVisible(true)
     canvas.addEventListener('webglcontextlost', contextLostListener)
     canvas.addEventListener('webglcontextrestored', contextRestoredListener)
+    ownedListenerCount += 2
 
     const resize = () => {
       if (destroyed) {
@@ -113,6 +115,7 @@ export async function createLunarCityWorld(
 
     resizeListener = resize
     window.addEventListener('resize', resize)
+    ownedListenerCount += 1
 
     if (typeof ResizeObserver !== 'undefined') {
       observer = new ResizeObserver(resize)
@@ -139,7 +142,10 @@ export async function createLunarCityWorld(
         const metrics = world?.getPerfSnapshot()
 
         return metrics
-          ? { ...metrics, listeners: metrics.listeners + 9 }
+          ? {
+              ...metrics,
+              listeners: metrics.listeners + ownedListenerCount + (releaseCameraInput?.activeListenerCount() ?? 0)
+            }
           : {
               activeAnimations: 0,
               drawCalls: 0,
@@ -175,16 +181,19 @@ export async function createLunarCityWorld(
 
         if (resizeListener) {
           window.removeEventListener('resize', resizeListener)
+          ownedListenerCount -= 1
         }
 
         releaseCameraInput?.()
 
         if (contextLostListener) {
           canvas.removeEventListener('webglcontextlost', contextLostListener)
+          ownedListenerCount -= 1
         }
 
         if (contextRestoredListener) {
           canvas.removeEventListener('webglcontextrestored', contextRestoredListener)
+          ownedListenerCount -= 1
         }
 
         observer?.disconnect()
@@ -205,16 +214,19 @@ export async function createLunarCityWorld(
 
     if (resizeListener) {
       window.removeEventListener('resize', resizeListener)
+      ownedListenerCount -= 1
     }
 
     releaseCameraInput?.()
 
     if (contextLostListener) {
       canvas.removeEventListener('webglcontextlost', contextLostListener)
+      ownedListenerCount -= 1
     }
 
     if (contextRestoredListener) {
       canvas.removeEventListener('webglcontextrestored', contextRestoredListener)
+      ownedListenerCount -= 1
     }
 
     observer?.disconnect()

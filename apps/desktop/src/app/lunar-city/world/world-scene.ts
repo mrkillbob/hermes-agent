@@ -1842,10 +1842,10 @@ export async function createWorldScene(
 
         return {
           ...babylon,
-          activeAnimations:
-            activeNavigation.size +
-            (entityRegistryController.hasActiveAnimations() ? 1 : 0) +
-            activeLeaderAnimations.size,
+          activeAnimations: entityRegistryController.activeAnimationCount() + activeLeaderAnimations.size,
+          cameraAlpha: camera.alpha,
+          cameraBeta: camera.beta,
+          cameraRadius: camera.radius,
           frameMs: lastFrameMs,
           frameTimestampsMs: schedulerMetrics.frameTimestampsMs,
           internalRenderScale: qualitySettings.renderScale,

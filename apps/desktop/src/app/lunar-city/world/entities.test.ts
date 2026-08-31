@@ -460,6 +460,38 @@ describe('EntityRegistry', () => {
     sort.mockRestore()
   })
 
+  it('reports the exact live count of retained active worker animations', () => {
+    const registry = createEntityRegistry({
+      characterAssets: parseWorldManifest(structuredClone(actualManifest)).characterAssets,
+      factory: factory(),
+      workerClips: new Set(['idle', 'walk', 'work'])
+    })
+
+    const placed = (index: number, animation: string) =>
+      entity(index, {
+        animation,
+        identity: { connectionId: 'local', kind: 'profile', profile: `worker-${index}` },
+        presentation: {
+          groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+          metadata: { source: 'test', state: 'fresh' },
+          placement: { lodHint: 0, overflow: false, primaryGroupId: 'engineering', slot: index }
+        }
+      })
+
+    const idle = placed(1, 'idle')
+    const working = placed(2, 'work')
+    const moving = placed(3, 'walk')
+
+    registry.reconcile(snapshot(idle, working, moving))
+
+    expect(registry.activeAnimationCount()).toBe(2)
+    registry.reconcile(snapshot(idle, working, { ...moving, animation: 'idle' }))
+    registry.setMoving(moving.key, false)
+    expect(registry.activeAnimationCount()).toBe(1)
+    registry.dispose()
+    expect(registry.activeAnimationCount()).toBe(0)
+  })
+
   it('releases removed presentation resources once without disturbing unrelated entities', () => {
     const presentationFactory = factory()
     const first = entity(1, { animation: 'walk' })

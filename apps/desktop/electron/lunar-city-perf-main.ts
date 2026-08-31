@@ -124,7 +124,10 @@ interface TraceEvent {
     }
   }
   cat?: unknown
+  id?: unknown
   ph?: unknown
+  pid?: unknown
+  ts?: unknown
 }
 
 function parseHexBytes(value: unknown): number | undefined {
@@ -145,7 +148,10 @@ export function parseChromiumMemoryInfraGpuAllocation(trace: { traceEvents?: rea
   gpuMemoryMiB: number | null
   gpuMemorySource: typeof LUNAR_CITY_GPU_MEMORY_SOURCE | 'unavailable'
 } {
-  let newest: number | undefined
+  const unavailable = { gpuMemoryMiB: null, gpuMemorySource: 'unavailable' as const }
+  const groups = new Map<string, { allocators: Map<string, unknown>; ts: number }>()
+  const processIds = new Set<number>()
+  let previousTimestamp = Number.NEGATIVE_INFINITY
 
   for (const event of trace.traceEvents ?? []) {
     if (
@@ -162,38 +168,80 @@ export function parseChromiumMemoryInfraGpuAllocation(trace: { traceEvents?: rea
       continue
     }
 
-    let bytes = 0
-    let attributable = false
+    const gpuAllocators = Object.entries(allocators).filter(([name]) => name === 'gpu' || name.startsWith('gpu/'))
 
-    for (const [name, allocator] of Object.entries(allocators)) {
-      if (name !== 'gpu' && !name.startsWith('gpu/')) {
-        continue
-      }
-
-      const size = allocator.attrs?.effective_size
-
-      if (size?.units !== 'bytes') {
-        continue
-      }
-
-      const parsed = parseHexBytes(size.value)
-
-      if (parsed === undefined) {
-        continue
-      }
-
-      attributable = true
-      bytes += parsed
+    if (gpuAllocators.length === 0) {
+      continue
     }
 
-    if (attributable) {
-      newest = bytes
+    if (
+      (typeof event.id !== 'string' && typeof event.id !== 'number') ||
+      !Number.isInteger(event.pid) ||
+      (event.pid as number) <= 0 ||
+      typeof event.ts !== 'number' ||
+      !Number.isFinite(event.ts) ||
+      event.ts < previousTimestamp
+    ) {
+      return unavailable
     }
+
+    previousTimestamp = event.ts
+    processIds.add(event.pid as number)
+
+    if (processIds.size > 1) {
+      return unavailable
+    }
+
+    const key = `${String(event.id)}:${event.pid}:${event.ts}`
+    const group = groups.get(key) ?? { allocators: new Map<string, unknown>(), ts: event.ts }
+
+    for (const [name, allocator] of gpuAllocators) {
+      if (group.allocators.has(name)) {
+        return unavailable
+      }
+
+      group.allocators.set(name, allocator)
+    }
+
+    groups.set(key, group)
   }
 
-  return newest === undefined
-    ? { gpuMemoryMiB: null, gpuMemorySource: 'unavailable' }
-    : { gpuMemoryMiB: newest / 1024 / 1024, gpuMemorySource: LUNAR_CITY_GPU_MEMORY_SOURCE }
+  if (groups.size === 0) {
+    return unavailable
+  }
+
+  const newestTimestamp = Math.max(...[...groups.values()].map(group => group.ts))
+  const newestGroups = [...groups.values()].filter(group => group.ts === newestTimestamp)
+
+  if (newestGroups.length !== 1) {
+    return unavailable
+  }
+
+  const selectedNames: string[] = []
+  let bytes = 0
+
+  for (const [name, rawAllocator] of [...newestGroups[0]!.allocators.entries()].sort(
+    ([left], [right]) => left.split('/').length - right.split('/').length || left.localeCompare(right)
+  )) {
+    const allocator = rawAllocator as { attrs?: { effective_size?: { units?: unknown; value?: unknown } } }
+    const size = allocator.attrs?.effective_size
+    const parsed = size?.units === 'bytes' ? parseHexBytes(size.value) : undefined
+
+    if (parsed === undefined) {
+      return unavailable
+    }
+
+    if (selectedNames.some(parent => name.startsWith(`${parent}/`))) {
+      continue
+    }
+
+    selectedNames.push(name)
+    bytes += parsed
+  }
+
+  return selectedNames.length === 0
+    ? unavailable
+    : { gpuMemoryMiB: bytes / 1024 / 1024, gpuMemorySource: LUNAR_CITY_GPU_MEMORY_SOURCE }
 }
 
 export interface ChromiumMemoryInfraCaptureConfig {
@@ -228,6 +276,7 @@ interface PerfSender {
 }
 
 interface PerfEvent {
+  frameId: number
   sender: PerfSender
 }
 
@@ -245,10 +294,67 @@ export interface LunarCityPerfMainControllerOptions {
 }
 
 interface PendingRequest {
+  action: string
+  identity: RendererRequestIdentity
   reject: (reason: Error) => void
   resolve: (value: unknown) => void
-  senderId: number
   timer: ReturnType<typeof setTimeout>
+}
+
+interface RendererLifetime {
+  generation: number
+  pid: number
+  startedAtMs: number
+}
+
+interface RendererRequestIdentity {
+  bridgeVersion: typeof LUNAR_CITY_PERF_BRIDGE_VERSION
+  buildSha: string
+  frameId: number
+  launchNonce: string
+  mainPid: number
+  rendererGeneration: number
+  rendererPid: number
+  rendererStartedAtMs: number
+  senderId: number
+}
+
+interface RendererSession {
+  active: boolean
+  frameId: number
+  handshake: ReturnType<typeof buildLunarCityPerfHandshake>
+  identity: RendererRequestIdentity
+  responderRegistered: boolean
+  senderId: number
+}
+
+function sameHandshake(left: unknown, right: ReturnType<typeof buildLunarCityPerfHandshake>): boolean {
+  if (!left || typeof left !== 'object' || Array.isArray(left)) {
+    return false
+  }
+
+  const value = left as Record<string, unknown>
+
+  return (
+    value.bridgeVersion === right.bridgeVersion &&
+    value.buildSha === right.buildSha &&
+    value.launchNonce === right.launchNonce &&
+    value.mainPid === right.mainPid &&
+    value.packaged === true &&
+    value.processMetricsSource === right.processMetricsSource &&
+    (value.rendererIdentity as Record<string, unknown> | undefined)?.pid === right.rendererIdentity.pid &&
+    (value.rendererIdentity as Record<string, unknown> | undefined)?.startedAtMs === right.rendererIdentity.startedAtMs
+  )
+}
+
+function sameIdentity(left: unknown, right: RendererRequestIdentity): boolean {
+  if (!left || typeof left !== 'object' || Array.isArray(left)) {
+    return false
+  }
+
+  const value = left as Record<string, unknown>
+
+  return Object.entries(right).every(([key, expected]) => value[key] === expected)
 }
 
 /**
@@ -257,9 +363,11 @@ interface PendingRequest {
  */
 export function createLunarCityPerfMainController(options: LunarCityPerfMainControllerOptions) {
   const pending = new Map<string, PendingRequest>()
-  const rendererLifetimes = new Map<number, { pid: number; startedAtMs: number }>()
+  const rendererLifetimes = new Map<number, RendererLifetime>()
   const requestTimeoutMs = options.requestTimeoutMs ?? 5_000
   let requestSequence = 0
+  let rendererGeneration = 0
+  let session: RendererSession | undefined
   let disposed = false
 
   const lifetimeFor = (sender: PerfSender) => {
@@ -279,7 +387,7 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
       return existing
     }
 
-    const created = { pid, startedAtMs: options.now() }
+    const created = { generation: ++rendererGeneration, pid, startedAtMs: options.now() }
     rendererLifetimes.set(sender.id, created)
 
     return created
@@ -292,7 +400,7 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
 
     const renderer = lifetimeFor(event.sender)
 
-    return renderer
+    return renderer && Number.isInteger(event.frameId) && event.frameId >= 0
       ? buildLunarCityPerfHandshake({
           ...options.launch,
           mainPid: options.mainPid,
@@ -302,18 +410,84 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
       : undefined
   }
 
+  const sessionFor = (event: PerfEvent, requireActive = true): RendererSession | undefined => {
+    const current = session
+    const lifetime = lifetimeFor(event.sender)
+
+    if (
+      !current ||
+      (requireActive && !current.active) ||
+      !lifetime ||
+      current.senderId !== event.sender.id ||
+      current.frameId !== event.frameId ||
+      current.identity.rendererPid !== lifetime.pid ||
+      current.identity.rendererStartedAtMs !== lifetime.startedAtMs ||
+      current.identity.rendererGeneration !== lifetime.generation
+    ) {
+      return undefined
+    }
+
+    return current
+  }
+
+  const registerResponder = (event: PerfEvent, handshake: unknown): boolean => {
+    if (disposed || session) {
+      return false
+    }
+
+    const lifetime = lifetimeFor(event.sender)
+    const exact = bootstrap(event)
+
+    if (!lifetime || !exact || !sameHandshake(handshake, exact)) {
+      return false
+    }
+
+    session = {
+      active: false,
+      frameId: event.frameId,
+      handshake: exact,
+      identity: {
+        bridgeVersion: LUNAR_CITY_PERF_BRIDGE_VERSION,
+        buildSha: options.launch.buildStamp.commit,
+        frameId: event.frameId,
+        launchNonce: options.launch.launchNonce,
+        mainPid: options.mainPid,
+        rendererGeneration: lifetime.generation,
+        rendererPid: lifetime.pid,
+        rendererStartedAtMs: lifetime.startedAtMs,
+        senderId: event.sender.id
+      },
+      responderRegistered: true,
+      senderId: event.sender.id
+    }
+
+    return true
+  }
+
+  const activate = (event: PerfEvent, handshake: unknown): boolean => {
+    const current = sessionFor(event, false)
+
+    if (!current?.responderRegistered || current.active || !sameHandshake(handshake, current.handshake)) {
+      return false
+    }
+
+    current.active = true
+
+    return true
+  }
+
   const requestRenderer = (event: PerfEvent, action: string, payload?: unknown): Promise<unknown> => {
     if (disposed || typeof action !== 'string' || action.length === 0) {
       return Promise.resolve(undefined)
     }
 
-    const renderer = lifetimeFor(event.sender)
+    const current = sessionFor(event)
 
-    if (!renderer) {
+    if (!current) {
       return Promise.resolve(undefined)
     }
 
-    const requestId = `${event.sender.id}:${renderer.pid}:${++requestSequence}`
+    const requestId = `${current.senderId}:${current.identity.rendererPid}:${current.identity.rendererGeneration}:${++requestSequence}`
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -321,8 +495,13 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
         reject(new Error(`Lunar City performance renderer request timed out: ${action}`))
       }, requestTimeoutMs)
 
-      pending.set(requestId, { reject, resolve, senderId: event.sender.id, timer })
-      event.sender.send('hermes:lunar-city-perf:request', { action, payload, requestId })
+      pending.set(requestId, { action, identity: current.identity, reject, resolve, timer })
+      event.sender.send('hermes:lunar-city-perf:request', {
+        action,
+        identity: current.identity,
+        payload,
+        requestId
+      })
     }).then(async result => {
       if (action !== 'snapshot' || !result || typeof result !== 'object' || Array.isArray(result)) {
         return result
@@ -331,8 +510,9 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
       const metrics = result as Record<string, unknown>
 
       if (
-        (metrics.rendererPid !== undefined && metrics.rendererPid !== renderer.pid) ||
-        (metrics.rendererStartedAtMs !== undefined && metrics.rendererStartedAtMs !== renderer.startedAtMs)
+        metrics.rendererPid !== current.identity.rendererPid ||
+        metrics.rendererStartedAtMs !== current.identity.rendererStartedAtMs ||
+        metrics.rendererGeneration !== current.identity.rendererGeneration
       ) {
         throw new Error('Lunar City performance renderer lifetime changed')
       }
@@ -343,8 +523,6 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
       return {
         ...metrics,
         ...gpu,
-        rendererPid: renderer.pid,
-        rendererStartedAtMs: renderer.startedAtMs,
         ...(environment
           ? {
               environment: {
@@ -357,25 +535,39 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
     })
   }
 
-  const resolveRendererResponse = (event: PerfEvent, requestId: unknown, result: unknown): boolean => {
-    if (disposed || typeof requestId !== 'string') {
+  const resolveRendererResponse = (event: PerfEvent, response: unknown): boolean => {
+    if (disposed || !response || typeof response !== 'object' || Array.isArray(response)) {
       return false
     }
 
-    const request = pending.get(requestId)
+    const envelope = response as { action?: unknown; identity?: unknown; requestId?: unknown; value?: unknown }
 
-    if (!request || request.senderId !== event.sender.id || !options.ownsSender(event.sender)) {
+    if (typeof envelope.requestId !== 'string' || typeof envelope.action !== 'string') {
+      return false
+    }
+
+    const request = pending.get(envelope.requestId)
+    const current = sessionFor(event)
+
+    if (
+      !request ||
+      !current ||
+      request.action !== envelope.action ||
+      !sameIdentity(envelope.identity, request.identity) ||
+      !sameIdentity(current.identity, request.identity)
+    ) {
       return false
     }
 
     clearTimeout(request.timer)
-    pending.delete(requestId)
-    request.resolve(result)
+    pending.delete(envelope.requestId)
+    request.resolve(envelope.value)
 
     return true
   }
 
   return {
+    activate,
     bootstrap,
     dispose(): void {
       if (disposed) {
@@ -392,9 +584,25 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
       pending.clear()
       rendererLifetimes.clear()
     },
-    processMetrics(event: PerfEvent) {
-      return !disposed && lifetimeFor(event.sender) ? sanitizeAppMetrics(options.appMetrics()) : undefined
+    invalidateRenderer(sender: PerfSender, reason: string): void {
+      if (!session || session.senderId !== sender.id) {
+        return
+      }
+
+      session = undefined
+      rendererLifetimes.delete(sender.id)
+
+      for (const request of pending.values()) {
+        clearTimeout(request.timer)
+        request.reject(new Error(`Lunar City performance renderer invalidated: ${reason}`))
+      }
+
+      pending.clear()
     },
+    processMetrics(event: PerfEvent) {
+      return !disposed && sessionFor(event) ? sanitizeAppMetrics(options.appMetrics()) : undefined
+    },
+    registerResponder,
     requestRenderer,
     resolveRendererResponse
   }

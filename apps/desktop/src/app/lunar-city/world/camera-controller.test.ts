@@ -195,6 +195,8 @@ describe('bindCameraInput', () => {
 
     const release = bindCameraInput(canvas, { dispatch, pick })
 
+    expect(release.activeListenerCount()).toBe(6)
+
     canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 150, clientY: 75, pointerId: 1 }))
     rect = new DOMRect(120, 60, 200, 100)
     canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 170, clientY: 85, pointerId: 1 }))
@@ -202,6 +204,7 @@ describe('bindCameraInput', () => {
     expect(pick).toHaveBeenCalledWith(50, 25)
     expect(dispatch).toHaveBeenCalledWith({ kind: 'clear-focus' })
     release()
+    expect(release.activeListenerCount()).toBe(0)
   })
 
   it.each([

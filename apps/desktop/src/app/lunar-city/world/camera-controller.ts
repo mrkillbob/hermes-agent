@@ -43,6 +43,11 @@ export interface CameraInputBindings {
   pick(canvasX: number, canvasY: number): CameraPickTarget | undefined
 }
 
+export interface CameraInputRelease {
+  (): void
+  activeListenerCount(): number
+}
+
 interface FocusTransition {
   elapsedMs: number
   from: CameraPose
@@ -335,7 +340,7 @@ function dispatchPick(
   bindings.dispatch({ kind: 'clear-focus' })
 }
 
-export function bindCameraInput(canvas: HTMLCanvasElement, bindings: CameraInputBindings): () => void {
+export function bindCameraInput(canvas: HTMLCanvasElement, bindings: CameraInputBindings): CameraInputRelease {
   const activePointers = new Map<number, PointerSample>()
   let pinchDistance: number | undefined
 
@@ -438,12 +443,23 @@ export function bindCameraInput(canvas: HTMLCanvasElement, bindings: CameraInput
   canvas.addEventListener('wheel', wheel, { passive: false })
   canvas.addEventListener('contextmenu', contextMenu)
 
-  return () => {
+  let activeListenerCount = 6
+
+  const release = (): void => {
+    if (activeListenerCount === 0) {
+      return
+    }
+
     canvas.removeEventListener('pointerdown', pointerDown)
     canvas.removeEventListener('pointermove', pointerMove)
     canvas.removeEventListener('pointerup', pointerUp)
     canvas.removeEventListener('pointercancel', pointerCancel)
     canvas.removeEventListener('wheel', wheel)
     canvas.removeEventListener('contextmenu', contextMenu)
+    activeListenerCount = 0
   }
+
+  release.activeListenerCount = () => activeListenerCount
+
+  return release
 }

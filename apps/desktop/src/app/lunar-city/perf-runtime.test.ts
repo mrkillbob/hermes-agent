@@ -67,8 +67,11 @@ describe('Lunar City route-local packaged metrics runtime', () => {
     const route = runtime.registerRoute!({
       canvas: document.createElement('canvas'),
       getCameraState: () => ({ focusedEntityKey: worker.key, following: true }),
+      getCameraPose: () => ({ alpha: 1, beta: 1, radius: 10 }),
       getCitySnapshot: () => city,
       getDialogueState: () => 'idle',
+      getInteriorState: () => false,
+      getWorldGeneration: () => 4,
       getQuality: () => ({ internalRenderScale: 1, qualityTier: 'balanced' }),
       getWorldMetrics: () => ({
         activeAnimations: 1,
@@ -86,7 +89,8 @@ describe('Lunar City route-local packaged metrics runtime', () => {
         worldUpdateMs: 3,
         worldUpdateTimestampsMs: [101, 110]
       }),
-      setLeaderDialogue: vi.fn(),
+      performLeaderDialogue: vi.fn(),
+      setInterior: vi.fn(),
       setQuality: vi.fn(),
       worldAction: vi.fn()
     })
@@ -113,6 +117,7 @@ describe('Lunar City route-local packaged metrics runtime', () => {
       qualityTier: 'balanced',
       renderFrames: 2,
       sceneMount: { generation: 1 },
+      worldGeneration: 4,
       targetFps: 30,
       visibleTriangles: 1200
     })
@@ -127,9 +132,29 @@ describe('Lunar City route-local packaged metrics runtime', () => {
 
   it('executes only bounded scenario actions and returns causal proof counters', async () => {
     let request!: (action: string, payload: unknown) => Promise<unknown>
-    const worldAction = vi.fn()
-    const setQuality = vi.fn()
-    const setLeaderDialogue = vi.fn()
+    let camera = { alpha: 1, beta: 1, focusedEntityKey: undefined as EntityKey | undefined, radius: 10 }
+    let inside = false
+    let qualityTier: 'balanced' | 'efficient' = 'balanced'
+
+    const worldAction = vi.fn(intent => {
+      if (intent.kind === 'orbit') {
+        camera = { ...camera, alpha: camera.alpha + intent.deltaAlpha }
+      }
+
+      if (intent.kind === 'zoom') {
+        camera = { ...camera, radius: camera.radius + intent.delta }
+      }
+
+      if (intent.kind === 'focus') {
+        camera = { ...camera, focusedEntityKey: intent.entityKey }
+      }
+    })
+
+    const setQuality = vi.fn(tier => {
+      qualityTier = tier
+    })
+
+    const performLeaderDialogue = vi.fn(async () => ({ opened: 1, received: 1, sent: 1 }))
 
     const runtime = createLunarCityPerfRuntime({
       onRequest: callback => {
@@ -141,10 +166,13 @@ describe('Lunar City route-local packaged metrics runtime', () => {
 
     runtime.registerRoute!({
       canvas: document.createElement('canvas'),
-      getCameraState: () => ({ focusedEntityKey: undefined, following: false }),
+      getCameraState: () => ({ focusedEntityKey: camera.focusedEntityKey, following: false }),
+      getCameraPose: () => ({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius }),
       getCitySnapshot: () => city,
-      getDialogueState: () => 'idle',
-      getQuality: () => ({ internalRenderScale: 1, qualityTier: 'balanced' }),
+      getDialogueState: () => (performLeaderDialogue.mock.calls.length > 0 ? 'active' : 'idle'),
+      getInteriorState: () => inside,
+      getQuality: () => ({ internalRenderScale: 1, qualityTier }),
+      getWorldGeneration: () => 1,
       getWorldMetrics: () => ({
         activeAnimations: 0,
         drawCalls: 1,
@@ -161,7 +189,10 @@ describe('Lunar City route-local packaged metrics runtime', () => {
         worldUpdateMs: 0,
         worldUpdateTimestampsMs: []
       }),
-      setLeaderDialogue,
+      performLeaderDialogue,
+      setInterior: value => {
+        inside = value
+      },
       setQuality,
       worldAction
     })
@@ -178,13 +209,24 @@ describe('Lunar City route-local packaged metrics runtime', () => {
       proof: 1
     })
     expect(worldAction).toHaveBeenCalledWith({ kind: 'orbit', deltaAlpha: 0.5, deltaBeta: 0.1 })
+    expect(await request('scenario-action', { action: 'zoom', payload: { delta: 2 } })).toMatchObject({ proof: 1 })
+    expect(await request('scenario-action', { action: 'focus', payload: { entityKey: worker.key } })).toMatchObject({
+      proof: 1
+    })
+    expect(await request('scenario-action', { action: 'interior', payload: {} })).toMatchObject({ proof: 1 })
     expect(await request('scenario-action', { action: 'leader-dialogue', payload: { leaderId: 'owl' } })).toMatchObject(
       {
         action: 'leader-dialogue',
         proof: 1
       }
     )
-    expect(setLeaderDialogue).toHaveBeenCalledWith('owl')
+    expect(performLeaderDialogue).toHaveBeenCalledWith('owl')
+    await expect(
+      request('scenario-action', { action: 'orbit', payload: { deltaAlpha: 0, deltaBeta: 0 } })
+    ).rejects.toThrow(/nonzero/u)
+    await expect(
+      request('scenario-action', { action: 'focus', payload: { entityKey: 'source-a::missing' } })
+    ).rejects.toThrow(/existing exact worker/u)
     await expect(request('scenario-action', { action: 'send-command', payload: {} })).rejects.toThrow(/unsupported/i)
   })
 })

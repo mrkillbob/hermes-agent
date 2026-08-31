@@ -114,7 +114,10 @@ describe('chromium-memory-infra-v1 GPU parser', () => {
             }
           },
           cat: 'disabled-by-default-memory-infra',
-          ph: 'v'
+          id: 'dump-1',
+          ph: 'v',
+          pid: 82,
+          ts: 100
         }
       ]
     })
@@ -140,6 +143,54 @@ describe('chromium-memory-infra-v1 GPU parser', () => {
       { gpuMemoryMiB: null, gpuMemorySource: 'unavailable' }
     )
   })
+
+  test('uses one coherent dump and never double-counts GPU parents with children', () => {
+    assert.deepEqual(
+      parseChromiumMemoryInfraGpuAllocation({
+        traceEvents: [
+          {
+            args: {
+              dumps: {
+                allocators: {
+                  'gpu/gl': { attrs: { effective_size: { units: 'bytes', value: '200000' } } },
+                  'gpu/gl/textures': { attrs: { effective_size: { units: 'bytes', value: '100000' } } },
+                  'gpu/shared_images': { attrs: { effective_size: { units: 'bytes', value: '100000' } } }
+                }
+              }
+            },
+            cat: 'disabled-by-default-memory-infra',
+            id: 'dump-1',
+            ph: 'v',
+            pid: 82,
+            ts: 100
+          }
+        ]
+      }),
+      { gpuMemoryMiB: 3, gpuMemorySource: 'chromium-memory-infra-v1' }
+    )
+  })
+
+  test('rejects multi-process, duplicate, and out-of-order GPU dump attribution', () => {
+    const gpuEvent = (id: string, pid: number, ts: number) => ({
+      args: { dumps: { allocators: { 'gpu/gl': { attrs: { effective_size: { units: 'bytes', value: '100000' } } } } } },
+      cat: 'disabled-by-default-memory-infra',
+      id,
+      ph: 'v',
+      pid,
+      ts
+    })
+
+    for (const traceEvents of [
+      [gpuEvent('a', 82, 100), gpuEvent('b', 83, 110)],
+      [gpuEvent('a', 82, 100), gpuEvent('a', 82, 100)],
+      [gpuEvent('a', 82, 110), gpuEvent('b', 82, 100)]
+    ]) {
+      assert.deepEqual(parseChromiumMemoryInfraGpuAllocation({ traceEvents }), {
+        gpuMemoryMiB: null,
+        gpuMemorySource: 'unavailable'
+      })
+    }
+  })
 })
 
 test('controller binds bootstrap, metrics, and renderer requests to the launched window', async () => {
@@ -153,6 +204,7 @@ test('controller binds bootstrap, metrics, and renderer requests to the launched
   }
 
   const otherSender = { ...sender, id: 8 }
+  const event = { frameId: 3, sender }
 
   const controller = createLunarCityPerfMainController({
     appMetrics: () => [{ cpu: { percentCPUUsage: 2 }, memory: { workingSetSize: 400 }, pid: 82, type: 'Tab' }],
@@ -164,8 +216,9 @@ test('controller binds bootstrap, metrics, and renderer requests to the launched
     requestTimeoutMs: 1_000
   })
 
-  assert.equal(controller.bootstrap({ sender: otherSender }), undefined)
-  assert.deepEqual(controller.bootstrap({ sender }), {
+  assert.equal(controller.bootstrap({ frameId: 3, sender: otherSender }), undefined)
+  const exactHandshake = controller.bootstrap(event)
+  assert.deepEqual(exactHandshake, {
     bridgeVersion: 1,
     buildSha: stamp.commit,
     buildStamp: stamp,
@@ -176,26 +229,96 @@ test('controller binds bootstrap, metrics, and renderer requests to the launched
     rendererIdentity: { pid: 82, startedAtMs: 1234 },
     supportedPhases: ['baseline-shell', 'mounted-city']
   })
-  assert.deepEqual(controller.processMetrics({ sender }), [
+  assert.equal(controller.processMetrics(event), undefined)
+  assert.equal(controller.requestRenderer(event, 'snapshot') instanceof Promise, true)
+  assert.equal(await controller.requestRenderer(event, 'snapshot'), undefined)
+  assert.equal(controller.registerResponder(event, exactHandshake), true)
+  assert.equal(controller.registerResponder(event, exactHandshake), false)
+  assert.equal(controller.activate(event, exactHandshake), true)
+  assert.equal(controller.activate(event, exactHandshake), false)
+  assert.deepEqual(controller.processMetrics(event), [
     { cpu: { percentCPUUsage: 2 }, memory: { workingSetSize: 400 }, pid: 82, type: 'Tab' }
   ])
-  assert.equal(controller.processMetrics({ sender: otherSender }), undefined)
+  assert.equal(controller.processMetrics({ frameId: 3, sender: otherSender }), undefined)
 
-  const pending = controller.requestRenderer({ sender }, 'snapshot')
-  const request = sent.at(-1)?.payload as { requestId: string }
+  const pending = controller.requestRenderer(event, 'snapshot')
+  const request = sent.at(-1)?.payload as { action: string; identity: Record<string, unknown>; requestId: string }
   assert.equal(sent.at(-1)?.channel, 'hermes:lunar-city-perf:request')
-  assert.equal(controller.resolveRendererResponse({ sender: otherSender }, request.requestId, { forged: true }), false)
-  assert.equal(controller.resolveRendererResponse({ sender }, request.requestId, { frameMs: 4 }), true)
+  assert.deepEqual(request.identity, {
+    bridgeVersion: 1,
+    buildSha: stamp.commit,
+    frameId: 3,
+    launchNonce: 'nonce-0123456789abcdef-unique',
+    mainPid: 41,
+    rendererGeneration: 1,
+    rendererPid: 82,
+    rendererStartedAtMs: 1234,
+    senderId: 7
+  })
+  assert.equal(
+    controller.resolveRendererResponse({ frameId: 3, sender: otherSender }, { ...request, value: { forged: true } }),
+    false
+  )
+  assert.equal(
+    controller.resolveRendererResponse(event, {
+      ...request,
+      identity: { ...request.identity, rendererGeneration: 2 },
+      value: { frameMs: 4 }
+    }),
+    false
+  )
+  assert.equal(
+    controller.resolveRendererResponse(event, {
+      ...request,
+      value: { frameMs: 4, rendererGeneration: 1, rendererPid: 82, rendererStartedAtMs: 1234 }
+    }),
+    true
+  )
   assert.deepEqual(await pending, {
     gpuMemoryMiB: 12,
     gpuMemorySource: 'chromium-memory-infra-v1',
     frameMs: 4,
+    rendererGeneration: 1,
     rendererPid: 82,
     rendererStartedAtMs: 1234
   })
 
   controller.dispose()
-  assert.equal(await controller.requestRenderer({ sender }, 'snapshot'), undefined)
+  assert.equal(await controller.requestRenderer(event, 'snapshot'), undefined)
+})
+
+test('controller invalidates authentication and pending work on renderer lifecycle changes', async () => {
+  const sent: unknown[] = []
+
+  const sender = {
+    getOSProcessId: () => 82,
+    id: 7,
+    isDestroyed: () => false,
+    send: (_channel: string, payload: unknown) => sent.push(payload)
+  }
+
+  const event = { frameId: 3, sender }
+
+  const controller = createLunarCityPerfMainController({
+    appMetrics: () => [],
+    gpuSnapshot: async () => ({ gpuMemoryMiB: null, gpuMemorySource: 'unavailable' }),
+    launch: { buildStamp: stamp, launchNonce: 'nonce-0123456789abcdef-unique' },
+    mainPid: 41,
+    now: () => 1234,
+    ownsSender: candidate => candidate.id === 7,
+    requestTimeoutMs: 1_000
+  })
+
+  const handshake = controller.bootstrap(event)
+
+  assert.equal(controller.registerResponder(event, handshake), true)
+  assert.equal(controller.activate(event, handshake), true)
+  const pending = controller.requestRenderer(event, 'snapshot')
+  controller.invalidateRenderer(sender, 'navigation')
+
+  await assert.rejects(pending, /navigation/u)
+  assert.equal(controller.processMetrics(event), undefined)
+  assert.equal(await controller.requestRenderer(event, 'snapshot'), undefined)
 })
 
 test('controller reports unavailable GPU attribution without substituting RSS', async () => {
@@ -218,14 +341,21 @@ test('controller reports unavailable GPU attribution without substituting RSS', 
     requestTimeoutMs: 1_000
   })
 
-  controller.bootstrap({ sender })
-  const pending = controller.requestRenderer({ sender }, 'snapshot')
-  const request = responses.at(-1)?.payload as { requestId: string }
-  controller.resolveRendererResponse({ sender }, request.requestId, {})
+  const event = { frameId: 3, sender }
+  const handshake = controller.bootstrap(event)
+  controller.registerResponder(event, handshake)
+  controller.activate(event, handshake)
+  const pending = controller.requestRenderer(event, 'snapshot')
+  const request = responses.at(-1)?.payload as Record<string, unknown>
+  controller.resolveRendererResponse(event, {
+    ...request,
+    value: { rendererGeneration: 1, rendererPid: 82, rendererStartedAtMs: 1234 }
+  })
 
   assert.deepEqual(await pending, {
     gpuMemoryMiB: null,
     gpuMemorySource: 'unavailable',
+    rendererGeneration: 1,
     rendererPid: 82,
     rendererStartedAtMs: 1234
   })
@@ -244,7 +374,10 @@ test('GPU probe requests only Chromium memory-infra and fails closed on capture 
             dumps: { allocators: { 'gpu/gl': { attrs: { effective_size: { units: 'bytes', value: '200000' } } } } }
           },
           cat: 'disabled-by-default-memory-infra',
-          ph: 'v'
+          id: 'dump-1',
+          ph: 'v',
+          pid: 82,
+          ts: 100
         }
       ]
     }
