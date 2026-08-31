@@ -568,13 +568,12 @@ class WorktreePoolExhausted(RuntimeError):
 # CI audits run up to 8 hours), with margin. A slot must never look reclaimable
 # while its dispatched agent task could still legitimately be running.
 DEFAULT_WORKTREE_POOL_LEASE = timedelta(hours=10)
-# A blocked or triage card has no worker that can still use its checkout.  Keep
-# those leases reclaimable as well as the ordinary terminal states; otherwise
-# a failed card strands a pool slot for the full lease timeout and can make
-# the next scan report the pool exhausted even when no worker is running.
-_WORKTREE_POOL_TERMINAL_TASK_STATUSES = frozenset(
-    {"done", "archived", "blocked", "triage"}
-)
+# Only genuinely terminal cards release their checkout. Blocked and triage
+# cards have no worker *right now*, but both are retryable in Kanban. Reusing
+# their slot lets a later retry operate on whichever unrelated PR most recently
+# occupied that path, violating the exact-head invariant. Capacity pressure is
+# therefore reported honestly until the operator completes/archives the card.
+_WORKTREE_POOL_TERMINAL_TASK_STATUSES = frozenset({"done", "archived"})
 
 
 class PooledLocalGitRepository:
@@ -2292,9 +2291,10 @@ def _ci_failure_task(
         "already exist, do not repeat completed work: run only the affected failed lane when "
         "fresh exact-head evidence is absent, then acknowledge and complete. "
         f"Reproduce the typed failure from the receipt worktree; run exactly "
-        f"`{reproduction_command}` in the foreground with the terminal tool. Do not invent or alter "
-        "the command path, and do not use process poll or wait unless the foreground invocation "
-        "actually returns a process session id. If the failed lane names a failing subcheck, run "
+        f"`{reproduction_command}` once as a background terminal process, then use process wait on "
+        "the returned session id until it exits. Do not invent or alter the command path, do not "
+        "launch a second copy while the first is active, and do not mistake one wait timeout for "
+        "the process exiting. If the failed lane names a failing subcheck, run "
         "that repository-owned subcheck once for bounded detail, then inspect the implicated files, "
         "relevant Git history, and focused tests before deciding the cause. Make the smallest "
         "non-gate-weakening fix supported by that evidence. Never block merely because the receipt "
