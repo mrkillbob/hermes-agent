@@ -1,9 +1,34 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { test } from 'node:test'
 
 import { summarizeRawSamples, validateReceipt } from './lunar-city.mjs'
 
 const SHA = 'a'.repeat(40)
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function bindPackagedArtifact(value) {
+  const environmentDigest = createHash('sha256').update(canonicalJson(value.environment)).digest('hex')
+  value.rawProvenance.acceptanceBindings = { environmentDigest }
+  value.rawArtifact = { rawProvenance: value.rawProvenance, rawSamples: value.rawSamples }
+  value.artifactProvenance = {
+    environmentDigest,
+    rawArtifactSha256: createHash('sha256')
+      .update(`${JSON.stringify(value.rawArtifact, null, 2)}\n`)
+      .digest('hex')
+  }
+  return value
+}
 
 function samples(overrides = {}) {
   return {
@@ -394,6 +419,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
         populationSourceMix: { 'fake-backend': 100 },
         qualityTier: 'Balanced',
         internalRenderScale: 1,
+        targetFps: 30,
         cameraState: 'overview',
         cameraActions: { overview: 1, focus: 0, orbit: 0, zoom: 0, indoor: 0 },
         dialogueState: 'idle',
@@ -505,7 +531,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   assert.equal(forged.ok, false)
   assert.match(forged.errors.join('\n'), /raw provenance.*cpuDeltaPp|cpuDeltaPp.*provenance/i)
 
-  const packaged = validateReceipt(
+  const packagedReceipt = bindPackagedArtifact(
     receipt({
       evidenceClass: 'fake-backend-packaged',
       rawSamples,
@@ -519,7 +545,23 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
       }
     })
   )
+  const packaged = validateReceipt(packagedReceipt)
   assert.equal(packaged.packagedPerformanceEligible, true, packaged.errors.join('; '))
+
+  for (const [label, mutate, pattern] of [
+    [
+      'tampered raw artifact',
+      value => (value.rawArtifact.rawSamples.frameMs[0] += 1),
+      /raw artifact digest|samples do not match/i
+    ],
+    ['tampered environment', value => (value.environment.gpuAdapter = 'Spoofed GPU'), /environment provenance digest/i]
+  ]) {
+    const tampered = structuredClone(packagedReceipt)
+    mutate(tampered)
+    const result = validateReceipt(tampered)
+    assert.equal(result.packagedPerformanceEligible, false, label)
+    assert.match(result.errors.join('\n'), pattern, label)
+  }
 
   for (const [label, patch, pattern] of [
     [
@@ -679,15 +721,17 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   terminal.cameraState = 'unmounted'
   terminal.dialogueState = 'closed'
   const truthfulDisposed = validateReceipt(
-    receipt({
-      evidenceClass: 'fake-backend-packaged',
-      scenario: 'disposal',
-      disposal: 'disposed',
-      lifecycleState: 'disposed',
-      rawSamples,
-      rawProvenance: truthfulDisposal,
-      population: packagedPopulation
-    })
+    bindPackagedArtifact(
+      receipt({
+        evidenceClass: 'fake-backend-packaged',
+        scenario: 'disposal',
+        disposal: 'disposed',
+        lifecycleState: 'disposed',
+        rawSamples,
+        rawProvenance: truthfulDisposal,
+        population: packagedPopulation
+      })
+    )
   )
   assert.equal(truthfulDisposed.packagedPerformanceEligible, true, truthfulDisposed.errors.join('; '))
 

@@ -42,29 +42,38 @@ npm run perf:lunar-city:accept -- \
   --scenario balanced-overview
 ```
 
-The metadata JSON must contain nonempty `hardwareModel`, `architecture`, `os`,
-`electronVersion`, `chromiumVersion`, `powerState`, `gpuAdapter`, and
-`backendMode` strings, a positive `displayScale`, and a positive
-`windowSize.width` and `windowSize.height`. The command writes immutable
-`*.raw.json` and `*.receipt.json` files, then runs the canonical validator. It
-exits nonzero if capture, GPU telemetry, raw metrics, package provenance,
-scenario timing, receipt validation, or validator-owned acceptance eligibility
-is unavailable.
+The optional metadata JSON is supplemental operator annotation only. It cannot
+satisfy an acceptance gate. Architecture, hardware model, OS, power state,
+Electron/Chromium versions, window bounds, display scale, GPU adapter, GPU
+state, and scheduler FPS cap are captured from the launched package and host.
+The command writes immutable `*.raw.json` and `*.receipt.json` files, SHA-256
+binds the exact raw bytes and runtime environment into the receipt, then runs
+the canonical validator. It exits nonzero if capture, GPU telemetry, raw
+metrics, package provenance, scenario timing, receipt validation, or
+validator-owned acceptance eligibility is unavailable.
 
 `visible-idle` always measures at least 60 seconds. `30-minute-stability`
 always measures at least 1,800,000 ms. Programmatic overrides may lengthen
 these clocks or increase sampling frequency; they cannot shorten a scenario.
 Unit tests use an injected clock and never stand in for these wall-clock runs.
 
-Exact 25/100/250 population scenarios require `--fixture` with an isolated
-connection contract. Every fixture path must remain beneath its declared
-`root`; the runner passes only that Hermes home and user-data directory to the
-package, retains the population-contract path in raw provenance, and does not
-inherit API keys or tokens.
-The current real gateway exposes no authenticated external `subagent.start`
-fixture API, so a fixture declaring `subagentEmission: "unsupported"` is
-refused for the exact-population scenarios. Run profile/session/Kanban-backed
-scenarios separately; this blocker is never reported as a skip or acceptance.
+Every exact-population scenario—25 active, 100 active, 250 LOD, and 30-minute
+stability—requires canonical `lunar-city-population-v3` fixture bytes and three
+gateways started and owned by the same run. The contract digest, raw bytes,
+authenticated observed source mix, and observed subagent keys must agree.
+Descriptor flags cannot claim subagent evidence. Fixture paths must be real,
+current-UID-owned, non-symlinked descendants of a run-specific isolated root
+with a nonce-bound ownership sentinel; real homes, workspaces, and broad
+ancestors are refused. The runner passes only the verified Hermes home and
+user-data directory and does not inherit API keys or tokens.
+
+The repository currently has no supported lifecycle that both owns all three
+fixture gateways and emits authenticated observed `subagent.start` evidence.
+Therefore exact-population package acceptance remains deliberately blocked.
+Profile/session/Kanban-backed preserved-population scenarios may still capture
+diagnostics, but cannot become fake-backend acceptance unless their fixture
+backend provenance is validated. This blocker is never reported as a skip or
+acceptance.
 
 `npm run perf:lunar-city` is raw capture only and deliberately emits no
 validator-eligible evidence class. `npm run perf:lunar-city:validate --

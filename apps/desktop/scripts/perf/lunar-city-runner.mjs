@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { tmpdir } from 'node:os'
+import { arch, release, tmpdir, type as osType } from 'node:os'
 import { basename, dirname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -19,6 +19,15 @@ import {
 const SHA_PATTERN = /^[0-9a-f]{40}$/i
 const CANONICAL_ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const BRIDGE_VERSION = 1
+
+function defaultHostEnvironment() {
+  if (process.platform !== 'darwin') throw new Error('packaged acceptance host capture currently requires macOS')
+  const hardwareModel = execFileSync('/usr/sbin/sysctl', ['-n', 'hw.model'], { encoding: 'utf8' }).trim()
+  const power = execFileSync('/usr/bin/pmset', ['-g', 'batt'], { encoding: 'utf8' })
+  const powerState = /AC Power/iu.test(power) ? 'ac' : /Battery Power/iu.test(power) ? 'battery' : ''
+  if (!hardwareModel || !powerState) throw new Error('authoritative host hardware/power state is unavailable')
+  return { architecture: arch(), hardwareModel, os: `${osType()} ${release()}`, powerState }
+}
 
 function resourcesPathFor(binaryPath, platform = process.platform) {
   const binary = resolve(binaryPath)
@@ -122,7 +131,7 @@ export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runI
   let fixtureBinding
   if (fixture) {
     if (
-      fixture.contractVersion !== 1 ||
+      fixture.version !== 'lunar-city-population-v3' ||
       fixture.evidenceClass !== 'fake-backend-packaged' ||
       ![25, 100, 250].includes(fixture.expectedPopulation)
     ) {
@@ -140,12 +149,12 @@ export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runI
     hermesHome = withinFixture(fixture.hermesHome, 'hermesHome')
     userDataDir = withinFixture(fixture.userDataDir, 'userDataDir')
     fixtureBinding = {
-      contractVersion: fixture.contractVersion,
+      version: fixture.version,
       evidenceClass: fixture.evidenceClass,
       expectedPopulation: fixture.expectedPopulation,
-      populationContractPath: withinFixture(fixture.populationContractPath, 'populationContractPath'),
+      contractPath: withinFixture(fixture.contractPath, 'contractPath'),
       root: fixtureRoot,
-      subagentEmission: fixture.subagentEmission
+      runNonce: fixture.runNonce
     }
   }
   const launchEnv = {}
@@ -549,6 +558,7 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     runScenario: runScenarioThroughBridge,
     clock: defaultClock,
     cleanup: cleanupIsolatedRun,
+    captureHostEnvironment: defaultHostEnvironment,
     ...injected
   }
   const target = deps.inspectTarget({ binaryPath: options.binaryPath, expectedGitSha: options.expectedGitSha })
@@ -640,6 +650,7 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     }
     return {
       buildStamp: target.buildStamp,
+      hostEnvironment: deps.captureHostEnvironment(),
       package: { binaryPath: target.binaryPath },
       ...(plan.fixture ? { fixture: plan.fixture } : {}),
       bridgeHandshake: connected.handshake,

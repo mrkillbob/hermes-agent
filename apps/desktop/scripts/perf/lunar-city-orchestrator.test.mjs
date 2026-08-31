@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { SCENARIOS, isAcceptancePopulationState } from './lunar-city.mjs'
 import {
   assembleLunarCityReceipt,
+  canonicalJson,
   orchestrateLunarCityAcceptance,
-  resolveScenarioMeasurement
+  resolveScenarioMeasurement,
+  validateIsolatedFixturePaths,
+  validateCanonicalFixture
 } from './lunar-city-orchestrator.mjs'
 
 const SHA = 'a'.repeat(40)
@@ -37,10 +44,19 @@ function capture(scenario = 'balanced-overview') {
     cameraState: 'overview',
     dialogueState: 'idle',
     lifecycleState: 'mounted',
-    environment: { electronMode: 'packaged', gpuEnabled: true },
+    environment: {
+      chromiumVersion: '134.0.0.0',
+      displayScaleFactor: 2,
+      electronMode: 'packaged',
+      electronVersion: '41.10.3',
+      gpuEnabled: true,
+      gpuInfo: { gpuDevice: [{ deviceString: 'Test GPU' }] },
+      windowBounds: { height: 900, width: 1440 }
+    },
+    targetFps: 15,
     scenarioExecution: { scenario, actions: [] }
   }
-  return {
+  const value = {
     buildStamp: {
       schemaVersion: 1,
       commit: SHA,
@@ -74,26 +90,39 @@ function capture(scenario = 'balanced-overview') {
     },
     rawSamples,
     sampleTimestampsMs: timestamps,
-    mountedClaims
+    mountedClaims,
+    hostEnvironment
   }
+  const environment = {
+    ...hostEnvironment,
+    backendMode: 'unbound',
+    chromiumVersion: mountedClaims.environment.chromiumVersion,
+    cityPopulated: true,
+    displayScale: 2,
+    electronMode: 'packaged',
+    electronVersion: mountedClaims.environment.electronVersion,
+    gpuAdapter: 'Test GPU',
+    gpuEnabled: true,
+    windowSize: { height: 900, width: 1440 }
+  }
+  value.rawProvenance.acceptanceBindings = {
+    environmentDigest: createHash('sha256').update(canonicalJson(environment)).digest('hex')
+  }
+  return value
 }
 
-const metadata = {
+const metadata = { note: 'supplemental operator note only' }
+const hostEnvironment = {
   architecture: 'arm64',
-  backendMode: 'fake-backend',
-  chromiumVersion: '134.0.0.0',
-  displayScale: 2,
-  electronVersion: '41.10.3',
-  gpuAdapter: 'Test GPU',
   hardwareModel: 'Test Mac',
   os: 'macOS 15.6',
-  powerState: 'ac',
-  windowSize: { width: 1440, height: 900 }
+  powerState: 'ac'
 }
 
 test('defines a bounded measurement policy for every validator scenario', () => {
   assert.equal(SCENARIOS.length, 18)
   for (const scenario of SCENARIOS) {
+    if (['25-active', '100-active', '250-lod', '30-minute-stability'].includes(scenario)) continue
     const policy = resolveScenarioMeasurement(scenario, {})
     assert.ok(policy.durationMs >= 30_000, scenario)
     assert.ok(policy.warmupDurationMs >= 30_000, scenario)
@@ -101,7 +130,7 @@ test('defines a bounded measurement policy for every validator scenario', () => 
     assert.equal((policy.sampleCount - 1) * policy.sampleIntervalMs, policy.durationMs, scenario)
   }
   assert.equal(resolveScenarioMeasurement('visible-idle', {}).durationMs, 60_000)
-  assert.equal(resolveScenarioMeasurement('30-minute-stability', {}).durationMs, 1_800_000)
+  assert.throws(() => resolveScenarioMeasurement('30-minute-stability', {}), /fixture/i)
   assert.throws(() => resolveScenarioMeasurement('visible-idle', { durationMs: 59_999 }), /cannot shorten/i)
   assert.throws(() => resolveScenarioMeasurement('30-minute-stability', { durationMs: 60_000 }), /cannot shorten/i)
 })
@@ -111,6 +140,7 @@ test('assembles raw capture into a validator-shaped fake-backend packaged receip
     capture: capture(),
     evidenceClass: 'fake-backend-packaged',
     metadata,
+    hostEnvironment,
     scenario: 'balanced-overview',
     timestamp: '2026-08-31T12:01:00.000Z'
   })
@@ -119,7 +149,8 @@ test('assembles raw capture into a validator-shaped fake-backend packaged receip
   assert.equal('packagedPerformanceEligible' in receipt, false)
   assert.deepEqual(receipt.rawProvenance, capture().rawProvenance)
   assert.equal(receipt.gitSha, SHA)
-  assert.equal(receipt.environment.backendMode, 'fake-backend')
+  assert.equal(receipt.environment.backendMode, 'unbound')
+  assert.equal(receipt.fpsCap, 15)
   assert.deepEqual(receipt.measurement.sampleTimestampsMs, [0, 15_000, 30_000])
 })
 
@@ -134,6 +165,7 @@ test('top-level orchestration writes raw and complete receipts then fails closed
           evidenceClass: 'fake-backend-packaged',
           expectedGitSha: SHA,
           metadata,
+          hostEnvironment,
           outputDirectory: '/receipts',
           scenarios: ['balanced-overview']
         },
@@ -159,18 +191,165 @@ test('top-level orchestration writes raw and complete receipts then fails closed
 
 test('subagent-inclusive exact population remains blocked while runnable fixture subset is explicit', () => {
   const fixture = {
-    contractVersion: 1,
+    version: 'lunar-city-population-v3',
     evidenceClass: 'fake-backend-packaged',
     expectedPopulation: 25,
     hermesHome: '/isolated/run/hermes-home',
-    populationContractPath: '/isolated/run/population.json',
+    contractPath: '/isolated/run/population.json',
     root: '/isolated/run',
-    subagentEmission: 'unsupported',
     userDataDir: '/isolated/run/user-data'
   }
-  assert.throws(() => resolveScenarioMeasurement('25-active', { fixture }), /subagent.*unavailable|blocked/i)
+  assert.equal(resolveScenarioMeasurement('25-active', { fixture }).fixture.expectedPopulation, 25)
+  assert.throws(() => resolveScenarioMeasurement('100-active', { fixture }), /population 100/i)
+  const stabilityFixture = { ...fixture, expectedPopulation: 100 }
+  assert.equal(resolveScenarioMeasurement('30-minute-stability', { fixture: stabilityFixture }).durationMs, 1_800_000)
   const subset = resolveScenarioMeasurement('balanced-overview', { fixture })
   assert.equal(subset.fixture.expectedPopulation, 25)
+})
+
+test('every exact population scenario requires canonical v3 fixture evidence', () => {
+  for (const scenario of ['25-active', '100-active', '250-lod', '30-minute-stability']) {
+    assert.throws(() => resolveScenarioMeasurement(scenario, {}), /canonical.*fixture|required/i, scenario)
+  }
+})
+
+test('canonical fixture verifies v3 bytes, digest, source mix, and authenticated observed subagents', () => {
+  const unsigned = {
+    activity: { active: 1, idle: 0, unavailable: 0 },
+    entities: Array.from({ length: 25 }, (_, index) => ({
+      activity: 'active',
+      connectionId: 'local',
+      exactKey: index === 0 ? 'subagent-key' : `profile-${index}`,
+      kind: index === 0 ? 'subagent' : 'profile'
+    })),
+    entitiesByKind: { profile: 24, session: 0, subagent: 1, task: 0, worker: 0 },
+    groups: [],
+    leaderFamilies: [],
+    lod: { aggregate: 0, far: 0, mid: 0, near: 1 },
+    population: 25,
+    version: 'lunar-city-population-v3'
+  }
+  const contract = {
+    ...unsigned,
+    digest: createHash('sha256').update(canonicalJson(unsigned)).digest('hex')
+  }
+  const bytes = `${JSON.stringify(contract, null, 2)}\n`
+  const proof = {
+    authenticated: true,
+    source: 'owned-authenticated-gateways-v1',
+    gatewayProcesses: [101, 102, 103],
+    entityKeys: ['subagent-key'],
+    observedPopulation: 25,
+    sourceMix: { local: 25 }
+  }
+  const validated = validateCanonicalFixture({ bytes, proof })
+  assert.equal(validated.contractDigest, contract.digest)
+  assert.equal(validated.bytesSha256, createHash('sha256').update(bytes).digest('hex'))
+
+  assert.throws(() => validateCanonicalFixture({ bytes: bytes.replace('subagent-key', 'tampered'), proof }), /digest/i)
+  assert.throws(() => validateCanonicalFixture({ bytes, proof: { ...proof, authenticated: false } }), /authenticated/i)
+  assert.throws(() => validateCanonicalFixture({ bytes, proof: { ...proof, entityKeys: [] } }), /subagent/i)
+})
+
+test('fixture isolation rejects broad, real-home, and symlinked paths and requires a run-owned sentinel', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'lunar-owned-')))
+  const hermesHome = join(root, 'hermes-home')
+  const userDataDir = join(root, 'user-data')
+  const contractPath = join(root, 'population.json')
+  mkdirSync(hermesHome)
+  mkdirSync(userDataDir)
+  writeFileSync(contractPath, '{}')
+  const fixture = {
+    contractPath,
+    evidenceClass: 'fake-backend-packaged',
+    expectedPopulation: 25,
+    hermesHome,
+    root,
+    runNonce: 'owned-nonce',
+    userDataDir,
+    version: 'lunar-city-population-v3'
+  }
+  assert.throws(() => validateIsolatedFixturePaths(fixture), /sentinel|owned/i)
+  writeFileSync(
+    join(root, '.lunar-city-fixture-owner.json'),
+    JSON.stringify({ nonce: 'owned-nonce', pid: process.pid, version: 1 })
+  )
+  assert.equal(validateIsolatedFixturePaths(fixture).root, root)
+  const link = join(root, 'linked-home')
+  symlinkSync(hermesHome, link)
+  assert.throws(() => validateIsolatedFixturePaths({ ...fixture, hermesHome: link }), /symlink|canonical/i)
+  assert.throws(
+    () => validateIsolatedFixturePaths({ ...fixture, root: process.env.HOME, hermesHome: process.env.HOME }),
+    /home|broad|isolated/i
+  )
+})
+
+test('generic receipt assembly refuses live relabel and missing runtime-owned environment or scheduler fps', () => {
+  assert.throws(
+    () =>
+      assembleLunarCityReceipt({
+        capture: capture(),
+        evidenceClass: 'supervised-live',
+        hostEnvironment,
+        metadata,
+        scenario: 'balanced-overview',
+        timestamp: '2026-08-31T12:01:00.000Z'
+      }),
+    /supervised-live.*dedicated/i
+  )
+  const noFps = capture()
+  delete noFps.mountedClaims.targetFps
+  assert.throws(
+    () =>
+      assembleLunarCityReceipt({
+        capture: noFps,
+        evidenceClass: 'fake-backend-packaged',
+        hostEnvironment,
+        metadata,
+        scenario: 'balanced-overview',
+        timestamp: '2026-08-31T12:01:00.000Z'
+      }),
+    /fps/i
+  )
+})
+
+test('fixture binding rejects mounted source/population mismatch instead of trusting descriptor claims', () => {
+  const value = capture()
+  value.rawProvenance.acceptanceBindings.fixture = {
+    bytesSha256: 'a'.repeat(64),
+    contractDigest: 'b'.repeat(64),
+    expectedPopulation: 25,
+    proofDigest: 'c'.repeat(64),
+    sourceMix: { local: 25 },
+    subagentKeys: ['subagent-key']
+  }
+  const fakeEnvironment = {
+    ...hostEnvironment,
+    backendMode: 'fake-backend',
+    chromiumVersion: '134.0.0.0',
+    cityPopulated: true,
+    displayScale: 2,
+    electronMode: 'packaged',
+    electronVersion: '41.10.3',
+    gpuAdapter: 'Test GPU',
+    gpuEnabled: true,
+    windowSize: { height: 900, width: 1440 }
+  }
+  value.rawProvenance.acceptanceBindings.environmentDigest = createHash('sha256')
+    .update(canonicalJson(fakeEnvironment))
+    .digest('hex')
+  assert.throws(
+    () =>
+      assembleLunarCityReceipt({
+        capture: value,
+        evidenceClass: 'fake-backend-packaged',
+        hostEnvironment,
+        metadata,
+        scenario: 'balanced-overview',
+        timestamp: '2026-08-31T12:01:00.000Z'
+      }),
+    /source mix|fixture binding/i
+  )
 })
 
 test('route-unmounted accepts truthful zero population while every mounted scenario requires population', () => {
@@ -188,6 +367,7 @@ test('assembles canonical recovery and disposal outcome vocabulary from lifecycl
       capture: recovered,
       evidenceClass: 'fake-backend-packaged',
       metadata,
+      hostEnvironment,
       scenario: 'context-loss-recovery',
       timestamp: '2026-08-31T12:01:00.000Z'
     }).recovery,
@@ -201,6 +381,7 @@ test('assembles canonical recovery and disposal outcome vocabulary from lifecycl
       capture: disposed,
       evidenceClass: 'fake-backend-packaged',
       metadata,
+      hostEnvironment,
       scenario: 'disposal',
       timestamp: '2026-08-31T12:01:00.000Z'
     }).disposal,

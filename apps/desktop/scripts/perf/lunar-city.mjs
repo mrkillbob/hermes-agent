@@ -6,6 +6,7 @@
  * the retained raw samples so a summary cannot be edited to hide a regression.
  */
 
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
 import { deriveRawSamplesFromProvenance } from './lib/lunar-city-provenance.mjs'
@@ -343,6 +344,21 @@ function equalNumber(left, right) {
   )
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
 function percentile(values, p) {
   if (!values.length) return 0
 
@@ -491,6 +507,7 @@ function validateRawProvenance(receipt, errors) {
   for (const field of ['qualityTier', 'internalRenderScale', 'cameraState', 'dialogueState']) {
     if (receipt[field] !== claims[field]) errors.push(`${field} does not match raw mounted state`)
   }
+  if (receipt.fpsCap !== claims.targetFps) errors.push('fpsCap does not match raw scheduler target FPS')
   if (receipt.lifecycleState !== claims.lifecycleState)
     errors.push('top-level lifecycleState does not match final raw lifecycle state')
   if (receipt.environment?.gpuEnabled !== claims.environment.gpuEnabled)
@@ -811,6 +828,90 @@ function validateBuildStamp(receipt, errors) {
   }
 }
 
+function validateArtifactProvenance(receipt, errors) {
+  if (receipt.evidenceClass === 'supervised-live') {
+    errors.push('supervised-live requires a dedicated live provenance validator')
+    return
+  }
+  if (receipt.evidenceClass !== 'fake-backend-packaged') return
+  const artifact = receipt.artifactProvenance
+  const raw = receipt.rawArtifact
+  if (!isRecord(artifact) || !isRecord(raw)) {
+    errors.push('packaged receipt requires hash-bound rawArtifact provenance')
+    return
+  }
+  if (artifact.rawArtifactSha256 !== sha256(`${JSON.stringify(raw, null, 2)}\n`))
+    errors.push('raw artifact digest mismatch')
+  if (canonicalJson(raw.rawProvenance) !== canonicalJson(receipt.rawProvenance))
+    errors.push('raw artifact provenance does not match receipt')
+  if (canonicalJson(raw.rawSamples) !== canonicalJson(receipt.rawSamples))
+    errors.push('raw artifact samples do not match receipt')
+  const environmentDigest = sha256(canonicalJson(receipt.environment))
+  if (
+    artifact.environmentDigest !== environmentDigest ||
+    raw.rawProvenance?.acceptanceBindings?.environmentDigest !== environmentDigest
+  )
+    errors.push('runtime environment provenance digest mismatch')
+  const fixture = raw.rawProvenance?.acceptanceBindings?.fixture
+  if (SCENARIO_PROFILES[receipt.scenario]?.populationMode === 'exact' && !isRecord(fixture))
+    errors.push(`${receipt.scenario} requires canonical v3 fixture binding`)
+  if (isRecord(fixture)) {
+    let contract
+    try {
+      contract = JSON.parse(fixture.contractBytes)
+    } catch {
+      errors.push('fixture canonical bytes are malformed')
+    }
+    const unsigned = isRecord(contract)
+      ? Object.fromEntries(Object.entries(contract).filter(([key]) => key !== 'digest'))
+      : null
+    const canonicalDigest = unsigned ? sha256(canonicalJson(unsigned)) : null
+    const expectedSourceMix = Array.isArray(contract?.entities)
+      ? Object.fromEntries(
+          [...new Set(contract.entities.map(entity => entity.connectionId))]
+            .sort()
+            .map(connectionId => [
+              connectionId,
+              contract.entities.filter(entity => entity.connectionId === connectionId).length
+            ])
+        )
+      : null
+    const subagentKeys = Array.isArray(contract?.entities)
+      ? contract.entities.filter(entity => entity.kind === 'subagent').map(entity => entity.exactKey)
+      : []
+    if (
+      typeof fixture.contractBytes !== 'string' ||
+      sha256(fixture.contractBytes) !== fixture.bytesSha256 ||
+      contract?.version !== 'lunar-city-population-v3' ||
+      contract?.digest !== fixture.contractDigest ||
+      canonicalDigest !== fixture.contractDigest ||
+      contract?.population !== fixture.expectedPopulation ||
+      canonicalJson(expectedSourceMix) !== canonicalJson(fixture.sourceMix)
+    )
+      errors.push('fixture canonical bytes/digest/population/source mix mismatch')
+    if (
+      fixture.proof?.authenticated !== true ||
+      fixture.proof?.source !== 'owned-authenticated-gateways-v1' ||
+      sha256(canonicalJson(fixture.proof)) !== fixture.proofDigest ||
+      !Array.isArray(fixture.proof?.gatewayProcesses) ||
+      fixture.proof.gatewayProcesses.length !== 3 ||
+      subagentKeys.some(key => !fixture.proof.entityKeys?.includes(key))
+    )
+      errors.push('fixture authenticated subagent/gateway proof mismatch')
+    if (
+      artifact.fixtureBytesSha256 !== fixture.bytesSha256 ||
+      artifact.fixtureContractDigest !== fixture.contractDigest ||
+      artifact.fixtureProofDigest !== fixture.proofDigest
+    )
+      errors.push('fixture artifact provenance digest mismatch')
+    if (
+      fixture.expectedPopulation !== receipt.population?.observed ||
+      canonicalJson(fixture.sourceMix) !== canonicalJson(receipt.population?.sourceMix)
+    )
+      errors.push('fixture binding does not match mounted population/source mix')
+  }
+}
+
 function validatePopulation(population, errors) {
   if (!isRecord(population)) return
   for (const field of ['observed', 'active', 'lodMix', 'source']) {
@@ -1047,10 +1148,11 @@ function validateAcceptanceGate(receipt, scenario, errors) {
   const stamp = receipt.buildStamp
   const evidenceClass = receipt.evidenceClass
   const profile = SCENARIO_PROFILES[scenario]
-  const eligibleClass = evidenceClass === 'fake-backend-packaged' || evidenceClass === 'supervised-live'
+  const eligibleClass = evidenceClass === 'fake-backend-packaged'
   if (!eligibleClass) return false
   const packaged = isRecord(environment) && environment.electronMode === 'packaged'
   const gpuEnabled = isRecord(environment) && environment.gpuEnabled === true
+  const fixtureBackend = isRecord(environment) && environment.backendMode === 'fake-backend'
   const populated = isRecord(environment) && environment.cityPopulated === true
   const hasPopulation = Number.isInteger(receipt.population?.observed) && receipt.population.observed > 0
   const populationStateEligible = isAcceptancePopulationState(
@@ -1077,6 +1179,7 @@ function validateAcceptanceGate(receipt, scenario, errors) {
     profile &&
     packaged &&
     gpuEnabled &&
+    fixtureBackend &&
     populationStateEligible &&
     cleanPinnedBuild &&
     hasRawProvenance &&
@@ -1087,6 +1190,7 @@ function validateAcceptanceGate(receipt, scenario, errors) {
     errors.push(`receipt is not eligible for packaged performance acceptance (${scenario ?? 'unknown scenario'})`)
     if (!packaged) errors.push('packaged performance requires packaged Electron, not dev Electron')
     if (!gpuEnabled) errors.push('packaged performance requires GPU enabled')
+    if (!fixtureBackend) errors.push('fake packaged performance requires validated fixture backend provenance')
     if (!populationStateEligible) {
       if (scenario === 'route-unmounted') {
         errors.push('route-unmounted acceptance requires a truthful zero-population unmounted city')
@@ -1114,6 +1218,7 @@ export function validateReceipt(receipt) {
 
   validateCommonShape(receipt, errors)
   validateBuildStamp(receipt, errors)
+  validateArtifactProvenance(receipt, errors)
   validateEnvironment(receipt.environment, errors)
   validatePopulation(receipt.population, errors)
   validateMeasurement(receipt, SCENARIO_PROFILES[receipt.scenario], errors)

@@ -67,6 +67,7 @@ function rendererMetrics(overrides = {}) {
     populationSourceMix: { 'fake-backend': 100 },
     qualityTier: 'Balanced',
     internalRenderScale: 1,
+    targetFps: 15,
     cameraState: 'overview',
     cameraActions: { overview: 1, focus: 0, orbit: 0, zoom: 0, indoor: 0 },
     dialogueState: 'idle',
@@ -317,20 +318,20 @@ test('binds an explicit isolated fixture home and connection registry without in
     runId: 'run-7',
     launchNonce: 'nonce-7',
     fixture: {
-      contractVersion: 1,
+      version: 'lunar-city-population-v3',
       evidenceClass: 'fake-backend-packaged',
       expectedPopulation: 25,
       hermesHome: '/private/tmp/lunar-city-fixture/hermes-home',
-      populationContractPath: '/private/tmp/lunar-city-fixture/population.json',
+      contractPath: '/private/tmp/lunar-city-fixture/population.json',
       root: '/private/tmp/lunar-city-fixture',
-      subagentEmission: 'supported',
+      runNonce: 'nonce-7',
       userDataDir: '/private/tmp/lunar-city-fixture/user-data'
     }
   })
 
   assert.equal(plan.paths.hermesHome, '/private/tmp/lunar-city-fixture/hermes-home')
   assert.equal(plan.paths.userDataDir, '/private/tmp/lunar-city-fixture/user-data')
-  assert.equal(plan.fixture.populationContractPath, '/private/tmp/lunar-city-fixture/population.json')
+  assert.equal(plan.fixture.contractPath, '/private/tmp/lunar-city-fixture/population.json')
   assert.equal('HERMES_LUNAR_CITY_FIXTURE_CONTRACT' in plan.env, false)
   assert.equal('OPENAI_API_KEY' in plan.env, false)
   assert.equal('GITHUB_TOKEN' in plan.env, false)
@@ -346,13 +347,13 @@ test('rejects fixture paths that escape their declared isolated root', () => {
         runId: 'run-7',
         launchNonce: 'nonce-7',
         fixture: {
-          contractVersion: 1,
+          version: 'lunar-city-population-v3',
           evidenceClass: 'fake-backend-packaged',
           expectedPopulation: 25,
           hermesHome: '/Users/operator/.hermes',
-          populationContractPath: '/private/tmp/lunar-city-fixture/population.json',
+          contractPath: '/private/tmp/lunar-city-fixture/population.json',
           root: '/private/tmp/lunar-city-fixture',
-          subagentEmission: 'supported',
+          runNonce: 'nonce-7',
           userDataDir: '/private/tmp/lunar-city-fixture/user-data'
         }
       }),
@@ -971,7 +972,13 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
           now += milliseconds
         }
       },
-      cleanup: async () => {}
+      cleanup: async () => {},
+      captureHostEnvironment: () => ({
+        architecture: 'arm64',
+        hardwareModel: 'Test Mac',
+        os: 'macOS 15.6',
+        powerState: 'ac'
+      })
     }
   )
 
@@ -995,6 +1002,7 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
   assert.equal(result.rawProvenance.provenanceVersion, 3)
   assert.deepEqual(result.rawSamples.cpuDeltaPp, [3, 3])
   assert.equal(result.buildStamp.commit, SHA)
+  assert.equal(result.hostEnvironment.hardwareModel, 'Test Mac')
   assert.equal(result.packagedPerformanceEligible, false)
   assert.equal(result.evidenceClass, 'deterministic')
 })
@@ -1078,7 +1086,13 @@ test('captures mounted disposal samples followed by exactly one truthful termina
           now += milliseconds
         }
       },
-      cleanup: async () => {}
+      cleanup: async () => {},
+      captureHostEnvironment: () => ({
+        architecture: 'arm64',
+        hardwareModel: 'Test Mac',
+        os: 'macOS 15.6',
+        powerState: 'ac'
+      })
     }
   )
 

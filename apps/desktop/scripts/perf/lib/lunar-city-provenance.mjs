@@ -108,6 +108,7 @@ function validateRendererMetrics(metrics, identity, label, allowEmpty) {
     fail(`${label} population source distribution is not exact`)
   if (typeof metrics.qualityTier !== 'string' || !isFiniteNumber(metrics.internalRenderScale))
     fail(`${label} quality state is unavailable`)
+  if (![0, 15, 30].includes(metrics.targetFps)) fail(`${label} scheduler target FPS is unavailable`)
   for (const [field, keys] of [
     ['cameraActions', ['overview', 'focus', 'orbit', 'zoom', 'indoor']],
     ['dialogueActions', ['opened', 'messagesSent', 'responsesReceived']],
@@ -564,6 +565,7 @@ export function deriveRawSamplesFromProvenance(provenance, { scenario } = {}) {
       populationSourceMix: structuredClone(claimMetrics.populationSourceMix),
       qualityTier: claimMetrics.qualityTier,
       internalRenderScale: claimMetrics.internalRenderScale,
+      targetFps: claimMetrics.targetFps,
       cameraState: claimMetrics.cameraState,
       cameraActions: structuredClone(claimMetrics.cameraActions),
       dialogueState: claimMetrics.dialogueState,
