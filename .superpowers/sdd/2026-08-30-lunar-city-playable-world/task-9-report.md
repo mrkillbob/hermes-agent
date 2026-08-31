@@ -79,10 +79,8 @@ Final result: 8 test files, 89 passing tests.
 - Desktop production build: passed (`vite`, Electron main/preload bundle, and
   staged native dependencies). It was a dirty-worktree build at pre-Task9B
   commit `426250270f8f`; it is build evidence, not a clean packaged receipt.
-- Full desktop typecheck was attempted but is currently blocked by unrelated
-  concurrent Task 10 WIP: `command-broker.ts` is deleted while its tests and
-  related Task 10 component tests reference its older API. No Task 9B file was
-  named in that failure output.
+- Full desktop typecheck passed: renderer, Electron, and E2E TypeScript
+  projects all completed after the concurrent Task 10 surface settled.
 
 These receipts are deterministic unit/build evidence. They do not establish a
 live Hermes profile/session/voice interaction or supervised Task 12 acceptance.

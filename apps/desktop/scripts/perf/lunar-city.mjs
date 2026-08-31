@@ -45,7 +45,8 @@ const RAW_FIELDS = Object.freeze([
   'timers'
 ])
 
-const NON_NEGATIVE_RAW_FIELDS = new Set(RAW_FIELDS)
+const SIGNED_RAW_FIELDS = new Set(['cpuDeltaPp', 'gpuMemoryDeltaMiB'])
+const NON_NEGATIVE_RAW_FIELDS = new Set(RAW_FIELDS.filter(field => !SIGNED_RAW_FIELDS.has(field)))
 const MONOTONIC_FIELDS = Object.freeze([
   ['entities', 'entities'],
   ['textures', 'textures'],
@@ -54,24 +55,63 @@ const MONOTONIC_FIELDS = Object.freeze([
   ['timers', 'timers']
 ])
 
-const SCENARIO_ALIASES = new Map([
-  ['unmounted', 'route-unmounted'],
-  ['route-unmounted', 'route-unmounted'],
-  ['hidden', 'hidden'],
-  ['minimized', 'minimized'],
-  ['visible-idle', 'visible-idle'],
-  ['visible_idle', 'visible-idle'],
-  ['100-active', '100-active'],
-  ['100_active', '100-active'],
-  ['250-lod', '250-lod'],
-  ['250_lod', '250-lod'],
-  ['balanced-overview', 'balanced-overview'],
-  ['balanced_overview', 'balanced-overview'],
-  ['balanced-worker-focus', 'balanced-worker-focus'],
-  ['balanced_worker_focus', 'balanced-worker-focus'],
-  ['30-minute-stability', '30-minute-stability'],
-  ['30_minute_stability', '30-minute-stability']
-])
+const SCENARIO_PROFILES = Object.freeze({
+  'route-unmounted': { dormant: true, cpuLimit: 0.5 },
+  hidden: { dormant: true, cpuLimit: 0.5 },
+  minimized: { dormant: true, cpuLimit: 0.5 },
+  'visible-idle': { durationMs: 60_000, cpuLimit: 3, maxCadenceMs: 15_000 },
+  '25-active': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  '100-active': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    cpuLimit: 12,
+    p95FrameLimit: 33.3,
+    p95UpdateLimit: 6,
+    expectedObserved: 100,
+    expectedActive: 100,
+    maxCadenceMs: 10_000
+  },
+  '250-lod': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    cpuLimit: 18,
+    p95FrameLimit: 33.3,
+    expectedObserved: 250,
+    expectedActive: 250,
+    maxCadenceMs: 10_000
+  },
+  'balanced-overview': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    drawCalls: 180,
+    triangles: 1_500_000,
+    maxCadenceMs: 10_000
+  },
+  'balanced-worker-focus': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    drawCalls: 220,
+    triangles: 2_000_000,
+    maxCadenceMs: 10_000
+  },
+  'continuous-orbit-zoom': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  'indoor-occlusion': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  'dialogue-camera': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  'tier-efficient': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  'tier-balanced': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  'tier-detailed': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  'context-loss-recovery': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  disposal: { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  '30-minute-stability': {
+    durationMs: 1_800_000,
+    warmupMs: 30_000,
+    cpuLimit: 12,
+    maxCadenceMs: 600_000,
+    stability: true
+  }
+})
+
+export const SCENARIOS = Object.freeze(Object.keys(SCENARIO_PROFILES))
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isFiniteNumber = value => typeof value === 'number' && Number.isFinite(value)
@@ -86,38 +126,75 @@ function percentile(values, p) {
   if (!values.length) return 0
 
   const sorted = [...values].sort((a, b) => a - b)
-  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]
+  return sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1))]
 }
 
 function max(values) {
-  return values.length ? Math.max(...values) : 0
+  if (!values.length) return 0
+  let result = values[0]
+  for (const value of values) result = Math.max(result, value)
+  return result
+}
+
+function min(values) {
+  if (!values.length) return 0
+  let result = values[0]
+  for (const value of values) result = Math.min(result, value)
+  return result
+}
+
+function average(values) {
+  if (!values.length) return 0
+  let total = 0
+  for (const value of values) total += value
+  return total / values.length
+}
+
+function boundedValues(values) {
+  return Array.isArray(values) && values.length <= THRESHOLDS.maxRawSamples ? values : []
 }
 
 /** Recompute all receipt summaries from raw samples using a deterministic rank. */
 export function summarizeRawSamples(rawSamples) {
   const raw = isRecord(rawSamples) ? rawSamples : {}
-  const resident = Array.isArray(raw.residentMemoryMiB) ? raw.residentMemoryMiB : []
+  const resident = boundedValues(raw.residentMemoryMiB)
+  const cpu = boundedValues(raw.cpuDeltaPp)
+  const gpu = boundedValues(raw.gpuMemoryDeltaMiB)
+  const frame = boundedValues(raw.frameMs)
+  const update = boundedValues(raw.worldUpdateMs)
+  const renderFrames = boundedValues(raw.renderFrames)
+  const drawCalls = boundedValues(raw.drawCalls)
+  const triangles = boundedValues(raw.visibleTriangles)
+  const animations = boundedValues(raw.activeAnimations)
+  const entities = boundedValues(raw.entities)
+  const textures = boundedValues(raw.textures)
+  const listeners = boundedValues(raw.listeners)
+  const timers = boundedValues(raw.timers)
 
   return {
-    sampleCount: Array.isArray(raw.frameMs) ? raw.frameMs.length : 0,
-    p95FrameMs: percentile(Array.isArray(raw.frameMs) ? raw.frameMs : [], 0.95),
-    p95WorldUpdateMs: percentile(Array.isArray(raw.worldUpdateMs) ? raw.worldUpdateMs : [], 0.95),
-    maxCpuDeltaPp: max(Array.isArray(raw.cpuDeltaPp) ? raw.cpuDeltaPp : []),
-    maxGpuMemoryDeltaMiB: max(Array.isArray(raw.gpuMemoryDeltaMiB) ? raw.gpuMemoryDeltaMiB : []),
+    sampleCount: frame.length,
+    p95FrameMs: percentile(frame, 0.95),
+    p95WorldUpdateMs: percentile(update, 0.95),
+    avgCpuDeltaPp: average(cpu),
+    maxCpuDeltaPp: max(cpu),
+    avgGpuMemoryDeltaMiB: average(gpu),
+    maxAbsGpuMemoryDeltaMiB: max(gpu.map(value => Math.abs(value))),
+    minGpuMemoryDeltaMiB: min(gpu),
+    maxGpuMemoryDeltaMiB: max(gpu),
     residentMemoryDriftMiB: resident.length ? resident[resident.length - 1] - resident[0] : 0,
-    maxRenderFrames: max(Array.isArray(raw.renderFrames) ? raw.renderFrames : []),
-    maxDrawCalls: max(Array.isArray(raw.drawCalls) ? raw.drawCalls : []),
-    maxVisibleTriangles: max(Array.isArray(raw.visibleTriangles) ? raw.visibleTriangles : []),
-    maxActiveAnimations: max(Array.isArray(raw.activeAnimations) ? raw.activeAnimations : []),
-    maxEntities: max(Array.isArray(raw.entities) ? raw.entities : []),
-    maxTextures: max(Array.isArray(raw.textures) ? raw.textures : []),
-    maxListeners: max(Array.isArray(raw.listeners) ? raw.listeners : []),
-    maxTimers: max(Array.isArray(raw.timers) ? raw.timers : [])
+    maxRenderFrames: max(renderFrames),
+    maxDrawCalls: max(drawCalls),
+    maxVisibleTriangles: max(triangles),
+    maxActiveAnimations: max(animations),
+    maxEntities: max(entities),
+    maxTextures: max(textures),
+    maxListeners: max(listeners),
+    maxTimers: max(timers)
   }
 }
 
 function canonicalScenario(scenario) {
-  return typeof scenario === 'string' ? (SCENARIO_ALIASES.get(scenario.toLowerCase()) ?? scenario.toLowerCase()) : null
+  return typeof scenario === 'string' && Object.hasOwn(SCENARIO_PROFILES, scenario) ? scenario : null
 }
 
 function addRequired(errors, object, field, label = field) {
@@ -140,10 +217,11 @@ function validateRawSamples(rawSamples, errors) {
     if (values.length === 0) errors.push(`rawSamples.${field} must not be empty`)
     if (values.length > THRESHOLDS.maxRawSamples) {
       errors.push(`rawSamples.${field} has too many samples (max ${THRESHOLDS.maxRawSamples})`)
+      continue
     }
     for (const value of values) {
       if (!isFiniteNumber(value)) errors.push(`rawSamples.${field} contains nonfinite values`)
-      else if (value > THRESHOLDS.maxRawValue) errors.push(`rawSamples.${field} contains unbounded values`)
+      else if (Math.abs(value) > THRESHOLDS.maxRawValue) errors.push(`rawSamples.${field} contains unbounded values`)
       else if (NON_NEGATIVE_RAW_FIELDS.has(field) && value < 0)
         errors.push(`rawSamples.${field} contains negative values`)
     }
@@ -175,6 +253,10 @@ function validateSummaries(rawSamples, summaries, errors) {
 }
 
 function numericMetric(receipt, summaries, directField, summaryField, errors, label) {
+  if (!(directField in receipt) && (directField === 'processCpuDeltaPp' || directField === 'gpuMemoryDeltaMiB')) {
+    errors.push(`${label} unavailable; missing ${label} is not zero`)
+    return undefined
+  }
   const value = receipt[directField]
   if (directField in receipt && value === undefined) {
     errors.push(`${label} unavailable; missing ${label} is not zero`)
@@ -291,9 +373,10 @@ function validateCommonShape(receipt, errors) {
     'listeners',
     'timers'
   ]) {
-    if (field in receipt && (!isFiniteNumber(receipt[field]) || receipt[field] < 0)) {
+    const signed = field === 'processCpuDeltaPp' || field === 'gpuMemoryDeltaMiB' || field === 'residentMemoryDriftMiB'
+    if (field in receipt && (!isFiniteNumber(receipt[field]) || (!signed && receipt[field] < 0))) {
       errors.push(`${field} must be a nonnegative finite number`)
-    } else if (field in receipt && receipt[field] > THRESHOLDS.maxRawValue) {
+    } else if (field in receipt && Math.abs(receipt[field]) > THRESHOLDS.maxRawValue) {
       errors.push(`${field} contains an unbounded value`)
     }
   }
@@ -334,6 +417,43 @@ function validateEnvironment(environment, errors) {
   if (typeof environment.cityPopulated !== 'boolean') errors.push('environment.cityPopulated must be boolean')
 }
 
+function validateBuildStamp(receipt, errors) {
+  const stamp = receipt.buildStamp
+  if (!isRecord(stamp)) {
+    errors.push('buildStamp must be a strict stamp object')
+    return
+  }
+  for (const field of ['schemaVersion', 'commit', 'branch', 'builtAt', 'dirty', 'source']) {
+    addRequired(errors, stamp, field, `buildStamp.${field}`)
+  }
+  if (stamp.schemaVersion !== 1) errors.push('buildStamp.schemaVersion must equal 1')
+  if (typeof stamp.commit !== 'string' || !/^[0-9a-f]{40}$/i.test(stamp.commit))
+    errors.push('buildStamp.commit must be an exact 40-character hexadecimal SHA')
+  if (typeof receipt.gitSha === 'string' && stamp.commit !== receipt.gitSha)
+    errors.push('buildStamp.commit must match gitSha')
+  if (stamp.branch !== null && typeof stamp.branch !== 'string')
+    errors.push('buildStamp.branch must be a string or null')
+  if (typeof stamp.builtAt !== 'string' || Number.isNaN(Date.parse(stamp.builtAt)))
+    errors.push('buildStamp.builtAt must be an ISO timestamp')
+  if (typeof stamp.dirty !== 'boolean') errors.push('buildStamp.dirty must be boolean')
+  if (!['ci', 'local', 'fallback'].includes(stamp.source))
+    errors.push('buildStamp.source must be ci, local, or fallback')
+  if (Object.keys(stamp).sort().join(',') !== 'branch,builtAt,commit,dirty,schemaVersion,source')
+    errors.push('buildStamp contains unknown or missing fields')
+  if (
+    (receipt.evidenceClass === 'fake-backend-packaged' || receipt.evidenceClass === 'supervised-live') &&
+    stamp.dirty === true
+  ) {
+    errors.push('packaged performance receipts cannot use a dirty buildStamp')
+  }
+  if (
+    (receipt.evidenceClass === 'fake-backend-packaged' || receipt.evidenceClass === 'supervised-live') &&
+    stamp.source === 'fallback'
+  ) {
+    errors.push('packaged performance receipts require a pinned buildStamp source')
+  }
+}
+
 function validatePopulation(population, errors) {
   if (!isRecord(population)) return
   for (const field of ['observed', 'active', 'lodMix', 'source']) {
@@ -346,13 +466,129 @@ function validatePopulation(population, errors) {
   }
   if ('lodMix' in population && !isRecord(population.lodMix)) errors.push('population.lodMix must be an object')
   if ('source' in population && typeof population.source !== 'string') errors.push('population.source must be a string')
+  if (isRecord(population.lodMix)) {
+    let total = 0
+    for (const [lod, count] of Object.entries(population.lodMix)) {
+      if (!Number.isInteger(count) || count < 0) errors.push(`population.lodMix.${lod} must be a nonnegative integer`)
+      else total += count
+    }
+    if (Number.isInteger(population.observed) && total !== population.observed) {
+      errors.push(`population.lodMix total ${total} must equal observed ${population.observed}`)
+    }
+  }
+}
+
+function validateMeasurement(receipt, profile, errors) {
+  if (!profile) return
+  const measurement = receipt.measurement
+  if (!isRecord(measurement)) {
+    errors.push('measurement is required and must be an object')
+    return
+  }
+  for (const field of ['durationMs', 'sampleIntervalMs', 'sampleTimestampsMs'])
+    addRequired(errors, measurement, field, `measurement.${field}`)
+  if (
+    !isFiniteNumber(measurement.durationMs) ||
+    measurement.durationMs < 0 ||
+    measurement.durationMs > THRESHOLDS.maxRawValue
+  )
+    errors.push('measurement.durationMs must be nonnegative and finite')
+  if (
+    !isFiniteNumber(measurement.sampleIntervalMs) ||
+    measurement.sampleIntervalMs <= 0 ||
+    measurement.sampleIntervalMs > THRESHOLDS.maxRawValue
+  )
+    errors.push('measurement.sampleIntervalMs must be positive and finite')
+  const timestamps = measurement.sampleTimestampsMs
+  if (!Array.isArray(timestamps)) {
+    errors.push('measurement.sampleTimestampsMs must be an array')
+    return
+  }
+  if (timestamps.length > THRESHOLDS.maxRawSamples) {
+    errors.push(`measurement.sampleTimestampsMs has too many samples (max ${THRESHOLDS.maxRawSamples})`)
+    return
+  }
+  if (timestamps.length < 3) errors.push('measurement sample coverage is inadequate; at least 3 samples are required')
+  if (timestamps.length && timestamps[0] !== 0) errors.push('measurement timestamps must begin at zero')
+  let previous = null
+  for (const timestamp of timestamps) {
+    if (!isFiniteNumber(timestamp) || timestamp < 0 || timestamp > THRESHOLDS.maxRawValue)
+      errors.push('measurement timestamps must be nonnegative finite values')
+    if (previous !== null && timestamp <= previous) errors.push('measurement timestamps must be strictly increasing')
+    previous = timestamp
+  }
+  const raw = receipt.rawSamples
+  if (isRecord(raw) && timestamps.length > 0) {
+    for (const field of RAW_FIELDS) {
+      if (Array.isArray(raw[field]) && raw[field].length !== timestamps.length) {
+        errors.push(`rawSamples.${field} must be aligned with measurement timestamps`)
+      }
+    }
+  }
+  if (
+    isFiniteNumber(measurement.durationMs) &&
+    timestamps.length &&
+    timestamps[timestamps.length - 1] < measurement.durationMs
+  ) {
+    errors.push('measurement timestamps do not cover measured duration')
+  }
+  if (isFiniteNumber(measurement.sampleIntervalMs)) {
+    for (let index = 1; index < timestamps.length; index += 1) {
+      const delta = timestamps[index] - timestamps[index - 1]
+      const tolerance = Math.max(1, measurement.sampleIntervalMs * 0.25)
+      if (Math.abs(delta - measurement.sampleIntervalMs) > tolerance) {
+        errors.push('measurement timestamps do not match declared cadence')
+      }
+    }
+  }
+  if (
+    profile.maxCadenceMs &&
+    isFiniteNumber(measurement.sampleIntervalMs) &&
+    measurement.sampleIntervalMs > profile.maxCadenceMs
+  ) {
+    errors.push(`measurement cadence exceeds ${profile.maxCadenceMs}ms`)
+  }
+  if (profile.durationMs && isFiniteNumber(measurement.durationMs) && measurement.durationMs < profile.durationMs) {
+    errors.push(`measurement duration must be at least ${profile.durationMs}ms`)
+  }
+  if (profile.warmupMs && (!isFiniteNumber(receipt.warmupDurationMs) || receipt.warmupDurationMs < profile.warmupMs)) {
+    errors.push(`warmup must be at least ${profile.warmupMs}ms for measured visible scenarios`)
+  }
+}
+
+function validateScenarioInvariants(receipt, profile, scenario, errors) {
+  if (!profile) {
+    errors.push(`unknown scenario: ${String(receipt.scenario)}`)
+    return
+  }
+  const observed = receipt.population?.observed
+  const active = receipt.population?.active
+  if (profile.expectedObserved !== undefined && observed !== profile.expectedObserved) {
+    errors.push(`${scenario} requires observed population ${profile.expectedObserved}`)
+  }
+  if (profile.expectedActive !== undefined && active !== profile.expectedActive) {
+    errors.push(`${scenario} requires active population ${profile.expectedActive}`)
+  }
+  if (isRecord(receipt.environment) && observed > 0 && receipt.environment.cityPopulated !== true) {
+    errors.push('cityPopulated must be true when the receipt has observed inhabitants')
+  }
+  if (profile.dormant) {
+    if (receipt.renderFrames !== 0) errors.push(`${scenario} requires zero render frames`)
+    return
+  }
+  if (receipt.renderFrames === 0) errors.push(`${scenario} requires measured render frames`)
+  if (scenario === '100-active' || scenario === '250-lod') {
+    let total = 0
+    for (const count of Object.values(receipt.population?.lodMix ?? {})) total += count
+    if (total !== profile.expectedObserved) errors.push(`${scenario} requires LOD total ${profile.expectedObserved}`)
+  }
 }
 
 function validateDirectSummaries(receipt, expected, errors) {
   for (const [field, summaryField] of [
     ['renderFrames', 'maxRenderFrames'],
-    ['processCpuDeltaPp', 'maxCpuDeltaPp'],
-    ['gpuMemoryDeltaMiB', 'maxGpuMemoryDeltaMiB'],
+    ['processCpuDeltaPp', 'avgCpuDeltaPp'],
+    ['gpuMemoryDeltaMiB', 'avgGpuMemoryDeltaMiB'],
     ['residentMemoryDriftMiB', 'residentMemoryDriftMiB'],
     ['drawCalls', 'maxDrawCalls'],
     ['visibleTriangles', 'maxVisibleTriangles'],
@@ -397,12 +633,18 @@ function validateMonotonicStability(rawSamples, errors) {
 
 function validateAcceptanceGate(receipt, scenario, errors) {
   const environment = receipt.environment
+  const stamp = receipt.buildStamp
   const evidenceClass = receipt.evidenceClass
+  const profile = SCENARIO_PROFILES[scenario]
   const eligibleClass = evidenceClass === 'fake-backend-packaged' || evidenceClass === 'supervised-live'
   const packaged = isRecord(environment) && environment.electronMode === 'packaged'
   const gpuEnabled = isRecord(environment) && environment.gpuEnabled === true
   const populated = isRecord(environment) && environment.cityPopulated === true
-  const eligible = eligibleClass && packaged && gpuEnabled && populated
+  const hasPopulation = Number.isInteger(receipt.population?.observed) && receipt.population.observed > 0
+  const cleanPinnedBuild = isRecord(stamp) && stamp.dirty === false && stamp.source !== 'fallback'
+  const eligible = Boolean(
+    profile && eligibleClass && packaged && gpuEnabled && populated && hasPopulation && cleanPinnedBuild
+  )
 
   if (!eligible) {
     errors.push(`receipt is not eligible for packaged performance acceptance (${scenario ?? 'unknown scenario'})`)
@@ -411,6 +653,9 @@ function validateAcceptanceGate(receipt, scenario, errors) {
     if (!packaged) errors.push('packaged performance requires packaged Electron, not dev Electron')
     if (!gpuEnabled) errors.push('packaged performance requires GPU enabled')
     if (!populated) errors.push('packaged performance requires a real populated city, not an empty fake boot')
+    if (!hasPopulation)
+      errors.push('packaged performance requires a populated population snapshot, not an empty fake boot')
+    if (!cleanPinnedBuild) errors.push('packaged performance requires a clean pinned buildStamp')
   }
 
   return eligible
@@ -425,8 +670,11 @@ export function validateReceipt(receipt) {
   }
 
   validateCommonShape(receipt, errors)
+  validateBuildStamp(receipt, errors)
   validateEnvironment(receipt.environment, errors)
   validatePopulation(receipt.population, errors)
+  validateMeasurement(receipt, SCENARIO_PROFILES[receipt.scenario], errors)
+  validateScenarioInvariants(receipt, SCENARIO_PROFILES[receipt.scenario], canonicalScenario(receipt.scenario), errors)
   validateRawSamples(receipt.rawSamples, errors)
   const summaries = validateSummaries(receipt.rawSamples, receipt.summaries, errors)
   const expected = summarizeRawSamples(receipt.rawSamples)
@@ -434,12 +682,12 @@ export function validateReceipt(receipt) {
   const scenario = canonicalScenario(receipt.scenario)
 
   const renderFrames = receipt.renderFrames ?? expected.maxRenderFrames
-  const cpuDelta = numericMetric(receipt, summaries, 'processCpuDeltaPp', 'maxCpuDeltaPp', errors, 'process CPU delta')
+  const cpuDelta = numericMetric(receipt, summaries, 'processCpuDeltaPp', 'avgCpuDeltaPp', errors, 'process CPU delta')
   const gpuDelta = numericMetric(
     receipt,
     summaries,
     'gpuMemoryDeltaMiB',
-    'maxGpuMemoryDeltaMiB',
+    'avgGpuMemoryDeltaMiB',
     errors,
     'GPU memory delta'
   )
@@ -459,8 +707,7 @@ export function validateReceipt(receipt) {
   for (const [value, label] of [
     [renderFrames, 'renderFrames'],
     [drawCalls, 'drawCalls'],
-    [triangles, 'visibleTriangles'],
-    [residentDrift, 'residentMemoryDriftMiB']
+    [triangles, 'visibleTriangles']
   ]) {
     if (!isFiniteNumber(value) || value < 0) errors.push(`${label} must be a nonnegative finite number`)
   }
@@ -469,46 +716,36 @@ export function validateReceipt(receipt) {
   if (!isFiniteNumber(cpuDelta)) errors.push('process CPU delta unavailable; missing CPU is not zero')
   if (!isFiniteNumber(gpuDelta)) errors.push('GPU memory delta unavailable; missing GPU is not zero')
 
-  if (['hidden', 'minimized', 'route-unmounted'].includes(scenario)) {
+  const profile = SCENARIO_PROFILES[scenario]
+  if (profile?.dormant) {
     if (renderFrames !== 0) errors.push(`${scenario} requires zero render frames`)
-    if (isFiniteNumber(cpuDelta) && cpuDelta > THRESHOLDS.dormantCpuDeltaPp)
-      errors.push(`CPU delta exceed ${THRESHOLDS.dormantCpuDeltaPp} percentage points`)
   }
-  if (scenario === 'visible-idle' && isFiniteNumber(cpuDelta) && cpuDelta > THRESHOLDS.visibleIdleCpuDeltaPp)
-    errors.push(`CPU delta exceed ${THRESHOLDS.visibleIdleCpuDeltaPp} percentage points`)
+  if (profile?.cpuLimit !== undefined && isFiniteNumber(cpuDelta) && cpuDelta > profile.cpuLimit) {
+    errors.push(`CPU delta exceed ${profile.cpuLimit} percentage points (average)`)
+  }
   if (scenario === '100-active') {
     if (receipt.fpsCap !== 30) errors.push('100 active requires a 30 FPS cap')
-    if (isFiniteNumber(p95Frame) && p95Frame > THRESHOLDS.activeFrameP95Ms)
-      errors.push(`p95 frame exceed ${THRESHOLDS.activeFrameP95Ms}ms`)
-    if (isFiniteNumber(p95Update) && p95Update > THRESHOLDS.activeWorldUpdateP95Ms)
-      errors.push(`p95 world update exceed ${THRESHOLDS.activeWorldUpdateP95Ms}ms`)
-    if (isFiniteNumber(cpuDelta) && cpuDelta > THRESHOLDS.active100CpuDeltaPp)
-      errors.push(`CPU delta exceed ${THRESHOLDS.active100CpuDeltaPp} percentage points`)
+    if (isFiniteNumber(p95Frame) && p95Frame > profile.p95FrameLimit)
+      errors.push(`p95 frame exceed ${profile.p95FrameLimit}ms`)
+    if (isFiniteNumber(p95Update) && p95Update > profile.p95UpdateLimit)
+      errors.push(`p95 world update exceed ${profile.p95UpdateLimit}ms`)
   }
-  if (scenario === '250-lod') {
-    if (isFiniteNumber(p95Frame) && p95Frame > THRESHOLDS.activeFrameP95Ms)
-      errors.push(`p95 frame exceed ${THRESHOLDS.activeFrameP95Ms}ms`)
-    if (isFiniteNumber(cpuDelta) && cpuDelta > THRESHOLDS.active250CpuDeltaPp)
-      errors.push(`CPU delta exceed ${THRESHOLDS.active250CpuDeltaPp} percentage points`)
+  if (scenario === '250-lod' && isFiniteNumber(p95Frame) && p95Frame > profile.p95FrameLimit) {
+    errors.push(`p95 frame exceed ${profile.p95FrameLimit}ms`)
   }
-  if (scenario === 'balanced-overview') {
-    if (isFiniteNumber(drawCalls) && drawCalls > THRESHOLDS.balancedOverviewDrawCalls)
-      errors.push(`draw calls exceed ${THRESHOLDS.balancedOverviewDrawCalls}`)
-    if (isFiniteNumber(triangles) && triangles > THRESHOLDS.balancedOverviewTriangles)
-      errors.push(`triangles exceed ${THRESHOLDS.balancedOverviewTriangles}`)
+  if (profile?.drawCalls !== undefined && isFiniteNumber(drawCalls) && drawCalls > profile.drawCalls) {
+    errors.push(`draw calls exceed ${profile.drawCalls}`)
   }
-  if (scenario === 'balanced-worker-focus') {
-    if (isFiniteNumber(drawCalls) && drawCalls > THRESHOLDS.balancedWorkerFocusDrawCalls)
-      errors.push(`draw calls exceed ${THRESHOLDS.balancedWorkerFocusDrawCalls}`)
-    if (isFiniteNumber(triangles) && triangles > THRESHOLDS.balancedWorkerFocusTriangles)
-      errors.push(`triangles exceed ${THRESHOLDS.balancedWorkerFocusTriangles}`)
+  if (profile?.triangles !== undefined && isFiniteNumber(triangles) && triangles > profile.triangles) {
+    errors.push(`triangles exceed ${profile.triangles}`)
   }
-  if (scenario === '30-minute-stability') {
+  if (profile?.stability) {
     if (isFiniteNumber(residentDrift) && residentDrift > THRESHOLDS.stabilityResidentDriftMiB)
       errors.push(`resident memory drift exceed ${THRESHOLDS.stabilityResidentDriftMiB} MiB`)
     validateMonotonicStability(receipt.rawSamples, errors)
   }
-  if (isFiniteNumber(gpuDelta) && gpuDelta > THRESHOLDS.maxGpuMemoryDeltaMiB) {
+  const gpuAbsDelta = expected.maxAbsGpuMemoryDeltaMiB
+  if (isFiniteNumber(gpuAbsDelta) && gpuAbsDelta > THRESHOLDS.maxGpuMemoryDeltaMiB) {
     errors.push(`GPU memory exceed ${THRESHOLDS.maxGpuMemoryDeltaMiB} MiB`)
   }
   if (
@@ -520,6 +757,13 @@ export function validateReceipt(receipt) {
   }
 
   const packagedPerformanceEligible = validateAcceptanceGate(receipt, scenario, errors)
+  const canonicalErrors = [...errors]
+  if ('pass' in receipt && receipt.pass !== (canonicalErrors.length === 0)) {
+    errors.push(`pass contradicts canonical outcome (expected ${canonicalErrors.length === 0})`)
+  }
+  if (Array.isArray(receipt.errors) && JSON.stringify(receipt.errors) !== JSON.stringify(canonicalErrors)) {
+    errors.push('errors contradict canonical outcome')
+  }
   return { ok: errors.length === 0, packagedPerformanceEligible, errors, summary: expected }
 }
 

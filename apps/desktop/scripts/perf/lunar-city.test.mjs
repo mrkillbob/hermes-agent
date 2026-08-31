@@ -40,17 +40,34 @@ function receipt(overrides = {}) {
     timers: 'timers'
   }
   for (const [direct, raw] of Object.entries(directToRaw)) {
-    if (direct in overrides && !(raw in rawOverrides)) rawOverrides[raw] = [overrides[direct]]
+    if (direct in overrides && !(raw in rawOverrides)) rawOverrides[raw] = Array(5).fill(overrides[direct])
   }
   const rawSamples = samples(rawOverrides)
   const computed = summarizeRawSamples(rawSamples)
   const scenario = overrides.scenario ?? 'balanced-overview'
+  const durationMs =
+    overrides.measurement?.durationMs ??
+    (scenario === 'visible-idle' ? 60_000 : scenario === '30-minute-stability' ? 1_800_000 : 30_000)
+  const sampleTimestampsMs = overrides.measurement?.sampleTimestampsMs ?? [
+    0,
+    durationMs / 4,
+    durationMs / 2,
+    (durationMs * 3) / 4,
+    durationMs
+  ]
   const base = {
     receiptVersion: 1,
     evidenceClass: 'fake-backend-packaged',
     scenario,
     gitSha: SHA,
-    buildStamp: '2026-08-31T12:00:00.000Z+dirty:false',
+    buildStamp: {
+      schemaVersion: 1,
+      commit: SHA,
+      branch: 'test',
+      builtAt: '2026-08-31T12:00:00.000Z',
+      dirty: false,
+      source: 'ci'
+    },
     timestamp: '2026-08-31T12:00:00.000Z',
     pass: true,
     errors: [],
@@ -75,14 +92,19 @@ function receipt(overrides = {}) {
     population: { observed: 100, active: 100, lodMix: { near: 100 }, source: 'fake-backend' },
     cameraState: 'overview',
     dialogueState: 'idle',
+    measurement: {
+      durationMs,
+      sampleIntervalMs: durationMs / 4,
+      sampleTimestampsMs
+    },
     rawSamples,
     summaries: summarizeRawSamples(rawSamples),
     fpsCap: 30,
     renderFrames: computed.maxRenderFrames,
     processCpuBaselinePp: 10,
-    processCpuDeltaPp: computed.maxCpuDeltaPp,
+    processCpuDeltaPp: computed.avgCpuDeltaPp,
     gpuMemoryBaselineMiB: 1000,
-    gpuMemoryDeltaMiB: computed.maxGpuMemoryDeltaMiB,
+    gpuMemoryDeltaMiB: computed.avgGpuMemoryDeltaMiB,
     residentMemoryDriftMiB: computed.residentMemoryDriftMiB,
     drawCalls: computed.maxDrawCalls,
     visibleTriangles: computed.maxVisibleTriangles,
@@ -104,6 +126,109 @@ test('rejects malformed receipts and hidden receipts with one frame', () => {
   assert.equal(result.ok, false)
   assert.match(result.errors.join('\n'), /receiptVersion|required|malformed/i)
   assert.match(result.errors.join('\n'), /hidden.*zero render frames|render frames.*zero/i)
+})
+
+test('rejects unknown scenarios instead of silently applying no budget', () => {
+  const result = validateReceipt(receipt({ scenario: 'invented-scenario' }))
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /unknown scenario|scenario.*allowed/i)
+  assert.equal(result.packagedPerformanceEligible, false)
+})
+
+test('requires duration, cadence, and aligned raw coverage for visible measurements', () => {
+  const short = validateReceipt(
+    receipt({
+      scenario: '100-active',
+      measurement: { durationMs: 29_999, sampleIntervalMs: 1_000, sampleTimestampsMs: [0, 1_000] }
+    })
+  )
+  assert.match(short.errors.join('\n'), /duration|warmup|sample/i)
+
+  const misaligned = validateReceipt(
+    receipt({
+      scenario: '100-active',
+      measurement: { durationMs: 30_000, sampleIntervalMs: 7_500, sampleTimestampsMs: [0, 7_500] }
+    })
+  )
+  assert.match(misaligned.errors.join('\n'), /aligned|coverage|timestamp/i)
+
+  const idle = validateReceipt(
+    receipt({
+      scenario: 'visible-idle',
+      measurement: {
+        durationMs: 59_999,
+        sampleIntervalMs: 1_000,
+        sampleTimestampsMs: [0, 15_000, 30_000, 45_000, 59_999]
+      }
+    })
+  )
+  assert.match(idle.errors.join('\n'), /60 seconds|duration/i)
+})
+
+test('binds exact 100-active and 250-lod population invariants', () => {
+  const active = validateReceipt(
+    receipt({
+      scenario: '100-active',
+      population: { observed: 99, active: 100, lodMix: { near: 100 }, source: 'fake-backend' }
+    })
+  )
+  assert.match(active.errors.join('\n'), /100-active.*observed|population/i)
+
+  const lod = validateReceipt(
+    receipt({
+      scenario: '250-lod',
+      population: { observed: 250, active: 100, lodMix: { near: 50, far: 199 }, source: 'fake-backend' }
+    })
+  )
+  assert.match(lod.errors.join('\n'), /250-lod.*LOD|lodMix|population/i)
+})
+
+test('requires a typed build stamp tied to git SHA and evidence cleanliness', () => {
+  const stringStamp = validateReceipt(receipt({ buildStamp: 'arbitrary' }))
+  assert.match(stringStamp.errors.join('\n'), /buildStamp.*object|schema|commit/i)
+
+  const mismatched = validateReceipt(receipt({ buildStamp: { ...receipt().buildStamp, commit: 'b'.repeat(40) } }))
+  assert.match(mismatched.errors.join('\n'), /buildStamp.*gitSha|commit.*match/i)
+
+  const dirtyPackaged = validateReceipt(receipt({ buildStamp: { ...receipt().buildStamp, dirty: true } }))
+  assert.match(dirtyPackaged.errors.join('\n'), /dirty|packaged/i)
+})
+
+test('rejects contradictory declared pass and errors outcome', () => {
+  const result = validateReceipt(receipt({ drawCalls: 181, pass: true, errors: [] }))
+
+  assert.match(result.errors.join('\n'), /pass.*contradict|errors.*canonical|outcome/i)
+})
+
+test('short-circuits oversized arrays without reducer or stack failure', () => {
+  const raw = samples({ frameMs: Array(10_001).fill(18) })
+  assert.doesNotThrow(() => summarizeRawSamples(raw))
+  const result = validateReceipt(receipt({ rawSamples: raw }))
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /too many|sample.*bound/i)
+})
+
+test('uses nearest-rank p95 and averages signed CPU/GPU deltas', () => {
+  const summaryRaw = samples({
+    frameMs: Array.from({ length: 20 }, (_, index) => index + 1),
+    cpuDeltaPp: [-4, -2, 1, 2, 2],
+    gpuMemoryDeltaMiB: [-4, -2, 1, 2, 2]
+  })
+  const summary = summarizeRawSamples(summaryRaw)
+  assert.equal(summary.p95FrameMs, 19)
+  assert.equal(summary.avgCpuDeltaPp, -0.2)
+  assert.equal(summary.maxAbsGpuMemoryDeltaMiB, 4)
+
+  const result = validateReceipt(
+    receipt({
+      rawSamples: samples({ cpuDeltaPp: [-4, -2, 1, 2, 2], gpuMemoryDeltaMiB: [-4, -2, 1, 2, 2] }),
+      processCpuDeltaPp: -0.2,
+      gpuMemoryDeltaMiB: -0.2
+    })
+  )
+  assert.equal(result.ok, true, result.errors.join('; '))
 })
 
 test('reports balanced overview draw calls over the hard limit', () => {
@@ -129,7 +254,7 @@ test('hidden, minimized, and unmounted require no frames and at most 0.5 CPU poi
         scenario,
         renderFrames: 0,
         processCpuDeltaPp: 0.5,
-        rawSamples: samples({ renderFrames: [0, 0, 0], cpuDeltaPp: [0, 0, 0.5] })
+        rawSamples: samples({ renderFrames: [0, 0, 0, 0, 0], cpuDeltaPp: [0.5, 0.5, 0.5, 0.5, 0.5] })
       })
     )
 
@@ -143,7 +268,8 @@ test('hidden, minimized, and unmounted require no frames and at most 0.5 CPU poi
 })
 
 test('enforces idle, active, and LOD CPU/frame budgets', () => {
-  assert.equal(validateReceipt(receipt({ scenario: 'visible-idle', processCpuDeltaPp: 3 })).ok, true)
+  const idlePass = validateReceipt(receipt({ scenario: 'visible-idle', processCpuDeltaPp: 3 }))
+  assert.equal(idlePass.ok, true, idlePass.errors.join('; '))
   assert.match(
     validateReceipt(receipt({ scenario: 'visible-idle', processCpuDeltaPp: 3.01 })).errors.join('\n'),
     /CPU delta exceed 3/
@@ -153,7 +279,7 @@ test('enforces idle, active, and LOD CPU/frame budgets', () => {
     scenario: '100-active',
     processCpuDeltaPp: 12
   })
-  assert.equal(validateReceipt(active).ok, true)
+  assert.equal(validateReceipt(active).ok, true, validateReceipt(active).errors.join('; '))
 
   assert.match(
     validateReceipt(
@@ -260,4 +386,20 @@ test('rejects forged summaries and nonfinite or unbounded raw samples', () => {
 
   const unboundedMetric = validateReceipt(receipt({ visibleTriangles: Number.MAX_VALUE }))
   assert.match(unboundedMetric.errors.join('\n'), /visibleTriangles.*unbounded/i)
+
+  const signedUnbounded = validateReceipt(
+    receipt({
+      rawSamples: samples({
+        cpuDeltaPp: [-Number.MAX_VALUE, -Number.MAX_VALUE, -Number.MAX_VALUE, -Number.MAX_VALUE, -Number.MAX_VALUE]
+      })
+    })
+  )
+  assert.match(signedUnbounded.errors.join('\n'), /cpuDeltaPp.*unbounded/i)
+
+  const unboundedClock = validateReceipt(
+    receipt({
+      measurement: { durationMs: Number.MAX_VALUE, sampleIntervalMs: 1, sampleTimestampsMs: [0, 1, 2, 3, 4] }
+    })
+  )
+  assert.match(unboundedClock.errors.join('\n'), /duration.*finite|unbounded/i)
 })
