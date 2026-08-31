@@ -47,7 +47,13 @@ function fakeNode(name: string, metadata?: Record<string, unknown>): FakeNode {
   }
 }
 
-function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolean } = {}) {
+function fakeRuntime({
+  opaqueLeaderNames = false,
+  rejectWhenReady = false
+}: {
+  opaqueLeaderNames?: boolean
+  rejectWhenReady?: boolean
+} = {}) {
   const engines: FakeEngine[] = []
   const scenes: FakeScene[] = []
   const loadedUrls: string[] = []
@@ -86,7 +92,11 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
     dispose = vi.fn()
     pick = vi.fn()
     render = vi.fn()
-    whenReadyAsync = vi.fn(async () => {})
+    whenReadyAsync = vi.fn(async () => {
+      if (rejectWhenReady) {
+        throw new Error('scene readiness rejected')
+      }
+    })
 
     constructor(public readonly engine: FakeEngine) {
       scenes.push(this)
@@ -151,6 +161,23 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
     const filename = new URL(url).pathname.split('/').pop()!
     const id = filename.replace(/\.glb$/, '')
     const modelId = id === 'research-lab' || id === 'review-office' ? id : id
+
+    if (modelId === 'navigation') {
+      return {
+        animationGroups: [],
+        meshes: [
+          {
+            dispose: vi.fn(),
+            getIndices: () => [0, 1, 2, 1, 3, 2],
+            getVerticesData: () => [0, 0, 0, 4, 0, 0, 0, 0, 4, 4, 0, 4],
+            name: 'navigation:surface',
+            setEnabled: vi.fn()
+          }
+        ],
+        transformNodes: []
+      }
+    }
+
     const root = fakeNode(`${modelId}:root`)
     const near = fakeNode(`${modelId}:lod:near`)
     const far = fakeNode(`${modelId}:lod:far`)
@@ -540,6 +567,54 @@ describe('createLunarCityWorld', () => {
 
     expect(runtime.scenes[0]?.dispose).toHaveBeenCalledOnce()
     expect(runtime.engines[0]?.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('releases world-stage scheduler, navigation, registry, and occlusion resources if readiness rejects after Recast initializes', async () => {
+    const runtime = fakeRuntime({ rejectWhenReady: true })
+    const configurationDestroy = vi.fn()
+    const navMeshDestroy = vi.fn()
+    const documentRemove = vi.spyOn(document, 'removeEventListener')
+
+    class FakeConfiguration {
+      destroy = configurationDestroy
+      set_bmax = vi.fn()
+      set_bmin = vi.fn()
+    }
+
+    class FakeNavMesh {
+      build = vi.fn()
+      computePath = vi.fn()
+      destroy = navMeshDestroy
+    }
+
+    class FakeVector3 {
+      constructor(
+        public readonly x: number,
+        public readonly y: number,
+        public readonly z: number
+      ) {}
+    }
+
+    runtime.modules.createRecastNavigation = vi.fn(
+      async () =>
+        ({
+          NavMesh: FakeNavMesh,
+          Vec3: FakeVector3,
+          rcConfig: FakeConfiguration
+        }) as unknown as Awaited<ReturnType<NonNullable<LunarCityWorldModules['createRecastNavigation']>>>
+    )
+
+    await expect(
+      createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    ).rejects.toThrow(/scene readiness rejected/)
+
+    expect(configurationDestroy).toHaveBeenCalledOnce()
+    expect(navMeshDestroy).toHaveBeenCalledOnce()
+    expect(documentRemove).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+    expect(runtime.scenes[0]?.dispose).toHaveBeenCalledOnce()
+    const rendersAfterRejection = runtime.scenes[0]!.render.mock.calls.length
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(runtime.scenes[0]?.render).toHaveBeenCalledTimes(rendersAfterRejection)
   })
 
   it('rejects a forged runtime manifest even when the caller bypasses the parser', async () => {

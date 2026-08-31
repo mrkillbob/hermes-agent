@@ -1125,6 +1125,23 @@ export async function createWorldScene(
 ): Promise<LunarCitySceneHandle> {
   const scene = new modules.Scene(engine)
   let disposed = false
+  let scheduler: ReturnType<typeof createFrameScheduler> | undefined
+  let navigation: ReturnType<typeof createNavigationController> | undefined
+  let entityRegistry: ReturnType<typeof createEntityRegistry> | undefined
+  let occlusion: ReturnType<typeof createOcclusionController> | undefined
+
+  const disposeWorld = (): void => {
+    if (disposed) {
+      return
+    }
+
+    disposed = true
+    scheduler?.dispose()
+    entityRegistry?.dispose()
+    occlusion?.clear()
+    navigation?.dispose()
+    scene.dispose()
+  }
 
   try {
     scene.ambientColor = new modules.Color3(0.32, 0.18, 0.12)
@@ -1185,7 +1202,8 @@ export async function createWorldScene(
       freezeStaticResources(result, scene.materials?.slice(materialStart) ?? [], model)
     }
 
-    const occlusion = createOcclusionController(occlusionCandidates)
+    const occlusionController = createOcclusionController(occlusionCandidates)
+    occlusion = occlusionController
     const quality = createQualityController('efficient')
 
     const applyRuntimeQuality = (): void => {
@@ -1207,18 +1225,22 @@ export async function createWorldScene(
 
     const workerClipNames = new Set(workerAnimationGroups(workerAsset.result).keys())
 
-    const entityRegistry = createEntityRegistry({
+    const entityRegistryController = createEntityRegistry({
       factory: createBabylonEntityFactory(workerAsset.model, workerAsset.result, modules, scene),
       focusAnchors,
       focusMetadata,
       workerClips: workerClipNames
     })
 
-    const navigation = createNavigationController({
+    entityRegistry = entityRegistryController
+
+    const navigationController = createNavigationController({
       destinations: manifest.destinations,
       query: await createRouteNavigationQuery(manifest.navigation, modules, scene, resolveAssetUrl),
       workerClips: workerClipNames
     })
+
+    navigation = navigationController
 
     const destinationByEntity = new Map<EntityKey, string>()
     const authoritativeOriginByEntity = new Map<EntityKey, Vec3>()
@@ -1228,10 +1250,10 @@ export async function createWorldScene(
       const focusedEntityKey = cameraController.getState().focusedEntityKey
       const selection = focusedEntityKey ? focusMetadata.get(focusedEntityKey)?.() : undefined
 
-      occlusion.update({ position: cameraPosition(camera) }, selection)
+      occlusionController.update({ position: cameraPosition(camera) }, selection)
     }
 
-    const scheduler = createFrameScheduler({
+    const schedulerController = createFrameScheduler({
       onFrame(frame) {
         const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
         const previousCameraState = cameraController.getState()
@@ -1242,20 +1264,20 @@ export async function createWorldScene(
           previousCameraState.focusedEntityKey !== cameraState.focusedEntityKey ||
           previousCameraState.following !== cameraState.following
         ) {
-          entityRegistry.setSelection(cameraState.focusedEntityKey)
+          entityRegistryController.setSelection(cameraState.focusedEntityKey)
           emit({ kind: 'camera-state', state: cameraState })
         }
 
         const settings = quality.settings()
         const currentCameraPosition = cameraPosition(camera)
 
-        const navigationActive = navigation.tick(frame.elapsedMs)
-        entityRegistry.syncMotion()
+        const navigationActive = navigationController.tick(frame.elapsedMs)
+        entityRegistryController.syncMotion()
 
         for (const key of [...activeNavigation]) {
-          if (!navigation.isMoving(key)) {
+          if (!navigationController.isMoving(key)) {
             activeNavigation.delete(key)
-            entityRegistry.setMoving(key, false)
+            entityRegistryController.setMoving(key, false)
           }
         }
 
@@ -1271,7 +1293,7 @@ export async function createWorldScene(
           })
         }
 
-        entityRegistry.applyLodPolicy(
+        entityRegistryController.applyLodPolicy(
           (_key, position, isSelected) =>
             selectLodIndex(workerAsset.model.lods, {
               distance: Math.hypot(
@@ -1306,13 +1328,15 @@ export async function createWorldScene(
           activeNavigation.size > 0 ||
           cameraController.isTransitioning() ||
           cameraState.following ||
-          entityRegistry.hasActiveAnimations()
+          entityRegistryController.hasActiveAnimations()
         )
       },
       renderer: engine
     })
 
-    scheduler.bindRendererPauseState()
+    scheduler = schedulerController
+
+    schedulerController.bindRendererPauseState()
 
     await scene.whenReadyAsync()
 
@@ -1326,14 +1350,14 @@ export async function createWorldScene(
 
           for (const key of destinationByEntity.keys()) {
             if (!dynamicEntities.has(key)) {
-              navigation.cancel(key)
+              navigationController.cancel(key)
               destinationByEntity.delete(key)
               authoritativeOriginByEntity.delete(key)
               activeNavigation.delete(key)
             }
           }
 
-          entityRegistry.reconcile({ ...snapshot, entities: dynamicEntities })
+          entityRegistryController.reconcile({ ...snapshot, entities: dynamicEntities })
 
           for (const [key, entity] of dynamicEntities) {
             const previousDestination = destinationByEntity.get(key)
@@ -1349,32 +1373,32 @@ export async function createWorldScene(
               authoritativeOriginByEntity.set(key, { ...authoritativeOrigin })
             }
 
-            navigation.updateArrivalAnimation(key, entity.animation)
+            navigationController.updateArrivalAnimation(key, entity.animation)
 
             if (entity.authority !== 'authoritative') {
-              navigation.cancel(key)
+              navigationController.cancel(key)
               activeNavigation.delete(key)
-              entityRegistry.setMoving(key, false)
+              entityRegistryController.setMoving(key, false)
 
               continue
             }
 
-            const presentation = entityRegistry.navigationEntity(key)
+            const presentation = entityRegistryController.navigationEntity(key)
 
             if (
               presentation &&
               (previousDestination !== entity.destination || hasOriginCorrection) &&
-              navigation.move(presentation, entity.destination, entity.animation)
+              navigationController.move(presentation, entity.destination, entity.animation)
             ) {
               activeNavigation.add(key)
-              entityRegistry.setMoving(key, true)
+              entityRegistryController.setMoving(key, true)
             } else if (previousDestination !== entity.destination || hasOriginCorrection) {
               activeNavigation.delete(key)
-              entityRegistry.setMoving(key, false)
+              entityRegistryController.setMoving(key, false)
             }
           }
 
-          scheduler.requestRender()
+          schedulerController.requestRender()
         }
       },
       dispatchCamera(intent) {
@@ -1384,9 +1408,9 @@ export async function createWorldScene(
 
         cameraController.dispatch(intent)
         const cameraState = cameraController.getState()
-        entityRegistry.setSelection(cameraState.focusedEntityKey)
+        entityRegistryController.setSelection(cameraState.focusedEntityKey)
         emit({ kind: 'camera-state', state: cameraState })
-        scheduler.noteInteraction(typeof performance === 'undefined' ? Date.now() : performance.now())
+        schedulerController.noteInteraction(typeof performance === 'undefined' ? Date.now() : performance.now())
       },
       getCameraState() {
         return cameraController.getState()
@@ -1405,34 +1429,23 @@ export async function createWorldScene(
       setQuality(tier) {
         quality.setTier(tier)
         applyRuntimeQuality()
-        scheduler.requestRender()
+        schedulerController.requestRender()
       },
       setVisible(visible) {
-        scheduler.setVisible(visible)
+        schedulerController.setVisible(visible)
       },
       render() {
         if (!disposed) {
-          scheduler.requestRender()
-          scheduler.tick(typeof performance === 'undefined' ? Date.now() : performance.now())
+          schedulerController.requestRender()
+          schedulerController.tick(typeof performance === 'undefined' ? Date.now() : performance.now())
         }
       },
       dispose() {
-        if (disposed) {
-          return
-        }
-
-        disposed = true
-
-        scheduler.dispose()
-        navigation.dispose()
-        entityRegistry.dispose()
-        occlusion.clear()
-        scene.dispose()
+        disposeWorld()
       }
     }
   } catch (error) {
-    disposed = true
-    scene.dispose()
+    disposeWorld()
     throw error
   }
 }
