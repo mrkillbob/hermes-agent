@@ -122,7 +122,8 @@ describe('LunarCityCommandRuntime', () => {
       destination: 'project',
       identity,
       key: entityKey(identity),
-      observedAt: 100
+      observedAt: 100,
+      sourceState: 'done'
     }
 
     publish([entity], [{ authority: 'authoritative', observedAt: 100, source: 'kanban:connection-a:default' }])
@@ -132,6 +133,73 @@ describe('LunarCityCommandRuntime', () => {
     expect(screen.getByRole('button', { name: 'Move task to ready' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Reclaim task' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Terminate run' })).toBeNull()
+  })
+
+  it('uses canonical Kanban source state instead of lossy animation to advertise commands', () => {
+    const identity = {
+      board: 'main',
+      connectionId: 'connection-a',
+      kind: 'kanban',
+      profile: 'default',
+      runId: '7',
+      taskId: 'T-7'
+    } as const
+
+    const entity: LunarEntity = {
+      animation: 'work',
+      authority: 'authoritative',
+      destination: 'project',
+      identity,
+      key: entityKey(identity),
+      observedAt: 100,
+      sourceState: 'review'
+    }
+
+    publish([entity], [{ authority: 'authoritative', observedAt: 100, source: 'kanban:connection-a:default' }])
+    render(<LunarCityCommandRuntime executors={executors()} selectedEntityKey={entity.key} />)
+
+    expect(screen.getByRole('button', { name: 'Move task to ready' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Reclaim task' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Terminate run' })).toBeNull()
+  })
+
+  it('renders the exact authoritative evidence response instead of a manufactured receipt', async () => {
+    const identity = {
+      board: 'main',
+      connectionId: 'connection-a',
+      kind: 'kanban',
+      profile: 'default',
+      taskId: 'T-8'
+    } as const
+
+    const entity: LunarEntity = {
+      animation: 'idle',
+      authority: 'authoritative',
+      destination: 'project',
+      identity,
+      key: entityKey(identity),
+      observedAt: 100,
+      sourceState: 'blocked'
+    }
+
+    const response = { task: { diagnostics: ['exact-source'], id: 'T-8', status: 'blocked' } }
+
+    const executor: CommandExecutor = {
+      readback: vi.fn(async () => null),
+      send: vi.fn(async () => response)
+    }
+
+    publish([entity], [{ authority: 'authoritative', observedAt: 100, source: 'kanban:connection-a:default' }])
+    render(
+      <LunarCityCommandRuntime
+        executors={{ kanbanRun: executor, kanbanTask: executor, session: executor, subagent: executor }}
+        selectedEntityKey={entity.key}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect evidence' }))
+
+    await waitFor(() => expect(screen.getByLabelText('Exact source evidence').textContent).toContain('exact-source'))
+    expect(screen.getByRole('status').textContent).toContain('Verification required')
   })
 
   it('invalidates a staged disruptive confirmation when the source revision changes', async () => {

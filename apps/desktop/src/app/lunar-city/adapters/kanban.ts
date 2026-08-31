@@ -641,6 +641,7 @@ function normalizeEntities(
       identity,
       key: entityKey(identity),
       observedAt,
+      sourceState: task.status,
       ...(position ? { position } : {}),
       ...(task.projectId ? { projectId: task.projectId } : {})
     } satisfies LunarEntity
@@ -673,6 +674,7 @@ function normalizeEntities(
       identity,
       key: entityKey(identity),
       observedAt,
+      sourceState: matched?.status ?? worker.status,
       ...(position ? { position } : {}),
       ...(matched?.projectId ? { projectId: matched.projectId } : {})
     } satisfies LunarEntity

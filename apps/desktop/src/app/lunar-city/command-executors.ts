@@ -1,5 +1,6 @@
 import { pluginRest, type PluginSourceScope } from '@/api/plugins'
 import { requestForSessionProfile } from '@/store/session-request-router'
+import { $sessionStates, knownOwnerForSession } from '@/store/session-states'
 
 import {
   type CommandExecutor,
@@ -12,6 +13,10 @@ import type { InspectorSessionTarget } from './components/entity-inspector'
 
 export interface LunarCityCommandExecutorOptions {
   onOpenSession?: (target: InspectorSessionTarget) => void
+  resolveLiveRuntime?: (
+    owner: Readonly<{ connectionId: string; profile: string }>,
+    storedSessionId: string
+  ) => string | undefined
 }
 
 function rejectAmbientRequest<T>(): Promise<T> {
@@ -24,6 +29,14 @@ function record(value: unknown): Record<string, unknown> {
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function identifier(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isSafeInteger(value)) {
+    return String(value)
+  }
+
+  return text(value)
 }
 
 function bool(value: unknown): boolean | undefined {
@@ -76,8 +89,32 @@ function localReadback(plan: CommandPlan): CommandReadback {
   }
 }
 
+function defaultLiveRuntime(
+  owner: Readonly<{ connectionId: string; profile: string }>,
+  storedSessionId: string
+): string | undefined {
+  const known = knownOwnerForSession(storedSessionId)
+
+  if (
+    !known ||
+    typeof known !== 'object' ||
+    known.connectionId !== owner.connectionId ||
+    known.profile !== owner.profile
+  ) {
+    return undefined
+  }
+
+  const matches = Object.entries($sessionStates.get())
+    .filter(([, state]) => state?.storedSessionId === storedSessionId)
+    .map(([runtimeId]) => runtimeId.trim())
+    .filter(Boolean)
+
+  return matches.length === 1 ? matches[0] : undefined
+}
+
 function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecutor {
   const localReceipts = new Set<string>()
+  const resolveLiveRuntime = options.resolveLiveRuntime ?? defaultLiveRuntime
 
   return {
     async readback(plan) {
@@ -116,13 +153,19 @@ function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecu
       }
 
       if (plan.method === 'evidence.inspect') {
-        localReceipts.add(plan.digest)
+        throw new Error('Authoritative session evidence is unavailable from the Lunar City route.')
+      }
 
-        return { inspected: true }
+      const storedSessionId = text(plan.params.session_id)
+      const liveRuntimeId = storedSessionId ? resolveLiveRuntime(plan.owner, storedSessionId) : undefined
+
+      if (!storedSessionId || !liveRuntimeId) {
+        throw new Error('The exact-owner live runtime is unavailable; no session command was sent.')
       }
 
       const response = await requestForSessionProfile<unknown>(plan.owner, rejectAmbientRequest, plan.method, {
-        ...plan.params
+        ...plan.params,
+        session_id: liveRuntimeId
       })
 
       const status = text(record(response).status)
@@ -136,11 +179,21 @@ function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecu
   }
 }
 
+function exactTask(plan: CommandPlan, response: unknown): Record<string, unknown> | undefined {
+  if (plan.identity.kind !== 'kanban') {
+    return undefined
+  }
+
+  const task = record(record(response).task)
+
+  return identifier(task.id) === plan.identity.taskId ? task : undefined
+}
+
 function taskEffectVerified(plan: CommandPlan, task: Record<string, unknown>): boolean {
   const expected = plan.readback.expectedEffect
 
   if (expected.kind === 'task-reclaimed') {
-    return text(task.status) !== 'running' && !text(task.current_run_id)
+    return typeof task.status === 'string' && task.status !== 'running' && task.current_run_id === null
   }
 
   if (expected.kind === 'task-reassigned') {
@@ -155,12 +208,10 @@ function taskEffectVerified(plan: CommandPlan, task: Record<string, unknown>): b
 }
 
 function kanbanTaskExecutor(): CommandExecutor {
-  const inspected = new Set<string>()
-
   return {
     async readback(plan) {
-      if (inspected.delete(plan.digest)) {
-        return localReadback(plan)
+      if (plan.operation === 'inspect-evidence') {
+        return null
       }
 
       if (plan.identity.kind !== 'kanban') {
@@ -173,15 +224,21 @@ function kanbanTaskExecutor(): CommandExecutor {
         { method: 'GET', scope: exactScope(plan) }
       )
 
-      const task = record(record(response).task)
+      const task = exactTask(plan, response)
+
+      if (!task) {
+        return null
+      }
+
+      const verified = taskEffectVerified(plan, task)
 
       return {
         authority: 'authoritative',
-        ...(taskEffectVerified(plan, task) ? { effect: plan.readback.expectedEffect } : {}),
+        ...(verified ? { effect: plan.readback.expectedEffect } : {}),
         identity: plan.identity,
         observedAt: Date.now(),
         operation: plan.operation,
-        outcome: taskEffectVerified(plan, task) ? 'verified' : 'unknown',
+        outcome: verified ? 'verified' : 'unknown',
         owner: plan.owner,
         receipt: { authority: 'authoritative', planDigest: plan.digest },
         revision: plan.plannedRevision
@@ -203,7 +260,9 @@ function kanbanTaskExecutor(): CommandExecutor {
           scope: exactScope(plan)
         })
 
-        inspected.add(plan.digest)
+        if (!exactTask(plan, response)) {
+          throw new Error('Authoritative exact-task evidence is unavailable from the Kanban source.')
+        }
 
         return response
       }
@@ -240,15 +299,13 @@ function kanbanTaskExecutor(): CommandExecutor {
 }
 
 function kanbanRunExecutor(): CommandExecutor {
-  const inspected = new Set<string>()
-
   return {
     async readback(plan) {
-      if (inspected.delete(plan.digest)) {
-        return localReadback(plan)
+      if (plan.identity.kind !== 'kanban' || !plan.identity.runId) {
+        return null
       }
 
-      if (plan.identity.kind !== 'kanban' || !plan.identity.runId) {
+      if (plan.operation === 'inspect-evidence') {
         return null
       }
 
@@ -259,7 +316,13 @@ function kanbanRunExecutor(): CommandExecutor {
       )
 
       const run = record(record(response).run)
-      const ended = Boolean(text(run.ended_at) || text(run.outcome))
+      const endedAt = run.ended_at
+
+      const ended =
+        identifier(run.id) === plan.identity.runId &&
+        identifier(run.task_id) === plan.identity.taskId &&
+        ((typeof endedAt === 'number' && Number.isFinite(endedAt)) || Boolean(text(endedAt))) &&
+        run.outcome === 'reclaimed'
 
       return {
         authority: 'authoritative',
@@ -287,7 +350,11 @@ function kanbanRunExecutor(): CommandExecutor {
           scope: exactScope(plan)
         })
 
-        inspected.add(plan.digest)
+        const run = record(record(response).run)
+
+        if (identifier(run.id) !== plan.identity.runId || identifier(run.task_id) !== plan.identity.taskId) {
+          throw new Error('Authoritative exact-run evidence is unavailable from the Kanban source.')
+        }
 
         return response
       }

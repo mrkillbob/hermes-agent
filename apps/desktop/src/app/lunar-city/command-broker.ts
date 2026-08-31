@@ -266,6 +266,7 @@ function sameEntity(left: LunarEntity, right: LunarEntity): boolean {
     left.observedAt === right.observedAt &&
     left.destination === right.destination &&
     left.animation === right.animation &&
+    left.sourceState === right.sourceState &&
     left.projectId === right.projectId &&
     left.variant === right.variant &&
     samePosition(left.position, right.position)

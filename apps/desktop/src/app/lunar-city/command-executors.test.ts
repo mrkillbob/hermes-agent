@@ -87,12 +87,32 @@ describe('createLunarCityCommandExecutors', () => {
     const snapshot = planning(identity)
     const plan = planCommand({ entityKey: entityKey(identity), kind: 'send-guidance', text: 'Check.' }, snapshot)
 
-    await createLunarCityCommandExecutors().session.send(plan)
+    await createLunarCityCommandExecutors({
+      resolveLiveRuntime: (owner, storedId) =>
+        owner.connectionId === 'source-b' && storedId === 'same' ? 'runtime-b' : undefined
+    }).session.send(plan)
 
     expect(requestForSessionProfile).toHaveBeenCalledOnce()
     expect(requestForSessionProfile.mock.calls[0]?.[0]).toEqual({ connectionId: 'source-b', profile: 'builder' })
     expect(requestForSessionProfile.mock.calls[0]?.[2]).toBe('prompt.submit')
-    expect(requestForSessionProfile.mock.calls[0]?.[3]).toEqual({ session_id: 'same', text: 'Check.' })
+    expect(requestForSessionProfile.mock.calls[0]?.[3]).toEqual({ session_id: 'runtime-b', text: 'Check.' })
+  })
+
+  it('does not send a stored DB id when no exact-owner live runtime is authoritative', async () => {
+    const identity = {
+      connectionId: 'source-b',
+      kind: 'session',
+      profile: 'builder',
+      sessionId: 'stored-only'
+    } as const
+
+    const snapshot = planning(identity)
+    const plan = planCommand({ entityKey: entityKey(identity), kind: 'send-guidance', text: 'Check.' }, snapshot)
+
+    await expect(
+      createLunarCityCommandExecutors({ resolveLiveRuntime: () => undefined }).session.send(plan)
+    ).rejects.toThrow(/live runtime.*unavailable/i)
+    expect(requestForSessionProfile).not.toHaveBeenCalled()
   })
 
   it('uses only exact scoped Kanban endpoints and verifies from authoritative task readback', async () => {
@@ -181,7 +201,31 @@ describe('createLunarCityCommandExecutors', () => {
       method: 'GET',
       scope: { connectionId: 'source-a', profile: 'default' }
     })
-    expect(readback).toMatchObject({ effect: plan.readback.expectedEffect, outcome: 'verified' })
+    expect(readback).toBeNull()
+  })
+
+  it('does not verify or replace malformed exact-source evidence', async () => {
+    pluginRest.mockResolvedValue({ task: { diagnostics: ['wrong'], id: 'T-other', status: 'blocked' } })
+
+    const identity = {
+      board: 'main',
+      connectionId: 'source-a',
+      kind: 'kanban',
+      profile: 'default',
+      taskId: 'T-4'
+    } as const
+
+    const snapshot = planning(identity, 'blocked')
+
+    const plan = planCommand(
+      { entityKey: entityKey(identity), evidence: 'diagnostics', kind: 'inspect-evidence' },
+      snapshot
+    )
+
+    const executor = createLunarCityCommandExecutors().kanbanTask
+
+    await expect(executor.send(plan)).rejects.toThrow(/exact-task evidence.*unavailable/i)
+    await expect(executor.readback(plan)).resolves.toBeNull()
   })
 
   it('classifies an authoritative Kanban conflict as rejected instead of ambiguous', async () => {
@@ -200,5 +244,83 @@ describe('createLunarCityCommandExecutors', () => {
 
     await expect(createLunarCityCommandExecutors().kanbanTask.send(plan)).rejects.toBeInstanceOf(CommandRejectedError)
     expect(pluginRest).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['empty payload', {}],
+    ['missing task id', { task: { current_run_id: null, status: 'ready' } }],
+    ['mismatched task id', { task: { current_run_id: null, id: 'T-other', status: 'ready' } }],
+    ['missing terminal run field', { task: { id: 'T-6', status: 'ready' } }],
+    ['wrong terminal status type', { task: { current_run_id: null, id: 'T-6', status: 7 } }]
+  ])('does not verify reclaim from %s', async (_label, malformed) => {
+    pluginRest.mockResolvedValueOnce({ ok: true, task_id: 'T-6' }).mockResolvedValueOnce(malformed)
+
+    const identity = {
+      board: 'main',
+      connectionId: 'source-a',
+      kind: 'kanban',
+      profile: 'default',
+      runId: '8',
+      taskId: 'T-6'
+    } as const
+
+    const snapshot = planning(identity, 'work')
+    const plan = planCommand({ entityKey: entityKey(identity), kind: 'reclaim-task' }, snapshot)
+    const executor = createLunarCityCommandExecutors().kanbanTask
+
+    await executor.send(plan)
+    const readback = await executor.readback(plan)
+
+    expect(readback).not.toMatchObject({ effect: plan.readback.expectedEffect, outcome: 'verified' })
+  })
+
+  it.each([
+    ['mismatched run id', { run: { ended_at: 200, id: 99, outcome: 'reclaimed', task_id: 'T-7' } }],
+    ['mismatched task id', { run: { ended_at: 200, id: 9, outcome: 'reclaimed', task_id: 'T-other' } }],
+    ['missing terminal timestamp', { run: { id: 9, outcome: 'reclaimed', task_id: 'T-7' } }],
+    ['wrong terminal outcome', { run: { ended_at: 200, id: 9, outcome: 'running', task_id: 'T-7' } }]
+  ])('does not verify terminate-run from %s', async (_label, malformed) => {
+    pluginRest.mockResolvedValueOnce({ ok: true, run_id: 9 }).mockResolvedValueOnce(malformed)
+
+    const identity = {
+      board: 'main',
+      connectionId: 'source-a',
+      kind: 'kanban',
+      profile: 'default',
+      runId: '9',
+      taskId: 'T-7'
+    } as const
+
+    const snapshot = planning(identity, 'work')
+    const plan = planCommand({ entityKey: entityKey(identity), kind: 'terminate-run' }, snapshot)
+    const executor = createLunarCityCommandExecutors().kanbanRun
+
+    await executor.send(plan)
+    const readback = await executor.readback(plan)
+
+    expect(readback).not.toMatchObject({ effect: plan.readback.expectedEffect, outcome: 'verified' })
+  })
+
+  it('does not manufacture verified session evidence without an authoritative evidence seam', async () => {
+    const identity = { connectionId: 'source-b', kind: 'session', profile: 'builder', sessionId: 'stored-8' } as const
+    const snapshot = planning(identity)
+
+    const plan = planCommand(
+      { entityKey: entityKey(identity), evidence: 'diagnostics', kind: 'inspect-evidence' },
+      {
+        ...snapshot,
+        targets: new Map([
+          [
+            entityKey(identity),
+            { ...snapshot.targets.get(entityKey(identity))!, availableOperations: ['inspect-evidence'] }
+          ]
+        ])
+      }
+    )
+
+    const executor = createLunarCityCommandExecutors().session
+
+    await expect(executor.send(plan)).rejects.toThrow(/authoritative session evidence.*unavailable/i)
+    await expect(executor.readback(plan)).resolves.toBeNull()
   })
 })

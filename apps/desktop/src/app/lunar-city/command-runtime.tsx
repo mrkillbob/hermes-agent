@@ -60,13 +60,16 @@ function compatibleOperations(entity: LunarEntity): readonly CommandOperation[] 
   }
 
   if (identity.kind === 'kanban') {
-    const running = entity.animation === 'work'
+    const running = entity.sourceState === 'running'
+
+    if (!entity.sourceState) {
+      return ['inspect-evidence']
+    }
 
     return [
       'inspect-evidence',
       ...(running && identity.runId ? (['terminate-run'] as const) : []),
       ...(running ? (['reclaim-task'] as const) : []),
-      'reassign-task',
       ...(!running ? (['change-task-state'] as const) : [])
     ]
   }
@@ -118,7 +121,12 @@ export function buildLunarCityCommandSnapshot(city: LunarCitySnapshot): CommandP
         destination: entity.destination,
         observedAt: entity.observedAt,
         source: source.source,
-        value: entity.animation === 'work' ? 'running' : entity.animation
+        value:
+          entity.identity.kind === 'kanban'
+            ? (entity.sourceState ?? 'unknown')
+            : entity.animation === 'work'
+              ? 'running'
+              : entity.animation
       },
       ownerCandidates: [owner],
       readbackCapabilities: readbackCapabilities(entity.identity),
@@ -165,8 +173,8 @@ function inspectorData(entity: LunarEntity, source: SourceHealth): EntityInspect
     ...(entity.presentation ? { presentation: entity.presentation } : {}),
     ...(identity.kind === 'kanban'
       ? {
-          ...(identity.runId ? { run: { id: identity.runId, status: entity.animation } } : {}),
-          task: { id: identity.taskId, state: entity.animation, title: `Task ${identity.taskId}` }
+          ...(identity.runId ? { run: { id: identity.runId, status: entity.sourceState ?? 'unknown' } } : {}),
+          task: { id: identity.taskId, state: entity.sourceState ?? 'unknown', title: `Task ${identity.taskId}` }
         }
       : {}),
     source
@@ -199,7 +207,11 @@ function disruptiveChoices(entity: LunarEntity): readonly CommandChoice[] {
     return []
   }
 
-  const running = entity.animation === 'work'
+  const running = entity.sourceState === 'running'
+
+  if (!entity.sourceState) {
+    return []
+  }
 
   return [
     ...(running && identity.runId
@@ -229,6 +241,7 @@ export function LunarCityCommandRuntime({
   const [staged, setStaged] = useState<CommandPlan | undefined>()
   const [submitting, setSubmitting] = useState(false)
   const [status, setStatus] = useState<string | undefined>()
+  const [evidence, setEvidence] = useState<unknown>()
   const [lifetime] = useState<CommandLifetime>(() => ({ active: true, generation: 0 }))
 
   const executors = useMemo(
@@ -256,6 +269,8 @@ export function LunarCityCommandRuntime({
       setStaged(undefined)
       setStatus('Confirmation cancelled because the selection or source changed.')
     }
+
+    setEvidence(undefined)
     // A staged plan is deliberately invalidated by either dependency. It is
     // excluded so staging itself does not immediately cancel the dialog.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -283,6 +298,11 @@ export function LunarCityCommandRuntime({
 
     setSubmitting(false)
     setStaged(undefined)
+
+    if (plan.operation === 'inspect-evidence' && receipt.response !== undefined) {
+      setEvidence(receipt.response)
+    }
+
     setStatus(receiptText(receipt))
   }
 
@@ -377,6 +397,12 @@ export function LunarCityCommandRuntime({
         <p aria-live="polite" className="mt-3 text-xs" role="status">
           {status}
         </p>
+      ) : null}
+
+      {evidence !== undefined ? (
+        <pre aria-label="Exact source evidence" className="mt-3 max-h-48 overflow-auto text-xs">
+          {JSON.stringify(evidence, null, 2)}
+        </pre>
       ) : null}
 
       {staged ? (

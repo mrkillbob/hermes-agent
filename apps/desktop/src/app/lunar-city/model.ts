@@ -159,6 +159,8 @@ export interface LunarEntity {
   authority: AuthorityState
   destination: DestinationId
   animation: string
+  /** Exact upstream state used for command compatibility; never inferred from animation. */
+  sourceState?: string
   /** Presentation position only; it never represents work progress. */
   position?: Vec3
   projectId?: string
