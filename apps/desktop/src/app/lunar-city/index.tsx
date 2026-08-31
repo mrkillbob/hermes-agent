@@ -64,15 +64,19 @@ function sameProfileLeaderList(left: readonly LunarEntity[], right: readonly Lun
 }
 
 export function lunarCityHudStatus(
-  rendererStatus: RendererStatus,
+  rendererStatus: RendererStatus | 'loading',
   snapshot: ReturnType<typeof $lunarCitySnapshot.get>
-): 'EMPTY' | 'LIVE' | 'RENDERER UNAVAILABLE' | 'STALE' | 'STARTING' | 'UNAVAILABLE' {
+): 'DEGRADED' | 'EMPTY' | 'LIVE' | 'RENDERER UNAVAILABLE' | 'STALE' | 'STARTING' | 'UNAVAILABLE' {
   if (rendererStatus === 'unavailable') {
     return 'RENDERER UNAVAILABLE'
   }
 
-  if (rendererStatus !== 'ready') {
+  if (rendererStatus === 'loading') {
     return 'STARTING'
+  }
+
+  if (rendererStatus === 'degraded') {
+    return 'DEGRADED'
   }
 
   if (snapshot.sources.length === 0 || snapshot.entities.size === 0) {
@@ -90,7 +94,7 @@ export function lunarCityHudStatus(
   return 'LIVE'
 }
 
-function LunarCityHudStatus({ rendererStatus }: { rendererStatus: RendererStatus }) {
+function LunarCityHudStatus({ rendererStatus }: { rendererStatus: RendererStatus | 'loading' }) {
   const snapshot = useStore($lunarCitySnapshot)
 
   return <>{lunarCityHudStatus(rendererStatus, snapshot)}</>
@@ -155,7 +159,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   const [selectedEntityKey, setSelectedEntityKey] = useState<EntityKey | undefined>(undefined)
   const [focusedEntityLabel, setFocusedEntityLabel] = useState<string | undefined>(undefined)
   const [qualityTier, setQualityTier] = useState<QualityTier>('efficient')
-  const [rendererStatus, setRendererStatus] = useState<RendererStatus>('degraded')
+  const [rendererStatus, setRendererStatus] = useState<RendererStatus | 'loading'>('loading')
   const [operationsReady, setOperationsReady] = useState(false)
 
   const [reducedMotion, setReducedMotion] = useState(
@@ -751,7 +755,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
               onSelect={selectEntity}
               qualityTier={qualityTier}
               reducedMotion={reducedMotion}
-              rendererStatus={rendererStatus}
+              rendererStatus={rendererStatus === 'loading' ? 'degraded' : rendererStatus}
               selectedEntityKey={selectedEntityKey}
             />
           ) : null}
