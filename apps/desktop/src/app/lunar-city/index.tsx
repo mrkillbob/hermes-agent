@@ -2,7 +2,7 @@ import './lunar-city.css'
 
 import { LOCAL_CONNECTION_ID } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -31,8 +31,16 @@ import { $connection } from '@/store/session'
 import { createKanbanCitySource } from './adapters/kanban'
 import { startLunarCityReconciler } from './adapters/reconciler'
 import { CameraControls } from './components/camera-controls'
+import { LeaderDialogueRuntime } from './components/leader-dialogue-runtime'
+import {
+  leaderModelFocusKeyForOwner,
+  leaderModelIdForOwner,
+  leaderOwnerForProfile,
+  profileLeaders
+} from './leader-runtime'
+import { type LeaderOwner, leaderOwnerKey, type LeaderSession, resolveLeaderSession } from './leader-sessions'
 import { loadWorldManifest } from './manifest'
-import type { CameraControlState, CameraIntent, LunarCityWorldHandle, WorldManifestV2 } from './model'
+import type { CameraControlState, CameraIntent, LunarCityWorldHandle, LunarEntity, WorldManifestV2 } from './model'
 import { $lunarCitySnapshot } from './store'
 import { createLunarCityWorld } from './world/create-world'
 
@@ -470,7 +478,16 @@ export function disposeLunarCityRuntime(
   world?.destroy()
 }
 
-export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void }) {
+export interface LunarCityProps {
+  onOpenFullChat?: (storedId: string, owner: LeaderOwner) => Promise<void> | void
+  onOpenMemoryGraph: () => void
+}
+
+function sameProfileLeaderList(left: readonly LunarEntity[], right: readonly LunarEntity[]): boolean {
+  return left.length === right.length && left.every((entity, index) => entity.key === right[index]?.key)
+}
+
+export function LunarCity({ onOpenFullChat, onOpenMemoryGraph }: LunarCityProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const activeGatewayProfile = useStore($activeGatewayProfile)
   const connection = useStore($connection)
@@ -480,7 +497,16 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
   const [tick, setTick] = useState(0)
   const [cameraState, setCameraState] = useState<CameraControlState>({ focusedEntityKey: undefined, following: false })
   const [worldManifest, setWorldManifest] = useState<WorldManifestV2 | undefined>(undefined)
+
+  const [profileLeaderEntities, setProfileLeaderEntities] = useState(() =>
+    profileLeaders($lunarCitySnapshot.get().entities)
+  )
+
+  const [selectedLeaderOwner, setSelectedLeaderOwner] = useState<LeaderOwner | undefined>(undefined)
+  const [leaderSession, setLeaderSession] = useState<LeaderSession | undefined>(undefined)
+  const [leaderSessionError, setLeaderSessionError] = useState<string | undefined>(undefined)
   const worldHandleRef = useRef<LunarCityWorldHandle | undefined>(undefined)
+  const profileLeaderEntitiesRef = useRef(profileLeaderEntities)
   const stopReconcilerRef = useRef<(() => void) | undefined>(undefined)
 
   const kanbanScope = useMemo(() => {
@@ -500,6 +526,122 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
 
     world?.dispatchCamera(intent)
     setCameraState(world?.getCameraState() ?? { focusedEntityKey: undefined, following: false })
+  }
+
+  const selectedLeaderKey = selectedLeaderOwner ? leaderOwnerKey(selectedLeaderOwner) : undefined
+
+  const selectedLeaderModel = selectedLeaderOwner ? leaderModelIdForOwner(selectedLeaderOwner) : undefined
+
+  const onLeaderStateChange = useCallback(
+    (state: Parameters<LunarCityWorldHandle['setLeaderAnimation']>[1]): void => {
+      if (selectedLeaderModel) {
+        worldHandleRef.current?.setLeaderAnimation(selectedLeaderModel, state)
+      }
+    },
+    [selectedLeaderModel]
+  )
+
+  const closeLeaderDialogue = (): void => {
+    if (leaderSessionError) {
+      onLeaderStateChange('idle')
+    }
+
+    setSelectedLeaderOwner(undefined)
+    setLeaderSession(undefined)
+    setLeaderSessionError(undefined)
+  }
+
+  const openLeader = (entity: LunarEntity): void => {
+    const owner = leaderOwnerForProfile(entity)
+
+    if (!owner) {
+      return
+    }
+
+    // The source profile is the selected identity. The animal model is only a
+    // deterministic visual assignment and never a route or mutation key.
+    setSelectedLeaderOwner(owner)
+    setLeaderSession(undefined)
+    setLeaderSessionError(undefined)
+    dispatchCamera({ kind: 'focus', entityKey: leaderModelFocusKeyForOwner(owner), follow: false })
+  }
+
+  // Profile entities change far less often than workers. Keep this compact
+  // semantic list separate from the imperative world snapshot listener so
+  // worker/frame publications do not re-render the React route.
+  useEffect(
+    () =>
+      $lunarCitySnapshot.listen(snapshot => {
+        const next = profileLeaders(snapshot.entities)
+        const current = profileLeaderEntitiesRef.current
+
+        if (!sameProfileLeaderList(current, next)) {
+          profileLeaderEntitiesRef.current = next
+          setProfileLeaderEntities(next)
+        }
+      }),
+    []
+  )
+
+  useEffect(() => {
+    if (!selectedLeaderKey) {
+      return
+    }
+
+    if (!profileLeaderEntities.some(entity => leaderOwnerKey(leaderOwnerForProfile(entity)!) === selectedLeaderKey)) {
+      setSelectedLeaderOwner(undefined)
+      setLeaderSession(undefined)
+      setLeaderSessionError(undefined)
+    }
+  }, [profileLeaderEntities, selectedLeaderKey])
+
+  useEffect(() => {
+    if (!selectedLeaderOwner || !selectedLeaderKey) {
+      return
+    }
+
+    let current = true
+    const owner = selectedLeaderOwner
+
+    setLeaderSession(undefined)
+    setLeaderSessionError(undefined)
+    void resolveLeaderSession(owner).then(
+      resolved => {
+        if (current && leaderOwnerKey(owner) === selectedLeaderKey) {
+          setLeaderSession(resolved)
+        }
+      },
+      error => {
+        if (current && leaderOwnerKey(owner) === selectedLeaderKey) {
+          setLeaderSessionError(error instanceof Error ? error.message : String(error))
+        }
+      }
+    )
+
+    return () => {
+      current = false
+    }
+  }, [selectedLeaderKey, selectedLeaderOwner])
+
+  useEffect(() => {
+    if (leaderSessionError) {
+      onLeaderStateChange('unavailable')
+    }
+  }, [leaderSessionError, onLeaderStateChange])
+
+  const voiceAvailable = Boolean(
+    selectedLeaderOwner &&
+    kanbanScope &&
+    selectedLeaderOwner.connectionId === kanbanScope.connectionId &&
+    selectedLeaderOwner.profile === kanbanScope.profile
+  )
+
+  const openSelectedLeaderFullChat = async (storedId: string, owner: LeaderOwner): Promise<void> => {
+    if (!onOpenFullChat) {
+      throw new Error('Open Full Chat is available only from the dedicated Lunar City route')
+    }
+
+    await onOpenFullChat(storedId, owner)
   }
 
   // The reconciler is imperative route lifetime state, so the world cleanup can stop it before disposal.
@@ -784,6 +926,30 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
             <CameraControls dispatch={dispatchCamera} state={cameraState} />
           </div>
 
+          {profileLeaderEntities.length > 0 ? (
+            <section
+              aria-label="Profile leaders"
+              className="pointer-events-auto absolute left-3 top-34 z-30 flex max-w-[min(20rem,calc(100%-1.5rem))] flex-wrap gap-1.5 sm:left-5 sm:top-40"
+            >
+              {profileLeaderEntities.map(entity => {
+                const owner = leaderOwnerForProfile(entity)!
+                const selected = leaderOwnerKey(owner) === selectedLeaderKey
+
+                return (
+                  <Button
+                    aria-label={`Talk to ${owner.profile} leader`}
+                    key={entity.key}
+                    onClick={() => openLeader(entity)}
+                    size="xs"
+                    variant={selected ? 'default' : 'secondary'}
+                  >
+                    Talk to {owner.profile}
+                  </Button>
+                )
+              })}
+            </section>
+          ) : null}
+
           <div className="pointer-events-auto absolute right-3 top-3 flex max-w-[calc(100%-1.5rem)] flex-wrap justify-end gap-1.5 sm:right-5 sm:top-5">
             <div className="lunar-city-counter">
               <Activity aria-hidden="true" className="text-(--ui-green)" size={13} />
@@ -959,6 +1125,38 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
                 </div>
               </div>
             </div>
+          ) : null}
+
+          {selectedLeaderOwner && leaderSession ? (
+            <div className="pointer-events-auto absolute right-3 top-20 z-40 w-[min(27rem,calc(100%-1.5rem))] sm:right-5 sm:top-24">
+              <LeaderDialogueRuntime
+                clips={
+                  selectedLeaderModel ? worldHandleRef.current?.leaderStateClips?.get?.(selectedLeaderModel) : undefined
+                }
+                key={`${selectedLeaderKey}::${leaderSession.storedId}::${leaderSession.runtimeId}`}
+                leaderLabel={`${selectedLeaderOwner.profile} leader`}
+                onClose={closeLeaderDialogue}
+                onLeaderStateChange={onLeaderStateChange}
+                onOpenFullChat={openSelectedLeaderFullChat}
+                owner={selectedLeaderOwner}
+                session={leaderSession}
+                voiceAvailable={voiceAvailable}
+              />
+            </div>
+          ) : null}
+
+          {selectedLeaderOwner && leaderSessionError ? (
+            <section
+              aria-label={`${selectedLeaderOwner.profile} leader conversation error`}
+              className="pointer-events-auto absolute right-3 top-20 z-40 w-[min(27rem,calc(100%-1.5rem))] rounded-xl border border-(--ui-red)/35 bg-background/95 p-4 text-sm shadow-xl backdrop-blur-xl sm:right-5 sm:top-24"
+              role="status"
+            >
+              <p className="font-medium text-foreground">Unable to open {selectedLeaderOwner.profile} leader</p>
+              <p className="mt-1 text-xs text-muted-foreground">{leaderSessionError}</p>
+              <Button className="mt-3" onClick={closeLeaderDialogue} size="xs" variant="secondary">
+                Close
+              </Button>
+            </section>
           ) : null}
         </div>
       </div>

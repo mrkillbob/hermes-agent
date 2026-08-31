@@ -1,9 +1,13 @@
 import { lazy } from 'react'
 import { useNavigate } from 'react-router'
 
+import { openSession } from '@/app/open-session'
 import { ROUTES_AREA, SIDEBAR_NAV_AREA, STARMAP_ROUTE } from '@/app/routes'
 import { registry } from '@/contrib/registry'
 import type { Contribution } from '@/contrib/types'
+import { setSessionOwnerHint } from '@/store/session'
+
+import type { LeaderOwner } from './leader-sessions'
 
 const LazyLunarCity = lazy(async () => ({ default: (await import('./index')).LunarCity }))
 
@@ -14,10 +18,27 @@ export const LUNAR_CITY_ROUTE = '/lunar-city'
 // whether Kanban is enabled for a particular profile.
 export const LUNAR_CITY_NAV_ORDER = 60
 
+export function openLeaderFullChat(
+  storedId: string,
+  owner: LeaderOwner,
+  navigate: ReturnType<typeof useNavigate>
+): void {
+  // Preserve the exact source/profile route while handing off to the normal
+  // full chat. The ordinary session lifecycle resumes this durable id; no
+  // Lunar City chat route or ambient gateway is introduced here.
+  setSessionOwnerHint(storedId, owner)
+  openSession(storedId, navigate, 'main')
+}
+
 export function LunarCityRoute() {
   const navigate = useNavigate()
 
-  return <LazyLunarCity onOpenMemoryGraph={() => navigate(STARMAP_ROUTE)} />
+  return (
+    <LazyLunarCity
+      onOpenFullChat={(storedId, owner) => openLeaderFullChat(storedId, owner, navigate)}
+      onOpenMemoryGraph={() => navigate(STARMAP_ROUTE)}
+    />
+  )
 }
 
 export const LUNAR_CITY_CONTRIBUTIONS: Contribution[] = [

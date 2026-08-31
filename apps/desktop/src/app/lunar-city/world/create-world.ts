@@ -119,6 +119,9 @@ export async function createLunarCityWorld(
       getCameraState() {
         return world?.getCameraState() ?? { focusedEntityKey: undefined, following: false }
       },
+      setLeaderAnimation(leaderId, state) {
+        world?.setLeaderAnimation(leaderId, state)
+      },
       setQuality(tier) {
         world?.setQuality(tier)
       },

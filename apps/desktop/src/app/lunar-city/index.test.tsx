@@ -4,6 +4,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { Profiler } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import type * as SessionRequestRouter from '@/store/session-request-router'
+
+import { leaderModelIdForOwner } from './leader-runtime'
+import type * as LeaderSessions from './leader-sessions'
 import type { LunarCityWorldHandle } from './model'
 import { $lunarCitySnapshot, createLunarCitySnapshot } from './store'
 
@@ -17,7 +21,10 @@ const {
   dispatchCamera,
   getCameraState,
   kanbanSource,
+  leaderAnimation,
   loadManifest,
+  requestForSessionProfile,
+  resolveLeaderSession,
   startReconciler,
   stopReconciler,
   worldHandle,
@@ -27,25 +34,32 @@ const {
   const destroy = vi.fn()
   const dispatch = vi.fn()
   const readCameraState = vi.fn(() => ({ focusedEntityKey: undefined, following: false }))
+  const setLeaderAnimation = vi.fn()
   const setQuality = vi.fn()
   type TestWorldHandle = {
     applySnapshot: typeof apply
     destroy: typeof destroy
     dispatchCamera: typeof dispatch
     getCameraState: typeof readCameraState
+    setLeaderAnimation: typeof setLeaderAnimation
     setQuality: typeof setQuality
   }
+
   const handle: TestWorldHandle = {
     applySnapshot: apply,
     destroy,
     dispatchCamera: dispatch,
     getCameraState: readCameraState,
+    setLeaderAnimation,
     setQuality
   }
+
   let resolveWorld!: (handle: TestWorldHandle) => void
+
   const deferred = new Promise<TestWorldHandle>(resolve => {
     resolveWorld = resolve
   })
+
   const source = { onFrame: vi.fn(), read: vi.fn(), start: vi.fn() }
   const stopLive = vi.fn()
 
@@ -59,7 +73,10 @@ const {
     destroyWorld: destroy,
     getCameraState: readCameraState,
     kanbanSource: source,
+    leaderAnimation: setLeaderAnimation,
     loadManifest: vi.fn(async () => ({ models: [] })),
+    requestForSessionProfile: vi.fn(async () => ({ status: 'queued' })),
+    resolveLeaderSession: vi.fn(async () => ({ runtimeId: 'runtime-owl', storedId: 'stored-owl' })),
     startReconciler: vi.fn(() => stopLive),
     stopReconciler: stopLive,
     worldHandle: handle,
@@ -71,6 +88,14 @@ vi.mock('./manifest', () => ({ loadWorldManifest: loadManifest }))
 vi.mock('./adapters/kanban', () => ({ createKanbanCitySource }))
 vi.mock('./adapters/reconciler', () => ({ startLunarCityReconciler: startReconciler }))
 vi.mock('./world/create-world', () => ({ createLunarCityWorld: createWorld }))
+vi.mock('./leader-sessions', async importOriginal => ({
+  ...(await importOriginal<typeof LeaderSessions>()),
+  resolveLeaderSession
+}))
+vi.mock('@/store/session-request-router', async importOriginal => ({
+  ...(await importOriginal<typeof SessionRequestRouter>()),
+  requestForSessionProfile
+}))
 
 afterEach(() => {
   cleanup()
@@ -130,6 +155,7 @@ describe('LunarCity', () => {
 
     const rendersBeforePublications = commits.mock.calls.length
     const applicationsBeforePublications = applySnapshot.mock.calls.length
+
     const publications = Array.from({ length: 8 }, (_, index) =>
       createLunarCitySnapshot({ observedAt: 800 + index, revision: 2 + index })
     )
@@ -228,6 +254,82 @@ describe('LunarCity', () => {
     expect(dispatchCamera).toHaveBeenCalledWith({ kind: 'orbit', deltaAlpha: -0.22, deltaBeta: 0 })
     expect(dispatchCamera).toHaveBeenCalledWith({ kind: 'return-to-city' })
     expect(createWorld).toHaveBeenCalledOnce()
+  })
+
+  it('opens one exact profile-owned leader session without changing the city camera surface', async () => {
+    const identity = { connectionId: 'source-a', kind: 'profile' as const, profile: 'owl' }
+
+    const profile = {
+      animation: 'rest',
+      authority: 'authoritative' as const,
+      destination: 'garden' as const,
+      identity,
+      key: 'profile-source-a-owl' as never,
+      observedAt: 42
+    }
+
+    $lunarCitySnapshot.set({
+      entities: new Map([[profile.key, profile]]),
+      observedAt: 42,
+      revision: 1,
+      sources: []
+    })
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Talk to owl leader' }))
+
+    await waitFor(() => expect(resolveLeaderSession).toHaveBeenCalledWith({ connectionId: 'source-a', profile: 'owl' }))
+    expect(screen.getByRole('dialog', { name: 'owl leader conversation' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate Left' }))
+    expect(dispatchCamera).toHaveBeenCalledWith({ kind: 'orbit', deltaAlpha: -0.22, deltaBeta: 0 })
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message owl leader' }), {
+      target: { value: 'Continue safely' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() =>
+      expect(requestForSessionProfile).toHaveBeenCalledWith(
+        { connectionId: 'source-a', profile: 'owl' },
+        expect.any(Function),
+        'prompt.submit',
+        { session_id: 'runtime-owl', text: 'Continue safely' }
+      )
+    )
+    expect(createWorld).toHaveBeenCalledOnce()
+  })
+
+  it('projects an exact session-resolution failure to only that leader unavailable clip', async () => {
+    const identity = { connectionId: 'source-a', kind: 'profile' as const, profile: 'owl' }
+
+    const profile = {
+      animation: 'rest',
+      authority: 'authoritative' as const,
+      destination: 'garden' as const,
+      identity,
+      key: 'profile-source-a-owl' as never,
+      observedAt: 42
+    }
+
+    resolveLeaderSession.mockRejectedValueOnce(new Error('owner route unavailable'))
+    $lunarCitySnapshot.set({
+      entities: new Map([[profile.key, profile]]),
+      observedAt: 42,
+      revision: 1,
+      sources: []
+    })
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Talk to owl leader' }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('status', { name: 'owl leader conversation error' }).textContent).toContain(
+        'owner route unavailable'
+      )
+    )
+    expect(leaderAnimation).toHaveBeenCalledWith(
+      leaderModelIdForOwner({ connectionId: 'source-a', profile: 'owl' }),
+      'unavailable'
+    )
   })
 
   it('advances task progress while the simulation is playing', async () => {

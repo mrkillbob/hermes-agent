@@ -68,6 +68,7 @@ export interface LunarCitySceneHandle {
   dispatchCamera(intent: CameraIntent): void
   getCameraState(): CameraControlState
   pick(clientX: number, clientY: number): CameraPickTarget | undefined
+  setLeaderAnimation(leaderId: LeaderId, state: LeaderAnimationState): void
   setVisible(visible: boolean): void
   setQuality(tier: QualityTier): void
   render(): void
@@ -1218,6 +1219,8 @@ export async function createWorldScene(
     keyLight.intensity = 0.55
 
     const leaderStateClips = new Map<string, LeaderStateClipMap>()
+    const leaderAnimationGroups = new Map<LeaderId, ReadonlyMap<LeaderAnimationState, BabylonAnimationGroupLike>>()
+    const activeLeaderAnimations = new Map<LeaderId, BabylonAnimationGroupLike>()
     const camera = scene.activeCamera as CameraLike
     const focusAnchors = new Map<EntityKey, () => Vec3 | undefined>()
     const focusMetadata = new Map<EntityKey, () => EntityFocusMetadata | undefined>()
@@ -1245,6 +1248,24 @@ export async function createWorldScene(
 
       if (model.id === 'leaders') {
         retainLeaderIdentityMetadata(result, leaderStateClips, model, focus.cameraAnchor)
+        const importedAnimationGroups = workerAnimationGroups(result)
+
+        for (const leaderId of LEADER_IDS) {
+          const stateClips = leaderStateClips.get(leaderId)
+          const groups = new Map<LeaderAnimationState, BabylonAnimationGroupLike>()
+
+          if (stateClips) {
+            for (const state of LEADER_STATES) {
+              const group = importedAnimationGroups.get(stateClips[state])
+
+              if (group) {
+                groups.set(state, group)
+              }
+            }
+          }
+
+          leaderAnimationGroups.set(leaderId, groups)
+        }
 
         for (const leaderId of LEADER_IDS) {
           const leaderFocusKey = staticFocusKey('leader', leaderId)
@@ -1518,6 +1539,32 @@ export async function createWorldScene(
       },
       getCameraState() {
         return cameraController.getState()
+      },
+      setLeaderAnimation(leaderId, state) {
+        if (disposed) {
+          return
+        }
+
+        // State is selected by the exact profile-owned dialogue, while this
+        // map is sourced only from the corresponding GLB stateClips metadata.
+        // A missing declared animation is a visual no-op, never a guessed or
+        // ambient fallback clip.
+        const next = leaderAnimationGroups.get(leaderId)?.get(state)
+
+        if (!next) {
+          return
+        }
+
+        const active = activeLeaderAnimations.get(leaderId)
+
+        if (active === next) {
+          return
+        }
+
+        active?.stop?.()
+        activeLeaderAnimations.set(leaderId, next)
+        next.start?.(true)
+        schedulerController.requestRender()
       },
       pick(clientX, clientY) {
         const target = pickedCameraTarget(scene.pick?.(clientX, clientY)?.pickedMesh)

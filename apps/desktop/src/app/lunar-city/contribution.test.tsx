@@ -4,19 +4,33 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
+import type * as SessionStore from '@/store/session'
 
 // @vitest-environment jsdom
 
 const mocks = vi.hoisted(() => ({
   createWorld: vi.fn(),
   destroy: vi.fn(),
-  loadManifest: vi.fn()
+  loadManifest: vi.fn(),
+  openSession: vi.fn(),
+  setSessionOwnerHint: vi.fn()
 }))
 
 vi.mock('./manifest', () => ({ loadWorldManifest: mocks.loadManifest }))
 vi.mock('./world/create-world', () => ({ createLunarCityWorld: mocks.createWorld }))
+vi.mock('@/app/open-session', () => ({ openSession: mocks.openSession }))
+vi.mock('@/store/session', async importOriginal => ({
+  ...(await importOriginal<typeof SessionStore>()),
+  setSessionOwnerHint: mocks.setSessionOwnerHint
+}))
 
-import { LUNAR_CITY_CONTRIBUTIONS, LUNAR_CITY_NAV_ORDER, LUNAR_CITY_ROUTE, LunarCityRoute } from './contribution'
+import {
+  LUNAR_CITY_CONTRIBUTIONS,
+  LUNAR_CITY_NAV_ORDER,
+  LUNAR_CITY_ROUTE,
+  LunarCityRoute,
+  openLeaderFullChat
+} from './contribution'
 
 function KanbanRoute() {
   const navigate = useNavigate()
@@ -60,6 +74,16 @@ beforeEach(() => {
 })
 
 describe('Lunar City route contribution', () => {
+  it('hands a leader conversation to the ordinary full chat with its exact owner hint', () => {
+    const navigate = vi.fn()
+    const owner = { connectionId: 'source-a', profile: 'owl' }
+
+    openLeaderFullChat('stored-owl', owner, navigate)
+
+    expect(mocks.setSessionOwnerHint).toHaveBeenCalledWith('stored-owl', owner)
+    expect(mocks.openSession).toHaveBeenCalledWith('stored-owl', navigate, 'main')
+  })
+
   it('registers its dedicated destination directly after the order-50 Kanban entry', () => {
     const page = LUNAR_CITY_CONTRIBUTIONS.find(contribution => contribution.area === 'routes')
     const nav = LUNAR_CITY_CONTRIBUTIONS.find(contribution => contribution.area === 'sidebar.nav')

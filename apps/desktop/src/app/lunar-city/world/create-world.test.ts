@@ -27,6 +27,12 @@ interface FakeNode {
   setPivotPoint: ReturnType<typeof vi.fn>
 }
 
+interface FakeAnimationGroup {
+  name: string
+  start: ReturnType<typeof vi.fn>
+  stop: ReturnType<typeof vi.fn>
+}
+
 const leaderStateClips = (leaderId: string): LeaderStateClipMap => ({
   acknowledging: `leader:${leaderId}:acknowledging`,
   idle: `leader:${leaderId}:idle`,
@@ -64,6 +70,7 @@ function fakeRuntime({
   const placements = new Map<string, FakeNode>()
   const leaderMeshes = new Map<string, FakeNode>()
   const leaderNodes = new Map<string, FakeNode>()
+  const leaderAnimationGroups = new Map<string, FakeAnimationGroup>()
   const lights: FakeDirectionalLight[] = []
 
   const frozenMeshes: Array<FakeNode & { freezeWorldMatrix: ReturnType<typeof vi.fn>; modelId: string }> = []
@@ -223,6 +230,10 @@ function fakeRuntime({
         leaderNodes.set(leaderId, leaderNode)
         leaderPickMeshes.push(leaderMesh)
         transformNodes.push(leaderNode, leaderChild)
+
+        for (const clip of Object.values(leaderStateClips(leaderId))) {
+          leaderAnimationGroups.set(clip, { name: clip, start: vi.fn(), stop: vi.fn() })
+        }
       }
     }
 
@@ -234,7 +245,7 @@ function fakeRuntime({
     scene.materials.push(material)
 
     return {
-      animationGroups: [],
+      animationGroups: modelId === 'leaders' ? [...leaderAnimationGroups.values()] : [],
       meshes: [mesh, ...leaderPickMeshes],
       particleSystems: [],
       skeletons: [],
@@ -265,6 +276,7 @@ function fakeRuntime({
     lodNodes,
     leaderMeshes,
     leaderNodes,
+    leaderAnimationGroups,
     lights,
     modules,
     placements,
@@ -488,6 +500,24 @@ describe('createLunarCityWorld', () => {
     expect(handle.leaderStateClips.get('fox')).toEqual(leaderStateClips('fox'))
     expect(handle.leaderStateClips.get('badger')?.talking).toBe('leader:badger:talking')
     expect(handle.leaderStateClips.get('fox')?.talking).not.toBe('talking')
+    handle.destroy()
+  })
+
+  it('plays only the selected GLB-declared leader state clip without rebuilding the world', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    const foxThinking = runtime.leaderAnimationGroups.get('leader:fox:thinking')!
+    const foxTalking = runtime.leaderAnimationGroups.get('leader:fox:talking')!
+    const owlThinking = runtime.leaderAnimationGroups.get('leader:owl:thinking')!
+
+    handle.setLeaderAnimation('fox', 'thinking')
+    handle.setLeaderAnimation('fox', 'talking')
+
+    expect(foxThinking.start).toHaveBeenCalledWith(true)
+    expect(foxThinking.stop).toHaveBeenCalledOnce()
+    expect(foxTalking.start).toHaveBeenCalledWith(true)
+    expect(owlThinking.start).not.toHaveBeenCalled()
+    expect(runtime.scenes).toHaveLength(1)
     handle.destroy()
   })
 
