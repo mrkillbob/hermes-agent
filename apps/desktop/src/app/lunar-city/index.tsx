@@ -20,14 +20,13 @@ import {
   SteeringWheel,
   Users,
   Wrench,
-  X,
-  ZoomIn,
-  ZoomOut
+  X
 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
+import { CameraControls } from './components/camera-controls'
 import { loadWorldManifest } from './manifest'
-import type { LunarCityWorldHandle } from './model'
+import type { CameraControlState, CameraIntent, LunarCityWorldHandle } from './model'
 import { createLunarCityWorld } from './world/create-world'
 
 const LUNAR_CITY_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
@@ -460,7 +459,13 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
   const [inside, setInside] = useState(false)
   const [playing, setPlaying] = useState(true)
   const [tick, setTick] = useState(0)
-  const [cameraZoom, setCameraZoom] = useState(0)
+  const [cameraState, setCameraState] = useState<CameraControlState>({ focusedEntityKey: undefined, following: false })
+  const [worldHandle, setWorldHandle] = useState<LunarCityWorldHandle | undefined>(undefined)
+
+  const dispatchCamera = (intent: CameraIntent): void => {
+    worldHandle?.dispatchCamera(intent)
+    setCameraState(worldHandle?.getCameraState() ?? { focusedEntityKey: undefined, following: false })
+  }
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -475,15 +480,28 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
     let disposed = false
     let world: LunarCityWorldHandle | undefined
 
+    const handleWorldIntent = (intent: { kind: string; state?: CameraControlState }): void => {
+      if (intent.kind === 'camera-state' && intent.state) {
+        setCameraState(intent.state)
+      }
+    }
     void (async () => {
       try {
         const manifest = await loadWorldManifest(LUNAR_CITY_MANIFEST_URL, abortController.signal)
-        const created = await createLunarCityWorld(canvas, manifest, () => {}, undefined, LUNAR_CITY_MANIFEST_URL)
+
+        const created = await createLunarCityWorld(
+          canvas,
+          manifest,
+          handleWorldIntent,
+          undefined,
+          LUNAR_CITY_MANIFEST_URL
+        )
 
         if (disposed) {
           created.destroy()
         } else {
           world = created
+          setWorldHandle(created)
           canvas.dataset.worldStatus = 'ready'
         }
       } catch (error) {
@@ -592,14 +610,10 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
 
       <div
         className="lunar-city-viewport relative min-h-0 flex-1 overflow-hidden"
-        data-camera="isometric"
+        data-camera="angled-simcity"
         data-testid="lunar-city-viewport"
-        data-zoom={cameraZoom}
       >
-        <div
-          className="lunar-city-world absolute inset-[-4%]"
-          style={{ transform: `scale(${1.03 + cameraZoom * 0.08})` }}
-        >
+        <div className="lunar-city-world absolute inset-[-4%]">
           <canvas
             aria-label="Interactive 3D Lunar City"
             className="lunar-city-terrain absolute inset-0 size-full object-cover object-center"
@@ -683,34 +697,7 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
 
         <div className="pointer-events-none absolute inset-0 z-20">
           <div className="pointer-events-auto absolute left-3 top-20 flex items-center gap-1.5 sm:left-5 sm:top-24">
-            <div className="lunar-city-camera-controls flex items-center rounded-lg border border-(--ui-stroke-tertiary) bg-background/88 p-1 shadow-lg backdrop-blur-md">
-              <Button
-                aria-label="Zoom out"
-                disabled={cameraZoom === 0}
-                onClick={() => setCameraZoom(value => Math.max(0, value - 1))}
-                size="icon-xs"
-                variant="ghost"
-              >
-                <ZoomOut aria-hidden="true" />
-              </Button>
-              <span className="min-w-10 text-center text-[0.6rem] tabular-nums text-muted-foreground">
-                {cameraZoom === 0 ? 'CITY' : `${cameraZoom + 1}×`}
-              </span>
-              <Button
-                aria-label="Zoom in"
-                disabled={cameraZoom === 2}
-                onClick={() => setCameraZoom(value => Math.min(2, value + 1))}
-                size="icon-xs"
-                variant="ghost"
-              >
-                <ZoomIn aria-hidden="true" />
-              </Button>
-              {cameraZoom > 0 ? (
-                <Button aria-label="Reset camera" onClick={() => setCameraZoom(0)} size="xs" variant="ghost">
-                  Reset
-                </Button>
-              ) : null}
-            </div>
+            <CameraControls dispatch={dispatchCamera} state={cameraState} />
           </div>
 
           <div className="pointer-events-auto absolute right-3 top-3 flex max-w-[calc(100%-1.5rem)] flex-wrap justify-end gap-1.5 sm:right-5 sm:top-5">

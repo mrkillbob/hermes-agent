@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { LunarCity } from './index'
 
-const { createWorld, destroyWorld, loadManifest, worldDeferred } = vi.hoisted(() => {
+const { createWorld, destroyWorld, dispatchCamera, getCameraState, loadManifest, worldDeferred } = vi.hoisted(() => {
   let resolveWorld!: (handle: { destroy: () => void }) => void
 
   const deferred = new Promise<{ destroy: () => void }>(resolve => {
@@ -12,11 +12,18 @@ const { createWorld, destroyWorld, loadManifest, worldDeferred } = vi.hoisted(()
   })
 
   const destroy = vi.fn()
-  const create = vi.fn((_canvas: unknown): Promise<{ destroy: () => void }> => Promise.resolve({ destroy }))
+  const dispatch = vi.fn()
+  const readCameraState = vi.fn(() => ({ focusedEntityKey: undefined, following: false }))
+
+  const create = vi.fn((_canvas: unknown): Promise<{ destroy: () => void }> =>
+    Promise.resolve({ destroy, dispatchCamera: dispatch, getCameraState: readCameraState })
+  )
 
   return {
     createWorld: create,
+    dispatchCamera: dispatch,
     destroyWorld: destroy,
+    getCameraState: readCameraState,
     loadManifest: vi.fn(async () => ({ models: [] })),
     worldDeferred: { promise: deferred, resolve: resolveWorld }
   }
@@ -94,19 +101,29 @@ describe('LunarCity', () => {
       'orbital'
     )
     expect(screen.queryByText('Worker states')).toBeNull()
-    expect(screen.getByTestId('lunar-city-viewport').getAttribute('data-camera')).toBe('isometric')
+    expect(screen.getByTestId('lunar-city-viewport').getAttribute('data-camera')).toBe('angled-simcity')
   })
 
-  it('supports low-cost camera zoom for the isometric world', () => {
+  it('uses native Babylon camera controls instead of a CSS viewport zoom', () => {
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
 
     const viewport = screen.getByTestId('lunar-city-viewport')
-    const initialZoom = viewport.getAttribute('data-zoom')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    expect(viewport.getAttribute('data-zoom')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Zoom In' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Return to City' })).toBeTruthy()
+  })
 
-    expect(viewport.getAttribute('data-zoom')).not.toBe(initialZoom)
-    expect(screen.getByRole('button', { name: 'Reset camera' })).toBeTruthy()
+  it('routes the native camera controls to the existing Babylon world without recreating it', async () => {
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate Left' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Return to City' }))
+
+    expect(dispatchCamera).toHaveBeenCalledWith({ kind: 'orbit', deltaAlpha: -0.22, deltaBeta: 0 })
+    expect(dispatchCamera).toHaveBeenCalledWith({ kind: 'return-to-city' })
+    expect(createWorld).toHaveBeenCalledOnce()
   })
 
   it('advances task progress while the simulation is playing', async () => {

@@ -41,7 +41,52 @@
 }
 
 .lunar-city-camera-controls {
+  width: min(15.5rem, calc(100vw - 2rem));
+  border: 1px solid color-mix(in srgb, var(--ui-stroke-tertiary) 88%, transparent);
+  border-radius: 0.6rem;
+  background: color-mix(in srgb, var(--ui-bg-editor) 88%, transparent);
+  padding: 0.35rem;
   box-shadow: 0 10px 22px rgb(0 0 0 / 22%);
+  backdrop-filter: blur(0.75rem);
+}
+
+.lunar-city-camera-controls button {
+  min-height: 1.75rem;
+  border: 1px solid transparent;
+  border-radius: 0.28rem;
+  padding: 0.18rem 0.35rem;
+  color: var(--ui-text-secondary);
+  font-size: 0.61rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-align: left;
+}
+
+.lunar-city-camera-controls button:hover:not(:disabled) {
+  background: var(--chrome-action-hover);
+  color: var(--ui-text-primary);
+}
+
+.lunar-city-camera-controls button:focus-visible {
+  border-color: var(--ui-accent);
+  outline: 2px solid color-mix(in srgb, var(--ui-accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.lunar-city-camera-controls button:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.lunar-city-camera-controls output {
+  display: block;
+  overflow: hidden;
+  margin-top: 0.3rem;
+  color: var(--ui-text-secondary);
+  font-size: 0.6rem;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lunar-city-terrain {

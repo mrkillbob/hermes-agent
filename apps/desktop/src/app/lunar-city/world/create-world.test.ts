@@ -72,6 +72,7 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
     ambientColor: unknown
     materials: Array<{ freeze: ReturnType<typeof vi.fn>; modelId: string }> = []
     dispose = vi.fn()
+    pick = vi.fn()
     render = vi.fn()
     whenReadyAsync = vi.fn(async () => {})
 
@@ -289,6 +290,59 @@ describe('createLunarCityWorld', () => {
     expect(handle.leaderStateClips.get('fox')).toEqual(leaderStateClips('fox'))
     expect(handle.leaderStateClips.get('badger')?.talking).toBe('leader:badger:talking')
     expect(handle.leaderStateClips.get('fox')?.talking).not.toBe('talking')
+    handle.destroy()
+  })
+
+  it('applies camera intents on the existing world scene and restores the exact approved overview', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+
+    const camera = runtime.scenes[0]?.activeCamera as {
+      alpha: number
+      beta: number
+      radius: number
+      target: { x: number; y: number; z: number }
+    }
+
+    handle.dispatchCamera({ kind: 'orbit', deltaAlpha: 99, deltaBeta: 99 })
+    handle.dispatchCamera({ kind: 'zoom', delta: -999 })
+
+    expect(camera.beta).toBe(manifest.camera.overview.maxBeta)
+    expect(camera.radius).toBe(manifest.camera.overview.minRadius)
+    expect(runtime.scenes).toHaveLength(1)
+
+    handle.dispatchCamera({ kind: 'return-to-city' })
+
+    expect(camera).toMatchObject({
+      alpha: manifest.camera.overview.alpha,
+      beta: manifest.camera.overview.beta,
+      radius: manifest.camera.overview.radius,
+      target: manifest.camera.overview.target
+    })
+    expect(runtime.scenes).toHaveLength(1)
+    handle.destroy()
+  })
+
+  it('uses only typed mesh metadata for picks and clears focus when empty terrain is selected', async () => {
+    const runtime = fakeRuntime({ opaqueLeaderNames: true })
+    const emit = vi.fn()
+    const canvas = document.createElement('canvas')
+    const handle = await createLunarCityWorld(canvas, manifest, emit, runtime.modules)
+    const foxMesh = runtime.leaderMeshes.get('fox')!
+
+    runtime.scenes[0]?.pick.mockReturnValueOnce({ pickedMesh: foxMesh }).mockReturnValueOnce(undefined)
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 10, clientY: 10, pointerId: 1 }))
+    canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 10, clientY: 10, pointerId: 1 }))
+
+    expect(foxMesh.name).not.toContain('fox')
+    expect(handle.getCameraState()).toEqual({ focusedEntityKey: 'lunar-city:leader:fox', following: true })
+    expect(emit).toHaveBeenCalledWith({ kind: 'select-focus', entityKey: 'lunar-city:leader:fox' })
+
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 14, clientY: 14, pointerId: 2 }))
+    canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 14, clientY: 14, pointerId: 2 }))
+
+    expect(handle.getCameraState()).toEqual({ focusedEntityKey: undefined, following: false })
+    expect(emit).toHaveBeenCalledWith({ kind: 'clear-selection' })
     handle.destroy()
   })
 

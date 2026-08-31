@@ -1,6 +1,7 @@
 import { assertWorldManifestRuntimeAssets } from '../manifest'
 import type { LunarCityIntent, LunarCityWorldHandle, LunarCityWorldModules, WorldManifestV2 } from '../model'
 
+import { bindCameraInput } from './camera-controller'
 import { createWorldScene } from './world-scene'
 
 const DEFAULT_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
@@ -60,10 +61,19 @@ export async function createLunarCityWorld(
   let world: Awaited<ReturnType<typeof createWorldScene>> | undefined
   let observer: ResizeObserver | undefined
   let resizeListener: (() => void) | undefined
+  let releaseCameraInput: (() => void) | undefined
   let destroyed = false
 
   try {
     world = await createWorldScene(engine, manifest, emit, loaded, uri => new URL(uri, resolvedManifestUrl).toString())
+    releaseCameraInput = bindCameraInput(canvas, {
+      dispatch(intent) {
+        world?.dispatchCamera(intent)
+      },
+      pick(clientX, clientY) {
+        return world?.pick(clientX, clientY)
+      }
+    })
 
     const resize = () => {
       if (destroyed) {
@@ -92,6 +102,9 @@ export async function createLunarCityWorld(
       dispatchCamera(intent) {
         world?.dispatchCamera(intent)
       },
+      getCameraState() {
+        return world?.getCameraState() ?? { focusedEntityKey: undefined, following: false }
+      },
       setQuality(tier) {
         world?.setQuality(tier)
       },
@@ -106,12 +119,14 @@ export async function createLunarCityWorld(
           window.removeEventListener('resize', resizeListener)
         }
 
+        releaseCameraInput?.()
         observer?.disconnect()
         world?.dispose()
         engine.dispose()
         world = undefined
         observer = undefined
         resizeListener = undefined
+        releaseCameraInput = undefined
       }
     }
 
@@ -123,6 +138,7 @@ export async function createLunarCityWorld(
       window.removeEventListener('resize', resizeListener)
     }
 
+    releaseCameraInput?.()
     observer?.disconnect()
     world?.dispose()
     engine.dispose()

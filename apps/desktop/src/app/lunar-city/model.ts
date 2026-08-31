@@ -169,7 +169,16 @@ export type CameraIntent =
   | { kind: 'clear-focus' }
   | { kind: 'return-to-city' }
 
-export type LunarCityIntent = { kind: 'select-landmark'; landmarkId: string } | { kind: 'clear-selection' }
+export interface CameraControlState {
+  focusedEntityKey: EntityKey | undefined
+  following: boolean
+}
+
+export type LunarCityIntent =
+  | { kind: 'camera-state'; state: CameraControlState }
+  | { kind: 'clear-selection' }
+  | { kind: 'select-focus'; entityKey: EntityKey }
+  | { kind: 'select-landmark'; landmarkId: string }
 
 export type LeaderAnimationState = 'acknowledging' | 'idle' | 'listening' | 'talking' | 'thinking' | 'unavailable'
 export type LeaderId = 'owl' | 'fox' | 'badger' | 'otter' | 'bird' | 'stag'
@@ -178,6 +187,7 @@ export type LeaderStateClipMap = Readonly<Record<LeaderAnimationState, string>>
 
 export interface LunarCityLandmarkMetadata {
   cameraAnchor: Vec3
+  focusEntityKey: EntityKey
   kind: 'landmark' | 'landmark-mesh'
   modelId: string
   occlusionGroup: string
@@ -192,6 +202,7 @@ export interface LunarCityLodMetadata {
 
 export interface LunarCityLeaderPickMetadata {
   cameraAnchor: Vec3
+  focusEntityKey: EntityKey
   kind: 'leader'
   leaderId: LeaderId
   modelId: 'leaders'
@@ -202,6 +213,7 @@ export interface LunarCityLeaderPickMetadata {
 
 export interface LunarCitySharedLeaderSurfaceMetadata {
   cameraAnchor: Vec3
+  focusEntityKey: EntityKey
   kind: 'leader-shared-surface'
   modelId: 'leaders'
   occlusionGroup: string
@@ -215,6 +227,7 @@ export interface LunarCityWorldHandle {
   readonly leaderStateClips: ReadonlyMap<string, LeaderStateClipMap>
   applySnapshot(snapshot: LunarCitySnapshot): void
   dispatchCamera(intent: CameraIntent): void
+  getCameraState(): CameraControlState
   setQuality(tier: QualityTier): void
   destroy(): void
 }
@@ -226,6 +239,9 @@ export interface BabylonVector3Like {
 }
 
 export interface BabylonMutableVectorLike {
+  x?: number
+  y?: number
+  z?: number
   set(x: number, y: number, z: number): void
 }
 
@@ -242,6 +258,10 @@ export interface BabylonNodeLike {
 export interface BabylonMeshLike extends BabylonNodeLike {
   freezeWorldMatrix?(): void
   isPickable?: boolean
+  material?: {
+    alpha?: number
+    clone?(name: string): unknown
+  } | null
 }
 
 export interface BabylonMaterialLike {
@@ -260,6 +280,7 @@ export interface BabylonSceneLike {
   dispose(): void
   render(): void
   whenReadyAsync(): Promise<void>
+  pick?(x: number, y: number): { pickedMesh?: BabylonNodeLike } | undefined
 }
 
 export interface BabylonImportResultLike {
