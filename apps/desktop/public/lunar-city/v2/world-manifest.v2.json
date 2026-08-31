@@ -391,7 +391,7 @@
       "requiredClips": ["lights-idle"],
       "lods": [
         { "distance": 0, "node": "library:lod:near" },
-        { "distance": 48, "node": "library:lod:far" }
+        { "distance": 112, "node": "library:lod:far" }
       ],
       "transform": { "position": [-28, 4, -18], "rotation": [0, 0.28, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -438,7 +438,7 @@
       "requiredClips": ["lights-idle", "telescope-scan"],
       "lods": [
         { "distance": 0, "node": "research-lab:lod:near" },
-        { "distance": 52, "node": "research-lab:lod:far" }
+        { "distance": 112, "node": "research-lab:lod:far" }
       ],
       "transform": { "position": [25, 5, -22], "rotation": [0, -0.2, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -484,7 +484,7 @@
       "requiredClips": ["lights-idle"],
       "lods": [
         { "distance": 0, "node": "depot:lod:near" },
-        { "distance": 44, "node": "depot:lod:far" }
+        { "distance": 112, "node": "depot:lod:far" }
       ],
       "transform": { "position": [-31, 2, 12], "rotation": [0, 0.18, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -530,7 +530,7 @@
       "requiredClips": ["portal-idle", "lights-idle"],
       "lods": [
         { "distance": 0, "node": "review-office:lod:near" },
-        { "distance": 48, "node": "review-office:lod:far" }
+        { "distance": 112, "node": "review-office:lod:far" }
       ],
       "transform": { "position": [33, 3, 10], "rotation": [0, -0.26, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -569,7 +569,7 @@
       "requiredClips": ["door-open", "lights-idle"],
       "lods": [
         { "distance": 0, "node": "triage:lod:near" },
-        { "distance": 36, "node": "triage:lod:far" }
+        { "distance": 112, "node": "triage:lod:far" }
       ],
       "transform": { "position": [4, 1, 25], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -608,7 +608,7 @@
       "requiredClips": ["garden-idle"],
       "lods": [
         { "distance": 0, "node": "garden:lod:near" },
-        { "distance": 42, "node": "garden:lod:far" }
+        { "distance": 112, "node": "garden:lod:far" }
       ],
       "transform": { "position": [-8, 0, 34], "rotation": [0, 0.14, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -647,7 +647,7 @@
       "requiredClips": ["lights-idle"],
       "lods": [
         { "distance": 0, "node": "council:lod:near" },
-        { "distance": 46, "node": "council:lod:far" }
+        { "distance": 112, "node": "council:lod:far" }
       ],
       "transform": { "position": [27, 1, 31], "rotation": [0, -0.18, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -698,7 +698,7 @@
       "requiredClips": ["lights-idle"],
       "lods": [
         { "distance": 0, "node": "arts-studio:lod:near" },
-        { "distance": 46, "node": "arts-studio:lod:far" }
+        { "distance": 112, "node": "arts-studio:lod:far" }
       ],
       "transform": { "position": [-29, 2, -1], "rotation": [0, 0.2, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -756,7 +756,7 @@
       "requiredClips": ["workbench-cycle", "gantry-idle"],
       "lods": [
         { "distance": 0, "node": "engineering-workshop:lod:near" },
-        { "distance": 48, "node": "engineering-workshop:lod:far" }
+        { "distance": 112, "node": "engineering-workshop:lod:far" }
       ],
       "transform": { "position": [-29, 2, 30], "rotation": [0, -0.16, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -806,7 +806,7 @@
       "requiredClips": ["gatehouse-beacon", "gatehouse-gate"],
       "lods": [
         { "distance": 0, "node": "release-gatehouse:lod:near" },
-        { "distance": 44, "node": "release-gatehouse:lod:far" }
+        { "distance": 112, "node": "release-gatehouse:lod:far" }
       ],
       "transform": { "position": [0, 2, 12], "rotation": [0, 0.08, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -856,7 +856,7 @@
       "requiredClips": ["archive-seal-idle"],
       "lods": [
         { "distance": 0, "node": "archive:lod:near" },
-        { "distance": 46, "node": "archive:lod:far" }
+        { "distance": 112, "node": "archive:lod:far" }
       ],
       "transform": { "position": [38, 2, 18], "rotation": [0, -0.22, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -895,7 +895,7 @@
       "requiredClips": ["idle", "arrive", "depart"],
       "lods": [
         { "distance": 0, "node": "bus:lod:near" },
-        { "distance": 40, "node": "bus:lod:far" }
+        { "distance": 112, "node": "bus:lod:far" }
       ],
       "transform": { "position": [0, 2, -1], "rotation": [0, 0.2, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
@@ -1015,9 +1015,9 @@
         "triangles": 12386,
         "gpuMiB": 0.2579,
         "budget": { "maxDrawCalls": 12, "maxGpuMiB": 14, "maxMaterials": 6, "maxTextures": 4, "maxTriangles": 36000 },
-        "bytes": 384928,
-        "extent": [28.9478, 7.9677, 10.7553],
-        "sha256": "4cce68bfe4b8a15e937565b6d40014716a888ba4b31667783b78c6be8ec4c268"
+        "bytes": 385032,
+        "extent": [77.8494, 13.0881, 78.1521],
+        "sha256": "c12723b8ef340d2322dcefeee8cca2fbba96d240acf73475d204f73fd0d2371e"
       }
     },
     {

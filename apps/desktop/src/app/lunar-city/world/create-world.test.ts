@@ -635,12 +635,13 @@ describe('createLunarCityWorld', () => {
     )
     expect(runtime.roots.get('library')?.position.set).not.toHaveBeenCalled()
     expect(runtime.lodNodes.get('library:lod:far')?.metadata).toMatchObject({
-      lunarCity: { kind: 'lod', modelId: 'library', distance: 48 }
+      lunarCity: { kind: 'lod', modelId: 'library', distance: 112 }
     })
-    // Efficient is the default tier, so its aggressive LOD policy may choose
-    // far detail; the safety contract is that the two subtrees never coexist.
-    expect(runtime.lodNodes.get('library:lod:near')?.setEnabled).toHaveBeenLastCalledWith(false)
-    expect(runtime.lodNodes.get('library:lod:far')?.setEnabled).toHaveBeenLastCalledWith(true)
+    // Efficient keeps the authored near silhouette for the overview while
+    // lowering pixel work and disabling optional decorations/shadows. The
+    // safety contract is that the two subtrees never coexist.
+    expect(runtime.lodNodes.get('library:lod:near')?.setEnabled).toHaveBeenLastCalledWith(true)
+    expect(runtime.lodNodes.get('library:lod:far')?.setEnabled).toHaveBeenLastCalledWith(false)
     expect(runtime.frozenMeshes.find(mesh => mesh.modelId === 'terrain')?.freezeWorldMatrix).toHaveBeenCalledOnce()
     expect(runtime.frozenMaterials.find(material => material.modelId === 'terrain')?.freeze).toHaveBeenCalledOnce()
     expect(runtime.frozenMeshes.find(mesh => mesh.modelId === 'leaders')?.freezeWorldMatrix).not.toHaveBeenCalled()

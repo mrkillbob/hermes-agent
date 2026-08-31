@@ -46,7 +46,7 @@ const LUNAR_CITY_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
 // A renderer must never leave the route in an unbounded STARTING state. This
 // is deliberately generous for a cold Electron asset load while still giving
 // browser previews and low-power machines a deterministic degraded surface.
-const RENDERER_START_TIMEOUT_MS = 10_000
+const RENDERER_START_TIMEOUT_MS = 30_000
 
 export function disposeLunarCityRuntime(
   stopReconciler: (() => void) | undefined,
@@ -642,6 +642,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
           ownGeneration === generation &&
           !(error instanceof DOMException && error.name === 'AbortError')
         ) {
+          console.error('[lunar-city] renderer startup failed', error)
           canvas.dataset.worldStatus = 'unavailable'
           setRendererStatus('unavailable')
           setOperationsReady(true)
@@ -724,7 +725,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   }, [])
 
   return (
-    <div className="lunar-city relative flex min-h-0 flex-1 flex-col overflow-hidden bg-(--ui-bg-editor)">
+    <div className="lunar-city relative flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-(--ui-bg-editor)">
       <header className="lunar-city-hud pointer-events-none absolute inset-x-0 top-0 z-50 flex items-center justify-between gap-4 px-4 py-3 sm:px-6">
         <div className="pointer-events-auto flex min-w-0 items-center gap-3">
           <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-(--ui-accent)/12 text-(--ui-accent)">

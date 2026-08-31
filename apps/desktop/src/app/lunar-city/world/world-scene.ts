@@ -1477,7 +1477,10 @@ export async function createWorldScene(
   }
 
   try {
-    scene.ambientColor = new modules.Color3(0.32, 0.18, 0.12)
+    // The authored rooms use charcoal interiors with cyan/violet accents. A
+    // warmer ambient floor keeps those PBR surfaces legible when the efficient
+    // tier disables dynamic shadows, without adding another per-frame light.
+    scene.ambientColor = new modules.Color3(0.46, 0.32, 0.28)
     const overview = manifest.camera.overview
     scene.activeCamera = new modules.ArcRotateCamera(
       'lunar-city:approved-overview',
@@ -1490,7 +1493,7 @@ export async function createWorldScene(
 
     const keyLight = new modules.DirectionalLight('lunar-city:key-light', new modules.Vector3(-0.45, -1, 0.35), scene)
 
-    keyLight.intensity = 0.55
+    keyLight.intensity = 0.72
 
     const leaderStateClips = new Map<string, LeaderStateClipMap>()
     const leaderAnimationGroups = new Map<LeaderId, ReadonlyMap<LeaderAnimationState, BabylonAnimationGroupLike>>()

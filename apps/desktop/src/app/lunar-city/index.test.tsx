@@ -200,6 +200,7 @@ describe('LunarCity', () => {
 
     expect(screen.getByRole('heading', { name: 'Lunar City' })).toBeTruthy()
     const canvas = screen.getByLabelText('Interactive 3D Lunar City')
+    expect(canvas.closest('.lunar-city')?.classList.contains('h-full')).toBe(true)
 
     await waitFor(() => expect(canvas.getAttribute('data-world-status')).toBe('ready'))
     expect(globalThis.document.querySelectorAll('canvas')).toHaveLength(1)

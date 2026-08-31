@@ -35,6 +35,19 @@ const WORKER_GROUP_KITS = Object.freeze([
   ['upstream-hermes-maintenance', 'Upstream Hermes Maintenance']
 ])
 
+// District-authored leader anchors mirror the approved overview: each leader
+// has a permanent home instead of a central showcase row. The near group is
+// intentionally scaled for readability, so its local offsets are normalized
+// below while the mid/far silhouettes use world-space positions directly.
+const LEADER_DISTRICT_POSITIONS = Object.freeze([
+  [-27.5, 5.5, -18], // owl — Library
+  [23, 6.5, -22], // fox — Research Lab
+  [-31, 3.5, 12], // badger — Operations Depot
+  [0, 3.5, -1], // otter — Release Gatehouse / transit
+  [27, 2.5, 31], // bird — Council Hall
+  [33, 4.5, 10] // stag — Review Office
+])
+
 function createRobotSkeleton(scene, rig) {
   const skeleton = new Skeleton('worker:skeleton', 'worker:skeleton', scene)
   const rootBone = new Bone('worker:bone:root', skeleton, null, Matrix.Identity())
@@ -855,6 +868,23 @@ export function buildLeaders(scene) {
   const otter = buildOtter(scene, near)
   const bird = buildBird(scene, near)
   const stag = buildStag(scene, near)
+  const authoredLocalPositions = [
+    [-7.5, 1.5, -2.2],
+    [-4.4, 1.55, 2.1],
+    [-1.45, 1.45, -2],
+    [1.7, 1.5, 2.1],
+    [4.7, 1.55, -2],
+    [7.7, 1.7, 2.1]
+  ]
+  for (const [index, leader] of [owl, fox, badger, otter, bird, stag].entries()) {
+    const authored = authoredLocalPositions[index]
+    const district = LEADER_DISTRICT_POSITIONS[index]
+    leader.position.set(
+      district[0] / near.scaling.x - authored[0],
+      district[1] / near.scaling.y - authored[1],
+      district[2] / near.scaling.z - authored[2]
+    )
+  }
   badger.leaderRig.headMesh.dispose()
   badger.leaderRig.headMesh = owl.leaderRig.headMesh.createInstance('leader:badger:head')
   badger.leaderRig.headMesh.parent = badger.leaderRig.head
@@ -865,14 +895,7 @@ export function buildLeaders(scene) {
 
   const mid = group(scene, 'leaders:lod:mid', root)
   const far = group(scene, 'leaders:lod:far', root)
-  const positions = [
-    [-7.5, 1.5, -2.2],
-    [-4.4, 1.55, 2.1],
-    [-1.45, 1.45, -2],
-    [1.7, 1.5, 2.1],
-    [4.7, 1.55, -2],
-    [7.7, 1.7, 2.1]
-  ]
+  const positions = LEADER_DISTRICT_POSITIONS
   positions.forEach((position, index) => {
     const midLeader = capsule(scene, `leaders:mid:silhouette:${index}`, {
       height: 2.7 + (index % 3) * 0.22,

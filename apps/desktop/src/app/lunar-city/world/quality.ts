@@ -48,7 +48,12 @@ const QUALITY_BY_TIER: Readonly<Record<QualityTier, QualitySettings>> = Object.f
     animationDistance: 'short',
     decorations: false,
     dynamicShadows: 'none',
-    lodAdvance: 1,
+    // Keep the authored near silhouettes for the overview.  The efficient
+    // tier already lowers pixel work and removes dynamic detail; jumping one
+    // LOD at boot made every district collapse into the placeholder blocks
+    // from the approved asset pack's far representation.  The governor can
+    // still advance this value after sustained frame pressure.
+    lodAdvance: 0,
     renderScale: 0.7,
     tier: 'efficient'
   }

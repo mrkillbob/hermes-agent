@@ -9,7 +9,7 @@ describe('qualitySettings', () => {
   })
 
   it.each([
-    ['efficient', 0.7, 'none', 'short', 1],
+    ['efficient', 0.7, 'none', 'short', 0],
     ['balanced', 0.85, 'near', 'normal', 0],
     ['detailed', 1, 'near', 'long', 0]
   ] as const)('defines the exact %s tier', (tier, renderScale, dynamicShadows, animationDistance, lodAdvance) => {
@@ -39,13 +39,14 @@ describe('automatic quality degradation', () => {
     expect(controller.settings()).toMatchObject({
       animationDistance: 'short',
       dynamicShadows: 'none',
-      lodAdvance: 1,
+      lodAdvance: 0,
       renderScale: 0.7
     })
   })
 
   it('degrades a detailed world in the exact declared order after each 120 over-budget interactive frames', () => {
     const controller = createQualityController('detailed')
+
     const observeOverBudget = () => {
       for (let frame = 0; frame < 120; frame += 1) {
         controller.noteFrame({ elapsedMs: 34, interactive: true })
@@ -77,6 +78,7 @@ describe('automatic quality degradation', () => {
     for (let frame = 0; frame < 120; frame += 1) {
       controller.noteFrame({ elapsedMs: 34, interactive: true })
     }
+
     for (let frame = 0; frame < 600; frame += 1) {
       controller.noteFrame({ elapsedMs: 1, interactive: false })
     }
