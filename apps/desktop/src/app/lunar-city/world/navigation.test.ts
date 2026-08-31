@@ -205,16 +205,28 @@ describe('Recast NavigationQuery adapter', () => {
       getPoint: (index: number) => [validPoint, invalidPoint][index],
       getPointCount: () => 2
     }
-    const query = createRecastNavigationQuery(
-      { computePath: vi.fn(() => path) },
-      (x, y, z) => (x === 1 ? start : end)
-    )
+    const query = createRecastNavigationQuery({ computePath: vi.fn(() => path) }, (x, y, z) => (x === 1 ? start : end))
 
     expect(query.computePath({ x: 1, y: 0, z: 2 }, { x: 9, y: 0, z: 2 })).toBeUndefined()
     expect(start.destroy).toHaveBeenCalledOnce()
     expect(end.destroy).toHaveBeenCalledOnce()
-    expect(validPoint.destroy).toHaveBeenCalledOnce()
-    expect(invalidPoint.destroy).toHaveBeenCalledOnce()
+    // NavPath owns getPoint() vectors; only the path may release them.
+    expect(validPoint.destroy).not.toHaveBeenCalled()
+    expect(invalidPoint.destroy).not.toHaveBeenCalled()
     expect(path.destroy).toHaveBeenCalledOnce()
+  })
+
+  it('releases the first owned vector when construction of the second vector fails', () => {
+    const start = { destroy: vi.fn(), x: 1, y: 0, z: 2 }
+    const query = createRecastNavigationQuery({ computePath: vi.fn() }, x => {
+      if (x === 9) {
+        throw new Error('out of WASM memory')
+      }
+
+      return start
+    })
+
+    expect(query.computePath({ x: 1, y: 0, z: 2 }, { x: 9, y: 0, z: 2 })).toBeUndefined()
+    expect(start.destroy).toHaveBeenCalledOnce()
   })
 })

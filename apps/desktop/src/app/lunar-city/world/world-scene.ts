@@ -10,15 +10,14 @@ import type {
   LeaderStateClipMap,
   LunarCityIntent,
   LunarCityNodeMetadata,
-  LunarEntity,
-  LunarCityWorkerPickMetadata,
   LunarCitySnapshot,
+  LunarCityWorkerPickMetadata,
   LunarCityWorldModules,
+  LunarEntity,
   ModelManifestEntry,
   QualityTier,
-  RecastRuntimeLike,
   RecastConfigLike,
-  RecastWrapperLike,
+  RecastRuntimeLike,
   Vec3,
   WorldBounds,
   WorldManifestV2
@@ -33,8 +32,8 @@ import {
 import {
   applyLodSelection,
   createEntityRegistry,
-  type EntityPresentationFactory,
   type EntityFocusMetadata,
+  type EntityPresentationFactory,
   type EntityVisual,
   type InstancedEntityGroup,
   type InstancedEntityMember,
@@ -223,10 +222,16 @@ function navigationGeometry(result: BabylonImportResultLike): NavigationGeometry
     const transformed = [] as Vec3[]
 
     for (let index = 0; index < meshPositions.length; index += 3) {
-      const point = transformNavigationVertex(mesh, meshPositions[index]!, meshPositions[index + 1]!, meshPositions[index + 2]!)
+      const point = transformNavigationVertex(
+        mesh,
+        meshPositions[index]!,
+        meshPositions[index + 1]!,
+        meshPositions[index + 2]!
+      )
 
       if (!point) {
         transformed.length = 0
+
         break
       }
 
@@ -271,10 +276,7 @@ function disposeNavigationImport(result: BabylonImportResultLike): void {
   }
 }
 
-function recastConfig(
-  Runtime: RecastRuntimeLike,
-  bounds: WorldBounds
-): RecastConfigLike {
+function recastConfig(Runtime: RecastRuntimeLike, bounds: WorldBounds): RecastConfigLike {
   const config = new Runtime.rcConfig()
 
   if (!config.set_bmin || !config.set_bmax) {
@@ -351,6 +353,7 @@ export async function createRouteNavigationQuery(
     } finally {
       disposeRecastWrapper(configuration)
     }
+
     const query = createRecastNavigationQuery(navMesh, (x, y, z) => new Runtime.Vec3(x, y, z))
 
     // The query now owns navMesh and its idempotent destroy lifecycle.
@@ -586,6 +589,13 @@ function gltfExtras(node: BabylonNodeLike): Record<string, unknown> {
   return metadataRecord(gltf.extras)
 }
 
+/** Decorative authored GLB nodes are optional detail, never a source of city truth. */
+function isDecorationNode(node: BabylonNodeLike): boolean {
+  const semantic = gltfExtras(node).semantic
+
+  return typeof semantic === 'string' && /:(?:plants|bench|cyan-fixture|wheels|signal)$/u.test(semantic)
+}
+
 function readLeaderStateClips(node: BabylonNodeLike, leaderId: LeaderId): LeaderStateClipMap {
   const extras = gltfExtras(node)
 
@@ -816,6 +826,7 @@ export function createBabylonEntityFactory(
   const variants = model.instancing?.variants ?? []
   const candidateMeshes = result.meshes.filter(mesh => mesh.name !== '__root__') as readonly BabylonInstancedMeshLike[]
   const sourceLodNodes = model.lods.map(lod => findNode(result, lod.node))
+
   const sourceVariantNodes = new Map(
     variants.flatMap(variant => {
       const node = findNode(result, `worker:variant:${variant}`)
@@ -867,6 +878,7 @@ export function createBabylonEntityFactory(
       for (const node of new Set(clone.nodeMap.values())) {
         tagWorkerNode(node, metadata)
       }
+
       clone.root.setEnabled?.(true)
 
       for (const [variantId, sourceNode] of sourceVariantNodes) {
@@ -879,10 +891,12 @@ export function createBabylonEntityFactory(
         dispose() {
           active?.stop?.()
           active = undefined
+
           for (const group of clone.animations.values()) {
             group.stop?.()
             group.dispose?.()
           }
+
           clone.root.dispose?.()
           anchor.dispose?.()
         },
@@ -975,6 +989,7 @@ export function createBabylonEntityFactory(
             for (const instance of visual.instances) {
               tagWorkerNode(instance, metadata)
             }
+
             setNodePosition(visual.root, member.position)
           }
         }
@@ -1132,6 +1147,7 @@ export async function createWorldScene(
     const focusAnchors = new Map<EntityKey, () => Vec3 | undefined>()
     const focusMetadata = new Map<EntityKey, () => EntityFocusMetadata | undefined>()
     const occlusionCandidates: OcclusionCandidate[] = []
+    const decorationNodes: BabylonNodeLike[] = []
     const staticLods: Array<{ focus: FocusMetadata; lods: readonly LodEntry[] }> = []
     let workerAsset: { model: ModelManifestEntry; result: BabylonImportResultLike } | undefined
 
@@ -1150,6 +1166,7 @@ export async function createWorldScene(
       focusMetadata.set(focus.focusEntityKey, () => focus)
       staticLods.push({ focus, lods: placed.lods })
       occlusionCandidates.push(...buildOcclusionCandidates(result, model))
+      decorationNodes.push(...allImportedNodes(result).filter(isDecorationNode))
 
       if (model.id === 'leaders') {
         retainLeaderIdentityMetadata(result, leaderStateClips, model, focus.cameraAnchor)
@@ -1170,6 +1187,19 @@ export async function createWorldScene(
 
     const occlusion = createOcclusionController(occlusionCandidates)
     const quality = createQualityController('efficient')
+
+    const applyRuntimeQuality = (): void => {
+      const settings = quality.settings()
+
+      applyQualitySettings(engine, settings)
+      keyLight.shadowEnabled = settings.dynamicShadows === 'near'
+
+      for (const node of decorationNodes) {
+        node.setEnabled?.(settings.decorations)
+      }
+    }
+
+    applyRuntimeQuality()
 
     if (!workerAsset) {
       throw new Error('Lunar City manifest has no workers model')
@@ -1268,7 +1298,7 @@ export async function createWorldScene(
         if (
           quality.noteFrame({ elapsedMs: Math.max(0, finishedAt - startedAt), interactive: frame.targetFps === 30 })
         ) {
-          applyQualitySettings(engine, quality.settings())
+          applyRuntimeQuality()
         }
 
         return (
@@ -1309,7 +1339,10 @@ export async function createWorldScene(
             const previousDestination = destinationByEntity.get(key)
             const previousOrigin = authoritativeOriginByEntity.get(key)
             const authoritativeOrigin = entity.authority === 'authoritative' ? entity.position : undefined
-            const hasOriginCorrection = authoritativeOrigin !== undefined && !samePoint(previousOrigin, authoritativeOrigin)
+
+            const hasOriginCorrection =
+              authoritativeOrigin !== undefined && !samePoint(previousOrigin, authoritativeOrigin)
+
             destinationByEntity.set(key, entity.destination)
 
             if (authoritativeOrigin) {
@@ -1371,7 +1404,7 @@ export async function createWorldScene(
       },
       setQuality(tier) {
         quality.setTier(tier)
-        applyQualitySettings(engine, quality.settings())
+        applyRuntimeQuality()
         scheduler.requestRender()
       },
       setVisible(visible) {

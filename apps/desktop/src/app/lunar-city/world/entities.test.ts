@@ -171,9 +171,10 @@ describe('EntityRegistry', () => {
   })
 
   it('publishes authoritative typed worker focus metadata that follows motion and fails closed for stale workers', () => {
-    const focusMetadata = new Map<EntityKey, () =>
-      | { cameraAnchor: Vec3; focusEntityKey: EntityKey; occlusionGroup: string }
-      | undefined>()
+    const focusMetadata = new Map<
+      EntityKey,
+      () => { cameraAnchor: Vec3; focusEntityKey: EntityKey; occlusionGroup: string } | undefined
+    >()
     const presentationFactory = factory()
     const worker = entity(1, { position: { x: 2, y: 0, z: 3 } })
     const registry = createEntityRegistry({
@@ -217,7 +218,10 @@ describe('EntityRegistry', () => {
   it('keeps the authoritative arrival clip while navigation temporarily presents the declared walk clip', () => {
     const presentationFactory = factory()
     const worker = entity(1, { animation: 'work' })
-    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk', 'work']) })
+    const registry = createEntityRegistry({
+      factory: presentationFactory,
+      workerClips: new Set(['idle', 'walk', 'work'])
+    })
 
     registry.setSelection(worker.key)
     registry.reconcile(snapshot(worker))
@@ -241,11 +245,17 @@ describe('EntityRegistry', () => {
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
 
     registry.reconcile(snapshot(worker))
-    registry.applyLodPolicy(() => 0, () => true)
+    registry.applyLodPolicy(
+      () => 0,
+      () => true
+    )
     expect(presentationFactory.animated).toHaveBeenCalledOnce()
 
     const visual = presentationFactory.animated.mock.results[0]?.value
-    registry.applyLodPolicy(() => 1, () => false)
+    registry.applyLodPolicy(
+      () => 1,
+      () => false
+    )
 
     expect(visual.dispose).toHaveBeenCalledOnce()
     expect(registry.instancedGroup('worker:idle:lod:1')?.count).toBe(1)

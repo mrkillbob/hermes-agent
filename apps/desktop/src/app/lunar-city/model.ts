@@ -321,6 +321,7 @@ export interface BabylonImportResultLike {
 
 export interface BabylonLightLike {
   intensity: number
+  shadowEnabled?: boolean
 }
 
 export interface RecastPathLike {

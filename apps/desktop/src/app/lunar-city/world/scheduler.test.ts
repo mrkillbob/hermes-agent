@@ -160,7 +160,12 @@ describe('FrameScheduler', () => {
     }
     const navigation = createNavigationController({
       destinations: { review: { x: 1, y: 0, z: 0 } },
-      query: { computePath: () => [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }] },
+      query: {
+        computePath: () => [
+          { x: 0, y: 0, z: 0 },
+          { x: 1, y: 0, z: 0 }
+        ]
+      },
       speedUnitsPerSecond: 1,
       workerClips: new Set(['idle', 'walk', 'work'])
     })

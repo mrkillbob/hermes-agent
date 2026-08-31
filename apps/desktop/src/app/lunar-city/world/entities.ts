@@ -1,4 +1,12 @@
-import type { AuthorityState, DestinationId, EntityIdentity, EntityKey, LunarCitySnapshot, LunarEntity, Vec3 } from '../model'
+import type {
+  AuthorityState,
+  DestinationId,
+  EntityIdentity,
+  EntityKey,
+  LunarCitySnapshot,
+  LunarEntity,
+  Vec3
+} from '../model'
 
 export interface EntityVisual {
   dispose?(): void
@@ -286,7 +294,6 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
           record.nearby = nextNearby
           changed = true
         }
-
       }
 
       if (changed) {

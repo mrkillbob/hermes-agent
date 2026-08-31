@@ -7,6 +7,7 @@ import type {
   LunarEntity,
   ModelManifestEntry,
   NavigationManifest,
+  RecastRuntimeLike,
   Vec3,
   WorldBounds
 } from '../model'
@@ -172,7 +173,66 @@ describe('manifest navigation query', () => {
       { x: 4, y: 0, z: 0 }
     ])
     expect(dispose).toHaveBeenCalledOnce()
-    expect(vectors.map(vector => vector.destroy.mock.calls.length)).toEqual([1, 1, 1, 1])
+    expect(vectors.map(vector => vector.destroy.mock.calls.length)).toEqual([1, 1, 0, 0])
+
+    query.dispose?.()
+    expect(destroy).toHaveBeenCalledOnce()
+  })
+
+  it('builds and disposes a nonzero route through the actual Recast WASM runtime', async () => {
+    const imported = await import('recast-detour')
+    const createRecast = imported.default as unknown as () => Promise<RecastRuntimeLike>
+    const runtime = await createRecast()
+    const OriginalNavMesh = runtime.NavMesh
+    const destroy = vi.fn()
+
+    class TrackingNavMesh {
+      private readonly delegate = new OriginalNavMesh()
+
+      build(
+        positions: Float32Array,
+        positionCount: number,
+        indices: Uint32Array,
+        indexCount: number,
+        configuration: unknown
+      ): void {
+        this.delegate.build(positions, positionCount, indices, indexCount, configuration)
+      }
+
+      computePath(from: unknown, to: unknown) {
+        return this.delegate.computePath(from, to)
+      }
+
+      destroy(): void {
+        destroy()
+        this.delegate.destroy?.()
+      }
+    }
+
+    const result: BabylonImportResultLike = {
+      animationGroups: [],
+      meshes: [
+        {
+          dispose: vi.fn(),
+          getIndices: () => [0, 1, 2, 1, 3, 2],
+          getVerticesData: () => [0, 0, 0, 4, 0, 0, 0, 0, 4, 4, 0, 4],
+          name: 'navigation:surface',
+          setEnabled: vi.fn()
+        }
+      ],
+      transformNodes: []
+    }
+    const modules = {
+      ImportMeshAsync: vi.fn(async () => result),
+      createRecastNavigation: vi.fn(async () => ({ ...runtime, NavMesh: TrackingNavMesh }))
+    } as unknown as Pick<LunarCityWorldModules, 'ImportMeshAsync' | 'createRecastNavigation'>
+
+    const query = await createRouteNavigationQuery(navigation, modules, {} as never, uri => uri)
+    const path = query.computePath({ x: 0.1, y: 0, z: 0.1 }, { x: 3.9, y: 0, z: 3.9 })
+
+    expect(path).toHaveLength(2)
+    expect(path?.[0]?.x).toBeGreaterThanOrEqual(0)
+    expect(path?.at(-1)?.z).toBeGreaterThan(3)
 
     query.dispose?.()
     expect(destroy).toHaveBeenCalledOnce()
@@ -206,8 +266,22 @@ describe('worker GLB presentation', () => {
       name: 'workers:root',
       setEnabled: vi.fn()
     }
-    const animation = { clone: vi.fn(() => clonedAnimation), name: 'work' }
-    const clonedAnimation = { dispose: vi.fn(), start: vi.fn(), stop: vi.fn() }
+    const sceneAnimationGroups: unknown[] = []
+    const clonedAnimation = {
+      dispose: vi.fn(() => {
+        sceneAnimationGroups.splice(sceneAnimationGroups.indexOf(clonedAnimation), 1)
+      }),
+      start: vi.fn(),
+      stop: vi.fn()
+    }
+    const animation = {
+      clone: vi.fn(() => {
+        sceneAnimationGroups.push(clonedAnimation)
+
+        return clonedAnimation
+      }),
+      name: 'work'
+    }
     const result: BabylonImportResultLike = {
       animationGroups: [animation],
       meshes: [],
@@ -234,7 +308,7 @@ describe('worker GLB presentation', () => {
       model as ModelManifestEntry,
       result,
       { TransformNode } as unknown as LunarCityWorldModules,
-      {} as never
+      { animationGroups: sceneAnimationGroups } as never
     )
     const entity = {
       animation: 'work',
@@ -247,6 +321,7 @@ describe('worker GLB presentation', () => {
 
     const visual = factory.createAnimated(entity, 'builder')
     visual.setAnimation?.('work')
+    expect(sceneAnimationGroups).toHaveLength(1)
     visual.dispose?.()
 
     expect(variantClones.get(builder)?.setEnabled).toHaveBeenCalledWith(true)
@@ -263,5 +338,6 @@ describe('worker GLB presentation', () => {
     })
     expect(clonedAnimation.start).toHaveBeenCalledOnce()
     expect(clonedAnimation.dispose).toHaveBeenCalledOnce()
+    expect(sceneAnimationGroups).toHaveLength(0)
   })
 })

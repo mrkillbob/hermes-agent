@@ -56,6 +56,7 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
   const placements = new Map<string, FakeNode>()
   const leaderMeshes = new Map<string, FakeNode>()
   const leaderNodes = new Map<string, FakeNode>()
+  const lights: FakeDirectionalLight[] = []
 
   const frozenMeshes: Array<FakeNode & { freezeWorldMatrix: ReturnType<typeof vi.fn>; modelId: string }> = []
 
@@ -117,12 +118,15 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
 
   class FakeDirectionalLight {
     intensity = 1
+    shadowEnabled = true
 
     constructor(
       public readonly name: string,
       public readonly direction: FakeVector3,
       public readonly scene: FakeScene
-    ) {}
+    ) {
+      lights.push(this)
+    }
   }
 
   class FakeTransformNode implements FakeNode {
@@ -155,6 +159,12 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
     lodNodes.set(far.name, far)
 
     const transformNodes: FakeNode[] = [root, near, far]
+
+    if (modelId === 'garden') {
+      const plants = fakeNode('garden:plants', { gltf: { extras: { semantic: 'garden:plants' } } })
+      transformNodes.push(plants)
+      lodNodes.set(plants.name, plants)
+    }
 
     const leaderPickMeshes: Array<FakeNode & { freezeWorldMatrix: ReturnType<typeof vi.fn>; modelId: string }> = []
 
@@ -225,6 +235,7 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
     lodNodes,
     leaderMeshes,
     leaderNodes,
+    lights,
     modules,
     placements,
     roots,
@@ -329,6 +340,21 @@ describe('createLunarCityWorld', () => {
     handle.setQuality('balanced')
 
     expect(runtime.engines[0]?.setHardwareScalingLevel).toHaveBeenCalledWith(1 / 0.85)
+    expect(runtime.scenes).toHaveLength(1)
+    handle.destroy()
+  })
+
+  it('applies dynamic-shadow and decorative-node settings to the loaded scene without rebuilding it', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+
+    handle.setQuality('detailed')
+    expect(runtime.lights[0]?.shadowEnabled).toBe(true)
+    expect(runtime.lodNodes.get('garden:plants')?.setEnabled).toHaveBeenLastCalledWith(true)
+
+    handle.setQuality('efficient')
+    expect(runtime.lights[0]?.shadowEnabled).toBe(false)
+    expect(runtime.lodNodes.get('garden:plants')?.setEnabled).toHaveBeenLastCalledWith(false)
     expect(runtime.scenes).toHaveLength(1)
     handle.destroy()
   })

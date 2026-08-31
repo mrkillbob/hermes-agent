@@ -47,11 +47,13 @@ export function createRecastNavigationQuery(
         return undefined
       }
 
-      const start = vector(from.x, from.y, from.z) as RecastWrapperLike
-      const end = vector(to.x, to.y, to.z) as RecastWrapperLike
+      let start: RecastWrapperLike | undefined
+      let end: RecastWrapperLike | undefined
       let path: RecastPathLike | undefined
 
       try {
+        start = vector(from.x, from.y, from.z) as RecastWrapperLike
+        end = vector(to.x, to.y, to.z) as RecastWrapperLike
         path = navMesh.computePath(start, end)
       } catch {
         disposeRecastWrapper(start)
@@ -67,17 +69,17 @@ export function createRecastNavigationQuery(
 
       try {
         for (let index = 0; index < path.getPointCount(); index += 1) {
-          const point = path.getPoint(index) as (Vec3 & RecastWrapperLike) | undefined
+          // Recast's NavPath owns its getPoint() vector views.  They are not
+          // separately allocated by this adapter; destroying a borrowed view
+          // corrupts the real WASM heap.  Copy coordinates, then release the
+          // owning NavPath in the finally below.
+          const point = path.getPoint(index)
 
-          try {
-            if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
-              return undefined
-            }
-
-            points.push({ x: point.x, y: point.y, z: point.z })
-          } finally {
-            disposeRecastWrapper(point)
+          if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
+            return undefined
           }
+
+          points.push({ x: point.x, y: point.y, z: point.z })
         }
       } finally {
         disposeRecastWrapper(path)
