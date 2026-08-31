@@ -14,6 +14,8 @@ import type {
   LunarCityWorldModules,
   ModelManifestEntry,
   QualityTier,
+  RecastRuntimeLike,
+  RecastWrapperLike,
   Vec3,
   WorldBounds,
   WorldManifestV2
@@ -35,7 +37,12 @@ import {
   type LodEntry,
   selectLodIndex
 } from './entities'
-import { createNavigationController, createRecastNavigationQuery, type NavigationQuery } from './navigation'
+import {
+  createNavigationController,
+  createRecastNavigationQuery,
+  disposeRecastWrapper,
+  type NavigationQuery
+} from './navigation'
 import { createOcclusionController, type OcclusionCandidate, type OcclusionSelection } from './occlusion'
 import { animationDistanceUnits, applyQualitySettings, createQualityController } from './quality'
 import { createFrameScheduler } from './scheduler'
@@ -163,6 +170,30 @@ interface NavigationGeometry {
   positions: Float32Array
 }
 
+function transformNavigationVertex(mesh: BabylonMeshLike, x: number, y: number, z: number): Vec3 | undefined {
+  const values = mesh.getWorldMatrix?.().m
+
+  if (!values) {
+    return { x, y, z }
+  }
+
+  if (values.length !== 16 || !values.every(Number.isFinite)) {
+    return undefined
+  }
+
+  const w = values[3]! * x + values[7]! * y + values[11]! * z + values[15]!
+
+  if (!Number.isFinite(w) || w === 0) {
+    return undefined
+  }
+
+  return {
+    x: (values[0]! * x + values[4]! * y + values[8]! * z + values[12]!) / w,
+    y: (values[1]! * x + values[5]! * y + values[9]! * z + values[13]!) / w,
+    z: (values[2]! * x + values[6]! * y + values[10]! * z + values[14]!) / w
+  }
+}
+
 /** Extracts valid, indexed geometry only; malformed navigation assets fail closed. */
 function navigationGeometry(result: BabylonImportResultLike): NavigationGeometry | undefined {
   const positions: number[] = []
@@ -185,8 +216,29 @@ function navigationGeometry(result: BabylonImportResultLike): NavigationGeometry
       continue
     }
 
+    const transformed = [] as Vec3[]
+
+    for (let index = 0; index < meshPositions.length; index += 3) {
+      const point = transformNavigationVertex(mesh, meshPositions[index]!, meshPositions[index + 1]!, meshPositions[index + 2]!)
+
+      if (!point) {
+        transformed.length = 0
+        break
+      }
+
+      transformed.push(point)
+    }
+
+    if (transformed.length !== vertexCount) {
+      continue
+    }
+
     const vertexOffset = positions.length / 3
-    positions.push(...meshPositions)
+
+    for (const point of transformed) {
+      positions.push(point.x, point.y, point.z)
+    }
+
     indices.push(...Array.from(meshIndices, index => vertexOffset + index))
   }
 
@@ -216,16 +268,18 @@ function disposeNavigationImport(result: BabylonImportResultLike): void {
 }
 
 function recastConfig(
-  Runtime: NonNullable<LunarCityWorldModules['createRecastNavigation']> extends () => Promise<infer T> ? T : never,
+  Runtime: RecastRuntimeLike,
   bounds: WorldBounds
-): Record<string, unknown> {
+): { config: Record<string, unknown> & RecastWrapperLike; wrappers: readonly RecastWrapperLike[] } {
   const config = new Runtime.rcConfig()
+  const bmin = new Runtime.Vec3(bounds.min.x, bounds.min.y, bounds.min.z)
+  const bmax = new Runtime.Vec3(bounds.max.x, bounds.max.y, bounds.max.z)
 
   // These are Recast voxelization inputs, not hand-authored city coordinates;
   // the actual navigable extent is extracted from the declared navigation GLB.
   Object.assign(config, {
-    bmax: new Runtime.Vec3(bounds.max.x, bounds.max.y, bounds.max.z),
-    bmin: new Runtime.Vec3(bounds.min.x, bounds.min.y, bounds.min.z),
+    bmax,
+    bmin,
     ch: 0.2,
     cs: 0.2,
     detailSampleDist: 6,
@@ -241,7 +295,7 @@ function recastConfig(
     walkableSlopeAngle: 45
   })
 
-  return config
+  return { config, wrappers: [bmin, bmax] }
 }
 
 /**
@@ -275,13 +329,23 @@ export async function createRouteNavigationQuery(
     const Runtime = await modules.createRecastNavigation()
     const navMesh = new Runtime.NavMesh()
     releaseNavMesh = () => navMesh.destroy?.()
-    navMesh.build(
-      geometry.positions,
-      geometry.positions.length / 3,
-      geometry.indices,
-      geometry.indices.length,
-      recastConfig(Runtime, geometry.bounds)
-    )
+    const built = recastConfig(Runtime, geometry.bounds)
+
+    try {
+      navMesh.build(
+        geometry.positions,
+        geometry.positions.length / 3,
+        geometry.indices,
+        geometry.indices.length,
+        built.config
+      )
+    } finally {
+      disposeRecastWrapper(built.config)
+
+      for (const wrapper of built.wrappers) {
+        disposeRecastWrapper(wrapper)
+      }
+    }
     const query = createRecastNavigationQuery(navMesh, (x, y, z) => new Runtime.Vec3(x, y, z))
 
     // The query now owns navMesh and its idempotent destroy lifecycle.

@@ -6,6 +6,9 @@ export interface NavigationQuery {
 }
 
 export interface RecastPathLike {
+  __destroy__?(): void
+  delete?(): void
+  destroy?(): void
   getPoint(index: number): Vec3 | undefined
   getPointCount(): number
 }
@@ -13,6 +16,22 @@ export interface RecastPathLike {
 export interface RecastNavMeshLike {
   computePath(from: unknown, to: unknown): RecastPathLike
   destroy?(): void
+}
+
+interface RecastWrapperLike {
+  __destroy__?(): void
+  delete?(): void
+  destroy?(): void
+}
+
+export function disposeRecastWrapper(value: RecastWrapperLike | undefined): void {
+  if (value?.destroy) {
+    value.destroy()
+  } else if (value?.delete) {
+    value.delete()
+  } else {
+    value?.__destroy__?.()
+  }
 }
 
 /** Adapts Recast's route-local navmesh to the narrow fail-closed query seam. */
@@ -28,24 +47,37 @@ export function createRecastNavigationQuery(
         return undefined
       }
 
-      let path: RecastPathLike
+      const start = vector(from.x, from.y, from.z) as RecastWrapperLike
+      const end = vector(to.x, to.y, to.z) as RecastWrapperLike
+      let path: RecastPathLike | undefined
 
       try {
-        path = navMesh.computePath(vector(from.x, from.y, from.z), vector(to.x, to.y, to.z))
+        path = navMesh.computePath(start, end)
       } catch {
+        disposeRecastWrapper(start)
+        disposeRecastWrapper(end)
+
         return undefined
       }
 
+      disposeRecastWrapper(start)
+      disposeRecastWrapper(end)
+
       const points: Vec3[] = []
 
-      for (let index = 0; index < path.getPointCount(); index += 1) {
-        const point = path.getPoint(index)
+      try {
+        for (let index = 0; index < path.getPointCount(); index += 1) {
+          const point = path.getPoint(index) as (Vec3 & RecastWrapperLike) | undefined
 
-        if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
-          return undefined
+          if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
+            return undefined
+          }
+
+          points.push({ x: point.x, y: point.y, z: point.z })
+          disposeRecastWrapper(point)
         }
-
-        points.push({ x: point.x, y: point.y, z: point.z })
+      } finally {
+        disposeRecastWrapper(path)
       }
 
       return points.length > 0 ? points : undefined

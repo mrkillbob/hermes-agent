@@ -103,7 +103,17 @@ describe('manifest navigation query', () => {
     class FakeNavMesh {
       build = build
       computePath = vi.fn(() => ({
-        getPoint: (index: number) => [new FakeVector3(0, 0, 0), new FakeVector3(4, 0, 0)][index],
+        getPoint: (index: number) => {
+          if (index === 0) {
+            return new FakeVector3(0, 0, 0)
+          }
+
+          if (index === 1) {
+            return new FakeVector3(4, 0, 0)
+          }
+
+          return undefined
+        },
         getPointCount: () => 2,
         destroy: vi.fn()
       }))
@@ -150,7 +160,7 @@ describe('manifest navigation query', () => {
       { x: 4, y: 0, z: 0 }
     ])
     expect(dispose).toHaveBeenCalledOnce()
-    expect(vectors.every(vector => vector.destroy.mock.calls.length === 1)).toBe(true)
+    expect(vectors.map(vector => vector.destroy.mock.calls.length)).toEqual([1, 1, 1, 1, 1, 1])
 
     query.dispose?.()
     expect(destroy).toHaveBeenCalledOnce()

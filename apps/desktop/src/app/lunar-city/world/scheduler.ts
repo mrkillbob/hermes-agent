@@ -66,6 +66,7 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
   let frameHandle: number | undefined
   let timerHandle: number | undefined
   let timerDeadline: number | undefined
+  let throttleUntil: number | undefined
   let releaseVisibility: (() => void) | undefined
 
   const targetFpsAt = (now: number): 15 | 30 => (now < interactiveUntil ? 30 : 15)
@@ -115,10 +116,19 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
     const now = clock()
 
     const deadline = visualDeadline
+    const throttleDeadline = throttleUntil
 
     if (!dirty && deadline === undefined) {
       return
     }
+
+    if (throttleDeadline !== undefined && throttleDeadline > now) {
+      ensureTimer(throttleDeadline, now)
+
+      return
+    }
+
+    throttleUntil = undefined
 
     if (!dirty && deadline !== undefined && deadline > now) {
       ensureTimer(deadline, now)
@@ -168,11 +178,13 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
     }
 
     if (lastFrameAt !== undefined && now - lastFrameAt < interval) {
-      scheduleAt(lastFrameAt + interval)
+      throttleUntil = lastFrameAt + interval
+      ensureTimer(throttleUntil, now)
 
       return false
     }
 
+    throttleUntil = undefined
     const elapsedMs = lastFrameAt === undefined ? interval : Math.max(0, now - lastFrameAt)
     dirty = false
     visualDeadline = undefined
@@ -180,7 +192,8 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
     const needsAnotherFrame = options.onFrame({ elapsedMs, now, targetFps }) === true
 
     if (needsAnotherFrame || now < interactiveUntil) {
-      scheduleAt(now + interval)
+      throttleUntil = now + interval
+      scheduleAt(throttleUntil)
     }
 
     return true
@@ -202,6 +215,7 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
     if (wasRunnable && !canRender()) {
       dirty = false
       visualDeadline = undefined
+      throttleUntil = undefined
       cancelPending()
       options.renderer.stopRenderLoop?.()
 

@@ -115,6 +115,26 @@ describe('FrameScheduler', () => {
     expect(harness.frames.length).toBeGreaterThan(25)
   })
 
+  it('parks repeated dirty requests behind one timer while waiting for the next allowed frame', () => {
+    const harness = schedulerHarness()
+    harness.scheduler.noteInteraction(0)
+    harness.scheduler.tick(0)
+    harness.requestFrame.mockClear()
+
+    for (let now = 1; now < 20; now += 1) {
+      harness.now(now)
+      harness.scheduler.requestRender()
+      harness.scheduler.tick(now)
+    }
+
+    expect(harness.requestFrame).not.toHaveBeenCalled()
+    expect(harness.setTimer).toHaveBeenCalledWith(expect.any(Function), expect.any(Number))
+
+    harness.scheduler.tick(34)
+
+    expect(harness.frames.length).toBe(2)
+  })
+
   it('keeps context loss paused when document visibility returns until every reason clears', () => {
     const harness = schedulerHarness()
 
