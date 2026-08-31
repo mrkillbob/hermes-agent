@@ -172,8 +172,44 @@ export type CameraIntent =
 export type LunarCityIntent = { kind: 'select-landmark'; landmarkId: string } | { kind: 'clear-selection' }
 
 export type LeaderAnimationState = 'acknowledging' | 'idle' | 'listening' | 'talking' | 'thinking' | 'unavailable'
+export type LeaderId = 'owl' | 'fox' | 'badger' | 'otter' | 'bird' | 'stag'
 
 export type LeaderStateClipMap = Readonly<Record<LeaderAnimationState, string>>
+
+export interface LunarCityLandmarkMetadata {
+  cameraAnchor: Vec3
+  kind: 'landmark' | 'landmark-mesh'
+  modelId: string
+  occlusionGroup: string
+  selectable: boolean
+}
+
+export interface LunarCityLodMetadata {
+  distance: number
+  kind: 'lod'
+  modelId: string
+}
+
+export interface LunarCityLeaderPickMetadata {
+  cameraAnchor: Vec3
+  kind: 'leader'
+  leaderId: LeaderId
+  modelId: 'leaders'
+  occlusionGroup: string
+  selectable: true
+  stateClips: LeaderStateClipMap
+}
+
+export interface LunarCitySharedLeaderSurfaceMetadata {
+  cameraAnchor: Vec3
+  kind: 'leader-shared-surface'
+  modelId: 'leaders'
+  occlusionGroup: string
+  selectable: false
+}
+
+export type LunarCityNodeMetadata =
+  LunarCityLandmarkMetadata | LunarCityLeaderPickMetadata | LunarCityLodMetadata | LunarCitySharedLeaderSurfaceMetadata
 
 export interface LunarCityWorldHandle {
   readonly leaderStateClips: ReadonlyMap<string, LeaderStateClipMap>
@@ -195,8 +231,8 @@ export interface BabylonMutableVectorLike {
 
 export interface BabylonNodeLike {
   name: string
-  metadata?: unknown
-  parent?: unknown
+  metadata?: Record<string, unknown> & { lunarCity?: LunarCityNodeMetadata }
+  parent?: BabylonNodeLike | null
   position?: BabylonMutableVectorLike
   rotation?: BabylonMutableVectorLike
   scaling?: BabylonMutableVectorLike
@@ -205,6 +241,7 @@ export interface BabylonNodeLike {
 
 export interface BabylonMeshLike extends BabylonNodeLike {
   freezeWorldMatrix?(): void
+  isPickable?: boolean
 }
 
 export interface BabylonMaterialLike {

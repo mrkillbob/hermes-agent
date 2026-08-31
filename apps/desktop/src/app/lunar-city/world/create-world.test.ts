@@ -3,14 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // @vitest-environment jsdom
 import actualManifest from '../../../../public/lunar-city/v2/world-manifest.v2.json'
 import { parseWorldManifest } from '../manifest'
-import type { LeaderStateClipMap, LunarCityWorldModules, WorldManifestV2 } from '../model'
+import type { LeaderStateClipMap, LunarCityLeaderPickMetadata, LunarCityWorldModules, WorldManifestV2 } from '../model'
 
 import { createLunarCityWorld } from './create-world'
 
 interface FakeNode {
   name: string
   metadata?: Record<string, unknown>
-  parent?: unknown
+  parent?: FakeNode | null
+  isPickable?: boolean
   position: { set: ReturnType<typeof vi.fn> }
   rotation: { set: ReturnType<typeof vi.fn> }
   scaling: { set: ReturnType<typeof vi.fn> }
@@ -37,20 +38,17 @@ function fakeNode(name: string, metadata?: Record<string, unknown>): FakeNode {
   }
 }
 
-function fakeRuntime() {
+function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolean } = {}) {
   const engines: FakeEngine[] = []
   const scenes: FakeScene[] = []
   const loadedUrls: string[] = []
   const roots = new Map<string, FakeNode>()
   const lodNodes = new Map<string, FakeNode>()
   const placements = new Map<string, FakeNode>()
+  const leaderMeshes = new Map<string, FakeNode>()
+  const leaderNodes = new Map<string, FakeNode>()
 
-  const frozenMeshes: Array<{
-    freezeWorldMatrix: ReturnType<typeof vi.fn>
-    metadata?: unknown
-    modelId: string
-    parent?: unknown
-  }> = []
+  const frozenMeshes: Array<FakeNode & { freezeWorldMatrix: ReturnType<typeof vi.fn>; modelId: string }> = []
 
   const frozenMaterials: Array<{ freeze: ReturnType<typeof vi.fn>; modelId: string }> = []
 
@@ -117,7 +115,7 @@ function fakeRuntime() {
 
   class FakeTransformNode implements FakeNode {
     metadata?: Record<string, unknown>
-    parent?: unknown
+    parent?: FakeNode | null
     position = { set: vi.fn() }
     rotation = { set: vi.fn() }
     scaling = { set: vi.fn() }
@@ -145,30 +143,46 @@ function fakeRuntime() {
 
     const transformNodes: FakeNode[] = [root, near, far]
 
+    const leaderPickMeshes: Array<FakeNode & { freezeWorldMatrix: ReturnType<typeof vi.fn>; modelId: string }> = []
+
     if (modelId === 'leaders') {
-      for (const leaderId of ['owl', 'fox', 'badger', 'otter', 'bird', 'stag']) {
-        transformNodes.push(
-          fakeNode(`leader:${leaderId}`, {
-            gltf: {
-              extras: {
-                leaderId,
-                stateClips: leaderStateClips(leaderId)
-              }
+      for (const [index, leaderId] of ['owl', 'fox', 'badger', 'otter', 'bird', 'stag'].entries()) {
+        const leaderNode = fakeNode(opaqueLeaderNames ? `identity-node-${index}` : `leader:${leaderId}`, {
+          gltf: {
+            extras: {
+              leaderId,
+              stateClips: leaderStateClips(leaderId)
             }
-          })
-        )
+          }
+        })
+
+        const leaderChild = fakeNode(`render-node-${index}`)
+
+        const leaderMesh = {
+          ...fakeNode(`pick-surface-${index}`),
+          freezeWorldMatrix: vi.fn(),
+          modelId,
+          parent: leaderChild
+        }
+
+        leaderChild.parent = leaderNode
+        leaderMeshes.set(leaderId, leaderMesh)
+        leaderNodes.set(leaderId, leaderNode)
+        leaderPickMeshes.push(leaderMesh)
+        transformNodes.push(leaderNode, leaderChild)
       }
     }
 
     const mesh = { ...fakeNode('__root__'), freezeWorldMatrix: vi.fn(), modelId }
     const material = { freeze: vi.fn(), modelId }
     frozenMeshes.push(mesh)
+    frozenMeshes.push(...leaderPickMeshes)
     frozenMaterials.push(material)
     scene.materials.push(material)
 
     return {
       animationGroups: [],
-      meshes: [mesh],
+      meshes: [mesh, ...leaderPickMeshes],
       particleSystems: [],
       skeletons: [],
       transformNodes,
@@ -196,6 +210,8 @@ function fakeRuntime() {
     ImportMeshAsync,
     loadedUrls,
     lodNodes,
+    leaderMeshes,
+    leaderNodes,
     modules,
     placements,
     roots,
@@ -273,6 +289,47 @@ describe('createLunarCityWorld', () => {
     expect(handle.leaderStateClips.get('fox')).toEqual(leaderStateClips('fox'))
     expect(handle.leaderStateClips.get('badger')?.talking).toBe('leader:badger:talking')
     expect(handle.leaderStateClips.get('fox')?.talking).not.toBe('talking')
+    handle.destroy()
+  })
+
+  it('tags every selectable leader node and mesh with structured identity metadata', async () => {
+    const runtime = fakeRuntime({ opaqueLeaderNames: true })
+
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+
+    for (const leaderId of ['owl', 'fox', 'badger', 'otter', 'bird', 'stag']) {
+      const leaderNode = runtime.leaderNodes.get(leaderId)!
+      const pickedMesh = runtime.leaderMeshes.get(leaderId)!
+      const pickMetadata = (pickedMesh.metadata as { lunarCity?: LunarCityLeaderPickMetadata }).lunarCity
+
+      expect(leaderNode.name).not.toContain(leaderId)
+      expect(pickedMesh.name).not.toContain(leaderId)
+      expect(leaderNode.metadata?.lunarCity).toMatchObject({
+        kind: 'leader',
+        leaderId,
+        modelId: 'leaders',
+        selectable: true,
+        stateClips: leaderStateClips(leaderId)
+      })
+      expect(pickedMesh.isPickable).toBe(true)
+      expect(pickMetadata).toMatchObject({
+        kind: 'leader',
+        leaderId,
+        modelId: 'leaders',
+        selectable: true,
+        stateClips: leaderStateClips(leaderId)
+      })
+      expect(pickMetadata?.leaderId).toBe(leaderId)
+    }
+
+    const sharedLeaderSurface = runtime.frozenMeshes.find(
+      mesh => mesh.modelId === 'leaders' && mesh.name === '__root__'
+    )!
+
+    expect(sharedLeaderSurface.isPickable).toBe(false)
+    expect(sharedLeaderSurface.metadata).toMatchObject({
+      lunarCity: { kind: 'leader-shared-surface', modelId: 'leaders', selectable: false }
+    })
     handle.destroy()
   })
 

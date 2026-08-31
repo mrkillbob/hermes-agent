@@ -3,8 +3,10 @@ import type {
   BabylonNodeLike,
   CameraIntent,
   LeaderAnimationState,
+  LeaderId,
   LeaderStateClipMap,
   LunarCityIntent,
+  LunarCityNodeMetadata,
   LunarCitySnapshot,
   LunarCityWorldModules,
   ModelManifestEntry,
@@ -21,7 +23,7 @@ const LEADER_STATES: readonly LeaderAnimationState[] = [
   'unavailable'
 ]
 
-const LEADER_IDS = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag'] as const
+const LEADER_IDS = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag'] as const satisfies readonly LeaderId[]
 
 export interface LunarCitySceneHandle {
   readonly leaderStateClips: ReadonlyMap<string, LeaderStateClipMap>
@@ -36,7 +38,7 @@ function metadataRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
 }
 
-function tagNode(node: BabylonNodeLike, lunarCity: Record<string, unknown>): void {
+function tagNode(node: BabylonNodeLike, lunarCity: LunarCityNodeMetadata): void {
   node.metadata = { ...metadataRecord(node.metadata), lunarCity }
 }
 
@@ -106,7 +108,7 @@ function gltfExtras(node: BabylonNodeLike): Record<string, unknown> {
   return metadataRecord(gltf.extras)
 }
 
-function readLeaderStateClips(node: BabylonNodeLike, leaderId: string): LeaderStateClipMap {
+function readLeaderStateClips(node: BabylonNodeLike, leaderId: LeaderId): LeaderStateClipMap {
   const extras = gltfExtras(node)
 
   if (extras.leaderId !== leaderId) {
@@ -129,18 +131,111 @@ function readLeaderStateClips(node: BabylonNodeLike, leaderId: string): LeaderSt
   return Object.freeze(Object.fromEntries(entries)) as LeaderStateClipMap
 }
 
-function retainLeaderStateClips(
-  result: BabylonImportResultLike,
-  leaderStateClips: Map<string, LeaderStateClipMap>
-): void {
-  for (const leaderId of LEADER_IDS) {
-    const node = findNode(result, `leader:${leaderId}`)
+interface StructuredLeader {
+  id: LeaderId
+  node: BabylonNodeLike
+  stateClips: LeaderStateClipMap
+}
 
-    if (!node) {
-      throw new Error(`leaders GLB is missing leader:${leaderId}`)
+function isLeaderId(value: unknown): value is LeaderId {
+  return typeof value === 'string' && LEADER_IDS.some(leaderId => leaderId === value)
+}
+
+function readStructuredLeaders(result: BabylonImportResultLike): readonly StructuredLeader[] {
+  const leaders = new Map<LeaderId, StructuredLeader>()
+
+  for (const node of new Set(allImportedNodes(result))) {
+    const extras = gltfExtras(node)
+
+    if (!('leaderId' in extras) && !('stateClips' in extras)) {
+      continue
     }
 
-    leaderStateClips.set(leaderId, readLeaderStateClips(node, leaderId))
+    if (!isLeaderId(extras.leaderId)) {
+      throw new Error('leaders GLB contains state metadata without a recognized leaderId')
+    }
+
+    if (leaders.has(extras.leaderId)) {
+      throw new Error(`leaders GLB contains duplicate structured identity for ${extras.leaderId}`)
+    }
+
+    leaders.set(extras.leaderId, {
+      id: extras.leaderId,
+      node,
+      stateClips: readLeaderStateClips(node, extras.leaderId)
+    })
+  }
+
+  return LEADER_IDS.map(leaderId => {
+    const leader = leaders.get(leaderId)
+
+    if (!leader) {
+      throw new Error(`leaders GLB is missing structured identity for ${leaderId}`)
+    }
+
+    return leader
+  })
+}
+
+function belongsToLeader(node: BabylonNodeLike, leaderNode: BabylonNodeLike): boolean {
+  const visited = new Set<BabylonNodeLike>()
+  let current: BabylonNodeLike | null | undefined = node
+
+  while (current && !visited.has(current)) {
+    if (current === leaderNode) {
+      return true
+    }
+
+    visited.add(current)
+    current = current.parent
+  }
+
+  return false
+}
+
+function retainLeaderIdentityMetadata(
+  result: BabylonImportResultLike,
+  leaderStateClips: Map<string, LeaderStateClipMap>,
+  model: ModelManifestEntry
+): void {
+  const leaders = readStructuredLeaders(result)
+
+  for (const leader of leaders) {
+    leaderStateClips.set(leader.id, leader.stateClips)
+  }
+
+  for (const node of new Set(allImportedNodes(result))) {
+    const leader = leaders.find(entry => belongsToLeader(node, entry.node))
+    const mesh = result.meshes.find(candidate => candidate === node)
+
+    if (!leader) {
+      if (mesh) {
+        mesh.isPickable = false
+        tagNode(mesh, {
+          cameraAnchor: model.cameraAnchor,
+          kind: 'leader-shared-surface',
+          modelId: 'leaders',
+          occlusionGroup: model.occlusionGroup,
+          selectable: false
+        })
+      }
+
+      continue
+    }
+
+    if (mesh) {
+      mesh.isPickable = true
+    }
+
+    tagNode(node, {
+      cameraAnchor: model.cameraAnchor,
+      kind: 'leader',
+      leaderId: leader.id,
+      modelId: 'leaders',
+      occlusionGroup: model.occlusionGroup,
+      selectable: true,
+      stateClips: leader.stateClips
+    })
   }
 }
 
@@ -196,7 +291,7 @@ export async function createWorldScene(
       placeModel(result, model, modules, scene)
 
       if (model.id === 'leaders') {
-        retainLeaderStateClips(result, leaderStateClips)
+        retainLeaderIdentityMetadata(result, leaderStateClips, model)
       }
 
       freezeStaticResources(result, scene.materials?.slice(materialStart) ?? [], model)
