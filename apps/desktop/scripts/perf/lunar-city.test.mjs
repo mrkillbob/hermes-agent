@@ -257,4 +257,7 @@ test('rejects forged summaries and nonfinite or unbounded raw samples', () => {
 
   const unbounded = validateReceipt(receipt({ rawSamples: samples({ frameMs: Array(10001).fill(18) }) }))
   assert.match(unbounded.errors.join('\n'), /sample.*bound|too many/i)
+
+  const unboundedMetric = validateReceipt(receipt({ visibleTriangles: Number.MAX_VALUE }))
+  assert.match(unboundedMetric.errors.join('\n'), /visibleTriangles.*unbounded/i)
 })

@@ -240,6 +240,9 @@ function validateCommonShape(receipt, errors) {
   ) {
     errors.push('buildStamp must be a nonempty string or stamp object')
   }
+  if (isRecord(receipt.buildStamp) && Object.keys(receipt.buildStamp).length === 0) {
+    errors.push('buildStamp object must not be empty')
+  }
   if (
     receipt.timestamp !== undefined &&
     (typeof receipt.timestamp !== 'string' || Number.isNaN(Date.parse(receipt.timestamp)))
@@ -290,6 +293,8 @@ function validateCommonShape(receipt, errors) {
   ]) {
     if (field in receipt && (!isFiniteNumber(receipt[field]) || receipt[field] < 0)) {
       errors.push(`${field} must be a nonnegative finite number`)
+    } else if (field in receipt && receipt[field] > THRESHOLDS.maxRawValue) {
+      errors.push(`${field} contains an unbounded value`)
     }
   }
 }
@@ -308,6 +313,9 @@ function validateEnvironment(environment, errors) {
     'backendMode'
   ]) {
     addRequired(errors, environment, field, `environment.${field}`)
+    if (field in environment && (typeof environment[field] !== 'string' || environment[field].length === 0)) {
+      errors.push(`environment.${field} must be a nonempty string`)
+    }
   }
   addRequired(errors, environment, 'windowSize', 'environment.windowSize')
   addRequired(errors, environment, 'displayScale', 'environment.displayScale')
