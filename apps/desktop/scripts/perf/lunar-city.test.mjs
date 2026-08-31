@@ -558,11 +558,38 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   )
   assert.match(recovered.errors.join('\n'), /final.*recovered|later context loss|lifecycle/i)
 
+  const truthfulDisposal = structuredClone(rawProvenance)
+  const terminal = truthfulDisposal.mountedCity.samples.at(-1).rendererMetrics
+  terminal.lifecycleActions.disposals = 1
+  terminal.lifecycleState = 'disposed'
+  terminal.population = { observed: 0, active: 0, lodMix: {}, source: 'route-unmounted' }
+  terminal.populationSourceMix = {}
+  terminal.qualityTier = 'Disposed'
+  terminal.internalRenderScale = 0
+  terminal.cameraState = 'unmounted'
+  terminal.dialogueState = 'closed'
+  const truthfulDisposed = validateReceipt(
+    receipt({
+      evidenceClass: 'fake-backend-packaged',
+      scenario: 'disposal',
+      disposal: 'disposed',
+      lifecycleState: 'disposed',
+      rawSamples,
+      rawProvenance: truthfulDisposal,
+      population: packagedPopulation
+    })
+  )
+  assert.equal(truthfulDisposed.packagedPerformanceEligible, true, truthfulDisposed.errors.join('; '))
+
   const disposedThenRemounted = structuredClone(rawProvenance)
   disposedThenRemounted.mountedCity.samples.forEach((sample, index) => {
-    sample.rendererMetrics.lifecycleActions.disposals = [0, 1, 1, 2, 2][index]
-    sample.rendererMetrics.lifecycleState = ['mounted', 'disposed', 'mounted', 'disposed', 'disposed'][index]
-    if (index >= 2) sample.rendererMetrics.sceneMount = { id: 'scene-2', generation: 2, startedAtMs: 15_000 }
+    sample.rendererMetrics.lifecycleActions.disposals = index === 4 ? 1 : 0
+    sample.rendererMetrics.lifecycleState = index === 4 ? 'disposed' : 'mounted'
+    if (index === 4) {
+      sample.rendererMetrics.sceneMount = { id: 'scene-2', generation: 2, startedAtMs: 30_000 }
+      sample.rendererMetrics.population = { observed: 0, active: 0, lodMix: {}, source: 'route-unmounted' }
+      sample.rendererMetrics.populationSourceMix = {}
+    }
   })
   const disposed = validateReceipt(
     receipt({
@@ -576,6 +603,81 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
     })
   )
   assert.match(disposed.errors.join('\n'), /final.*disposed|remount|lifecycle/i)
+
+  for (const [label, mutate, pattern] of [
+    [
+      'zero without prior mounted population',
+      provenance => {
+        for (const sample of provenance.mountedCity.samples) {
+          sample.rendererMetrics.population = { observed: 0, active: 0, lodMix: {}, source: 'route-unmounted' }
+          sample.rendererMetrics.populationSourceMix = {}
+        }
+      },
+      /prior.*mounted|empty city|positive/i
+    ],
+    [
+      'early zero population',
+      provenance => {
+        provenance.mountedCity.samples[2].rendererMetrics.population = {
+          observed: 0,
+          active: 0,
+          lodMix: {},
+          source: 'route-unmounted'
+        }
+        provenance.mountedCity.samples[2].rendererMetrics.populationSourceMix = {}
+      },
+      /terminal|empty city|population/i
+    ],
+    [
+      'multiple disposal transitions',
+      provenance => {
+        provenance.mountedCity.samples[3].rendererMetrics.lifecycleActions.disposals = 1
+        provenance.mountedCity.samples[3].rendererMetrics.lifecycleState = 'disposed'
+        provenance.mountedCity.samples.at(-1).rendererMetrics.lifecycleActions.disposals = 2
+      },
+      /multiple|exactly one|post-disposal|lifecycle/i
+    ],
+    [
+      'stale nonzero terminal population',
+      provenance => {
+        const final = provenance.mountedCity.samples.at(-1).rendererMetrics
+        final.lifecycleActions.disposals = 1
+        final.lifecycleState = 'disposed'
+        final.population = { observed: 100, active: 100, lodMix: { near: 100 }, source: 'fake-backend' }
+        final.populationSourceMix = { 'fake-backend': 100 }
+      },
+      /route-unmounted|terminal.*population|zero/i
+    ],
+    [
+      'post-disposal sample',
+      provenance => {
+        provenance.mountedCity.samples[3].rendererMetrics.lifecycleActions.disposals = 1
+        provenance.mountedCity.samples[3].rendererMetrics.lifecycleState = 'disposed'
+        const final = provenance.mountedCity.samples.at(-1).rendererMetrics
+        final.lifecycleActions.disposals = 1
+        final.lifecycleState = 'disposed'
+        final.population = { observed: 0, active: 0, lodMix: {}, source: 'route-unmounted' }
+        final.populationSourceMix = {}
+      },
+      /terminal|post-disposal|exactly one|lifecycle/i
+    ]
+  ]) {
+    const adversarial = structuredClone(truthfulDisposal)
+    mutate(adversarial)
+    const result = validateReceipt(
+      receipt({
+        evidenceClass: 'fake-backend-packaged',
+        scenario: 'disposal',
+        disposal: 'disposed',
+        lifecycleState: 'disposed',
+        rawSamples,
+        rawProvenance: adversarial,
+        population: packagedPopulation
+      })
+    )
+    assert.equal(result.packagedPerformanceEligible, false, label)
+    assert.match(result.errors.join('\n'), pattern, label)
+  }
 })
 
 test('reports balanced overview draw calls over the hard limit', () => {

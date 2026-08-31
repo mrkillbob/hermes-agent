@@ -393,7 +393,7 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
       clock: deps.clock
     })
     const rawProvenance = { provenanceVersion: LUNAR_CITY_PROVENANCE_VERSION, baselineShell, mountedCity }
-    const derived = deriveRawSamplesFromProvenance(rawProvenance)
+    const derived = deriveRawSamplesFromProvenance(rawProvenance, { scenario: options.scenario })
     if (
       derived.rendererIdentity.pid !== connected.handshake.rendererIdentity.pid ||
       derived.rendererIdentity.startedAtMs !== connected.handshake.rendererIdentity.startedAtMs
@@ -421,6 +421,7 @@ function parseArgs(argv) {
     const value = argv[index]
     if (value === '--binary') result.binaryPath = argv[++index]
     else if (value === '--sha') result.expectedGitSha = argv[++index]
+    else if (value === '--scenario') result.scenario = argv[++index]
     else throw new Error(`unknown Lunar City performance argument: ${value}`)
   }
   return result

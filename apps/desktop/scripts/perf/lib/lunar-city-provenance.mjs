@@ -135,7 +135,7 @@ function validateRendererMetrics(metrics, identity, label, allowEmpty) {
     fail(`${label} lifecycle state is unavailable`)
 }
 
-function validatePhase(envelope, expectedPhase) {
+function validatePhase(envelope, expectedPhase, scenario) {
   if (!isRecord(envelope)) fail(`${expectedPhase} envelope is unavailable`)
   if (envelope.envelopeVersion !== LUNAR_CITY_PHASE_ENVELOPE_VERSION) {
     fail(`${expectedPhase} envelopeVersion must equal ${LUNAR_CITY_PHASE_ENVELOPE_VERSION}`)
@@ -148,6 +148,7 @@ function validatePhase(envelope, expectedPhase) {
     fail(`${expectedPhase} samples are unavailable`)
 
   let previousTimestamp = -1
+  const terminalDisposal = expectedPhase === 'mounted-city' && scenario === 'disposal'
   for (const [index, sample] of envelope.samples.entries()) {
     const label = `${expectedPhase} sample ${index}`
     if (!isRecord(sample) || !isFiniteNumber(sample.timestampMs) || sample.timestampMs < 0) {
@@ -160,7 +161,10 @@ function validatePhase(envelope, expectedPhase) {
       sample.rendererMetrics,
       envelope.rendererIdentity,
       label,
-      expectedPhase === 'baseline-shell'
+      expectedPhase === 'baseline-shell' ||
+        (terminalDisposal &&
+          index === envelope.samples.length - 1 &&
+          sample.rendererMetrics?.lifecycleState === 'disposed')
     )
     if (!sample.processMetrics.some(row => row.pid === envelope.rendererIdentity.pid)) {
       fail(`${label} does not retain the renderer app.getAppMetrics row`)
@@ -187,13 +191,38 @@ function validatePhase(envelope, expectedPhase) {
     }
   }
   if (expectedPhase === 'mounted-city') {
-    const expected = JSON.stringify(envelope.samples[0].rendererMetrics.population)
-    if (envelope.samples.some(sample => JSON.stringify(sample.rendererMetrics.population) !== expected)) {
+    let mountedSamples = envelope.samples
+    if (terminalDisposal) {
+      if (envelope.samples.length < 2) fail('disposal requires positive prior mounted samples before terminal disposal')
+      const terminal = envelope.samples.at(-1).rendererMetrics
+      mountedSamples = envelope.samples.slice(0, -1)
+      if (mountedSamples.some(sample => sample.rendererMetrics.lifecycleState !== 'mounted'))
+        fail('disposal must be exactly one terminal transition with no post-disposal samples')
+      if (
+        mountedSamples.some(sample => sample.rendererMetrics.lifecycleActions.disposals !== 0) ||
+        terminal.lifecycleState !== 'disposed' ||
+        terminal.lifecycleActions.disposals !== 1
+      )
+        fail('disposal requires exactly one terminal lifecycle transition')
+      if (
+        terminal.population.observed !== 0 ||
+        terminal.population.active !== 0 ||
+        Object.keys(terminal.population.lodMix).length !== 0 ||
+        terminal.population.source !== 'route-unmounted' ||
+        Object.keys(terminal.populationSourceMix).length !== 0
+      )
+        fail('disposal terminal population must be zero and route-unmounted')
+      const mount = JSON.stringify(mountedSamples[0].rendererMetrics.sceneMount)
+      if (envelope.samples.some(sample => JSON.stringify(sample.rendererMetrics.sceneMount) !== mount))
+        fail('disposal requires one unchanged scene mount with no remount')
+    }
+    const expected = JSON.stringify(mountedSamples[0].rendererMetrics.population)
+    if (mountedSamples.some(sample => JSON.stringify(sample.rendererMetrics.population) !== expected)) {
       fail('mounted-city exact population must remain consistent across samples')
     }
     for (const field of ['qualityTier', 'internalRenderScale', 'populationSourceMix', 'environment']) {
-      const first = JSON.stringify(envelope.samples[0].rendererMetrics[field])
-      if (envelope.samples.some(sample => JSON.stringify(sample.rendererMetrics[field]) !== first))
+      const first = JSON.stringify(mountedSamples[0].rendererMetrics[field])
+      if (mountedSamples.some(sample => JSON.stringify(sample.rendererMetrics[field]) !== first))
         fail(`mounted-city ${field} must remain consistent across samples`)
     }
   }
@@ -218,12 +247,12 @@ function rendererRssMiB(sample, rendererPid) {
  * CPU and GPU deltas are measured against the baseline-shell average. Renderer
  * RSS remains an absolute series so the receipt validator derives its drift.
  */
-export function deriveRawSamplesFromProvenance(provenance) {
+export function deriveRawSamplesFromProvenance(provenance, { scenario } = {}) {
   if (!isRecord(provenance) || provenance.provenanceVersion !== LUNAR_CITY_PROVENANCE_VERSION) {
     fail(`provenanceVersion must equal ${LUNAR_CITY_PROVENANCE_VERSION}`)
   }
-  validatePhase(provenance.baselineShell, 'baseline-shell')
-  validatePhase(provenance.mountedCity, 'mounted-city')
+  validatePhase(provenance.baselineShell, 'baseline-shell', scenario)
+  validatePhase(provenance.mountedCity, 'mounted-city', scenario)
   if (!sameIdentity(provenance.baselineShell.rendererIdentity, provenance.mountedCity.rendererIdentity)) {
     fail('renderer lifetime identity changed between baseline-shell and mounted-city')
   }
@@ -239,6 +268,7 @@ export function deriveRawSamplesFromProvenance(provenance) {
   const gpuMemoryDeltaMiB = city.map(sample => sample.rendererMetrics.gpuMemoryMiB - baselineGpu)
   const residentMemoryMiB = city.map(sample => rendererRssMiB(sample, identity.pid))
   const lastMetrics = city.at(-1).rendererMetrics
+  const claimMetrics = scenario === 'disposal' ? city.at(-2).rendererMetrics : lastMetrics
 
   return {
     rendererIdentity: { ...identity },
@@ -246,14 +276,14 @@ export function deriveRawSamplesFromProvenance(provenance) {
     mountedClaims: {
       durationMs: city.at(-1).timestampMs - city[0].timestampMs,
       warmupDurationMs: provenance.mountedCity.warmupDurationMs,
-      population: structuredClone(lastMetrics.population),
-      populationSourceMix: structuredClone(lastMetrics.populationSourceMix),
-      qualityTier: lastMetrics.qualityTier,
-      internalRenderScale: lastMetrics.internalRenderScale,
-      cameraState: lastMetrics.cameraState,
-      cameraActions: structuredClone(lastMetrics.cameraActions),
-      dialogueState: lastMetrics.dialogueState,
-      dialogueActions: structuredClone(lastMetrics.dialogueActions),
+      population: structuredClone(claimMetrics.population),
+      populationSourceMix: structuredClone(claimMetrics.populationSourceMix),
+      qualityTier: claimMetrics.qualityTier,
+      internalRenderScale: claimMetrics.internalRenderScale,
+      cameraState: claimMetrics.cameraState,
+      cameraActions: structuredClone(claimMetrics.cameraActions),
+      dialogueState: claimMetrics.dialogueState,
+      dialogueActions: structuredClone(claimMetrics.dialogueActions),
       lifecycleActions: structuredClone(lastMetrics.lifecycleActions),
       lifecycleState: lastMetrics.lifecycleState,
       sceneMount: structuredClone(lastMetrics.sceneMount),
@@ -270,7 +300,7 @@ export function deriveRawSamplesFromProvenance(provenance) {
         timers: city.map(sample => sample.rendererMetrics.timers),
         residentMemoryMiB
       },
-      environment: structuredClone(lastMetrics.environment),
+      environment: structuredClone(claimMetrics.environment),
       rendererIdentity: { ...identity }
     },
     resourceDeltas: {

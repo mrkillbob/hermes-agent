@@ -453,7 +453,7 @@ function validateRawProvenance(receipt, errors) {
   if (!Object.hasOwn(receipt, 'rawProvenance')) return
   let derived
   try {
-    derived = deriveRawSamplesFromProvenance(receipt.rawProvenance)
+    derived = deriveRawSamplesFromProvenance(receipt.rawProvenance, { scenario: receipt.scenario })
   } catch (error) {
     errors.push(error instanceof Error ? error.message : `raw provenance validation failed: ${String(error)}`)
     return
