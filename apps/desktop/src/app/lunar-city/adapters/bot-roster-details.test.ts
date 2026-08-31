@@ -194,6 +194,21 @@ describe('complete Hermes Bots roster details', () => {
     expect(forward.filter(entity => entity.presentation?.placement.lodHint === 1)).toHaveLength(16)
   })
 
+  it('keeps every bounded placement unique across capped-ring and former 256-slot collision boundaries', async () => {
+    const profiles = Array.from({ length: 320 }, (_, index) => `worker-${index.toString().padStart(3, '0')}`)
+    const source = roster(profiles)
+    const result = await enrichBotRosterEntities(source, entities(source), async () => ({
+      profiles: profiles.map(name => ({ name }))
+    }))
+    const bySlot = new Map(result.map(entity => [entity.presentation!.placement.slot, entity.position]))
+
+    expect(new Set(result.map(entity => entity.presentation?.placement.slot)).size).toBe(320)
+    expect(new Set(result.map(entity => JSON.stringify(entity.position))).size).toBe(320)
+    expect(bySlot.get(228)).not.toEqual(bySlot.get(240))
+    expect(bySlot.get(255)).not.toEqual(bySlot.get(256))
+    expect(bySlot.get(319)).toBeDefined()
+  })
+
   it('does not bind unscoped projected members to another exact connection', async () => {
     const source = roster(['steward'], 'desktop-source')
 

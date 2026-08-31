@@ -481,6 +481,116 @@ describe('Lunar City reconciler', () => {
     stop()
   })
 
+  it('does not let an in-flight metadata read consume a newer invalidation generation', async () => {
+    const fleet = atom({
+      agents: [
+        {
+          connectionId: 'local',
+          connectionKind: 'local' as const,
+          connectionLabel: 'This device',
+          handle: '@worker',
+          profile: 'worker'
+        }
+      ],
+      sources: [{ connectionId: 'local', kind: 'local' as const, label: 'This device', reachable: true }]
+    })
+    let emit!: (event: unknown) => void
+    let resolveFirst!: (value: unknown) => void
+    const first = new Promise(resolve => {
+      resolveFirst = resolve
+    })
+    const readProfileRoster = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce({
+        profiles: [{ name: 'worker', ui_meta: { 'hermes-bots': { title: 'New title' } } }]
+      })
+    const stop = startLunarCityReconciler({
+      now: () => 42,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        onEvent: listener => {
+          emit = listener
+
+          return () => undefined
+        },
+        readProfileRoster,
+        refreshFleet: async () => ({ observedAt: 42, status: 'refreshed' })
+      }
+    })
+    await flush()
+    expect(readProfileRoster).toHaveBeenCalledOnce()
+
+    emit({ connectionId: 'local', profile: 'worker', type: 'gateway.ready' })
+    resolveFirst({ profiles: [{ name: 'worker', ui_meta: { 'hermes-bots': { title: 'Old title' } } }] })
+    await flush()
+    await flush()
+    await flush()
+
+    expect(readProfileRoster).toHaveBeenCalledTimes(2)
+    expect([...$lunarCitySnapshot.get().entities.values()][0]?.presentation?.configuredTitle).toBe('New title')
+    stop()
+  })
+
+  it('retains source-owned metadata across a representative-profile change when refresh fails', async () => {
+    let now = 42
+    const initial = {
+      agents: ['alpha', 'beta'].map(profileName => ({
+        connectionId: 'local',
+        connectionKind: 'local' as const,
+        connectionLabel: 'This device',
+        handle: `@${profileName}`,
+        profile: profileName
+      })),
+      sources: [{ connectionId: 'local', kind: 'local' as const, label: 'This device', reachable: true }]
+    }
+    const fleet = atom(initial)
+    const readProfileRoster = vi
+      .fn()
+      .mockResolvedValueOnce({
+        profiles: [
+          { name: 'alpha', ui_meta: { 'hermes-bots': { title: 'Alpha' } } },
+          { name: 'beta', ui_meta: { 'hermes-bots': { groups: ['Engineering Guild'], title: 'Beta Builder' } } }
+        ]
+      })
+      .mockRejectedValueOnce(new Error('metadata refresh failed'))
+    const stop = startLunarCityReconciler({
+      now: () => now,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        readProfileRoster,
+        refreshFleet: async () => ({ observedAt: now, status: 'refreshed' })
+      }
+    })
+    await flush()
+    await flush()
+    now = 100
+    fleet.set({ ...initial, agents: initial.agents.filter(agent => agent.profile === 'beta') })
+    await flush()
+    await flush()
+    await flush()
+
+    expect(readProfileRoster.mock.calls).toEqual([
+      ['local', 'alpha'],
+      ['local', 'beta']
+    ])
+    expect([...$lunarCitySnapshot.get().entities.values()][0]).toMatchObject({
+      destination: 'project',
+      identity: { connectionId: 'local', profile: 'beta' },
+      presentation: {
+        configuredTitle: 'Beta Builder',
+        metadata: { observedAt: 42, source: 'profiles:local', state: 'stale' }
+      }
+    })
+    stop()
+  })
+
   it('marks retained roster data stale when the real fleet refresh helper catches an enumeration rejection', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(42)

@@ -100,6 +100,7 @@ function sameEntity(left: LunarEntity, right: LunarEntity): boolean {
     left.authority === right.authority &&
     left.destination === right.destination &&
     left.animation === right.animation &&
+    left.sourceState === right.sourceState &&
     left.projectId === right.projectId &&
     left.variant === right.variant &&
     JSON.stringify(left.presentation) === JSON.stringify(right.presentation) &&
@@ -513,7 +514,9 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   let fleetReference = sources.$fleetRoster.get()
   let fleetObservedAt = 0
   let forceFleetRefresh = true
-  let refreshBotMetadata = true
+  let requestedBotMetadataGeneration = 1
+  let appliedBotMetadataGeneration = 0
+  let activeBotMetadataGeneration = 0
   let refreshingFleet = false
   let disposed = false
   const botMetadataCache = new Map<string, { observedAt: number; payload: unknown; representativeProfile: string }>()
@@ -542,7 +545,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   const readBotMetadata: ScopedProfilesListRequest = async (connectionId, representativeProfile) => {
     const cached = botMetadataCache.get(connectionId)
 
-    if (!refreshBotMetadata && cached?.representativeProfile === representativeProfile) {
+    if (appliedBotMetadataGeneration >= activeBotMetadataGeneration && cached) {
       return cached.payload
     }
 
@@ -558,7 +561,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
 
       return payload
     } catch (error) {
-      if (cached?.representativeProfile === representativeProfile) {
+      if (cached) {
         botMetadataProvenance.set(connectionId, {
           observedAt: cached.observedAt,
           source: `profiles:${connectionId}`,
@@ -630,15 +633,17 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
           })
         : { entities: [], sources: [] as readonly SourceHealth[] }
       let fleet = normalizedFleet
+      const botMetadataGeneration = requestedBotMetadataGeneration
 
       if (roster && sources.readProfileRoster) {
         if (
-          !refreshBotMetadata &&
+          appliedBotMetadataGeneration >= botMetadataGeneration &&
           enrichedFleetCache?.roster === roster &&
           sameFleetBase(enrichedFleetCache.base, normalizedFleet.entities)
         ) {
           fleet = { ...normalizedFleet, entities: enrichedFleetCache.entities }
         } else {
+          activeBotMetadataGeneration = botMetadataGeneration
           const entities = await enrichBotRosterEntities(
             roster,
             normalizedFleet.entities,
@@ -647,7 +652,8 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
           )
           fleet = { ...normalizedFleet, entities }
           enrichedFleetCache = { base: normalizedFleet.entities, entities, roster }
-          refreshBotMetadata = false
+          appliedBotMetadataGeneration = Math.max(appliedBotMetadataGeneration, botMetadataGeneration)
+          activeBotMetadataGeneration = 0
         }
 
         const currentSources = new Set(roster.sources.map(source => source.connectionId))
@@ -718,7 +724,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       if (roster !== fleetReference) {
         fleetReference = roster
         fleetObservedAt = now()
-        refreshBotMetadata = true
+        requestedBotMetadataGeneration += 1
 
         if (!refreshingFleet) {
           reconciler.invalidate('fleet')
@@ -735,7 +741,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   if (sources.onFocus) {
     disposers.push(
       sources.onFocus(() => {
-        refreshBotMetadata = true
+        requestedBotMetadataGeneration += 1
         reconciler.invalidate('focus')
       })
     )
@@ -745,7 +751,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
     disposers.push(
       sources.onRegistryChange(() => {
         forceFleetRefresh = true
-        refreshBotMetadata = true
+        requestedBotMetadataGeneration += 1
         reconciler.invalidate('registry')
       })
     )
@@ -759,10 +765,10 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
 
         if (type === 'gateway.ready') {
           forceFleetRefresh = true
-          refreshBotMetadata = true
+          requestedBotMetadataGeneration += 1
           reconciler.resetSequences(cursor.scope)
         } else if (type === 'profile.changed' || type === 'profiles.changed' || type === 'profile.ui_meta.changed') {
-          refreshBotMetadata = true
+          requestedBotMetadataGeneration += 1
         }
 
         reconciler.acceptEvent(cursor)

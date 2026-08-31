@@ -41,6 +41,7 @@ function factory(): EntityPresentationFactory & {
   const animated = vi.fn(() => ({
     dispose: vi.fn(),
     setAnimation: vi.fn(),
+    setLod: vi.fn(),
     setPosition: vi.fn(),
     setStaticPose: vi.fn()
   }))
@@ -136,6 +137,40 @@ describe('EntityRegistry', () => {
     registry.reconcile(snapshot(overflow))
 
     expect(registry.instancedGroup('worker:idle:lod:1')?.count).toBe(1)
+  })
+
+  it('promotes one selected overflow worker to LOD0 by replacing a near worker within the strict district budget', () => {
+    const presentationFactory = factory()
+    const workers = Array.from({ length: 26 }, (_, index) =>
+      entity(index, {
+        animation: index === 24 ? 'walk' : 'idle',
+        presentation: {
+          groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+          metadata: { source: 'profiles:local', state: 'fresh' },
+          placement: { lodHint: index >= 24 ? 1 : 0, overflow: index >= 24, slot: index }
+        }
+      })
+    )
+    const selectedOverflow = workers[25]!
+    const otherOverflow = workers[24]!
+    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
+
+    registry.reconcile(snapshot(...workers))
+    registry.applyLodPolicy(
+      () => 0,
+      () => true
+    )
+    registry.setSelection(selectedOverflow.key)
+
+    const activeVisuals = presentationFactory.animated.mock.results
+      .map(result => result.value)
+      .filter(visual => !visual.dispose.mock.calls.length)
+
+    expect(activeVisuals).toHaveLength(24)
+    expect(registry.entity(selectedOverflow.key)?.visual?.setLod).toHaveBeenLastCalledWith(0)
+    expect(registry.entity(otherOverflow.key)?.visual).toBeUndefined()
+    expect(registry.instancedGroup('worker:idle:lod:1')?.count).toBe(1)
+    expect(registry.instancedGroup('worker:walk:lod:1')?.count).toBe(1)
   })
 
   it('releases removed presentation resources once without disturbing unrelated entities', () => {

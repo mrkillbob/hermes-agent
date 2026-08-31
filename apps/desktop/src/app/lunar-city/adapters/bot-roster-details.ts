@@ -45,7 +45,6 @@ const MAX_PROJECTED_ROOMS = 128
 const MAX_ROOM_MEMBERS = 512
 const MAX_PRESENTATION_CHARS = 160
 const NEAR_WORKER_BUDGET = 24
-const DISTRICT_SLOT_BUDGET = 256
 
 /**
  * Binding table approved from the live Hermes Bots group inventory. Matching
@@ -274,28 +273,14 @@ function hash(value: string): number {
 }
 
 function stableSlots(keys: readonly EntityKey[]): ReadonlyMap<EntityKey, number> {
-  const slots = new Map<EntityKey, number>()
-  const occupied = new Set<number>()
-
-  for (const key of [...keys].sort()) {
-    let slot = hash(key) % DISTRICT_SLOT_BUDGET
-
-    while (occupied.has(slot) && occupied.size < DISTRICT_SLOT_BUDGET) {
-      slot = (slot + 1) % DISTRICT_SLOT_BUDGET
-    }
-
-    occupied.add(slot)
-    slots.set(key, slot)
-  }
-
-  return slots
+  return new Map([...keys].sort().map((key, index) => [key, index]))
 }
 
 function positionFor(destination: DestinationId, slot: number): Vec3 {
   const anchor = DISTRICT_ANCHORS[destination]
   const ring = Math.floor(slot / 12) + 1
   const angle = ((slot % 12) / 12) * Math.PI * 2
-  const radius = Math.min(12, 1.5 + ring * 0.55)
+  const radius = 1.5 + ring * 0.55
 
   return {
     x: Number((anchor.x + Math.cos(angle) * radius).toFixed(4)),
