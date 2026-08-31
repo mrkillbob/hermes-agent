@@ -455,12 +455,14 @@ export function createLunarCityPerfRuntime(
         }
       }
 
-      case 'dispose':
-        if (route) {
-          disposeRoute(route)
-        }
+      case 'dispose': {
+        const disposingRoute = activeRoute
+
+        navigate('/')
+        await waitFor(() => disposingRoute.disposed && route === undefined, 'route unmount and Babylon world disposal')
 
         return { action: request.action, proof: counters.lifecycleActions.disposals }
+      }
 
       default:
         throw new Error(`Unsupported Lunar City performance action: ${request.action}`)

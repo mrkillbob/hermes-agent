@@ -745,16 +745,48 @@ function belongsToLeader(node: BabylonNodeLike, leaderNode: BabylonNodeLike): bo
   return false
 }
 
+export function leaderCameraAnchor(node: BabylonNodeLike, fallback: Vec3): Vec3 {
+  const visited = new Set<BabylonNodeLike>()
+  let current: BabylonNodeLike | null | undefined = node
+  const anchor = { x: 0, y: 0, z: 0 }
+  let observed = false
+
+  while (current && !visited.has(current)) {
+    visited.add(current)
+    const position = current.position
+
+    if (
+      typeof position?.x === 'number' &&
+      Number.isFinite(position.x) &&
+      typeof position.y === 'number' &&
+      Number.isFinite(position.y) &&
+      typeof position.z === 'number' &&
+      Number.isFinite(position.z)
+    ) {
+      anchor.x += position.x
+      anchor.y += position.y
+      anchor.z += position.z
+      observed = true
+    }
+
+    current = current.parent
+  }
+
+  return observed ? anchor : { ...fallback }
+}
+
 function retainLeaderIdentityMetadata(
   result: BabylonImportResultLike,
   leaderStateClips: Map<string, LeaderStateClipMap>,
   model: ModelManifestEntry,
   cameraAnchor: Vec3
-): void {
+): ReadonlyMap<LeaderId, Vec3> {
   const leaders = readStructuredLeaders(result)
+  const anchors = new Map<LeaderId, Vec3>()
 
   for (const leader of leaders) {
     leaderStateClips.set(leader.id, leader.stateClips)
+    anchors.set(leader.id, leaderCameraAnchor(leader.node, cameraAnchor))
   }
 
   for (const node of new Set(allImportedNodes(result))) {
@@ -782,7 +814,7 @@ function retainLeaderIdentityMetadata(
     }
 
     tagNode(node, {
-      cameraAnchor,
+      cameraAnchor: anchors.get(leader.id)!,
       focusEntityKey: staticFocusKey('leader', leader.id),
       kind: 'leader',
       leaderId: leader.id,
@@ -792,6 +824,8 @@ function retainLeaderIdentityMetadata(
       stateClips: leader.stateClips
     })
   }
+
+  return anchors
 }
 
 function freezeStaticResources(
@@ -1507,7 +1541,7 @@ export async function createWorldScene(
       decorationNodes.push(...allImportedNodes(result).filter(isDecorationNode))
 
       if (model.id === 'leaders') {
-        retainLeaderIdentityMetadata(result, leaderStateClips, model, focus.cameraAnchor)
+        const leaderCameraAnchors = retainLeaderIdentityMetadata(result, leaderStateClips, model, focus.cameraAnchor)
         const importedAnimationGroups = workerAnimationGroups(result)
 
         for (const leaderId of LEADER_IDS) {
@@ -1529,8 +1563,9 @@ export async function createWorldScene(
 
         for (const leaderId of LEADER_IDS) {
           const leaderFocusKey = staticFocusKey('leader', leaderId)
-          focusAnchors.set(leaderFocusKey, () => focus.cameraAnchor)
-          focusMetadata.set(leaderFocusKey, () => ({ ...focus, focusEntityKey: leaderFocusKey }))
+          const cameraAnchor = leaderCameraAnchors.get(leaderId) ?? focus.cameraAnchor
+          focusAnchors.set(leaderFocusKey, () => cameraAnchor)
+          focusMetadata.set(leaderFocusKey, () => ({ ...focus, cameraAnchor, focusEntityKey: leaderFocusKey }))
         }
       }
 

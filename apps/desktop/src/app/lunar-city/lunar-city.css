@@ -279,7 +279,6 @@
   box-shadow:
     0 0 0 3px color-mix(in srgb, var(--ui-green) 16%, transparent),
     0 0 12px color-mix(in srgb, var(--ui-green) 76%, transparent);
-  animation: lunar-city-signal 2.2s ease-in-out infinite;
   pointer-events: none;
   display: none;
 }
@@ -321,10 +320,6 @@
   background: transparent;
   color: var(--ui-accent);
   filter: drop-shadow(0 9px 6px rgb(0 0 0 / 30%));
-  animation-duration: 9s;
-  animation-timing-function: ease-in-out;
-  animation-iteration-count: infinite;
-  animation-delay: var(--worker-delay);
   transform-style: preserve-3d;
   transition: filter 180ms ease;
   opacity: 0;
@@ -377,37 +372,30 @@
 .lunar-city-worker-route-north {
   left: 53%;
   top: 24%;
-  animation-name: lunar-city-route-north;
 }
 .lunar-city-worker-route-west {
   left: 21%;
   top: 24%;
-  animation-name: lunar-city-route-west;
 }
 .lunar-city-worker-route-east {
   left: 72%;
   top: 37%;
-  animation-name: lunar-city-route-east;
 }
 .lunar-city-worker-route-south {
   left: 35%;
   top: 39%;
-  animation-name: lunar-city-route-south;
 }
 .lunar-city-worker-route-center {
   left: 50%;
   top: 46%;
-  animation-name: lunar-city-route-center;
 }
 .lunar-city-worker-route-gate {
   left: 66%;
   top: 48%;
-  animation-name: lunar-city-route-gate;
 }
 .lunar-city-worker-route-transit {
   left: 25%;
   top: 59%;
-  animation-name: lunar-city-route-transit;
 }
 
 .lunar-city-counter {
@@ -611,121 +599,9 @@
   background: rgb(5 10 18 / 94%) !important;
 }
 
-.is-paused .lunar-city-worker,
-.is-paused .lunar-city-building-signal {
-  animation-play-state: paused;
-}
-
-@keyframes lunar-city-route-north {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 32px);
-  }
-  33% {
-    transform: translate3d(-4rem, 2.1rem, 32px);
-  }
-  66% {
-    transform: translate3d(-1.4rem, 5.3rem, 32px);
-  }
-}
-
-@keyframes lunar-city-route-west {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 32px);
-  }
-  38% {
-    transform: translate3d(5rem, 1.8rem, 32px);
-  }
-  72% {
-    transform: translate3d(8rem, 5.5rem, 32px);
-  }
-}
-
-@keyframes lunar-city-route-east {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 32px);
-  }
-  40% {
-    transform: translate3d(-4rem, 2.5rem, 32px);
-  }
-  78% {
-    transform: translate3d(-8rem, 4rem, 32px);
-  }
-}
-
-@keyframes lunar-city-route-south {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 32px);
-  }
-  45% {
-    transform: translate3d(4rem, 1.8rem, 32px);
-  }
-  82% {
-    transform: translate3d(8rem, 4.8rem, 32px);
-  }
-}
-
-@keyframes lunar-city-route-center {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 32px);
-  }
-  35% {
-    transform: translate3d(-3rem, 1.5rem, 32px);
-  }
-  70% {
-    transform: translate3d(3.5rem, 3.6rem, 32px);
-  }
-}
-
-@keyframes lunar-city-route-gate {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 32px);
-  }
-  35% {
-    transform: translate3d(-2.5rem, -1.1rem, 32px);
-  }
-  72% {
-    transform: translate3d(-5rem, 2.8rem, 32px);
-  }
-}
-
-@keyframes lunar-city-route-transit {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 32px);
-  }
-  40% {
-    transform: translate3d(4rem, -1.8rem, 32px);
-  }
-  75% {
-    transform: translate3d(8rem, 0.8rem, 32px);
-  }
-}
-
-@keyframes lunar-city-signal {
-  0%,
-  100% {
-    opacity: 0.55;
-    transform: scale(0.88);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.12);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .lunar-city-world {
     transition: none;
-  }
-  .lunar-city-worker,
-  .lunar-city-building-signal {
-    animation: none;
   }
 }
 

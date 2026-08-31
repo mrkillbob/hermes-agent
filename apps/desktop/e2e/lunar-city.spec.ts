@@ -18,7 +18,9 @@ test.afterAll(async () => {
   fixture = null
 })
 
-test('renders the lunar city and opens a building detail view', async ({ page: _page }, testInfo) => {
+test('renders the live lunar city canvas and its snapshot-backed accessible controls', async ({
+  page: _page
+}, testInfo) => {
   const page = fixture!.page
   const lunarRequests: string[] = []
 
@@ -40,26 +42,18 @@ test('renders the lunar city and opens a building detail view', async ({ page: _
   await expect(canvas).toHaveAttribute('data-world-status', 'ready', { timeout: 30_000 })
   expect(lunarRequests.some(url => /\/v2\/models\/terrain\.glb(?:[?#]|$)/.test(url))).toBe(true)
   expect(lunarRequests.some(url => /moon-settlement-approved\.jpg/i.test(url))).toBe(false)
-  await expect(page.getByRole('button', { name: /Open Library/i })).toBeVisible()
-  await expect(page.getByRole('button', { name: /Open Research Lab/i })).toBeVisible()
-  await expect(page.getByText('MISSIONS')).toBeVisible()
-  await expect(page.getByRole('button', { name: /Inspect .* worker/ }).first()).toBeVisible()
-  await expect(page.getByText('Worker states')).toHaveCount(0)
+  await expect(page.getByRole('complementary', { name: 'Lunar City accessible operations' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: /3D quality/i })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Source health' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Open (Library|Research Lab)/i })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Inspect .* worker/i })).toHaveCount(0)
+  await expect(page.getByText('MISSIONS')).toHaveCount(0)
 
   const viewport = page.getByTestId('lunar-city-viewport')
-  await expect(page.getByRole('button', { name: 'Zoom in' })).toBeVisible()
-  await page.getByRole('button', { name: 'Zoom in' }).click()
-  await expect(viewport).toHaveAttribute('data-zoom', '1')
-  await page.getByRole('button', { name: 'Reset camera' }).click()
-  await expect(viewport).toHaveAttribute('data-zoom', '0')
+  await expect(page.getByRole('button', { name: 'Zoom In' })).toBeVisible()
+  await page.getByRole('button', { name: 'Zoom In' }).click()
+  await expect(viewport).not.toHaveAttribute('data-zoom')
+  await page.getByRole('button', { name: 'Return to City' }).click()
   await page.screenshot({ path: testInfo.outputPath('lunar-city-overview.png'), fullPage: true })
-
-  await page.getByRole('button', { name: /Research Lab/i }).click()
-  await expect(page.getByText('Enter building')).toBeVisible()
-  await page.getByRole('button', { name: 'Enter building' }).click()
-  await expect(page.getByText('Fox Scientist is managing this shift')).toBeVisible()
-  await expect(page.getByText('Observatory', { exact: true })).toBeVisible()
-
-  await page.screenshot({ path: testInfo.outputPath('lunar-city-building.png'), fullPage: true })
   page.off('request', recordLunarRequest)
 })

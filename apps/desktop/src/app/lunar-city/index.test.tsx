@@ -180,6 +180,7 @@ function publishAccessibleEntities(): { leaderKey: never; workerKey: never } {
 
 describe('LunarCity', () => {
   it('opens the world with one ready 3D canvas and no runtime source-art image', async () => {
+    const interval = vi.spyOn(window, 'setInterval')
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
 
     expect(screen.getByRole('heading', { name: 'Lunar City' })).toBeTruthy()
@@ -188,11 +189,11 @@ describe('LunarCity', () => {
     await waitFor(() => expect(canvas.getAttribute('data-world-status')).toBe('ready'))
     expect(globalThis.document.querySelectorAll('canvas')).toHaveLength(1)
     expect(globalThis.document.querySelector('img[src*="moon-settlement-approved.jpg"]')).toBeNull()
-    expect(screen.getByRole('button', { name: /Open Research Lab/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Inspect Fox Scientist' }).getAttribute('data-character-kind')).toBe(
-      'leader'
-    )
-    expect(screen.getByText('SIMULATION')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Open Research Lab/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Inspect Fox Scientist/i })).toBeNull()
+    expect(screen.queryByText('SIMULATION')).toBeNull()
+    expect(screen.queryByText('MISSIONS')).toBeNull()
+    expect(interval.mock.calls.some(([, delay]) => delay === 1_200)).toBe(false)
   })
 
   it('opens exact worker controls from the Babylon entity pick without replacing the city canvas', async () => {
@@ -308,18 +309,6 @@ describe('LunarCity', () => {
     expect(destroyWorld).toHaveBeenCalledOnce()
   })
 
-  it('lets the user enter a building and inspect its rooms', () => {
-    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
-
-    fireEvent.click(screen.getByRole('button', { name: /Open Library/i }))
-    fireEvent.click(screen.getByRole('button', { name: 'Enter building' }))
-
-    expect(screen.getByText('Inside Library')).toBeTruthy()
-    expect(screen.getByText('Owl Librarian is managing this shift')).toBeTruthy()
-    expect(screen.getByText('Consultation desk')).toBeTruthy()
-    expect(screen.getByText('Quiet reading room')).toBeTruthy()
-  })
-
   it('exposes the memory graph escape hatch', () => {
     const onOpenMemoryGraph = vi.fn()
     render(<LunarCity onOpenMemoryGraph={onOpenMemoryGraph} />)
@@ -329,16 +318,15 @@ describe('LunarCity', () => {
     expect(onOpenMemoryGraph).toHaveBeenCalledOnce()
   })
 
-  it('shows live task progress and moving workers without a state legend', () => {
+  it('uses only immutable snapshot entities for its accessible world interactions', async () => {
+    publishAccessibleEntities()
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
 
-    expect(screen.getByText('MISSIONS')).toBeTruthy()
-    expect(screen.getByRole('progressbar', { name: 'Survey the archive' })).toBeTruthy()
-    expect(screen.getAllByRole('button', { name: /Inspect .* worker/ }).length).toBeGreaterThanOrEqual(5)
-    expect(screen.getByRole('button', { name: /Inspect Pip worker/ }).getAttribute('data-worker-design')).toBe(
-      'orbital'
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab/i })).toBeTruthy()
     )
-    expect(screen.queryByText('Worker states')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Inspect .* worker/i })).toBeNull()
+    expect(screen.queryByRole('progressbar')).toBeNull()
     expect(screen.getByTestId('lunar-city-viewport').getAttribute('data-camera')).toBe('angled-simcity')
   })
 
@@ -626,22 +614,66 @@ describe('LunarCity', () => {
     })
   })
 
-  it('advances task progress while the simulation is playing', async () => {
-    vi.useFakeTimers()
+  it('opens the exact profile owner when its physical leader model is picked', async () => {
+    publishAccessibleEntities()
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
 
-    try {
-      render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
-
-      const progress = screen.getByRole('progressbar', { name: 'Survey the archive' })
-      const initialProgress = progress.getAttribute('aria-valuenow')
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1200)
+    act(() =>
+      emitWorldIntent({
+        entityKey:
+          `lunar-city:leader:${leaderModelIdForOwner({ connectionId: 'source-a', profile: 'fox-scientist' })}` as never,
+        kind: 'select-focus'
       })
+    )
 
-      expect(progress.getAttribute('aria-valuenow')).not.toBe(initialProgress)
-    } finally {
-      vi.useRealTimers()
-    }
+    await waitFor(() =>
+      expect(resolveLeaderSession).toHaveBeenCalledWith({ connectionId: 'source-a', profile: 'fox-scientist' })
+    )
+    expect(dispatchCamera).toHaveBeenCalledWith({
+      entityKey: `lunar-city:leader:${leaderModelIdForOwner({ connectionId: 'source-a', profile: 'fox-scientist' })}`,
+      follow: false,
+      kind: 'focus'
+    })
+    expect(screen.getByRole('dialog', { name: 'fox-scientist leader conversation' })).toBeTruthy()
+  })
+
+  it('requires exact-profile disambiguation when one physical leader model has multiple owners', async () => {
+    const owners = Array.from({ length: 100 }, (_, index) => ({
+      connectionId: 'source-a',
+      profile: `profile-${index}`
+    }))
+
+    const first = owners[0]!
+    const modelId = leaderModelIdForOwner(first)
+    const second = owners.find(owner => owner.profile !== first.profile && leaderModelIdForOwner(owner) === modelId)!
+
+    const entities = [first, second].map(owner => {
+      const identity = { ...owner, kind: 'profile' as const }
+      const key = entityKey(identity)
+
+      return [
+        key,
+        {
+          animation: 'rest' as const,
+          authority: 'authoritative' as const,
+          destination: 'council' as const,
+          identity,
+          key,
+          observedAt: 42
+        }
+      ] as const
+    })
+
+    $lunarCitySnapshot.set({ entities: new Map(entities), observedAt: 42, revision: 1, sources: [] })
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+
+    act(() => emitWorldIntent({ entityKey: `lunar-city:leader:${modelId}` as never, kind: 'select-focus' }))
+
+    expect(resolveLeaderSession).not.toHaveBeenCalled()
+    const chooser = screen.getByRole('region', { name: `Choose exact ${modelId} profile` })
+    fireEvent.click(chooser.querySelector(`button[aria-label="Talk to ${second.profile} leader"]`)!)
+    await waitFor(() => expect(resolveLeaderSession).toHaveBeenCalledWith(second))
   })
 })

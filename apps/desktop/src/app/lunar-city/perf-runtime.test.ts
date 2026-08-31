@@ -55,6 +55,57 @@ describe('Lunar City route-local packaged metrics runtime', () => {
     expect(runtime.registerRoute).toBeUndefined()
   })
 
+  it('does not report disposal until navigation has actually unmounted the registered route', async () => {
+    let request!: (action: string, payload: unknown) => Promise<unknown>
+    const navigate = vi.fn()
+
+    const runtime = createLunarCityPerfRuntime(
+      {
+        onRequest: callback => {
+          request = callback
+
+          return vi.fn()
+        }
+      },
+      { actionTimeoutMs: 20, navigate }
+    )
+
+    runtime.registerRoute!({
+      canvas: document.createElement('canvas'),
+      getCameraPose: () => ({ alpha: 0, beta: 0, radius: 1 }),
+      getCameraState: () => ({ focusedEntityKey: undefined, following: false }),
+      getCitySnapshot: () => city,
+      getDialogueState: () => 'idle',
+      getInteriorState: () => false,
+      getQuality: () => ({ internalRenderScale: 1, qualityTier: 'efficient' }),
+      getWorldGeneration: () => 1,
+      getWorldMetrics: () => ({
+        activeAnimations: 0,
+        drawCalls: 1,
+        entities: 2,
+        frameMs: 1,
+        frameTimestampsMs: [],
+        listeners: 1,
+        rafs: 1,
+        renderFrames: 1,
+        targetFps: 15,
+        textures: 1,
+        timers: 0,
+        visibleTriangles: 1,
+        worldUpdateMs: 1,
+        worldUpdateTimestampsMs: []
+      }),
+      performLeaderDialogue: vi.fn(),
+      setInterior: vi.fn(),
+      setQuality: vi.fn(),
+      worldAction: vi.fn()
+    })
+
+    await expect(request('scenario-action', { action: 'dispose', payload: {} })).rejects.toThrow(/unmount/i)
+    expect(navigate).toHaveBeenCalledWith('/')
+    expect(await request('snapshot', undefined)).toMatchObject({ lifecycleState: 'mounted', entities: 2 })
+  })
+
   it('reports exact route population, scene, scheduler and Babylon adapter facts', async () => {
     let request!: (action: string, payload: unknown) => Promise<unknown>
     const release = vi.fn()
@@ -136,14 +187,18 @@ describe('Lunar City route-local packaged metrics runtime', () => {
 
   it('feeds the actual terminal disposal snapshot through the v3 provenance validator', async () => {
     let request!: (action: string, payload: unknown) => Promise<unknown>
+    let routeHandle: { dispose(): void } | undefined
 
-    const runtime = createLunarCityPerfRuntime({
-      onRequest: callback => {
-        request = callback
+    const runtime = createLunarCityPerfRuntime(
+      {
+        onRequest: callback => {
+          request = callback
 
-        return vi.fn()
-      }
-    })
+          return vi.fn()
+        }
+      },
+      { navigate: () => routeHandle?.dispose() }
+    )
 
     const canvas = document.createElement('canvas')
 
@@ -168,7 +223,7 @@ describe('Lunar City route-local packaged metrics runtime', () => {
 
     const baseline = enrich(await request('snapshot', undefined))
 
-    runtime.registerRoute!({
+    routeHandle = runtime.registerRoute!({
       canvas,
       getCameraPose: () => ({ alpha: 1, beta: 1, radius: 10 }),
       getCameraState: () => ({ focusedEntityKey: undefined, following: false }),
