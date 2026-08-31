@@ -1,6 +1,8 @@
+import { atom } from 'nanostores'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { PluginSourceScope } from '@/api/plugins'
+import type { DesktopAgentRoster } from '@/global'
 
 import actualManifest from '../../../../public/lunar-city/v2/world-manifest.v2.json'
 import { entityKey } from '../identity'
@@ -11,6 +13,7 @@ import {
   allocateProjectCompounds,
   compoundKey,
   createKanbanCitySource,
+  createRegisteredKanbanCitySource,
   type KanbanRest,
   type KanbanSocket,
   projectSlotContractIssues
@@ -815,5 +818,173 @@ describe('Kanban Lunar City optional source', () => {
     expect(projectSlotContractIssues({ ...parsed, projectSlots: [first!, overlapping] })).toContain(
       'projectSlots[compound-inner-1] overlaps projectSlots[compound-overlap]'
     )
+  })
+})
+
+describe('registered Kanban Lunar City source', () => {
+  it('merges colliding task identities from every exact registered profile owner', async () => {
+    const roster = atom<DesktopAgentRoster>({
+      agents: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        connectionKind: 'local' as const,
+        connectionLabel: connectionId,
+        handle: `@worker-${connectionId}`,
+        profile: 'worker'
+      })),
+      sources: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        kind: 'local' as const,
+        label: connectionId,
+        reachable: true
+      }))
+    })
+    const childStops: ReturnType<typeof vi.fn>[] = []
+    const createSource = vi.fn((options: { scope: PluginSourceScope }) => {
+      const stop = vi.fn()
+      childStops.push(stop)
+      const identity = {
+        board: 'main',
+        connectionId: options.scope.connectionId,
+        kind: 'kanban' as const,
+        profile: options.scope.profile,
+        taskId: 'shared-task'
+      }
+
+      return {
+        onFrame: vi.fn(),
+        read: vi.fn(async () => ({
+          authoritative: true,
+          compounds: [],
+          details: new Map(),
+          entities: [
+            {
+              animation: 'work' as const,
+              authority: 'authoritative' as const,
+              destination: 'project' as const,
+              identity,
+              key: entityKey(identity),
+              observedAt: 42
+            }
+          ],
+          health: 'authoritative' as const,
+          sources: [
+            {
+              authority: 'authoritative' as const,
+              observedAt: 42,
+              source: `kanban:${options.scope.connectionId}:worker`
+            }
+          ]
+        })),
+        start: vi.fn(() => stop)
+      }
+    })
+    const source = createRegisteredKanbanCitySource({
+      createSource: createSource as never,
+      manifest: manifest(),
+      roster
+    })
+    const invalidate = vi.fn()
+    const stop = source.start(invalidate)
+    const result = await source.read()
+
+    expect(createSource.mock.calls.map(call => call[0].scope)).toEqual([
+      { connectionId: 'source-a', profile: 'worker' },
+      { connectionId: 'source-b', profile: 'worker' }
+    ])
+    expect(result.authoritative).toBe(true)
+    expect(result.entities.map(entity => entity.identity)).toEqual([
+      { board: 'main', connectionId: 'source-a', kind: 'kanban', profile: 'worker', taskId: 'shared-task' },
+      { board: 'main', connectionId: 'source-b', kind: 'kanban', profile: 'worker', taskId: 'shared-task' }
+    ])
+    expect(result.replacementSources).toEqual(['kanban:source-a:worker', 'kanban:source-b:worker'])
+
+    stop()
+    expect(childStops.every(childStop => childStop.mock.calls.length === 1)).toBe(true)
+  })
+
+  it('keeps a failed owner partial without rereading or replacing the healthy owner and bounds dynamic cleanup', async () => {
+    const roster = atom<DesktopAgentRoster>({
+      agents: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        connectionKind: 'local' as const,
+        connectionLabel: connectionId,
+        handle: `@worker-${connectionId}`,
+        profile: 'worker'
+      })),
+      sources: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        kind: 'local' as const,
+        label: connectionId,
+        reachable: true
+      }))
+    })
+    const stops = new Map<string, ReturnType<typeof vi.fn>>()
+    let remoteFails = true
+    const createSource = vi.fn((options: { scope: PluginSourceScope }) => {
+      const stop = vi.fn()
+      stops.set(options.scope.connectionId, stop)
+
+      return {
+        onFrame: vi.fn(),
+        read: vi.fn(async () => {
+          if (options.scope.connectionId === 'source-b' && remoteFails) {
+            return {
+              authoritative: false,
+              compounds: [],
+              details: new Map(),
+              entities: [],
+              health: 'unavailable' as const,
+              sources: [
+                {
+                  authority: 'unknown' as const,
+                  error: 'Kanban plugin unavailable',
+                  observedAt: 42,
+                  source: 'kanban:source-b:worker'
+                }
+              ]
+            }
+          }
+
+          return {
+            authoritative: true,
+            compounds: [],
+            details: new Map(),
+            entities: [],
+            health: 'authoritative' as const,
+            sources: [
+              {
+                authority: 'authoritative' as const,
+                observedAt: 42,
+                source: `kanban:${options.scope.connectionId}:worker`
+              }
+            ]
+          }
+        }),
+        start: vi.fn(() => stop)
+      }
+    })
+    const source = createRegisteredKanbanCitySource({
+      createSource: createSource as never,
+      manifest: manifest(),
+      roster
+    })
+    const stop = source.start(vi.fn())
+
+    await expect(source.read()).resolves.toMatchObject({
+      authoritative: false,
+      replacementSources: ['kanban:source-a:worker']
+    })
+
+    roster.set({
+      agents: roster.get().agents.filter(agent => agent.connectionId === 'source-a'),
+      sources: roster.get().sources.filter(item => item.connectionId === 'source-a')
+    })
+    expect(stops.get('source-b')).toHaveBeenCalledOnce()
+
+    remoteFails = false
+    await expect(source.read()).resolves.toMatchObject({ authoritative: false })
+    expect(createSource).toHaveBeenCalledTimes(2)
+    stop()
+    expect(stops.get('source-a')).toHaveBeenCalledOnce()
   })
 })

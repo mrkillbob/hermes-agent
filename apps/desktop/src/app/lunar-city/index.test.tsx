@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { LOCAL_CONNECTION_ID } from '@hermes/shared'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { Profiler } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -16,7 +15,7 @@ import { disposeLunarCityRuntime, LunarCity, lunarCityHudStatus } from './index'
 
 const {
   applySnapshot,
-  createKanbanCitySource,
+  createRegisteredKanbanCitySource,
   createWorld,
   destroyWorld,
   dispatchCamera,
@@ -83,7 +82,7 @@ const {
 
   return {
     applySnapshot: apply,
-    createKanbanCitySource: vi.fn(() => source),
+    createRegisteredKanbanCitySource: vi.fn(() => source),
     createWorld: create,
     dispatchCamera: dispatch,
     destroyWorld: destroy,
@@ -105,7 +104,7 @@ const {
 })
 
 vi.mock('./manifest', () => ({ loadWorldManifest: loadManifest }))
-vi.mock('./adapters/kanban', () => ({ createKanbanCitySource }))
+vi.mock('./adapters/kanban', () => ({ createRegisteredKanbanCitySource }))
 vi.mock('./adapters/reconciler', () => ({ startLunarCityReconciler: startReconciler }))
 vi.mock('./world/create-world', () => ({ createLunarCityWorld: createWorld }))
 vi.mock('./leader-sessions', async importOriginal => ({
@@ -243,16 +242,15 @@ describe('LunarCity', () => {
     expect(screen.getAllByLabelText('Interactive 3D Lunar City')).toHaveLength(1)
   })
 
-  it('starts the live writer only inside the Lunar City route with an explicit Kanban source scope', async () => {
+  it('starts the live writer only inside the Lunar City route with the registered-owner Kanban source', async () => {
     const { unmount } = render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
 
     await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
 
     await waitFor(() =>
-      expect(createKanbanCitySource).toHaveBeenCalledWith(
+      expect(createRegisteredKanbanCitySource).toHaveBeenCalledWith(
         expect.objectContaining({
-          manifest: { models: [] },
-          scope: { connectionId: LOCAL_CONNECTION_ID, profile: 'default' }
+          manifest: { models: [] }
         })
       )
     )

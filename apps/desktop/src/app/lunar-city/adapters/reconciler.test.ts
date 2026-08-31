@@ -1028,7 +1028,7 @@ describe('Lunar City reconciler', () => {
         .map(entity => [entity.identity.connectionId, entity.authority])
     ).toEqual([
       ['local', 'stale'],
-      ['ssh-1', 'authoritative']
+      ['ssh-1', 'stale']
     ])
 
     now = 200
@@ -1163,6 +1163,199 @@ describe('Lunar City reconciler', () => {
     await flush()
 
     expect($lunarCitySnapshot.get().entities.has(entityKey(kanbanIdentity))).toBe(false)
+    stop()
+  })
+
+  it('reads every registered profile owner and keeps colliding sessions and subagents connection-exact', async () => {
+    const fleet = atom<DesktopAgentRoster>({
+      agents: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        connectionKind: 'local' as const,
+        connectionLabel: connectionId,
+        handle: `@worker-${connectionId}`,
+        profile: 'worker'
+      })),
+      sources: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        kind: 'local' as const,
+        label: connectionId,
+        reachable: true
+      }))
+    })
+    const sessionReads = vi.fn(async (connectionId: string, profileName: string) => ({
+      sessions: [
+        {
+          ended_at: null,
+          id: 'shared-session',
+          is_active: true,
+          profile: profileName,
+          title: `${connectionId} session`
+        }
+      ]
+    }))
+    const delegationReads = vi.fn(async (connectionId: string) => ({
+      active: [
+        {
+          goal: `${connectionId} child`,
+          owner_agent_session_id: 'shared-session',
+          started_at: 1,
+          status: 'running',
+          subagent_id: 'shared-child',
+          tool_count: 0
+        }
+      ]
+    }))
+    const stop = startLunarCityReconciler({
+      now: () => 500,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        readDelegationStatus: delegationReads,
+        readSessionList: sessionReads,
+        refreshFleet: async () => ({ observedAt: 500, status: 'refreshed' })
+      }
+    })
+
+    await flush()
+    await flush()
+
+    const identities = [...$lunarCitySnapshot.get().entities.values()].map(entity => entity.identity)
+    expect(identities).toContainEqual({
+      connectionId: 'source-a',
+      kind: 'session',
+      profile: 'worker',
+      sessionId: 'shared-session'
+    })
+    expect(identities).toContainEqual({
+      connectionId: 'source-b',
+      kind: 'session',
+      profile: 'worker',
+      sessionId: 'shared-session'
+    })
+    expect(identities).toContainEqual({
+      connectionId: 'source-a',
+      kind: 'subagent',
+      profile: 'worker',
+      sessionId: 'shared-session',
+      subagentId: 'shared-child'
+    })
+    expect(identities).toContainEqual({
+      connectionId: 'source-b',
+      kind: 'subagent',
+      profile: 'worker',
+      sessionId: 'shared-session',
+      subagentId: 'shared-child'
+    })
+    expect(sessionReads.mock.calls).toEqual([
+      ['source-a', 'worker'],
+      ['source-b', 'worker']
+    ])
+    expect(delegationReads.mock.calls).toEqual([
+      ['source-a', 'worker'],
+      ['source-b', 'worker']
+    ])
+    stop()
+  })
+
+  it('retains a failed registered owner stale, refreshes it on reconnect, and does not hot-read healthy owners', async () => {
+    const fleet = atom<DesktopAgentRoster>({
+      agents: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        connectionKind: 'local' as const,
+        connectionLabel: connectionId,
+        handle: `@worker-${connectionId}`,
+        profile: 'worker'
+      })),
+      sources: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        kind: 'local' as const,
+        label: connectionId,
+        reachable: true
+      }))
+    })
+    let emit!: (event: unknown) => void
+    let remoteFails = false
+    const sessionReads = vi.fn(async (connectionId: string) => {
+      if (connectionId === 'source-b' && remoteFails) {
+        throw new Error('remote sleeping')
+      }
+
+      return {
+        sessions: [{ ended_at: null, id: 'shared-session', is_active: true, profile: 'worker' }]
+      }
+    })
+    const stop = startLunarCityReconciler({
+      now: () => 600,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        onEvent: listener => {
+          emit = listener
+          return () => undefined
+        },
+        readSessionList: sessionReads,
+        refreshFleet: async () => ({ observedAt: 600, status: 'refreshed' })
+      }
+    })
+    await flush()
+    await flush()
+    expect(sessionReads).toHaveBeenCalledTimes(2)
+
+    remoteFails = true
+    emit({ connectionId: 'source-b', profile: 'worker', session_id: 'shared-session', type: 'session.changed' })
+    await flush()
+    await flush()
+    expect(sessionReads.mock.calls.map(call => call[0])).toEqual(['source-a', 'source-b', 'source-b'])
+    expect(
+      $lunarCitySnapshot
+        .get()
+        .entities.get(
+          entityKey({ connectionId: 'source-b', kind: 'session', profile: 'worker', sessionId: 'shared-session' })
+        )
+    ).toMatchObject({ authority: 'stale' })
+
+    emit({ connectionId: 'source-a', profile: 'worker', session_id: 'shared-session', type: 'session.changed' })
+    await flush()
+    await flush()
+    expect(sessionReads.mock.calls.map(call => call[0])).toEqual(['source-a', 'source-b', 'source-b', 'source-a'])
+
+    remoteFails = false
+    emit({ connectionId: 'source-b', profile: 'worker', type: 'gateway.ready' })
+    await flush()
+    await flush()
+    expect(sessionReads.mock.calls.map(call => call[0])).toEqual([
+      'source-a',
+      'source-b',
+      'source-b',
+      'source-a',
+      'source-b'
+    ])
+    expect(
+      $lunarCitySnapshot
+        .get()
+        .entities.get(
+          entityKey({ connectionId: 'source-b', kind: 'session', profile: 'worker', sessionId: 'shared-session' })
+        )
+    ).toMatchObject({ authority: 'authoritative' })
+
+    fleet.set({
+      agents: fleet.get().agents.filter(agent => agent.connectionId === 'source-a'),
+      sources: fleet.get().sources.filter(source => source.connectionId === 'source-a')
+    })
+    await flush()
+    await flush()
+    expect(
+      $lunarCitySnapshot
+        .get()
+        .entities.get(
+          entityKey({ connectionId: 'source-b', kind: 'session', profile: 'worker', sessionId: 'shared-session' })
+        )
+    ).toMatchObject({ authority: 'stale' })
+    expect(sessionReads.mock.calls.filter(call => call[0] === 'source-b')).toHaveLength(3)
     stop()
   })
 })

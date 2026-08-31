@@ -6,10 +6,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Moon, Network } from '@/lib/icons'
+import { $fleetRoster } from '@/store/fleet-roster'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { $connection } from '@/store/session'
 
-import { createKanbanCitySource } from './adapters/kanban'
+import { createRegisteredKanbanCitySource } from './adapters/kanban'
 import { startLunarCityReconciler } from './adapters/reconciler'
 import { LunarCityCommandRuntime } from './command-runtime'
 import { CameraControls } from './components/camera-controls'
@@ -410,11 +411,9 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
       return
     }
 
-    const kanbanSource = kanbanScope
-      ? createKanbanCitySource({ manifest: worldManifest, scope: kanbanScope })
-      : undefined
+    const kanbanSource = createRegisteredKanbanCitySource({ manifest: worldManifest, roster: $fleetRoster })
 
-    const stop = startLunarCityReconciler({ optionalSources: kanbanSource ? [kanbanSource] : [] })
+    const stop = startLunarCityReconciler({ optionalSources: [kanbanSource] })
     let stopped = false
 
     const stopOnce = (): void => {
@@ -434,7 +433,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
     stopReconcilerRef.current = stopOnce
 
     return stopOnce
-  }, [kanbanScope, worldManifest])
+  }, [worldManifest])
 
   // The Babylon handle is imperative runtime state, not a mirror of reactive route data.
   // eslint-disable-next-line no-restricted-syntax

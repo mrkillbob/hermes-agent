@@ -1,4 +1,5 @@
 import { pluginRest, pluginSocket, type PluginSourceScope } from '@/api/plugins'
+import type { DesktopAgentRoster } from '@/global'
 
 import { entityKey, projectCompoundKey } from '../identity'
 import type {
@@ -65,8 +66,23 @@ export interface KanbanReadResult {
   details: ReadonlyMap<string, unknown>
   entities: readonly LunarEntity[]
   health: KanbanSourceHealth
+  replacementSources?: readonly string[]
   selectedBoard?: string
   sources: readonly SourceHealth[]
+}
+
+interface ReadableRoster {
+  get(): DesktopAgentRoster | null
+  listen(listener: (roster: DesktopAgentRoster | null) => void): () => void
+}
+
+export interface RegisteredKanbanCitySourceOptions {
+  createSource?: (options: KanbanCitySourceOptions) => KanbanCitySource
+  manifest?: Pick<WorldManifestV2, 'camera' | 'navigation' | 'projectSlots'>
+  now?: () => number
+  roster: ReadableRoster
+  selectedTaskId?: () => string | undefined
+  timeoutMs?: number
 }
 
 export interface KanbanCitySource {
@@ -997,4 +1013,134 @@ export function createKanbanCitySource(options: KanbanCitySourceOptions): Kanban
   }
 
   return source
+}
+
+/**
+ * One bounded optional source over every registered profile owner. Each child
+ * keeps its own scoped REST/socket authority; this merger never consults the
+ * active connection and never aliases same-named profiles or tasks.
+ */
+export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySourceOptions): KanbanCitySource {
+  const makeSource = options.createSource ?? createKanbanCitySource
+  const now = options.now ?? Date.now
+  const entries = new Map<string, { scope: PluginSourceScope; source: KanbanCitySource; stop?: () => void }>()
+  const retiredSources = new Set<string>()
+  let active = false
+  let invalidate: ((result: KanbanFrameResult) => void) | undefined
+  let stopRoster: (() => void) | undefined
+
+  const registeredScopes = (): readonly PluginSourceScope[] => {
+    const roster = options.roster.get()
+
+    if (!roster || roster.agents.length > 256) {
+      return []
+    }
+
+    const unique = new Map<string, PluginSourceScope>()
+
+    for (const agent of roster.agents) {
+      const connectionId = agent.connectionId.trim()
+      const profile = agent.profile.trim()
+
+      if (connectionId && profile) {
+        unique.set(JSON.stringify([connectionId, profile]), { connectionId, profile })
+      }
+    }
+
+    return [...unique.values()].sort(
+      (left, right) => left.connectionId.localeCompare(right.connectionId) || left.profile.localeCompare(right.profile)
+    )
+  }
+
+  const sync = (): void => {
+    const scopes = registeredScopes()
+    const desired = new Set(scopes.map(scope => JSON.stringify([scope.connectionId, scope.profile])))
+
+    for (const [key, entry] of entries) {
+      if (!desired.has(key)) {
+        entry.stop?.()
+        entries.delete(key)
+        retiredSources.add(sourceName(entry.scope))
+      }
+    }
+
+    for (const scope of scopes) {
+      const key = JSON.stringify([scope.connectionId, scope.profile])
+      retiredSources.delete(sourceName(scope))
+
+      if (entries.has(key)) {
+        continue
+      }
+
+      const source = makeSource({
+        manifest: options.manifest,
+        scope,
+        selectedTaskId: options.selectedTaskId,
+        timeoutMs: options.timeoutMs
+      })
+      const entry = { scope, source, ...(active && invalidate ? { stop: source.start(invalidate) } : {}) }
+      entries.set(key, entry)
+    }
+  }
+
+  const read = async (): Promise<KanbanReadResult> => {
+    sync()
+    const pending = [...entries.values()].map(entry => entry.source.read())
+    const reads = await Promise.all(pending)
+    const successfulSources = reads
+      .filter(result => result.authoritative)
+      .flatMap(result => result.sources.map(source => source.source))
+    const removed = [...retiredSources].sort().map(source => ({
+      authority: 'unknown' as const,
+      error: 'Registered Kanban owner removed',
+      observedAt: now(),
+      source
+    }))
+    const authoritative = retiredSources.size === 0 && reads.every(result => result.authoritative)
+
+    return {
+      authoritative,
+      compounds: reads.flatMap(result => result.compounds),
+      details: new Map(reads.flatMap(result => [...result.details])),
+      entities: reads.flatMap(result => result.entities),
+      health: authoritative ? 'authoritative' : 'unavailable',
+      replacementSources: successfulSources,
+      sources: [...reads.flatMap(result => result.sources), ...removed]
+    }
+  }
+
+  return {
+    onFrame: () => EMPTY_FRAME_RESULT,
+    read,
+    start(onInvalidate) {
+      if (active) {
+        return () => undefined
+      }
+
+      active = true
+      invalidate = onInvalidate
+      sync()
+      stopRoster = options.roster.listen(() => {
+        sync()
+        onInvalidate({ accepted: true, dirtyTaskIds: [], needsReconcile: true })
+      })
+
+      return () => {
+        if (!active) {
+          return
+        }
+
+        active = false
+        invalidate = undefined
+        stopRoster?.()
+        stopRoster = undefined
+
+        for (const entry of entries.values()) {
+          entry.stop?.()
+        }
+
+        entries.clear()
+      }
+    }
+  }
 }
