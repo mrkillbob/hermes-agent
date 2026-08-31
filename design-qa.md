@@ -1,6 +1,6 @@
 # Design QA
 
-> **Current status (2026-08-31):** The historical image-backed QA below is superseded. The runtime is now a genuine Babylon 3D scene using `apps/desktop/public/lunar-city/v2/`; `moon-settlement-approved.jpg` is a reference asset only. Current source/unit implementation is review-clean at `HEAD b40e67825121cd0edb99b64e3a1bedcfbd19ec96`, but no clean packaged visual, GPU/CPU, 30-minute, or supervised-live acceptance has been performed.
+> **Current status (2026-08-31):** The historical image-backed QA below is superseded. The runtime is now a genuine Babylon 3D scene using `apps/desktop/public/lunar-city/v2/`; `moon-settlement-approved.jpg` is a reference asset only. The final 3D implementation source tip is `b40e67825121cd0edb99b64e3a1bedcfbd19ec96`; this documentation update is committed at `3c16a086d745ca44d7a57af75dcfe15f301123d8`. Source/unit implementation is review-clean, but no clean packaged visual, GPU/CPU, 30-minute, or supervised-live acceptance has been performed.
 
 ## Current 3D QA disposition
 

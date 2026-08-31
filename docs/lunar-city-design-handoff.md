@@ -1,6 +1,6 @@
 # Lunar City Visualizer Handoff
 
-> **Current 3D handoff (2026-08-31):** This file's original image-backed notes below are historical and superseded by the current implementation record in this banner and the linked design QA addendum. The runtime is a genuine Babylon 3D world; the approved JPG is a visual reference only, never the runtime background. Current source `HEAD` is `b40e67825121cd0edb99b64e3a1bedcfbd19ec96`. Source/unit lanes are review-clean, but no clean packaged GPU/CPU, visual-regression, 30-minute, or supervised-live acceptance receipt exists.
+> **Current 3D handoff (2026-08-31):** This file's original image-backed notes below are historical and superseded by the current implementation record in this banner and the linked design QA addendum. The runtime is a genuine Babylon 3D world; the approved JPG is a visual reference only, never the runtime background. The final 3D implementation source tip is `b40e67825121cd0edb99b64e3a1bedcfbd19ec96`; this documentation update is committed at `3c16a086d745ca44d7a57af75dcfe15f301123d8`. Source/unit lanes are review-clean, but no clean packaged GPU/CPU, visual-regression, 30-minute, or supervised-live acceptance receipt exists.
 
 ## Current implementation addendum
 
