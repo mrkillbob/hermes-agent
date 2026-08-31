@@ -10,12 +10,12 @@ final result: passed
 
 ## Capture status
 
-The real Electron Playwright test passed and captured both the city overview and building-detail state:
+The mock-backed dev-Electron Playwright test passed and captured both the city overview and building-detail state. This is not packaged-binary evidence.
 
 - Overview: `/Users/mikedemott/.codex/worktrees/e16d/hermes-agent/apps/desktop/test-results/lunar-city-renders-the-lun-a3de9-pens-a-building-detail-view/lunar-city-overview.png`
 - Screenshot: `/Users/mikedemott/.codex/worktrees/e16d/hermes-agent/apps/desktop/test-results/lunar-city-renders-the-lun-a3de9-pens-a-building-detail-view/lunar-city-building.png`
 - State: the approved settlement artwork remains visible with its original leaders and robot children; Research Lab selected and building detail open with Fox Scientist room activity
-- Interaction: zoom/reset, building selection, and `Enter building` all passed in the browser
+- Interaction: zoom/reset, building selection, and `Enter building` all passed in dev Electron
 - Motion: normal runtime uses the live tick/route animations; the test capture uses reduced motion for deterministic screenshots
 
 ## Supporting evidence
@@ -23,8 +23,8 @@ The real Electron Playwright test passed and captured both the city overview and
 - Focused UI tests: passed, 6 tests
 - Targeted ESLint: passed
 - Desktop TypeScript checks: passed
-- Production desktop build: passed after the clean commit; the final exact SHA and `dirty: false` state are recorded in `apps/desktop/build/install-stamp.json`
-- Source visual and implementation screenshot were inspected together
+- Desktop build: passed after the clean commit; the final exact SHA and `dirty: false` state are recorded in `apps/desktop/build/install-stamp.json`. This build receipt is not packaged-binary evidence.
+- Source visual and mock/dev-Electron implementation screenshot were inspected together
 
 ## Follow-up
 

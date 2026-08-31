@@ -10,9 +10,7 @@ import { expect, test } from './test'
 let fixture: MockBackendFixture | null = null
 
 test.beforeAll(async () => {
-  fixture = await setupMockBackend({
-    startGateway: true
-  })
+  fixture = await setupMockBackend()
 })
 
 test.afterAll(async () => {

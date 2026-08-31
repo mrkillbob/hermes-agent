@@ -20,7 +20,7 @@
  * Prerequisite: `npm run build` must have been run so that `dist/` exists.
  */
 
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -242,50 +242,6 @@ export function buildAppEnv(sandbox: Sandbox, extra: Record<string, string> = {}
   }
 }
 
-async function startSandboxGateway(sandbox: Sandbox, env: Record<string, string>): Promise<ChildProcess> {
-  const python = path.join(REPO_ROOT, '.venv', 'bin', 'python')
-
-  if (!fs.existsSync(python)) {
-    throw new Error(`Hermes virtualenv not found at ${python}. Run 'uv sync --extra web' first.`)
-  }
-
-  const gateway = spawn(python, ['-m', 'hermes_cli.main', 'gateway', 'run', '--force'], {
-    cwd: REPO_ROOT,
-    env: {
-      ...env,
-      HERMES_KANBAN_DISPATCH_IN_GATEWAY: '1'
-    },
-    stdio: ['ignore', 'pipe', 'pipe']
-  })
-
-  let output = ''
-
-  const capture = (chunk: Buffer): void => {
-    output = `${output}${chunk.toString()}`.slice(-4000)
-  }
-
-  gateway.stdout?.on('data', capture)
-  gateway.stderr?.on('data', capture)
-
-  const pidPath = path.join(sandbox.hermesHome, 'gateway.pid')
-  const startedAt = Date.now()
-
-  while (Date.now() - startedAt < 20_000) {
-    if (fs.existsSync(pidPath)) {
-      return gateway
-    }
-
-    if (gateway.exitCode !== null) {
-      throw new Error(`Sandbox gateway exited with code ${gateway.exitCode}.\n${output}`)
-    }
-
-    await new Promise(resolve => setTimeout(resolve, 100))
-  }
-
-  gateway.kill('SIGTERM')
-  throw new Error(`Sandbox gateway did not claim its PID file.\n${output}`)
-}
-
 // ─── Electron launch ────────────────────────────────────────────────────
 
 /**
@@ -395,8 +351,6 @@ export interface MockBackendOptions {
   modelContextLength?: number
   /** Additional process environment overrides for an isolated backend boot. */
   extraEnv?: Record<string, string>
-  /** Start a disposable gateway in the sandbox for strict Kanban readiness. */
-  startGateway?: boolean
   mockServer?: MockServerOptions
 }
 
@@ -424,7 +378,6 @@ export async function setupMockBackend(options: MockBackendOptions = {}): Promis
 
   // 3. Build env + launch
   const env = buildAppEnv(sandbox, options.extraEnv)
-  const gateway = options.startGateway ? await startSandboxGateway(sandbox, env) : null
   const { app, page } = await launchDesktop(env)
 
   return {
@@ -435,10 +388,6 @@ export async function setupMockBackend(options: MockBackendOptions = {}): Promis
     sandbox,
     cleanup: async () => {
       await app.close().catch(() => undefined)
-
-      if (gateway && gateway.exitCode === null) {
-        gateway.kill('SIGTERM')
-      }
 
       await mock.close()
       sandbox.cleanup()

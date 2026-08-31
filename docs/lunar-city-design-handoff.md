@@ -89,9 +89,10 @@ Executed successfully:
 - Targeted ESLint for Lunar City source, test, and Electron E2E files. CSS was reported as ignored by the ESLint configuration; it produced no lint errors.
 - Lunar City UI test suite: 6 tests passed.
 - `npm run build` from `apps/desktop`.
-- Packaged Electron Playwright test:
+- Mock-backed dev-Electron Playwright test (runs `electron .` against built
+  `dist/`, not an `electron-builder` package):
   `npx playwright test e2e/lunar-city.spec.ts`
-- Final Electron result: 1 test passed.
+- Final mock/dev-Electron result: 1 test passed.
 - `git diff --check` passed.
 - `apps/desktop/build/install-stamp.json` reports:
 
@@ -103,7 +104,7 @@ Executed successfully:
 }
 ```
 
-Final visual captures from the packaged Electron run:
+Final visual captures from the mock-backed dev-Electron run:
 
 - `apps/desktop/test-results/lunar-city-renders-the-lun-a3de9-pens-a-building-detail-view/lunar-city-overview.png`
 - `apps/desktop/test-results/lunar-city-renders-the-lun-a3de9-pens-a-building-detail-view/lunar-city-building.png`
@@ -119,7 +120,7 @@ Start from the current clean `HEAD`. Inspect the approved asset and the current 
 5. Add building-specific activity animations that remain subordinate to the artwork: telescope motion in the lab, book/resource interactions in the library/depot, review/triage transitions, bus-stop readiness, and break-garden pauses.
 6. Keep counters and inspectors as secondary game HUD elements. Do not turn the screen into a table, legend, or traditional web dashboard.
 7. Add tests for adapter mapping, SOUL-derived metadata, state-to-animation mapping, and hotspot interaction.
-8. Re-run the packaged Electron test after visual changes because Electron has previously crashed or behaved differently from browser-only runs.
+8. Re-run the mock-backed dev-Electron test after visual changes because Electron has previously crashed or behaved differently from browser-only runs. Run a separately packaged-binary lane before claiming packaged evidence.
 
 ## Guardrails
 
@@ -136,7 +137,7 @@ Start from the current clean `HEAD`. Inspect the approved asset and the current 
 - `apps/desktop/src/app/lunar-city/index.tsx` — scene, districts, worker/task state, interactions.
 - `apps/desktop/src/app/lunar-city/lunar-city.css` — scene composition and hotspot styling.
 - `apps/desktop/src/app/lunar-city/index.test.tsx` — component coverage.
-- `apps/desktop/e2e/lunar-city.spec.ts` — packaged Electron visual/interaction coverage.
+- `apps/desktop/e2e/lunar-city.spec.ts` — mock-backed dev-Electron visual/interaction coverage.
 - `apps/desktop/public/lunar-city/moon-settlement-approved.jpg` — canonical approved artwork.
 - `design-qa.md` — visual QA and source-of-truth record.
 
