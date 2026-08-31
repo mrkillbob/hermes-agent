@@ -7,9 +7,11 @@ import {
   assertGpuPackagedEligibility,
   buildPopulationContract,
   createLunarCityPopulationFixture,
+  expectedStandardProjection,
   gpuPackagedLaunchOptions,
   GROUP_DISTRICTS,
   LEADER_FAMILIES,
+  readStandardPopulation,
   startPopulationGateways
 } from './lunar-city-fixtures'
 
@@ -54,6 +56,48 @@ test('fixture retains exact-source collisions and every required entity family',
   )
 })
 
+test('fixture entity keys have byte parity with production EntityIdentity for every kind', async () => {
+  const identityModulePath = '../src/app/lunar-city/identity'
+
+  const { entityKey } = (await import(identityModulePath)) as {
+    entityKey(identity: Record<string, unknown>): string
+  }
+
+  const contract = buildPopulationContract(100)
+
+  for (const row of contract.entities) {
+    const identity =
+      row.kind === 'profile'
+        ? { kind: 'profile', connectionId: row.connectionId, profile: row.profile }
+        : row.kind === 'session'
+          ? {
+              kind: 'session',
+              connectionId: row.connectionId,
+              profile: row.profile,
+              sessionId: row.sessionId
+            }
+          : row.kind === 'subagent'
+            ? {
+                kind: 'subagent',
+                connectionId: row.connectionId,
+                profile: row.profile,
+                sessionId: row.sessionId,
+                subagentId: row.subagentId
+              }
+            : {
+                kind: 'kanban',
+                connectionId: row.connectionId,
+                profile: row.profile,
+                board: row.board,
+                taskId: row.taskId,
+                runId: row.runId,
+                ...(row.kind === 'worker' ? { workerId: row.workerId } : {})
+              }
+
+    expect(row.exactKey).toBe(entityKey(identity))
+  }
+})
+
 test('seed uses isolated standard Hermes files, contains no secrets, and cleans up', () => {
   const fixture = createLunarCityPopulationFixture(25)
 
@@ -90,7 +134,7 @@ test('seed uses isolated standard Hermes files, contains no secrets, and cleans 
 })
 
 for (const population of [25, 100, 250] as const) {
-  test(`standard gateway routes expose the exact ${population}-entity source population`, async () => {
+  test(`standard gateway routes expose exact persisted sources for population ${population}`, async () => {
     test.slow()
     const fixture = createLunarCityPopulationFixture(population)
     let gateways: Awaited<ReturnType<typeof startPopulationGateways>> | undefined
@@ -103,6 +147,12 @@ for (const population of [25, 100, 250] as const) {
 
       for (const source of gateways.sources) {
         const headers = { 'X-Hermes-Session-Token': source.token }
+
+        const unauthorized = await fetch(`${source.url}/api/profiles`, {
+          headers: { 'X-Hermes-Session-Token': `${source.token}-wrong` }
+        })
+
+        expect(unauthorized.ok).toBe(false)
 
         const profiles = (await (await fetch(`${source.url}/api/profiles`, { headers })).json()) as {
           profiles: unknown[]
@@ -133,33 +183,10 @@ for (const population of [25, 100, 250] as const) {
         task: fixture.contract.entitiesByKind.task,
         worker: fixture.contract.entitiesByKind.worker
       })
+      expect(await readStandardPopulation(gateways)).toEqual(expectedStandardProjection(fixture.contract))
 
-      const productionStorePath = '../src/store/subagents'
-
-      const { $subagentsBySession, upsertSubagent } = (await import(productionStorePath)) as {
-        $subagentsBySession: {
-          get(): Record<string, unknown[]>
-          set(value: Record<string, unknown[]>): void
-        }
-        upsertSubagent(
-          sessionId: string,
-          payload: Record<string, unknown>,
-          createIfMissing: boolean,
-          eventType: string
-        ): void
-      }
-
-      $subagentsBySession.set({})
-
-      const frames = await receiveStandardGatewayFrames(fixture.subagentFrames)
-
-      for (const frame of frames) {
-        upsertSubagent(frame.session_id, frame.payload, true, frame.type)
-      }
-
-      expect(Object.values($subagentsBySession.get()).flat()).toHaveLength(fixture.contract.entitiesByKind.subagent)
-      expect(Object.values(observed).reduce((sum, value) => sum + value, 0) + fixture.subagentFrames.length).toBe(
-        population
+      expect(Object.values(observed).reduce((sum, value) => sum + value, 0)).toBe(
+        population - fixture.contract.entitiesByKind.subagent
       )
     } finally {
       await gateways?.close()
@@ -168,66 +195,12 @@ for (const population of [25, 100, 250] as const) {
   })
 }
 
-async function receiveStandardGatewayFrames<T extends { type: string }>(frames: readonly T[]): Promise<T[]> {
-  interface SocketLike {
-    close(): void
-    once(event: string, listener: (...args: unknown[]) => void): void
-    on(event: string, listener: (data: { toString(): string }) => void): void
-    send(data: string): void
-  }
-
-  interface ServerLike {
-    address(): string | { port: number }
-    close(callback: () => void): void
-    once(event: string, listener: (...args: unknown[]) => void): void
-  }
-
-  const wsModulePath = 'ws'
-
-  const ws = (await import(wsModulePath)) as unknown as {
-    default: new (url: string) => SocketLike
-    WebSocketServer: new (options: { host: string; port: number }) => ServerLike
-  }
-
-  const WebSocket = ws.default
-  const WebSocketServer = ws.WebSocketServer
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
-
-  await new Promise<void>((resolve, reject) => {
-    server.once('listening', () => resolve())
-    server.once('error', reject)
-  })
-
-  const address = server.address()
-
-  if (typeof address === 'string') {
-    await new Promise<void>(resolve => server.close(() => resolve()))
-    throw new Error('Standard gateway fixture did not bind a TCP port')
-  }
-
-  server.once('connection', (...args) => {
-    const socket = args[0] as SocketLike
-
-    for (const frame of frames) {
-      socket.send(JSON.stringify(frame))
-    }
-
-    socket.close()
-  })
-
-  try {
-    return await new Promise<T[]>((resolve, reject) => {
-      const rows: T[] = []
-      const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/ws`)
-
-      socket.on('message', data => rows.push(JSON.parse(data.toString()) as T))
-      socket.once('error', reject)
-      socket.once('close', () => resolve(rows))
-    })
-  } finally {
-    await new Promise<void>(resolve => server.close(() => resolve()))
-  }
-}
+test('subagent population requires a supported real gateway emission path', () => {
+  test.skip(
+    true,
+    'Real /api/ws supports subagent interrupt, steer, and replay but has no authenticated fixture emission method; direct store mutation is forbidden and this skip is not subagent evidence.'
+  )
+})
 
 test('GPU packaged path rejects dev, absent, dirty, fallback, and mismatched packages', () => {
   const clean = {

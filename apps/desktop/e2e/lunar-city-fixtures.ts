@@ -107,7 +107,8 @@ function optionalIdentityField(name: string, value: string | undefined): string 
 
 /** Mirrors the production typed, length-prefixed Lunar City identity contract. */
 export function canonicalEntityKey(identity: CanonicalIdentityInput): string {
-  const common = [identityField('kind', identity.kind), identityField('connection', identity.connectionId)]
+  const identityKind = identity.kind === 'task' || identity.kind === 'worker' ? 'kanban' : identity.kind
+  const common = [identityField('kind', identityKind), identityField('connection', identity.connectionId)]
 
   if (identity.kind === 'profile') {
     return [...common, identityField('profile', identity.profile)].join(':')
@@ -188,7 +189,7 @@ export function buildPopulationContract(population: LunarCityPopulation): Popula
 
       const ownerSession = `session-${String(index % Math.max(1, shape.kinds.session)).padStart(3, '0')}`
       const taskId = `task-${String(index % Math.max(1, shape.kinds.task)).padStart(3, '0')}`
-      const runId = kind === 'task' || kind === 'worker' ? String(1000 + index) : undefined
+      const runId = kind === 'worker' ? String(1000 + index) : undefined
       const workerId = kind === 'worker' ? `pid:${process.pid}` : undefined
 
       const identity = {
@@ -240,6 +241,16 @@ export function buildPopulationContract(population: LunarCityPopulation): Popula
 
     worker.taskId = task.taskId
     worker.profile = task.profile
+    task.runId = worker.runId
+    task.exactKey = canonicalEntityKey({
+      kind: task.kind,
+      connectionId: task.connectionId,
+      durableId: task.durableId,
+      profile: task.profile,
+      board: task.board,
+      runId: task.runId,
+      taskId: task.taskId
+    })
     worker.exactKey = canonicalEntityKey({
       kind: worker.kind,
       connectionId: worker.connectionId,
@@ -262,12 +273,30 @@ export function buildPopulationContract(population: LunarCityPopulation): Popula
     unavailableProfile.activity = 'unavailable'
   }
 
-  for (const worker of entities.filter(row => row.kind === 'worker' && row.activity !== 'active')) {
-    const donor = entities.find(row => row.kind !== 'worker' && row.activity === 'active')
+  const requireActive = (entity: PopulationEntity): void => {
+    if (entity.activity === 'active') {
+      return
+    }
+
+    const donor = entities.find(row => row.kind === 'profile' && row.activity === 'active')
 
     if (donor) {
-      donor.activity = worker.activity
-      worker.activity = 'active'
+      donor.activity = entity.activity
+      entity.activity = 'active'
+    }
+  }
+
+  for (const subagent of entities.filter(row => row.kind === 'subagent')) {
+    requireActive(subagent)
+  }
+
+  for (const worker of entities.filter(row => row.kind === 'worker')) {
+    requireActive(worker)
+
+    const task = entities.find(row => row.kind === 'task' && row.taskId === worker.taskId)
+
+    if (task) {
+      requireActive(task)
     }
   }
 
@@ -309,14 +338,7 @@ export interface LunarCityPopulationFixture {
   hermesHome: string
   root: string
   sourceHomes: Readonly<Record<string, string>>
-  subagentFrames: readonly StandardSubagentFrame[]
   userDataDir: string
-}
-
-export interface StandardSubagentFrame {
-  payload: Readonly<Record<string, unknown>>
-  session_id: string
-  type: 'subagent.start'
 }
 
 export function createLunarCityPopulationFixture(population: LunarCityPopulation): LunarCityPopulationFixture {
@@ -354,28 +376,26 @@ export function createLunarCityPopulationFixture(population: LunarCityPopulation
         'utf8'
       )
       fs.writeFileSync(path.join(profileDir, 'profile.yaml'), profileYaml(entity), 'utf8')
+      fs.writeFileSync(
+        path.join(profileDir, 'desktop.json'),
+        `${JSON.stringify(
+          {
+            lunarCityFixture: {
+              activity: entity.activity,
+              groups: entity.groups,
+              leaderFamily: entity.leaderFamily,
+              version: CONTRACT_VERSION
+            }
+          },
+          null,
+          2
+        )}\n`,
+        'utf8'
+      )
     }
 
     fs.writeFileSync(contractPath, `${JSON.stringify(contract, null, 2)}\n`, 'utf8')
     seedStandardStores(contractPath, sourceHomes)
-
-    const subagentFrames = deepFreeze(
-      contract.entities
-        .filter(row => row.kind === 'subagent')
-        .map(row => ({
-          payload: {
-            child_session_id: `${row.sessionId}-child`,
-            goal: row.title,
-            parent_id: row.sessionId,
-            status: 'running',
-            subagent_id: row.subagentId,
-            task_count: 1,
-            task_index: 0
-          },
-          session_id: row.sessionId!,
-          type: 'subagent.start' as const
-        }))
-    )
 
     return {
       cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
@@ -384,7 +404,6 @@ export function createLunarCityPopulationFixture(population: LunarCityPopulation
       hermesHome: sourceHomes.local,
       root,
       sourceHomes: deepFreeze({ ...sourceHomes }),
-      subagentFrames,
       userDataDir
     }
   } catch (error) {
@@ -404,6 +423,211 @@ export interface StandardGatewaySource {
 export interface PopulationGateways {
   close: () => Promise<void>
   sources: readonly StandardGatewaySource[]
+}
+
+export interface StandardPopulationProjection {
+  activity: Readonly<Record<Activity, number>>
+  byKind: Readonly<Record<'profile' | 'session' | 'task' | 'worker', number>>
+  digest: string
+  entityKeys: readonly string[]
+  groups: readonly string[]
+  leaderFamilies: readonly string[]
+  sourceMix: Readonly<Record<string, number>>
+}
+
+function projectionFromRows(rows: readonly PopulationEntity[]): StandardPopulationProjection {
+  const persisted = rows.filter(
+    (row): row is PopulationEntity & { kind: 'profile' | 'session' | 'task' | 'worker' } => row.kind !== 'subagent'
+  )
+
+  const projection = {
+    activity: {
+      active: persisted.filter(row => row.activity === 'active').length,
+      idle: persisted.filter(row => row.activity === 'idle').length,
+      unavailable: persisted.filter(row => row.activity === 'unavailable').length
+    },
+    byKind: {
+      profile: persisted.filter(row => row.kind === 'profile').length,
+      session: persisted.filter(row => row.kind === 'session').length,
+      task: persisted.filter(row => row.kind === 'task').length,
+      worker: persisted.filter(row => row.kind === 'worker').length
+    },
+    entityKeys: persisted.map(row => row.exactKey).sort(),
+    groups: [...new Set(persisted.flatMap(row => row.groups))].sort(),
+    leaderFamilies: [...new Set(persisted.flatMap(row => (row.leaderFamily ? [row.leaderFamily] : [])))].sort(),
+    sourceMix: Object.fromEntries(
+      [...new Set(persisted.map(row => row.connectionId))]
+        .sort()
+        .map(connectionId => [connectionId, persisted.filter(row => row.connectionId === connectionId).length])
+    )
+  }
+
+  return deepFreeze({ ...projection, digest: createHash('sha256').update(stableJson(projection)).digest('hex') })
+}
+
+export function expectedStandardProjection(contract: PopulationContract): StandardPopulationProjection {
+  return projectionFromRows(contract.entities)
+}
+
+/** Read only standard authenticated REST routes and reconstruct production identities. */
+export async function readStandardPopulation(gateways: PopulationGateways): Promise<StandardPopulationProjection> {
+  const rows: PopulationEntity[] = []
+
+  for (const source of gateways.sources) {
+    const headers = { 'X-Hermes-Session-Token': source.token }
+
+    const profiles = (await (await fetch(`${source.url}/api/profiles`, { headers })).json()) as {
+      profiles: Array<{ name: string }>
+    }
+
+    const sessions = (await (
+      await fetch(`${source.url}/api/profiles/sessions?limit=500&profile=all`, { headers })
+    ).json()) as {
+      sessions: Array<{ ended_at?: null | number; id: string; is_active?: boolean; profile: string }>
+    }
+
+    const board = (await (await fetch(`${source.url}/api/plugins/kanban/board?board=default`, { headers })).json()) as {
+      columns: Array<{
+        tasks: Array<{ assignee: string; current_run_id?: null | number | string; id: string; status: string }>
+      }>
+    }
+
+    const workers = (await (
+      await fetch(`${source.url}/api/plugins/kanban/workers/active?board=default`, { headers })
+    ).json()) as {
+      workers: Array<{ profile: string; run_id: number | string; task_id: string; worker_pid: number }>
+    }
+
+    for (const profile of profiles.profiles) {
+      const overlay = (await (
+        await fetch(`${source.url}/api/profiles/${encodeURIComponent(profile.name)}/desktop-overlay`, { headers })
+      ).json()) as {
+        desktop?: {
+          lunarCityFixture?: {
+            activity?: Activity
+            groups?: string[]
+            leaderFamily?: (typeof LEADER_FAMILIES)[number]
+          }
+        }
+      }
+
+      const metadata = overlay.desktop?.lunarCityFixture
+
+      const identity = {
+        connectionId: source.connectionId,
+        durableId: profile.name,
+        kind: 'profile' as const,
+        profile: profile.name
+      }
+
+      rows.push({
+        activity: metadata?.activity ?? 'unavailable',
+        connectionId: source.connectionId,
+        displayId: profile.name,
+        durableId: profile.name,
+        exactKey: canonicalEntityKey(identity),
+        groups: metadata?.groups ?? [],
+        kind: 'profile',
+        leaderFamily: metadata?.leaderFamily,
+        lod: 'aggregate',
+        profile: profile.name,
+        sourceLabel: source.connectionId,
+        title: profile.name
+      })
+    }
+
+    for (const session of sessions.sessions) {
+      const identity = {
+        connectionId: source.connectionId,
+        durableId: session.id,
+        kind: 'session' as const,
+        profile: session.profile,
+        sessionId: session.id
+      }
+
+      rows.push({
+        activity: session.ended_at == null && session.is_active ? 'active' : 'idle',
+        connectionId: source.connectionId,
+        displayId: session.id,
+        durableId: session.id,
+        exactKey: canonicalEntityKey(identity),
+        groups: [],
+        kind: 'session',
+        lod: 'aggregate',
+        profile: session.profile,
+        sessionId: session.id,
+        sourceLabel: source.connectionId,
+        title: session.id
+      })
+    }
+
+    for (const task of board.columns.flatMap(column => column.tasks)) {
+      const runId = task.current_run_id == null ? undefined : String(task.current_run_id)
+
+      const identity = {
+        board: 'default',
+        connectionId: source.connectionId,
+        durableId: task.id,
+        kind: 'task' as const,
+        profile: task.assignee,
+        runId,
+        taskId: task.id
+      }
+
+      rows.push({
+        activity: task.status === 'running' ? 'active' : 'idle',
+        board: 'default',
+        connectionId: source.connectionId,
+        displayId: task.id,
+        durableId: task.id,
+        exactKey: canonicalEntityKey(identity),
+        groups: [],
+        kind: 'task',
+        lod: 'aggregate',
+        profile: task.assignee,
+        runId,
+        sourceLabel: source.connectionId,
+        taskId: task.id,
+        title: task.id
+      })
+    }
+
+    for (const worker of workers.workers) {
+      const runId = String(worker.run_id)
+      const workerId = `pid:${worker.worker_pid}`
+
+      const identity = {
+        board: 'default',
+        connectionId: source.connectionId,
+        durableId: workerId,
+        kind: 'worker' as const,
+        profile: worker.profile,
+        runId,
+        taskId: worker.task_id,
+        workerId
+      }
+
+      rows.push({
+        activity: 'active',
+        board: 'default',
+        connectionId: source.connectionId,
+        displayId: workerId,
+        durableId: workerId,
+        exactKey: canonicalEntityKey(identity),
+        groups: [],
+        kind: 'worker',
+        lod: 'aggregate',
+        profile: worker.profile,
+        runId,
+        sourceLabel: source.connectionId,
+        taskId: worker.task_id,
+        title: workerId,
+        workerId
+      })
+    }
+  }
+
+  return projectionFromRows(rows)
 }
 
 const SAFE_GATEWAY_ENV = ['PATH', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'SHELL', 'USER', 'LOGNAME'] as const

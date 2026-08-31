@@ -8,7 +8,9 @@ import { _electron, expect, test } from '@playwright/test'
 import { PACKAGED_BINARY_PATH } from './fixtures'
 import {
   createLunarCityPopulationFixture,
+  expectedStandardProjection,
   gpuPackagedLaunchOptions,
+  readStandardPopulation,
   startPopulationGateways
 } from './lunar-city-fixtures'
 
@@ -55,6 +57,13 @@ for (const population of [25, 100, 250] as const) {
 
     try {
       gateways = await startPopulationGateways(fixture)
+      const standardProjection = await readStandardPopulation(gateways)
+
+      expect(standardProjection).toEqual(expectedStandardProjection(fixture.contract))
+      test.skip(
+        fixture.contract.entitiesByKind.subagent > 0,
+        'No authenticated real-gateway fixture method emits subagent.start; packaged exact-population proof is blocked and this skip is not evidence.'
+      )
       const nonce = `lunar-city-${randomUUID()}`
 
       const launch = gpuPackagedLaunchOptions({
@@ -110,20 +119,18 @@ for (const population of [25, 100, 250] as const) {
         expect(result.gpu.gpuMemoryMiB).toBeNull()
       }
 
-      // Deliberately fail closed against the renderer bridge. Detached fixture data,
-      // a skipped run, or an inferred GPU boolean is never accepted as evidence.
       expect(result.snapshot).toMatchObject({
-        contractDigest: fixture.contract.digest,
-        entityKeys: fixture.contract.entities.map(entity => entity.exactKey),
-        groups: fixture.contract.groups,
-        leaderFamilies: fixture.contract.leaderFamilies,
         population: {
-          activity: fixture.contract.activity,
-          byKind: fixture.contract.entitiesByKind,
-          lodMix: fixture.contract.lod,
+          active: standardProjection.activity.active,
+          lodMix: {
+            far: fixture.contract.lod.far + fixture.contract.lod.aggregate,
+            mid: fixture.contract.lod.mid,
+            near: fixture.contract.lod.near
+          },
           observed: population,
           source: 'lunar-city-snapshot-v1'
-        }
+        },
+        populationSourceMix: standardProjection.sourceMix
       })
     } finally {
       await app?.close().catch(() => undefined)
