@@ -922,7 +922,9 @@ _EGRESS_PROTECTED_PROVIDERS = frozenset(
 )
 
 
-def _attach_source_provenance_sidecar(agent, kwargs: dict, messages: list) -> dict:
+def _attach_source_provenance_sidecar(
+    agent, kwargs: dict, messages: list | None = None, *, sidecar: list | None = None
+) -> dict:
     """Carry internal read proofs around strict wire-message conversion."""
 
     provider = str(getattr(agent, "provider", "") or "").strip().lower()
@@ -930,7 +932,8 @@ def _attach_source_provenance_sidecar(agent, kwargs: dict, messages: list) -> di
         return kwargs
     from agent.source_provenance_tools import build_source_provenance_sidecar
 
-    sidecar = build_source_provenance_sidecar(messages)
+    if sidecar is None:
+        sidecar = build_source_provenance_sidecar(messages)
     if not sidecar:
         return kwargs
     return {**kwargs, "_hermes_source_provenance": sidecar}
@@ -1868,6 +1871,12 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
 def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = None) -> dict:
     """Build the keyword arguments dict for the active API mode."""
+    # Capture internal provenance before any transport converts or sanitizes
+    # messages. Codex Responses removes internal tool-message keys entirely,
+    # and some chat transports normalize the list in place.
+    from agent.source_provenance_tools import build_source_provenance_sidecar
+
+    _source_sidecar = build_source_provenance_sidecar(api_messages)
     if tools_for_api is None:
         tools_for_api = agent.tools
 
@@ -1972,7 +1981,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
                     getattr(agent, "log_prefix", ""), exc,
                 )
 
-        return _ct.build_kwargs(
+        _codex_kwargs = _ct.build_kwargs(
             model=agent.model,
             messages=_msgs_for_codex,
             tools=tools_for_api,
@@ -1992,6 +2001,9 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
                 getattr(agent, "_codex_reasoning_replay_enabled", True)
             ),
             context_management=_context_management,
+        )
+        return _attach_source_provenance_sidecar(
+            agent, _codex_kwargs, sidecar=_source_sidecar
         )
 
     # ── chat_completions (default) ─────────────────────────────────────
@@ -2100,7 +2112,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
             qwen_session_metadata=_qwen_meta,
         )
         return _attach_source_provenance_sidecar(
-            agent, _chat_kwargs, _source_sidecar_messages
+            agent, _chat_kwargs, _source_sidecar_messages, sidecar=_source_sidecar
         )
 
     # ── Legacy flag path ────────────────────────────────────────────
@@ -2151,7 +2163,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
         provider_name=agent.provider,
     )
     return _attach_source_provenance_sidecar(
-        agent, _chat_kwargs, _source_sidecar_messages
+        agent, _chat_kwargs, _source_sidecar_messages, sidecar=_source_sidecar
     )
 
 
