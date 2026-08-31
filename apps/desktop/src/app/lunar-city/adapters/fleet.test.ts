@@ -67,4 +67,33 @@ describe('normalizeRoster', () => {
       destination: 'unavailable'
     })
   })
+
+  it('treats a reachable source reporting an error as stale rather than authoritative', () => {
+    const normalized = normalizeRoster(
+      {
+        agents: [
+          {
+            connectionId: 'local',
+            connectionKind: 'local',
+            connectionLabel: 'this Mac',
+            handle: '@worker-local',
+            profile: 'worker'
+          }
+        ],
+        sources: [
+          {
+            connectionId: 'local',
+            error: 'refresh retained cached roster',
+            kind: 'local',
+            label: 'this Mac',
+            reachable: true
+          }
+        ]
+      },
+      { observedAt: 42 }
+    )
+
+    expect(normalized.sources[0]).toMatchObject({ authority: 'stale', error: 'refresh retained cached roster' })
+    expect(normalized.entities[0]).toMatchObject({ authority: 'stale', destination: 'unavailable' })
+  })
 })

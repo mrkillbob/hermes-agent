@@ -7,7 +7,7 @@ import { $subagentsBySession, type SubagentProgress } from '@/store/subagents'
 import type { SessionInfo } from '@/types/hermes'
 
 import type { LunarEntity, SourceHealth } from '../model'
-import { $lunarCitySnapshot, applyLunarDelta, type LunarDelta } from '../store'
+import { $lunarCitySnapshot, applyLunarDelta, freezeLunarDelta, type LunarDelta } from '../store'
 
 import { normalizeRoster } from './fleet'
 import { normalizeSessions, normalizeSubagents } from './sessions'
@@ -21,7 +21,24 @@ export interface ReconcileReadResult {
 
 export interface ReconcilerEvent {
   sequence?: number
-  source: string
+  source?: SequenceSource
+}
+
+export interface SequenceSource {
+  connectionId: string
+  profile: string
+  sessionId: string
+}
+
+export interface SequenceScope {
+  connectionId?: string
+  profile?: string
+  sessionId?: string
+}
+
+export interface FleetRefreshResult {
+  error?: string
+  status?: 'failed' | 'partial' | 'refreshed' | 'retained'
 }
 
 export interface LunarCityReconcilerOptions {
@@ -45,7 +62,7 @@ export interface LunarCityLiveSources {
   onEvent?: (listener: (event: unknown) => void) => () => void
   onFocus?: (listener: () => void) => () => void
   onRegistryChange?: (listener: () => void) => () => void
-  refreshFleet: (options: { force: boolean }) => Promise<void>
+  refreshFleet: (options: { force: boolean }) => Promise<FleetRefreshResult | void>
   sessionRows?: () => readonly SessionInfo[]
   sessionStores?: readonly ReadableAtom<readonly SessionInfo[]>[]
 }
@@ -100,6 +117,30 @@ function sortedSources(sources: readonly SourceHealth[]): readonly SourceHealth[
   return [...sources].sort((left, right) => left.source.localeCompare(right.source))
 }
 
+function sourceKey(source: SequenceSource): string {
+  return JSON.stringify([source.connectionId, source.profile, source.sessionId])
+}
+
+function belongsToScope(source: SequenceSource, scope: SequenceScope): boolean {
+  return (
+    (scope.connectionId === undefined || source.connectionId === scope.connectionId) &&
+    (scope.profile === undefined || source.profile === scope.profile) &&
+    (scope.sessionId === undefined || source.sessionId === scope.sessionId)
+  )
+}
+
+function healthSourceFor(entity: LunarEntity): string {
+  switch (entity.identity.kind) {
+    case 'profile':
+      return `fleet:${entity.identity.connectionId}`
+    case 'session':
+    case 'subagent':
+      return `session:${entity.identity.connectionId}`
+    case 'kanban':
+      return `kanban:${entity.identity.connectionId}`
+  }
+}
+
 function staleEntity(entity: LunarEntity): LunarEntity {
   if (entity.authority === 'stale') {
     return entity
@@ -118,7 +159,7 @@ export class LunarCityReconciler {
   private freshnessTimer: ReturnType<typeof setTimeout> | undefined
   private inFlight = false
   private queued = false
-  private readonly sequences = new Map<string, number>()
+  private readonly sequences = new Map<string, { sequence: number; source: SequenceSource }>()
 
   constructor(private readonly options: LunarCityReconcilerOptions) {}
 
@@ -150,16 +191,36 @@ export class LunarCityReconciler {
       return 'accepted'
     }
 
-    const prior = this.sequences.get(event.source)
+    if (!event.source) {
+      this.invalidate('unscoped-event')
 
-    if (prior !== undefined && sequence <= prior) {
+      return 'accepted'
+    }
+
+    const key = sourceKey(event.source)
+    const prior = this.sequences.get(key)
+
+    if (prior !== undefined && sequence <= prior.sequence) {
       return 'ignored'
     }
 
-    this.sequences.set(event.source, sequence)
-    this.invalidate(prior !== undefined && shouldReconcile(prior, sequence) ? 'sequence-gap' : 'event')
+    this.sequences.set(key, { sequence, source: event.source })
+    this.invalidate(prior !== undefined && shouldReconcile(prior.sequence, sequence) ? 'sequence-gap' : 'event')
 
     return 'accepted'
+  }
+
+  /**
+   * A restarted gateway can legitimately replay a lower sequence.  Clear only
+   * the exact connection/profile/session scope that declared the restart; an
+   * unscoped restart clears all cursors rather than retaining false ordering.
+   */
+  resetSequences(scope: SequenceScope = {}): void {
+    for (const [key, entry] of this.sequences) {
+      if (belongsToScope(entry.source, scope)) {
+        this.sequences.delete(key)
+      }
+    }
   }
 
   invalidate(_reason: string): void {
@@ -213,7 +274,9 @@ export class LunarCityReconciler {
       candidates.set(entity.key, entity)
     }
 
-    this.publishCandidate([...candidates.values()], sortedSources(result.sources))
+    const sources = result.authoritative === false ? this.mergePartialSources(previous.sources, result.sources) : result.sources
+
+    this.publishCandidate([...candidates.values()], sortedSources(sources))
   }
 
   private publishStale(): void {
@@ -223,6 +286,19 @@ export class LunarCityReconciler {
       [...previous.entities.values()].map(staleEntity),
       previous.sources.map(source => ({ ...source, authority: 'stale' as const }))
     )
+  }
+
+  private mergePartialSources(
+    previous: readonly SourceHealth[],
+    incoming: readonly SourceHealth[]
+  ): readonly SourceHealth[] {
+    const merged = new Map(previous.map(source => [source.source, source]))
+
+    for (const source of incoming) {
+      merged.set(source.source, source)
+    }
+
+    return [...merged.values()]
   }
 
   private publishCandidate(candidates: readonly LunarEntity[], sources: readonly SourceHealth[]): void {
@@ -250,13 +326,14 @@ export class LunarCityReconciler {
       ...candidates.map(entity => entity.observedAt)
     )
 
-    this.options.publish?.({
+    const delta = freezeLunarDelta({
       observedAt,
       removals,
       revision: previous.revision + 1,
       sources,
       upserts
-    }) ?? applyLunarDelta({ observedAt, removals, revision: previous.revision + 1, sources, upserts })
+    })
+    this.options.publish?.(delta) ?? applyLunarDelta(delta)
     this.scheduleFreshness(sources)
   }
 
@@ -281,9 +358,31 @@ export class LunarCityReconciler {
       this.freshnessTimer = undefined
 
       if (this.active) {
-        this.publishStale()
+        this.publishExpiredSources()
       }
     }, delay)
+  }
+
+  private publishExpiredSources(): void {
+    const previous = $lunarCitySnapshot.get()
+    const now = this.options.now?.() ?? Date.now()
+    const freshnessMs = this.options.freshnessMs ?? 60_000
+    const expired = new Set(
+      previous.sources
+        .filter(source => source.authority === 'authoritative' && source.observedAt + freshnessMs <= now)
+        .map(source => source.source)
+    )
+
+    if (expired.size === 0) {
+      this.scheduleFreshness(previous.sources)
+
+      return
+    }
+
+    this.publishCandidate(
+      [...previous.entities.values()].map(entity => (expired.has(healthSourceFor(entity)) ? staleEntity(entity) : entity)),
+      previous.sources.map(source => (expired.has(source.source) ? { ...source, authority: 'stale' as const } : source))
+    )
   }
 }
 
@@ -323,7 +422,36 @@ function defaultLiveSources(): LunarCityLiveSources {
         offBridge?.()
       }
     },
-    refreshFleet: refreshFleetRoster,
+    refreshFleet: async options => {
+      if (!options.force) {
+        const before = $fleetRoster.get()
+        await refreshFleetRoster(options)
+        const roster = $fleetRoster.get()
+
+        if (roster?.sources.some(source => !source.reachable || Boolean(source.error))) {
+          return { status: 'partial' }
+        }
+
+        return { status: roster === before ? 'retained' : 'refreshed' }
+      }
+
+      const readFleet = window.hermesDesktop?.getAgentRoster
+
+      if (!readFleet) {
+        return { error: 'Fleet roster bridge unavailable', status: 'failed' }
+      }
+
+      try {
+        const roster = await readFleet()
+        $fleetRoster.set(roster)
+
+        return roster.sources.some(source => !source.reachable || Boolean(source.error))
+          ? { status: 'partial' }
+          : { status: 'refreshed' }
+      } catch {
+        return { error: 'Fleet refresh failed', status: 'failed' }
+      }
+    },
     sessionRows: ownerLookupSessionRows,
     sessionStores: [$sessions, $cronSessions, $messagingSessions]
   }
@@ -337,7 +465,7 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
-function eventCursor(event: unknown): { sequence?: number; source: string } {
+function eventCursor(event: unknown): { scope: SequenceScope; sequence?: number; source?: SequenceSource } {
   const value = record(event)
   const payload = record(value.payload)
   const connectionId = optionalString(value.connectionId)
@@ -348,11 +476,13 @@ function eventCursor(event: unknown): { sequence?: number; source: string } {
 
   // A backend sequence has meaning only alongside every owner component it
   // scopes.  An unscoped event remains a reread hint, never a shared cursor.
+  const scope = { ...(connectionId ? { connectionId } : {}), ...(profile ? { profile } : {}) }
+
   if (!connectionId || !profile || !sessionId || sequence === undefined) {
-    return { source: 'unscoped' }
+    return { scope }
   }
 
-  return { sequence, source: `${connectionId}/${profile}/${sessionId}` }
+  return { scope, sequence, source: { connectionId, profile, sessionId } }
 }
 
 /**
@@ -377,13 +507,17 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       const force = forceFleetRefresh
       forceFleetRefresh = false
       let fleetReadFailed = false
+      let fleetError: string | undefined
 
       try {
-        await sources.refreshFleet({ force })
+        const result = await sources.refreshFleet({ force })
+        fleetReadFailed = result?.status === 'failed' || result?.status === 'partial'
+        fleetError = result?.error
       } catch {
         // The existing roster remains valuable evidence, but it must retain
         // its last successful observation timestamp and become stale below.
         fleetReadFailed = true
+        fleetError = 'Fleet refresh failed'
       }
 
       const roster = sources.$fleetRoster.get()
@@ -404,7 +538,9 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         authoritative: !fleetReadFailed,
         entities: [...fleet.entities, ...sessions.entities, ...subagents.entities],
         sources: [
-          ...fleet.sources.map(source => (fleetReadFailed ? { ...source, error: 'Fleet refresh failed' } : source)),
+          ...fleet.sources.map(source =>
+            fleetReadFailed ? { ...source, error: fleetError ?? 'Fleet refresh failed' } : source
+          ),
           ...sessions.sources
         ]
       }
@@ -443,12 +579,14 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
     disposers.push(
       sources.onEvent(event => {
         const type = optionalString(record(event).type)
+        const cursor = eventCursor(event)
 
         if (type === 'gateway.ready') {
           forceFleetRefresh = true
+          reconciler.resetSequences(cursor.scope)
         }
 
-        reconciler.acceptEvent(eventCursor(event))
+        reconciler.acceptEvent(cursor)
       })
     )
   }

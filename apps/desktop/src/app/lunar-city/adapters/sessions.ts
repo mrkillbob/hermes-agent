@@ -167,6 +167,10 @@ export function normalizeSubagents(
       const owner = candidates[0]!
 
       return rows.flatMap(row => {
+        if (row.parentId !== null && row.parentId !== parentSessionId) {
+          return []
+        }
+
         const entity = normalizeSubagent(row, owner, observation)
 
         return entity ? [entity] : []

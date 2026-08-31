@@ -80,28 +80,44 @@ export function createLunarCitySnapshot(seed: SnapshotSeed = {}): LunarCitySnaps
 export const $lunarCitySnapshot = atom<LunarCitySnapshot>(createLunarCitySnapshot())
 
 /**
+ * Clones and freezes a presentation delta before it crosses from adapters to
+ * a renderer or any other publisher.  It deliberately excludes mutable input
+ * references so callers cannot change a published value after handoff.
+ */
+export function freezeLunarDelta(delta: LunarDelta): LunarDelta {
+  return Object.freeze({
+    observedAt: delta.observedAt,
+    removals: Object.freeze([...delta.removals]),
+    revision: delta.revision,
+    sources: Object.freeze(delta.sources.map(freezeSource)),
+    upserts: Object.freeze(delta.upserts.map(freezeEntity))
+  })
+}
+
+/**
  * Applies adapter-owned publication revisions with copy-on-write records. A
  * duplicate or out-of-order publication is a no-op, preserving semantic atom
  * identity for Babylon consumers.
  */
 export function applyLunarDelta(delta: LunarDelta): LunarCitySnapshot {
+  const frozen = freezeLunarDelta(delta)
   const previous = $lunarCitySnapshot.get()
 
-  if (delta.revision <= previous.revision) {
+  if (frozen.revision <= previous.revision) {
     return previous
   }
 
   const entities = new Map(previous.entities)
 
-  for (const key of delta.removals) {
+  for (const key of frozen.removals) {
     entities.delete(key)
   }
 
-  for (const entity of delta.upserts) {
-    entities.set(entity.key, freezeEntity(entity))
+  for (const entity of frozen.upserts) {
+    entities.set(entity.key, entity)
   }
 
-  const next = snapshot(delta.revision, delta.observedAt, [...entities], delta.sources)
+  const next = snapshot(frozen.revision, frozen.observedAt, [...entities], frozen.sources)
   $lunarCitySnapshot.set(next)
 
   return next

@@ -15,7 +15,7 @@ export interface FleetObservation {
 
 function sourceHealth(source: DesktopAgentRoster['sources'][number], observedAt: number): SourceHealth {
   return {
-    authority: source.reachable ? 'authoritative' : 'stale',
+    authority: source.reachable && !source.error ? 'authoritative' : 'stale',
     ...(source.error ? { error: source.error } : {}),
     observedAt,
     source: `fleet:${source.connectionId}`
@@ -43,13 +43,13 @@ export function normalizeRoster(roster: DesktopAgentRoster, observation: FleetOb
     )
     .map(agent => {
       const source = healthByConnection.get(agent.connectionId)
-      const available = fresh && source?.reachable === true
+      const available = fresh && source?.reachable === true && !source.error
       const identity = { kind: 'profile' as const, connectionId: agent.connectionId, profile: agent.profile }
 
       return {
         animation: available ? 'rest' : 'unavailable',
         authority: fresh ? (available ? 'authoritative' : source ? 'stale' : 'unknown') : 'stale',
-        destination: available ? 'garden' : fresh && source?.reachable === false ? 'unavailable' : 'unknown',
+        destination: available ? 'garden' : source ? 'unavailable' : 'unknown',
         identity,
         key: entityKey(identity),
         observedAt: observation.observedAt

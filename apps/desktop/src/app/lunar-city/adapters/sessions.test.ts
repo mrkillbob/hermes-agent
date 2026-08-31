@@ -134,4 +134,34 @@ describe('session live adapter', () => {
 
     expect(normalized.entities).toEqual([])
   })
+
+  it('fails closed when a subagent row claims a different parent than its map key', () => {
+    const parents = normalizeSessions([session({ connection_id: 'local', id: 'parent', profile: 'worker' })], {
+      observedAt: 42
+    })
+
+    const normalized = normalizeSubagents(
+      {
+        parent: [
+          {
+            filesRead: [],
+            filesWritten: [],
+            goal: 'work',
+            id: 'sub-1',
+            parentId: 'other-parent',
+            startedAt: 10,
+            status: 'running',
+            stream: [],
+            taskCount: 1,
+            taskIndex: 0,
+            updatedAt: 20
+          }
+        ]
+      },
+      parents.entities,
+      { observedAt: 42 }
+    )
+
+    expect(normalized.entities).toEqual([])
+  })
 })
