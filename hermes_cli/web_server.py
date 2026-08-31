@@ -316,6 +316,20 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
     provider.start(stop_event, **start_kwargs)
 
 
+def _desktop_cron_ticker_enabled() -> bool:
+    """Return whether this Desktop backend owns the machine-wide cron tick.
+
+    Electron's primary backend is the single scheduler authority. Named-profile
+    pool backends still carry ``HERMES_DESKTOP=1`` because they are app-owned
+    GUI surfaces, but ``HERMES_DESKTOP_POOL=1`` keeps each of those helpers from
+    starting another multiplex ticker across every profile.
+    """
+    return (
+        os.getenv("HERMES_DESKTOP") == "1"
+        and os.getenv("HERMES_DESKTOP_POOL") != "1"
+    )
+
+
 def _warm_gateway_module() -> None:
     """Pre-import heavy modules so the event loop is not stalled on first use.
 
@@ -435,7 +449,7 @@ async def _lifespan(app: "FastAPI"):
     # dashboard` is unaffected — it relies on its own gateway.
     cron_stop: "threading.Event | None" = None
     cron_thread: "threading.Thread | None" = None
-    if os.getenv("HERMES_DESKTOP") == "1":
+    if _desktop_cron_ticker_enabled():
         # Before forking a fresh gateway, reap any orphan left by a previous
         # serve session. Graceful shutdown reaps the managed child, but an
         # abnormal exit (crash, SIGKILL, power loss, forced update) reparents
