@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto'
-import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -75,6 +75,7 @@ function validateFixtureLocation(fixture) {
     root.startsWith(`${home}/`) ||
     workspace === root ||
     workspace.startsWith(`${root}/`) ||
+    root.startsWith(`${workspace}/`) ||
     root.split('/').filter(Boolean).length < 3
   ) {
     throw new Error('fixture root is a home, workspace, broad ancestor, or otherwise not isolated')
@@ -83,6 +84,8 @@ function validateFixtureLocation(fixture) {
   if (canonicalRoot !== root || lstatSync(root).isSymbolicLink())
     throw new Error('fixture root is symlinked, not canonical')
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid !== undefined && statSync(canonicalRoot).uid !== uid)
+    throw new Error('fixture root is not owned by current uid')
   const checked = { ...fixture, root: canonicalRoot }
   for (const field of ['hermesHome', 'contractPath', 'userDataDir']) {
     const requested = resolve(fixture[field])
@@ -120,7 +123,127 @@ export function validateIsolatedFixturePaths(fixture) {
   return Object.freeze(checked)
 }
 
-export function validateCanonicalFixture({ bytes, proof }) {
+function currentUid() {
+  if (typeof process.getuid !== 'function') throw new Error('gateway ownership requires current uid support')
+  return process.getuid()
+}
+
+/** Own and observe three gateway children through a narrow injectable process boundary. */
+export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps) {
+  if (typeof runNonce !== 'string' || runNonce.length === 0) throw new Error('gateway lifecycle run nonce is required')
+  if (!Array.isArray(sourceIds) || sourceIds.length !== 3 || new Set(sourceIds).size !== 3)
+    throw new Error('gateway lifecycle requires exactly three distinct sources')
+  for (const name of ['inspectProcess', 'probePopulation', 'spawnGateway', 'terminateGateway', 'waitGateway']) {
+    if (typeof deps?.[name] !== 'function') throw new Error(`gateway lifecycle ${name} boundary is unavailable`)
+  }
+  const uid = currentUid()
+  const handles = []
+  const identities = []
+  const cleanupSpawned = async () => {
+    await Promise.allSettled(handles.map(handle => deps.terminateGateway(handle)))
+    await Promise.allSettled(handles.map(handle => deps.waitGateway(handle)))
+  }
+  try {
+    for (const sourceId of sourceIds) {
+      const handle = await deps.spawnGateway(sourceId, { runNonce })
+      const pid = handle?.pid
+      if (!Number.isInteger(pid) || pid <= 0) throw new Error(`gateway ${sourceId} has no positive child PID`)
+      if (handles.some(existing => existing.pid === pid)) throw new Error('gateway child PID is duplicated')
+      const observed = await deps.inspectProcess(pid)
+      if (!observed) throw new Error(`gateway child process ${pid} is missing`)
+      if (observed.alive !== true) throw new Error(`gateway child process ${pid} is not alive`)
+      if (observed.parentPid !== process.pid) throw new Error(`gateway process ${pid} is not an orchestrator child`)
+      if (observed.uid !== uid) throw new Error(`gateway process ${pid} does not match current uid`)
+      if (typeof observed.startToken !== 'string' || observed.startToken.length === 0)
+        throw new Error(`gateway process ${pid} start token is unavailable`)
+      handles.push({ ...handle, pid, sourceId })
+      identities.push({ pid, sourceId, parentPid: observed.parentPid, startToken: observed.startToken, uid })
+    }
+  } catch (error) {
+    await cleanupSpawned()
+    throw error
+  }
+
+  const inspectIdentity = async identity => {
+    const observed = await deps.inspectProcess(identity.pid)
+    return Boolean(
+      observed?.alive === true &&
+      observed.parentPid === identity.parentPid &&
+      observed.uid === identity.uid &&
+      observed.startToken === identity.startToken
+    )
+  }
+  const assertLive = async () => {
+    const statuses = await Promise.all(identities.map(inspectIdentity))
+    if (statuses.some(alive => !alive)) throw new Error('owned gateway child identity/liveness changed before capture')
+  }
+  await assertLive()
+  const observation = await deps.probePopulation(handles, { runNonce })
+  if (
+    observation?.authenticated !== true ||
+    !Number.isInteger(observation.observedPopulation) ||
+    !observation.sourceMix ||
+    !Array.isArray(observation.entityKeys)
+  ) {
+    await cleanupSpawned()
+    throw new Error('owned gateways did not return authenticated population observation')
+  }
+  let stopPromise
+  return {
+    assertLive,
+    async stop() {
+      stopPromise ??= (async () => {
+        const livenessResults = await Promise.allSettled(identities.map(inspectIdentity))
+        const terminateResults = await Promise.allSettled(handles.map(handle => deps.terminateGateway(handle)))
+        const waitResults = await Promise.allSettled(handles.map(handle => deps.waitGateway(handle)))
+        const inspections = await Promise.allSettled(handles.map(handle => deps.inspectProcess(handle.pid)))
+        const terminations = handles.map((handle, index) => {
+          const terminateResult = terminateResults[index]
+          const waitResult = waitResults[index]
+          const inspection = inspections[index]
+          const waited = waitResult.status === 'fulfilled' ? waitResult.value : undefined
+          const after = inspection.status === 'fulfilled' ? inspection.value : undefined
+          if (
+            terminateResult.status !== 'fulfilled' ||
+            waitResult.status !== 'fulfilled' ||
+            inspection.status !== 'fulfilled' ||
+            waited?.exited !== true ||
+            after?.alive === true
+          ) {
+            throw new Error(`gateway child process ${handle.pid} did not terminate with verified wait evidence`)
+          }
+          return {
+            exitCode: waited.exitCode ?? null,
+            signal: waited.signal ?? null,
+            verifiedExited: true,
+            waited: true
+          }
+        })
+        if (livenessResults.some(result => result.status !== 'fulfilled' || result.value !== true)) {
+          throw new Error('owned gateway child identity/liveness changed before stop')
+        }
+        return {
+          authenticated: true,
+          entityKeys: [...observation.entityKeys],
+          gatewayProcesses: identities.map((identity, index) => ({
+            ...identity,
+            aliveAtCapture: true,
+            termination: terminations[index]
+          })),
+          observedPopulation: observation.observedPopulation,
+          orchestratorPid: process.pid,
+          runNonce,
+          source: 'owned-authenticated-gateways-v2',
+          sourceMix: structuredClone(observation.sourceMix),
+          uid
+        }
+      })()
+      return stopPromise
+    }
+  }
+}
+
+function parseCanonicalFixture(bytes) {
   let contract
   try {
     contract = JSON.parse(bytes)
@@ -146,21 +269,50 @@ export function validateCanonicalFixture({ bytes, proof }) {
     .filter(entity => entity.kind === 'subagent')
     .map(entity => entity.exactKey)
     .sort()
+  const sourceIds = Object.keys(sourceMix)
+  if (sourceIds.length !== 3) throw new Error('canonical fixture requires exactly three gateway sources')
+  return { contract, digest, sourceIds, sourceMix, subagentKeys }
+}
+
+export function validateCanonicalFixture({ bytes, proof }) {
+  const { contract, digest, sourceIds, sourceMix, subagentKeys } = parseCanonicalFixture(bytes)
   if (
     proof?.authenticated !== true ||
-    proof?.source !== 'owned-authenticated-gateways-v1' ||
+    proof?.source !== 'owned-authenticated-gateways-v2' ||
     proof.observedPopulation !== contract.population ||
     canonicalJson(proof.sourceMix) !== canonicalJson(sourceMix)
   ) {
     throw new Error('canonical fixture lacks matching authenticated gateway population evidence')
   }
+  const processRows = proof.gatewayProcesses
+  const pids = Array.isArray(processRows) ? processRows.map(row => row?.pid) : []
   if (
-    !Array.isArray(proof.gatewayProcesses) ||
-    proof.gatewayProcesses.length !== 3 ||
-    new Set(proof.gatewayProcesses).size !== 3 ||
-    proof.gatewayProcesses.some(pid => !Number.isInteger(pid) || pid <= 0)
+    proof.orchestratorPid !== process.pid ||
+    proof.uid !== currentUid() ||
+    typeof proof.runNonce !== 'string' ||
+    proof.runNonce.length === 0 ||
+    !Array.isArray(processRows) ||
+    processRows.length !== 3 ||
+    new Set(pids).size !== 3 ||
+    canonicalJson(processRows.map(row => row?.sourceId).sort()) !== canonicalJson(sourceIds) ||
+    processRows.some(
+      row =>
+        !Number.isInteger(row?.pid) ||
+        row.pid <= 0 ||
+        row.parentPid !== proof.orchestratorPid ||
+        row.uid !== proof.uid ||
+        typeof row.startToken !== 'string' ||
+        row.startToken.length === 0 ||
+        row.aliveAtCapture !== true ||
+        row.termination?.verifiedExited !== true ||
+        row.termination?.waited !== true ||
+        !Object.hasOwn(row.termination, 'exitCode') ||
+        !Object.hasOwn(row.termination, 'signal') ||
+        (row.termination.exitCode !== null && !Number.isInteger(row.termination.exitCode)) ||
+        (row.termination.signal !== null && typeof row.termination.signal !== 'string')
+    )
   )
-    throw new Error('canonical fixture requires three owned authenticated gateway processes')
+    throw new Error('canonical fixture requires fully observed owned and terminated gateway child processes')
   const observedKeys = Array.isArray(proof.entityKeys) ? [...proof.entityKeys].sort() : []
   if (subagentKeys.length === 0 || subagentKeys.some(key => !observedKeys.includes(key))) {
     throw new Error('canonical fixture lacks authenticated observed subagent evidence')
@@ -290,6 +442,15 @@ export function assembleLunarCityReceipt({ capture, evidenceClass, metadata, sce
     throw new Error('runtime environment provenance digest mismatch')
   }
   const rawBytes = rawArtifactBytes(capture)
+  const operatorMetadataBytes =
+    metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? canonicalJson(metadata) : undefined
+  if (operatorMetadataBytes) {
+    try {
+      if (canonicalJson(JSON.parse(operatorMetadataBytes)) !== operatorMetadataBytes) throw new Error('noncanonical')
+    } catch {
+      throw new Error('operator metadata must be canonical JSON data')
+    }
+  }
   const receipt = {
     receiptVersion: RECEIPT_VERSION,
     evidenceClass,
@@ -297,10 +458,11 @@ export function assembleLunarCityReceipt({ capture, evidenceClass, metadata, sce
     gitSha: capture.buildStamp.commit,
     buildStamp: capture.buildStamp,
     timestamp,
-    ...(metadata && typeof metadata === 'object' ? { operatorMetadata: metadata } : {}),
+    ...(operatorMetadataBytes ? { operatorMetadata: structuredClone(metadata), operatorMetadataBytes } : {}),
     artifactProvenance: {
       environmentDigest,
       rawArtifactSha256: sha256(rawBytes),
+      ...(operatorMetadataBytes ? { operatorMetadataSha256: sha256(operatorMetadataBytes) } : {}),
       ...(fixtureBinding
         ? {
             fixtureBytesSha256: fixtureBinding.bytesSha256,
@@ -363,10 +525,18 @@ export async function orchestrateLunarCityAcceptance(options, injected = {}) {
     mkdir: path => mkdirSync(path, { recursive: true }),
     nowIso: () => new Date().toISOString(),
     makeRunNonce: randomUUID,
-    readFixture: path => readFileSync(path, 'utf8'),
-    startFixture: async () => {
-      throw new Error('owned authenticated fixture gateway lifecycle is unavailable')
+    inspectProcess: async () => {
+      throw new Error('owned authenticated fixture process inspection is unavailable')
     },
+    probePopulation: async () => {
+      throw new Error('owned authenticated fixture population probe is unavailable')
+    },
+    readFixture: path => readFileSync(path, 'utf8'),
+    spawnGateway: async () => {
+      throw new Error('owned authenticated fixture gateway spawn is unavailable')
+    },
+    terminateGateway: async () => undefined,
+    waitGateway: async () => ({ exited: false }),
     validate: validateReceipt,
     writeJson: defaultWriteJson,
     ...injected
@@ -390,25 +560,37 @@ export async function orchestrateLunarCityAcceptance(options, injected = {}) {
       fixture: options.fixture
     })
     let fixtureLifecycle
+    let fixtureStopped = false
+    let sentinelPath
     try {
       let fixtureBinding
       let fixture = policy.fixture
       if (policy.fixture) {
         fixture = validateFixtureLocation(policy.fixture)
         const runNonce = deps.makeRunNonce()
-        fixtureLifecycle = await deps.startFixture(fixture, { runNonce })
-        if (typeof fixtureLifecycle?.stop !== 'function' || fixtureLifecycle?.owned !== true) {
-          throw new Error('fixture gateway lifecycle is not owned by this run')
-        }
-        fixture = validateIsolatedFixturePaths({ ...fixture, runNonce })
-        fixtureBinding = validateCanonicalFixture({
-          bytes: deps.readFixture(fixture.contractPath),
-          proof: fixtureLifecycle.proof
+        const pendingSentinelPath = join(fixture.root, '.lunar-city-fixture-owner.json')
+        writeFileSync(pendingSentinelPath, JSON.stringify({ nonce: runNonce, pid: process.pid, version: 1 }), {
+          encoding: 'utf8',
+          flag: 'wx',
+          mode: 0o600
         })
-        if (fixtureBinding.expectedPopulation !== fixture.expectedPopulation) {
-          throw new Error('fixture descriptor population does not match canonical bytes')
-        }
+        sentinelPath = pendingSentinelPath
+        fixture = validateIsolatedFixturePaths({ ...fixture, runNonce })
+        const fixtureBytes = deps.readFixture(fixture.contractPath)
+        const { sourceIds } = parseCanonicalFixture(fixtureBytes)
+        fixtureLifecycle = await createOwnedGatewayLifecycle(
+          { runNonce, sourceIds },
+          {
+            inspectProcess: deps.inspectProcess,
+            probePopulation: deps.probePopulation,
+            spawnGateway: deps.spawnGateway,
+            terminateGateway: deps.terminateGateway,
+            waitGateway: deps.waitGateway
+          }
+        )
+        fixture.rawBytes = fixtureBytes
       }
+      await fixtureLifecycle?.assertLive()
       const captured = await deps.capture({
         binaryPath: options.binaryPath,
         expectedGitSha: options.expectedGitSha,
@@ -418,6 +600,14 @@ export async function orchestrateLunarCityAcceptance(options, injected = {}) {
         scenario,
         warmupDurationMs: policy.warmupDurationMs
       })
+      await fixtureLifecycle?.assertLive()
+      if (fixtureLifecycle) {
+        const proof = await fixtureLifecycle.stop()
+        fixtureStopped = true
+        fixtureBinding = validateCanonicalFixture({ bytes: fixture.rawBytes, proof })
+        if (fixtureBinding.expectedPopulation !== fixture.expectedPopulation)
+          throw new Error('fixture descriptor population does not match canonical bytes')
+      }
       const environment = runtimeEnvironment({ ...captured, hostEnvironment: captured.hostEnvironment }, fixtureBinding)
       const capture = {
         ...captured,
@@ -444,7 +634,11 @@ export async function orchestrateLunarCityAcceptance(options, injected = {}) {
       if (!validation.ok) throw new Error(`${scenario} receipt validation failed: ${validation.errors.join('; ')}`)
       if (!validation.packagedPerformanceEligible) throw new Error(`${scenario} receipt is not eligible for acceptance`)
     } finally {
-      await fixtureLifecycle?.stop()
+      try {
+        if (fixtureLifecycle && !fixtureStopped) await fixtureLifecycle.stop()
+      } finally {
+        if (sentinelPath) rmSync(sentinelPath, { force: true })
+      }
     }
   }
   return results

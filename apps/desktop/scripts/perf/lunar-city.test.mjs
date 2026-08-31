@@ -548,13 +548,24 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   const packaged = validateReceipt(packagedReceipt)
   assert.equal(packaged.packagedPerformanceEligible, true, packaged.errors.join('; '))
 
+  const operatorMetadata = { note: 'supplemental operator context', operator: 'test' }
+  packagedReceipt.operatorMetadata = operatorMetadata
+  packagedReceipt.operatorMetadataBytes = canonicalJson(operatorMetadata)
+  packagedReceipt.artifactProvenance.operatorMetadataSha256 = createHash('sha256')
+    .update(packagedReceipt.operatorMetadataBytes)
+    .digest('hex')
+  const metadataBound = validateReceipt(packagedReceipt)
+  assert.equal(metadataBound.packagedPerformanceEligible, true, metadataBound.errors.join('; '))
+
   for (const [label, mutate, pattern] of [
     [
       'tampered raw artifact',
       value => (value.rawArtifact.rawSamples.frameMs[0] += 1),
       /raw artifact digest|samples do not match/i
     ],
-    ['tampered environment', value => (value.environment.gpuAdapter = 'Spoofed GPU'), /environment provenance digest/i]
+    ['tampered environment', value => (value.environment.gpuAdapter = 'Spoofed GPU'), /environment provenance digest/i],
+    ['tampered operator metadata', value => (value.operatorMetadata.operator = 'spoofed'), /operator metadata/i],
+    ['tampered operator metadata bytes', value => (value.operatorMetadataBytes += ' '), /operator metadata/i]
   ]) {
     const tampered = structuredClone(packagedReceipt)
     mutate(tampered)

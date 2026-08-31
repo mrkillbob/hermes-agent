@@ -2,13 +2,14 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 
 import { SCENARIOS, isAcceptancePopulationState } from './lunar-city.mjs'
 import {
   assembleLunarCityReceipt,
   canonicalJson,
+  createOwnedGatewayLifecycle,
   orchestrateLunarCityAcceptance,
   resolveScenarioMeasurement,
   validateIsolatedFixturePaths,
@@ -218,7 +219,7 @@ test('canonical fixture verifies v3 bytes, digest, source mix, and authenticated
     activity: { active: 1, idle: 0, unavailable: 0 },
     entities: Array.from({ length: 25 }, (_, index) => ({
       activity: 'active',
-      connectionId: 'local',
+      connectionId: index < 9 ? 'local' : index < 17 ? 'remote-archive' : 'remote-lab',
       exactKey: index === 0 ? 'subagent-key' : `profile-${index}`,
       kind: index === 0 ? 'subagent' : 'profile'
     })),
@@ -236,11 +237,22 @@ test('canonical fixture verifies v3 bytes, digest, source mix, and authenticated
   const bytes = `${JSON.stringify(contract, null, 2)}\n`
   const proof = {
     authenticated: true,
-    source: 'owned-authenticated-gateways-v1',
-    gatewayProcesses: [101, 102, 103],
+    source: 'owned-authenticated-gateways-v2',
+    gatewayProcesses: [101, 102, 103].map((pid, index) => ({
+      aliveAtCapture: true,
+      parentPid: process.pid,
+      pid,
+      sourceId: ['local', 'remote-archive', 'remote-lab'][index],
+      startToken: `s-${pid}`,
+      termination: { exitCode: 0, signal: 'SIGTERM', verifiedExited: true, waited: true },
+      uid: process.getuid()
+    })),
     entityKeys: ['subagent-key'],
     observedPopulation: 25,
-    sourceMix: { local: 25 }
+    orchestratorPid: process.pid,
+    runNonce: 'fixture-proof-nonce',
+    sourceMix: { local: 9, 'remote-archive': 8, 'remote-lab': 8 },
+    uid: process.getuid()
   }
   const validated = validateCanonicalFixture({ bytes, proof })
   assert.equal(validated.contractDigest, contract.digest)
@@ -249,6 +261,126 @@ test('canonical fixture verifies v3 bytes, digest, source mix, and authenticated
   assert.throws(() => validateCanonicalFixture({ bytes: bytes.replace('subagent-key', 'tampered'), proof }), /digest/i)
   assert.throws(() => validateCanonicalFixture({ bytes, proof: { ...proof, authenticated: false } }), /authenticated/i)
   assert.throws(() => validateCanonicalFixture({ bytes, proof: { ...proof, entityKeys: [] } }), /subagent/i)
+  for (const [label, mutate] of [
+    ['duplicate pid', value => (value.gatewayProcesses[1].pid = value.gatewayProcesses[0].pid)],
+    ['foreign parent', value => (value.gatewayProcesses[0].parentPid = 1)],
+    ['foreign uid', value => (value.gatewayProcesses[0].uid += 1)],
+    ['dead at capture', value => (value.gatewayProcesses[0].aliveAtCapture = false)],
+    ['not terminated', value => (value.gatewayProcesses[0].termination.verifiedExited = false)],
+    ['source mismatch', value => (value.gatewayProcesses[0].sourceId = 'spoofed')]
+  ]) {
+    const tampered = structuredClone(proof)
+    mutate(tampered)
+    assert.throws(() => validateCanonicalFixture({ bytes, proof: tampered }), /owned|terminated|gateway/i, label)
+  }
+})
+
+test('owned gateway lifecycle observes child identity, liveness, authenticated population, and termination', async () => {
+  const states = new Map(
+    [101, 102, 103].map(pid => [
+      pid,
+      { alive: true, parentPid: process.pid, startToken: `s-${pid}`, uid: process.getuid() }
+    ])
+  )
+  const handles = [101, 102, 103].map((pid, index) => ({
+    pid,
+    sourceId: ['local', 'remote-lab', 'remote-archive'][index]
+  }))
+  const lifecycle = await createOwnedGatewayLifecycle(
+    { runNonce: 'run-nonce', sourceIds: handles.map(handle => handle.sourceId) },
+    {
+      inspectProcess: async pid => states.get(pid),
+      probePopulation: async () => ({
+        authenticated: true,
+        entityKeys: ['subagent-key'],
+        observedPopulation: 25,
+        sourceMix: { local: 9, 'remote-archive': 8, 'remote-lab': 8 }
+      }),
+      spawnGateway: async sourceId => handles.find(handle => handle.sourceId === sourceId),
+      terminateGateway: async handle => states.set(handle.pid, { ...states.get(handle.pid), alive: false }),
+      waitGateway: async () => ({ exitCode: 0, exited: true, signal: 'SIGTERM' })
+    }
+  )
+  await lifecycle.assertLive()
+  const proof = await lifecycle.stop()
+  assert.equal(proof.gatewayProcesses.length, 3)
+  assert.equal(
+    proof.gatewayProcesses.every(processRow => processRow.aliveAtCapture),
+    true
+  )
+  assert.equal(
+    proof.gatewayProcesses.every(processRow => processRow.termination.verifiedExited),
+    true
+  )
+  assert.equal(proof.orchestratorPid, process.pid)
+  assert.equal(proof.uid, process.getuid())
+})
+
+test('owned lifecycle rejects nonexistent, foreign, duplicate, dead, and unterminated child processes', async () => {
+  const base = {
+    probePopulation: async () => ({
+      authenticated: true,
+      entityKeys: ['subagent-key'],
+      observedPopulation: 25,
+      sourceMix: { local: 9, 'remote-archive': 8, 'remote-lab': 8 }
+    }),
+    terminateGateway: async () => undefined,
+    waitGateway: async () => ({ exitCode: 0, exited: true, signal: 'SIGTERM' })
+  }
+  const sources = ['local', 'remote-lab', 'remote-archive']
+  for (const [label, spawnGateway, inspectProcess, pattern] of [
+    ['nonexistent', async () => ({ pid: 0 }), async () => undefined, /positive|missing|process/i],
+    [
+      'duplicate',
+      async () => ({ pid: 101 }),
+      async () => ({ alive: true, parentPid: process.pid, startToken: 's', uid: process.getuid() }),
+      /duplicate/i
+    ],
+    [
+      'foreign parent',
+      async source => ({ pid: 101 + sources.indexOf(source) }),
+      async pid => ({ alive: true, parentPid: 1, startToken: `s-${pid}`, uid: process.getuid() }),
+      /parent|child/i
+    ],
+    [
+      'foreign uid',
+      async source => ({ pid: 101 + sources.indexOf(source) }),
+      async pid => ({ alive: true, parentPid: process.pid, startToken: `s-${pid}`, uid: process.getuid() + 1 }),
+      /uid/i
+    ],
+    [
+      'already dead',
+      async source => ({ pid: 101 + sources.indexOf(source) }),
+      async pid => ({ alive: false, parentPid: process.pid, startToken: `s-${pid}`, uid: process.getuid() }),
+      /alive/i
+    ]
+  ]) {
+    await assert.rejects(
+      () =>
+        createOwnedGatewayLifecycle(
+          { runNonce: 'nonce', sourceIds: sources },
+          { ...base, inspectProcess, spawnGateway }
+        ),
+      pattern,
+      label
+    )
+  }
+
+  const states = new Map(
+    [101, 102, 103].map(pid => [
+      pid,
+      { alive: true, parentPid: process.pid, startToken: `s-${pid}`, uid: process.getuid() }
+    ])
+  )
+  const lifecycle = await createOwnedGatewayLifecycle(
+    { runNonce: 'nonce', sourceIds: sources },
+    {
+      ...base,
+      inspectProcess: async pid => states.get(pid),
+      spawnGateway: async source => ({ pid: 101 + sources.indexOf(source), sourceId: source })
+    }
+  )
+  await assert.rejects(() => lifecycle.stop(), /terminate|still alive|exited/i)
 })
 
 test('fixture isolation rejects broad, real-home, and symlinked paths and requires a run-owned sentinel', () => {
@@ -281,6 +413,14 @@ test('fixture isolation rejects broad, real-home, and symlinked paths and requir
   assert.throws(
     () => validateIsolatedFixturePaths({ ...fixture, root: process.env.HOME, hermesHome: process.env.HOME }),
     /home|broad|isolated/i
+  )
+  assert.throws(
+    () => validateIsolatedFixturePaths({ ...fixture, root: join(process.cwd(), 'fixture-descendant') }),
+    /workspace|isolated/i
+  )
+  assert.throws(
+    () => validateIsolatedFixturePaths({ ...fixture, root: resolve(process.cwd(), '..') }),
+    /workspace|ancestor|isolated/i
   )
 })
 

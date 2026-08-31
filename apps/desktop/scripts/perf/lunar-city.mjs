@@ -842,6 +842,27 @@ function validateArtifactProvenance(receipt, errors) {
   }
   if (artifact.rawArtifactSha256 !== sha256(`${JSON.stringify(raw, null, 2)}\n`))
     errors.push('raw artifact digest mismatch')
+  const hasOperatorMetadata =
+    Object.hasOwn(receipt, 'operatorMetadata') ||
+    Object.hasOwn(receipt, 'operatorMetadataBytes') ||
+    Object.hasOwn(artifact, 'operatorMetadataSha256')
+  if (hasOperatorMetadata) {
+    let parsedOperatorMetadata
+    try {
+      parsedOperatorMetadata = JSON.parse(receipt.operatorMetadataBytes)
+    } catch {
+      errors.push('operator metadata canonical bytes are malformed')
+    }
+    if (
+      typeof receipt.operatorMetadataBytes !== 'string' ||
+      !isRecord(receipt.operatorMetadata) ||
+      canonicalJson(parsedOperatorMetadata) !== receipt.operatorMetadataBytes ||
+      canonicalJson(parsedOperatorMetadata) !== canonicalJson(receipt.operatorMetadata) ||
+      artifact.operatorMetadataSha256 !== sha256(receipt.operatorMetadataBytes ?? '')
+    ) {
+      errors.push('operator metadata bytes/digest mismatch')
+    }
+  }
   if (canonicalJson(raw.rawProvenance) !== canonicalJson(receipt.rawProvenance))
     errors.push('raw artifact provenance does not match receipt')
   if (canonicalJson(raw.rawSamples) !== canonicalJson(receipt.rawSamples))
@@ -879,6 +900,10 @@ function validateArtifactProvenance(receipt, errors) {
     const subagentKeys = Array.isArray(contract?.entities)
       ? contract.entities.filter(entity => entity.kind === 'subagent').map(entity => entity.exactKey)
       : []
+    const proofRows = fixture.proof?.gatewayProcesses
+    const proofPids = Array.isArray(proofRows) ? proofRows.map(row => row?.pid) : []
+    const proofSourceIds = Array.isArray(proofRows) ? proofRows.map(row => row?.sourceId).sort() : []
+    const expectedSourceIds = expectedSourceMix ? Object.keys(expectedSourceMix).sort() : []
     if (
       typeof fixture.contractBytes !== 'string' ||
       sha256(fixture.contractBytes) !== fixture.bytesSha256 ||
@@ -891,10 +916,36 @@ function validateArtifactProvenance(receipt, errors) {
       errors.push('fixture canonical bytes/digest/population/source mix mismatch')
     if (
       fixture.proof?.authenticated !== true ||
-      fixture.proof?.source !== 'owned-authenticated-gateways-v1' ||
+      fixture.proof?.source !== 'owned-authenticated-gateways-v2' ||
       sha256(canonicalJson(fixture.proof)) !== fixture.proofDigest ||
-      !Array.isArray(fixture.proof?.gatewayProcesses) ||
-      fixture.proof.gatewayProcesses.length !== 3 ||
+      fixture.proof?.observedPopulation !== contract?.population ||
+      canonicalJson(fixture.proof?.sourceMix) !== canonicalJson(expectedSourceMix) ||
+      !Number.isInteger(fixture.proof?.orchestratorPid) ||
+      fixture.proof.orchestratorPid <= 0 ||
+      !Number.isInteger(fixture.proof?.uid) ||
+      fixture.proof.uid < 0 ||
+      typeof fixture.proof?.runNonce !== 'string' ||
+      fixture.proof.runNonce.length === 0 ||
+      !Array.isArray(proofRows) ||
+      proofRows.length !== 3 ||
+      new Set(proofPids).size !== 3 ||
+      canonicalJson(proofSourceIds) !== canonicalJson(expectedSourceIds) ||
+      proofRows.some(
+        row =>
+          !Number.isInteger(row?.pid) ||
+          row.pid <= 0 ||
+          row.parentPid !== fixture.proof.orchestratorPid ||
+          row.uid !== fixture.proof.uid ||
+          typeof row.startToken !== 'string' ||
+          row.startToken.length === 0 ||
+          row.aliveAtCapture !== true ||
+          row.termination?.verifiedExited !== true ||
+          row.termination?.waited !== true ||
+          !Object.hasOwn(row.termination, 'exitCode') ||
+          !Object.hasOwn(row.termination, 'signal') ||
+          (row.termination.exitCode !== null && !Number.isInteger(row.termination.exitCode)) ||
+          (row.termination.signal !== null && typeof row.termination.signal !== 'string')
+      ) ||
       subagentKeys.some(key => !fixture.proof.entityKeys?.includes(key))
     )
       errors.push('fixture authenticated subagent/gateway proof mismatch')
