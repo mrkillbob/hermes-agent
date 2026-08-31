@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { LOCAL_CONNECTION_ID } from '@hermes/shared'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { Profiler } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -688,5 +688,51 @@ describe('LunarCity', () => {
       chooser.querySelector(`button[aria-label="Talk to ${second.profile} leader on ${second.connectionId}"]`)!
     )
     await waitFor(() => expect(resolveLeaderSession).toHaveBeenCalledWith(second))
+  })
+
+  it('routes the production accessible model selector through exact-owner disambiguation and camera focus', async () => {
+    const first = { connectionId: 'source-0', profile: 'duplicate' }
+    const second = { connectionId: 'source-2', profile: 'duplicate' }
+    const modelId = leaderModelIdForOwner(first)
+    expect(leaderModelIdForOwner(second)).toBe(modelId)
+
+    const entities = [first, second].map(owner => {
+      const identity = { ...owner, kind: 'profile' as const }
+      const key = entityKey(identity)
+
+      return [
+        key,
+        {
+          animation: 'rest' as const,
+          authority: 'authoritative' as const,
+          destination: 'council' as const,
+          identity,
+          key,
+          observedAt: 42
+        }
+      ] as const
+    })
+
+    $lunarCitySnapshot.set({ entities: new Map(entities), observedAt: 42, revision: 1, sources: [] })
+    getCameraState.mockReturnValue({
+      focusedEntityKey: `lunar-city:leader:${modelId}` as never,
+      following: false
+    })
+    render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+
+    fireEvent.click(screen.getByRole('button', { name: `Select ${modelId} leader model with 2 exact profiles` }))
+
+    const chooser = screen.getByRole('region', { name: `Choose exact ${modelId} profile` })
+    expect(within(chooser).getByRole('button', { name: 'Talk to duplicate leader on source-0' })).toBeTruthy()
+    fireEvent.click(within(chooser).getByRole('button', { name: 'Talk to duplicate leader on source-2' }))
+
+    await waitFor(() => expect(resolveLeaderSession).toHaveBeenCalledWith(second))
+    expect(dispatchCamera).toHaveBeenCalledWith({
+      entityKey: `lunar-city:leader:${modelId}`,
+      follow: false,
+      kind: 'focus'
+    })
+    expect(screen.getByRole('status', { name: 'Camera position' }).textContent).toContain('duplicate leader')
   })
 })

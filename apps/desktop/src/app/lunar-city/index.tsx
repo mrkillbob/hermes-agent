@@ -252,6 +252,21 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
 
   const selectedLeaderModel = selectedLeaderOwner ? leaderModelIdForOwner(selectedLeaderOwner) : undefined
 
+  const ambiguousLeaderModels = useMemo(() => {
+    const counts = new Map<string, number>()
+
+    for (const entity of profileLeaderEntities) {
+      const owner = leaderOwnerForProfile(entity)
+
+      if (owner) {
+        const modelId = leaderModelIdForOwner(owner)
+        counts.set(modelId, (counts.get(modelId) ?? 0) + 1)
+      }
+    }
+
+    return [...counts].filter((entry): entry is [string, number] => entry[1] > 1)
+  }, [profileLeaderEntities])
+
   const onLeaderStateChange = useCallback(
     (state: Parameters<LunarCityWorldHandle['setLeaderAnimation']>[1]): void => {
       if (selectedLeaderModel) {
@@ -290,6 +305,21 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   }
 
   openLeaderRef.current = openLeader
+
+  const selectPhysicalLeaderModel = (leaderId: string): void => {
+    const candidates = profileLeaderEntitiesRef.current.filter(candidate => {
+      const owner = leaderOwnerForProfile(candidate)
+
+      return owner && leaderModelIdForOwner(owner) === leaderId
+    })
+
+    if (candidates.length === 1) {
+      openLeaderRef.current(candidates[0]!)
+    } else if (candidates.length > 1) {
+      setLeaderDisambiguationId(leaderId)
+      setFocusedEntityLabel(`${candidates.length} exact ${leaderId} profiles`)
+    }
+  }
 
   // Profile entities change far less often than workers. Keep this compact
   // semantic list separate from the imperative world snapshot listener so
@@ -450,19 +480,8 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
 
         const leaderId = String(intent.entityKey).match(/^lunar-city:leader:(owl|fox|badger|otter|bird|stag)$/u)?.[1]
 
-        const candidates = leaderId
-          ? profileLeaderEntitiesRef.current.filter(candidate => {
-              const owner = leaderOwnerForProfile(candidate)
-
-              return owner && leaderModelIdForOwner(owner) === leaderId
-            })
-          : []
-
-        if (candidates.length === 1) {
-          openLeaderRef.current(candidates[0]!)
-        } else if (leaderId && candidates.length > 1) {
-          setLeaderDisambiguationId(leaderId)
-          setFocusedEntityLabel(`${candidates.length} exact ${leaderId} profiles`)
+        if (leaderId) {
+          selectPhysicalLeaderModel(leaderId)
         }
       } else if (intent.kind === 'clear-selection') {
         setSelectedEntityKey(undefined)
@@ -746,6 +765,19 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
               aria-label={leaderDisambiguationId ? `Choose exact ${leaderDisambiguationId} profile` : 'Profile leaders'}
               className="pointer-events-auto absolute left-3 top-34 z-30 flex max-w-[min(20rem,calc(100%-1.5rem))] flex-wrap gap-1.5 sm:left-5 sm:top-40"
             >
+              {!leaderDisambiguationId
+                ? ambiguousLeaderModels.map(([leaderId, count]) => (
+                    <Button
+                      aria-label={`Select ${leaderId} leader model with ${count} exact profiles`}
+                      key={`model:${leaderId}`}
+                      onClick={() => selectPhysicalLeaderModel(leaderId)}
+                      size="xs"
+                      variant="secondary"
+                    >
+                      Choose {leaderId} leader ({count})
+                    </Button>
+                  ))
+                : null}
               {profileLeaderEntities
                 .filter(entity => {
                   const owner = leaderOwnerForProfile(entity)!
