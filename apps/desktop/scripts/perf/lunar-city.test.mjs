@@ -164,6 +164,12 @@ test('requires duration, cadence, and aligned raw coverage for visible measureme
     })
   )
   assert.match(idle.errors.join('\n'), /60 seconds|duration/i)
+
+  const shortWarmup = validateReceipt(receipt({ scenario: 'visible-idle', warmupDurationMs: 29_999 }))
+  assert.match(shortWarmup.errors.join('\n'), /warmup.*30000|warmup.*30 seconds/i)
+
+  const dormantWarmup = validateReceipt(receipt({ scenario: 'hidden', warmupDurationMs: 0, renderFrames: 0 }))
+  assert.match(dormantWarmup.errors.join('\n'), /warmup.*30000|warmup.*30 seconds/i)
 })
 
 test('binds exact 100-active and 250-lod population invariants', () => {
@@ -193,6 +199,45 @@ test('requires a typed build stamp tied to git SHA and evidence cleanliness', ()
 
   const dirtyPackaged = validateReceipt(receipt({ buildStamp: { ...receipt().buildStamp, dirty: true } }))
   assert.match(dirtyPackaged.errors.join('\n'), /dirty|packaged/i)
+
+  const nonCanonicalTimestamp = validateReceipt(receipt({ timestamp: '0' }))
+  assert.match(nonCanonicalTimestamp.errors.join('\n'), /canonical ISO|timestamp/i)
+  assert.equal(nonCanonicalTimestamp.packagedPerformanceEligible, false)
+  const localeStamp = validateReceipt(receipt({ buildStamp: { ...receipt().buildStamp, builtAt: 'August 31, 2026' } }))
+  assert.match(localeStamp.errors.join('\n'), /builtAt.*canonical ISO/i)
+  assert.equal(localeStamp.packagedPerformanceEligible, false)
+})
+
+test('requires exact 25-active and stability populations and scenario state bindings', () => {
+  const twentyFive = validateReceipt(
+    receipt({
+      scenario: '25-active',
+      population: { observed: 25, active: 25, lodMix: { near: 25 }, source: 'fake-backend' }
+    })
+  )
+  assert.equal(twentyFive.ok, true, twentyFive.errors.join('; '))
+  const wrongTwentyFive = validateReceipt(
+    receipt({
+      scenario: '25-active',
+      population: { observed: 25, active: 24, lodMix: { near: 25 }, source: 'fake-backend' }
+    })
+  )
+  assert.match(wrongTwentyFive.errors.join('\n'), /25-active.*active population/i)
+
+  const stableSamples = samples({
+    activeAnimations: [10, 10, 10, 10, 10],
+    entities: [100, 100, 100, 100, 100],
+    textures: [20, 20, 20, 20, 20],
+    listeners: [12, 12, 12, 12, 12],
+    timers: [2, 2, 2, 2, 2]
+  })
+  const stableReceipt = validateReceipt(receipt({ scenario: '30-minute-stability', rawSamples: stableSamples }))
+  assert.equal(stableReceipt.ok, true, stableReceipt.errors.join('; '))
+
+  const wrongTier = validateReceipt(receipt({ scenario: 'tier-efficient' }))
+  assert.match(wrongTier.errors.join('\n'), /tier-efficient.*quality tier/i)
+  const wrongDialogue = validateReceipt(receipt({ scenario: 'dialogue-camera' }))
+  assert.match(wrongDialogue.errors.join('\n'), /dialogue-camera.*dialogue state/i)
 })
 
 test('rejects contradictory declared pass and errors outcome', () => {
@@ -208,6 +253,44 @@ test('short-circuits oversized arrays without reducer or stack failure', () => {
 
   assert.equal(result.ok, false)
   assert.match(result.errors.join('\n'), /too many|sample.*bound/i)
+})
+
+test('checks every actual timestamp gap and measured-coverage bound', () => {
+  const gap = validateReceipt(
+    receipt({
+      scenario: '100-active',
+      measurement: {
+        durationMs: 30_000,
+        sampleIntervalMs: 7_500,
+        sampleTimestampsMs: [0, 7_500, 20_000, 27_500, 30_000]
+      }
+    })
+  )
+  assert.match(gap.errors.join('\n'), /timestamp gap|declared cadence/i)
+
+  const duplicate = validateReceipt(
+    receipt({
+      scenario: '100-active',
+      measurement: {
+        durationMs: 30_000,
+        sampleIntervalMs: 7_500,
+        sampleTimestampsMs: [0, 7_500, 7_500, 22_500, 30_000]
+      }
+    })
+  )
+  assert.match(duplicate.errors.join('\n'), /strictly increasing|duplicate/i)
+
+  const overlong = validateReceipt(
+    receipt({
+      scenario: '100-active',
+      measurement: {
+        durationMs: 30_000,
+        sampleIntervalMs: 7_500,
+        sampleTimestampsMs: [0, 7_500, 15_000, 22_500, 30_002]
+      }
+    })
+  )
+  assert.match(overlong.errors.join('\n'), /coverage.*duration|measured duration/i)
 })
 
 test('uses nearest-rank p95 and averages signed CPU/GPU deltas', () => {

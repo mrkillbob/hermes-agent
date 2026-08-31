@@ -55,12 +55,77 @@ const MONOTONIC_FIELDS = Object.freeze([
   ['timers', 'timers']
 ])
 
-const SCENARIO_PROFILES = Object.freeze({
-  'route-unmounted': { dormant: true, cpuLimit: 0.5 },
-  hidden: { dormant: true, cpuLimit: 0.5 },
-  minimized: { dormant: true, cpuLimit: 0.5 },
-  'visible-idle': { durationMs: 60_000, cpuLimit: 3, maxCadenceMs: 15_000 },
-  '25-active': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+const SCENARIO_PROFILE_DEFINITIONS = {
+  'route-unmounted': {
+    dormant: true,
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    cpuLimit: 0.5,
+    maxCadenceMs: 15_000,
+    minObserved: 0,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  hidden: {
+    dormant: true,
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    cpuLimit: 0.5,
+    maxCadenceMs: 15_000,
+    minObserved: 0,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  minimized: {
+    dormant: true,
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    cpuLimit: 0.5,
+    maxCadenceMs: 15_000,
+    minObserved: 0,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  'visible-idle': {
+    durationMs: 60_000,
+    warmupMs: 30_000,
+    cpuLimit: 3,
+    maxCadenceMs: 15_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  '25-active': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    maxCadenceMs: 10_000,
+    expectedObserved: 25,
+    expectedActive: 25,
+    lodTotal: 25,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'exact',
+    minObserved: 25,
+    minActive: 25,
+    lodRequired: true
+  },
   '100-active': {
     durationMs: 30_000,
     warmupMs: 30_000,
@@ -69,7 +134,15 @@ const SCENARIO_PROFILES = Object.freeze({
     p95UpdateLimit: 6,
     expectedObserved: 100,
     expectedActive: 100,
-    maxCadenceMs: 10_000
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    lodTotal: 100,
+    maxCadenceMs: 10_000,
+    populationMode: 'exact',
+    minObserved: 100,
+    minActive: 100,
+    lodRequired: true
   },
   '250-lod': {
     durationMs: 30_000,
@@ -78,43 +151,187 @@ const SCENARIO_PROFILES = Object.freeze({
     p95FrameLimit: 33.3,
     expectedObserved: 250,
     expectedActive: 250,
-    maxCadenceMs: 10_000
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    lodTotal: 250,
+    maxCadenceMs: 10_000,
+    populationMode: 'exact',
+    minObserved: 250,
+    minActive: 250,
+    lodRequired: true
   },
   'balanced-overview': {
     durationMs: 30_000,
     warmupMs: 30_000,
     drawCalls: 180,
     triangles: 1_500_000,
-    maxCadenceMs: 10_000
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
   },
   'balanced-worker-focus': {
     durationMs: 30_000,
     warmupMs: 30_000,
     drawCalls: 220,
     triangles: 2_000_000,
-    maxCadenceMs: 10_000
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'worker-focus',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
   },
-  'continuous-orbit-zoom': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
-  'indoor-occlusion': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
-  'dialogue-camera': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
-  'tier-efficient': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
-  'tier-balanced': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
-  'tier-detailed': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
-  'context-loss-recovery': { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
-  disposal: { durationMs: 30_000, warmupMs: 30_000, maxCadenceMs: 10_000 },
+  'continuous-orbit-zoom': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    requiredCamera: 'orbit-zoom',
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  'indoor-occlusion': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    requiredCamera: 'indoor',
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  'dialogue-camera': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    requiredDialogue: 'active',
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'orbit-zoom',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  'tier-efficient': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    requiredQuality: 'Efficient',
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  'tier-balanced': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    requiredQuality: 'Balanced',
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  'tier-detailed': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    requiredQuality: 'Detailed',
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  'context-loss-recovery': {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    requiredRecovery: 'recovered',
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
+  disposal: {
+    durationMs: 30_000,
+    warmupMs: 30_000,
+    requiredDisposal: 'disposed',
+    maxCadenceMs: 10_000,
+    minObserved: 1,
+    minActive: 0,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    populationMode: 'preserved',
+    lodRequired: true
+  },
   '30-minute-stability': {
     durationMs: 1_800_000,
     warmupMs: 30_000,
     cpuLimit: 12,
     maxCadenceMs: 600_000,
-    stability: true
+    stability: true,
+    expectedObserved: 100,
+    expectedActive: 100,
+    requiredQuality: 'Balanced',
+    requiredCamera: 'overview',
+    requiredDialogue: 'idle',
+    lodTotal: 100,
+    populationMode: 'exact',
+    minObserved: 100,
+    minActive: 100,
+    lodRequired: true
   }
-})
+}
+
+const SCENARIO_PROFILES = Object.freeze(
+  Object.fromEntries(
+    Object.entries(SCENARIO_PROFILE_DEFINITIONS).map(([scenario, profile]) => [
+      scenario,
+      {
+        durationMs: profile.durationMs,
+        warmupMs: profile.warmupMs,
+        maxCadenceMs: profile.maxCadenceMs,
+        ...profile
+      }
+    ])
+  )
+)
 
 export const SCENARIOS = Object.freeze(Object.keys(SCENARIO_PROFILES))
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isFiniteNumber = value => typeof value === 'number' && Number.isFinite(value)
+const CLOCK_TOLERANCE_MS = 1
+const CANONICAL_ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+
+function isCanonicalIsoUtc(value) {
+  if (typeof value !== 'string' || !CANONICAL_ISO_UTC.test(value)) return false
+  const milliseconds = Date.parse(value)
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value
+}
 
 function equalNumber(left, right) {
   return (
@@ -325,11 +542,8 @@ function validateCommonShape(receipt, errors) {
   if (isRecord(receipt.buildStamp) && Object.keys(receipt.buildStamp).length === 0) {
     errors.push('buildStamp object must not be empty')
   }
-  if (
-    receipt.timestamp !== undefined &&
-    (typeof receipt.timestamp !== 'string' || Number.isNaN(Date.parse(receipt.timestamp)))
-  ) {
-    errors.push('timestamp must be an ISO timestamp')
+  if (receipt.timestamp !== undefined && !isCanonicalIsoUtc(receipt.timestamp)) {
+    errors.push('timestamp must be a canonical ISO-8601 UTC timestamp')
   }
   if (receipt.pass !== undefined && typeof receipt.pass !== 'boolean') errors.push('pass must be boolean')
   if (receipt.errors !== undefined && !Array.isArray(receipt.errors)) errors.push('errors must be an array')
@@ -433,8 +647,7 @@ function validateBuildStamp(receipt, errors) {
     errors.push('buildStamp.commit must match gitSha')
   if (stamp.branch !== null && typeof stamp.branch !== 'string')
     errors.push('buildStamp.branch must be a string or null')
-  if (typeof stamp.builtAt !== 'string' || Number.isNaN(Date.parse(stamp.builtAt)))
-    errors.push('buildStamp.builtAt must be an ISO timestamp')
+  if (!isCanonicalIsoUtc(stamp.builtAt)) errors.push('buildStamp.builtAt must be a canonical ISO-8601 UTC timestamp')
   if (typeof stamp.dirty !== 'boolean') errors.push('buildStamp.dirty must be boolean')
   if (!['ci', 'local', 'fallback'].includes(stamp.source))
     errors.push('buildStamp.source must be ci, local, or fallback')
@@ -525,19 +738,20 @@ function validateMeasurement(receipt, profile, errors) {
       }
     }
   }
-  if (
-    isFiniteNumber(measurement.durationMs) &&
-    timestamps.length &&
-    timestamps[timestamps.length - 1] < measurement.durationMs
-  ) {
-    errors.push('measurement timestamps do not cover measured duration')
+  if (isFiniteNumber(measurement.durationMs) && timestamps.length) {
+    const coverageDelta = timestamps[timestamps.length - 1] - measurement.durationMs
+    if (Math.abs(coverageDelta) > CLOCK_TOLERANCE_MS) {
+      errors.push('measurement timestamps coverage must end at measured duration')
+    }
   }
   if (isFiniteNumber(measurement.sampleIntervalMs)) {
     for (let index = 1; index < timestamps.length; index += 1) {
       const delta = timestamps[index] - timestamps[index - 1]
-      const tolerance = Math.max(1, measurement.sampleIntervalMs * 0.25)
-      if (Math.abs(delta - measurement.sampleIntervalMs) > tolerance) {
+      if (Math.abs(delta - measurement.sampleIntervalMs) > CLOCK_TOLERANCE_MS) {
         errors.push('measurement timestamps do not match declared cadence')
+      }
+      if (profile.maxCadenceMs && delta > profile.maxCadenceMs + CLOCK_TOLERANCE_MS) {
+        errors.push(`measurement timestamp gap exceeds ${profile.maxCadenceMs}ms`)
       }
     }
   }
@@ -563,24 +777,51 @@ function validateScenarioInvariants(receipt, profile, scenario, errors) {
   }
   const observed = receipt.population?.observed
   const active = receipt.population?.active
+  if (!['preserved', 'exact'].includes(profile.populationMode)) {
+    errors.push(`${scenario} has no explicit population invariant`)
+  }
+  if (profile.lodRequired !== true) errors.push(`${scenario} has no explicit LOD invariant`)
+  if (Number.isInteger(observed) && observed < profile.minObserved) {
+    errors.push(`${scenario} requires at least ${profile.minObserved} observed inhabitants`)
+  }
+  if (Number.isInteger(active) && active < profile.minActive) {
+    errors.push(`${scenario} requires at least ${profile.minActive} active inhabitants`)
+  }
   if (profile.expectedObserved !== undefined && observed !== profile.expectedObserved) {
     errors.push(`${scenario} requires observed population ${profile.expectedObserved}`)
   }
   if (profile.expectedActive !== undefined && active !== profile.expectedActive) {
     errors.push(`${scenario} requires active population ${profile.expectedActive}`)
   }
-  if (isRecord(receipt.environment) && observed > 0 && receipt.environment.cityPopulated !== true) {
-    errors.push('cityPopulated must be true when the receipt has observed inhabitants')
+  if (isRecord(receipt.environment) && Number.isInteger(observed)) {
+    const cityPopulated = receipt.environment.cityPopulated === true
+    if (observed > 0 !== cityPopulated) {
+      errors.push('cityPopulated must match the observed population')
+    }
   }
   if (profile.dormant) {
     if (receipt.renderFrames !== 0) errors.push(`${scenario} requires zero render frames`)
-    return
   }
-  if (receipt.renderFrames === 0) errors.push(`${scenario} requires measured render frames`)
-  if (scenario === '100-active' || scenario === '250-lod') {
+  if (profile.requiredQuality && receipt.qualityTier !== profile.requiredQuality) {
+    errors.push(`${scenario} requires quality tier ${profile.requiredQuality}`)
+  }
+  if (profile.requiredCamera && receipt.cameraState !== profile.requiredCamera) {
+    errors.push(`${scenario} requires camera state ${profile.requiredCamera}`)
+  }
+  if (profile.requiredDialogue && receipt.dialogueState !== profile.requiredDialogue) {
+    errors.push(`${scenario} requires dialogue state ${profile.requiredDialogue}`)
+  }
+  if (profile.requiredRecovery && receipt.recovery !== profile.requiredRecovery) {
+    errors.push(`${scenario} requires recovery state ${profile.requiredRecovery}`)
+  }
+  if (profile.requiredDisposal && receipt.disposal !== profile.requiredDisposal) {
+    errors.push(`${scenario} requires disposal state ${profile.requiredDisposal}`)
+  }
+  if (!profile.dormant && receipt.renderFrames === 0) errors.push(`${scenario} requires measured render frames`)
+  if (!profile.dormant && profile.lodTotal !== undefined) {
     let total = 0
     for (const count of Object.values(receipt.population?.lodMix ?? {})) total += count
-    if (total !== profile.expectedObserved) errors.push(`${scenario} requires LOD total ${profile.expectedObserved}`)
+    if (total !== profile.lodTotal) errors.push(`${scenario} requires LOD total ${profile.lodTotal}`)
   }
 }
 
@@ -756,7 +997,7 @@ export function validateReceipt(receipt) {
     errors.push('Efficient integrated GPU receipt must prove interaction usability')
   }
 
-  const packagedPerformanceEligible = validateAcceptanceGate(receipt, scenario, errors)
+  const gateEligible = validateAcceptanceGate(receipt, scenario, errors)
   const canonicalErrors = [...errors]
   if ('pass' in receipt && receipt.pass !== (canonicalErrors.length === 0)) {
     errors.push(`pass contradicts canonical outcome (expected ${canonicalErrors.length === 0})`)
@@ -764,7 +1005,12 @@ export function validateReceipt(receipt) {
   if (Array.isArray(receipt.errors) && JSON.stringify(receipt.errors) !== JSON.stringify(canonicalErrors)) {
     errors.push('errors contradict canonical outcome')
   }
-  return { ok: errors.length === 0, packagedPerformanceEligible, errors, summary: expected }
+  return {
+    ok: errors.length === 0,
+    packagedPerformanceEligible: gateEligible && errors.length === 0,
+    errors,
+    summary: expected
+  }
 }
 
 /** Validate a JSON receipt file for command-line/package integration. */
