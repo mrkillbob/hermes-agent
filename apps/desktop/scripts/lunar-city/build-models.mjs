@@ -3,10 +3,14 @@ import { fileURLToPath } from 'node:url'
 
 import { NullEngine, Scene } from './modeling/babylon.mjs'
 import {
+  buildArchive,
+  buildArtsStudio,
   buildCouncil,
   buildDepot,
+  buildEngineeringWorkshop,
   buildGarden,
   buildLibrary,
+  buildReleaseGatehouse,
   buildResearchLab,
   buildReviewOffice
 } from './modeling/buildings.mjs'
@@ -25,12 +29,16 @@ const DEFAULT_OUTPUT_ROOT = fileURLToPath(new URL('../../public/lunar-city/v2/',
 const MANIFEST_URL = new URL('../../public/lunar-city/v2/world-manifest.v2.json', import.meta.url)
 const SOURCE_REFERENCE_URL = new URL('../../public/lunar-city/v2/source-reference.v2.json', import.meta.url)
 const MODEL_BUILDERS = Object.freeze({
+  archive: buildArchive,
+  'arts-studio': buildArtsStudio,
   bus: buildBus,
   council: buildCouncil,
   depot: buildDepot,
+  'engineering-workshop': buildEngineeringWorkshop,
   garden: buildGarden,
   leaders: buildLeaders,
   library: buildLibrary,
+  'release-gatehouse': buildReleaseGatehouse,
   'research-lab': buildResearchLab,
   'review-office': buildReviewOffice,
   terrain: buildTerrain,

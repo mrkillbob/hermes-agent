@@ -327,7 +327,10 @@
     { "id": "charcoal-structure", "palette": "charcoal-structure", "maxTextures": 1 },
     { "id": "bone-metal", "palette": "bone-metal", "maxTextures": 1 },
     { "id": "signal-emissive", "palette": "cyan-signal", "maxTextures": 1 },
-    { "id": "archive-emissive", "palette": "violet-archive", "maxTextures": 1 }
+    { "id": "archive-emissive", "palette": "violet-archive", "maxTextures": 1 },
+    { "id": "sunset-orange", "palette": "sunset-orange", "maxTextures": 1 },
+    { "id": "garden-green", "palette": "garden-green", "maxTextures": 1 },
+    { "id": "triage-amber", "palette": "triage-amber", "maxTextures": 1 }
   ],
   "models": [
     {
@@ -353,20 +356,20 @@
       "collision": { "kind": "mesh", "navigationArea": "walkable" },
       "materialSlots": ["lunar-rust", "charcoal-structure"],
       "statistics": {
-        "accessorBytes": 58200,
+        "accessorBytes": 82440,
         "animationClips": [],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 22,
-        "gpuBytes": 58200,
+        "nodes": 29,
+        "gpuBytes": 82440,
         "textures": 0,
-        "triangles": 1532,
-        "gpuMiB": 0.0555,
+        "triangles": 2148,
+        "gpuMiB": 0.0786,
         "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 4, "maxTextures": 4, "maxTriangles": 90000 },
-        "bytes": 81616,
+        "bytes": 113428,
         "extent": [101.564, 12.425, 84.6786],
-        "sha256": "042c92dae91e29c819f8fcf877a9c47b6248a3a090ce28ae9500dd709f6864e0"
+        "sha256": "7bacc30c665ced2b096bcbaa8cc25323f8ff7c964621fa66bdfc5afb7bb91763"
       }
     },
     {
@@ -672,6 +675,215 @@
       }
     },
     {
+      "id": "arts-studio",
+      "uri": "models/arts-studio.glb",
+      "maxTriangles": 26000,
+      "maxDrawCalls": 8,
+      "maxMaterials": 6,
+      "maxTextures": 3,
+      "maxGpuMiB": 10,
+      "requiredNodes": [
+        "arts-studio:root",
+        "arts-studio:lod:near",
+        "arts-studio:lod:far",
+        "arts-studio:roof",
+        "arts-studio:entrance",
+        "arts-studio:camera",
+        "arts-studio:gallery",
+        "arts-studio:easels",
+        "arts-studio:palette",
+        "arts-studio:city-identity",
+        "arts-studio:leader-anchor"
+      ],
+      "requiredClips": ["lights-idle"],
+      "lods": [
+        { "distance": 0, "node": "arts-studio:lod:near" },
+        { "distance": 46, "node": "arts-studio:lod:far" }
+      ],
+      "transform": { "position": [-29, 2, -1], "rotation": [0, 0.2, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-12, 0, -10], "max": [12, 15, 10] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 14], "dialogue": [-2, 1, 1] },
+      "cameraAnchor": [0, 7, 14],
+      "occlusionGroup": "arts-studio-roof",
+      "collision": { "kind": "box", "navigationArea": "arts" },
+      "materialSlots": [
+        "charcoal-structure",
+        "bone-metal",
+        "lunar-rust",
+        "archive-emissive",
+        "sunset-orange",
+        "garden-green"
+      ],
+      "statistics": {
+        "accessorBytes": 44340,
+        "animationClips": ["lights-idle"],
+        "drawCalls": 8,
+        "materials": 6,
+        "meshes": 8,
+        "nodes": 21,
+        "gpuBytes": 44340,
+        "textures": 0,
+        "triangles": 1568,
+        "gpuMiB": 0.0423,
+        "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 6, "maxTextures": 3, "maxTriangles": 26000 },
+        "bytes": 65360,
+        "extent": [15.4, 12.434, 12.96],
+        "sha256": "400c39b2e895f368e51d370e0dc750061ba2ee1981dd23a3eee0c50a81aa0bfa"
+      }
+    },
+    {
+      "id": "engineering-workshop",
+      "uri": "models/engineering-workshop.glb",
+      "maxTriangles": 28000,
+      "maxDrawCalls": 8,
+      "maxMaterials": 5,
+      "maxTextures": 3,
+      "maxGpuMiB": 10,
+      "requiredNodes": [
+        "engineering-workshop:root",
+        "engineering-workshop:lod:near",
+        "engineering-workshop:lod:far",
+        "engineering-workshop:roof",
+        "engineering-workshop:entrance",
+        "engineering-workshop:camera",
+        "engineering-workshop:workbenches",
+        "engineering-workshop:gantry",
+        "engineering-workshop:gear",
+        "engineering-workshop:city-identity",
+        "engineering-workshop:leader-anchor"
+      ],
+      "requiredClips": ["workbench-cycle", "gantry-idle"],
+      "lods": [
+        { "distance": 0, "node": "engineering-workshop:lod:near" },
+        { "distance": 48, "node": "engineering-workshop:lod:far" }
+      ],
+      "transform": { "position": [-29, 2, 30], "rotation": [0, -0.16, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-13, 0, -11], "max": [13, 16, 11] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 8, 15], "dialogue": [2, 1, 1] },
+      "cameraAnchor": [0, 8, 15],
+      "occlusionGroup": "engineering-workshop-roof",
+      "collision": { "kind": "box", "navigationArea": "engineering" },
+      "materialSlots": ["charcoal-structure", "bone-metal", "lunar-rust", "signal-emissive"],
+      "statistics": {
+        "accessorBytes": 33948,
+        "animationClips": ["gantry-idle", "workbench-cycle"],
+        "drawCalls": 6,
+        "materials": 4,
+        "meshes": 6,
+        "nodes": 19,
+        "gpuBytes": 33948,
+        "textures": 0,
+        "triangles": 898,
+        "gpuMiB": 0.0324,
+        "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 28000 },
+        "bytes": 51480,
+        "extent": [16.9, 10.4931, 14.46],
+        "sha256": "e0ce1b68968ad217c1473e9bb026eb28376e10f9d0921dda282ba6872769cb23"
+      }
+    },
+    {
+      "id": "release-gatehouse",
+      "uri": "models/release-gatehouse.glb",
+      "maxTriangles": 24000,
+      "maxDrawCalls": 8,
+      "maxMaterials": 5,
+      "maxTextures": 3,
+      "maxGpuMiB": 9,
+      "requiredNodes": [
+        "release-gatehouse:root",
+        "release-gatehouse:lod:near",
+        "release-gatehouse:lod:far",
+        "release-gatehouse:roof",
+        "release-gatehouse:entrance",
+        "release-gatehouse:camera",
+        "release-gatehouse:release-gate",
+        "release-gatehouse:beacon",
+        "release-gatehouse:city-identity",
+        "release-gatehouse:leader-anchor"
+      ],
+      "requiredClips": ["gatehouse-beacon", "gatehouse-gate"],
+      "lods": [
+        { "distance": 0, "node": "release-gatehouse:lod:near" },
+        { "distance": 44, "node": "release-gatehouse:lod:far" }
+      ],
+      "transform": { "position": [0, 2, 12], "rotation": [0, 0.08, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-11, 0, -9], "max": [11, 15, 9] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [0, 1, 1] },
+      "cameraAnchor": [0, 7, 13],
+      "occlusionGroup": "release-gatehouse-roof",
+      "collision": { "kind": "box", "navigationArea": "release" },
+      "materialSlots": ["charcoal-structure", "bone-metal", "lunar-rust", "triage-amber", "garden-green"],
+      "statistics": {
+        "accessorBytes": 30012,
+        "animationClips": ["gatehouse-beacon", "gatehouse-gate"],
+        "drawCalls": 7,
+        "materials": 5,
+        "meshes": 7,
+        "nodes": 19,
+        "gpuBytes": 30012,
+        "textures": 0,
+        "triangles": 994,
+        "gpuMiB": 0.0286,
+        "budget": { "maxDrawCalls": 8, "maxGpuMiB": 9, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 24000 },
+        "bytes": 46948,
+        "extent": [13.9, 10.973, 11.96],
+        "sha256": "7d95fa82f490b5e9c324098471ea2e7b6c4be8d671eaf198805b7bd0b89057fe"
+      }
+    },
+    {
+      "id": "archive",
+      "uri": "models/archive.glb",
+      "maxTriangles": 26000,
+      "maxDrawCalls": 8,
+      "maxMaterials": 5,
+      "maxTextures": 3,
+      "maxGpuMiB": 10,
+      "requiredNodes": [
+        "archive:root",
+        "archive:lod:near",
+        "archive:lod:far",
+        "archive:roof",
+        "archive:entrance",
+        "archive:camera",
+        "archive:stacks",
+        "archive:vault",
+        "archive:city-identity",
+        "archive:leader-anchor"
+      ],
+      "requiredClips": ["archive-seal-idle"],
+      "lods": [
+        { "distance": 0, "node": "archive:lod:near" },
+        { "distance": 46, "node": "archive:lod:far" }
+      ],
+      "transform": { "position": [38, 2, 18], "rotation": [0, -0.22, 0], "scale": [1, 1, 1] },
+      "pivot": [0, 0, 0],
+      "bounds": { "min": [-12, 0, -10], "max": [12, 15, 10] },
+      "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 14], "dialogue": [-2, 1, 1] },
+      "cameraAnchor": [0, 7, 14],
+      "occlusionGroup": "archive-roof",
+      "collision": { "kind": "box", "navigationArea": "archive" },
+      "materialSlots": ["charcoal-structure", "bone-metal", "lunar-rust", "archive-emissive"],
+      "statistics": {
+        "accessorBytes": 40752,
+        "animationClips": ["archive-seal-idle"],
+        "drawCalls": 6,
+        "materials": 4,
+        "meshes": 6,
+        "nodes": 18,
+        "gpuBytes": 40752,
+        "textures": 0,
+        "triangles": 930,
+        "gpuMiB": 0.0389,
+        "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 26000 },
+        "bytes": 59568,
+        "extent": [14.9, 10.1198, 13.46],
+        "sha256": "cd7ceaa48da30de49b4cc4cae5e7d373d4ea9560b93c0228de575833e2f6a6cb"
+      }
+    },
+    {
       "id": "bus",
       "uri": "models/bus.glb",
       "maxTriangles": 9000,
@@ -922,19 +1134,33 @@
       "id": "approved-overview",
       "alpha": -0.78,
       "beta": 1.02,
-      "radius": 54,
-      "target": [0, 5, 0],
+      "radius": 78,
+      "target": [0, 5, 4],
       "minBeta": 0.72,
       "maxBeta": 1.3,
       "minRadius": 18,
-      "maxRadius": 96
+      "maxRadius": 120
     },
     "bounds": { "min": [-60, -12, -60], "max": [60, 36, 60] },
     "followOffset": [0, 5, -8]
   },
   "navigation": {
     "meshUri": "models/navigation.glb",
-    "areas": ["walkable", "library", "research", "depot", "review", "triage", "garden", "council", "transit"],
+    "areas": [
+      "walkable",
+      "library",
+      "research",
+      "depot",
+      "review",
+      "triage",
+      "garden",
+      "council",
+      "transit",
+      "arts",
+      "engineering",
+      "release",
+      "archive"
+    ],
     "links": [
       { "from": [-28, 0, -18], "to": [0, 0, -1], "bidirectional": true },
       { "from": [25, 0, -22], "to": [0, 0, -1], "bidirectional": true },
@@ -944,7 +1170,14 @@
       { "from": [27, 0, 31], "to": [4, 0, 25], "bidirectional": true },
       { "from": [16, 0, 30], "to": [4, 0, 25], "bidirectional": true },
       { "from": [30, 0, 30], "to": [27, 0, 31], "bidirectional": true },
-      { "from": [-32, 0, 34], "to": [-8, 0, 34], "bidirectional": true }
+      { "from": [-32, 0, 34], "to": [-8, 0, 34], "bidirectional": true },
+      { "from": [-29, 0, -1], "to": [-28, 0, -18], "bidirectional": true },
+      { "from": [-29, 0, -1], "to": [-31, 0, 12], "bidirectional": true },
+      { "from": [-29, 0, 30], "to": [-8, 0, 34], "bidirectional": true },
+      { "from": [-29, 0, 30], "to": [0, 0, 12], "bidirectional": true },
+      { "from": [0, 0, 12], "to": [4, 0, 25], "bidirectional": true },
+      { "from": [38, 0, 18], "to": [27, 0, 31], "bidirectional": true },
+      { "from": [38, 0, 18], "to": [33, 0, 10], "bidirectional": true }
     ]
   },
   "destinations": {
@@ -955,6 +1188,10 @@
     "triage": [4, 0, 25],
     "garden": [-8, 0, 34],
     "council": [27, 0, 31],
+    "arts-studio": [-29, 0, -1],
+    "engineering-workshop": [-29, 0, 30],
+    "release-gatehouse": [0, 0, 12],
+    "archive": [38, 0, 18],
     "unavailable": [0, 0, 0]
   },
   "projectSlots": [
@@ -993,20 +1230,20 @@
     "builder": "babylonjs-null-engine",
     "engineVersion": "9.21.2",
     "navigation": {
-      "accessorBytes": 14016,
+      "accessorBytes": 22968,
       "animationClips": [],
       "drawCalls": 1,
       "materials": 1,
       "meshes": 1,
-      "nodes": 11,
-      "gpuBytes": 14016,
+      "nodes": 18,
+      "gpuBytes": 22968,
       "textures": 0,
-      "triangles": 352,
-      "gpuMiB": 0.0134,
+      "triangles": 564,
+      "gpuMiB": 0.0219,
       "budget": { "maxDrawCalls": 4, "maxGpuMiB": 4, "maxMaterials": 1, "maxTextures": 0, "maxTriangles": 12000 },
-      "bytes": 20084,
-      "extent": [77, 1.01, 69],
-      "sha256": "65b359f1f02bc77b777536918ab701d8a22f096e4b0ce442dedf4b951a78534d"
+      "bytes": 32304,
+      "extent": [82, 1.01, 69],
+      "sha256": "ab4f4da6cccc432492a8570d97cbd5bc8e032938fa25049bed8b0462e27ff851"
     },
     "sourceSha256": "248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590"
   }

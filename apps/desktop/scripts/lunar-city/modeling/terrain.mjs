@@ -9,7 +9,11 @@ const DISTRICTS = Object.freeze([
   [4, 0.4, 25],
   [-8, 0.25, 34],
   [27, 0.35, 31],
-  [0, 0.55, -1]
+  [0, 0.55, -1],
+  [-29, 0.7, -1],
+  [-29, 0.6, 30],
+  [0, 0.5, 12],
+  [38, 0.5, 18]
 ])
 
 function districtPad(scene, parent, index, [x, y, z]) {
@@ -103,6 +107,13 @@ export function buildTerrain(scene) {
   walkway(scene, walkways, 'terrain:walkway:triage-garden', DISTRICTS[4], DISTRICTS[5])
   walkway(scene, walkways, 'terrain:walkway:triage-council', DISTRICTS[4], DISTRICTS[6])
   walkway(scene, walkways, 'terrain:walkway:bus-triage', DISTRICTS[7], DISTRICTS[4])
+  walkway(scene, walkways, 'terrain:walkway:arts-library', DISTRICTS[8], DISTRICTS[0])
+  walkway(scene, walkways, 'terrain:walkway:arts-depot', DISTRICTS[8], DISTRICTS[2])
+  walkway(scene, walkways, 'terrain:walkway:engineering-garden', DISTRICTS[9], DISTRICTS[5])
+  walkway(scene, walkways, 'terrain:walkway:engineering-release', DISTRICTS[9], DISTRICTS[10])
+  walkway(scene, walkways, 'terrain:walkway:release-triage', DISTRICTS[10], DISTRICTS[4])
+  walkway(scene, walkways, 'terrain:walkway:archive-council', DISTRICTS[11], DISTRICTS[6])
+  walkway(scene, walkways, 'terrain:walkway:archive-review', DISTRICTS[11], DISTRICTS[3])
 
   const busStop = group(scene, 'terrain:bus-stop', near, { position: [0, 2.1, -1] })
   box(scene, 'terrain:bus-stop:platform', {
@@ -182,7 +193,14 @@ export function buildNavigation(scene) {
     ['review-triage', DISTRICTS[3], DISTRICTS[4]],
     ['triage-garden', DISTRICTS[4], DISTRICTS[5]],
     ['triage-council', DISTRICTS[4], DISTRICTS[6]],
-    ['bus-triage', DISTRICTS[7], DISTRICTS[4]]
+    ['bus-triage', DISTRICTS[7], DISTRICTS[4]],
+    ['arts-library', DISTRICTS[8], DISTRICTS[0]],
+    ['arts-depot', DISTRICTS[8], DISTRICTS[2]],
+    ['engineering-garden', DISTRICTS[9], DISTRICTS[5]],
+    ['engineering-release', DISTRICTS[9], DISTRICTS[10]],
+    ['release-triage', DISTRICTS[10], DISTRICTS[4]],
+    ['archive-council', DISTRICTS[11], DISTRICTS[6]],
+    ['archive-review', DISTRICTS[11], DISTRICTS[3]]
   ]
   links.forEach(([id, from, to]) => {
     const link = group(scene, `navigation:link:${id}`, walkable)

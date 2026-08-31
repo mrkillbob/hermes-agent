@@ -24,7 +24,11 @@
     { "id": "review-office", "point": [0.79, 0.55], "silhouette": "violet portal office with owl verifier" },
     { "id": "triage", "point": [0.52, 0.72], "silhouette": "amber service bus with cross-marked roof" },
     { "id": "garden", "point": [0.36, 0.83], "silhouette": "sunken planted break garden with cyan fixtures" },
-    { "id": "council", "point": [0.72, 0.81], "silhouette": "foreground council overlook with bird leader" }
+    { "id": "council", "point": [0.72, 0.81], "silhouette": "foreground council overlook with bird leader" },
+    { "id": "arts-studio", "point": [0.2, 0.47], "silhouette": "open-front gallery with stacked canvases, easels, and palette star" },
+    { "id": "engineering-workshop", "point": [0.2, 0.72], "silhouette": "open-front workshop with gantry crane, workbenches, and gear" },
+    { "id": "release-gatehouse", "point": [0.45, 0.62], "silhouette": "amber release gate with raised lintel, signal panel, and beacon" },
+    { "id": "archive", "point": [0.82, 0.74], "silhouette": "compact open-front vault with violet records and sealed volume" }
   ],
   "silhouettes": {
     "buildings": ["open-front lunar rooms", "stepped cliffs", "raised metal walkways", "removable roof shells"],

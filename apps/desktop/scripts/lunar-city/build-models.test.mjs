@@ -14,12 +14,16 @@ const execFileAsync = promisify(execFile)
 
 const APPROVED_SOURCE_NAME = 'moon-settlement-approved.jpg'
 const MODEL_IDS = [
+  'archive',
+  'arts-studio',
   'bus',
   'council',
   'depot',
+  'engineering-workshop',
   'garden',
   'leaders',
   'library',
+  'release-gatehouse',
   'research-lab',
   'review-office',
   'terrain',
@@ -27,13 +31,17 @@ const MODEL_IDS = [
   'workers'
 ]
 const SEMANTIC_NODES = {
+  archive: ['archive:stacks', 'archive:vault', 'archive:city-identity', 'archive:leader-anchor'],
+  'arts-studio': ['arts-studio:gallery', 'arts-studio:easels', 'arts-studio:palette', 'arts-studio:city-identity', 'arts-studio:leader-anchor'],
   bus: ['bus:cabin', 'bus:signal', 'bus:wheels'],
   council: ['council:console', 'council:dais', 'council:roost'],
   depot: ['depot:crates', 'depot:stocked-shelves', 'depot:workbench'],
+  'engineering-workshop': ['engineering-workshop:workbenches', 'engineering-workshop:gantry', 'engineering-workshop:gear', 'engineering-workshop:city-identity', 'engineering-workshop:leader-anchor'],
   garden: ['garden:bench', 'garden:cyan-fixture', 'garden:plants'],
   leaders: ['leader:badger', 'leader:bird', 'leader:fox', 'leader:otter', 'leader:owl', 'leader:stag'],
   library: ['library:archive-stacks', 'library:leader-anchor', 'library:violet-orb'],
   'research-lab': ['research-lab:consoles', 'research-lab:specimen', 'research-lab:telescope'],
+  'release-gatehouse': ['release-gatehouse:release-gate', 'release-gatehouse:beacon', 'release-gatehouse:city-identity', 'release-gatehouse:leader-anchor'],
   'review-office': ['review-office:consoles', 'review-office:portal', 'review-office:verifier-dais'],
   terrain: ['terrain:bus-stop', 'terrain:cliffs', 'terrain:walkway:library-research'],
   triage: ['triage:cross', 'triage:door', 'triage:station'],
@@ -45,12 +53,16 @@ const SPECIALIST_STATE_CHANNELS = {
   triage: ['triage-station-idle']
 }
 const MIN_TRIANGLES = {
+  archive: 220,
+  'arts-studio': 220,
   bus: 100,
   council: 180,
   depot: 180,
+  'engineering-workshop': 220,
   garden: 180,
   leaders: 900,
   library: 220,
+  'release-gatehouse': 180,
   'research-lab': 260,
   'review-office': 220,
   terrain: 180,

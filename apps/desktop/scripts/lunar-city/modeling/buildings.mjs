@@ -682,6 +682,430 @@ function addCouncilMassing(scene, building) {
   }
 }
 
+// The four secondary districts share the same low-poly structural language as
+// the primary landmarks, but keep their silhouettes and identity props
+// separate so the overview can distinguish every approved room at a glance.
+function secondaryDistrictFrame(scene, id, { accent, depth, height, width }) {
+  const root = group(scene, `${id}:root`)
+  const near = group(scene, `${id}:lod:near`, root)
+  const far = group(scene, `${id}:lod:far`, root)
+  const shell = group(scene, `${id}:shell`, near)
+  const roof = group(scene, `${id}:roof`, near)
+  const entrance = group(scene, `${id}:entrance`, near, { position: [0, 1.8, depth / 2 + 0.35] })
+  group(scene, `${id}:camera`, root, { position: [0, 6, depth + 4] })
+
+  box(scene, `${id}:floor`, {
+    depth: depth + 1.2,
+    height: 0.62,
+    material: 'charcoal-structure',
+    parent: shell,
+    position: [0, 0.31, 0],
+    width: width + 1.4
+  })
+  box(scene, `${id}:back-wall`, {
+    depth: 0.72,
+    height: height * 0.72,
+    material: 'charcoal-structure',
+    parent: shell,
+    position: [0, height * 0.36, -depth / 2],
+    width: width
+  })
+  for (const side of [-1, 1]) {
+    box(scene, `${id}:side-wall:${side}`, {
+      depth: depth * 0.7,
+      height: height * 0.58,
+      material: 'charcoal-structure',
+      parent: shell,
+      position: [side * width * 0.46, height * 0.29, -depth * 0.12],
+      width: 0.9
+    })
+    box(scene, `${id}:entrance-post:${side}`, {
+      depth: 0.8,
+      height: height * 0.82,
+      material: 'bone-metal',
+      parent: entrance,
+      position: [side * width * 0.35, 0, 0],
+      width: 0.76
+    })
+    box(scene, `${id}:roof-shell:${side}`, {
+      depth: depth * 0.52,
+      height: 0.7,
+      material: side < 0 ? 'bone-metal' : accent,
+      parent: roof,
+      position: [side * width * 0.28, height * 0.76, -depth * 0.25],
+      rotation: [0, 0, side * 0.11],
+      width: width * 0.48
+    })
+  }
+  box(scene, `${id}:roof-beam`, {
+    depth: 0.9,
+    height: 0.72,
+    material: 'bone-metal',
+    parent: roof,
+    position: [0, height * 0.82, -depth * 0.2],
+    width: width * 0.7
+  })
+  for (let step = 0; step < 3; step += 1)
+    box(scene, `${id}:entrance:step:${step}`, {
+      depth: 0.62 + step * 0.35,
+      height: 0.18,
+      material: step === 1 ? accent : 'lunar-rust',
+      parent: entrance,
+      position: [0, -1.45 + step * 0.18, 0.45 + step * 0.2],
+      width: width * (0.5 - step * 0.05)
+    })
+
+  box(scene, `${id}:far:floor`, {
+    depth: depth + 0.8,
+    height: 0.58,
+    material: 'bone-metal',
+    parent: far,
+    position: [0, 0.28, 0],
+    width: width + 1
+  })
+  box(scene, `${id}:far:back-wall`, {
+    depth: 0.6,
+    height: height * 0.68,
+    material: 'bone-metal',
+    parent: far,
+    position: [0, height * 0.34, -depth * 0.42],
+    width: width * 0.9
+  })
+  return { entrance, far, near, roof, root, shell }
+}
+
+export function buildArtsStudio(scene) {
+  const building = secondaryDistrictFrame(scene, 'arts-studio', {
+    accent: 'archive-emissive',
+    depth: 10.5,
+    height: 8.4,
+    width: 14
+  })
+  const { near } = building
+  addSign(scene, 'arts-studio:sign', near, {
+    accent: 'archive-emissive',
+    position: [0, 7.3, 5.5],
+    width: 5.4
+  })
+  const gallery = group(scene, 'arts-studio:gallery', near)
+  for (let panel = 0; panel < 5; panel += 1) {
+    const x = -5.1 + panel * 2.55
+    box(scene, `arts-studio:canvas:${panel}`, {
+      depth: 0.2,
+      height: 2.2 + (panel % 2) * 0.6,
+      material: panel % 2 ? 'sunset-orange' : 'archive-emissive',
+      parent: gallery,
+      position: [x, 3.4 + (panel % 2) * 0.5, -5.02],
+      rotation: [0, 0, (panel - 2) * 0.04],
+      width: 1.7
+    })
+    box(scene, `arts-studio:canvas-frame:${panel}`, {
+      depth: 0.24,
+      height: 0.14,
+      material: 'bone-metal',
+      parent: gallery,
+      position: [x, 2.12 + (panel % 2) * 0.5, -4.9],
+      width: 1.9
+    })
+  }
+  const easels = group(scene, 'arts-studio:easels', near)
+  for (const [index, x] of [-3.4, 3.4].entries()) {
+    box(scene, `arts-studio:easel:${index}:board`, {
+      depth: 0.35,
+      height: 2.6,
+      material: index ? 'sunset-orange' : 'garden-green',
+      parent: easels,
+      position: [x, 2.2, 1.5],
+      rotation: [0, index ? -0.12 : 0.12, 0],
+      width: 2.1
+    })
+    for (const leg of [-1, 1])
+      box(scene, `arts-studio:easel:${index}:leg:${leg}`, {
+        depth: 0.3,
+        height: 2.4,
+        material: 'bone-metal',
+        parent: easels,
+        position: [x + leg * 0.55, 1.1, 1.7],
+        rotation: [0, leg * 0.09, leg * 0.08],
+        width: 0.22
+      })
+  }
+  const palette = group(scene, 'arts-studio:palette', near, { position: [0, 2.1, 0.4] })
+  torus(scene, 'arts-studio:palette:rim', {
+    diameter: 2.2,
+    material: 'lunar-rust',
+    parent: palette,
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 10,
+    thickness: 0.34
+  })
+  for (const [index, material] of ['archive-emissive', 'sunset-orange', 'garden-green'].entries())
+    sphere(scene, `arts-studio:palette:paint:${index}`, {
+      diameter: 0.46,
+      material,
+      parent: palette,
+      position: [-0.55 + index * 0.55, 0.2, 0],
+      segments: 6
+    })
+  const identity = group(scene, 'arts-studio:city-identity', near)
+  keepIdentity(
+    torus(scene, 'arts-studio:city-identity:studio-star', {
+      diameter: 6.8,
+      material: 'lunar-rust',
+      parent: identity,
+      position: [0, 7.2, -5.2],
+      rotation: [Math.PI / 2, 0, 0],
+      tessellation: 8,
+      thickness: 0.38
+    })
+  )
+  group(scene, 'arts-studio:leader-anchor', near, { position: [-2.4, 1, 0.6] })
+  scalarClip(scene, 'lights-idle', palette, 'rotation.y', 0.18, { duration: 72 })
+  return building.root
+}
+
+export function buildEngineeringWorkshop(scene) {
+  const building = secondaryDistrictFrame(scene, 'engineering-workshop', {
+    accent: 'signal-emissive',
+    depth: 12,
+    height: 8.8,
+    width: 15.5
+  })
+  const { near } = building
+  addSign(scene, 'engineering-workshop:sign', near, {
+    accent: 'signal-emissive',
+    position: [0, 7.65, 6.25],
+    width: 6.2
+  })
+  const workbenches = addWorkbenches(scene, 'engineering-workshop:workbenches', near, {
+    accent: 'signal-emissive',
+    count: 3,
+    position: [0, 0.7, 1.5]
+  })
+  const gantry = group(scene, 'engineering-workshop:gantry', near, { position: [0, 0.4, -1.8] })
+  for (const side of [-1, 1])
+    box(scene, `engineering-workshop:gantry-post:${side}`, {
+      depth: 0.62,
+      height: 7.3,
+      material: 'lunar-rust',
+      parent: gantry,
+      position: [side * 5.5, 3.65, 0],
+      width: 0.62
+    })
+  box(scene, 'engineering-workshop:gantry-beam', {
+    depth: 0.62,
+    height: 0.65,
+    material: 'bone-metal',
+    parent: gantry,
+    position: [0, 7.1, 0],
+    width: 11.6
+  })
+  box(scene, 'engineering-workshop:gantry-hook', {
+    depth: 0.38,
+    height: 2.2,
+    material: 'signal-emissive',
+    parent: gantry,
+    position: [1.7, 5.9, 0],
+    width: 0.34
+  })
+  const gear = group(scene, 'engineering-workshop:gear', near, { position: [-4.1, 3, -3.7] })
+  torus(scene, 'engineering-workshop:gear:outer', {
+    diameter: 4.6,
+    material: 'lunar-rust',
+    parent: gear,
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 12,
+    thickness: 0.55
+  })
+  cylinder(scene, 'engineering-workshop:gear:hub', {
+    diameter: 1.1,
+    height: 0.6,
+    material: 'signal-emissive',
+    parent: gear,
+    tessellation: 8
+  })
+  for (let tooth = 0; tooth < 8; tooth += 1) {
+    const angle = tooth * (Math.PI / 4)
+    box(scene, `engineering-workshop:gear:tooth:${tooth}`, {
+      depth: 0.48,
+      height: 0.62,
+      material: 'bone-metal',
+      parent: gear,
+      position: [Math.sin(angle) * 2.25, 0, Math.cos(angle) * 2.25],
+      rotation: [0, angle, 0],
+      width: 0.7
+    })
+  }
+  const identity = group(scene, 'engineering-workshop:city-identity', near)
+  keepIdentity(
+    box(scene, 'engineering-workshop:city-identity:bridge', {
+      depth: 0.7,
+      height: 1.6,
+      material: 'lunar-rust',
+      parent: identity,
+      position: [0, 7.4, -5.5],
+      rotation: [0, 0, -0.12],
+      width: 8.2
+    })
+  )
+  group(scene, 'engineering-workshop:leader-anchor', near, { position: [3.1, 1, 0.6] })
+  scalarClip(scene, 'workbench-cycle', workbenches, 'rotation.y', 0.04, { duration: 64 })
+  scalarClip(scene, 'gantry-idle', gantry, 'rotation.y', 0.06, { duration: 80 })
+  return building.root
+}
+
+export function buildReleaseGatehouse(scene) {
+  const building = secondaryDistrictFrame(scene, 'release-gatehouse', {
+    accent: 'triage-amber',
+    depth: 9.5,
+    height: 7.8,
+    width: 12.5
+  })
+  const { near, entrance } = building
+  addSign(scene, 'release-gatehouse:sign', near, {
+    accent: 'triage-amber',
+    position: [0, 6.8, 5.1],
+    width: 6.5
+  })
+  const gate = group(scene, 'release-gatehouse:release-gate', near, { position: [0, 1.4, 0] })
+  for (const side of [-1, 1])
+    box(scene, `release-gatehouse:gate-post:${side}`, {
+      depth: 0.72,
+      height: 6.1,
+      material: 'bone-metal',
+      parent: gate,
+      position: [side * 4.5, 3.05, -0.3],
+      width: 0.72
+    })
+  box(scene, 'release-gatehouse:gate-lintel', {
+    depth: 0.72,
+    height: 0.8,
+    material: 'triage-amber',
+    parent: gate,
+    position: [0, 5.8, -0.3],
+    width: 9.8
+  })
+  box(scene, 'release-gatehouse:gate-panel', {
+    depth: 0.28,
+    height: 3.7,
+    material: 'charcoal-structure',
+    parent: gate,
+    position: [0, 2.3, -0.35],
+    width: 7.4
+  })
+  for (let stripe = 0; stripe < 4; stripe += 1)
+    box(scene, `release-gatehouse:gate-signal:${stripe}`, {
+      depth: 0.08,
+      height: 0.22,
+      material: stripe % 2 ? 'triage-amber' : 'garden-green',
+      parent: gate,
+      position: [-2.7 + stripe * 1.8, 4.4, -0.55],
+      width: 1.2
+    })
+  const beacon = group(scene, 'release-gatehouse:beacon', near, { position: [0, 7.6, -3.7] })
+  cylinder(scene, 'release-gatehouse:beacon:stem', {
+    diameter: 0.5,
+    height: 2.2,
+    material: 'bone-metal',
+    parent: beacon,
+    tessellation: 8
+  })
+  sphere(scene, 'release-gatehouse:beacon:light', {
+    diameter: 1.35,
+    material: 'triage-amber',
+    parent: beacon,
+    position: [0, 1.3, 0],
+    segments: 7
+  })
+  const identity = group(scene, 'release-gatehouse:city-identity', near)
+  keepIdentity(
+    torus(scene, 'release-gatehouse:city-identity:release-ring', {
+      diameter: 6.2,
+      material: 'lunar-rust',
+      parent: identity,
+      position: [0, 5.9, -5.1],
+      rotation: [Math.PI / 2, 0, 0],
+      tessellation: 12,
+      thickness: 0.42
+    })
+  )
+  group(scene, 'release-gatehouse:leader-anchor', near, { position: [0, 1, 1.2] })
+  scalarClip(scene, 'gatehouse-beacon', beacon, 'rotation.y', 0.16, { duration: 56 })
+  scalarClip(scene, 'gatehouse-gate', entrance, 'rotation.y', 0.025, { duration: 80 })
+  return building.root
+}
+
+export function buildArchive(scene) {
+  const building = secondaryDistrictFrame(scene, 'archive', {
+    accent: 'archive-emissive',
+    depth: 11,
+    height: 8.7,
+    width: 13.5
+  })
+  const { near } = building
+  addSign(scene, 'archive:sign', near, {
+    accent: 'archive-emissive',
+    position: [0, 7.55, 5.75],
+    width: 4.8
+  })
+  const stacks = group(scene, 'archive:stacks', near)
+  for (const side of [-1, 1]) {
+    for (let row = 0; row < 3; row += 1) {
+      const x = side * (3.9 + row * 1.25)
+      box(scene, `archive:shelf:${side}:${row}`, {
+        depth: 0.85,
+        height: 5.7,
+        material: 'charcoal-structure',
+        parent: stacks,
+        position: [x, 3.2, -4.95],
+        width: 0.92
+      })
+      for (let level = 0; level < 5; level += 1)
+        box(scene, `archive:record:${side}:${row}:${level}`, {
+          depth: 0.32,
+          height: 0.42,
+          material: level % 2 ? 'archive-emissive' : 'lunar-rust',
+          parent: stacks,
+          position: [x, 1.25 + level * 1.03, -4.48],
+          width: 0.7
+        })
+    }
+  }
+  const vault = group(scene, 'archive:vault', near, { position: [0, 2, 0.5] })
+  cylinder(scene, 'archive:vault:body', {
+    diameter: 3.7,
+    height: 3.1,
+    material: 'bone-metal',
+    parent: vault,
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 10
+  })
+  torus(scene, 'archive:vault:seal', {
+    diameter: 2.5,
+    material: 'archive-emissive',
+    parent: vault,
+    position: [0, 0, 1.9],
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 10,
+    thickness: 0.25
+  })
+  const identity = group(scene, 'archive:city-identity', near)
+  keepIdentity(
+    box(scene, 'archive:city-identity:sealed-volume', {
+      depth: 0.55,
+      height: 1.8,
+      material: 'lunar-rust',
+      parent: identity,
+      position: [0, 7.2, -5.4],
+      rotation: [0, 0, -0.08],
+      width: 6.4
+    })
+  )
+  group(scene, 'archive:leader-anchor', near, { position: [-2.5, 1, 0.5] })
+  scalarClip(scene, 'archive-seal-idle', vault, 'rotation.y', 0.12, { duration: 96 })
+  return building.root
+}
+
 export function buildLibrary(scene) {
   const building = specialistFrame(scene, 'library', {
     accent: 'archive-emissive',
