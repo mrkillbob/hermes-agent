@@ -342,6 +342,67 @@ test('uses nearest-rank p95 and averages signed CPU/GPU deltas', () => {
   assert.equal(result.ok, true, result.errors.join('; '))
 })
 
+test('re-derives receipt arrays from versioned baseline-shell and mounted-city provenance', () => {
+  const rawSamples = samples({
+    cpuDeltaPp: [3, 3, 3, 3, 3],
+    gpuMemoryDeltaMiB: [10, 10, 10, 10, 10],
+    residentMemoryMiB: [300, 301, 301, 302, 302]
+  })
+  const rendererIdentity = { pid: 20, startedAtMs: 1_000 }
+  const phase = (name, cpu, gpu, residentMemoryMiB) => ({
+    envelopeVersion: 1,
+    phase: name,
+    rendererIdentity,
+    samples: rawSamples.frameMs.map((frameMs, index) => ({
+      timestampMs: index * 7_500,
+      processMetrics: [
+        {
+          pid: 10,
+          type: 'Browser',
+          cpu: { percentCPUUsage: 1 },
+          memory: { workingSetSize: 102_400 }
+        },
+        {
+          pid: 20,
+          type: 'Tab',
+          cpu: { percentCPUUsage: cpu - 1 },
+          memory: { workingSetSize: residentMemoryMiB[index] * 1024 }
+        }
+      ],
+      rendererMetrics: {
+        rendererPid: 20,
+        rendererStartedAtMs: 1_000,
+        gpuMemoryMiB: gpu,
+        gpuMemorySource: 'babylon-engine-counter',
+        gpuEnabled: true,
+        frameMs,
+        worldUpdateMs: rawSamples.worldUpdateMs[index],
+        renderFrames: rawSamples.renderFrames[index],
+        drawCalls: rawSamples.drawCalls[index],
+        visibleTriangles: rawSamples.visibleTriangles[index],
+        activeAnimations: rawSamples.activeAnimations[index],
+        entities: rawSamples.entities[index],
+        textures: rawSamples.textures[index],
+        listeners: rawSamples.listeners[index],
+        timers: rawSamples.timers[index],
+        population: { observed: 100, active: 100, lodMix: { near: 100 }, source: 'fake-backend' }
+      }
+    }))
+  })
+  const rawProvenance = {
+    provenanceVersion: 1,
+    baselineShell: phase('baseline-shell', 3, 40, [200, 200, 200, 200, 200]),
+    mountedCity: phase('mounted-city', 6, 50, rawSamples.residentMemoryMiB)
+  }
+  const valid = validateReceipt(receipt({ rawSamples, rawProvenance }))
+  assert.equal(valid.ok, true, valid.errors.join('; '))
+
+  const forgedRaw = { ...rawSamples, cpuDeltaPp: [0, 0, 0, 0, 0] }
+  const forged = validateReceipt(receipt({ rawSamples: forgedRaw, rawProvenance }))
+  assert.equal(forged.ok, false)
+  assert.match(forged.errors.join('\n'), /raw provenance.*cpuDeltaPp|cpuDeltaPp.*provenance/i)
+})
+
 test('reports balanced overview draw calls over the hard limit', () => {
   const result = validateReceipt(receipt({ scenario: 'balanced-overview', drawCalls: 181 }))
 

@@ -42,6 +42,7 @@
     "dist:win:nsis": "npm run build && npm run builder -- --win nsis",
     "dist:linux": "npm run build && npm run builder -- --linux AppImage deb rpm",
     "perf": "node scripts/perf/run.mjs",
+    "perf:lunar-city": "node scripts/perf/lunar-city-runner.mjs",
     "update:shim": "bash ../../scripts/desktop-update/repro.sh shim",
     "update:shim:fail": "bash ../../scripts/desktop-update/repro.sh shim-fail",
     "update:repro:fresh": "bash ../../scripts/desktop-update/repro.sh fresh",

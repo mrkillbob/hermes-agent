@@ -8,6 +8,8 @@
 
 import { readFileSync } from 'node:fs'
 
+import { deriveRawSamplesFromProvenance } from './lib/lunar-city-provenance.mjs'
+
 export const RECEIPT_VERSION = 1
 
 export const EVIDENCE_CLASSES = Object.freeze(['deterministic', 'fake-backend-packaged', 'supervised-live'])
@@ -443,6 +445,29 @@ function validateRawSamples(rawSamples, errors) {
       else if (Math.abs(value) > THRESHOLDS.maxRawValue) errors.push(`rawSamples.${field} contains unbounded values`)
       else if (NON_NEGATIVE_RAW_FIELDS.has(field) && value < 0)
         errors.push(`rawSamples.${field} contains negative values`)
+    }
+  }
+}
+
+function validateRawProvenance(receipt, errors) {
+  if (!Object.hasOwn(receipt, 'rawProvenance')) return
+  let derived
+  try {
+    derived = deriveRawSamplesFromProvenance(receipt.rawProvenance)
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : `raw provenance validation failed: ${String(error)}`)
+    return
+  }
+  if (!isRecord(receipt.rawSamples)) return
+  for (const field of RAW_FIELDS) {
+    const retained = receipt.rawSamples[field]
+    const expected = derived.rawSamples[field]
+    if (
+      !Array.isArray(retained) ||
+      retained.length !== expected.length ||
+      retained.some((value, index) => !equalNumber(value, expected[index]))
+    ) {
+      errors.push(`rawSamples.${field} does not match raw provenance`)
     }
   }
 }
@@ -940,6 +965,7 @@ export function validateReceipt(receipt) {
   validateMeasurement(receipt, SCENARIO_PROFILES[receipt.scenario], errors)
   validateScenarioInvariants(receipt, SCENARIO_PROFILES[receipt.scenario], canonicalScenario(receipt.scenario), errors)
   validateRawSamples(receipt.rawSamples, errors)
+  validateRawProvenance(receipt, errors)
   const summaries = validateSummaries(receipt.rawSamples, receipt.summaries, errors)
   const expected = summarizeRawSamples(receipt.rawSamples)
   validateDirectSummaries(receipt, expected, errors)
