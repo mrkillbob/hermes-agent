@@ -1151,16 +1151,145 @@ describe('registered Kanban Lunar City source', () => {
 
     const removalRead = await source.read()
     expect(removalRead.authoritative).toBe(false)
-    expect(removalRead.sources).toHaveLength(257)
+    expect(removalRead.staleUnlistedSourcePrefixes).toEqual(['kanban:'])
+    expect(removalRead.sources).toHaveLength(258)
     expect(removalRead.sources.some(item => item.source === 'kanban:source-1:worker')).toBe(false)
     expect(removalRead.sources).toContainEqual(
       expect.objectContaining({ source: 'kanban:source-299:worker', error: 'Registered Kanban owner removed' })
     )
+    expect(removalRead.sources).toContainEqual({
+      authority: 'partial',
+      error: 'Registered Kanban removal tombstone limit exceeded',
+      observedAt: expect.any(Number),
+      source: 'kanban-registry:removal-overflow'
+    })
 
     const acknowledged = await source.read()
     expect(acknowledged.authoritative).toBe(true)
     expect(acknowledged.sources).toEqual([
       { authority: 'authoritative', observedAt: 42, source: 'kanban:source-300:worker' }
+    ])
+  })
+
+  it('distinguishes unavailable, authoritative empty, and oversized roster states', async () => {
+    const roster = atom<DesktopAgentRoster | null>({
+      agents: [
+        {
+          connectionId: 'source-a',
+          connectionKind: 'local',
+          connectionLabel: 'source a',
+          handle: '@worker',
+          profile: 'worker'
+        }
+      ],
+      sources: [{ connectionId: 'source-a', kind: 'local', label: 'source a', reachable: true }]
+    })
+    const identity = {
+      board: 'main',
+      connectionId: 'source-a',
+      kind: 'kanban' as const,
+      profile: 'worker',
+      taskId: 'task-a'
+    }
+    const createSource = vi.fn(() => ({
+      onFrame: vi.fn(),
+      read: async () => ({
+        authoritative: true,
+        compounds: [],
+        details: new Map(),
+        entities: [
+          {
+            animation: 'work' as const,
+            authority: 'authoritative' as const,
+            destination: 'project' as const,
+            identity,
+            key: entityKey(identity),
+            observedAt: 42
+          }
+        ],
+        health: 'authoritative' as const,
+        sources: [{ authority: 'authoritative' as const, observedAt: 42, source: 'kanban:source-a:worker' }]
+      }),
+      start: () => () => undefined
+    }))
+    const source = createRegisteredKanbanCitySource({ createSource: createSource as never, roster })
+    source.start(vi.fn())
+    await expect(source.read()).resolves.toMatchObject({ authoritative: true })
+
+    roster.set(null)
+    const unavailable = await source.read()
+    expect(unavailable.authoritative).toBe(false)
+    expect(unavailable.entities).toEqual([expect.objectContaining({ authority: 'stale', key: entityKey(identity) })])
+    expect(unavailable.sources).toContainEqual(
+      expect.objectContaining({ source: 'kanban-registry:unavailable', authority: 'partial' })
+    )
+
+    const oversizedAgents = Array.from({ length: 257 }, (_, index) => ({
+      connectionId: `oversized-${index}`,
+      connectionKind: 'local' as const,
+      connectionLabel: `oversized-${index}`,
+      handle: '@worker',
+      profile: 'worker'
+    }))
+    roster.set({
+      agents: oversizedAgents,
+      sources: oversizedAgents.map(agent => ({
+        connectionId: agent.connectionId,
+        kind: 'local' as const,
+        label: agent.connectionLabel,
+        reachable: true
+      }))
+    })
+    const oversized = await source.read()
+    expect(oversized.authoritative).toBe(false)
+    expect(oversized.entities).toEqual([expect.objectContaining({ authority: 'stale', key: entityKey(identity) })])
+    expect(oversized.sources).toContainEqual(
+      expect.objectContaining({ source: 'kanban-registry:overflow', authority: 'partial' })
+    )
+    expect(createSource).toHaveBeenCalledOnce()
+
+    roster.set({ agents: [], sources: [] })
+    const removed = await source.read()
+    expect(removed.authoritative).toBe(false)
+    expect(removed.sources).toContainEqual(
+      expect.objectContaining({ source: 'kanban:source-a:worker', error: 'Registered Kanban owner removed' })
+    )
+    const acknowledged = await source.read()
+    expect(acknowledged).toMatchObject({ authoritative: true, entities: [], sources: [] })
+  })
+
+  it('fails closed for an initially oversized roster without creating child sources', async () => {
+    const agents = Array.from({ length: 257 }, (_, index) => ({
+      connectionId: `source-${index}`,
+      connectionKind: 'local' as const,
+      connectionLabel: `source-${index}`,
+      handle: '@worker',
+      profile: 'worker'
+    }))
+    const roster = atom<DesktopAgentRoster>({
+      agents,
+      sources: agents.map(agent => ({
+        connectionId: agent.connectionId,
+        kind: 'local' as const,
+        label: agent.connectionLabel,
+        reachable: true
+      }))
+    })
+    const createSource = vi.fn()
+    const source = createRegisteredKanbanCitySource({ createSource, roster })
+    source.start(vi.fn())
+    const result = await source.read()
+
+    expect(createSource).not.toHaveBeenCalled()
+    expect(result.authoritative).toBe(false)
+    expect(result.entities).toEqual([])
+    expect(result.sources).toEqual([
+      {
+        authority: 'partial',
+        error: 'Registered Kanban owner limit exceeded',
+        observedAt: expect.any(Number),
+        source: 'kanban-registry:overflow'
+      }
     ])
   })
 

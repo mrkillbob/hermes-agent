@@ -195,6 +195,54 @@ describe('Lunar City reconciler', () => {
     stop()
   })
 
+  it('stales unlisted prior entities in an overflowed source namespace', async () => {
+    const identity = { board: 'main', connectionId: 'removed', kind: 'kanban' as const, profile: 'worker', taskId: 't' }
+    const entity = {
+      animation: 'work' as const,
+      authority: 'authoritative' as const,
+      destination: 'project' as const,
+      identity,
+      key: entityKey(identity),
+      observedAt: 1
+    }
+    let overflow = false
+    const reconciler = createLunarCityReconciler({
+      now: () => 2,
+      read: async () =>
+        overflow
+          ? {
+              authoritative: false,
+              entities: [],
+              sources: [
+                {
+                  authority: 'partial' as const,
+                  error: 'Removal tombstone limit exceeded',
+                  observedAt: 2,
+                  source: 'kanban-registry:removal-overflow'
+                }
+              ],
+              staleUnlistedSourcePrefixes: ['kanban:']
+            }
+          : {
+              authoritative: true,
+              entities: [entity],
+              sources: [{ authority: 'authoritative' as const, observedAt: 1, source: 'kanban:removed:worker' }]
+            }
+    })
+    const stop = reconciler.start()
+    await flush()
+    overflow = true
+    reconciler.invalidate('overflow')
+    await flush()
+
+    expect($lunarCitySnapshot.get().entities.get(entity.key)).toMatchObject({
+      animation: 'unavailable',
+      authority: 'stale',
+      destination: 'unknown'
+    })
+    stop()
+  })
+
   it('freezes the complete delta payload before handing it to a publisher', async () => {
     let published: LunarDelta | undefined
     const reconciler = createLunarCityReconciler({
@@ -866,6 +914,12 @@ describe('Lunar City reconciler', () => {
         observedAt: 700,
         source: 'kanban:source-a'
       },
+      {
+        authority: 'partial',
+        error: 'Registered session roster unavailable',
+        observedAt: 700,
+        source: 'session-registry:unavailable'
+      },
       { authority: 'stale', observedAt: 0, source: 'session:source-a:worker' }
     ])
 
@@ -891,7 +945,22 @@ describe('Lunar City reconciler', () => {
     const remote = { ...sessionRow, connection_id: 'ssh-1' } as unknown as SessionInfo
     const sessions = atom([local, remote])
     const fleet = atom({
-      agents: [],
+      agents: [
+        {
+          connectionId: 'local',
+          connectionKind: 'local' as const,
+          connectionLabel: 'this Mac',
+          handle: '@worker-local',
+          profile: 'worker'
+        },
+        {
+          connectionId: 'ssh-1',
+          connectionKind: 'ssh' as const,
+          connectionLabel: 'relay',
+          handle: '@worker-remote',
+          profile: 'worker'
+        }
+      ],
       sources: [
         { connectionId: 'local', kind: 'local' as const, label: 'this Mac', reachable: true },
         { connectionId: 'ssh-1', kind: 'ssh' as const, label: 'relay', reachable: true }
@@ -1121,7 +1190,15 @@ describe('Lunar City reconciler', () => {
       now: () => 900,
       sources: {
         $fleetRoster: atom({
-          agents: [],
+          agents: [
+            {
+              connectionId: 'source-a',
+              connectionKind: 'local' as const,
+              connectionLabel: 'source a',
+              handle: '@worker-source-a',
+              profile: 'worker'
+            }
+          ],
           sources: [{ connectionId: 'source-a', kind: 'local' as const, label: 'source a', reachable: true }]
         }),
         $sessions: sessions,
@@ -1399,6 +1476,125 @@ describe('Lunar City reconciler', () => {
           entityKey({ connectionId: 'source-b', kind: 'session', profile: 'worker', sessionId: 'shared-session' })
         )
     ).toMatchObject({ authority: 'authoritative' })
+    stop()
+  })
+
+  it('treats an authoritative empty roster as final-owner removal without cached resurrection', async () => {
+    const fleet = atom<DesktopAgentRoster>({
+      agents: [
+        {
+          connectionId: 'source-a',
+          connectionKind: 'local',
+          connectionLabel: 'source a',
+          handle: '@worker',
+          profile: 'worker'
+        }
+      ],
+      sources: [{ connectionId: 'source-a', kind: 'local', label: 'source a', reachable: true }]
+    })
+    let emit!: (event: unknown) => void
+    const sessionReads = vi.fn(async () => ({
+      sessions: [{ ended_at: null, id: 'session-a', is_active: true, profile: 'worker' }]
+    }))
+    const sessionKey = entityKey({
+      connectionId: 'source-a',
+      kind: 'session',
+      profile: 'worker',
+      sessionId: 'session-a'
+    })
+    const stop = startLunarCityReconciler({
+      now: () => 700,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        onEvent: listener => {
+          emit = listener
+          return () => undefined
+        },
+        readSessionList: sessionReads,
+        refreshFleet: async () => ({ observedAt: 700, status: 'refreshed' })
+      }
+    })
+    await flush()
+    expect($lunarCitySnapshot.get().entities.get(sessionKey)).toMatchObject({ authority: 'authoritative' })
+
+    const overflowAgents = [
+      fleet.get().agents[0]!,
+      ...Array.from({ length: 256 }, (_, index) => ({
+        connectionId: `overflow-${index}`,
+        connectionKind: 'local' as const,
+        connectionLabel: `overflow-${index}`,
+        handle: '@worker',
+        profile: 'worker'
+      }))
+    ]
+    fleet.set({
+      agents: overflowAgents,
+      sources: overflowAgents.map(agent => ({
+        connectionId: agent.connectionId,
+        kind: 'local',
+        label: agent.connectionLabel,
+        reachable: true
+      }))
+    })
+    await flush()
+    expect($lunarCitySnapshot.get().entities.get(sessionKey)).toMatchObject({ authority: 'stale' })
+    expect($lunarCitySnapshot.get().sources).toContainEqual(
+      expect.objectContaining({ authority: 'partial', source: 'session-registry:overflow' })
+    )
+    expect(sessionReads).toHaveBeenCalledOnce()
+
+    fleet.set({ agents: [], sources: [] })
+    await flush()
+    expect($lunarCitySnapshot.get().entities.get(sessionKey)).toMatchObject({ authority: 'stale' })
+
+    emit({ connectionId: 'source-a', profile: 'worker', type: 'gateway.ready' })
+    await flush()
+    expect($lunarCitySnapshot.get().entities.has(sessionKey)).toBe(false)
+    expect(sessionReads).toHaveBeenCalledOnce()
+    stop()
+  })
+
+  it('fails closed on an oversized roster without instantiating owner readers or vacuous authority', async () => {
+    const agents = Array.from({ length: 257 }, (_, index) => ({
+      connectionId: `source-${index}`,
+      connectionKind: 'local' as const,
+      connectionLabel: `source-${index}`,
+      handle: '@worker',
+      profile: 'worker'
+    }))
+    const fleet = atom<DesktopAgentRoster>({
+      agents,
+      sources: agents.map(agent => ({
+        connectionId: agent.connectionId,
+        kind: 'local' as const,
+        label: agent.connectionLabel,
+        reachable: true
+      }))
+    })
+    const sessionReads = vi.fn()
+    const stop = startLunarCityReconciler({
+      now: () => 800,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        readSessionList: sessionReads,
+        refreshFleet: async () => ({ observedAt: 800, status: 'refreshed' })
+      }
+    })
+    await flush()
+    expect(sessionReads).not.toHaveBeenCalled()
+    expect($lunarCitySnapshot.get().entities.size).toBe(0)
+    expect($lunarCitySnapshot.get().sources).toContainEqual({
+      authority: 'partial',
+      error: 'Registered session owner limit exceeded',
+      observedAt: 800,
+      source: 'session-registry:overflow'
+    })
     stop()
   })
 

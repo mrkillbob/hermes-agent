@@ -34,6 +34,8 @@ export interface ReconcileReadResult {
   entities: readonly LunarEntity[]
   /** Source-owned rows this read may replace while another source is partial. */
   replacementSources?: readonly string[]
+  /** On bounded removal overflow, stale unlisted prior entities only in these source namespaces. */
+  staleUnlistedSourcePrefixes?: readonly string[]
   sources: readonly SourceHealth[]
 }
 
@@ -312,6 +314,13 @@ export class LunarCityReconciler {
 
     for (const [key, entity] of candidates) {
       if (stalePartialSources.has(healthSourceFor(entity))) {
+        candidates.set(key, staleEntity(entity))
+      }
+    }
+
+    for (const [key, entity] of candidates) {
+      const source = healthSourceFor(entity)
+      if (result.staleUnlistedSourcePrefixes?.some(prefix => source.startsWith(prefix))) {
         candidates.set(key, staleEntity(entity))
       }
     }
@@ -700,6 +709,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       }
 
       const roster = sources.$fleetRoster.get()
+      const rosterOversized = Boolean(roster && roster.agents.length > 256)
 
       const previousFleetSourceObservedAt = new Map(
         $lunarCitySnapshot
@@ -709,7 +719,10 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       )
 
       const fleetReadPartial =
-        fleetReadFailed || Boolean(roster?.sources.some(source => !source.reachable || Boolean(source.error)))
+        roster === null ||
+        fleetReadFailed ||
+        rosterOversized ||
+        Boolean(roster.sources.some(source => !source.reachable || Boolean(source.error)))
 
       const fleetSourceObservedAt = new Map(
         roster?.sources.map(source => [
@@ -720,17 +733,28 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         ])
       )
 
-      const normalizedFleet = roster
-        ? normalizeRoster(roster, {
-            fresh: !fleetReadFailed && fleetObservedAt > 0,
-            observedAt: fleetObservedAt,
-            sourceObservedAt: fleetSourceObservedAt
-          })
-        : { entities: [], sources: [] as readonly SourceHealth[] }
+      const normalizedFleet =
+        roster && !rosterOversized
+          ? normalizeRoster(roster, {
+              fresh: !fleetReadFailed && fleetObservedAt > 0,
+              observedAt: fleetObservedAt,
+              sourceObservedAt: fleetSourceObservedAt
+            })
+          : rosterOversized
+            ? {
+                entities: [...$lunarCitySnapshot.get().entities.values()]
+                  .filter(entity => entity.identity.kind === 'profile')
+                  .map(staleEntity),
+                sources: $lunarCitySnapshot
+                  .get()
+                  .sources.filter(source => source.source.startsWith('fleet:'))
+                  .map(source => ({ ...source, authority: 'stale' as const }))
+              }
+            : { entities: [], sources: [] as readonly SourceHealth[] }
       let fleet = normalizedFleet
       const botMetadataGeneration = requestedBotMetadataGeneration
 
-      if (roster && sources.readProfileRoster) {
+      if (roster && !rosterOversized && sources.readProfileRoster) {
         if (
           appliedBotMetadataGeneration >= botMetadataGeneration &&
           enrichedFleetCache?.roster === roster &&
@@ -786,7 +810,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
 
       const rosterOwners = new Map<string, { connectionId: string; profile: string; rows: SessionInfo[] }>()
 
-      for (const agent of roster?.agents ?? []) {
+      for (const agent of rosterOversized ? [] : (roster?.agents ?? [])) {
         const connectionId = agent.connectionId.trim()
         const profile = agent.profile.trim()
 
@@ -798,9 +822,19 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         rosterOwners.set(key, { connectionId, profile, rows: cachedOwners.get(key)?.rows ?? [] })
       }
 
-      const registeredOwners = rosterOwners.size > 0 ? rosterOwners : new Map(cachedOwners)
+      const registeredOwners =
+        roster === null
+          ? new Map(cachedOwners)
+          : rosterOversized
+            ? new Map(
+                [...registeredSessionOwners].map(([key, owner]) => [
+                  key,
+                  { ...owner, rows: sessionOwnerCache.get(key)?.rows ?? cachedOwners.get(key)?.rows ?? [] }
+                ])
+              )
+            : rosterOwners
 
-      if (rosterOwners.size > 0) {
+      if (roster !== null && !rosterOversized) {
         for (const [key, owner] of registeredSessionOwners) {
           if (!rosterOwners.has(key)) {
             retiredSessionOwners.set(key, owner)
@@ -829,7 +863,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         }
       }
 
-      const ownerSetBounded = registeredOwners.size <= 256
+      const ownerSetBounded = !rosterOversized && registeredOwners.size <= 256
       for (const key of registeredOwners.keys()) {
         if (!sessionOwnerCache.has(key)) {
           dirtySessionOwners.add(key)
@@ -1108,6 +1142,25 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
           authoritativeSessionSources.length !== registeredOwners.size ||
           (Boolean(sources.readDelegationStatus) && authoritativeDelegationSources.length !== registeredOwners.size))
       retiredSessionOwners.clear()
+      const registryHealth: SourceHealth[] = rosterOversized
+        ? [
+            {
+              authority: 'partial',
+              error: 'Registered session owner limit exceeded',
+              observedAt: sessionNow,
+              source: 'session-registry:overflow'
+            }
+          ]
+        : roster === null
+          ? [
+              {
+                authority: 'partial',
+                error: 'Registered session roster unavailable',
+                observedAt: sessionNow,
+                source: 'session-registry:unavailable'
+              }
+            ]
+          : []
 
       return {
         authoritative:
@@ -1127,8 +1180,10 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
           ...(sources.readSessionList ? sessionHealth : sessions.sources),
           ...delegationHealth,
           ...retiredSessionSources,
+          ...registryHealth,
           ...optionalReads.flatMap(read => [...read.sources])
-        ]
+        ],
+        staleUnlistedSourcePrefixes: [...new Set(optionalReads.flatMap(read => read.staleUnlistedSourcePrefixes ?? []))]
       }
     }
   })

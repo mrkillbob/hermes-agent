@@ -69,6 +69,7 @@ export interface KanbanReadResult {
   replacementSources?: readonly string[]
   selectedBoard?: string
   sources: readonly SourceHealth[]
+  staleUnlistedSourcePrefixes?: readonly string[]
 }
 
 interface ReadableRoster {
@@ -1041,16 +1042,26 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
     }
   >()
   const retiredSources = new Set<string>()
+  let retiredOverflow = false
+  let rosterState: 'available' | 'oversized' | 'unavailable' = 'unavailable'
   let active = false
   let invalidate: ((result: KanbanFrameResult) => void) | undefined
   let stopRoster: (() => void) | undefined
 
-  const registeredScopes = (): readonly PluginSourceScope[] => {
+  const registeredScopes = (): readonly PluginSourceScope[] | undefined => {
     const roster = options.roster.get()
 
-    if (!roster || roster.agents.length > 256) {
-      return []
+    if (!roster) {
+      rosterState = 'unavailable'
+      return undefined
     }
+
+    if (roster.agents.length > 256) {
+      rosterState = 'oversized'
+      return undefined
+    }
+
+    rosterState = 'available'
 
     const unique = new Map<string, PluginSourceScope>()
 
@@ -1070,6 +1081,9 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
 
   const sync = (): void => {
     const scopes = registeredScopes()
+    if (!scopes) {
+      return
+    }
     const desired = new Set(scopes.map(scope => JSON.stringify([scope.connectionId, scope.profile])))
 
     for (const [key, entry] of entries) {
@@ -1078,6 +1092,7 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
         entries.delete(key)
         retiredSources.add(sourceName(entry.scope))
         while (retiredSources.size > MAX_RETIRED_KANBAN_SOURCES) {
+          retiredOverflow = true
           retiredSources.delete(retiredSources.values().next().value!)
         }
       }
@@ -1156,8 +1171,34 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
       observedAt: now(),
       source
     }))
-    const authoritative = retiredSources.size === 0 && reads.every(({ result }) => result.authoritative)
+    const registrySource: SourceHealth[] =
+      rosterState === 'available'
+        ? []
+        : [
+            {
+              authority: 'partial',
+              error:
+                rosterState === 'oversized' ? 'Registered Kanban owner limit exceeded' : 'Kanban roster unavailable',
+              observedAt: now(),
+              source: rosterState === 'oversized' ? 'kanban-registry:overflow' : 'kanban-registry:unavailable'
+            }
+          ]
+    const authoritative =
+      rosterState === 'available' && retiredSources.size === 0 && reads.every(({ result }) => result.authoritative)
+    const staleCached = rosterState !== 'available'
+    const overflowed = retiredOverflow
+    const removalOverflowSource: SourceHealth[] = overflowed
+      ? [
+          {
+            authority: 'partial',
+            error: 'Registered Kanban removal tombstone limit exceeded',
+            observedAt: now(),
+            source: 'kanban-registry:removal-overflow'
+          }
+        ]
+      : []
     retiredSources.clear()
+    retiredOverflow = false
 
     return {
       authoritative,
@@ -1170,10 +1211,27 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
           ])
         )
       ),
-      entities: reads.flatMap(({ result }) => result.entities),
+      entities: reads.flatMap(({ result }) =>
+        staleCached
+          ? result.entities.map(entity => ({
+              ...entity,
+              animation: 'unavailable' as const,
+              authority: 'stale' as const,
+              destination: 'unknown' as const
+            }))
+          : result.entities
+      ),
       health: authoritative ? 'authoritative' : 'unavailable',
-      replacementSources: successfulSources,
-      sources: [...reads.flatMap(({ result }) => result.sources), ...removed]
+      replacementSources: staleCached ? [] : successfulSources,
+      sources: [
+        ...reads.flatMap(({ result }) =>
+          staleCached ? result.sources.map(source => ({ ...source, authority: 'stale' as const })) : result.sources
+        ),
+        ...removed,
+        ...registrySource,
+        ...removalOverflowSource
+      ],
+      ...(overflowed ? { staleUnlistedSourcePrefixes: ['kanban:'] } : {})
     }
   }
 
