@@ -11,6 +11,14 @@ export interface SessionObservation {
   legacyConnectionId?: string
   legacySingleBackend?: boolean
   observedAt: number
+  sourceObservations?: ReadonlyMap<string, SessionSourceObservation>
+}
+
+export interface SessionSourceObservation {
+  /** Monotonic source generation. It is provenance, never wall-clock freshness. */
+  generation: number
+  fresh: boolean
+  observedAt: number
 }
 
 export interface NormalizedSessions {
@@ -24,6 +32,13 @@ export interface NormalizedSubagents {
 
 function isFresh(observation: SessionObservation): boolean {
   return observation.fresh !== false
+}
+
+function sourceObservation(
+  connectionId: string,
+  observation: Pick<SessionObservation, 'fresh' | 'observedAt' | 'sourceObservations'>
+): Pick<SessionSourceObservation, 'fresh' | 'observedAt'> {
+  return observation.sourceObservations?.get(connectionId) ?? observation
 }
 
 function exactSessionOwner(
@@ -51,14 +66,27 @@ function sessionStatus(row: SessionInfo): string {
   return row.is_active ? 'running' : 'idle'
 }
 
-function sourceRows(entities: readonly LunarEntity[], observation: SessionObservation): readonly SourceHealth[] {
-  return [...new Set(entities.map(entity => `session:${entity.identity.connectionId}`))]
-    .sort((left, right) => left.localeCompare(right))
-    .map(source => ({
-      authority: isFresh(observation) ? 'authoritative' : 'stale',
-      observedAt: observation.observedAt,
-      source
-    }))
+function sourceRows(entities: readonly LunarEntity[]): readonly SourceHealth[] {
+  const sources = new Map<string, SourceHealth>()
+
+  for (const entity of entities) {
+    const source = `session:${entity.identity.connectionId}`
+    const prior = sources.get(source)
+
+    if (prior && (prior.authority !== entity.authority || prior.observedAt !== entity.observedAt)) {
+      // One connection source must have one canonical observation. A mixed
+      // batch is partial rather than borrowing freshness from either row.
+      sources.set(source, {
+        authority: 'partial',
+        observedAt: Math.min(prior.observedAt, entity.observedAt),
+        source
+      })
+    } else if (!prior) {
+      sources.set(source, { authority: entity.authority, observedAt: entity.observedAt, source })
+    }
+  }
+
+  return [...sources.values()].sort((left, right) => left.source.localeCompare(right.source))
 }
 
 /**
@@ -82,21 +110,22 @@ export function normalizeSessions(rows: readonly SessionInfo[], observation: Ses
         sessionId: row.id
       }
 
-      const state = mapObservedState({ fresh: isFresh(observation), source: 'session', status: sessionStatus(row) })
+      const source = sourceObservation(owner.connectionId, observation)
+      const state = mapObservedState({ fresh: isFresh(source), source: 'session', status: sessionStatus(row) })
 
       return [
         {
           ...state,
           identity,
           key: entityKey(identity),
-          observedAt: observation.observedAt,
+          observedAt: source.observedAt,
           ...(row.git_repo_root?.trim() ? { projectId: row.git_repo_root } : {})
         } satisfies LunarEntity
       ]
     })
     .sort((left, right) => left.key.localeCompare(right.key))
 
-  return { entities, sources: sourceRows(entities, observation) }
+  return { entities, sources: sourceRows(entities) }
 }
 
 function statusForSubagent(status: SubagentProgress['status'] | string): string {
@@ -134,6 +163,40 @@ export function normalizeSubagent(
   return { ...state, identity, key: entityKey(identity), observedAt: observation.observedAt }
 }
 
+export interface OwnedSubagentRows {
+  owner: Extract<LunarEntity['identity'], { kind: 'session' }>
+  rows: readonly SubagentProgress[]
+}
+
+/**
+ * Canonical bounded merge for callers that already retain exact parent
+ * ownership. Duplicate parent/child ids on other connections remain distinct.
+ */
+export function normalizeOwnedSubagents(
+  batches: readonly OwnedSubagentRows[],
+  observation: Pick<SessionObservation, 'fresh' | 'observedAt' | 'sourceObservations'>
+): NormalizedSubagents {
+  const entities = new Map<string, LunarEntity>()
+
+  for (const batch of batches) {
+    const source = sourceObservation(batch.owner.connectionId, observation)
+
+    for (const row of batch.rows) {
+      if (row.parentId !== null && row.parentId !== batch.owner.sessionId) {
+        continue
+      }
+
+      const entity = normalizeSubagent(row, batch.owner, source)
+
+      if (entity) {
+        entities.set(entity.key, entity)
+      }
+    }
+  }
+
+  return { entities: [...entities.values()].sort((left, right) => left.key.localeCompare(right.key)) }
+}
+
 /**
  * The subagent store is keyed only by parent session id.  A parent id that
  * resolves to zero or more than one exact session owner is unrepresentable in
@@ -142,7 +205,7 @@ export function normalizeSubagent(
 export function normalizeSubagents(
   byParentSession: Readonly<Record<string, readonly SubagentProgress[]>>,
   parentSessions: readonly LunarEntity[],
-  observation: Pick<SessionObservation, 'fresh' | 'observedAt'>
+  observation: Pick<SessionObservation, 'fresh' | 'observedAt' | 'sourceObservations'>
 ): NormalizedSubagents {
   const owners = new Map<string, Extract<LunarEntity['identity'], { kind: 'session' }>[]>()
 
@@ -165,13 +228,14 @@ export function normalizeSubagents(
       }
 
       const owner = candidates[0]!
+      const source = sourceObservation(owner.connectionId, observation)
 
       return rows.flatMap(row => {
         if (row.parentId !== null && row.parentId !== parentSessionId) {
           return []
         }
 
-        const entity = normalizeSubagent(row, owner, observation)
+        const entity = normalizeSubagent(row, owner, source)
 
         return entity ? [entity] : []
       })

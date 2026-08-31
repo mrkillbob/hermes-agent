@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { normalizeSessions, normalizeSubagents } from './sessions'
+import { normalizeOwnedSubagents, normalizeSessions, normalizeSubagents } from './sessions'
 
 const session = (overrides: Record<string, unknown> = {}) => ({
   archived: false,
@@ -34,6 +34,30 @@ describe('session live adapter', () => {
     expect(normalized.entities.map(entity => entity.identity.connectionId)).toEqual(['local', 'ssh-1'])
     expect(new Set(normalized.entities.map(entity => entity.key)).size).toBe(2)
     expect(normalized.entities.map(entity => entity.projectId)).toEqual(['/projects/alpha', '/projects/alpha'])
+  })
+
+  it('applies freshness and the last authoritative timestamp per exact connection source', () => {
+    const normalized = normalizeSessions(
+      [session({ connection_id: 'local', profile: 'worker' }), session({ connection_id: 'ssh-1', profile: 'worker' })],
+      {
+        observedAt: 999,
+        sourceObservations: new Map([
+          ['local', { fresh: true, generation: 4, observedAt: 80 }],
+          ['ssh-1', { fresh: false, generation: 2, observedAt: 40 }]
+        ])
+      }
+    )
+
+    expect(
+      normalized.entities.map(entity => [entity.identity.connectionId, entity.authority, entity.observedAt])
+    ).toEqual([
+      ['local', 'authoritative', 80],
+      ['ssh-1', 'stale', 40]
+    ])
+    expect(normalized.sources).toEqual([
+      { authority: 'authoritative', observedAt: 80, source: 'session:local' },
+      { authority: 'stale', observedAt: 40, source: 'session:ssh-1' }
+    ])
   })
 
   it('fails closed for untagged sessions in a registry topology', () => {
@@ -133,6 +157,50 @@ describe('session live adapter', () => {
     )
 
     expect(normalized.entities).toEqual([])
+  })
+
+  it('normalizes per-owner child batches without collapsing duplicate parent or child ids', () => {
+    const localOwner = {
+      connectionId: 'local',
+      kind: 'session' as const,
+      profile: 'worker',
+      sessionId: 'parent'
+    }
+    const remoteOwner = { ...localOwner, connectionId: 'ssh-1' }
+    const row = {
+      filesRead: [],
+      filesWritten: [],
+      goal: 'work',
+      id: 'sub-1',
+      parentId: 'parent',
+      startedAt: 10,
+      status: 'running' as const,
+      stream: [],
+      taskCount: 1,
+      taskIndex: 0,
+      updatedAt: 20
+    }
+
+    const normalized = normalizeOwnedSubagents(
+      [
+        { owner: localOwner, rows: [row] },
+        { owner: remoteOwner, rows: [row] }
+      ],
+      {
+        sourceObservations: new Map([
+          ['local', { fresh: true, generation: 3, observedAt: 80 }],
+          ['ssh-1', { fresh: false, generation: 1, observedAt: 30 }]
+        ])
+      }
+    )
+
+    expect(
+      normalized.entities.map(entity => [entity.identity.connectionId, entity.authority, entity.observedAt])
+    ).toEqual([
+      ['local', 'authoritative', 80],
+      ['ssh-1', 'stale', 30]
+    ])
+    expect(new Set(normalized.entities.map(entity => entity.key)).size).toBe(2)
   })
 
   it('fails closed when a subagent row claims a different parent than its map key', () => {

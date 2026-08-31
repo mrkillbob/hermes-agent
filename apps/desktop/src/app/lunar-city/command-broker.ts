@@ -850,6 +850,16 @@ function readbackBaseMatches(plan: CommandPlan, value: CommandReadback): boolean
   )
 }
 
+function currentAuthorityMatches(plan: CommandPlan, value: CommandReadback): boolean {
+  return (
+    value.authority === 'authoritative' &&
+    value.operation === plan.operation &&
+    sameIdentity(value.identity, plan.identity) &&
+    sameOwner(value.owner, plan.owner) &&
+    (value.observedAt > plan.plannedAt || value.revision > plan.plannedRevision)
+  )
+}
+
 function sameEffect(left: CommandEffect | undefined, right: CommandEffect): boolean {
   return left?.kind === right.kind && left.targetId === right.targetId && left.value === right.value
 }
@@ -899,6 +909,26 @@ export async function executeCommand(
 
   const canonicalPlan = validation.canonicalPlan
   const executor = executorFor(canonicalPlan, executors)
+
+  if (mutationRequiresAuthoritativeState(canonicalPlan.operation)) {
+    let authority: CommandReadback | null
+
+    try {
+      authority = await executor.readback(canonicalPlan)
+    } catch (error) {
+      return receipt(canonicalPlan, 'rejected', {
+        error: `Exact current authority read failed before send: ${errorMessage(error)}`
+      })
+    }
+
+    if (!authority || !currentAuthorityMatches(canonicalPlan, authority)) {
+      return receipt(canonicalPlan, 'rejected', {
+        error: 'Exact current authority was unavailable, stale, cached, or owned by another route; nothing was sent.',
+        readback: authority
+      })
+    }
+  }
+
   let response: unknown
 
   try {

@@ -854,7 +854,7 @@ describe('Lunar City reconciler', () => {
     const sessionEntity = [...snapshot.entities.values()].find(entity => entity.identity.kind === 'session')
 
     expect(sessionEntity).toMatchObject({
-      authority: 'authoritative',
+      authority: 'stale',
       identity: { connectionId: 'source-a', profile: 'worker', sessionId: 'session-a' }
     })
     expect(snapshot.sources).toEqual([
@@ -864,7 +864,7 @@ describe('Lunar City reconciler', () => {
         observedAt: 700,
         source: 'kanban:source-a'
       },
-      { authority: 'authoritative', observedAt: 700, source: 'session:source-a' }
+      { authority: 'stale', observedAt: 0, source: 'session:source-a' }
     ])
 
     optionalInvalidate()
@@ -873,6 +873,146 @@ describe('Lunar City reconciler', () => {
 
     stop()
     expect(optionalStop).toHaveBeenCalledOnce()
+  })
+
+  it('keeps expired cached sessions stale across unrelated reconciliation until an exact store reread', async () => {
+    vi.useFakeTimers()
+    let now = 100
+    const local = {
+      connection_id: 'local',
+      ended_at: null,
+      id: 'shared-session',
+      is_active: true,
+      profile: 'worker'
+    } as never
+    const remote = { ...local, connection_id: 'ssh-1' } as never
+    const sessions = atom([local, remote])
+    const fleet = atom({
+      agents: [],
+      sources: [
+        { connectionId: 'local', kind: 'local' as const, label: 'this Mac', reachable: true },
+        { connectionId: 'ssh-1', kind: 'ssh' as const, label: 'relay', reachable: true }
+      ]
+    })
+    let focus!: () => void
+    const stop = startLunarCityReconciler({
+      freshnessMs: 50,
+      now: () => now,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: sessions,
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        onFocus: listener => {
+          focus = listener
+          return () => undefined
+        },
+        refreshFleet: async () => ({ observedAt: now, status: 'refreshed' })
+      }
+    })
+
+    await flush()
+    expect(
+      [...$lunarCitySnapshot.get().entities.values()]
+        .filter(entity => entity.identity.kind === 'session')
+        .map(entity => entity.authority)
+    ).toEqual(['stale', 'stale'])
+
+    sessions.set([local, remote])
+    await flush()
+    expect(
+      [...$lunarCitySnapshot.get().entities.values()]
+        .filter(entity => entity.identity.kind === 'session')
+        .map(entity => [entity.identity.connectionId, entity.authority, entity.observedAt])
+    ).toEqual([
+      ['local', 'authoritative', 100],
+      ['ssh-1', 'authoritative', 100]
+    ])
+
+    now = 150
+    await vi.advanceTimersByTimeAsync(50)
+    focus()
+    await flush()
+
+    expect(
+      [...$lunarCitySnapshot.get().entities.values()]
+        .filter(entity => entity.identity.kind === 'session')
+        .map(entity => [entity.identity.connectionId, entity.authority, entity.observedAt])
+    ).toEqual([
+      ['local', 'stale', 100],
+      ['ssh-1', 'stale', 100]
+    ])
+
+    now = 160
+    sessions.set([local, remote])
+    await flush()
+    expect(
+      [...$lunarCitySnapshot.get().entities.values()]
+        .filter(entity => entity.identity.kind === 'session')
+        .map(entity => [entity.identity.connectionId, entity.authority, entity.observedAt])
+    ).toEqual([
+      ['local', 'authoritative', 160],
+      ['ssh-1', 'authoritative', 160]
+    ])
+
+    now = 170
+    fleet.set({
+      ...fleet.get(),
+      sources: fleet
+        .get()
+        .sources.map(source => (source.connectionId === 'local' ? { ...source, reachable: false } : source))
+    })
+    await flush()
+    expect(
+      [...$lunarCitySnapshot.get().entities.values()]
+        .filter(entity => entity.identity.kind === 'session')
+        .map(entity => [entity.identity.connectionId, entity.authority, entity.observedAt])
+    ).toEqual([
+      ['local', 'stale', 160],
+      ['ssh-1', 'authoritative', 160]
+    ])
+
+    now = 180
+    sessions.set([local, remote])
+    await flush()
+    expect(
+      [...$lunarCitySnapshot.get().entities.values()]
+        .filter(entity => entity.identity.kind === 'session')
+        .map(entity => [entity.identity.connectionId, entity.authority])
+    ).toEqual([
+      ['local', 'stale'],
+      ['ssh-1', 'authoritative']
+    ])
+
+    now = 190
+    fleet.set({
+      ...fleet.get(),
+      sources: fleet
+        .get()
+        .sources.map(source => (source.connectionId === 'local' ? { ...source, reachable: true } : source))
+    })
+    await flush()
+    expect(
+      [...$lunarCitySnapshot.get().entities.values()]
+        .filter(entity => entity.identity.kind === 'session')
+        .map(entity => [entity.identity.connectionId, entity.authority])
+    ).toEqual([
+      ['local', 'stale'],
+      ['ssh-1', 'authoritative']
+    ])
+
+    now = 200
+    sessions.set([local, remote])
+    await flush()
+    expect(
+      [...$lunarCitySnapshot.get().entities.values()]
+        .filter(entity => entity.identity.kind === 'session')
+        .map(entity => [entity.identity.connectionId, entity.authority, entity.observedAt])
+    ).toEqual([
+      ['local', 'authoritative', 200],
+      ['ssh-1', 'authoritative', 200]
+    ])
+    stop()
   })
 
   it('lets an optional Kanban failure retain only its own stale rows while core sessions keep reconciling', async () => {

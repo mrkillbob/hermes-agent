@@ -16,7 +16,7 @@ import {
   type ScopedProfilesListRequest
 } from './bot-roster-details'
 import { normalizeRoster } from './fleet'
-import { normalizeSessions, normalizeSubagents } from './sessions'
+import { normalizeSessions, normalizeSubagents, type SessionSourceObservation } from './sessions'
 
 export interface ReconcileReadResult {
   /** False means the read is partial and therefore cannot remove prior rows. */
@@ -523,6 +523,8 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   let activeBotMetadataGeneration = 0
   let refreshingFleet = false
   let disposed = false
+  let sessionSourceGeneration = 0
+  const sessionSourceObservations = new Map<string, Omit<SessionSourceObservation, 'fresh'>>()
   const botMetadataCache = new Map<string, { observedAt: number; payload: unknown; representativeProfile: string }>()
   const botMetadataProvenance = new Map<string, LunarPresentationMetadata>()
   const botRosterPlacementState = createBotRosterPlacementState()
@@ -545,6 +547,12 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         candidate.observedAt === entity.observedAt
       )
     })
+  }
+
+  const sessionConnectionReachable = (connectionId: string): boolean => {
+    const source = sources.$fleetRoster.get()?.sources.find(candidate => candidate.connectionId === connectionId)
+
+    return source === undefined || (source.reachable && !source.error)
   }
 
   const readBotMetadata: ScopedProfilesListRequest = async (connectionId, representativeProfile) => {
@@ -672,13 +680,47 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         }
       }
 
+      const sessionNow = now()
+      const freshnessMs = options.freshnessMs ?? 60_000
+      const priorSessionSources = new Map(
+        $lunarCitySnapshot
+          .get()
+          .sources.filter(source => source.source.startsWith('session:'))
+          .map(source => [source.source.slice('session:'.length), source])
+      )
+      const reachableConnections = new Map(
+        roster?.sources.map(source => [source.connectionId, source.reachable && !source.error]) ?? []
+      )
+      const observedSessionConnections = new Set([...sessionSourceObservations.keys(), ...priorSessionSources.keys()])
+      const currentSessionObservations = new Map<string, SessionSourceObservation>()
+
+      for (const connectionId of observedSessionConnections) {
+        const observed = sessionSourceObservations.get(connectionId)
+        const prior = priorSessionSources.get(connectionId)
+        const observedAt = observed?.observedAt ?? prior?.observedAt ?? 0
+        const reachable = reachableConnections.get(connectionId) !== false
+        const fresh = Boolean(observed && reachable && observedAt + freshnessMs > sessionNow)
+
+        currentSessionObservations.set(connectionId, {
+          fresh,
+          generation: observed?.generation ?? 0,
+          observedAt
+        })
+      }
+
       const sessions = normalizeSessions(sessionRows(), {
+        fresh: false,
         legacyConnectionId: sources.legacyConnectionId?.(),
         legacySingleBackend: sources.legacySingleBackend(),
-        observedAt: now()
+        observedAt: 0,
+        sourceObservations: currentSessionObservations
       })
 
-      const subagents = normalizeSubagents(sources.$subagentsBySession.get(), sessions.entities, { observedAt: now() })
+      const subagents = normalizeSubagents(sources.$subagentsBySession.get(), sessions.entities, {
+        fresh: false,
+        observedAt: 0,
+        sourceObservations: currentSessionObservations
+      })
       const optionalReads: ReconcileReadResult[] = []
 
       for (const source of optionalSources) {
@@ -732,6 +774,12 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         fleetObservedAt = now()
         requestedBotMetadataGeneration += 1
 
+        for (const source of roster?.sources ?? []) {
+          if (!source.reachable || source.error) {
+            sessionSourceObservations.delete(source.connectionId)
+          }
+        }
+
         if (!refreshingFleet) {
           reconciler.invalidate('fleet')
         }
@@ -741,7 +789,28 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   disposers.push(sources.$subagentsBySession.listen(() => reconciler.invalidate('subagents')))
 
   for (const store of sessionStores) {
-    disposers.push(store.listen(() => reconciler.invalidate('sessions')))
+    disposers.push(
+      store.listen(rows => {
+        sessionSourceGeneration += 1
+        const observedAt = now()
+        const observedConnections = new Set(
+          normalizeSessions(rows, {
+            fresh: false,
+            legacyConnectionId: sources.legacyConnectionId?.(),
+            legacySingleBackend: sources.legacySingleBackend(),
+            observedAt
+          }).entities.map(entity => entity.identity.connectionId)
+        )
+
+        for (const connectionId of observedConnections) {
+          if (sessionConnectionReachable(connectionId)) {
+            sessionSourceObservations.set(connectionId, { generation: sessionSourceGeneration, observedAt })
+          }
+        }
+
+        reconciler.invalidate('sessions')
+      })
+    )
   }
 
   if (sources.onFocus) {

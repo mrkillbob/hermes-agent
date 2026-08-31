@@ -271,7 +271,7 @@ describe('LunarCityCommandRuntime', () => {
     const before = publish([entity], [source('connection-a')])
 
     const executor: CommandExecutor = {
-      readback: vi.fn(async () => null),
+      readback: vi.fn(async plan => verifiedReadback(plan)),
       send: vi.fn(async () => {
         throw error
       })

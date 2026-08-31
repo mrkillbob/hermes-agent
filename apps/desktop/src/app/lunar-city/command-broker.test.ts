@@ -244,6 +244,10 @@ async function run(
 ) {
   const selected = bridge(result)
 
+  if (plan.operation !== 'open-session' && plan.operation !== 'inspect-evidence') {
+    selected.readback.mockResolvedValueOnce(readback(plan, { effect: undefined, outcome: 'unknown' }))
+  }
+
   const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
     confirmed,
     latestSnapshot: () => planningSnapshot
@@ -578,7 +582,9 @@ describe('LunarCityCommandBroker causal readback', () => {
 
     expect(fresh.receipt.verification).toBe('verified')
     expect(fresh.selected.send).toHaveBeenCalledTimes(1)
-    expect(fresh.selected.readback).toHaveBeenCalledTimes(1)
+    expect(fresh.selected.readback).toHaveBeenCalledTimes(
+      operation === 'open-session' || operation === 'inspect-evidence' ? 1 : 2
+    )
   })
 
   it.each(ALL_OPERATIONS)('does not verify %s from a boolean outcome without its canonical effect', async operation => {
@@ -630,6 +636,48 @@ describe('LunarCityCommandBroker causal readback', () => {
 })
 
 describe('LunarCityCommandBroker failure boundaries', () => {
+  it('does not send session guidance until an exact current authority read succeeds', async () => {
+    const identity = IDENTITIES.session
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent('send-guidance', identity), planningSnapshot)
+    const selected = bridge(null)
+
+    const blocked = await executeCommand(plan, executors(selected, plan.readback.kind), {
+      latestSnapshot: () => planningSnapshot
+    })
+
+    expect(blocked.verification).toBe('rejected')
+    expect(blocked.error).toContain('Exact current authority')
+    expect(selected.send).not.toHaveBeenCalled()
+
+    selected.readback
+      .mockResolvedValueOnce(readback(plan, { effect: undefined, outcome: 'unknown' }))
+      .mockResolvedValueOnce(readback(plan))
+
+    const restored = await executeCommand(plan, executors(selected, plan.readback.kind), {
+      latestSnapshot: () => planningSnapshot
+    })
+
+    expect(restored.verification).toBe('verified')
+    expect(selected.send).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a current-authority proof from a duplicate session id on another connection', async () => {
+    const identity = IDENTITIES.session
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent('interrupt-session', identity), planningSnapshot)
+    const foreignIdentity = { ...identity, connectionId: 'connection-b' }
+    const selected = bridge(readback(plan, { effect: undefined, identity: foreignIdentity, outcome: 'unknown' }))
+
+    const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
+      confirmed: true,
+      latestSnapshot: () => planningSnapshot
+    })
+
+    expect(receipt.verification).toBe('rejected')
+    expect(selected.send).not.toHaveBeenCalled()
+  })
+
   it('sends exactly once through the typed executor and never uses a blind retry', async () => {
     const identity = IDENTITIES.subagent
     const planningSnapshot = snapshot(identity)
@@ -667,6 +715,7 @@ describe('LunarCityCommandBroker failure boundaries', () => {
     const planningSnapshot = snapshot(identity)
     const plan = planCommand(intent('interrupt-session', identity), planningSnapshot)
     const selected = bridge(null)
+    selected.readback.mockResolvedValueOnce(readback(plan, { effect: undefined, outcome: 'unknown' }))
     selected.send.mockRejectedValueOnce(error)
 
     const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
@@ -676,6 +725,6 @@ describe('LunarCityCommandBroker failure boundaries', () => {
 
     expect(receipt.verification).toBe(verification)
     expect(selected.send).toHaveBeenCalledTimes(1)
-    expect(selected.readback).not.toHaveBeenCalled()
+    expect(selected.readback).toHaveBeenCalledOnce()
   })
 })
