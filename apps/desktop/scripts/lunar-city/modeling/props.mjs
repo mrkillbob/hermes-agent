@@ -1,0 +1,432 @@
+import { scalarClip, stateClips } from './animation.mjs'
+import { beamBetween, box, capsule, cone, cylinder, group, sphere, torus } from './primitives.mjs'
+
+export function addConsoleBank(
+  scene,
+  name,
+  parent,
+  { accent = 'signal-emissive', count = 3, position = [0, 1, 0], width = 1 } = {}
+) {
+  const consoles = group(scene, name, parent, { position })
+  for (let index = 0; index < count; index += 1) {
+    const x = (index - (count - 1) / 2) * width
+    box(scene, `${name}:desk:${index}`, {
+      depth: 0.65,
+      height: 0.54,
+      material: 'charcoal-structure',
+      parent: consoles,
+      position: [x, 0, 0],
+      width: width * 0.82
+    })
+    box(scene, `${name}:screen:${index}`, {
+      depth: 0.1,
+      height: 0.44,
+      material: accent,
+      parent: consoles,
+      position: [x, 0.52, -0.26],
+      rotation: [-0.2, 0, 0],
+      width: width * 0.62
+    })
+  }
+  return consoles
+}
+
+export function addWorkbenches(
+  scene,
+  name,
+  parent,
+  { accent = 'signal-emissive', count = 2, position = [0, 0.7, 0] } = {}
+) {
+  const benches = group(scene, name, parent, { position })
+  for (let index = 0; index < count; index += 1) {
+    const x = (index - (count - 1) / 2) * 2.25
+    box(scene, `${name}:top:${index}`, {
+      depth: 1.1,
+      height: 0.18,
+      material: 'bone-metal',
+      parent: benches,
+      position: [x, 0.55, 0],
+      width: 1.8
+    })
+    box(scene, `${name}:base:${index}`, {
+      depth: 0.72,
+      height: 0.72,
+      material: 'charcoal-structure',
+      parent: benches,
+      position: [x, 0.12, 0],
+      width: 1.15
+    })
+    cylinder(scene, `${name}:fixture:${index}`, {
+      diameter: 0.26,
+      height: 0.52,
+      material: accent,
+      parent: benches,
+      position: [x + 0.5, 0.92, 0]
+    })
+  }
+  return benches
+}
+
+export function addTelescope(scene, parent) {
+  const telescope = group(scene, 'research-lab:telescope', parent, {
+    position: [1.8, 2.8, 0.3],
+    rotation: [0, 0, -0.2]
+  })
+  cylinder(scene, 'research-lab:telescope:tube', {
+    diameter: 1.25,
+    height: 3.6,
+    material: 'bone-metal',
+    parent: telescope,
+    rotation: [0, 0, Math.PI / 2]
+  })
+  cylinder(scene, 'research-lab:telescope:lens', {
+    diameter: 1.38,
+    height: 0.22,
+    material: 'signal-emissive',
+    parent: telescope,
+    position: [-1.78, 0, 0],
+    rotation: [0, 0, Math.PI / 2]
+  })
+  cylinder(scene, 'research-lab:telescope:mount', {
+    diameter: 0.48,
+    height: 2.6,
+    material: 'charcoal-structure',
+    parent: telescope,
+    position: [0, -1.55, 0]
+  })
+  scalarClip(scene, 'telescope-scan', telescope, 'rotation.y', 0.72, { duration: 72, start: -0.42 })
+  return telescope
+}
+
+export function addPortal(scene, parent) {
+  const portal = group(scene, 'review-office:portal', parent, {
+    position: [-1.6, 2.35, -1.5],
+    rotation: [Math.PI / 2, 0, 0]
+  })
+  torus(scene, 'review-office:portal:ring', {
+    diameter: 3.4,
+    material: 'archive-emissive',
+    parent: portal,
+    tessellation: 14,
+    thickness: 0.28
+  })
+  cylinder(scene, 'review-office:portal:well', {
+    diameter: 2.5,
+    height: 0.16,
+    material: 'archive-emissive',
+    parent: portal,
+    position: [0, -0.12, 0]
+  })
+  scalarClip(scene, 'portal-idle', portal, 'rotation.y', Math.PI * 2, { duration: 120 })
+  return portal
+}
+
+export function addPlants(scene, parent) {
+  const plants = group(scene, 'garden:plants', parent)
+  const patches = [
+    [-4.8, 0, -2.7],
+    [-3.5, 0, 2.7],
+    [-1.8, 0, -3.8],
+    [0.2, 0, 3.3],
+    [2.3, 0, -3.1],
+    [3.8, 0, 2.2],
+    [5.1, 0, -0.4],
+    [-0.5, 0, -0.8]
+  ]
+  for (const [index, [x, y, z]] of patches.entries()) {
+    cylinder(scene, `garden:plant:stem:${index}`, {
+      diameter: 0.18,
+      height: 0.75 + (index % 3) * 0.16,
+      material: 'garden-green',
+      parent: plants,
+      position: [x, y + 0.38, z]
+    })
+    cone(scene, `garden:plant:leaf-a:${index}`, {
+      diameterBottom: 0.62,
+      height: 0.9,
+      material: 'garden-green',
+      parent: plants,
+      position: [x - 0.18, y + 0.75, z],
+      rotation: [0, 0, -0.48]
+    })
+    cone(scene, `garden:plant:leaf-b:${index}`, {
+      diameterBottom: 0.55,
+      height: 0.82,
+      material: 'garden-green',
+      parent: plants,
+      position: [x + 0.2, y + 0.68, z],
+      rotation: [0, 0, 0.56]
+    })
+    if (index % 2 === 0)
+      sphere(scene, `garden:plant:flower:${index}`, {
+        diameter: 0.36,
+        material: 'signal-emissive',
+        parent: plants,
+        position: [x, y + 1.12, z],
+        segments: 6
+      })
+  }
+  return plants
+}
+
+export function addSign(scene, name, parent, { accent, position = [0, 0, 0], width = 3.4 } = {}) {
+  const sign = group(scene, name, parent, { position })
+  box(scene, `${name}:panel`, { depth: 0.22, height: 0.86, material: 'charcoal-structure', parent: sign, width })
+  box(scene, `${name}:glow`, {
+    depth: 0.05,
+    height: 0.16,
+    material: accent,
+    parent: sign,
+    position: [0, 0.14, -0.13],
+    width: width * 0.74
+  })
+  box(scene, `${name}:glyph`, {
+    depth: 0.05,
+    height: 0.14,
+    material: accent,
+    parent: sign,
+    position: [0, -0.18, -0.13],
+    width: width * 0.42
+  })
+  return sign
+}
+
+export function buildBus(scene) {
+  const root = group(scene, 'bus:root')
+  const near = group(scene, 'bus:lod:near', root)
+  const far = group(scene, 'bus:lod:far', root)
+  const cabin = group(scene, 'bus:cabin', near)
+  box(scene, 'bus:cabin:lower', {
+    depth: 2.65,
+    height: 1.35,
+    material: 'lunar-rust',
+    parent: cabin,
+    position: [0, 1.22, 0],
+    width: 6.8
+  })
+  box(scene, 'bus:cabin:upper', {
+    depth: 2.42,
+    height: 1.05,
+    material: 'bone-metal',
+    parent: cabin,
+    position: [-0.2, 2.25, 0],
+    width: 5.55
+  })
+  box(scene, 'bus:cabin:windshield', {
+    depth: 2.46,
+    height: 0.62,
+    material: 'signal-emissive',
+    parent: cabin,
+    position: [2.72, 2.26, 0],
+    rotation: [0, 0, -0.12],
+    width: 0.5
+  })
+  const wheels = group(scene, 'bus:wheels', near)
+  for (const x of [-2.15, 2.05]) {
+    for (const z of [-1.32, 1.32])
+      cylinder(scene, `bus:wheel:${x}:${z}`, {
+        diameter: 0.92,
+        height: 0.28,
+        material: 'bone-metal',
+        parent: wheels,
+        position: [x, 0.62, z],
+        rotation: [Math.PI / 2, 0, 0]
+      })
+  }
+  const signal = group(scene, 'bus:signal', near)
+  box(scene, 'bus:signal:side-a', {
+    depth: 0.07,
+    height: 0.32,
+    material: 'signal-emissive',
+    parent: signal,
+    position: [-0.7, 1.7, -1.37],
+    width: 2.2
+  })
+  box(scene, 'bus:signal:side-b', {
+    depth: 0.07,
+    height: 0.32,
+    material: 'signal-emissive',
+    parent: signal,
+    position: [-0.7, 1.7, 1.37],
+    width: 2.2
+  })
+  group(scene, 'bus:camera', root, { position: [0, 5, 9] })
+
+  box(scene, 'bus:far:body', {
+    depth: 2.5,
+    height: 2.1,
+    material: 'lunar-rust',
+    parent: far,
+    position: [0, 1.45, 0],
+    width: 6.4
+  })
+  stateClips(scene, near, ['idle', 'arrive', 'depart'])
+  return root
+}
+
+export function buildTriage(scene) {
+  const root = group(scene, 'triage:root')
+  const near = group(scene, 'triage:lod:near', root)
+  const far = group(scene, 'triage:lod:far', root)
+  box(scene, 'triage:floor', {
+    depth: 7.4,
+    height: 0.5,
+    material: 'charcoal-structure',
+    parent: near,
+    position: [0, 0.25, 0],
+    width: 9.5
+  })
+  box(scene, 'triage:body', {
+    depth: 5.7,
+    height: 4.5,
+    material: 'triage-amber',
+    parent: near,
+    position: [0, 2.55, -0.5],
+    width: 7.4
+  })
+  box(scene, 'triage:open-front', {
+    depth: 0.28,
+    height: 3.15,
+    material: 'bone-metal',
+    parent: near,
+    position: [0, 2.25, 2.42],
+    width: 5.3
+  })
+  const door = group(scene, 'triage:door', near, { position: [2.25, 1.75, 2.62] })
+  box(scene, 'triage:door:panel', {
+    depth: 0.22,
+    height: 2.7,
+    material: 'charcoal-structure',
+    parent: door,
+    width: 1.35
+  })
+  const cross = group(scene, 'triage:cross', near, { position: [0, 4.55, 2.68] })
+  box(scene, 'triage:cross:h', { depth: 0.12, height: 0.34, material: 'bone-metal', parent: cross, width: 1.45 })
+  box(scene, 'triage:cross:v', { depth: 0.12, height: 1.45, material: 'bone-metal', parent: cross, width: 0.34 })
+  const station = group(scene, 'triage:station', near)
+  addConsoleBank(scene, 'triage:station:consoles', station, {
+    accent: 'triage-amber',
+    count: 2,
+    position: [0, 1, -1.55],
+    width: 1.1
+  })
+  group(scene, 'triage:camera', root, { position: [0, 6, 10] })
+  box(scene, 'triage:far:shell', {
+    depth: 5.7,
+    height: 4.5,
+    material: 'triage-amber',
+    parent: far,
+    position: [0, 2.55, -0.5],
+    width: 7.4
+  })
+  box(scene, 'triage:far:cross', {
+    depth: 0.1,
+    height: 0.44,
+    material: 'bone-metal',
+    parent: far,
+    position: [0, 4.15, 2.42],
+    width: 1.4
+  })
+  scalarClip(scene, 'door-open', door, 'rotation.y', -1.2, { duration: 36 })
+  scalarClip(scene, 'lights-idle', cross, 'rotation.y', 0.08, { duration: 42 })
+  scalarClip(scene, 'triage-station-idle', station, 'rotation.y', 0.055, { duration: 64 })
+  return root
+}
+
+export function addAntler(scene, name, parent, side) {
+  const antler = group(scene, name, parent, { position: [side * 0.44, 1.2, 0] })
+  beamBetween(scene, `${name}:stem`, [0, 0, 0], [side * 0.32, 1.1, 0], {
+    height: 0.12,
+    material: 'bone-metal',
+    parent: antler,
+    width: 0.14
+  })
+  for (let index = 0; index < 3; index += 1) {
+    beamBetween(
+      scene,
+      `${name}:tine:${index}`,
+      [side * 0.1, 0.34 + index * 0.25, 0],
+      [side * (0.48 + index * 0.08), 0.67 + index * 0.31, 0],
+      { height: 0.1, material: 'bone-metal', parent: antler, width: 0.1 }
+    )
+  }
+  return antler
+}
+
+export function addRobotTool(scene, name, parent, kind, position) {
+  const tool = group(scene, name, parent, { position })
+  if (kind === 'ring')
+    torus(scene, `${name}:shape`, {
+      diameter: 0.58,
+      material: 'signal-emissive',
+      parent: tool,
+      tessellation: 8,
+      thickness: 0.11
+    })
+  else if (kind === 'satchel')
+    box(scene, `${name}:shape`, {
+      depth: 0.18,
+      height: 0.46,
+      material: 'charcoal-structure',
+      parent: tool,
+      width: 0.56
+    })
+  else if (kind === 'antenna') {
+    cylinder(scene, `${name}:stem`, { diameter: 0.09, height: 0.58, material: 'charcoal-structure', parent: tool })
+    sphere(scene, `${name}:tip`, {
+      diameter: 0.22,
+      material: 'signal-emissive',
+      parent: tool,
+      position: [0, 0.35, 0],
+      segments: 6
+    })
+  } else {
+    box(scene, `${name}:handle`, {
+      depth: 0.12,
+      height: 0.62,
+      material: 'charcoal-structure',
+      parent: tool,
+      width: 0.12
+    })
+    box(scene, `${name}:head`, {
+      depth: 0.18,
+      height: 0.2,
+      material: 'charcoal-structure',
+      parent: tool,
+      position: [0, 0.34, 0],
+      width: 0.48
+    })
+  }
+  return tool
+}
+
+export function addRobotLimb(scene, name, parent, position, rotation = [0, 0, 0]) {
+  const limb = group(scene, name, parent, { position, rotation })
+  capsule(scene, `${name}:shell`, { height: 0.7, material: 'bone-metal', parent: limb, radius: 0.11, tessellation: 6 })
+  sphere(scene, `${name}:joint`, {
+    diameter: 0.24,
+    material: 'charcoal-structure',
+    parent: limb,
+    position: [0, -0.34, 0],
+    segments: 6
+  })
+  return limb
+}
+
+export function addAnimalTail(
+  scene,
+  name,
+  parent,
+  { material = 'lunar-rust', position = [0, 0, 0], scale = [1, 1, 1] } = {}
+) {
+  const tail = group(scene, name, parent, { position, rotation: [0.7, 0, -0.8], scale })
+  cone(scene, `${name}:shape`, {
+    diameterBottom: 0.65,
+    diameterTop: 0.18,
+    height: 1.8,
+    material,
+    parent: tail,
+    tessellation: 6
+  })
+  return tail
+}

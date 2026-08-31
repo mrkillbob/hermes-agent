@@ -156,6 +156,8 @@
   },
   "devDependencies": {
     "@babel/core": "8.0.1",
+    "@babylonjs/core": "9.21.2",
+    "@babylonjs/serializers": "9.21.2",
     "@electron/rebuild": "4.2.0",
     "@gltf-transform/core": "4.4.2",
     "@gltf-transform/extensions": "4.4.2",
