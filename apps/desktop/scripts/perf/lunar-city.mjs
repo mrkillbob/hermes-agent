@@ -458,6 +458,15 @@ function validateRawProvenance(receipt, errors) {
     errors.push(error instanceof Error ? error.message : `raw provenance validation failed: ${String(error)}`)
     return
   }
+  const bridgeIdentity = receipt.rawProvenance?.bridgeHandshake?.rendererIdentity
+  if (
+    bridgeIdentity !== undefined &&
+    (!isRecord(bridgeIdentity) ||
+      bridgeIdentity.pid !== derived.rendererIdentity.pid ||
+      bridgeIdentity.startedAtMs !== derived.rendererIdentity.startedAtMs)
+  ) {
+    errors.push('rawProvenance bridge renderer lifetime does not match sampled renderer identity')
+  }
   if (!isRecord(receipt.rawSamples)) return
   for (const field of RAW_FIELDS) {
     const retained = receipt.rawSamples[field]
@@ -926,25 +935,47 @@ function validateAcceptanceGate(receipt, scenario, errors) {
   const evidenceClass = receipt.evidenceClass
   const profile = SCENARIO_PROFILES[scenario]
   const eligibleClass = evidenceClass === 'fake-backend-packaged' || evidenceClass === 'supervised-live'
+  if (!eligibleClass) return false
   const packaged = isRecord(environment) && environment.electronMode === 'packaged'
   const gpuEnabled = isRecord(environment) && environment.gpuEnabled === true
   const populated = isRecord(environment) && environment.cityPopulated === true
   const hasPopulation = Number.isInteger(receipt.population?.observed) && receipt.population.observed > 0
   const cleanPinnedBuild = isRecord(stamp) && stamp.dirty === false && stamp.source !== 'fallback'
+  const hasRawProvenance = Object.hasOwn(receipt, 'rawProvenance')
+  const bridge = receipt.rawProvenance?.bridgeHandshake
+  const hasBridgeProvenance =
+    isRecord(bridge) &&
+    bridge.bridgeVersion === 1 &&
+    bridge.packaged === true &&
+    bridge.buildSha === receipt.gitSha &&
+    typeof bridge.launchNonce === 'string' &&
+    bridge.launchNonce.length > 0 &&
+    Number.isInteger(bridge.mainPid) &&
+    isRecord(bridge.rendererIdentity) &&
+    Array.isArray(bridge.supportedPhases) &&
+    ['baseline-shell', 'mounted-city'].every(phase => bridge.supportedPhases.includes(phase)) &&
+    bridge.processMetricsSource === 'electron.app.getAppMetrics'
   const eligible = Boolean(
-    profile && eligibleClass && packaged && gpuEnabled && populated && hasPopulation && cleanPinnedBuild
+    profile &&
+    packaged &&
+    gpuEnabled &&
+    populated &&
+    hasPopulation &&
+    cleanPinnedBuild &&
+    hasRawProvenance &&
+    hasBridgeProvenance
   )
 
   if (!eligible) {
     errors.push(`receipt is not eligible for packaged performance acceptance (${scenario ?? 'unknown scenario'})`)
-    if (!eligibleClass)
-      errors.push('packaged performance requires fake-backend-packaged or supervised-live evidence class')
     if (!packaged) errors.push('packaged performance requires packaged Electron, not dev Electron')
     if (!gpuEnabled) errors.push('packaged performance requires GPU enabled')
     if (!populated) errors.push('packaged performance requires a real populated city, not an empty fake boot')
     if (!hasPopulation)
       errors.push('packaged performance requires a populated population snapshot, not an empty fake boot')
     if (!cleanPinnedBuild) errors.push('packaged performance requires a clean pinned buildStamp')
+    if (!hasRawProvenance) errors.push('packaged performance requires versioned rawProvenance')
+    if (!hasBridgeProvenance) errors.push('packaged performance requires a versioned bound bridge handshake')
   }
 
   return eligible

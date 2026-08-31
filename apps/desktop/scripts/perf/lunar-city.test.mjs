@@ -57,7 +57,7 @@ function receipt(overrides = {}) {
   ]
   const base = {
     receiptVersion: 1,
-    evidenceClass: 'fake-backend-packaged',
+    evidenceClass: 'deterministic',
     scenario,
     gitSha: SHA,
     buildStamp: {
@@ -225,7 +225,9 @@ test('requires a typed build stamp tied to git SHA and evidence cleanliness', ()
   const mismatched = validateReceipt(receipt({ buildStamp: { ...receipt().buildStamp, commit: 'b'.repeat(40) } }))
   assert.match(mismatched.errors.join('\n'), /buildStamp.*gitSha|commit.*match/i)
 
-  const dirtyPackaged = validateReceipt(receipt({ buildStamp: { ...receipt().buildStamp, dirty: true } }))
+  const dirtyPackaged = validateReceipt(
+    receipt({ evidenceClass: 'fake-backend-packaged', buildStamp: { ...receipt().buildStamp, dirty: true } })
+  )
   assert.match(dirtyPackaged.errors.join('\n'), /dirty|packaged/i)
 
   const nonCanonicalTimestamp = validateReceipt(receipt({ timestamp: '0' }))
@@ -373,7 +375,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
         rendererPid: 20,
         rendererStartedAtMs: 1_000,
         gpuMemoryMiB: gpu,
-        gpuMemorySource: 'babylon-engine-counter',
+        gpuMemorySource: 'chromium-memory-infra-v1',
         gpuEnabled: true,
         frameMs,
         worldUpdateMs: rawSamples.worldUpdateMs[index],
@@ -532,17 +534,20 @@ test('missing CPU and GPU measurements are unavailable and block acceptance', ()
 })
 
 test('rejects dev, disabled-GPU, empty fake boot, and unknown evidence as packaged acceptance', () => {
+  const deterministic = validateReceipt(receipt())
+  assert.equal(deterministic.ok, true, deterministic.errors.join('; '))
+  assert.equal(deterministic.packagedPerformanceEligible, false)
   for (const patch of [
-    { evidenceClass: 'deterministic' },
-    { environment: { ...receipt().environment, electronMode: 'dev' } },
-    { environment: { ...receipt().environment, gpuEnabled: false } },
-    { environment: { ...receipt().environment, cityPopulated: false } },
+    { evidenceClass: 'fake-backend-packaged' },
+    { evidenceClass: 'fake-backend-packaged', environment: { ...receipt().environment, electronMode: 'dev' } },
+    { evidenceClass: 'fake-backend-packaged', environment: { ...receipt().environment, gpuEnabled: false } },
+    { evidenceClass: 'fake-backend-packaged', environment: { ...receipt().environment, cityPopulated: false } },
     { evidenceClass: 'unknown' }
   ]) {
     const result = validateReceipt(receipt(patch))
 
     assert.equal(result.packagedPerformanceEligible, false)
-    assert.match(result.errors.join('\n'), /packaged performance|evidence class|GPU|population/i)
+    assert.match(result.errors.join('\n'), /packaged performance|evidence class|GPU|population|rawProvenance/i)
   }
 })
 

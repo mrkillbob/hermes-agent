@@ -2,15 +2,19 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  cleanupIsolatedRun,
   createIsolatedLaunchPlan,
   inspectPackagedTarget,
-  runPackagedLunarCityMeasurement
+  reserveUniqueDebugPort,
+  runPackagedLunarCityMeasurement,
+  validateBridgeHandshake
 } from './lunar-city-runner.mjs'
 import { deriveRawSamplesFromProvenance } from './lib/lunar-city-provenance.mjs'
 
 const SHA = 'a'.repeat(40)
 const BINARY = '/packages/Hermes.app/Contents/MacOS/Hermes'
 const STAMP = '/packages/Hermes.app/Contents/Resources/install-stamp.json'
+const INFO = '/packages/Hermes.app/Contents/Info.plist'
 
 function cleanStamp(overrides = {}) {
   return {
@@ -46,7 +50,7 @@ function rendererMetrics(overrides = {}) {
     rendererPid: 20,
     rendererStartedAtMs: 1_000,
     gpuMemoryMiB: 40,
-    gpuMemorySource: 'babylon-engine-counter',
+    gpuMemorySource: 'chromium-memory-infra-v1',
     frameMs: 20,
     worldUpdateMs: 3,
     renderFrames: 5,
@@ -98,12 +102,17 @@ test('accepts only an existing packaged binary with an exact clean pinned embedd
   const result = inspectPackagedTarget(
     { binaryPath: BINARY, expectedGitSha: SHA, platform: 'darwin' },
     {
-      existsSync: path => path === BINARY || path === STAMP,
+      existsSync: path => path === BINARY || path === STAMP || path === INFO,
       readFileSync: path => {
         assert.equal(path, STAMP)
         return JSON.stringify(cleanStamp())
       },
-      statSync: () => ({ isFile: () => true, mode: 0o100755 })
+      statSync: () => ({ isFile: () => true, mode: 0o100755 }),
+      readInfoPlist: () => ({
+        CFBundleIdentifier: 'com.nousresearch.hermes',
+        CFBundleExecutable: 'Hermes',
+        CFBundleName: 'Hermes'
+      })
     }
   )
 
@@ -116,7 +125,12 @@ test('refuses dev Electron and missing or untrustworthy package stamps', () => {
   const deps = {
     existsSync: () => true,
     readFileSync: () => JSON.stringify(cleanStamp()),
-    statSync: () => ({ isFile: () => true, mode: 0o100755 })
+    statSync: () => ({ isFile: () => true, mode: 0o100755 }),
+    readInfoPlist: () => ({
+      CFBundleIdentifier: 'com.nousresearch.hermes',
+      CFBundleExecutable: 'Hermes',
+      CFBundleName: 'Hermes'
+    })
   }
   assert.throws(
     () =>
@@ -139,7 +153,7 @@ test('refuses dev Electron and missing or untrustworthy package stamps', () => {
           { binaryPath: BINARY, expectedGitSha: SHA },
           {
             ...deps,
-            existsSync: path => (label === 'missing' ? path === BINARY : true),
+            existsSync: path => (label === 'missing' ? path === BINARY || path === INFO : true),
             readFileSync: () => JSON.stringify(stamp)
           }
         ),
@@ -149,16 +163,69 @@ test('refuses dev Electron and missing or untrustworthy package stamps', () => {
   }
 })
 
+test('rejects non-Hermes macOS bundles, arbitrary executables, and nonexecutable files', () => {
+  const deps = {
+    existsSync: () => true,
+    readFileSync: () => JSON.stringify(cleanStamp()),
+    statSync: () => ({ isFile: () => true, mode: 0o100755 }),
+    readInfoPlist: () => ({
+      CFBundleIdentifier: 'com.nousresearch.hermes',
+      CFBundleExecutable: 'Hermes',
+      CFBundleName: 'Hermes'
+    })
+  }
+  assert.throws(
+    () =>
+      inspectPackagedTarget(
+        { binaryPath: '/Applications/Calculator.app/Contents/MacOS/Calculator', expectedGitSha: SHA },
+        deps
+      ),
+    /Hermes[.]app.*Hermes|bundle identity/i
+  )
+  assert.throws(
+    () =>
+      inspectPackagedTarget(
+        { binaryPath: BINARY, expectedGitSha: SHA },
+        { ...deps, statSync: () => ({ isFile: () => true, mode: 0o100644 }) }
+      ),
+    /executable/i
+  )
+  assert.throws(
+    () =>
+      inspectPackagedTarget(
+        { binaryPath: BINARY, expectedGitSha: SHA },
+        {
+          ...deps,
+          readInfoPlist: () => ({
+            CFBundleIdentifier: 'com.apple.calculator',
+            CFBundleExecutable: 'Hermes',
+            CFBundleName: 'Hermes'
+          })
+        }
+      ),
+    /bundle identity/i
+  )
+})
+
 test('builds an isolated packaged launch without disabling the GPU', () => {
   const previousDevServer = process.env.HERMES_DESKTOP_DEV_SERVER
   const previousRunAsNode = process.env.ELECTRON_RUN_AS_NODE
+  const previousBootFake = process.env.HERMES_DESKTOP_BOOT_FAKE
+  const previousDisableGpu = process.env.DISABLE_GPU
+  const previousApiKey = process.env.OPENAI_API_KEY
+  const previousGithubToken = process.env.GITHUB_TOKEN
   process.env.HERMES_DESKTOP_DEV_SERVER = 'http://127.0.0.1:5174'
   process.env.ELECTRON_RUN_AS_NODE = '1'
+  process.env.HERMES_DESKTOP_BOOT_FAKE = '1'
+  process.env.DISABLE_GPU = '1'
+  process.env.OPENAI_API_KEY = 'secret'
+  process.env.GITHUB_TOKEN = 'secret'
   const plan = createIsolatedLaunchPlan({
     binaryPath: BINARY,
     debugPort: 49321,
     tempRoot: '/private/tmp/lunar-city-run-7',
-    runId: 'run-7'
+    runId: 'run-7',
+    launchNonce: 'nonce-7'
   })
 
   assert.equal(plan.command, BINARY)
@@ -172,10 +239,67 @@ test('builds an isolated packaged launch without disabling the GPU', () => {
   )
   assert.equal('HERMES_DESKTOP_DEV_SERVER' in plan.env, false)
   assert.equal('ELECTRON_RUN_AS_NODE' in plan.env, false)
+  for (const forbidden of ['HERMES_DESKTOP_BOOT_FAKE', 'DISABLE_GPU', 'OPENAI_API_KEY', 'GITHUB_TOKEN']) {
+    assert.equal(forbidden in plan.env, false, forbidden)
+  }
+  assert.equal(plan.env.HERMES_LUNAR_CITY_PERF_NONCE, 'nonce-7')
   if (previousDevServer === undefined) delete process.env.HERMES_DESKTOP_DEV_SERVER
   else process.env.HERMES_DESKTOP_DEV_SERVER = previousDevServer
   if (previousRunAsNode === undefined) delete process.env.ELECTRON_RUN_AS_NODE
   else process.env.ELECTRON_RUN_AS_NODE = previousRunAsNode
+  for (const [key, previous] of [
+    ['HERMES_DESKTOP_BOOT_FAKE', previousBootFake],
+    ['DISABLE_GPU', previousDisableGpu],
+    ['OPENAI_API_KEY', previousApiKey],
+    ['GITHUB_TOKEN', previousGithubToken]
+  ]) {
+    if (previous === undefined) delete process.env[key]
+    else process.env[key] = previous
+  }
+})
+
+test('reserves distinct free loopback debug ports until each reservation is released', async () => {
+  const first = await reserveUniqueDebugPort()
+  const second = await reserveUniqueDebugPort()
+  try {
+    assert.notEqual(first.port, second.port)
+    assert.ok(first.port >= 1024 && first.port <= 65535)
+    assert.ok(second.port >= 1024 && second.port <= 65535)
+  } finally {
+    await first.release()
+    await second.release()
+  }
+})
+
+test('requires an exact versioned packaged bridge handshake bound to nonce, build, and process lifetime', () => {
+  const valid = {
+    bridgeVersion: 1,
+    launchNonce: 'nonce-7',
+    buildSha: SHA,
+    packaged: true,
+    mainPid: 999,
+    rendererIdentity: { pid: 20, startedAtMs: 1_000 },
+    supportedPhases: ['baseline-shell', 'mounted-city'],
+    processMetricsSource: 'electron.app.getAppMetrics'
+  }
+  assert.deepEqual(validateBridgeHandshake(valid, { launchNonce: 'nonce-7', buildSha: SHA, mainPid: 999 }), valid)
+  for (const [patch, pattern] of [
+    [null, /bridge_unavailable/],
+    [{ launchNonce: 'incumbent' }, /bridge_mismatch.*nonce/],
+    [{ buildSha: 'b'.repeat(40) }, /bridge_mismatch.*SHA/],
+    [{ mainPid: 111 }, /bridge_mismatch.*main PID/],
+    [{ packaged: false }, /bridge_mismatch.*packaged/]
+  ]) {
+    assert.throws(
+      () =>
+        validateBridgeHandshake(patch === null ? null : { ...valid, ...patch }, {
+          launchNonce: 'nonce-7',
+          buildSha: SHA,
+          mainPid: 999
+        }),
+      pattern
+    )
+  }
 })
 
 test('derives CPU, renderer RSS, and GPU deltas from retained baseline and city samples', () => {
@@ -201,6 +325,19 @@ test('refuses renderer lifetime changes and RSS masquerading as GPU memory', () 
   const gpuProcessRss = provenance()
   gpuProcessRss.mountedCity.samples[0].rendererMetrics.gpuMemorySource = 'gpu-process-private-memory'
   assert.throws(() => deriveRawSamplesFromProvenance(gpuProcessRss), /GPU.*source|process.*memory|RSS.*GPU/i)
+  const opaque = provenance()
+  opaque.mountedCity.samples[0].rendererMetrics.gpuMemorySource = 'babylon-engine-counter'
+  assert.throws(() => deriveRawSamplesFromProvenance(opaque), /GPU.*source|attributable/i)
+})
+
+test('allows an empty baseline shell but requires a consistent exact mounted population', () => {
+  const raw = provenance()
+  for (const sample of raw.baselineShell.samples) {
+    sample.rendererMetrics.population = { observed: 0, active: 0, lodMix: {}, source: 'unmounted' }
+  }
+  assert.doesNotThrow(() => deriveRawSamplesFromProvenance(raw))
+  raw.mountedCity.samples[1].rendererMetrics.population.observed = 99
+  assert.throws(() => deriveRawSamplesFromProvenance(raw), /population.*consistent|exact/i)
 })
 
 test('refuses an empty city, disabled GPU, and unavailable required metrics', () => {
@@ -230,7 +367,6 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
     {
       binaryPath: BINARY,
       expectedGitSha: SHA,
-      debugPort: 49321,
       sampleCount: 2,
       sampleIntervalMs: 1_000,
       warmupDurationMs: 0
@@ -238,11 +374,25 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
     {
       inspectTarget: () => ({ binaryPath: BINARY, buildStamp: cleanStamp() }),
       makeTempRoot: () => '/private/tmp/lunar-city-run-7',
+      makeLaunchNonce: () => 'nonce-7',
+      reserveDebugPort: async () => ({ port: 49321, release: async () => {} }),
       launch: plan => {
         launches.push(plan)
         return { pid: 999, kill() {} }
       },
-      connectCdp: async ({ port }) => ({ port, close() {} }),
+      connectCdp: async ({ port }) => ({
+        cdp: { port, close() {} },
+        handshake: {
+          bridgeVersion: 1,
+          launchNonce: 'nonce-7',
+          buildSha: SHA,
+          packaged: true,
+          mainPid: 999,
+          rendererIdentity: { pid: 20, startedAtMs: 1_000 },
+          supportedPhases: ['baseline-shell', 'mounted-city'],
+          processMetricsSource: 'electron.app.getAppMetrics'
+        }
+      }),
       preparePhase: async (_cdp, name) => phases.push(name),
       processProbe: async () => processRows(20, phases.length === 1 ? 1 : 2),
       rendererProbe: async () => rendererMetrics({ gpuMemoryMiB: phases.length === 1 ? 40 : 50 }),
@@ -261,4 +411,40 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
   assert.equal(result.rawProvenance.provenanceVersion, 1)
   assert.deepEqual(result.rawSamples.cpuDeltaPp, [3, 3])
   assert.equal(result.buildStamp.commit, SHA)
+  assert.equal(result.packagedPerformanceEligible, false)
+  assert.equal(result.evidenceClass, 'deterministic')
+})
+
+test('cleanup attempts close, terminate, wait, kill, and removal despite earlier failures', async () => {
+  const calls = []
+  await assert.rejects(
+    cleanupIsolatedRun(
+      {
+        cdp: {
+          close: () => {
+            calls.push('close')
+            throw new Error('close failed')
+          }
+        },
+        child: {
+          kill: signal => {
+            calls.push(signal)
+            if (signal === 'SIGTERM') throw new Error('term failed')
+          },
+          waitForExit: async () => {
+            calls.push('wait')
+            throw new Error('wait failed')
+          }
+        },
+        tempRoot: '/tmp/run'
+      },
+      {
+        removeTemp: () => {
+          calls.push('remove')
+        }
+      }
+    ),
+    /cleanup failed/i
+  )
+  assert.deepEqual(calls, ['close', 'SIGTERM', 'wait', 'SIGKILL', 'remove'])
 })

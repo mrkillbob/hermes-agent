@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,6 +18,7 @@ import {
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/i
 const CANONICAL_ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const BRIDGE_VERSION = 1
 
 function resourcesPathFor(binaryPath, platform = process.platform) {
   const binary = resolve(binaryPath)
@@ -59,17 +63,44 @@ function parseBuildStamp(raw) {
 /** Resolve and verify a pre-existing electron-builder package before launch. */
 export function inspectPackagedTarget(
   { binaryPath, expectedGitSha, platform = process.platform },
-  deps = { existsSync, readFileSync, statSync }
+  deps = {
+    existsSync,
+    readFileSync,
+    statSync,
+    readInfoPlist: path =>
+      JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', path], { encoding: 'utf8' }))
+  }
 ) {
   if (typeof binaryPath !== 'string' || binaryPath.length === 0)
     throw new Error('packaged Hermes binary path is required')
   if (!SHA_PATTERN.test(expectedGitSha ?? '')) throw new Error('expected packaged git SHA must be exact')
   if (isDevElectron(binaryPath))
     throw new Error('dev Electron is forbidden; target an electron-builder packaged Hermes binary')
+  if (
+    platform === 'darwin' &&
+    !normalize(resolve(binaryPath)).endsWith(normalize('/Hermes.app/Contents/MacOS/Hermes'))
+  ) {
+    throw new Error('packaged Hermes bundle identity requires Hermes.app/Contents/MacOS/Hermes')
+  }
   if (!deps.existsSync(binaryPath) || !deps.statSync(binaryPath).isFile()) {
     throw new Error(`packaged Hermes binary is missing: ${binaryPath}`)
   }
+  if (platform !== 'win32' && (deps.statSync(binaryPath).mode & 0o111) === 0) {
+    throw new Error(`packaged Hermes binary is not executable: ${binaryPath}`)
+  }
   const resourcesPath = resourcesPathFor(binaryPath, platform)
+  if (platform === 'darwin') {
+    const infoPath = join(dirname(dirname(binaryPath)), 'Info.plist')
+    if (!deps.existsSync(infoPath)) throw new Error(`packaged Hermes Info.plist is missing: ${infoPath}`)
+    const info = deps.readInfoPlist(infoPath)
+    if (
+      info?.CFBundleIdentifier !== 'com.nousresearch.hermes' ||
+      info?.CFBundleExecutable !== 'Hermes' ||
+      info?.CFBundleName !== 'Hermes'
+    ) {
+      throw new Error('packaged Hermes bundle identity does not match electron-builder Hermes')
+    }
+  }
   const stampPath = join(resourcesPath, 'install-stamp.json')
   if (!deps.existsSync(stampPath)) throw new Error(`packaged install-stamp.json is missing: ${stampPath}`)
   const buildStamp = parseBuildStamp(deps.readFileSync(stampPath, 'utf8'))
@@ -80,7 +111,7 @@ export function inspectPackagedTarget(
 }
 
 /** Build the direct packaged-binary launch contract without mutating the filesystem. */
-export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runId }) {
+export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runId, launchNonce }) {
   if (!Number.isInteger(debugPort) || debugPort < 1024 || debugPort > 65535) {
     throw new Error('isolated CDP debug port must be an integer from 1024 through 65535')
   }
@@ -88,9 +119,26 @@ export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runI
   const safeRunId = String(runId || 'run').replace(/[^a-z0-9._-]/giu, '-')
   const hermesHome = join(tempRoot, 'hermes-home')
   const userDataDir = join(tempRoot, 'user-data')
-  const launchEnv = { ...process.env }
-  delete launchEnv.HERMES_DESKTOP_DEV_SERVER
-  delete launchEnv.ELECTRON_RUN_AS_NODE
+  const launchEnv = {}
+  for (const key of [
+    'PATH',
+    'TMPDIR',
+    'TEMP',
+    'TMP',
+    'SystemRoot',
+    'WINDIR',
+    'LANG',
+    'LC_ALL',
+    'SHELL',
+    'USER',
+    'LOGNAME',
+    'DISPLAY',
+    'WAYLAND_DISPLAY',
+    'XDG_RUNTIME_DIR',
+    'DBUS_SESSION_BUS_ADDRESS'
+  ]) {
+    if (process.env[key] !== undefined) launchEnv[key] = process.env[key]
+  }
   return {
     command: resolve(binaryPath),
     args: [`--user-data-dir=${userDataDir}`, `--remote-debugging-port=${debugPort}`],
@@ -99,7 +147,8 @@ export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runI
       ...launchEnv,
       HERMES_HOME: hermesHome,
       HERMES_DESKTOP_APP_NAME: `Hermes Lunar City Perf ${safeRunId}`,
-      HERMES_DESKTOP_CDP_PORT: String(debugPort)
+      HERMES_DESKTOP_CDP_PORT: String(debugPort),
+      HERMES_LUNAR_CITY_PERF_NONCE: launchNonce
     },
     paths: { hermesHome, userDataDir, tempRoot }
   }
@@ -110,8 +159,56 @@ function defaultLaunch(plan) {
   return spawn(plan.command, plan.args, { cwd: plan.cwd, env: plan.env, stdio: 'inherit' })
 }
 
-async function defaultConnectCdp({ port }) {
-  return CDP.connect({ port, timeoutMs: 60_000 })
+export function validateBridgeHandshake(handshake, expected) {
+  if (!handshake || typeof handshake !== 'object')
+    throw new Error('bridge_unavailable: versioned packaged bridge absent')
+  if (handshake.bridgeVersion !== BRIDGE_VERSION) throw new Error('bridge_mismatch: bridge version')
+  if (typeof handshake.launchNonce !== 'string' || handshake.launchNonce !== expected.launchNonce)
+    throw new Error('bridge_mismatch: launch nonce')
+  if (handshake.buildSha !== expected.buildSha) throw new Error('bridge_mismatch: build SHA')
+  if (handshake.packaged !== true) throw new Error('bridge_mismatch: packaged status')
+  if (handshake.mainPid !== expected.mainPid) throw new Error('bridge_mismatch: main PID')
+  if (!handshake.rendererIdentity || !Number.isInteger(handshake.rendererIdentity.pid))
+    throw new Error('bridge_mismatch: renderer lifetime')
+  if (
+    !Array.isArray(handshake.supportedPhases) ||
+    !['baseline-shell', 'mounted-city'].every(phase => handshake.supportedPhases.includes(phase))
+  )
+    throw new Error('bridge_mismatch: phase support')
+  if (handshake.processMetricsSource !== 'electron.app.getAppMetrics')
+    throw new Error('bridge_mismatch: process metrics source')
+  return handshake
+}
+
+async function defaultConnectCdp({ port, expectedHandshake }) {
+  const deadline = Date.now() + 60_000
+  let lastMismatch = null
+  while (Date.now() < deadline) {
+    try {
+      const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()
+      for (const target of targets.filter(item => item.type === 'page' && item.webSocketDebuggerUrl)) {
+        const cdp = await CDP.open(target.webSocketDebuggerUrl)
+        try {
+          const handshake = await cdp.eval(`(() => {
+            const bridge = window.__LUNAR_CITY_PERF__
+            return bridge && typeof bridge.handshake === 'function'
+              ? bridge.handshake(${JSON.stringify({ bridgeVersion: BRIDGE_VERSION, launchNonce: expectedHandshake.launchNonce })})
+              : null
+          })()`)
+          validateBridgeHandshake(handshake, expectedHandshake)
+          return { cdp, handshake }
+        } catch (error) {
+          if (error instanceof Error && error.message.startsWith('bridge_mismatch:')) lastMismatch = error
+          cdp.close()
+        }
+      }
+    } catch {
+      // No matching launched target yet.
+    }
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 250))
+  }
+  if (lastMismatch) throw lastMismatch
+  throw new Error('bridge_unavailable: no CDP target matched launch nonce, build SHA, and main PID')
 }
 
 async function defaultPreparePhase(cdp, phase) {
@@ -147,6 +244,50 @@ const defaultClock = {
   sleep: milliseconds => new Promise(resolveSleep => setTimeout(resolveSleep, milliseconds))
 }
 
+export async function reserveUniqueDebugPort() {
+  const server = createServer()
+  await new Promise((resolveListen, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolveListen)
+  })
+  const address = server.address()
+  return {
+    port: address.port,
+    release: () =>
+      new Promise((resolveClose, reject) => server.close(error => (error ? reject(error) : resolveClose())))
+  }
+}
+
+async function waitForChild(child) {
+  if (!child) return
+  if (typeof child.waitForExit === 'function') return child.waitForExit()
+  if (child.exitCode !== null) return
+  await new Promise(resolveExit => {
+    const timeout = setTimeout(resolveExit, 2_000)
+    child.once('exit', () => {
+      clearTimeout(timeout)
+      resolveExit()
+    })
+  })
+}
+
+export async function cleanupIsolatedRun({ cdp, child, tempRoot }, injected = {}) {
+  const errors = []
+  const attempt = async action => {
+    try {
+      await action()
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  await attempt(() => cdp?.close())
+  await attempt(() => child?.kill('SIGTERM'))
+  await attempt(() => waitForChild(child))
+  await attempt(() => child?.kill('SIGKILL'))
+  await attempt(() => (injected.removeTemp ?? (path => rmSync(path, { recursive: true, force: true })))(tempRoot))
+  if (errors.length) throw new AggregateError(errors, 'cleanup failed')
+}
+
 async function capturePhase({ cdp, phase, sampleCount, sampleIntervalMs, processProbe, rendererProbe, clock }) {
   const firstRenderer = await rendererProbe(cdp)
   const rendererIdentity = { pid: firstRenderer.rendererPid, startedAtMs: firstRenderer.rendererStartedAtMs }
@@ -169,33 +310,45 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
   const deps = {
     inspectTarget: inspectPackagedTarget,
     makeTempRoot: () => mkdtempSync(join(tmpdir(), 'hermes-lunar-city-perf-')),
+    makeLaunchNonce: randomUUID,
+    reserveDebugPort: reserveUniqueDebugPort,
     launch: defaultLaunch,
     connectCdp: defaultConnectCdp,
     preparePhase: defaultPreparePhase,
     processProbe: defaultProcessProbe,
     rendererProbe: defaultRendererProbe,
     clock: defaultClock,
-    cleanup: async ({ child, cdp, tempRoot }) => {
-      cdp?.close()
-      child?.kill('SIGTERM')
-      rmSync(tempRoot, { recursive: true, force: true })
-    },
+    cleanup: cleanupIsolatedRun,
     ...injected
   }
   const target = deps.inspectTarget({ binaryPath: options.binaryPath, expectedGitSha: options.expectedGitSha })
   const tempRoot = deps.makeTempRoot()
   const runId = options.runId ?? `${process.pid}-${deps.clock.now()}`
+  const launchNonce = deps.makeLaunchNonce()
+  const reservation = await deps.reserveDebugPort()
   const plan = createIsolatedLaunchPlan({
     binaryPath: target.binaryPath,
-    debugPort: options.debugPort ?? 49321,
+    debugPort: reservation.port,
     tempRoot,
-    runId
+    runId,
+    launchNonce
   })
   let child
   let cdp
   try {
+    await reservation.release()
     child = await deps.launch(plan)
-    cdp = await deps.connectCdp({ port: options.debugPort ?? 49321, child })
+    const connected = await deps.connectCdp({
+      port: reservation.port,
+      child,
+      expectedHandshake: { launchNonce, buildSha: target.buildStamp.commit, mainPid: child.pid }
+    })
+    validateBridgeHandshake(connected.handshake, {
+      launchNonce,
+      buildSha: target.buildStamp.commit,
+      mainPid: child.pid
+    })
+    cdp = connected.cdp
     const sampleCount = options.sampleCount ?? 4
     const sampleIntervalMs = options.sampleIntervalMs ?? 10_000
     const warmupDurationMs = options.warmupDurationMs ?? 30_000
@@ -223,7 +376,22 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     })
     const rawProvenance = { provenanceVersion: LUNAR_CITY_PROVENANCE_VERSION, baselineShell, mountedCity }
     const derived = deriveRawSamplesFromProvenance(rawProvenance)
-    return { buildStamp: target.buildStamp, package: { binaryPath: target.binaryPath }, rawProvenance, ...derived }
+    if (
+      derived.rendererIdentity.pid !== connected.handshake.rendererIdentity.pid ||
+      derived.rendererIdentity.startedAtMs !== connected.handshake.rendererIdentity.startedAtMs
+    ) {
+      throw new Error('bridge_mismatch: sampled renderer lifetime differs from handshake')
+    }
+    rawProvenance.bridgeHandshake = connected.handshake
+    return {
+      buildStamp: target.buildStamp,
+      package: { binaryPath: target.binaryPath },
+      bridgeHandshake: connected.handshake,
+      rawProvenance,
+      ...derived,
+      evidenceClass: Object.keys(injected).length ? 'deterministic' : 'raw-packaged-capture',
+      packagedPerformanceEligible: false
+    }
   } finally {
     await deps.cleanup({ child, cdp, tempRoot })
   }
@@ -235,7 +403,6 @@ function parseArgs(argv) {
     const value = argv[index]
     if (value === '--binary') result.binaryPath = argv[++index]
     else if (value === '--sha') result.expectedGitSha = argv[++index]
-    else if (value === '--port') result.debugPort = Number(argv[++index])
     else throw new Error(`unknown Lunar City performance argument: ${value}`)
   }
   return result

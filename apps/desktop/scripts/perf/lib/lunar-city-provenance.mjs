@@ -13,6 +13,7 @@ const RAW_RENDERER_FIELDS = Object.freeze([
   'listeners',
   'timers'
 ])
+const GPU_MEMORY_SOURCES = new Set(['chromium-memory-infra-v1'])
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isFiniteNumber = value => typeof value === 'number' && Number.isFinite(value)
@@ -52,7 +53,28 @@ function validateProcessRows(rows, label) {
   }
 }
 
-function validateRendererMetrics(metrics, identity, label) {
+function validatePopulation(population, label, allowEmpty) {
+  if (
+    !isRecord(population) ||
+    !Number.isInteger(population.observed) ||
+    !Number.isInteger(population.active) ||
+    !isRecord(population.lodMix) ||
+    typeof population.source !== 'string'
+  ) {
+    fail(`${label} exact population metrics are unavailable`)
+  }
+  if (population.observed < 0 || population.active < 0 || population.active > population.observed) {
+    fail(`${label} exact population is invalid`)
+  }
+  const lodTotal = Object.values(population.lodMix).reduce(
+    (sum, count) => sum + (Number.isInteger(count) && count >= 0 ? count : Number.NaN),
+    0
+  )
+  if (!Number.isFinite(lodTotal) || lodTotal !== population.observed) fail(`${label} exact LOD population is invalid`)
+  if (!allowEmpty && population.observed === 0) fail(`${label} reports an empty city`)
+}
+
+function validateRendererMetrics(metrics, identity, label, allowEmpty) {
   if (!isRecord(metrics)) fail(`${label} renderer metrics are unavailable`)
   if (metrics.rendererPid !== identity.pid || metrics.rendererStartedAtMs !== identity.startedAtMs) {
     fail(`${label} renderer lifetime identity changed`)
@@ -62,17 +84,11 @@ function validateRendererMetrics(metrics, identity, label) {
   if (typeof metrics.gpuMemorySource !== 'string' || metrics.gpuMemorySource.length === 0) {
     fail(`${label} GPU memory source is unavailable`)
   }
-  if (/rss|working.?set|app.?metrics|process.*memory|memory.*process/i.test(metrics.gpuMemorySource)) {
-    fail(`${label} RSS must never be labeled as GPU memory`)
-  }
+  if (!GPU_MEMORY_SOURCES.has(metrics.gpuMemorySource)) fail(`${label} GPU memory source is not proven attributable`)
   for (const field of RAW_RENDERER_FIELDS) {
     if (!isFiniteNumber(metrics[field]) || metrics[field] < 0) fail(`${label} required metric ${field} is unavailable`)
   }
-  if (!isRecord(metrics.population) || !Number.isInteger(metrics.population.observed)) {
-    fail(`${label} populated city metrics are unavailable`)
-  }
-  if (metrics.population.observed <= 0)
-    fail(`${label} reports an empty city; packaged performance requires populated data`)
+  validatePopulation(metrics.population, label, allowEmpty)
 }
 
 function validatePhase(envelope, expectedPhase) {
@@ -94,9 +110,20 @@ function validatePhase(envelope, expectedPhase) {
     if (sample.timestampMs <= previousTimestamp) fail(`${expectedPhase} timestamps must be strictly increasing`)
     previousTimestamp = sample.timestampMs
     validateProcessRows(sample.processMetrics, label)
-    validateRendererMetrics(sample.rendererMetrics, envelope.rendererIdentity, label)
+    validateRendererMetrics(
+      sample.rendererMetrics,
+      envelope.rendererIdentity,
+      label,
+      expectedPhase === 'baseline-shell'
+    )
     if (!sample.processMetrics.some(row => row.pid === envelope.rendererIdentity.pid)) {
       fail(`${label} does not retain the renderer app.getAppMetrics row`)
+    }
+  }
+  if (expectedPhase === 'mounted-city') {
+    const expected = JSON.stringify(envelope.samples[0].rendererMetrics.population)
+    if (envelope.samples.some(sample => JSON.stringify(sample.rendererMetrics.population) !== expected)) {
+      fail('mounted-city exact population must remain consistent across samples')
     }
   }
 }
