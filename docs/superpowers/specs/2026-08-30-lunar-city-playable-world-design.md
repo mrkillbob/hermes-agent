@@ -5,9 +5,11 @@ Status: approved design
 
 ## Purpose
 
-Turn the approved Lunar City visualizer into a low-overhead, playable 2D
-isometric world for observing and safely interacting with Hermes profiles,
-sessions, subagents, Kanban tasks, and Kanban workers.
+Turn the approved Lunar City visualizer into a low-overhead, playable 3D city
+for observing and safely interacting with Hermes profiles, sessions, subagents,
+Kanban tasks, and Kanban workers. The city opens in a curated angled
+perspective and supports bounded orbit, pan, tilt, zoom, and worker follow like
+a focused city simulation.
 
 Lunar City is a hybrid control surface. It makes real work spatial and legible,
 lets the operator hold persistent text or voice conversations with profile
@@ -26,9 +28,10 @@ The approved restoration is recorded by these commits:
 - `aee1ad9ca8` restores the approved settlement artwork and interaction layer.
 - `55ffea25ba` adds `docs/lunar-city-design-handoff.md`.
 
-The approved image is an art bible and extraction source. It is not the runtime
-background. A flattened background would leave duplicated, stagnant leaders,
-workers, vehicles, and activity behind the live game layer.
+The approved image is the immutable art bible and modeling reference. It is not
+the runtime background or a billboard plane. A flattened image would leave
+duplicated, stagnant leaders, workers, vehicles, and activity behind the live
+3D world and would break when the camera rotates.
 
 Implementation must begin in a branch or worktree that contains the exact
 approved commit chain. If the implementation checkout does not contain that
@@ -37,11 +40,12 @@ editing Lunar City. It must not silently recreate or substitute the artwork.
 
 ## Goals
 
-- Rebuild the approved settlement from individually controllable assets while
+- Rebuild the approved settlement from individually controllable 3D assets while
   preserving its composition, palette, buildings, leaders, robot-child design,
   and warmth.
-- Use Phaser 3 for a genuine game scene with cameras, navigation, animation,
-  depth, object selection, and deterministic simulation.
+- Use Babylon.js for a genuine 3D scene with an angled perspective camera,
+  bounded orbit, pan, tilt, zoom, navigation, animation, occlusion-aware
+  selection, and deterministic presentation.
 - Represent all three live populations:
   - profiles as district leaders and conversational identities;
   - sessions and subagents as moving inhabitants;
@@ -61,9 +65,10 @@ editing Lunar City. It must not silently recreate or substitute the artwork.
 
 - Replacing the approved city with a generic strategy map, hex board, blue
   science-fiction board, procedural settlement, or spreadsheet dashboard.
-- Rendering the approved flattened image underneath live objects.
+- Rendering the approved flattened image underneath live objects, extruding the
+  image into false depth, or using camera-facing cutouts as primary models.
 - Simulating worker progress, evidence, task completion, or command success.
-- Giving Phaser direct access to gateway, profile, session, voice, filesystem,
+- Giving Babylon.js direct access to gateway, profile, session, voice, filesystem,
   or Kanban mutation APIs.
 - Adding a new model tool or granting profiles, workers, or the game authority
   they do not already possess.
@@ -126,34 +131,34 @@ exist for that entity:
 
 Display names are never used as mutation identities.
 
-## Art decomposition and reconstruction
+## 3D art reconstruction
 
 ### Source treatment
 
-The approved image is decomposed into individually controllable assets:
+The approved image is analyzed into a locked source digest, palette, landmark
+map, silhouette guide, character identity sheet, material guide, and default
+camera composition. Those references guide actual low-poly 3D models for:
 
-- terrain and clean ground plates;
-- cliffs, platforms, railings, and walkway segments;
-- building shells and open interiors;
+- terrain, cliffs, platforms, railings, and walkways;
+- building shells, removable roofs, occlusion groups, and open interiors;
 - furniture, signs, consoles, workbenches, plants, and small props;
-- bus and other vehicles;
-- each leader;
-- robot workers and carried objects;
-- emissive lights and effect masks.
+- the bus and other vehicles;
+- each distinct profile leader;
+- modular robot-child workers and carried objects;
+- emissive fixtures and restrained effect geometry.
 
-When an extracted object reveals previously obscured pixels, a matching clean
-plate is reconstructed. No removed object may leave a clone, hole, blur, or
-stagnant remnant in the world.
-
-The initial reconstructed scene matches the approved composition before any
-dynamic expansion is added. The original image remains in the repository as a
-visual reference and regression target only.
+The world does not render source-image fragments as floors, walls, characters,
+or camera-facing scenery. The initial 3D scene matches the approved default
+composition, palette relationships, recognizable silhouettes, district
+positions, and warmth before dynamic expansion is added. The original image
+remains in the repository as a visual reference and regression target only.
 
 ### Animation-ready assets
 
-Articulated objects are separated into the smallest useful parts. Required
-initial animated props include the laboratory telescope, review portal, bus,
-depot and room lights, triage station, doors, workbenches, and garden activity.
+Articulated models use the smallest useful shared rigs and animation clips.
+Required initial animated props include the laboratory telescope, review
+portal, bus, depot and room lights, triage station, doors, workbenches, and
+garden activity.
 
 Leader animation supports idle, listening, talking, thinking, acknowledging,
 and unavailable states. Leaders do not roam in the first playable release.
@@ -169,8 +174,10 @@ Robot-worker animation supports:
 - review and triage;
 - heartbeat, rest, and done.
 
-All derived animation frames must preserve the approved robot-child and animal
-leader designs. Generic replacement sprites are not acceptable.
+All models, rigs, materials, and clips must preserve the approved robot-child
+and animal leader designs. Leaders use distinct models. Workers share an
+optimized modular rig with approved color and accessory variations for role
+and state. Generic replacement characters are not acceptable.
 
 ### Asset manifest
 
@@ -178,29 +185,51 @@ A versioned scene manifest is the single source of spatial truth. Each asset
 entry records:
 
 - stable ID, source-art digest, and asset version;
-- atlas and frame names;
-- world scale and origin;
-- foot, interaction, attachment, and dialogue anchors;
-- depth band and occlusion behavior;
-- collision or navigation polygon;
-- animation names, frame timing, and reduced-motion frame;
-- optional effect masks and tint policy.
+- GLB URI, mesh and node names, material slots, and LOD variants;
+- triangle, draw-call, material, texture, and GPU-memory budgets;
+- world transform, scale, pivot, and bounding volume;
+- foot, interaction, attachment, dialogue, and camera-focus anchors;
+- roof, wall, and foreground occlusion-group behavior;
+- collision volume and navigation area;
+- animation clip names, timing, transition policy, and reduced-motion pose;
+- instancing eligibility and permitted color or accessory variants.
 
-The manifest also defines walkway navigation nodes, edges, entrances, room
-anchors, project-compound slots, camera bounds, and semantic destinations.
-Runtime code does not duplicate those coordinates in component constants.
+The manifest also defines navigation meshes and links, entrances, room anchors,
+project-compound slots, camera landmarks, camera bounds, tilt and zoom limits,
+follow offsets, and semantic destinations. Runtime code does not duplicate
+those values in component constants.
 
 ## Runtime architecture
 
-### Phaser world
+### Babylon.js world
 
-`LunarCityWorld` owns Phaser scenes, cameras, navigation, animation, depth
-sorting, selection hit areas, object pooling, and visual level of detail. It is
-lazy-loaded only when the Lunar City route opens and is fully destroyed when
-the route is closed.
+`LunarCityWorld` owns the Babylon.js engine and scene, camera controller,
+navigation, animation, picking, occlusion groups, instancing, and visual level
+of detail. Babylon.js is imported selectively and lazy-loaded only when the
+Lunar City route opens. The engine, scene, models, textures, listeners, and GPU
+resources are fully disposed when the route closes.
 
-Phaser receives immutable presentation snapshots and emits typed selection or
-intent events. It cannot read credentials, call Hermes, or mutate state.
+The renderer receives immutable presentation snapshots and emits typed
+selection or intent events. It cannot read credentials, call Hermes, or mutate
+state.
+
+### Camera and selection
+
+The city opens at a versioned angled-perspective camera landmark that preserves
+the approved composition. Primary drag orbits through 360 degrees around a
+bounded target; secondary drag or an explicit pan gesture moves across project
+compounds; wheel and pinch zoom. Tilt, distance, target, and world bounds keep
+the city visible and prevent terrain clipping or disorientation.
+
+Selecting a worker, leader, building, or job smoothly frames its declared
+camera anchor. Worker selection can enter follow mode without changing the
+worker's real execution. Selecting empty terrain exits follow mode. A persistent
+Return to City action restores the approved overview. Foreground roofs and
+walls fade by manifest-declared occlusion group when they obstruct the selected
+entity; the camera never passes through buildings to solve occlusion.
+
+Pointer, trackpad, keyboard, and accessibility controls map to the same camera
+intents. Camera motion does not create authoritative Hermes events.
 
 ### Live adapter
 
@@ -230,8 +259,8 @@ React and nanostores continue to own:
 - command staging, confirmation, progress, and receipts;
 - connection, profile, session, and route ownership.
 
-Phaser animation does not cause React rerenders. React snapshot changes do not
-recreate the Phaser scene; a thin bridge applies entity deltas.
+Babylon.js animation does not cause React rerenders. React snapshot changes do
+not recreate the 3D scene; a thin bridge applies entity deltas.
 
 ### Command broker
 
@@ -305,10 +334,10 @@ Unknown state never maps to `working`. Unknown, stale, disconnected,
 unavailable, and partially observed entities use distinct non-alarming visual
 treatments with last-observed timestamps.
 
-Selecting a worker focuses the camera but does not pause or modify the real
-worker. Its inspector presents identity, current action, evidence, files, cost,
-duration, task, blocker, and commands only when those fields are actually
-available.
+Selecting a worker focuses the camera and may follow its presentation position,
+but does not pause or modify the real worker. Its inspector presents identity,
+current action, evidence, files, cost, duration, task, blocker, and commands
+only when those fields are actually available.
 
 ## Performance architecture and budgets
 
@@ -316,19 +345,36 @@ available.
 
 - Interactive camera or selection runs at a maximum of 30 FPS.
 - Ambient visible mode runs at a maximum of 15 FPS.
-- Hidden, minimized, and route-unmounted worlds stop the Phaser scheduler and
-  render zero animation frames.
+- Hidden, minimized, and route-unmounted worlds stop the Babylon.js render loop
+  and render zero animation frames.
 - There is no general physics simulation. Navigation paths are computed only
   when origin, destination, or walkability changes.
-- Terrain and building layers are cached. Texture atlases permit batched draws.
-- Off-camera entities and animation are culled.
+- Static terrain and building meshes are merged where that preserves occlusion
+  groups. Repeated workers, furniture, vegetation, and building parts use
+  hardware instances or thin instances.
+- Off-camera meshes, animation, and path updates are culled or suspended.
 - Distant populations use truthful aggregate activity at the project or room
-  level rather than rendering hundreds of full animation rigs.
-- Continuous dynamic lighting, full-screen post-processing, expensive blur,
-  unbounded particles, and simulated real-time shadows are prohibited.
-- Workers, labels, effects, and path markers use object pools.
+  level or simplified LODs rather than hundreds of full animation rigs.
+- Lighting is primarily baked into textures and vertex colors. At most one
+  restrained real-time directional light is used. Dynamic shadows are limited
+  to the near camera tier and disabled by lower quality tiers.
+- Bloom, screen-space reflections, volumetrics, continuous physics, expensive
+  blur, unbounded particles, and decorative post-processing are prohibited
+  unless measured headroom is approved explicitly.
+- Dynamic resolution reduces internal render scale before input responsiveness
+  or truthful state updates are sacrificed.
+- GLB models use mesh compression when it reduces total cost. Textures use
+  compact atlases, mipmaps, and supported GPU compression where packaging and
+  visual validation prove it safe.
+- Workers, labels, selection effects, and path markers use pools or instances.
 - Reduced-motion mode replaces travel and looping activity with direct state
   placement and minimal status changes.
+
+Three quality tiers are available: Efficient, Balanced, and Detailed. Hardware
+probing selects a conservative initial tier, and the operator may override it.
+Automatic degradation may lower internal resolution, shadow quality, animation
+distance, LOD distance, and visible decoration. It may not hide authoritative
+workers, fabricate aggregates, or change interaction and command semantics.
 
 ### Acceptance budgets
 
@@ -336,25 +382,32 @@ Performance receipts record hardware, OS, Electron version, power state,
 window size, and display scale. After a 30-second warmup on the user's target
 Mac, the packaged Electron renderer must meet all of these initial budgets:
 
-- hidden or minimized Lunar City: no active Phaser animation frame loop and no
+- hidden or minimized Lunar City: no active Babylon.js render loop and no
   more than 0.5 percentage points of additional process CPU over the same
   desktop shell without Lunar City mounted;
 - visible idle city: no more than 3 percentage points of additional process
   CPU averaged over 60 seconds;
 - 100 individually rendered active inhabitants: 30 FPS cap, p95 frame time at
-  or below 33.3 ms, p95 Phaser update work at or below 6 ms, and no more than
+  or below 33.3 ms, p95 world update work at or below 6 ms, and no more than
   12 percentage points of additional process CPU;
 - 250 observed inhabitants with level-of-detail aggregation: p95 frame time at
   or below 33.3 ms and no more than 18 percentage points of additional process
   CPU;
 - incremental GPU memory attributable to Lunar City at or below 256 MiB;
+- the default overview on Balanced quality: no more than 180 draw calls after
+  warmup and no more than 1.5 million visible triangles;
+- a focused worker view on Balanced quality: no more than 220 draw calls and no
+  more than 2 million visible triangles;
+- Efficient quality on the target Mac's integrated GPU must retain camera,
+  selection, identity, conversation, and command usability while meeting the
+  30 FPS interactive budget;
 - after a 30-minute 100-inhabitant run, renderer resident-memory drift at or
   below 75 MiB and no monotonically growing entity, texture, listener, or timer
   count.
 
 Failure to meet a budget blocks acceptance. The response is to reduce work,
-atlas size, update frequency, effects, or visible detail, not to weaken the
-budget without explicit operator review.
+mesh or texture size, update frequency, effects, or visible detail, not to
+weaken the budget without explicit operator review.
 
 ## Failure handling
 
@@ -364,22 +417,22 @@ budget without explicit operator review.
 - Last-known entities remain visible with source and timestamp instead of
   silently disappearing.
 - A lost WebGL context restores the latest immutable snapshot. If restoration
-  fails, Phaser stops and the accessible React inspectors and conversations
+  fails, Babylon.js stops and the accessible React inspectors and conversations
   remain available.
 - An unavailable Kanban plugin, voice capability, remote gateway, or profile
   source closes only that source's buildings and actions. The rest of the city
   remains usable and does not fabricate substitute data.
 - Asset or manifest digest mismatch fails the world load before controls are
   enabled.
-- A missing animation uses the asset's declared reduced-motion or static frame
-  and emits a diagnostic; it does not substitute an unrelated sprite.
+- A missing animation uses the asset's declared reduced-motion pose and emits a
+  diagnostic; it does not substitute an unrelated model or clip.
 - Voice failure leaves the persistent text conversation intact.
 - Kanban task state, run state, typed blocker, diagnostics, comments, logs, and
   durable events remain separate evidence surfaces.
 
 ## Accessibility
 
-Every selectable Phaser entity has a synchronized keyboard-accessible React
+Every selectable 3D entity has a synchronized keyboard-accessible React
 representation. Selection, focus, identity, status, and available actions are
 available without pointer precision or animation.
 
@@ -391,12 +444,17 @@ ordinary accessible React dialogs and are not drawn inside canvas.
 
 ### Asset and visual tests
 
-- Validate source digest, transparent bounds, anchors, scale, depth, collision
-  shapes, attachment points, effect masks, and required animation states.
+- Validate source digest, GLB structure, node names, transforms, pivots, bounds,
+  collision volumes, navigation areas, attachment points, camera anchors, LODs,
+  instancing policy, and required animation clips.
+- Reject models that exceed declared triangle, draw-call, material, texture, or
+  GPU-memory budgets.
 - Render the reconstructed default camera deterministically and compare it with
-  the approved source. The comparison masks only explicitly dynamic regions.
-- Check extracted-object seams, clean plates, occlusion, and animation frames
-  at native and scaled resolutions.
+  the approved source for composition, palette relationships, landmark
+  placement, and recognizable silhouettes. The comparison masks only
+  explicitly dynamic regions.
+- Capture four world rotations, major districts, indoor occlusion, leaders, and
+  worker close-ups at native and reduced internal resolutions.
 - Reject generic substitute assets and missing manifest provenance.
 
 ### Adapter and state tests
@@ -423,16 +481,22 @@ ordinary accessible React dialogs and are not drawn inside canvas.
 
 ### Renderer and Electron tests
 
-- Use deterministic clocks and seeded routes for Phaser unit and integration
-  tests.
+- Use deterministic clocks, seeded routes, and fixed camera landmarks for
+  Babylon.js unit and integration tests.
 - Test React inspectors, dialogue, confirmations, keyboard access, and
-  reduced-motion behavior independently of Phaser.
+  reduced-motion behavior independently of Babylon.js.
+- Cover orbit, pan, tilt and zoom bounds, worker focus and follow, follow exit,
+  Return to City, roof and wall fading, pointer, trackpad, wheel, pinch, and
+  keyboard camera controls.
 - Run packaged Electron end to end against a fake backend: enter the city,
-  select leaders and workers, resume a leader conversation, use text and fake
-  voice, inspect evidence, send safe guidance, confirm a disruptive action,
-  reconcile a disconnect, and restore after simulated canvas-context loss.
+  rotate and zoom the world, follow a worker indoors, return to overview, select
+  leaders and workers, resume a leader conversation while moving the camera,
+  use text and fake voice, inspect evidence, send safe guidance, confirm a
+  disruptive action, reconcile a disconnect, and restore after simulated
+  canvas-context loss.
 - Run the performance budgets for idle, hidden, 25, 100, and 250 inhabitants,
-  active camera motion, active conversation, and the 30-minute stability case.
+  overview and close-worker views, active rotation and zoom, active
+  conversation, every quality tier, and the 30-minute stability case.
 
 Mock-backend, visual, performance, and live Hermes evidence remain separate.
 Live acceptance requires real profile, session, voice, subagent, and Kanban
@@ -441,18 +505,19 @@ receipts and must not be inferred from deterministic fixtures.
 ## Rollout
 
 1. Reconcile the exact approved commit chain into the implementation branch.
-2. Establish asset digests, manifest schema, clean plates, and a reconstructed
-   static scene that visually matches the approved source.
-3. Add camera, navigation graph, depth, and deterministic robot movement using
-   fixture snapshots.
+2. Establish the locked art reference, 3D asset budgets, manifest schema, and a
+   low-poly static scene that visually matches the approved composition.
+3. Add the angled camera, bounded orbit, pan, tilt, zoom, Return to City,
+   picking, occlusion groups, navigation mesh, and deterministic robot movement
+   using fixture snapshots.
 4. Add the read-only live adapter for profiles, sessions, subagents, and Kanban;
    keep controls disabled.
 5. Add persistent leader text conversations, then capability-gated voice.
 6. Add direct safe actions and evidence inspectors.
 7. Add staged disruptive commands with exact-identity confirmation and
    authoritative readback.
-8. Add project compounds, population level of detail, and the complete state
-   animation set.
+8. Add project compounds, instancing, population level of detail, quality
+   tiers, and the complete state animation set.
 9. Pass packaged Electron visual, accessibility, performance, and fake-backend
    acceptance.
 10. Capture separate supervised live Hermes receipts before calling the city a
