@@ -4464,6 +4464,34 @@ def _append_event(
     )
 
 
+def _append_respawn_guard_event(
+    conn: sqlite3.Connection,
+    task_id: str,
+    reason: str,
+) -> bool:
+    """Record only a respawn-guard transition, not every dispatcher tick.
+
+    The dispatcher may tick every five seconds. Persisting the same guard on
+    every tick grows the append-only ledger indefinitely and wakes live UIs
+    even though task state did not change. A different intervening event or a
+    different reason starts a new observable guard edge.
+    """
+    latest = conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if latest is not None and latest["kind"] == "respawn_guarded":
+        try:
+            payload = json.loads(latest["payload"]) if latest["payload"] else {}
+        except (TypeError, ValueError):
+            payload = {}
+        if payload.get("reason") == reason:
+            return False
+    _append_event(conn, task_id, "respawn_guarded", {"reason": reason})
+    return True
+
+
 def _end_run(
     conn: sqlite3.Connection,
     task_id: str,
@@ -11365,10 +11393,7 @@ def _dispatch_once_locked(
             # this the task appears stuck in ready with no diagnosis.
             if not dry_run:
                 with write_txn(conn):
-                    _append_event(
-                        conn, row["id"], "respawn_guarded",
-                        {"reason": guard_reason},
-                    )
+                    _append_respawn_guard_event(conn, row["id"], guard_reason)
             continue
         if dry_run:
             result.spawned.append((row["id"], row_assignee, ""))
@@ -11519,10 +11544,7 @@ def _dispatch_once_locked(
             result.respawn_guarded.append((row["id"], guard_reason))
             if not dry_run:
                 with write_txn(conn):
-                    _append_event(
-                        conn, row["id"], "respawn_guarded",
-                        {"reason": guard_reason},
-                    )
+                    _append_respawn_guard_event(conn, row["id"], guard_reason)
             continue
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))
