@@ -170,6 +170,32 @@ describe('EntityRegistry', () => {
     expect(focusAnchors.get(replacement.key)?.()).toEqual({ x: 2, y: 0, z: 0 })
   })
 
+  it('publishes authoritative typed worker focus metadata that follows motion and fails closed for stale workers', () => {
+    const focusMetadata = new Map<EntityKey, () =>
+      | { cameraAnchor: Vec3; focusEntityKey: EntityKey; occlusionGroup: string }
+      | undefined>()
+    const presentationFactory = factory()
+    const worker = entity(1, { position: { x: 2, y: 0, z: 3 } })
+    const registry = createEntityRegistry({
+      focusMetadata,
+      factory: presentationFactory,
+      workerClips: new Set(['idle', 'walk'])
+    })
+
+    registry.reconcile(snapshot(worker))
+    expect(focusMetadata.get(worker.key)?.()).toEqual({
+      cameraAnchor: { x: 2, y: 0, z: 3 },
+      focusEntityKey: worker.key,
+      occlusionGroup: 'workers'
+    })
+
+    registry.setPosition(worker.key, { x: 9, y: 0, z: -2 })
+    expect(focusMetadata.get(worker.key)?.()?.cameraAnchor).toEqual({ x: 9, y: 0, z: -2 })
+
+    registry.reconcile(snapshot({ ...worker, authority: 'stale' }))
+    expect(focusMetadata.get(worker.key)?.()).toBeUndefined()
+  })
+
   it('exposes only retained presentation state to navigation and flushes its changed position without touching snapshots', () => {
     const presentationFactory = factory()
     const worker = entity(1, { animation: 'walk' })

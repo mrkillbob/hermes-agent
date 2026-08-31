@@ -207,7 +207,8 @@ describe('worker GLB presentation', () => {
       lods: [
         { distance: 0, node: 'workers:lod:near' },
         { distance: 28, node: 'workers:lod:far' }
-      ]
+      ],
+      occlusionGroup: 'workers'
     } as Pick<ModelManifestEntry, 'id' | 'instancing' | 'lods'>
     class TransformNode {
       dispose = vi.fn()
@@ -238,6 +239,16 @@ describe('worker GLB presentation', () => {
 
     expect(variantClones.get(builder)?.setEnabled).toHaveBeenCalledWith(true)
     expect(variantClones.get(orbital)?.setEnabled).toHaveBeenCalledWith(false)
+    expect((variantClones.get(builder) as { metadata?: Record<string, unknown> } | undefined)?.metadata).toMatchObject({
+      lunarCity: {
+        entityKey: entity.key,
+        focusEntityKey: entity.key,
+        identity: entity.identity,
+        kind: 'worker',
+        occlusionGroup: 'workers',
+        selectable: true
+      }
+    })
     expect(clonedAnimation.start).toHaveBeenCalledOnce()
     expect(clonedAnimation.dispose).toHaveBeenCalledOnce()
   })

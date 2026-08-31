@@ -133,9 +133,12 @@ function healthSourceFor(entity: LunarEntity): string {
   switch (entity.identity.kind) {
     case 'profile':
       return `fleet:${entity.identity.connectionId}`
+
     case 'session':
+
     case 'subagent':
       return `session:${entity.identity.connectionId}`
+
     case 'kanban':
       return `kanban:${entity.identity.connectionId}`
   }
@@ -274,7 +277,8 @@ export class LunarCityReconciler {
       candidates.set(entity.key, entity)
     }
 
-    const sources = result.authoritative === false ? this.mergePartialSources(previous.sources, result.sources) : result.sources
+    const sources =
+      result.authoritative === false ? this.mergePartialSources(previous.sources, result.sources) : result.sources
 
     this.publishCandidate([...candidates.values()], sortedSources(sources))
   }
@@ -333,6 +337,7 @@ export class LunarCityReconciler {
       sources,
       upserts
     })
+
     this.options.publish?.(delta) ?? applyLunarDelta(delta)
     this.scheduleFreshness(sources)
   }
@@ -367,6 +372,7 @@ export class LunarCityReconciler {
     const previous = $lunarCitySnapshot.get()
     const now = this.options.now?.() ?? Date.now()
     const freshnessMs = this.options.freshnessMs ?? 60_000
+
     const expired = new Set(
       previous.sources
         .filter(source => source.authority === 'authoritative' && source.observedAt + freshnessMs <= now)
@@ -380,7 +386,9 @@ export class LunarCityReconciler {
     }
 
     this.publishCandidate(
-      [...previous.entities.values()].map(entity => (expired.has(healthSourceFor(entity)) ? staleEntity(entity) : entity)),
+      [...previous.entities.values()].map(entity =>
+        expired.has(healthSourceFor(entity)) ? staleEntity(entity) : entity
+      ),
       previous.sources.map(source => (expired.has(source.source) ? { ...source, authority: 'stale' as const } : source))
     )
   }

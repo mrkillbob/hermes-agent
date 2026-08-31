@@ -215,6 +215,19 @@ export interface LunarCityLeaderPickMetadata {
   stateClips: LeaderStateClipMap
 }
 
+/** Exact worker identity attached to every clone and hardware instance. */
+export interface LunarCityWorkerPickMetadata {
+  cameraAnchor: Vec3
+  entityKey: EntityKey
+  focusEntityKey: EntityKey
+  identity: EntityIdentity
+  kind: 'worker'
+  modelId: 'workers'
+  occlusionGroup: string
+  selectable: true
+  variant?: string
+}
+
 export interface LunarCitySharedLeaderSurfaceMetadata {
   cameraAnchor: Vec3
   focusEntityKey: EntityKey
@@ -225,7 +238,11 @@ export interface LunarCitySharedLeaderSurfaceMetadata {
 }
 
 export type LunarCityNodeMetadata =
-  LunarCityLandmarkMetadata | LunarCityLeaderPickMetadata | LunarCityLodMetadata | LunarCitySharedLeaderSurfaceMetadata
+  | LunarCityLandmarkMetadata
+  | LunarCityLeaderPickMetadata
+  | LunarCityLodMetadata
+  | LunarCitySharedLeaderSurfaceMetadata
+  | LunarCityWorkerPickMetadata
 
 export interface LunarCityWorldHandle {
   readonly leaderStateClips: ReadonlyMap<string, LeaderStateClipMap>

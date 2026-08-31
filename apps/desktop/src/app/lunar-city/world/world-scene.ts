@@ -10,6 +10,8 @@ import type {
   LeaderStateClipMap,
   LunarCityIntent,
   LunarCityNodeMetadata,
+  LunarEntity,
+  LunarCityWorkerPickMetadata,
   LunarCitySnapshot,
   LunarCityWorldModules,
   ModelManifestEntry,
@@ -31,6 +33,7 @@ import {
   applyLodSelection,
   createEntityRegistry,
   type EntityPresentationFactory,
+  type EntityFocusMetadata,
   type EntityVisual,
   type InstancedEntityGroup,
   type InstancedEntityMember,
@@ -472,6 +475,36 @@ function tagNode(node: BabylonNodeLike, lunarCity: LunarCityNodeMetadata): void 
   node.metadata = { ...metadataRecord(node.metadata), lunarCity }
 }
 
+function copiedPoint(point: Vec3 | undefined): Vec3 {
+  return point ? { x: point.x, y: point.y, z: point.z } : { x: 0, y: 0, z: 0 }
+}
+
+function workerPickMetadata(
+  entity: { identity: LunarEntity['identity']; key: EntityKey; position?: Vec3; variant?: string },
+  model: Pick<ModelManifestEntry, 'occlusionGroup'>,
+  variant: string | undefined
+): LunarCityWorkerPickMetadata {
+  return {
+    cameraAnchor: copiedPoint(entity.position),
+    entityKey: entity.key,
+    focusEntityKey: entity.key,
+    identity: entity.identity,
+    kind: 'worker',
+    modelId: 'workers',
+    occlusionGroup: model.occlusionGroup,
+    selectable: true,
+    variant
+  }
+}
+
+function tagWorkerNode(node: BabylonNodeLike, metadata: LunarCityWorkerPickMetadata): void {
+  tagNode(node, metadata)
+
+  if ('isPickable' in node) {
+    ;(node as BabylonMeshLike).isPickable = true
+  }
+}
+
 function allImportedNodes(result: BabylonImportResultLike): readonly BabylonNodeLike[] {
   return [...result.transformNodes, ...result.meshes]
 }
@@ -824,7 +857,14 @@ export function createBabylonEntityFactory(
       const anchor = new modules.TransformNode(`lunar-city:entity:${entity.key}`, scene)
       const clone = cloneWorkerHierarchy(template, anchor, sourceGroups, entity.key)
       const variant = declaredVariant ?? deterministicWorkerVariant(entity.key, variants)
+      const metadata = workerPickMetadata(entity, model, variant)
       anchor.metadata = { ...metadataRecord(anchor.metadata), lunarCityWorkerVariant: variant }
+      tagWorkerNode(anchor, metadata)
+      tagWorkerNode(clone.root, metadata)
+
+      for (const node of new Set(clone.nodeMap.values())) {
+        tagWorkerNode(node, metadata)
+      }
       clone.root.setEnabled?.(true)
 
       for (const [variantId, sourceNode] of sourceVariantNodes) {
@@ -927,6 +967,12 @@ export function createBabylonEntityFactory(
               members.set(member.key, visual)
             }
 
+            const metadata = workerPickMetadata(member, model, member.variant ?? variant)
+            tagWorkerNode(visual.root, metadata)
+
+            for (const instance of visual.instances) {
+              tagWorkerNode(instance, metadata)
+            }
             setNodePosition(visual.root, member.position)
           }
         }
@@ -1082,7 +1128,7 @@ export async function createWorldScene(
     const leaderStateClips = new Map<string, LeaderStateClipMap>()
     const camera = scene.activeCamera as CameraLike
     const focusAnchors = new Map<EntityKey, () => Vec3 | undefined>()
-    const focusMetadata = new Map<EntityKey, FocusMetadata>()
+    const focusMetadata = new Map<EntityKey, () => EntityFocusMetadata | undefined>()
     const occlusionCandidates: OcclusionCandidate[] = []
     const staticLods: Array<{ focus: FocusMetadata; lods: readonly LodEntry[] }> = []
     let workerAsset: { model: ModelManifestEntry; result: BabylonImportResultLike } | undefined
@@ -1099,7 +1145,7 @@ export async function createWorldScene(
       const focus = placed.focus
 
       focusAnchors.set(focus.focusEntityKey, () => focus.cameraAnchor)
-      focusMetadata.set(focus.focusEntityKey, focus)
+      focusMetadata.set(focus.focusEntityKey, () => focus)
       staticLods.push({ focus, lods: placed.lods })
       occlusionCandidates.push(...buildOcclusionCandidates(result, model))
 
@@ -1109,7 +1155,7 @@ export async function createWorldScene(
         for (const leaderId of LEADER_IDS) {
           const leaderFocusKey = staticFocusKey('leader', leaderId)
           focusAnchors.set(leaderFocusKey, () => focus.cameraAnchor)
-          focusMetadata.set(leaderFocusKey, { ...focus, focusEntityKey: leaderFocusKey })
+          focusMetadata.set(leaderFocusKey, () => ({ ...focus, focusEntityKey: leaderFocusKey }))
         }
       }
 
@@ -1132,6 +1178,7 @@ export async function createWorldScene(
     const entityRegistry = createEntityRegistry({
       factory: createBabylonEntityFactory(workerAsset.model, workerAsset.result, modules, scene),
       focusAnchors,
+      focusMetadata,
       workerClips: workerClipNames
     })
 
@@ -1147,7 +1194,7 @@ export async function createWorldScene(
 
     const applyOcclusion = (): void => {
       const focusedEntityKey = cameraController.getState().focusedEntityKey
-      const selection = focusedEntityKey ? focusMetadata.get(focusedEntityKey) : undefined
+      const selection = focusedEntityKey ? focusMetadata.get(focusedEntityKey)?.() : undefined
 
       occlusion.update({ position: cameraPosition(camera) }, selection)
     }

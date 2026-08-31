@@ -63,8 +63,14 @@ describe('Lunar City reconciler', () => {
 
     const stop = reconciler.start()
     await flush()
-    reconciler.acceptEvent({ sequence: 3, source: { connectionId: 'local', profile: 'worker', sessionId: 'session-a' } })
-    reconciler.acceptEvent({ sequence: 5, source: { connectionId: 'local', profile: 'worker', sessionId: 'session-a' } })
+    reconciler.acceptEvent({
+      sequence: 3,
+      source: { connectionId: 'local', profile: 'worker', sessionId: 'session-a' }
+    })
+    reconciler.acceptEvent({
+      sequence: 5,
+      source: { connectionId: 'local', profile: 'worker', sessionId: 'session-a' }
+    })
     reconciler.invalidate('gateway.ready')
     reconciler.invalidate('focus')
     resolveFirst(currentRead())
@@ -162,7 +168,9 @@ describe('Lunar City reconciler', () => {
             }
           : {
               authoritative: false,
-              entities: [{ ...profile, animation: 'unavailable', authority: 'stale' as const, destination: 'unknown' as const }],
+              entities: [
+                { ...profile, animation: 'unavailable', authority: 'stale' as const, destination: 'unknown' as const }
+              ],
               sources: [{ authority: 'stale' as const, error: 'fleet failed', observedAt: 42, source: 'fleet:local' }]
             }
       }
@@ -199,7 +207,9 @@ describe('Lunar City reconciler', () => {
     expect(Object.isFrozen(published!.upserts[0]!.identity)).toBe(true)
     expect(Object.isFrozen(published!.sources)).toBe(true)
     expect(Object.isFrozen(published!.sources[0]!)).toBe(true)
-    expect(() => (published!.upserts as LunarDelta['upserts'] & { push: (value: typeof profile) => void }).push(profile)).toThrow()
+    expect(() =>
+      (published!.upserts as LunarDelta['upserts'] & { push: (value: typeof profile) => void }).push(profile)
+    ).toThrow()
     stop()
   })
 
@@ -213,6 +223,41 @@ describe('Lunar City reconciler', () => {
     reconciler.resetSequences({ connectionId: 'a/b', profile: 'c' })
     expect(reconciler.acceptEvent({ sequence: 1, source: restarted })).toBe('accepted')
     expect(reconciler.acceptEvent({ sequence: 1, source: untouched })).toBe('ignored')
+  })
+
+  it('clears the affected cursor on gateway.ready so a restarted lower event is reread', async () => {
+    const fleet = atom({
+      agents: [],
+      sources: [{ connectionId: 'local', kind: 'local' as const, label: 'this Mac', reachable: true }]
+    })
+    let emit!: (event: unknown) => void
+    let reads = 0
+    const stop = startLunarCityReconciler({
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        onEvent: listener => {
+          emit = listener
+          return () => undefined
+        },
+        refreshFleet: async () => {
+          reads += 1
+          return { status: 'retained' }
+        }
+      }
+    })
+    await flush()
+    emit({ connectionId: 'local', profile: 'worker', seq: 5, session_id: 'session-a', type: 'session.changed' })
+    await flush()
+    emit({ connectionId: 'local', profile: 'worker', type: 'gateway.ready' })
+    await flush()
+    emit({ connectionId: 'local', profile: 'worker', seq: 1, session_id: 'session-a', type: 'session.changed' })
+    await flush()
+
+    expect(reads).toBe(4)
+    stop()
   })
 
   it('prevents a late read from publishing after disposal', async () => {

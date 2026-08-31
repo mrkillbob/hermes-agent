@@ -1,4 +1,4 @@
-import type { AuthorityState, DestinationId, EntityKey, LunarCitySnapshot, LunarEntity, Vec3 } from '../model'
+import type { AuthorityState, DestinationId, EntityIdentity, EntityKey, LunarCitySnapshot, LunarEntity, Vec3 } from '../model'
 
 export interface EntityVisual {
   dispose?(): void
@@ -10,9 +10,17 @@ export interface EntityVisual {
 
 export interface InstancedEntityMember {
   animation: string
+  identity: EntityIdentity
   key: EntityKey
   position: Vec3
   variant: string | undefined
+}
+
+/** Dynamic, exact worker focus data consumed by the camera and occlusion pass. */
+export interface EntityFocusMetadata {
+  cameraAnchor: Vec3
+  focusEntityKey: EntityKey
+  occlusionGroup: string
 }
 
 export interface InstancedEntityGroup {
@@ -66,6 +74,7 @@ export interface EntityRegistryOptions {
   diagnostic?: (message: string) => void
   factory: EntityPresentationFactory
   focusAnchors?: Map<EntityKey, () => Vec3 | undefined>
+  focusMetadata?: Map<EntityKey, () => EntityFocusMetadata | undefined>
   workerClips: ReadonlySet<string>
 }
 
@@ -141,6 +150,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
   const aggregates = new Map<DestinationId, AggregatePopulation>()
   const diagnostics = new Set<string>()
   const focusAnchors = options.focusAnchors
+  const focusMetadata = options.focusMetadata
   let selected: EntityKey | undefined
   let disposed = false
 
@@ -155,11 +165,21 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
     record.visual?.dispose?.()
     record.visual = undefined
     focusAnchors?.delete(record.entity.key)
+    focusMetadata?.delete(record.entity.key)
   }
 
   const publishAnchor = (record: RetainedEntity): void => {
     focusAnchors?.set(record.entity.key, () =>
       record.authority === 'authoritative' ? copied(record.position) : undefined
+    )
+    focusMetadata?.set(record.entity.key, () =>
+      record.authority === 'authoritative'
+        ? {
+            cameraAnchor: copied(record.position),
+            focusEntityKey: record.entity.key,
+            occlusionGroup: 'workers'
+          }
+        : undefined
     )
   }
 
@@ -207,6 +227,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       const members = nextGroups.get(key) ?? []
       members.push({
         animation: record.animation,
+        identity: record.entity.identity,
         key: record.entity.key,
         position: copied(record.position),
         variant: record.entity.variant
