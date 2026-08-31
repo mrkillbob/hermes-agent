@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -10,11 +10,17 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 
-import { type CommandOperation, type CommandPlan, commandPlanIntegrityError } from '../command-broker'
+import {
+  type CommandOperation,
+  type CommandPlan,
+  commandPlanIntegrityError,
+  type CommandPlanningSnapshot
+} from '../command-broker'
 import type { EntityIdentity } from '../model'
 
 export interface CommandConfirmationProps {
   disabledReason?: string
+  getLatestSnapshot: () => CommandPlanningSnapshot
   onCancel: () => void
   onConfirm: (plan: CommandPlan) => void
   open: boolean
@@ -36,14 +42,30 @@ const OPERATION_LABELS: Readonly<Record<CommandOperation, string>> = {
   'terminate-run': 'Terminate run'
 }
 
-export function commandPlanConfirmationError(plan: CommandPlan): string | undefined {
+export function commandPlanConfirmationError(
+  plan: CommandPlan,
+  latestSnapshot: CommandPlanningSnapshot
+): string | undefined {
   if (!plan.confirmation) {
     return 'This command does not require disruptive confirmation.'
   }
 
-  const integrityError = commandPlanIntegrityError(plan)
+  const integrityError = commandPlanIntegrityError(plan, latestSnapshot)
 
-  return integrityError ? `Confirmation unavailable: ${integrityError}.` : undefined
+  return integrityError ? `Confirmation unavailable: ${integrityError}` : undefined
+}
+
+function latestValidationError(
+  plan: CommandPlan,
+  getLatestSnapshot: () => CommandPlanningSnapshot
+): string | undefined {
+  try {
+    return commandPlanConfirmationError(plan, getLatestSnapshot())
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    return `Confirmation unavailable: latest target revalidation failed: ${message}`
+  }
 }
 
 function IdentityRows({ identity }: { identity: EntityIdentity }) {
@@ -69,6 +91,7 @@ function IdentityRows({ identity }: { identity: EntityIdentity }) {
 
 export function CommandConfirmation({
   disabledReason,
+  getLatestSnapshot,
   onCancel,
   onConfirm,
   open,
@@ -76,9 +99,15 @@ export function CommandConfirmation({
   submitting = false
 }: CommandConfirmationProps) {
   const cancelRef = useRef<HTMLButtonElement>(null)
+  const [clickError, setClickError] = useState<{ digest: string; message: string } | undefined>()
   const operationLabel = OPERATION_LABELS[plan.operation]
-  const validationError = commandPlanConfirmationError(plan)
-  const unavailableReason = disabledReason ?? validationError
+  const validationError = latestValidationError(plan, getLatestSnapshot)
+  const safeOperationLabel = validationError ? 'command' : operationLabel
+  const externalReason = disabledReason?.trim() || undefined
+
+  const unavailableReason =
+    validationError ?? (clickError?.digest === plan.digest ? clickError.message : undefined) ?? externalReason
+
   const disabled = submitting || Boolean(unavailableReason)
 
   return (
@@ -98,36 +127,40 @@ export function CommandConfirmation({
           </DialogDescription>
         </DialogHeader>
 
-        <section aria-label="Exact target identity">
-          <h3>Exact target identity</h3>
-          <IdentityRows identity={plan.identity} />
-          <dl>
-            {plan.context.canonicalProjectId ? (
-              <>
-                <dt>Canonical project</dt>
-                <dd>{plan.context.canonicalProjectId}</dd>
-              </>
-            ) : null}
-            {plan.context.repositoryId ? (
-              <>
-                <dt>Repository</dt>
-                <dd>{plan.context.repositoryId}</dd>
-              </>
-            ) : null}
-            <dt>Current state</dt>
-            <dd>{plan.context.currentState}</dd>
-          </dl>
-        </section>
+        {validationError ? null : (
+          <>
+            <section aria-label="Exact target identity">
+              <h3>Exact target identity</h3>
+              <IdentityRows identity={plan.identity} />
+              <dl>
+                {plan.context.canonicalProjectId ? (
+                  <>
+                    <dt>Canonical project</dt>
+                    <dd>{plan.context.canonicalProjectId}</dd>
+                  </>
+                ) : null}
+                {plan.context.repositoryId ? (
+                  <>
+                    <dt>Repository</dt>
+                    <dd>{plan.context.repositoryId}</dd>
+                  </>
+                ) : null}
+                <dt>Current state</dt>
+                <dd>{plan.context.currentState}</dd>
+              </dl>
+            </section>
 
-        <section aria-label="Requested operation">
-          <h3>Requested operation</h3>
-          <p>{operationLabel}</p>
-        </section>
+            <section aria-label="Requested operation">
+              <h3>Requested operation</h3>
+              <p>{operationLabel}</p>
+            </section>
 
-        <section aria-label="Expected consequence">
-          <h3>Expected consequence</h3>
-          <p>{plan.consequence}</p>
-        </section>
+            <section aria-label="Expected consequence">
+              <h3>Expected consequence</h3>
+              <p>{plan.consequence}</p>
+            </section>
+          </>
+        )}
 
         {unavailableReason ? (
           <p aria-live="polite" role="status">
@@ -140,17 +173,27 @@ export function CommandConfirmation({
             Cancel command
           </Button>
           <Button
-            aria-label={`Confirm ${operationLabel}`}
+            aria-label={`Confirm ${safeOperationLabel}`}
             disabled={disabled}
             onClick={() => {
-              if (!disabled) {
-                onConfirm(plan)
+              if (disabled) {
+                return
               }
+
+              const latestError = latestValidationError(plan, getLatestSnapshot)
+
+              if (latestError) {
+                setClickError({ digest: plan.digest, message: latestError })
+
+                return
+              }
+
+              onConfirm(plan)
             }}
             type="button"
             variant="destructive"
           >
-            {submitting ? 'Sending once…' : `Confirm ${operationLabel}`}
+            {submitting ? 'Sending once…' : `Confirm ${safeOperationLabel}`}
           </Button>
         </DialogFooter>
       </DialogContent>

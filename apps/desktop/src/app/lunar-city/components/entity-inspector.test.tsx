@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { EntityIdentity, SourceHealth } from '../model'
 
-import { EntityInspector, type EntityInspectorData } from './entity-inspector'
+import { EntityInspector, type EntityInspectorData, type InspectorSessionTarget } from './entity-inspector'
 
 const IDENTITY: EntityIdentity = {
   board: 'primary',
@@ -14,6 +14,14 @@ const IDENTITY: EntityIdentity = {
   runId: 'run-7',
   taskId: 'task-7',
   workerId: 'worker-7'
+}
+
+const SESSION: InspectorSessionTarget = {
+  connectionId: 'connection-a',
+  profile: 'worker',
+  runtimeSessionId: 'runtime-1',
+  sessionId: 'session-1',
+  storedSessionId: 'stored-1'
 }
 
 const SOURCE: SourceHealth = {
@@ -32,7 +40,7 @@ function data(overrides: Partial<EntityInspectorData> = {}): EntityInspectorData
     events: [{ at: 22, id: 'event-1', kind: 'task.blocked', summary: 'Blocked after review' }],
     identity: IDENTITY,
     logTail: { content: 'pytest: 2 failed', exists: true, truncated: true },
-    owningSessionId: 'session-1',
+    owningSession: SESSION,
     run: { id: 'run-7', outcome: 'blocked', status: 'failed' },
     source: SOURCE,
     subagent: {
@@ -95,17 +103,75 @@ describe('EntityInspector', () => {
     expect(screen.getByRole('region', { name: 'Files' }).textContent).toContain('src/b.ts')
   })
 
-  it('offers keyboard and screen-reader actions independent of canvas selection', () => {
+  it('opens a complete exact SessionOwnerRoute instead of a detached session ID', () => {
     const onInspectEvidence = vi.fn()
     const onOpenSession = vi.fn()
 
     render(<EntityInspector data={data()} onInspectEvidence={onInspectEvidence} onOpenSession={onOpenSession} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open owning session session-1' }))
-    fireEvent.keyDown(screen.getByRole('button', { name: 'Inspect diagnostics for task-7' }), { key: 'Enter' })
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Open session session-1 on connection connection-a with profile worker'
+      })
+    )
     fireEvent.click(screen.getByRole('button', { name: 'Inspect diagnostics for task-7' }))
 
-    expect(onOpenSession).toHaveBeenCalledWith('session-1')
+    expect(onOpenSession).toHaveBeenCalledWith(SESSION)
     expect(onInspectEvidence).toHaveBeenCalledWith('diagnostics', IDENTITY)
+  })
+
+  it('keeps duplicate session IDs on different connections distinct', () => {
+    const onOpenSession = vi.fn()
+
+    const secondIdentity: EntityIdentity = {
+      board: 'secondary',
+      connectionId: 'connection-b',
+      kind: 'kanban',
+      profile: 'worker',
+      taskId: 'task-8'
+    }
+
+    const secondSession: InspectorSessionTarget = {
+      connectionId: 'connection-b',
+      profile: 'worker',
+      sessionId: 'session-1'
+    }
+
+    render(
+      <>
+        <EntityInspector data={data()} onOpenSession={onOpenSession} />
+        <EntityInspector
+          data={data({ identity: secondIdentity, owningSession: secondSession })}
+          onOpenSession={onOpenSession}
+        />
+      </>
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Open session session-1 on connection connection-b with profile worker'
+      })
+    )
+
+    expect(onOpenSession).toHaveBeenCalledWith(secondSession)
+    expect(onOpenSession).not.toHaveBeenCalledWith(SESSION)
+  })
+
+  it('fails closed when an owning session route is incomplete or mismatched', () => {
+    const onOpenSession = vi.fn()
+
+    const view = render(
+      <EntityInspector
+        data={data({ owningSession: { ...SESSION, connectionId: 'connection-b' } })}
+        onOpenSession={onOpenSession}
+      />
+    )
+
+    expect(screen.queryByRole('button', { name: /Open session/ })).toBeNull()
+
+    view.rerender(
+      <EntityInspector data={data({ owningSession: { ...SESSION, sessionId: '' } })} onOpenSession={onOpenSession} />
+    )
+    expect(screen.queryByRole('button', { name: /Open session/ })).toBeNull()
   })
 })

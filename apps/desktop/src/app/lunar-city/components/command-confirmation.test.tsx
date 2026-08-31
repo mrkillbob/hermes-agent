@@ -2,9 +2,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import type { CommandPlan } from '../command-broker'
+import { type CommandPlan, type CommandPlanningSnapshot, type CommandTargetState, planCommand } from '../command-broker'
 import { entityKey } from '../identity'
-import type { EntityIdentity } from '../model'
+import type { EntityIdentity, LunarCitySnapshot, LunarEntity, SourceHealth } from '../model'
 
 import { CommandConfirmation } from './command-confirmation'
 
@@ -18,60 +18,108 @@ const IDENTITY: EntityIdentity = {
   workerId: 'worker-7'
 }
 
-function plan(overrides: Partial<CommandPlan> = {}): CommandPlan {
-  return {
-    confirmation: true,
-    consequence: 'Reassigning stops the current worker and gives the task to reviewer.',
-    context: {
-      canonicalProjectId: 'project-1',
-      currentState: 'running',
-      repositoryId: 'repo/hermes',
-      source: { authority: 'authoritative', observedAt: 2_000, source: 'connection-a/kanban/primary' }
-    },
-    entityKey: entityKey(IDENTITY),
-    identity: IDENTITY,
-    method: 'kanban.task.reassign',
-    operation: 'reassign-task',
-    owner: { connectionId: 'connection-a', profile: 'worker' },
-    params: {
-      assignee: 'reviewer',
-      board: 'primary',
-      run_id: 'run-7',
-      task_id: 'task-7',
-      worker_id: 'worker-7'
-    },
-    plannedAt: 2_000,
-    readback: { id: 'task-7', kind: 'kanban-task' },
-    ...overrides
+function planningSnapshot(state = 'running', time = 2_000, revision = 3): CommandPlanningSnapshot {
+  const source: SourceHealth = {
+    authority: 'authoritative',
+    observedAt: time,
+    source: 'connection-a/kanban/primary'
   }
+
+  const entity: LunarEntity = {
+    animation: 'work',
+    authority: 'authoritative',
+    destination: 'project',
+    identity: IDENTITY,
+    key: entityKey(IDENTITY),
+    observedAt: time,
+    projectId: 'project-1'
+  }
+
+  const target: CommandTargetState = {
+    availableOperations: ['reassign-task'],
+    canonicalProjectId: 'project-1',
+    entity,
+    observedState: {
+      animation: entity.animation,
+      authority: entity.authority,
+      destination: entity.destination,
+      observedAt: time,
+      source: source.source,
+      value: state
+    },
+    ownerCandidates: [{ connectionId: 'connection-a', profile: 'worker' }],
+    readbackCapabilities: ['kanban-task'],
+    repositoryId: 'repo/hermes',
+    source,
+    sourceOwner: { connectionId: 'connection-a', profile: 'worker' }
+  }
+
+  const city: LunarCitySnapshot = {
+    entities: new Map([[entity.key, entity]]),
+    observedAt: time,
+    revision,
+    sources: [source]
+  }
+
+  return { city, targets: new Map([[entity.key, target]]) }
+}
+
+function setup() {
+  const latest = planningSnapshot()
+  const plan = planCommand({ assignee: 'reviewer', entityKey: entityKey(IDENTITY), kind: 'reassign-task' }, latest)
+
+  return { getLatestSnapshot: () => latest, plan }
 }
 
 describe('CommandConfirmation', () => {
-  it('renders a real accessible dialog with the complete exact identity, state, operation, and consequence', () => {
-    render(<CommandConfirmation onCancel={vi.fn()} onConfirm={vi.fn()} open plan={plan()} />)
+  it('renders a real accessible dialog with the complete exact identity, state, operation, and canonical consequence', () => {
+    const { getLatestSnapshot, plan } = setup()
+
+    render(
+      <CommandConfirmation
+        getLatestSnapshot={getLatestSnapshot}
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+        open
+        plan={plan}
+      />
+    )
 
     const dialog = screen.getByRole('dialog', { name: 'Confirm Lunar City command' })
 
-    expect(dialog.textContent).toContain('connection-a')
-    expect(dialog.textContent).toContain('worker')
-    expect(dialog.textContent).toContain('project-1')
-    expect(dialog.textContent).toContain('repo/hermes')
-    expect(dialog.textContent).toContain('primary')
-    expect(dialog.textContent).toContain('task-7')
-    expect(dialog.textContent).toContain('run-7')
-    expect(dialog.textContent).toContain('worker-7')
-    expect(dialog.textContent).toContain('running')
-    expect(dialog.textContent).toContain('Reassign task')
-    expect(dialog.textContent).toContain('Reassigning stops the current worker')
+    for (const value of [
+      'connection-a',
+      'worker',
+      'project-1',
+      'repo/hermes',
+      'primary',
+      'task-7',
+      'run-7',
+      'worker-7',
+      'running',
+      'Reassign task',
+      'Reassign the exact task to reviewer'
+    ]) {
+      expect(dialog.textContent).toContain(value)
+    }
   })
 
   it('focuses Cancel first, traps focus, and maps Escape to the safe cancel path', async () => {
+    const { getLatestSnapshot, plan } = setup()
     const onCancel = vi.fn()
     const outside = window.document.createElement('button')
     outside.textContent = 'Outside'
     window.document.body.append(outside)
 
-    render(<CommandConfirmation onCancel={onCancel} onConfirm={vi.fn()} open plan={plan()} />)
+    render(
+      <CommandConfirmation
+        getLatestSnapshot={getLatestSnapshot}
+        onCancel={onCancel}
+        onConfirm={vi.fn()}
+        open
+        plan={plan}
+      />
+    )
 
     const dialog = screen.getByRole('dialog', { name: 'Confirm Lunar City command' })
     const cancel = screen.getByRole('button', { name: 'Cancel command' })
@@ -85,72 +133,65 @@ describe('CommandConfirmation', () => {
     outside.remove()
   })
 
-  it('confirms once only when the plan remains exact and enabled', () => {
-    const onConfirm = vi.fn()
-    const view = render(<CommandConfirmation onCancel={vi.fn()} onConfirm={onConfirm} open plan={plan()} />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm Reassign task' }))
-    expect(onConfirm).toHaveBeenCalledTimes(1)
-    expect(onConfirm).toHaveBeenCalledWith(plan())
-
-    view.rerender(
-      <CommandConfirmation
-        disabledReason="The owning connection changed. Refresh before retrying."
-        onCancel={vi.fn()}
-        onConfirm={onConfirm}
-        open
-        plan={plan()}
-      />
-    )
-
-    const disabled = screen.getByRole('button', { name: 'Confirm Reassign task' }) as HTMLButtonElement
-
-    expect(disabled.disabled).toBe(true)
-    expect(screen.getByRole('status').textContent).toContain('owning connection changed')
-    fireEvent.click(disabled)
-    expect(onConfirm).toHaveBeenCalledTimes(1)
-  })
-
-  it('cannot confirm an incomplete identity or a direct no-confirmation plan', () => {
-    const onConfirm = vi.fn()
-
-    const incomplete = {
-      ...plan(),
-      identity: { ...IDENTITY, taskId: '' },
-      params: { ...plan().params, task_id: '' }
-    } as CommandPlan
-
-    const view = render(<CommandConfirmation onCancel={vi.fn()} onConfirm={onConfirm} open plan={incomplete} />)
-
-    expect((screen.getByRole('button', { name: 'Confirm Reassign task' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByRole('status').textContent).toContain('incomplete exact identity')
-
-    view.rerender(
-      <CommandConfirmation onCancel={vi.fn()} onConfirm={onConfirm} open plan={plan({ confirmation: false })} />
-    )
-    expect((screen.getByRole('button', { name: 'Confirm Reassign task' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByRole('status').textContent).toContain('does not require disruptive confirmation')
-  })
-
-  it('cannot confirm when the readback identity or allowlisted method differs from the visible target', () => {
+  it('revalidates the latest target on render and again at the confirmation click', () => {
+    const initial = planningSnapshot()
+    let latest = initial
+    const plan = planCommand({ assignee: 'reviewer', entityKey: entityKey(IDENTITY), kind: 'reassign-task' }, initial)
     const onConfirm = vi.fn()
 
     const view = render(
+      <CommandConfirmation getLatestSnapshot={() => latest} onCancel={vi.fn()} onConfirm={onConfirm} open plan={plan} />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Reassign task' }))
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+
+    latest = planningSnapshot('done', 2_100, 4)
+    view.rerender(
+      <CommandConfirmation getLatestSnapshot={() => latest} onCancel={vi.fn()} onConfirm={onConfirm} open plan={plan} />
+    )
+
+    expect((screen.getByRole('button', { name: 'Confirm command' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('status').textContent).toContain('target-changed-since-plan')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm command' }))
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['consequence', (plan: CommandPlan) => ({ ...plan, consequence: 'No consequence.' })],
+    ['state', (plan: CommandPlan) => ({ ...plan, context: { ...plan.context, currentState: 'done' } })],
+    [
+      'source',
+      (plan: CommandPlan) => ({
+        ...plan,
+        context: { ...plan.context, source: { ...plan.context.source, source: 'foreign' } }
+      })
+    ],
+    [
+      'authority',
+      (plan: CommandPlan) => ({
+        ...plan,
+        context: { ...plan.context, source: { ...plan.context.source, authority: 'stale' as const } }
+      })
+    ]
+  ])('disables a forged %s even when disabledReason is empty', (_label, forge) => {
+    const { getLatestSnapshot, plan } = setup()
+
+    render(
       <CommandConfirmation
+        disabledReason="   "
+        getLatestSnapshot={getLatestSnapshot}
         onCancel={vi.fn()}
-        onConfirm={onConfirm}
+        onConfirm={vi.fn()}
         open
-        plan={plan({ readback: { id: 'foreign-task', kind: 'kanban-task' } })}
+        plan={forge(plan) as CommandPlan}
       />
     )
 
-    expect((screen.getByRole('button', { name: 'Confirm Reassign task' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByRole('status').textContent).toContain('readback target')
-
-    view.rerender(
-      <CommandConfirmation onCancel={vi.fn()} onConfirm={onConfirm} open plan={plan({ method: 'shell.exec' })} />
-    )
-    expect((screen.getByRole('button', { name: 'Confirm Reassign task' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByRole('status').textContent).toContain('method is not allowlisted')
+    expect((screen.getByRole('button', { name: 'Confirm command' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('status').textContent).toContain('Invalid command plan')
+    expect(screen.queryByText('No consequence.')).toBeNull()
+    expect(screen.queryByText('done')).toBeNull()
+    expect(screen.queryByText('foreign')).toBeNull()
   })
 })

@@ -1,3 +1,5 @@
+import type { SessionOwnerRoute } from '@/store/session-request-router'
+
 import type { CommandEvidenceKind } from '../command-broker'
 import type { EntityIdentity, SourceHealth } from '../model'
 
@@ -61,6 +63,13 @@ export interface InspectorBlockerEvidence {
   kind: string
 }
 
+/** Complete UI route for opening the exact owning standard session. */
+export interface InspectorSessionTarget extends SessionOwnerRoute {
+  runtimeSessionId?: string
+  sessionId: string
+  storedSessionId?: string
+}
+
 export interface EntityInspectorData {
   attachments?: readonly InspectorAttachmentEvidence[]
   blocker?: InspectorBlockerEvidence
@@ -69,7 +78,7 @@ export interface EntityInspectorData {
   events?: readonly InspectorEventEvidence[]
   identity: EntityIdentity
   logTail?: InspectorLogEvidence
-  owningSessionId?: string
+  owningSession?: InspectorSessionTarget
   run?: InspectorRunEvidence
   source: SourceHealth
   subagent?: InspectorSubagentEvidence
@@ -79,7 +88,7 @@ export interface EntityInspectorData {
 export interface EntityInspectorProps {
   data: EntityInspectorData
   onInspectEvidence?: (kind: CommandEvidenceKind, identity: EntityIdentity) => void
-  onOpenSession?: (sessionId: string) => void
+  onOpenSession?: (target: InspectorSessionTarget) => void
 }
 
 function label(value: string): string {
@@ -117,8 +126,32 @@ function Region({ children, name }: { children: React.ReactNode; name: string })
   )
 }
 
+function exactOwningSession(
+  identity: EntityIdentity,
+  target: InspectorSessionTarget | undefined
+): InspectorSessionTarget | undefined {
+  if (
+    !target?.connectionId.trim() ||
+    !target.profile.trim() ||
+    !target.sessionId.trim() ||
+    target.connectionId !== identity.connectionId ||
+    target.profile !== identity.profile ||
+    (target.storedSessionId !== undefined && !target.storedSessionId.trim()) ||
+    (target.runtimeSessionId !== undefined && !target.runtimeSessionId.trim())
+  ) {
+    return undefined
+  }
+
+  if ((identity.kind === 'session' || identity.kind === 'subagent') && target.sessionId !== identity.sessionId) {
+    return undefined
+  }
+
+  return target
+}
+
 export function EntityInspector({ data, onInspectEvidence, onOpenSession }: EntityInspectorProps) {
   const targetLabel = data.task?.id ?? data.identity.kind
+  const owningSession = exactOwningSession(data.identity, data.owningSession)
 
   return (
     <aside aria-label="Lunar City entity inspector">
@@ -296,10 +329,10 @@ export function EntityInspector({ data, onInspectEvidence, onOpenSession }: Enti
         </Region>
       ) : null}
 
-      {data.owningSessionId && onOpenSession ? (
+      {owningSession && onOpenSession ? (
         <button
-          aria-label={`Open owning session ${data.owningSessionId}`}
-          onClick={() => onOpenSession(data.owningSessionId!)}
+          aria-label={`Open session ${owningSession.sessionId} on connection ${owningSession.connectionId} with profile ${owningSession.profile}`}
+          onClick={() => onOpenSession(owningSession)}
           type="button"
         >
           Open owning session

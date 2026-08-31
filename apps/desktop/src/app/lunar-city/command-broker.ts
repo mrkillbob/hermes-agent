@@ -1,6 +1,14 @@
 import { entityKey as canonicalEntityKey } from './identity'
 import type { LeaderOwner } from './leader-sessions'
-import type { AuthorityState, EntityIdentity, EntityKey, LunarCitySnapshot, LunarEntity, SourceHealth } from './model'
+import type {
+  AuthorityState,
+  DestinationId,
+  EntityIdentity,
+  EntityKey,
+  LunarCitySnapshot,
+  LunarEntity,
+  SourceHealth
+} from './model'
 
 export type CommandVerification = 'verified' | 'rejected' | 'timed_out' | 'verification_required'
 
@@ -32,10 +40,38 @@ export type CommandIntent =
   | { kind: 'dispatch-task'; entityKey: EntityKey }
   | { kind: 'change-task-state'; entityKey: EntityKey; state: string }
 
+export type CommandEffectKind =
+  | 'session-present'
+  | 'evidence-present'
+  | 'guidance-recorded'
+  | 'session-interrupted'
+  | 'subagent-interrupted'
+  | 'run-terminated'
+  | 'task-retried'
+  | 'task-reclaimed'
+  | 'task-reassigned'
+  | 'task-dispatched'
+  | 'task-state-changed'
+
+export interface CommandEffect {
+  kind: CommandEffectKind
+  targetId: string
+  value?: string
+}
+
 export interface ReadbackPlan {
-  kind: 'session' | 'subagent' | 'kanban-task' | 'kanban-run'
+  expectedEffect: CommandEffect
   id: string
-  expectedState?: string
+  kind: 'session' | 'subagent' | 'kanban-task' | 'kanban-run'
+}
+
+export interface CommandObservedState {
+  animation: string
+  authority: AuthorityState
+  destination: DestinationId
+  observedAt: number
+  source: string
+  value: string
 }
 
 export interface CommandPlanContext {
@@ -43,19 +79,23 @@ export interface CommandPlanContext {
   currentState: string
   repositoryId?: string
   source: SourceHealth
+  sourceOwner: LeaderOwner
 }
 
 export interface CommandPlan {
   confirmation: boolean
   consequence: string
   context: CommandPlanContext
+  digest: string
   entityKey: EntityKey
   identity: EntityIdentity
+  intent: CommandIntent
   method: string
   operation: CommandOperation
   owner: LeaderOwner
-  params: Record<string, unknown>
+  params: Readonly<Record<string, unknown>>
   plannedAt: number
+  plannedRevision: number
   readback: ReadbackPlan
 }
 
@@ -70,12 +110,13 @@ export interface CommandReceipt {
 export interface CommandTargetState {
   availableOperations: readonly CommandOperation[]
   canonicalProjectId?: string
-  currentState: string
   entity: LunarEntity
+  observedState: CommandObservedState
   ownerCandidates: readonly LeaderOwner[]
   readbackCapabilities: readonly ReadbackPlan['kind'][]
   repositoryId?: string
   source: SourceHealth
+  sourceOwner: LeaderOwner
 }
 
 export interface CommandPlanningSnapshot {
@@ -83,14 +124,21 @@ export interface CommandPlanningSnapshot {
   targets: ReadonlyMap<EntityKey, CommandTargetState>
 }
 
+export interface CommandCausalReceipt {
+  authority: 'authoritative'
+  planDigest: string
+}
+
 export interface CommandReadback {
   authority: AuthorityState
+  effect?: CommandEffect
   identity: EntityIdentity
   observedAt: number
   operation: CommandOperation
   outcome: 'rejected' | 'unknown' | 'verified'
   owner: LeaderOwner
-  state?: string
+  receipt?: CommandCausalReceipt
+  revision: number
 }
 
 export interface CommandExecutor {
@@ -107,6 +155,7 @@ export interface CommandExecutors {
 
 export interface ExecuteCommandOptions {
   confirmed?: boolean
+  latestSnapshot: () => CommandPlanningSnapshot | Promise<CommandPlanningSnapshot>
 }
 
 export class CommandRejectedError extends Error {
@@ -126,6 +175,14 @@ export class CommandTimeoutError extends Error {
   }
 }
 
+interface Compatibility {
+  confirmation: boolean
+  consequence: string
+  method: string
+  params: Record<string, unknown>
+  readback: ReadbackPlan
+}
+
 function fail(code: string, detail: string): never {
   throw new Error(`${code}: ${detail}`)
 }
@@ -138,22 +195,6 @@ function required(value: string | undefined, code: string, label: string): strin
   }
 
   return normalized
-}
-
-function exactOwner(identity: EntityIdentity, candidates: readonly LeaderOwner[]): LeaderOwner {
-  if (candidates.length !== 1) {
-    fail('owner-is-ambiguous', `expected one owner route and found ${candidates.length}`)
-  }
-
-  const candidate = candidates[0]
-  const connectionId = required(candidate.connectionId, 'owner-is-ambiguous', 'connectionId')
-  const profile = required(candidate.profile, 'owner-is-ambiguous', 'profile')
-
-  if (connectionId !== identity.connectionId || profile !== identity.profile) {
-    fail('owner-is-ambiguous', 'the resolved route does not own the complete typed identity')
-  }
-
-  return { connectionId, profile }
 }
 
 function validateIdentity(identity: EntityIdentity): void {
@@ -207,7 +248,52 @@ function sameIdentity(left: EntityIdentity, right: EntityIdentity): boolean {
   return false
 }
 
-function sourceFor(target: CommandTargetState, city: LunarCitySnapshot): SourceHealth {
+function samePosition(left: LunarEntity['position'], right: LunarEntity['position']): boolean {
+  if (!left || !right) {
+    return left === right
+  }
+
+  return left.x === right.x && left.y === right.y && left.z === right.z
+}
+
+function sameEntity(left: LunarEntity, right: LunarEntity): boolean {
+  return (
+    left.key === right.key &&
+    sameIdentity(left.identity, right.identity) &&
+    left.authority === right.authority &&
+    left.observedAt === right.observedAt &&
+    left.destination === right.destination &&
+    left.animation === right.animation &&
+    left.projectId === right.projectId &&
+    left.variant === right.variant &&
+    samePosition(left.position, right.position)
+  )
+}
+
+function exactOwner(identity: EntityIdentity, target: CommandTargetState): LeaderOwner {
+  if (target.ownerCandidates.length !== 1) {
+    fail('owner-is-ambiguous', `expected one owner route and found ${target.ownerCandidates.length}`)
+  }
+
+  const candidate = target.ownerCandidates[0]
+
+  const owner = {
+    connectionId: required(candidate.connectionId, 'owner-is-ambiguous', 'connectionId'),
+    profile: required(candidate.profile, 'owner-is-ambiguous', 'profile')
+  }
+
+  if (
+    owner.connectionId !== identity.connectionId ||
+    owner.profile !== identity.profile ||
+    !sameOwner(owner, target.sourceOwner)
+  ) {
+    fail('owner-is-ambiguous', 'the resolved route and source owner do not own the complete typed identity')
+  }
+
+  return owner
+}
+
+function exactSource(target: CommandTargetState, city: LunarCitySnapshot): SourceHealth {
   const sources = city.sources.filter(source => source.source === target.source.source)
 
   if (sources.length !== 1) {
@@ -221,44 +307,50 @@ function sourceFor(target: CommandTargetState, city: LunarCitySnapshot): SourceH
     source.observedAt !== target.source.observedAt ||
     source.error !== target.source.error
   ) {
-    fail('source-is-ambiguous', 'target source metadata does not match the immutable city snapshot')
+    fail('target-binding-mismatch', 'target source differs from the immutable city source')
   }
 
   return { ...source }
 }
 
-function readbackFor(identity: EntityIdentity, operation: CommandOperation, expectedState?: string): ReadbackPlan {
-  if (operation === 'terminate-run') {
-    if (identity.kind !== 'kanban') {
-      fail('unsupported-command', 'run termination requires a Kanban identity')
-    }
-
-    return { expectedState, id: required(identity.runId, 'identity-incomplete', 'runId'), kind: 'kanban-run' }
+function validateTargetBinding(
+  intent: CommandIntent,
+  target: CommandTargetState,
+  cityEntity: LunarEntity,
+  source: SourceHealth
+): void {
+  if (
+    target.entity.key !== intent.entityKey ||
+    canonicalEntityKey(target.entity.identity) !== intent.entityKey ||
+    !sameEntity(target.entity, cityEntity)
+  ) {
+    fail('target-binding-mismatch', 'target entity differs from the immutable city entity')
   }
+
+  const state = target.observedState
 
   if (
-    operation === 'retry-task' ||
-    operation === 'reclaim-task' ||
-    operation === 'reassign-task' ||
-    operation === 'dispatch-task' ||
-    operation === 'change-task-state'
+    state.animation !== cityEntity.animation ||
+    state.authority !== cityEntity.authority ||
+    state.destination !== cityEntity.destination ||
+    state.observedAt !== cityEntity.observedAt ||
+    state.source !== source.source ||
+    source.observedAt !== cityEntity.observedAt ||
+    source.authority !== cityEntity.authority ||
+    !state.value.trim()
   ) {
-    if (identity.kind !== 'kanban') {
-      fail('unsupported-command', `${operation} requires a Kanban identity`)
-    }
-
-    return { expectedState, id: identity.taskId, kind: 'kanban-task' }
+    fail('target-binding-mismatch', 'current state evidence is not bound to the immutable city observation')
   }
+}
 
-  if (identity.kind === 'subagent') {
-    return { expectedState, id: identity.subagentId, kind: 'subagent' }
+function requireKind(
+  identity: EntityIdentity,
+  operation: CommandOperation,
+  allowed: readonly EntityIdentity['kind'][]
+): void {
+  if (!allowed.includes(identity.kind)) {
+    fail('operation-identity-incompatible', `${operation} cannot target ${identity.kind}`)
   }
-
-  if (identity.kind === 'session') {
-    return { expectedState, id: identity.sessionId, kind: 'session' }
-  }
-
-  fail('unsupported-command', `${operation} requires a session, subagent, task, or run identity`)
 }
 
 function identityParams(identity: EntityIdentity): Record<string, unknown> {
@@ -282,99 +374,209 @@ function identityParams(identity: EntityIdentity): Record<string, unknown> {
   return {}
 }
 
-function operationDetails(
-  intent: CommandIntent,
-  identity: EntityIdentity,
-  currentState: string
-): { consequence: string; expectedState?: string; method: string; params: Record<string, unknown> } {
+function effect(kind: CommandEffectKind, targetId: string, value?: string): CommandEffect {
+  return { kind, targetId, ...(value === undefined ? {} : { value }) }
+}
+
+function readback(kind: ReadbackPlan['kind'], id: string, expectedEffect: CommandEffect): ReadbackPlan {
+  return { expectedEffect, id, kind }
+}
+
+function compatibilityFor(intent: CommandIntent, identity: EntityIdentity, currentState: string): Compatibility {
   const params = identityParams(identity)
 
   switch (intent.kind) {
-    case 'open-session':
+    case 'open-session': {
+      requireKind(identity, intent.kind, ['session', 'subagent'])
+      const sessionId = identity.kind === 'session' || identity.kind === 'subagent' ? identity.sessionId : ''
+
       return {
+        confirmation: false,
         consequence: 'Open the exact owning standard session without changing execution.',
         method: 'session.open',
-        params
-      }
-
-    case 'inspect-evidence':
-      return {
-        consequence: `Inspect ${intent.evidence} from its labeled owning source without changing execution.`,
-        method: 'evidence.inspect',
-        params: { ...params, evidence: intent.evidence }
-      }
-    case 'send-guidance': {
-      const text = required(intent.text, 'identity-incomplete', 'guidance text')
-
-      const method =
-        identity.kind === 'subagent' ? 'subagent.steer' : currentState === 'running' ? 'session.steer' : 'prompt.submit'
-
-      return {
-        consequence: 'Send ordinary guidance to the exact owned conversation; it does not assert task completion.',
-        method,
-        params: { ...params, text }
+        params,
+        readback: readback('session', sessionId, effect('session-present', sessionId))
       }
     }
 
-    case 'interrupt-session':
+    case 'inspect-evidence': {
+      requireKind(identity, intent.kind, ['session', 'subagent', 'kanban'])
+
+      if (identity.kind === 'session') {
+        return {
+          confirmation: false,
+          consequence: `Inspect ${intent.evidence} from its labeled owning source without changing execution.`,
+          method: 'evidence.inspect',
+          params: { ...params, evidence: intent.evidence },
+          readback: readback(
+            'session',
+            identity.sessionId,
+            effect('evidence-present', identity.sessionId, intent.evidence)
+          )
+        }
+      }
+
+      if (identity.kind === 'subagent') {
+        return {
+          confirmation: false,
+          consequence: `Inspect ${intent.evidence} from its labeled owning source without changing execution.`,
+          method: 'evidence.inspect',
+          params: { ...params, evidence: intent.evidence },
+          readback: readback(
+            'subagent',
+            identity.subagentId,
+            effect('evidence-present', identity.subagentId, intent.evidence)
+          )
+        }
+      }
+
+      if (identity.kind !== 'kanban') {
+        fail('operation-identity-incompatible', `${intent.kind} cannot target ${identity.kind}`)
+      }
+
+      const useRun = intent.evidence === 'run' && Boolean(identity.runId)
+      const id = useRun ? identity.runId! : identity.taskId
+
       return {
+        confirmation: false,
+        consequence: `Inspect ${intent.evidence} from its labeled owning source without changing execution.`,
+        method: 'evidence.inspect',
+        params: { ...params, evidence: intent.evidence },
+        readback: readback(useRun ? 'kanban-run' : 'kanban-task', id, effect('evidence-present', id, intent.evidence))
+      }
+    }
+
+    case 'send-guidance': {
+      requireKind(identity, intent.kind, ['session', 'subagent'])
+      const text = required(intent.text, 'identity-incomplete', 'guidance text')
+
+      if (identity.kind === 'subagent') {
+        return {
+          confirmation: false,
+          consequence: 'Send ordinary guidance to the exact child worker; it does not assert task completion.',
+          method: 'subagent.steer',
+          params: { ...params, text },
+          readback: readback('subagent', identity.subagentId, effect('guidance-recorded', identity.subagentId))
+        }
+      }
+
+      if (identity.kind !== 'session') {
+        fail('operation-identity-incompatible', `${intent.kind} cannot target ${identity.kind}`)
+      }
+
+      return {
+        confirmation: false,
+        consequence: 'Send ordinary guidance to the exact owned conversation; it does not assert task completion.',
+        method: currentState === 'running' ? 'session.steer' : 'prompt.submit',
+        params: { ...params, text },
+        readback: readback('session', identity.sessionId, effect('guidance-recorded', identity.sessionId))
+      }
+    }
+
+    case 'interrupt-session': {
+      requireKind(identity, intent.kind, ['session'])
+      const sessionId = identity.kind === 'session' ? identity.sessionId : ''
+
+      return {
+        confirmation: true,
         consequence: 'Interrupt the active turn in the exact owning session; unfinished work may stop.',
         method: 'session.interrupt',
-        params
+        params,
+        readback: readback('session', sessionId, effect('session-interrupted', sessionId))
       }
+    }
 
-    case 'interrupt-subagent':
+    case 'interrupt-subagent': {
+      requireKind(identity, intent.kind, ['subagent'])
+      const subagentId = identity.kind === 'subagent' ? identity.subagentId : ''
+
       return {
+        confirmation: true,
         consequence: 'Interrupt the exact child worker; unfinished delegated work may stop.',
         method: 'subagent.interrupt',
-        params
+        params,
+        readback: readback('subagent', subagentId, effect('subagent-interrupted', subagentId))
       }
+    }
 
-    case 'terminate-run':
+    case 'terminate-run': {
+      requireKind(identity, intent.kind, ['kanban'])
+      const runId = identity.kind === 'kanban' ? required(identity.runId, 'identity-incomplete', 'runId') : ''
+
       return {
+        confirmation: true,
         consequence: 'Terminate the exact Kanban run; the worker may stop before producing acceptance evidence.',
         method: 'kanban.run.terminate',
-        params
+        params,
+        readback: readback('kanban-run', runId, effect('run-terminated', runId))
       }
+    }
 
-    case 'retry-task':
+    case 'retry-task': {
+      requireKind(identity, intent.kind, ['kanban'])
+      const taskId = identity.kind === 'kanban' ? identity.taskId : ''
+
       return {
+        confirmation: true,
         consequence:
           'Request one fresh retry for the exact task after confirmation; no retry occurs on an ambiguous result.',
         method: 'kanban.task.retry',
-        params
-      }
-
-    case 'reclaim-task':
-      return {
-        consequence: 'Reclaim the exact task from its current worker and return it to dispatcher control.',
-        method: 'kanban.task.reclaim',
-        params
-      }
-    case 'reassign-task': {
-      const assignee = required(intent.assignee, 'identity-incomplete', 'assignee')
-
-      return {
-        consequence: `Reassign the exact task to ${assignee}; its current worker may be replaced.`,
-        method: 'kanban.task.reassign',
-        params: { ...params, assignee }
+        params,
+        readback: readback('kanban-task', taskId, effect('task-retried', taskId))
       }
     }
 
-    case 'dispatch-task':
+    case 'reclaim-task': {
+      requireKind(identity, intent.kind, ['kanban'])
+      const taskId = identity.kind === 'kanban' ? identity.taskId : ''
+
       return {
+        confirmation: true,
+        consequence: 'Reclaim the exact task from its current worker and return it to dispatcher control.',
+        method: 'kanban.task.reclaim',
+        params,
+        readback: readback('kanban-task', taskId, effect('task-reclaimed', taskId))
+      }
+    }
+
+    case 'reassign-task': {
+      requireKind(identity, intent.kind, ['kanban'])
+      const taskId = identity.kind === 'kanban' ? identity.taskId : ''
+      const assignee = required(intent.assignee, 'identity-incomplete', 'assignee')
+
+      return {
+        confirmation: true,
+        consequence: `Reassign the exact task to ${assignee}; its current worker may be replaced.`,
+        method: 'kanban.task.reassign',
+        params: { ...params, assignee },
+        readback: readback('kanban-task', taskId, effect('task-reassigned', taskId, assignee))
+      }
+    }
+
+    case 'dispatch-task': {
+      requireKind(identity, intent.kind, ['kanban'])
+      const taskId = identity.kind === 'kanban' ? identity.taskId : ''
+
+      return {
+        confirmation: true,
         consequence: 'Dispatch the exact task once; an ambiguous acknowledgement will not be retried.',
         method: 'kanban.task.dispatch',
-        params
+        params,
+        readback: readback('kanban-task', taskId, effect('task-dispatched', taskId))
       }
+    }
+
     case 'change-task-state': {
+      requireKind(identity, intent.kind, ['kanban'])
+      const taskId = identity.kind === 'kanban' ? identity.taskId : ''
       const state = required(intent.state, 'identity-incomplete', 'task state')
 
       return {
+        confirmation: true,
         consequence: `Change the exact task state from ${currentState} to ${state}.`,
-        expectedState: state,
         method: 'kanban.task.patch',
-        params: { ...params, status: state }
+        params: { ...params, status: state },
+        readback: readback('kanban-task', taskId, effect('task-state-changed', taskId, state))
       }
     }
   }
@@ -384,187 +586,88 @@ function mutationRequiresAuthoritativeState(operation: CommandOperation): boolea
   return operation !== 'open-session' && operation !== 'inspect-evidence'
 }
 
-function confirmationFor(operation: CommandOperation): boolean {
-  return operation !== 'open-session' && operation !== 'inspect-evidence' && operation !== 'send-guidance'
+function stableValue(value: unknown): string {
+  if (value === undefined) {
+    return 'undefined'
+  }
+
+  if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
+    return JSON.stringify(value)
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map(stableValue).join(',')}]`
+  }
+
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+
+    return `{${Object.keys(record)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${stableValue(record[key])}`)
+      .join(',')}}`
+  }
+
+  return JSON.stringify(String(value))
 }
 
-const ALLOWED_METHODS: Readonly<Record<CommandOperation, readonly string[]>> = {
-  'change-task-state': ['kanban.task.patch'],
-  'dispatch-task': ['kanban.task.dispatch'],
-  'inspect-evidence': ['evidence.inspect'],
-  'interrupt-session': ['session.interrupt'],
-  'interrupt-subagent': ['subagent.interrupt'],
-  'open-session': ['session.open'],
-  'reassign-task': ['kanban.task.reassign'],
-  'reclaim-task': ['kanban.task.reclaim'],
-  'retry-task': ['kanban.task.retry'],
-  'send-guidance': ['prompt.submit', 'session.steer', 'subagent.steer'],
-  'terminate-run': ['kanban.run.terminate']
+function digest(value: unknown): string {
+  const input = stableValue(value)
+  let hash = 0xcbf29ce484222325n
+
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= BigInt(input.charCodeAt(index))
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
+  }
+
+  return hash.toString(16).padStart(16, '0')
 }
 
-function paramsMatchIdentity(plan: CommandPlan): boolean {
-  const { identity, params } = plan
+function planPayload(plan: Omit<CommandPlan, 'digest'> | CommandPlan): Omit<CommandPlan, 'digest'> {
+  const { digest: _digest, ...payload } = plan as CommandPlan
 
-  if (identity.kind === 'session') {
-    return params.session_id === identity.sessionId
-  }
-
-  if (identity.kind === 'subagent') {
-    return params.session_id === identity.sessionId && params.subagent_id === identity.subagentId
-  }
-
-  if (identity.kind === 'kanban') {
-    return (
-      params.board === identity.board &&
-      params.task_id === identity.taskId &&
-      (identity.runId === undefined ? params.run_id === undefined : params.run_id === identity.runId) &&
-      (identity.workerId === undefined ? params.worker_id === undefined : params.worker_id === identity.workerId)
-    )
-  }
-
-  return true
+  return payload
 }
 
-function operationParamsAreComplete(plan: CommandPlan): boolean {
-  if (plan.operation === 'send-guidance') {
-    return typeof plan.params.text === 'string' && Boolean(plan.params.text.trim())
-  }
-
-  if (plan.operation === 'inspect-evidence') {
-    return (
-      plan.params.evidence === 'attachments' ||
-      plan.params.evidence === 'comments' ||
-      plan.params.evidence === 'diagnostics' ||
-      plan.params.evidence === 'events' ||
-      plan.params.evidence === 'log' ||
-      plan.params.evidence === 'run' ||
-      plan.params.evidence === 'task'
-    )
-  }
-
-  if (plan.operation === 'reassign-task') {
-    return typeof plan.params.assignee === 'string' && Boolean(plan.params.assignee.trim())
-  }
-
-  if (plan.operation === 'change-task-state') {
-    return (
-      typeof plan.params.status === 'string' &&
-      Boolean(plan.params.status.trim()) &&
-      plan.readback.expectedState === plan.params.status
-    )
-  }
-
-  return true
+function freezeIntent(intent: CommandIntent): CommandIntent {
+  return Object.freeze({ ...intent }) as CommandIntent
 }
 
-function allowedParamNames(plan: CommandPlan): ReadonlySet<string> {
-  const names = new Set<string>()
-
-  if (plan.identity.kind === 'session' || plan.identity.kind === 'subagent') {
-    names.add('session_id')
+function buildPlan(
+  intent: CommandIntent,
+  identity: EntityIdentity,
+  owner: LeaderOwner,
+  source: SourceHealth,
+  target: CommandTargetState,
+  snapshot: CommandPlanningSnapshot,
+  compatibility: Compatibility
+): CommandPlan {
+  const payload: Omit<CommandPlan, 'digest'> = {
+    confirmation: compatibility.confirmation,
+    consequence: compatibility.consequence,
+    context: Object.freeze({
+      canonicalProjectId: target.canonicalProjectId,
+      currentState: target.observedState.value,
+      repositoryId: target.repositoryId,
+      source: Object.freeze({ ...source }),
+      sourceOwner: Object.freeze({ ...target.sourceOwner })
+    }),
+    entityKey: intent.entityKey,
+    identity: Object.freeze({ ...identity }) as EntityIdentity,
+    intent: freezeIntent(intent),
+    method: compatibility.method,
+    operation: intent.kind,
+    owner: Object.freeze({ ...owner }),
+    params: Object.freeze({ ...compatibility.params }),
+    plannedAt: Math.max(target.entity.observedAt, source.observedAt),
+    plannedRevision: snapshot.city.revision,
+    readback: Object.freeze({
+      ...compatibility.readback,
+      expectedEffect: Object.freeze({ ...compatibility.readback.expectedEffect })
+    })
   }
 
-  if (plan.identity.kind === 'subagent') {
-    names.add('subagent_id')
-  }
-
-  if (plan.identity.kind === 'kanban') {
-    names.add('board')
-    names.add('task_id')
-
-    if (plan.identity.runId !== undefined) {
-      names.add('run_id')
-    }
-
-    if (plan.identity.workerId !== undefined) {
-      names.add('worker_id')
-    }
-  }
-
-  if (plan.operation === 'send-guidance') {
-    names.add('text')
-  } else if (plan.operation === 'inspect-evidence') {
-    names.add('evidence')
-  } else if (plan.operation === 'reassign-task') {
-    names.add('assignee')
-  } else if (plan.operation === 'change-task-state') {
-    names.add('status')
-  }
-
-  return names
-}
-
-/** Revalidates an opaque plan at confirmation and send boundaries. */
-export function commandPlanIntegrityError(plan: CommandPlan): string | undefined {
-  try {
-    validateIdentity(plan.identity)
-  } catch {
-    return 'incomplete exact identity'
-  }
-
-  if (canonicalEntityKey(plan.identity) !== plan.entityKey) {
-    return 'entity key does not match the exact identity'
-  }
-
-  if (
-    !plan.owner.connectionId.trim() ||
-    !plan.owner.profile.trim() ||
-    plan.owner.connectionId !== plan.identity.connectionId ||
-    plan.owner.profile !== plan.identity.profile
-  ) {
-    return 'owner route is incomplete or mismatched'
-  }
-
-  if (plan.confirmation !== confirmationFor(plan.operation)) {
-    return 'confirmation class does not match the operation allowlist'
-  }
-
-  if (!ALLOWED_METHODS[plan.operation]?.includes(plan.method)) {
-    return 'method is not allowlisted for the operation'
-  }
-
-  if (!paramsMatchIdentity(plan) || !operationParamsAreComplete(plan)) {
-    return 'request parameters do not match the exact identity or operation'
-  }
-
-  const allowed = allowedParamNames(plan)
-
-  if (Object.keys(plan.params).some(name => !allowed.has(name))) {
-    return 'request parameters contain a non-allowlisted field'
-  }
-
-  let expectedReadback: ReadbackPlan
-
-  try {
-    expectedReadback = readbackFor(
-      plan.identity,
-      plan.operation,
-      plan.operation === 'change-task-state' ? String(plan.params.status) : undefined
-    )
-  } catch {
-    return 'readback target is incomplete'
-  }
-
-  if (
-    plan.readback.kind !== expectedReadback.kind ||
-    plan.readback.id !== expectedReadback.id ||
-    plan.readback.expectedState !== expectedReadback.expectedState
-  ) {
-    return 'readback target does not match the exact identity and requested result'
-  }
-
-  if (
-    !plan.context.currentState.trim() ||
-    !plan.context.source.source.trim() ||
-    !Number.isFinite(plan.context.source.observedAt) ||
-    !Number.isFinite(plan.plannedAt) ||
-    plan.plannedAt < plan.context.source.observedAt ||
-    !plan.consequence.trim()
-  ) {
-    return 'current state, source, timestamp, or consequence is incomplete'
-  }
-
-  return undefined
+  return Object.freeze({ ...payload, digest: digest(payload) })
 }
 
 export function planCommand(intent: CommandIntent, snapshot: CommandPlanningSnapshot): CommandPlan {
@@ -577,29 +680,19 @@ export function planCommand(intent: CommandIntent, snapshot: CommandPlanningSnap
 
   validateIdentity(target.entity.identity)
 
-  if (
-    target.entity.key !== intent.entityKey ||
-    canonicalEntityKey(target.entity.identity) !== intent.entityKey ||
-    !sameIdentity(target.entity.identity, cityEntity.identity)
-  ) {
-    fail('identity-mismatch', 'entity key, command target, and city snapshot do not name the same typed identity')
-  }
+  const owner = exactOwner(target.entity.identity, target)
+  const source = exactSource(target, snapshot.city)
+  validateTargetBinding(intent, target, cityEntity, source)
+
+  const compatibility = compatibilityFor(intent, target.entity.identity, target.observedState.value)
 
   if (!target.availableOperations.includes(intent.kind)) {
     fail('unsupported-command', `${intent.kind} is not available for this exact target`)
   }
 
-  const owner = exactOwner(target.entity.identity, target.ownerCandidates)
-
-  if (
-    target.entity.identity.kind === 'kanban' &&
-    !snapshot.city.sources.some(source => source.source === target.source.source)
-  ) {
-    fail('kanban-source-unavailable', 'the exact Kanban source is not available')
+  if (!target.readbackCapabilities.includes(compatibility.readback.kind)) {
+    fail('readback-unavailable', `${compatibility.readback.kind} cannot be authoritatively reread on this owner route`)
   }
-
-  const source = sourceFor(target, snapshot.city)
-  const currentState = required(target.currentState, 'state-unavailable', 'current state')
 
   if (mutationRequiresAuthoritativeState(intent.kind)) {
     if (target.entity.authority === 'stale' || source.authority === 'stale') {
@@ -615,31 +708,36 @@ export function planCommand(intent: CommandIntent, snapshot: CommandPlanningSnap
     }
   }
 
-  const details = operationDetails(intent, target.entity.identity, currentState)
-  const readback = readbackFor(target.entity.identity, intent.kind, details.expectedState)
+  return buildPlan(intent, target.entity.identity, owner, source, target, snapshot, compatibility)
+}
 
-  if (!target.readbackCapabilities.includes(readback.kind)) {
-    fail('readback-unavailable', `${readback.kind} cannot be authoritatively reread on this owner route`)
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Rebuilds every canonical field from the latest immutable semantic inputs. */
+export function revalidateCommandPlan(plan: CommandPlan, latest: CommandPlanningSnapshot): string | undefined {
+  if (digest(planPayload(plan)) !== plan.digest) {
+    return 'Invalid command plan: canonical digest mismatch.'
   }
 
-  return Object.freeze({
-    confirmation: confirmationFor(intent.kind),
-    consequence: details.consequence,
-    context: Object.freeze({
-      canonicalProjectId: target.canonicalProjectId,
-      currentState,
-      repositoryId: target.repositoryId,
-      source: Object.freeze(source)
-    }),
-    entityKey: intent.entityKey,
-    identity: Object.freeze({ ...target.entity.identity }) as EntityIdentity,
-    method: details.method,
-    operation: intent.kind,
-    owner: Object.freeze(owner),
-    params: Object.freeze(details.params),
-    plannedAt: Math.max(target.entity.observedAt, source.observedAt),
-    readback: Object.freeze(readback)
-  })
+  let rebuilt: CommandPlan
+
+  try {
+    rebuilt = planCommand(plan.intent, latest)
+  } catch (error) {
+    return `target-changed-since-plan: ${errorMessage(error)}`
+  }
+
+  if (stableValue(plan) !== stableValue(rebuilt)) {
+    return 'target-changed-since-plan: canonical plan fields no longer match the latest target.'
+  }
+
+  return undefined
+}
+
+export function commandPlanIntegrityError(plan: CommandPlan, latest: CommandPlanningSnapshot): string | undefined {
+  return revalidateCommandPlan(plan, latest)
 }
 
 function executorFor(plan: CommandPlan, executors: CommandExecutors): CommandExecutor {
@@ -658,10 +756,6 @@ function executorFor(plan: CommandPlan, executors: CommandExecutors): CommandExe
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 function receipt(
   plan: CommandPlan,
   verification: CommandVerification,
@@ -670,36 +764,56 @@ function receipt(
   return { identity: { ...plan.identity }, verification, ...extras }
 }
 
-function readbackMatchesPlan(plan: CommandPlan, readback: CommandReadback): boolean {
+function authoritativeCausalReadback(plan: CommandPlan, value: CommandReadback): boolean {
+  const monotonic = value.revision > plan.plannedRevision && value.observedAt > plan.plannedAt
+  const receiptMatches = value.receipt?.authority === 'authoritative' && value.receipt.planDigest === plan.digest
+
+  return Boolean(monotonic || receiptMatches)
+}
+
+function readbackBaseMatches(plan: CommandPlan, value: CommandReadback): boolean {
   return (
-    readback.authority === 'authoritative' &&
-    readback.observedAt >= plan.plannedAt &&
-    readback.operation === plan.operation &&
-    sameIdentity(readback.identity, plan.identity) &&
-    sameOwner(readback.owner, plan.owner) &&
-    (plan.readback.expectedState === undefined || readback.state === plan.readback.expectedState)
+    value.authority === 'authoritative' &&
+    value.operation === plan.operation &&
+    sameIdentity(value.identity, plan.identity) &&
+    sameOwner(value.owner, plan.owner) &&
+    authoritativeCausalReadback(plan, value)
   )
 }
 
+function sameEffect(left: CommandEffect | undefined, right: CommandEffect): boolean {
+  return left?.kind === right.kind && left.targetId === right.targetId && left.value === right.value
+}
+
 /**
- * Sends a command once through the executor selected by the plan's typed
- * readback. An ACK is retained only as non-authoritative evidence: identity,
- * owner, freshness, expected state, and terminal outcome must all match the
- * subsequent authoritative read before the command verifies.
+ * Revalidates against a freshly injected immutable target immediately before
+ * one send, then requires a causal operation-specific authoritative readback.
  */
 export async function executeCommand(
   plan: CommandPlan,
   executors: CommandExecutors,
-  options: ExecuteCommandOptions = {}
+  options: ExecuteCommandOptions
 ): Promise<CommandReceipt> {
-  const integrityError = commandPlanIntegrityError(plan)
-
-  if (integrityError) {
-    return receipt(plan, 'rejected', { error: `Invalid command plan: ${integrityError}.` })
-  }
-
   if (plan.confirmation && options.confirmed !== true) {
     return receipt(plan, 'rejected', { error: 'Command confirmation was not granted.' })
+  }
+
+  if (!options?.latestSnapshot) {
+    return receipt(plan, 'rejected', { error: 'Invalid command plan: latest target revalidation is required.' })
+  }
+
+  let latest: CommandPlanningSnapshot
+
+  try {
+    latest = await options.latestSnapshot()
+  } catch (error) {
+    return receipt(plan, 'rejected', { error: `Latest target revalidation failed: ${errorMessage(error)}` })
+  }
+
+  const integrityError = revalidateCommandPlan(plan, latest)
+
+  if (integrityError) {
+    return receipt(plan, 'rejected', { error: integrityError })
   }
 
   const executor = executorFor(plan, executors)
@@ -719,29 +833,35 @@ export async function executeCommand(
     return receipt(plan, 'verification_required', { error: errorMessage(error) })
   }
 
-  let readback: CommandReadback | null
+  let readbackValue: CommandReadback | null
 
   try {
-    readback = await executor.readback(plan)
+    readbackValue = await executor.readback(plan)
   } catch (error) {
     return receipt(plan, 'verification_required', { error: errorMessage(error), response })
   }
 
-  if (!readback || !readbackMatchesPlan(plan, readback)) {
+  if (!readbackValue || !readbackBaseMatches(plan, readbackValue)) {
     return receipt(plan, 'verification_required', {
-      error: 'Authoritative readback was missing, stale, mismatched, or did not show the requested result.',
-      readback,
+      error: 'Authoritative causal readback was missing, cached, stale, or mismatched.',
+      readback: readbackValue,
       response
     })
   }
 
-  if (readback.outcome === 'rejected') {
-    return receipt(plan, 'rejected', { readback, response })
+  // A canonical authoritative rejection is terminal even when the requested
+  // effect is absent or differs; rejection means the effect did not occur.
+  if (readbackValue.outcome === 'rejected') {
+    return receipt(plan, 'rejected', { readback: readbackValue, response })
   }
 
-  if (readback.outcome !== 'verified') {
-    return receipt(plan, 'verification_required', { readback, response })
+  if (readbackValue.outcome !== 'verified' || !sameEffect(readbackValue.effect, plan.readback.expectedEffect)) {
+    return receipt(plan, 'verification_required', {
+      error: 'Authoritative readback did not contain the expected canonical effect.',
+      readback: readbackValue,
+      response
+    })
   }
 
-  return receipt(plan, 'verified', { readback, response })
+  return receipt(plan, 'verified', { readback: readbackValue, response })
 }

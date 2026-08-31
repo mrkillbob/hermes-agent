@@ -1,370 +1,553 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  type CommandEffect,
   type CommandExecutors,
   type CommandIntent,
+  type CommandOperation,
+  type CommandPlan,
   type CommandPlanningSnapshot,
   type CommandReadback,
   CommandRejectedError,
   type CommandTargetState,
   CommandTimeoutError,
   executeCommand,
-  planCommand
+  planCommand,
+  revalidateCommandPlan
 } from './command-broker'
 import { entityKey } from './identity'
 import type { EntityIdentity, LunarCitySnapshot, LunarEntity, SourceHealth } from './model'
 
+type IdentityKind = EntityIdentity['kind']
+
 const OWNER = { connectionId: 'connection-a', profile: 'worker' }
 
-const SESSION_IDENTITY: EntityIdentity = {
-  connectionId: OWNER.connectionId,
-  kind: 'session',
-  profile: OWNER.profile,
-  sessionId: 'session-1'
+const IDENTITIES: Readonly<Record<IdentityKind, EntityIdentity>> = {
+  profile: { ...OWNER, kind: 'profile' },
+  session: { ...OWNER, kind: 'session', sessionId: 'session-1' },
+  subagent: { ...OWNER, kind: 'subagent', sessionId: 'session-1', subagentId: 'child-1' },
+  kanban: {
+    ...OWNER,
+    board: 'primary',
+    kind: 'kanban',
+    runId: 'run-7',
+    taskId: 'task-7',
+    workerId: 'worker-7'
+  }
 }
 
-const SUBAGENT_IDENTITY: EntityIdentity = {
-  connectionId: OWNER.connectionId,
-  kind: 'subagent',
-  profile: OWNER.profile,
-  sessionId: 'session-1',
-  subagentId: 'child-1'
+const ALL_OPERATIONS: readonly CommandOperation[] = [
+  'open-session',
+  'inspect-evidence',
+  'send-guidance',
+  'interrupt-session',
+  'interrupt-subagent',
+  'terminate-run',
+  'retry-task',
+  'reclaim-task',
+  'reassign-task',
+  'dispatch-task',
+  'change-task-state'
+]
+
+interface ValidCompatibility {
+  identityKind: IdentityKind
+  method: string
+  operation: CommandOperation
+  readback: 'kanban-run' | 'kanban-task' | 'session' | 'subagent'
 }
 
-const KANBAN_IDENTITY: EntityIdentity = {
-  board: 'primary',
-  connectionId: OWNER.connectionId,
-  kind: 'kanban',
-  profile: OWNER.profile,
-  runId: 'run-7',
-  taskId: 'task-7',
-  workerId: 'worker-7'
+const VALID_COMPATIBILITY: readonly ValidCompatibility[] = [
+  { identityKind: 'session', method: 'session.open', operation: 'open-session', readback: 'session' },
+  { identityKind: 'subagent', method: 'session.open', operation: 'open-session', readback: 'session' },
+  { identityKind: 'session', method: 'evidence.inspect', operation: 'inspect-evidence', readback: 'session' },
+  { identityKind: 'subagent', method: 'evidence.inspect', operation: 'inspect-evidence', readback: 'subagent' },
+  { identityKind: 'kanban', method: 'evidence.inspect', operation: 'inspect-evidence', readback: 'kanban-task' },
+  { identityKind: 'session', method: 'session.steer', operation: 'send-guidance', readback: 'session' },
+  { identityKind: 'subagent', method: 'subagent.steer', operation: 'send-guidance', readback: 'subagent' },
+  { identityKind: 'session', method: 'session.interrupt', operation: 'interrupt-session', readback: 'session' },
+  {
+    identityKind: 'subagent',
+    method: 'subagent.interrupt',
+    operation: 'interrupt-subagent',
+    readback: 'subagent'
+  },
+  { identityKind: 'kanban', method: 'kanban.run.terminate', operation: 'terminate-run', readback: 'kanban-run' },
+  { identityKind: 'kanban', method: 'kanban.task.retry', operation: 'retry-task', readback: 'kanban-task' },
+  { identityKind: 'kanban', method: 'kanban.task.reclaim', operation: 'reclaim-task', readback: 'kanban-task' },
+  { identityKind: 'kanban', method: 'kanban.task.reassign', operation: 'reassign-task', readback: 'kanban-task' },
+  { identityKind: 'kanban', method: 'kanban.task.dispatch', operation: 'dispatch-task', readback: 'kanban-task' },
+  {
+    identityKind: 'kanban',
+    method: 'kanban.task.patch',
+    operation: 'change-task-state',
+    readback: 'kanban-task'
+  }
+]
+
+const EXPECTED_EFFECTS: Readonly<Record<CommandOperation, CommandEffect>> = {
+  'open-session': { kind: 'session-present', targetId: 'session-1' },
+  'inspect-evidence': { kind: 'evidence-present', targetId: 'session-1', value: 'diagnostics' },
+  'send-guidance': { kind: 'guidance-recorded', targetId: 'session-1' },
+  'interrupt-session': { kind: 'session-interrupted', targetId: 'session-1' },
+  'interrupt-subagent': { kind: 'subagent-interrupted', targetId: 'child-1' },
+  'terminate-run': { kind: 'run-terminated', targetId: 'run-7' },
+  'retry-task': { kind: 'task-retried', targetId: 'task-7' },
+  'reclaim-task': { kind: 'task-reclaimed', targetId: 'task-7' },
+  'reassign-task': { kind: 'task-reassigned', targetId: 'task-7', value: 'reviewer' },
+  'dispatch-task': { kind: 'task-dispatched', targetId: 'task-7' },
+  'change-task-state': { kind: 'task-state-changed', targetId: 'task-7', value: 'review' }
 }
 
-const SOURCE: SourceHealth = {
-  authority: 'authoritative',
-  observedAt: 2_000,
-  source: 'connection-a/sessions'
+interface SnapshotOptions {
+  authority?: LunarEntity['authority']
+  revision?: number
+  sourceOwner?: { connectionId: string; profile: string }
+  sources?: readonly SourceHealth[]
+  state?: string
+  stateAnimation?: string
+  stateSource?: string
+  targetEntity?: LunarEntity
+  time?: number
 }
 
-function entity(identity: EntityIdentity, authority: LunarEntity['authority'] = 'authoritative'): LunarEntity {
+function makeEntity(
+  identity: EntityIdentity,
+  time: number,
+  authority: LunarEntity['authority'] = 'authoritative'
+): LunarEntity {
   return {
     animation: 'work',
     authority,
     destination: 'project',
     identity,
     key: entityKey(identity),
-    observedAt: 2_000
+    observedAt: time,
+    position: { x: 1, y: 0, z: 2 },
+    projectId: 'project-1',
+    variant: 'blue'
   }
 }
 
-function target(identity: EntityIdentity, overrides: Partial<CommandTargetState> = {}): CommandTargetState {
-  return {
-    availableOperations: [
-      'change-task-state',
-      'dispatch-task',
-      'inspect-evidence',
-      'interrupt-session',
-      'interrupt-subagent',
-      'open-session',
-      'reassign-task',
-      'reclaim-task',
-      'retry-task',
-      'send-guidance',
-      'terminate-run'
-    ],
+function snapshot(identity: EntityIdentity, options: SnapshotOptions = {}): CommandPlanningSnapshot {
+  const time = options.time ?? 2_000
+  const revision = options.revision ?? 3
+  const authority = options.authority ?? 'authoritative'
+  const cityEntity = makeEntity(identity, time, authority)
+
+  const source: SourceHealth = {
+    authority,
+    observedAt: time,
+    source: identity.kind === 'kanban' ? 'connection-a/kanban/primary' : 'connection-a/sessions'
+  }
+
+  const targetEntity = options.targetEntity ?? cityEntity
+
+  const target: CommandTargetState = {
+    availableOperations: ALL_OPERATIONS,
     canonicalProjectId: 'project-1',
-    currentState: 'running',
-    entity: entity(identity),
+    entity: targetEntity,
+    observedState: {
+      animation: options.stateAnimation ?? targetEntity.animation,
+      authority: targetEntity.authority,
+      destination: targetEntity.destination,
+      observedAt: targetEntity.observedAt,
+      source: options.stateSource ?? source.source,
+      value: options.state ?? 'running'
+    },
     ownerCandidates: [OWNER],
     readbackCapabilities: ['kanban-run', 'kanban-task', 'session', 'subagent'],
     repositoryId: 'repo/hermes',
-    source: SOURCE,
-    ...overrides
+    source,
+    sourceOwner: options.sourceOwner ?? OWNER
   }
-}
-
-function snapshot(
-  identity: EntityIdentity,
-  overrides: Partial<CommandTargetState> = {},
-  sources: readonly SourceHealth[] = [SOURCE]
-): CommandPlanningSnapshot {
-  const value = target(identity, overrides)
 
   const city: LunarCitySnapshot = {
-    entities: new Map([[value.entity.key, value.entity]]),
-    observedAt: 2_000,
-    revision: 3,
-    sources
+    entities: new Map([[cityEntity.key, cityEntity]]),
+    observedAt: time,
+    revision,
+    sources: options.sources ?? [source]
   }
 
-  return { city, targets: new Map([[value.entity.key, value]]) }
+  return { city, targets: new Map([[targetEntity.key, target]]) }
 }
 
-function intent(kind: CommandIntent['kind'], identity: EntityIdentity = SESSION_IDENTITY): CommandIntent {
+function replaceTarget(
+  value: CommandPlanningSnapshot,
+  update: (target: CommandTargetState) => CommandTargetState
+): CommandPlanningSnapshot {
+  const key = [...value.targets.keys()][0]
+  const target = value.targets.get(key)!
+
+  return { ...value, targets: new Map([[key, update(target)]]) }
+}
+
+function intent(operation: CommandOperation, identity: EntityIdentity): CommandIntent {
   const key = entityKey(identity)
 
-  switch (kind) {
+  switch (operation) {
     case 'send-guidance':
-      return { entityKey: key, kind, text: 'Please inspect the failing test.' }
+      return { entityKey: key, kind: operation, text: 'Please inspect the failing test.' }
 
     case 'reassign-task':
-      return { assignee: 'reviewer', entityKey: key, kind }
+      return { assignee: 'reviewer', entityKey: key, kind: operation }
 
     case 'change-task-state':
-      return { entityKey: key, kind, state: 'review' }
+      return { entityKey: key, kind: operation, state: 'review' }
 
     case 'inspect-evidence':
-      return { entityKey: key, evidence: 'diagnostics', kind }
+      return { entityKey: key, evidence: 'diagnostics', kind: operation }
 
     default:
-      return { entityKey: key, kind }
+      return { entityKey: key, kind: operation }
   }
 }
 
-function executor(readback: CommandReadback | null): {
-  calls: ReturnType<typeof vi.fn>
-  executors: CommandExecutors
-  reads: ReturnType<typeof vi.fn>
-} {
-  const calls = vi.fn().mockResolvedValue({ accepted: true })
-  const reads = vi.fn().mockResolvedValue(readback)
-  const bridge = { readback: reads, send: calls }
+function matchingRow(operation: CommandOperation, identityKind: IdentityKind): ValidCompatibility | undefined {
+  return VALID_COMPATIBILITY.find(row => row.operation === operation && row.identityKind === identityKind)
+}
+
+function bridge(readback: CommandReadback | null) {
+  return { readback: vi.fn().mockResolvedValue(readback), send: vi.fn().mockResolvedValue({ accepted: true }) }
+}
+
+function executors(selected: ReturnType<typeof bridge>, kind: CommandPlan['readback']['kind']): CommandExecutors {
+  const unused = bridge(null)
 
   return {
-    calls,
-    executors: { kanbanRun: bridge, kanbanTask: bridge, session: bridge, subagent: bridge },
-    reads
+    kanbanRun: kind === 'kanban-run' ? selected : unused,
+    kanbanTask: kind === 'kanban-task' ? selected : unused,
+    session: kind === 'session' ? selected : unused,
+    subagent: kind === 'subagent' ? selected : unused
   }
 }
 
-function verifiedReadback(
-  identity: EntityIdentity,
-  operation: CommandIntent['kind'],
-  overrides: Partial<CommandReadback> = {}
-): CommandReadback {
+function readback(plan: CommandPlan, overrides: Partial<CommandReadback> = {}): CommandReadback {
   return {
     authority: 'authoritative',
-    identity,
-    observedAt: 2_100,
-    operation,
+    effect: plan.readback.expectedEffect,
+    identity: plan.identity,
+    observedAt: plan.plannedAt + 1,
+    operation: plan.operation,
     outcome: 'verified',
-    owner: OWNER,
-    state: operation === 'change-task-state' ? 'review' : undefined,
+    owner: plan.owner,
+    revision: plan.plannedRevision + 1,
     ...overrides
   }
 }
 
-describe('LunarCityCommandBroker planning', () => {
-  it.each([
-    ['open-session', false, SESSION_IDENTITY],
-    ['inspect-evidence', false, SESSION_IDENTITY],
-    ['send-guidance', false, SESSION_IDENTITY],
-    ['interrupt-session', true, SESSION_IDENTITY],
-    ['interrupt-subagent', true, SUBAGENT_IDENTITY],
-    ['terminate-run', true, KANBAN_IDENTITY],
-    ['retry-task', true, KANBAN_IDENTITY],
-    ['reclaim-task', true, KANBAN_IDENTITY],
-    ['reassign-task', true, KANBAN_IDENTITY],
-    ['dispatch-task', true, KANBAN_IDENTITY],
-    ['change-task-state', true, KANBAN_IDENTITY]
-  ] as const)('classifies %s confirmation as %s', (kind, confirmation, identity) => {
-    const plan = planCommand(intent(kind, identity), snapshot(identity))
+async function run(
+  plan: CommandPlan,
+  planningSnapshot: CommandPlanningSnapshot,
+  result: CommandReadback | null,
+  confirmed = true
+) {
+  const selected = bridge(result)
 
-    expect(plan.confirmation).toBe(confirmation)
+  const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
+    confirmed,
+    latestSnapshot: () => planningSnapshot
   })
 
-  it('preserves complete identity, exact owner, typed params, consequence, context, and exact readback', () => {
-    const plan = planCommand(intent('reassign-task', KANBAN_IDENTITY), snapshot(KANBAN_IDENTITY))
+  return { receipt, selected }
+}
 
-    expect(plan).toMatchObject({
-      confirmation: true,
-      context: {
-        canonicalProjectId: 'project-1',
-        currentState: 'running',
-        repositoryId: 'repo/hermes'
-      },
-      entityKey: entityKey(KANBAN_IDENTITY),
-      identity: KANBAN_IDENTITY,
-      method: 'kanban.task.reassign',
-      operation: 'reassign-task',
-      owner: OWNER,
-      params: {
-        assignee: 'reviewer',
-        board: 'primary',
-        run_id: 'run-7',
-        task_id: 'task-7',
-        worker_id: 'worker-7'
-      },
-      readback: { id: 'task-7', kind: 'kanban-task' }
+describe('LunarCityCommandBroker immutable target binding', () => {
+  it.each([
+    ['authority', (entity: LunarEntity) => ({ ...entity, authority: 'stale' as const })],
+    ['observedAt', (entity: LunarEntity) => ({ ...entity, observedAt: entity.observedAt - 1 })],
+    ['animation', (entity: LunarEntity) => ({ ...entity, animation: 'idle' })],
+    ['destination', (entity: LunarEntity) => ({ ...entity, destination: 'garden' as const })],
+    ['position', (entity: LunarEntity) => ({ ...entity, position: { x: 99, y: 0, z: 2 } })],
+    ['project', (entity: LunarEntity) => ({ ...entity, projectId: 'foreign-project' })]
+  ])('rejects target entity %s that differs from the immutable city entity', (_field, change) => {
+    const identity = IDENTITIES.session
+    const value = snapshot(identity)
+    const cityEntity = value.city.entities.get(entityKey(identity))!
+    const mismatched = replaceTarget(value, target => ({ ...target, entity: change(cityEntity) }))
+
+    expect(() => planCommand(intent('interrupt-session', identity), mismatched)).toThrow(/target-binding-mismatch/)
+  })
+
+  it.each([
+    ['source owner', { sourceOwner: { connectionId: 'connection-b', profile: 'worker' } }],
+    ['state source', { stateSource: 'connection-b/sessions' }],
+    ['state animation', { stateAnimation: 'idle' }]
+  ])('rejects a mismatched %s binding', (_label, options) => {
+    const identity = IDENTITIES.session
+
+    expect(() => planCommand(intent('interrupt-session', identity), snapshot(identity, options))).toThrow(
+      /target-binding-mismatch|owner-is-ambiguous/
+    )
+  })
+
+  it('revalidates the exact latest target at confirmation and immediately before send', async () => {
+    const identity = IDENTITIES.session
+    const initial = snapshot(identity)
+    const plan = planCommand(intent('interrupt-session', identity), initial)
+    const changed = snapshot(identity, { revision: 4, state: 'completed', time: 2_100 })
+
+    expect(revalidateCommandPlan(plan, initial)).toBeUndefined()
+    expect(revalidateCommandPlan(plan, changed)).toMatch(/target-changed-since-plan/)
+
+    const selected = bridge(readback(plan))
+
+    const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
+      confirmed: true,
+      latestSnapshot: () => changed
     })
-    expect(plan.consequence).toContain('reviewer')
+
+    expect(receipt.verification).toBe('rejected')
+    expect(receipt.error).toContain('target-changed-since-plan')
+    expect(selected.send).not.toHaveBeenCalled()
+    expect(selected.readback).not.toHaveBeenCalled()
   })
 
-  it.each([
-    [
-      'duplicate display-name owners',
-      { ownerCandidates: [OWNER, { connectionId: 'connection-b', profile: 'worker' }] }
-    ],
-    ['mismatched owner', { ownerCandidates: [{ connectionId: 'connection-b', profile: 'worker' }] }],
-    ['missing owner', { ownerCandidates: [] }]
-  ] as const)('fails closed with owner-is-ambiguous for %s', (_label, overrides) => {
-    expect(() => planCommand(intent('open-session'), snapshot(SESSION_IDENTITY, overrides))).toThrow(
-      /owner-is-ambiguous/
-    )
-  })
+  it.each(['deleted', 'ambiguous'] as const)('blocks a %s target before send', async kind => {
+    const identity = IDENTITIES.session
+    const initial = snapshot(identity)
+    const plan = planCommand(intent('interrupt-session', identity), initial)
 
-  it('fails closed for unsupported, stale, partial, unavailable Kanban, and unreadable mutations', () => {
-    expect(() =>
-      planCommand(intent('interrupt-session'), snapshot(SESSION_IDENTITY, { availableOperations: [] }))
-    ).toThrow(/unsupported-command/)
-    expect(() =>
-      planCommand(
-        intent('interrupt-session'),
-        snapshot(SESSION_IDENTITY, { entity: entity(SESSION_IDENTITY, 'stale') })
-      )
-    ).toThrow(/target-is-stale/)
-    expect(() =>
-      planCommand(
-        intent('interrupt-session'),
-        snapshot(SESSION_IDENTITY, { entity: entity(SESSION_IDENTITY, 'partial') })
-      )
-    ).toThrow(/target-is-partial/)
-    expect(() => planCommand(intent('retry-task', KANBAN_IDENTITY), snapshot(KANBAN_IDENTITY, {}, []))).toThrow(
-      /kanban-source-unavailable/
-    )
-    expect(() =>
-      planCommand(intent('interrupt-session'), snapshot(SESSION_IDENTITY, { readbackCapabilities: ['subagent'] }))
-    ).toThrow(/readback-unavailable/)
-  })
+    const latest =
+      kind === 'deleted'
+        ? { ...initial, city: { ...initial.city, entities: new Map() }, targets: new Map() }
+        : replaceTarget(initial, target => ({
+            ...target,
+            ownerCandidates: [OWNER, { connectionId: 'connection-b', profile: 'worker' }]
+          }))
 
-  it('keeps stale read-only evidence inspectable with its source timestamp', () => {
-    const plan = planCommand(
-      intent('inspect-evidence'),
-      snapshot(
-        SESSION_IDENTITY,
-        {
-          entity: entity(SESSION_IDENTITY, 'stale'),
-          source: { ...SOURCE, authority: 'stale' }
-        },
-        [{ ...SOURCE, authority: 'stale' }]
-      )
-    )
+    const selected = bridge(readback(plan))
 
-    expect(plan.confirmation).toBe(false)
-    expect(plan.context.source).toEqual({ ...SOURCE, authority: 'stale' })
+    const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
+      confirmed: true,
+      latestSnapshot: () => latest
+    })
+
+    expect(receipt.verification).toBe('rejected')
+    expect(selected.send).not.toHaveBeenCalled()
   })
 })
 
-describe('LunarCityCommandBroker execution', () => {
-  it.each([
-    ['interrupt-session', SESSION_IDENTITY, 'session'],
-    ['interrupt-subagent', SUBAGENT_IDENTITY, 'subagent'],
-    ['retry-task', KANBAN_IDENTITY, 'kanbanTask'],
-    ['terminate-run', KANBAN_IDENTITY, 'kanbanRun']
-  ] as const)(
-    'uses the exact %s route once and verifies only matching readback',
-    async (kind, identity, executorKey) => {
-      const plan = planCommand(intent(kind, identity), snapshot(identity))
-      const matching = verifiedReadback(identity, kind)
-      const selected = executor(matching)
-      const unused = executor(matching)
+describe('LunarCityCommandBroker compatibility matrix', () => {
+  it.each(
+    ALL_OPERATIONS.flatMap(operation =>
+      (Object.keys(IDENTITIES) as IdentityKind[]).map(identityKind => ({ identityKind, operation }))
+    )
+  )('enforces $operation × $identityKind regardless of advertised capabilities', ({ identityKind, operation }) => {
+    const identity = IDENTITIES[identityKind]
+    const expected = matchingRow(operation, identityKind)
+    const act = () => planCommand(intent(operation, identity), snapshot(identity))
 
-      const executors = {
-        kanbanRun: unused.executors.kanbanRun,
-        kanbanTask: unused.executors.kanbanTask,
-        session: unused.executors.session,
-        subagent: unused.executors.subagent,
-        [executorKey]: selected.executors[executorKey]
-      }
+    if (!expected) {
+      expect(act).toThrow(/operation-identity-incompatible/)
 
-      const receipt = await executeCommand(plan, executors, { confirmed: true })
-
-      expect(selected.calls).toHaveBeenCalledTimes(1)
-      expect(selected.calls).toHaveBeenCalledWith(plan)
-      expect(selected.reads).toHaveBeenCalledTimes(1)
-      expect(receipt).toMatchObject({ identity, verification: 'verified' })
+      return
     }
-  )
 
-  it('returns rejected and unsent confirmation refusal without using an ambient route', async () => {
-    const plan = planCommand(intent('interrupt-session'), snapshot(SESSION_IDENTITY))
-    const selected = executor(verifiedReadback(SESSION_IDENTITY, 'interrupt-session'))
+    const plan = act()
 
-    const receipt = await executeCommand(plan, selected.executors, { confirmed: false })
-
-    expect(receipt.verification).toBe('rejected')
-    expect(selected.calls).not.toHaveBeenCalled()
-    expect(selected.reads).not.toHaveBeenCalled()
+    expect(plan.method).toBe(expected.method)
+    expect(plan.readback.kind).toBe(expected.readback)
   })
 
-  it.each([
-    ['foreign readback', { readback: { id: 'foreign-session', kind: 'session' } }],
-    ['non-allowlisted method', { method: 'shell.exec' }],
-    ['mismatched owner', { owner: { connectionId: 'connection-b', profile: 'worker' } }]
-  ] as const)('rejects a forged plan with %s before any send', async (_label, overrides) => {
-    const valid = planCommand(intent('interrupt-session'), snapshot(SESSION_IDENTITY))
-    const forged = { ...valid, ...overrides } as typeof valid
-    const selected = executor(verifiedReadback(SESSION_IDENTITY, 'interrupt-session'))
+  it('uses prompt.submit only for an idle standard session and never for a subagent', () => {
+    const sessionPlan = planCommand(
+      intent('send-guidance', IDENTITIES.session),
+      snapshot(IDENTITIES.session, { state: 'idle' })
+    )
 
-    const receipt = await executeCommand(forged, selected.executors, { confirmed: true })
+    const subagentPlan = planCommand(
+      intent('send-guidance', IDENTITIES.subagent),
+      snapshot(IDENTITIES.subagent, { state: 'idle' })
+    )
+
+    expect(sessionPlan.method).toBe('prompt.submit')
+    expect(subagentPlan.method).toBe('subagent.steer')
+  })
+
+  it.each(ALL_OPERATIONS)('rejects a forged %s method/readback combination before send', async operation => {
+    const valid = VALID_COMPATIBILITY.find(row => row.operation === operation)!
+    const identity = IDENTITIES[valid.identityKind]
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent(operation, identity), planningSnapshot)
+
+    const forged = {
+      ...plan,
+      method: plan.method === 'session.interrupt' ? 'prompt.submit' : 'session.interrupt',
+      readback: { ...plan.readback, kind: plan.readback.kind === 'session' ? 'kanban-task' : 'session' }
+    } as CommandPlan
+
+    const selected = bridge(readback(plan))
+
+    const receipt = await executeCommand(forged, executors(selected, plan.readback.kind), {
+      confirmed: true,
+      latestSnapshot: () => planningSnapshot
+    })
 
     expect(receipt.verification).toBe('rejected')
     expect(receipt.error).toContain('Invalid command plan')
-    expect(selected.calls).not.toHaveBeenCalled()
-    expect(selected.reads).not.toHaveBeenCalled()
+    expect(selected.send).not.toHaveBeenCalled()
+  })
+})
+
+describe('LunarCityCommandBroker canonical plan integrity', () => {
+  it.each([
+    ['consequence', (plan: CommandPlan) => ({ ...plan, consequence: 'Everything is already complete.' })],
+    ['current state', (plan: CommandPlan) => ({ ...plan, context: { ...plan.context, currentState: 'done' } })],
+    [
+      'source',
+      (plan: CommandPlan) => ({
+        ...plan,
+        context: { ...plan.context, source: { ...plan.context.source, source: 'connection-b/sessions' } }
+      })
+    ],
+    [
+      'authority',
+      (plan: CommandPlan) => ({
+        ...plan,
+        context: { ...plan.context, source: { ...plan.context.source, authority: 'stale' as const } }
+      })
+    ],
+    ['intent', (plan: CommandPlan) => ({ ...plan, intent: { ...plan.intent, kind: 'open-session' as const } })],
+    ['digest', (plan: CommandPlan) => ({ ...plan, digest: 'forged' })]
+  ])('rejects a spread copy with forged %s before send', async (_field, forge) => {
+    const identity = IDENTITIES.session
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent('interrupt-session', identity), planningSnapshot)
+    const forged = forge(plan) as CommandPlan
+    const selected = bridge(readback(plan))
+
+    const receipt = await executeCommand(forged, executors(selected, plan.readback.kind), {
+      confirmed: true,
+      latestSnapshot: () => planningSnapshot
+    })
+
+    expect(receipt.verification).toBe('rejected')
+    expect(selected.send).not.toHaveBeenCalled()
+  })
+})
+
+describe('LunarCityCommandBroker causal readback', () => {
+  it.each(ALL_OPERATIONS)('requires a strictly newer canonical %s effect', async operation => {
+    const valid = VALID_COMPATIBILITY.find(row => row.operation === operation)!
+    const identity = IDENTITIES[valid.identityKind]
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent(operation, identity), planningSnapshot)
+
+    const expectedEffect = EXPECTED_EFFECTS[operation]
+
+    expect(plan.readback.expectedEffect).toEqual(expectedEffect)
+
+    const cached = await run(
+      plan,
+      planningSnapshot,
+      readback(plan, { effect: expectedEffect, observedAt: plan.plannedAt, revision: plan.plannedRevision })
+    )
+
+    expect(cached.receipt.verification).toBe('verification_required')
+
+    const fresh = await run(plan, planningSnapshot, readback(plan, { effect: expectedEffect }))
+
+    expect(fresh.receipt.verification).toBe('verified')
+    expect(fresh.selected.send).toHaveBeenCalledTimes(1)
+    expect(fresh.selected.readback).toHaveBeenCalledTimes(1)
   })
 
-  it('distinguishes definite rejection, pre-send timeout, and possibly-applied timeout without retrying', async () => {
-    const plan = planCommand(intent('interrupt-session'), snapshot(SESSION_IDENTITY))
+  it.each(ALL_OPERATIONS)('does not verify %s from a boolean outcome without its canonical effect', async operation => {
+    const valid = VALID_COMPATIBILITY.find(row => row.operation === operation)!
+    const identity = IDENTITIES[valid.identityKind]
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent(operation, identity), planningSnapshot)
+    const result = await run(plan, planningSnapshot, readback(plan, { effect: undefined }))
 
-    for (const [error, expected] of [
-      [new CommandRejectedError('backend refused'), 'rejected'],
-      [new CommandTimeoutError('connection unavailable', false), 'timed_out'],
-      [new CommandTimeoutError('ACK timed out', true), 'verification_required']
-    ] as const) {
-      const selected = executor(null)
-      selected.calls.mockRejectedValueOnce(error)
+    expect(result.receipt.verification).toBe('verification_required')
+  })
 
-      const receipt = await executeCommand(plan, selected.executors, { confirmed: true })
+  it('accepts a matching authoritative causal receipt when monotonic clocks are unavailable', async () => {
+    const identity = IDENTITIES.kanban
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent('reassign-task', identity), planningSnapshot)
 
-      expect(receipt.verification).toBe(expected)
-      expect(selected.calls).toHaveBeenCalledTimes(1)
-      expect(selected.reads).not.toHaveBeenCalled()
-    }
+    const result = await run(
+      plan,
+      planningSnapshot,
+      readback(plan, {
+        observedAt: plan.plannedAt,
+        receipt: { authority: 'authoritative', planDigest: plan.digest },
+        revision: plan.plannedRevision
+      })
+    )
+
+    expect(result.receipt.verification).toBe('verified')
+  })
+
+  it('rejects the wrong operation-specific effect even when identity and clocks match', async () => {
+    const identity = IDENTITIES.kanban
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent('reassign-task', identity), planningSnapshot)
+    const wrong: CommandEffect = { kind: 'task-reassigned', targetId: 'task-7', value: 'foreign-worker' }
+    const result = await run(plan, planningSnapshot, readback(plan, { effect: wrong }))
+
+    expect(result.receipt.verification).toBe('verification_required')
+  })
+
+  it('returns an authoritative causal rejection before evaluating an expected effect', async () => {
+    const identity = IDENTITIES.kanban
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent('change-task-state', identity), planningSnapshot)
+    const result = await run(plan, planningSnapshot, readback(plan, { effect: undefined, outcome: 'rejected' }))
+
+    expect(result.receipt.verification).toBe('rejected')
+  })
+})
+
+describe('LunarCityCommandBroker failure boundaries', () => {
+  it('sends exactly once through the typed executor and never uses a blind retry', async () => {
+    const identity = IDENTITIES.subagent
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent('interrupt-subagent', identity), planningSnapshot)
+    const result = await run(plan, planningSnapshot, readback(plan))
+
+    expect(result.selected.send).toHaveBeenCalledTimes(1)
+    expect(result.selected.send).toHaveBeenCalledWith(plan)
+    expect(result.receipt.identity).toEqual(identity)
+  })
+
+  it('refuses an unconfirmed disruptive plan without reading the latest target or sending', async () => {
+    const identity = IDENTITIES.session
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent('interrupt-session', identity), planningSnapshot)
+    const latestSnapshot = vi.fn(() => planningSnapshot)
+    const selected = bridge(readback(plan))
+
+    const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
+      confirmed: false,
+      latestSnapshot
+    })
+
+    expect(receipt.verification).toBe('rejected')
+    expect(latestSnapshot).not.toHaveBeenCalled()
+    expect(selected.send).not.toHaveBeenCalled()
   })
 
   it.each([
-    ['missing', null],
-    ['stale', verifiedReadback(SESSION_IDENTITY, 'interrupt-session', { observedAt: 1_999 })],
-    [
-      'mismatched identity',
-      verifiedReadback({ ...SESSION_IDENTITY, sessionId: 'foreign-session' }, 'interrupt-session')
-    ],
-    [
-      'mismatched owner',
-      verifiedReadback(SESSION_IDENTITY, 'interrupt-session', {
-        owner: { connectionId: 'connection-b', profile: 'worker' }
-      })
-    ],
-    ['unexpected operation', verifiedReadback(SESSION_IDENTITY, 'send-guidance')],
-    ['unverified outcome', verifiedReadback(SESSION_IDENTITY, 'interrupt-session', { outcome: 'unknown' })]
-  ] as const)('does not verify a success-shaped ACK with %s readback', async (_label, readback) => {
-    const plan = planCommand(intent('interrupt-session'), snapshot(SESSION_IDENTITY))
-    const selected = executor(readback)
+    [new CommandRejectedError('backend refused'), 'rejected'],
+    [new CommandTimeoutError('connection unavailable', false), 'timed_out'],
+    [new CommandTimeoutError('ACK timed out', true), 'verification_required']
+  ] as const)('classifies %s without retrying', async (error, verification) => {
+    const identity = IDENTITIES.session
+    const planningSnapshot = snapshot(identity)
+    const plan = planCommand(intent('interrupt-session', identity), planningSnapshot)
+    const selected = bridge(null)
+    selected.send.mockRejectedValueOnce(error)
 
-    const receipt = await executeCommand(plan, selected.executors, { confirmed: true })
+    const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
+      confirmed: true,
+      latestSnapshot: () => planningSnapshot
+    })
 
-    expect(selected.calls).toHaveBeenCalledTimes(1)
-    expect(receipt.verification).toBe('verification_required')
-  })
-
-  it('uses expected task state as part of authoritative readback instead of moving a worker on ACK', async () => {
-    const plan = planCommand(intent('change-task-state', KANBAN_IDENTITY), snapshot(KANBAN_IDENTITY))
-    const selected = executor(verifiedReadback(KANBAN_IDENTITY, 'change-task-state', { state: 'running' }))
-
-    const receipt = await executeCommand(plan, selected.executors, { confirmed: true })
-
-    expect(receipt.verification).toBe('verification_required')
+    expect(receipt.verification).toBe(verification)
+    expect(selected.send).toHaveBeenCalledTimes(1)
+    expect(selected.readback).not.toHaveBeenCalled()
   })
 })
