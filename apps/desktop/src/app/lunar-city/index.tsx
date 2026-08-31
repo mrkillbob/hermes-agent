@@ -63,6 +63,39 @@ function sameProfileLeaderList(left: readonly LunarEntity[], right: readonly Lun
   return left.length === right.length && left.every((entity, index) => entity.key === right[index]?.key)
 }
 
+export function lunarCityHudStatus(
+  rendererStatus: RendererStatus,
+  snapshot: ReturnType<typeof $lunarCitySnapshot.get>
+): 'EMPTY' | 'LIVE' | 'RENDERER UNAVAILABLE' | 'STALE' | 'STARTING' | 'UNAVAILABLE' {
+  if (rendererStatus === 'unavailable') {
+    return 'RENDERER UNAVAILABLE'
+  }
+
+  if (rendererStatus !== 'ready') {
+    return 'STARTING'
+  }
+
+  if (snapshot.sources.length === 0 || snapshot.entities.size === 0) {
+    return 'EMPTY'
+  }
+
+  if (snapshot.sources.some(source => source.error || source.authority === 'unknown')) {
+    return 'UNAVAILABLE'
+  }
+
+  if (snapshot.sources.some(source => source.authority === 'partial' || source.authority === 'stale')) {
+    return 'STALE'
+  }
+
+  return 'LIVE'
+}
+
+function LunarCityHudStatus({ rendererStatus }: { rendererStatus: RendererStatus }) {
+  const snapshot = useStore($lunarCitySnapshot)
+
+  return <>{lunarCityHudStatus(rendererStatus, snapshot)}</>
+}
+
 interface LunarCityOperationsProps {
   getCameraOrder(): readonly EntityKey[]
   onQualityChange(tier: QualityTier): void
@@ -653,7 +686,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
             <div className="flex items-center gap-2">
               <h2 className="truncate text-sm font-semibold text-foreground">Lunar City</h2>
               <span className="rounded-full bg-(--ui-green)/12 px-2 py-0.5 text-[0.62rem] font-medium text-(--ui-green)">
-                LIVE
+                <LunarCityHudStatus rendererStatus={rendererStatus} />
               </span>
             </div>
             <p className="truncate text-xs text-muted-foreground">
@@ -681,7 +714,6 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
             ref={canvasRef}
           />
           <div aria-hidden="true" className="lunar-city-atmosphere absolute inset-0" />
-          <div aria-hidden="true" className="lunar-city-grid absolute inset-0" />
         </div>
 
         <div className="pointer-events-none absolute inset-0 z-20">
@@ -726,13 +758,13 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
 
                   return (
                     <Button
-                      aria-label={`Talk to ${owner.profile} leader`}
+                      aria-label={`Talk to ${owner.profile} leader on ${owner.connectionId}`}
                       key={entity.key}
                       onClick={() => openLeader(entity)}
                       size="xs"
                       variant={selected ? 'default' : 'secondary'}
                     >
-                      Talk to {owner.profile}
+                      Talk to {owner.profile} · {owner.connectionId}
                     </Button>
                   )
                 })}

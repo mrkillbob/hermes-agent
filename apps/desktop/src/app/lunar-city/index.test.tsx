@@ -12,7 +12,7 @@ import type * as LeaderSessions from './leader-sessions'
 import type { LunarCityIntent, LunarCityWorldHandle } from './model'
 import { $lunarCitySnapshot, applyLunarDelta, createLunarCitySnapshot } from './store'
 
-import { disposeLunarCityRuntime, LunarCity } from './index'
+import { disposeLunarCityRuntime, LunarCity, lunarCityHudStatus } from './index'
 
 const {
   applySnapshot,
@@ -179,6 +179,21 @@ function publishAccessibleEntities(): { leaderKey: never; workerKey: never } {
 }
 
 describe('LunarCity', () => {
+  it('reports HUD health from renderer and immutable source truth', () => {
+    const empty = createLunarCitySnapshot()
+    expect(lunarCityHudStatus('ready', empty)).toBe('EMPTY')
+    expect(lunarCityHudStatus('unavailable', empty)).toBe('RENDERER UNAVAILABLE')
+    expect(lunarCityHudStatus('degraded', empty)).toBe('STARTING')
+    const { workerKey } = publishAccessibleEntities()
+    expect(workerKey).toBeTruthy()
+    expect(lunarCityHudStatus('ready', $lunarCitySnapshot.get())).toBe('LIVE')
+    expect(
+      lunarCityHudStatus('ready', {
+        ...$lunarCitySnapshot.get(),
+        sources: [{ authority: 'stale', observedAt: 42, source: 'session:source-a' }]
+      })
+    ).toBe('STALE')
+  })
   it('opens the world with one ready 3D canvas and no runtime source-art image', async () => {
     const interval = vi.spyOn(window, 'setInterval')
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
@@ -447,7 +462,7 @@ describe('LunarCity', () => {
     await waitFor(() => expect(screen.getByText(/3D world renderer unavailable/i)).toBeTruthy())
     expect(screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab/i })).toBeTruthy()
     expect(screen.getByRole('combobox', { name: /3D quality/i })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Talk to fox-scientist leader' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Talk to fox-scientist leader on source-a' }))
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'fox-scientist leader conversation' })).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab/i }))
     expect(screen.getByRole('region', { name: 'Lunar City worker controls' })).toBeTruthy()
@@ -530,7 +545,7 @@ describe('LunarCity', () => {
     await waitFor(() => expect(screen.getByText(/Reduced motion: destinations snap into place/i)).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: /Session Pip.*Working.*Research Lab/i }))
     expect(screen.getByRole('region', { name: 'Lunar City worker controls' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Talk to fox-scientist leader' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Talk to fox-scientist leader on source-a' }))
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'fox-scientist leader conversation' })).toBeTruthy())
 
     act(() => changeListener?.({ matches: false } as MediaQueryListEvent))
@@ -558,7 +573,7 @@ describe('LunarCity', () => {
     })
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Talk to owl leader' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Talk to owl leader on source-a' }))
 
     await waitFor(() => expect(resolveLeaderSession).toHaveBeenCalledWith({ connectionId: 'source-a', profile: 'owl' }))
     expect(screen.getByRole('dialog', { name: 'owl leader conversation' })).toBeTruthy()
@@ -601,7 +616,7 @@ describe('LunarCity', () => {
     })
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Talk to owl leader' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Talk to owl leader on source-a' }))
 
     await waitFor(() => {
       expect(screen.getByRole('status', { name: 'owl leader conversation error' }).textContent).toContain(
@@ -639,14 +654,10 @@ describe('LunarCity', () => {
   })
 
   it('requires exact-profile disambiguation when one physical leader model has multiple owners', async () => {
-    const owners = Array.from({ length: 100 }, (_, index) => ({
-      connectionId: 'source-a',
-      profile: `profile-${index}`
-    }))
-
-    const first = owners[0]!
+    const first = { connectionId: 'source-0', profile: 'duplicate' }
+    const second = { connectionId: 'source-2', profile: 'duplicate' }
     const modelId = leaderModelIdForOwner(first)
-    const second = owners.find(owner => owner.profile !== first.profile && leaderModelIdForOwner(owner) === modelId)!
+    expect(leaderModelIdForOwner(second)).toBe(modelId)
 
     const entities = [first, second].map(owner => {
       const identity = { ...owner, kind: 'profile' as const }
@@ -673,7 +684,9 @@ describe('LunarCity', () => {
 
     expect(resolveLeaderSession).not.toHaveBeenCalled()
     const chooser = screen.getByRole('region', { name: `Choose exact ${modelId} profile` })
-    fireEvent.click(chooser.querySelector(`button[aria-label="Talk to ${second.profile} leader"]`)!)
+    fireEvent.click(
+      chooser.querySelector(`button[aria-label="Talk to ${second.profile} leader on ${second.connectionId}"]`)!
+    )
     await waitFor(() => expect(resolveLeaderSession).toHaveBeenCalledWith(second))
   })
 })

@@ -746,33 +746,12 @@ function belongsToLeader(node: BabylonNodeLike, leaderNode: BabylonNodeLike): bo
 }
 
 export function leaderCameraAnchor(node: BabylonNodeLike, fallback: Vec3): Vec3 {
-  const visited = new Set<BabylonNodeLike>()
-  let current: BabylonNodeLike | null | undefined = node
-  const anchor = { x: 0, y: 0, z: 0 }
-  let observed = false
+  const matrix = (node as BabylonNodeLike & { getWorldMatrix?(): { m: readonly number[] } }).getWorldMatrix?.().m
 
-  while (current && !visited.has(current)) {
-    visited.add(current)
-    const position = current.position
-
-    if (
-      typeof position?.x === 'number' &&
-      Number.isFinite(position.x) &&
-      typeof position.y === 'number' &&
-      Number.isFinite(position.y) &&
-      typeof position.z === 'number' &&
-      Number.isFinite(position.z)
-    ) {
-      anchor.x += position.x
-      anchor.y += position.y
-      anchor.z += position.z
-      observed = true
-    }
-
-    current = current.parent
-  }
-
-  return observed ? anchor : { ...fallback }
+  return matrix &&
+    [matrix[12], matrix[13], matrix[14]].every(value => typeof value === 'number' && Number.isFinite(value))
+    ? { x: matrix[12]!, y: matrix[13]!, z: matrix[14]! }
+    : { ...fallback }
 }
 
 function retainLeaderIdentityMetadata(

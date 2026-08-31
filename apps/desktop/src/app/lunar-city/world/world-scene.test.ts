@@ -27,9 +27,8 @@ import {
 
 describe('physical leader camera anchors', () => {
   it('derives a distinct world anchor from each structured leader node instead of sharing the pack anchor', () => {
-    const parent = { name: 'leader-pack', position: { x: 10, y: 1, z: 20, set: vi.fn() } }
-    const owl = { name: 'owl', parent, position: { x: -3, y: 2, z: 4, set: vi.fn() } }
-    const fox = { name: 'fox', parent, position: { x: 5, y: 2, z: -2, set: vi.fn() } }
+    const owl = { name: 'owl', getWorldMatrix: () => ({ m: [0, 2, 0, 0, -3, 0, 0, 0, 0, 0, 4, 0, 7, 3, 24, 1] }) }
+    const fox = { name: 'fox', getWorldMatrix: () => ({ m: [0, 2, 0, 0, -3, 0, 0, 0, 0, 0, 4, 0, 15, 3, 18, 1] }) }
 
     expect(leaderCameraAnchor(owl, { x: 0, y: 0, z: 0 })).toEqual({ x: 7, y: 3, z: 24 })
     expect(leaderCameraAnchor(fox, { x: 0, y: 0, z: 0 })).toEqual({ x: 15, y: 3, z: 18 })
