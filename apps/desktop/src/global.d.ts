@@ -14,6 +14,14 @@ export {}
 
 declare global {
   interface Window {
+    __LUNAR_CITY_PERF__?: {
+      handshake: (expected: { bridgeVersion: number; launchNonce: string }) => unknown
+      mountCity: () => Promise<unknown>
+      prepareBaselineShell: () => Promise<unknown>
+      processMetrics: () => Promise<unknown>
+      runAction: (action: string, payload?: unknown) => Promise<unknown>
+      snapshot: () => Promise<unknown>
+    }
     hermesDesktop: {
       // Resolve a backend connection. Omit `profile` (or pass the primary) for
       // the window's backend; pass a named profile to lazily spawn/reuse that
@@ -72,6 +80,9 @@ declare global {
       // reply). Resolves true for the first window to claim a key, false for
       // peers — so N open windows don't all fire the same cue.
       claimAmbientCue: (key: string) => Promise<boolean>
+      lunarCityPerf?: {
+        onRequest: (callback: (action: string, payload: unknown) => Promise<unknown> | unknown) => () => void
+      }
       wakeIndicator?: {
         getState: () => Promise<WakeIndicatorState>
         setState: (state: WakeIndicatorState) => void

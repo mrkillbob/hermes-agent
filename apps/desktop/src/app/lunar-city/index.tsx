@@ -56,6 +56,7 @@ import type {
   QualityTier,
   WorldManifestV2
 } from './model'
+import { lunarCityPerfRuntime } from './perf-runtime'
 import { $lunarCitySnapshot } from './store'
 import { createLunarCityWorld } from './world/create-world'
 
@@ -585,7 +586,10 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   const worldHandleRef = useRef<LunarCityWorldHandle | undefined>(undefined)
   const qualityTierRef = useRef(qualityTier)
   const profileLeaderEntitiesRef = useRef(profileLeaderEntities)
+  const selectedLeaderOwnerRef = useRef(selectedLeaderOwner)
+  const openLeaderRef = useRef<(entity: LunarEntity) => void>(() => undefined)
   const stopReconcilerRef = useRef<(() => void) | undefined>(undefined)
+  selectedLeaderOwnerRef.current = selectedLeaderOwner
 
   const kanbanScope = useMemo(() => {
     const connectionId =
@@ -683,6 +687,8 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
     dispatchCamera({ kind: 'focus', entityKey: leaderModelFocusKeyForOwner(owner), follow: false })
     setFocusedEntityLabel(`${owner.profile} leader`)
   }
+
+  openLeaderRef.current = openLeader
 
   // Profile entities change far less often than workers. Keep this compact
   // semantic list separate from the imperative world snapshot listener so
@@ -813,6 +819,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
     let restorationArmedGeneration: number | undefined
     let restorationAttempted = false
     let world: LunarCityWorldHandle | undefined
+    let perfRoute: { dispose(): void } | undefined
     let stopSnapshot: (() => void) | undefined
 
     const handleWorldIntent = (intent: LunarCityIntent): void => {
@@ -841,6 +848,8 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
       stopSnapshot = undefined
       const retired = world
       world = undefined
+      perfRoute?.dispose()
+      perfRoute = undefined
 
       if (worldHandleRef.current === retired) {
         worldHandleRef.current = undefined
@@ -880,6 +889,51 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
               globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches
           )
           created.applySnapshot($lunarCitySnapshot.get())
+          perfRoute = lunarCityPerfRuntime.registerRoute?.({
+            canvas,
+            getCameraState: () => created.getCameraState(),
+            getCitySnapshot: () => $lunarCitySnapshot.get(),
+            getDialogueState: () => (selectedLeaderOwnerRef.current ? 'active' : 'idle'),
+            getQuality: () => {
+              const metrics = created.getPerfSnapshot?.() as
+                { internalRenderScale?: number; qualityTier?: QualityTier } | undefined
+
+              return {
+                internalRenderScale: metrics?.internalRenderScale ?? 1,
+                qualityTier: metrics?.qualityTier ?? qualityTierRef.current
+              }
+            },
+            getWorldMetrics: () =>
+              created.getPerfSnapshot?.() ?? {
+                activeAnimations: 0,
+                drawCalls: 0,
+                entities: 0,
+                frameMs: 0,
+                frameTimestampsMs: [],
+                listeners: 0,
+                rafs: 0,
+                renderFrames: 0,
+                targetFps: 0,
+                textures: 0,
+                timers: 0,
+                visibleTriangles: 0,
+                worldUpdateMs: 0,
+                worldUpdateTimestampsMs: []
+              },
+            setLeaderDialogue: leaderId => {
+              const entity = profileLeaderEntitiesRef.current.find(candidate => {
+                const owner = leaderOwnerForProfile(candidate)
+
+                return owner ? leaderModelIdForOwner(owner) === leaderId : false
+              })
+
+              if (entity) {
+                openLeaderRef.current(entity)
+              }
+            },
+            setQuality: changeQuality,
+            worldAction: intent => created.dispatchCamera(intent)
+          })
           stopSnapshot = $lunarCitySnapshot.listen(snapshot => {
             if (!disposed && ownGeneration === generation && worldHandleRef.current === created) {
               created.applySnapshot(snapshot)
@@ -951,6 +1005,8 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
       canvas.removeEventListener('webglcontextlost', onContextLost)
       canvas.removeEventListener('webglcontextrestored', onContextRestored)
       disposeLunarCityRuntime(stopReconcilerRef.current, stopSnapshot, world)
+      perfRoute?.dispose()
+      perfRoute = undefined
       stopSnapshot = undefined
       worldHandleRef.current = undefined
       world = undefined

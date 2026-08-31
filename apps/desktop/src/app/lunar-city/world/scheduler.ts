@@ -13,6 +13,7 @@ export interface FrameTick {
 export type FramePauseReason = 'context-lost' | 'document-hidden' | 'window-minimized'
 
 export interface FrameSchedulerOptions {
+  captureMetrics?: boolean
   cancelFrame?: (handle: number) => void
   clearTimer?: (handle: number) => void
   now?: () => number
@@ -68,6 +69,8 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
   let timerDeadline: number | undefined
   let throttleUntil: number | undefined
   let releaseVisibility: (() => void) | undefined
+  let renderFrames = 0
+  const frameTimestampsMs: number[] | undefined = options.captureMetrics ? [] : undefined
 
   const targetFpsAt = (now: number): 15 | 30 => (now < interactiveUntil ? 30 : 15)
   const canRender = (): boolean => !disposed && pauseReasons.size === 0
@@ -190,6 +193,8 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
     visualDeadline = undefined
     lastFrameAt = now
     const needsAnotherFrame = options.onFrame({ elapsedMs, now, targetFps }) === true
+    renderFrames += 1
+    frameTimestampsMs?.push(now)
 
     if (needsAnotherFrame || now < interactiveUntil) {
       throttleUntil = now + interval
@@ -262,6 +267,19 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
       cancelPending()
       releaseVisibility?.()
       releaseVisibility = undefined
+    },
+    getMetrics() {
+      return {
+        frameTimestampsMs: frameTimestampsMs ? [...frameTimestampsMs] : [],
+        listeners:
+          releaseVisibility && typeof window !== 'undefined'
+            ? 3 + (typeof window.hermesDesktop?.onWindowStateChanged === 'function' ? 1 : 0)
+            : 0,
+        rafs: frameHandle === undefined ? 0 : 1,
+        renderFrames,
+        targetFps: canRender() ? targetFpsAt(clock()) : (0 as const),
+        timers: timerHandle === undefined ? 0 : 1
+      }
     },
     noteInteraction(now: number): void {
       if (disposed) {

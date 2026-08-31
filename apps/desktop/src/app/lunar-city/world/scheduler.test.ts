@@ -6,18 +6,22 @@ import { createFrameScheduler, type FrameTick } from './scheduler'
 function schedulerHarness() {
   const renderer = { stopRenderLoop: vi.fn() }
   const frames: FrameTick[] = []
+
   const onFrame = vi.fn((frame: FrameTick) => {
     frames.push(frame)
 
     return false
   })
+
   const requestFrame = vi.fn(() => 7)
   const cancelFrame = vi.fn()
   const setTimer = vi.fn(() => 8)
   const clearTimer = vi.fn()
   let now = 0
+
   const scheduler = createFrameScheduler({
     cancelFrame,
+    captureMetrics: true,
     clearTimer,
     now: () => now,
     onFrame,
@@ -89,6 +93,33 @@ describe('FrameScheduler', () => {
     expect(harness.onFrame).toHaveBeenCalledOnce()
   })
 
+  it('reports cumulative rendered timestamps and truthful zero target while paused', () => {
+    const harness = schedulerHarness()
+    harness.scheduler.requestRender()
+    harness.scheduler.tick(100)
+    harness.scheduler.requestRender()
+    harness.scheduler.tick(200)
+
+    expect(harness.scheduler.getMetrics()).toEqual({
+      frameTimestampsMs: [100, 200],
+      listeners: 0,
+      rafs: 1,
+      renderFrames: 2,
+      targetFps: 15,
+      timers: 0
+    })
+
+    harness.scheduler.setVisible(false)
+    expect(harness.scheduler.getMetrics()).toEqual({
+      frameTimestampsMs: [100, 200],
+      listeners: 0,
+      rafs: 0,
+      renderFrames: 2,
+      targetFps: 0,
+      timers: 0
+    })
+  })
+
   it('cancels frame, timer, and later wake work on disposal', () => {
     const harness = schedulerHarness()
     harness.scheduler.noteInteraction(0)
@@ -158,6 +189,7 @@ describe('FrameScheduler', () => {
       key: 'session:worker' as never,
       position: { x: 0, y: 0, z: 0 }
     }
+
     const navigation = createNavigationController({
       destinations: { review: { x: 1, y: 0, z: 0 } },
       query: {
@@ -169,6 +201,7 @@ describe('FrameScheduler', () => {
       speedUnitsPerSecond: 1,
       workerClips: new Set(['idle', 'walk', 'work'])
     })
+
     const harness = schedulerHarness()
     harness.onFrame.mockImplementation(frame => {
       harness.frames.push(frame)

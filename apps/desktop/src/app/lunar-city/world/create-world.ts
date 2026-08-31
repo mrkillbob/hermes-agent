@@ -7,19 +7,31 @@ import { createWorldScene } from './world-scene'
 const DEFAULT_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
 
 export async function loadBabylonModules(): Promise<LunarCityWorldModules> {
-  const [engine, scene, sceneLoader, camera, vector, color, directionalLight, transformNode, , recast] =
-    await Promise.all([
-      import('@babylonjs/core/Engines/engine'),
-      import('@babylonjs/core/scene'),
-      import('@babylonjs/core/Loading/sceneLoader'),
-      import('@babylonjs/core/Cameras/arcRotateCamera'),
-      import('@babylonjs/core/Maths/math.vector'),
-      import('@babylonjs/core/Maths/math.color'),
-      import('@babylonjs/core/Lights/directionalLight'),
-      import('@babylonjs/core/Meshes/transformNode'),
-      import('@babylonjs/loaders/glTF'),
-      import('recast-detour')
-    ])
+  const [
+    engine,
+    scene,
+    sceneLoader,
+    camera,
+    vector,
+    color,
+    directionalLight,
+    transformNode,
+    instrumentation,
+    ,
+    recast
+  ] = await Promise.all([
+    import('@babylonjs/core/Engines/engine'),
+    import('@babylonjs/core/scene'),
+    import('@babylonjs/core/Loading/sceneLoader'),
+    import('@babylonjs/core/Cameras/arcRotateCamera'),
+    import('@babylonjs/core/Maths/math.vector'),
+    import('@babylonjs/core/Maths/math.color'),
+    import('@babylonjs/core/Lights/directionalLight'),
+    import('@babylonjs/core/Meshes/transformNode'),
+    import('@babylonjs/core/Instrumentation/sceneInstrumentation'),
+    import('@babylonjs/loaders/glTF'),
+    import('recast-detour')
+  ])
 
   return {
     ArcRotateCamera: camera.ArcRotateCamera,
@@ -28,6 +40,7 @@ export async function loadBabylonModules(): Promise<LunarCityWorldModules> {
     Engine: engine.Engine,
     ImportMeshAsync: sceneLoader.ImportMeshAsync,
     Scene: scene.Scene,
+    SceneInstrumentation: instrumentation.SceneInstrumentation,
     TransformNode: transformNode.TransformNode,
     Vector3: vector.Vector3,
     createRecastNavigation: recast.default
@@ -121,6 +134,28 @@ export async function createLunarCityWorld(
       },
       getCameraState() {
         return world?.getCameraState() ?? { focusedEntityKey: undefined, following: false }
+      },
+      getPerfSnapshot() {
+        const metrics = world?.getPerfSnapshot()
+
+        return metrics
+          ? { ...metrics, listeners: metrics.listeners + 9 }
+          : {
+              activeAnimations: 0,
+              drawCalls: 0,
+              entities: 0,
+              frameMs: 0,
+              frameTimestampsMs: [],
+              listeners: 0,
+              rafs: 0,
+              renderFrames: 0,
+              targetFps: 0,
+              textures: 0,
+              timers: 0,
+              visibleTriangles: 0,
+              worldUpdateMs: 0,
+              worldUpdateTimestampsMs: []
+            }
       },
       setLeaderAnimation(leaderId, state) {
         world?.setLeaderAnimation(leaderId, state)

@@ -14,6 +14,7 @@ import type {
   LunarCityNodeMetadata,
   LunarCitySnapshot,
   LunarCityWorkerPickMetadata,
+  LunarCityWorldHandle,
   LunarCityWorldModules,
   LunarEntity,
   ModelManifestEntry,
@@ -50,6 +51,7 @@ import {
   type NavigationQuery
 } from './navigation'
 import { createOcclusionController, type OcclusionCandidate, type OcclusionSelection } from './occlusion'
+import { createBabylonPerfAdapter } from './perf-adapter'
 import { animationDistanceUnits, applyQualitySettings, createQualityController } from './quality'
 import { createFrameScheduler } from './scheduler'
 
@@ -72,6 +74,7 @@ export interface LunarCitySceneHandle {
   dispatchCamera(intent: CameraIntent): void
   getEntityCameraOrder(): readonly EntityKey[]
   getCameraState(): CameraControlState
+  getPerfSnapshot(): NonNullable<ReturnType<NonNullable<LunarCityWorldHandle['getPerfSnapshot']>>>
   pick(clientX: number, clientY: number): CameraPickTarget | undefined
   setLeaderAnimation(leaderId: LeaderId, state: LeaderAnimationState): void
   setVisible(visible: boolean): void
@@ -1410,6 +1413,17 @@ export async function createWorldScene(
   resolveAssetUrl: (uri: string) => string
 ): Promise<LunarCitySceneHandle> {
   const scene = new modules.Scene(engine)
+  const capturePerf = typeof window !== 'undefined' && window.hermesDesktop?.lunarCityPerf !== undefined
+
+  const perfAdapter = createBabylonPerfAdapter(
+    scene,
+    capturePerf && modules.SceneInstrumentation ? new modules.SceneInstrumentation(scene) : undefined
+  )
+
+  let lastFrameMs = 0
+  let lastWorldUpdateMs = 0
+  const worldUpdateTimestampsMs: number[] | undefined = capturePerf ? [] : undefined
+
   let disposed = false
   let scheduler: ReturnType<typeof createFrameScheduler> | undefined
   let navigation: ReturnType<typeof createNavigationController> | undefined
@@ -1445,6 +1459,7 @@ export async function createWorldScene(
     }
 
     projectCompoundNodes.clear()
+    perfAdapter.dispose()
     scene.dispose()
   }
 
@@ -1642,6 +1657,7 @@ export async function createWorldScene(
     }
 
     const schedulerController = createFrameScheduler({
+      captureMetrics: capturePerf,
       onFrame(frame) {
         const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
         const previousCameraState = cameraController.getState()
@@ -1702,9 +1718,13 @@ export async function createWorldScene(
         )
 
         applyOcclusion()
+        const renderStartedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
         scene.render()
         const leaderAnimationActive = hasActiveLeaderAnimation()
         const finishedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
+        lastFrameMs = Math.max(0, finishedAt - startedAt)
+        lastWorldUpdateMs = Math.max(0, renderStartedAt - startedAt)
+        worldUpdateTimestampsMs?.push(renderStartedAt)
 
         if (
           quality.noteFrame({ elapsedMs: Math.max(0, finishedAt - startedAt), interactive: frame.targetFps === 30 })
@@ -1814,6 +1834,30 @@ export async function createWorldScene(
       },
       getCameraState() {
         return cameraController.getState()
+      },
+      getPerfSnapshot() {
+        const schedulerMetrics = schedulerController.getMetrics()
+        const babylon = perfAdapter.snapshot()
+        const qualitySettings = quality.settings()
+
+        return {
+          ...babylon,
+          activeAnimations:
+            activeNavigation.size +
+            (entityRegistryController.hasActiveAnimations() ? 1 : 0) +
+            activeLeaderAnimations.size,
+          frameMs: lastFrameMs,
+          frameTimestampsMs: schedulerMetrics.frameTimestampsMs,
+          internalRenderScale: qualitySettings.renderScale,
+          listeners: schedulerMetrics.listeners,
+          rafs: schedulerMetrics.rafs,
+          renderFrames: schedulerMetrics.renderFrames,
+          targetFps: schedulerMetrics.targetFps,
+          timers: schedulerMetrics.timers,
+          qualityTier: qualitySettings.tier,
+          worldUpdateMs: lastWorldUpdateMs,
+          worldUpdateTimestampsMs: worldUpdateTimestampsMs ? [...worldUpdateTimestampsMs] : []
+        }
       },
       getEntityCameraOrder() {
         const position = cameraPosition(camera)

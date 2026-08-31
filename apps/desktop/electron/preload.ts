@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 
+import { createLunarCityPerfPreload } from './lunar-city-perf-preload'
+
 // Which translucency the OS can back. Asked synchronously because the renderer
 // needs it before its first paint, and answered by main because deciding it
 // needs `os.release()` — a sandboxed preload may only require electron, events,
@@ -10,6 +12,11 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 const translucencySupport = ipcRenderer.sendSync('hermes:translucency:support')
 const hudWindowing = ipcRenderer.sendSync('hermes:hud:windowing')
 const hudNativeDrag = hudWindowing?.nativeDrag === true
+const lunarCityPerf = createLunarCityPerfPreload(ipcRenderer)
+
+if (lunarCityPerf) {
+  contextBridge.exposeInMainWorld('__LUNAR_CITY_PERF__', lunarCityPerf.surface)
+}
 
 contextBridge.exposeInMainWorld('hermesDesktop', {
   glassSupported: translucencySupport?.glass === true,
@@ -37,6 +44,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     return () => ipcRenderer.removeListener('hermes:browser-popout:closed', listener)
   },
   claimAmbientCue: key => ipcRenderer.invoke('hermes:ambient:claim', key),
+  lunarCityPerf: lunarCityPerf?.renderer,
   wakeIndicator: {
     getState: () => ipcRenderer.invoke('hermes:wake-indicator:get'),
     setState: state => ipcRenderer.send('hermes:wake-indicator:set', state),

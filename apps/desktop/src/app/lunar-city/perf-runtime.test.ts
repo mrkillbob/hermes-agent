@@ -1,0 +1,190 @@
+import { describe, expect, it, vi } from 'vitest'
+
+import { entityKey } from './identity'
+import type { EntityKey, LunarCitySnapshot, LunarEntity } from './model'
+import { createLunarCityPerfRuntime } from './perf-runtime'
+
+const worker = {
+  animation: 'work',
+  authority: 'authoritative',
+  destination: 'lab',
+  identity: { connectionId: 'source-a', kind: 'session', profile: 'research', sessionId: 'session-a' },
+  key: entityKey({ connectionId: 'source-a', kind: 'session', profile: 'research', sessionId: 'session-a' }),
+  observedAt: 100,
+  presentation: {
+    groups: [],
+    metadata: { source: 'profiles:source-a', state: 'fresh' },
+    placement: { lodHint: 0, overflow: false, slot: 0 }
+  }
+} as const
+
+const leader = {
+  animation: 'rest',
+  authority: 'authoritative',
+  destination: 'council',
+  identity: { connectionId: 'source-b', kind: 'profile', profile: 'leader' },
+  key: entityKey({ connectionId: 'source-b', kind: 'profile', profile: 'leader' }),
+  observedAt: 100,
+  presentation: {
+    groups: [],
+    metadata: { source: 'profiles:source-b', state: 'fresh' },
+    placement: { lodHint: 1, overflow: false, primaryGroupId: 'leaders', slot: 1 }
+  }
+} as const
+
+const city = {
+  entities: new Map<EntityKey, LunarEntity>([
+    [worker.key, worker],
+    [leader.key, leader]
+  ]),
+  observedAt: 100,
+  revision: 1,
+  sources: []
+} as unknown as LunarCitySnapshot
+
+describe('Lunar City route-local packaged metrics runtime', () => {
+  it('allocates no listener or sampling state when the acceptance endpoint is absent', () => {
+    const endpoint = { onRequest: vi.fn() }
+    const runtime = createLunarCityPerfRuntime(undefined)
+
+    expect(runtime.enabled).toBe(false)
+    expect(endpoint.onRequest).not.toHaveBeenCalled()
+    expect(runtime.registerRoute).toBeUndefined()
+  })
+
+  it('reports exact route population, scene, scheduler and Babylon adapter facts', async () => {
+    let request!: (action: string, payload: unknown) => Promise<unknown>
+    const release = vi.fn()
+
+    const runtime = createLunarCityPerfRuntime({
+      onRequest: callback => {
+        request = callback
+
+        return release
+      }
+    })
+
+    const route = runtime.registerRoute!({
+      canvas: document.createElement('canvas'),
+      getCameraState: () => ({ focusedEntityKey: worker.key, following: true }),
+      getCitySnapshot: () => city,
+      getDialogueState: () => 'idle',
+      getQuality: () => ({ internalRenderScale: 1, qualityTier: 'balanced' }),
+      getWorldMetrics: () => ({
+        activeAnimations: 1,
+        drawCalls: 17,
+        entities: 2,
+        frameMs: 9,
+        frameTimestampsMs: [100, 109],
+        listeners: 4,
+        rafs: 1,
+        renderFrames: 2,
+        targetFps: 30,
+        textures: 3,
+        timers: 1,
+        visibleTriangles: 1200,
+        worldUpdateMs: 3,
+        worldUpdateTimestampsMs: [101, 110]
+      }),
+      setLeaderDialogue: vi.fn(),
+      setQuality: vi.fn(),
+      worldAction: vi.fn()
+    })
+
+    const snapshot = await request('snapshot', undefined)
+
+    expect(snapshot).toMatchObject({
+      activeAnimations: 1,
+      activeLeaderAnimations: 0,
+      activeWorkerAnimations: 1,
+      cameraState: 'worker-focus',
+      dialogueState: 'idle',
+      drawCalls: 17,
+      entities: 2,
+      frameMs: 9,
+      internalRenderScale: 1,
+      population: {
+        active: 1,
+        lodMix: { far: 0, mid: 1, near: 1 },
+        observed: 2,
+        source: 'lunar-city-snapshot-v1'
+      },
+      populationSourceMix: { 'source-a': 1, 'source-b': 1 },
+      qualityTier: 'balanced',
+      renderFrames: 2,
+      sceneMount: { generation: 1 },
+      targetFps: 30,
+      visibleTriangles: 1200
+    })
+    expect((snapshot as { sceneMount: { id: string } }).sceneMount.id).toMatch(/^lunar-city-scene:/u)
+
+    route.dispose()
+    const disposed = await request('snapshot', undefined)
+    expect(disposed).toMatchObject({ lifecycleState: 'disposed', renderFrames: 0 })
+    runtime.dispose?.()
+    expect(release).toHaveBeenCalledOnce()
+  })
+
+  it('executes only bounded scenario actions and returns causal proof counters', async () => {
+    let request!: (action: string, payload: unknown) => Promise<unknown>
+    const worldAction = vi.fn()
+    const setQuality = vi.fn()
+    const setLeaderDialogue = vi.fn()
+
+    const runtime = createLunarCityPerfRuntime({
+      onRequest: callback => {
+        request = callback
+
+        return vi.fn()
+      }
+    })
+
+    runtime.registerRoute!({
+      canvas: document.createElement('canvas'),
+      getCameraState: () => ({ focusedEntityKey: undefined, following: false }),
+      getCitySnapshot: () => city,
+      getDialogueState: () => 'idle',
+      getQuality: () => ({ internalRenderScale: 1, qualityTier: 'balanced' }),
+      getWorldMetrics: () => ({
+        activeAnimations: 0,
+        drawCalls: 1,
+        entities: 2,
+        frameMs: 0,
+        frameTimestampsMs: [],
+        listeners: 0,
+        rafs: 0,
+        renderFrames: 0,
+        targetFps: 15,
+        textures: 1,
+        timers: 0,
+        visibleTriangles: 1,
+        worldUpdateMs: 0,
+        worldUpdateTimestampsMs: []
+      }),
+      setLeaderDialogue,
+      setQuality,
+      worldAction
+    })
+
+    expect(await request('scenario-action', { action: 'quality', payload: { tier: 'efficient' } })).toMatchObject({
+      action: 'quality',
+      proof: 1
+    })
+    expect(setQuality).toHaveBeenCalledWith('efficient')
+    expect(
+      await request('scenario-action', { action: 'orbit', payload: { deltaAlpha: 0.5, deltaBeta: 0.1 } })
+    ).toMatchObject({
+      action: 'orbit',
+      proof: 1
+    })
+    expect(worldAction).toHaveBeenCalledWith({ kind: 'orbit', deltaAlpha: 0.5, deltaBeta: 0.1 })
+    expect(await request('scenario-action', { action: 'leader-dialogue', payload: { leaderId: 'owl' } })).toMatchObject(
+      {
+        action: 'leader-dialogue',
+        proof: 1
+      }
+    )
+    expect(setLeaderDialogue).toHaveBeenCalledWith('owl')
+    await expect(request('scenario-action', { action: 'send-command', payload: {} })).rejects.toThrow(/unsupported/i)
+  })
+})

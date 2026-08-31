@@ -12,6 +12,7 @@ import {
   app,
   BrowserWindow,
   clipboard,
+  contentTracing,
   dialog,
   net as electronNet,
   webContents as electronWebContents,
@@ -88,7 +89,6 @@ import {
 } from './browser-windows'
 import { detectBundleSkew } from './bundle-skew'
 import { applyConnectionChange, teardownSshState } from './connection-apply'
-import { stopDesktopBackgroundServices } from './desktop-background-shutdown'
 import {
   apiRequestRegistryConnectionId,
   authModeFromStatus,
@@ -154,6 +154,7 @@ import {
 import type { RosterProfileMetadata } from './connection-registry'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
+import { stopDesktopBackgroundServices } from './desktop-background-shutdown'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import { formatDesktopLogLine } from './desktop-log-line'
 import { resolveDesktopRemoteRoute } from './desktop-remote-route'
@@ -230,6 +231,11 @@ import { createHudSnapShortcut } from './hud-snap-shortcut'
 import { buildHudWindowUrl } from './hud-url'
 import { resolveHudWindowing } from './hud-windowing'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
+import {
+  createChromiumMemoryInfraGpuProbe,
+  createLunarCityPerfMainController,
+  resolveLunarCityPerfLaunch
+} from './lunar-city-perf-main'
 import { ensureMainWindow, shouldQuitAfterWindowAllClosed } from './main-window-lifecycle'
 import {
   assertManagedUpdatePreflightClear,
@@ -1381,6 +1387,96 @@ function registerMediaProtocol() {
 }
 
 let mainWindow = null
+
+const lunarCityPerfLaunch = resolveLunarCityPerfLaunch({
+  buildStamp: INSTALL_STAMP,
+  env: process.env,
+  // The development compatibility override used elsewhere is deliberately
+  // not accepted here: this is a packaged acceptance-only surface.
+  isPackaged: app.isPackaged
+})
+
+let lunarCityTraceCapture = Promise.resolve()
+
+async function captureLunarCityGpuTrace(config) {
+  let release
+  const previous = lunarCityTraceCapture
+  lunarCityTraceCapture = new Promise(resolve => {
+    release = resolve
+  })
+
+  await previous
+
+  const tracePath = path.join(app.getPath('temp'), `hermes-lunar-city-memory-${crypto.randomUUID()}.json`)
+  let recording = false
+
+  try {
+    await contentTracing.startRecording({
+      included_categories: [config.category],
+      memory_dump_config: {
+        allowed_dump_modes: [config.dumpMode],
+        triggers: [{ mode: config.dumpMode, periodic_interval_ms: config.periodicIntervalMs }]
+      }
+    })
+    recording = true
+    await new Promise(resolve => setTimeout(resolve, config.periodicIntervalMs + 100))
+    const completedPath = await contentTracing.stopRecording(tracePath)
+    recording = false
+
+    return JSON.parse(await fs.promises.readFile(completedPath, 'utf8'))
+  } finally {
+    if (recording) {
+      await contentTracing.stopRecording().catch(() => undefined)
+    }
+
+    await fs.promises.rm(tracePath, { force: true }).catch(() => undefined)
+    release()
+  }
+}
+
+const lunarCityPerfController = lunarCityPerfLaunch
+  ? createLunarCityPerfMainController({
+      appMetrics: () => app.getAppMetrics(),
+      environmentSnapshot: async sender => {
+        const contents = electronWebContents.fromId(sender.id)
+        const win = contents ? BrowserWindow.fromWebContents(contents) : null
+        const gpuFeatureStatus = app.getGPUFeatureStatus()
+        const gpuInfo = await app.getGPUInfo('complete').catch(() => undefined)
+        const bounds = win && !win.isDestroyed() ? win.getBounds() : undefined
+        const displayScaleFactor = bounds ? screen.getDisplayMatching(bounds).scaleFactor : undefined
+
+        return {
+          chromiumVersion: process.versions.chrome,
+          displayScaleFactor,
+          electronMode: 'packaged',
+          electronVersion: process.versions.electron,
+          gpuEnabled:
+            gpuFeatureStatus.gpu_compositing !== 'disabled_software' &&
+            gpuFeatureStatus.gpu_compositing !== 'disabled_off',
+          gpuFeatureStatus,
+          gpuInfo,
+          windowBounds: bounds
+        }
+      },
+      gpuSnapshot: createChromiumMemoryInfraGpuProbe(captureLunarCityGpuTrace),
+      launch: lunarCityPerfLaunch,
+      mainPid: process.pid,
+      now: () => Date.now(),
+      ownsSender: sender => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === sender.id)
+    })
+  : undefined
+
+ipcMain.on('hermes:lunar-city-perf:bootstrap', event => {
+  event.returnValue = lunarCityPerfController?.bootstrap(event)
+})
+ipcMain.handle('hermes:lunar-city-perf:process-metrics', event => lunarCityPerfController?.processMetrics(event))
+ipcMain.handle('hermes:lunar-city-perf:renderer-request', (event, action, payload) =>
+  lunarCityPerfController?.requestRenderer(event, action, payload)
+)
+ipcMain.on('hermes:lunar-city-perf:response', (event, requestId, result) => {
+  lunarCityPerfController?.resolveRendererResponse(event, requestId, result)
+})
+
 const backendConnectionState = createBackendConnectionState<ReturnType<typeof spawn>, any>()
 const remoteLiveness = new RemoteLivenessTracker()
 const remoteRevalidation = new RemoteRevalidationCoordinator()
@@ -2897,10 +2993,12 @@ async function resolveHealedBranch(updateRoot, branch) {
 
   const current = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: updateRoot })
   const currentBranch = current.code === 0 ? current.stdout.trim() : ''
+
   if (!shouldHealMissingUpdateBranch({ configuredBranch: branch, currentBranch })) {
     rememberLog(
       `[updates] origin/${branch} is gone, but it is the active local checkout; retaining it instead of falling back to main`
     )
+
     return branch
   }
 
@@ -12191,6 +12289,7 @@ const backendShutdown = createBackendShutdownCoordinator(async () => {
 
   stopBackendChild(primary)
   const pooledStops = stopAllPoolBackends()
+
   const backgroundServicesStop = stopDesktopBackgroundServices({
     resolveBackend: resolveHermesBackend,
     spawnFn: spawn,
@@ -16529,6 +16628,7 @@ app.on('before-quit', () => {
 // hold the event loop open or leak FDs past app teardown.
 app.on('will-quit', () => {
   destroyKeepaliveAgents()
+  lunarCityPerfController?.dispose()
 })
 
 // Answered synchronously so preload can publish the verdict before the
