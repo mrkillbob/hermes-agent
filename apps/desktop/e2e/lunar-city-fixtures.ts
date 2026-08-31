@@ -1,11 +1,12 @@
-import { spawnSync } from 'node:child_process'
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
+import * as net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..', '..')
-const CONTRACT_VERSION = 'lunar-city-population-v1' as const
+const CONTRACT_VERSION = 'lunar-city-population-v2' as const
 const EXACT_SHA = /^[a-f0-9]{40}$/u
 
 export const GROUP_DISTRICTS = Object.freeze([
@@ -57,6 +58,12 @@ export interface PopulationEntity {
   profile: string
   sourceLabel: string
   title: string
+  board?: string
+  runId?: string
+  sessionId?: string
+  subagentId?: string
+  taskId?: string
+  workerId?: string
 }
 
 export interface PopulationContract {
@@ -75,6 +82,60 @@ interface ScenarioShape {
   activity: Record<Activity, number>
   kinds: Record<EntityKind, number>
   lod: Record<Lod, number>
+}
+
+interface CanonicalIdentityInput {
+  board?: string
+  connectionId: string
+  durableId: string
+  kind: EntityKind
+  profile: string
+  runId?: string
+  sessionId?: string
+  subagentId?: string
+  taskId?: string
+  workerId?: string
+}
+
+function identityField(name: string, value: string): string {
+  return `${name}:string:${value.length}:${encodeURIComponent(value)}`
+}
+
+function optionalIdentityField(name: string, value: string | undefined): string {
+  return value === undefined ? `${name}:undefined` : identityField(name, value)
+}
+
+/** Mirrors the production typed, length-prefixed Lunar City identity contract. */
+export function canonicalEntityKey(identity: CanonicalIdentityInput): string {
+  const common = [identityField('kind', identity.kind), identityField('connection', identity.connectionId)]
+
+  if (identity.kind === 'profile') {
+    return [...common, identityField('profile', identity.profile)].join(':')
+  }
+
+  if (identity.kind === 'session') {
+    return [...common, identityField('profile', identity.profile), identityField('session', identity.sessionId!)].join(
+      ':'
+    )
+  }
+
+  if (identity.kind === 'subagent') {
+    return [
+      ...common,
+      identityField('profile', identity.profile),
+      identityField('session', identity.sessionId!),
+      identityField('subagent', identity.subagentId!)
+    ].join(':')
+  }
+
+  return [
+    ...common,
+    identityField('profile', identity.profile),
+    identityField('board', identity.board!),
+    identityField('task', identity.taskId!),
+    optionalIdentityField('run', identity.runId),
+    optionalIdentityField('worker', identity.workerId)
+  ].join(':')
 }
 
 const SHAPES: Readonly<Record<LunarCityPopulation, ScenarioShape>> = Object.freeze({
@@ -107,7 +168,14 @@ export function buildPopulationContract(population: LunarCityPopulation): Popula
     for (let index = 0; index < shape.kinds[kind]; index += 1) {
       const collision = kind === 'profile' && index < 2
       const connectionId = collision ? connections[index]! : connections[(index + ordinal) % connections.length]!
-      const durableId = collision ? 'shared-steward' : `${kind}-${String(index).padStart(3, '0')}`
+      const implicitDefault = kind === 'profile' && [2, 3, 4].includes(index)
+
+      const durableId = implicitDefault
+        ? 'default'
+        : collision
+          ? 'shared-steward'
+          : `${kind}-${String(index).padStart(3, '0')}`
+
       const owners = profilesByConnection.get(connectionId) ?? []
       const profile = kind === 'profile' ? durableId : owners[index % owners.length]!
       const groupIndex = kind === 'profile' && index < GROUP_DISTRICTS.length - 1 ? index : -1
@@ -118,19 +186,43 @@ export function buildPopulationContract(population: LunarCityPopulation): Popula
         groups.push(GROUP_DISTRICTS.at(-1)![0])
       }
 
+      const ownerSession = `session-${String(index % Math.max(1, shape.kinds.session)).padStart(3, '0')}`
+      const taskId = `task-${String(index % Math.max(1, shape.kinds.task)).padStart(3, '0')}`
+      const runId = kind === 'task' || kind === 'worker' ? String(1000 + index) : undefined
+      const workerId = kind === 'worker' ? `pid:${process.pid}` : undefined
+
+      const identity = {
+        kind,
+        connectionId,
+        profile,
+        durableId,
+        board: 'default',
+        runId,
+        sessionId: kind === 'session' ? durableId : ownerSession,
+        subagentId: kind === 'subagent' ? durableId : undefined,
+        taskId: kind === 'task' ? durableId : taskId,
+        workerId
+      }
+
       entities.push({
         activity: 'idle',
         connectionId,
         displayId: durableId,
         durableId,
-        exactKey: `${kind}:${encodeURIComponent(connectionId)}:${encodeURIComponent(profile)}:${encodeURIComponent(durableId)}`,
+        exactKey: canonicalEntityKey(identity),
         groups: Object.freeze(groups),
         kind,
         ...(kind === 'profile' ? { leaderFamily: LEADER_FAMILIES[index % LEADER_FAMILIES.length] } : {}),
         lod: 'aggregate',
         profile,
         sourceLabel: labels[connectionId],
-        title: `${kind[0]!.toUpperCase()}${kind.slice(1)} ${String(index + 1).padStart(3, '0')}`
+        title: `${kind[0]!.toUpperCase()}${kind.slice(1)} ${String(index + 1).padStart(3, '0')}`,
+        ...(kind === 'session' || kind === 'subagent' ? { sessionId: identity.sessionId } : {}),
+        ...(kind === 'subagent' ? { subagentId: identity.subagentId } : {}),
+        ...(kind === 'task' || kind === 'worker'
+          ? { board: identity.board, runId: identity.runId, taskId: identity.taskId }
+          : {}),
+        ...(kind === 'worker' ? { workerId: identity.workerId } : {})
       })
 
       if (kind === 'profile') {
@@ -141,6 +233,25 @@ export function buildPopulationContract(population: LunarCityPopulation): Popula
     }
   }
 
+  for (const worker of entities.filter(row => row.kind === 'worker')) {
+    const task =
+      entities.find(row => row.kind === 'task' && row.connectionId === worker.connectionId) ??
+      entities.find(row => row.kind === 'task')!
+
+    worker.taskId = task.taskId
+    worker.profile = task.profile
+    worker.exactKey = canonicalEntityKey({
+      kind: worker.kind,
+      connectionId: worker.connectionId,
+      durableId: worker.durableId,
+      profile: worker.profile,
+      board: worker.board,
+      runId: worker.runId,
+      taskId: worker.taskId,
+      workerId: worker.workerId
+    })
+  }
+
   assignBuckets(entities, 'activity', shape.activity, ['active', 'idle', 'unavailable'])
   assignBuckets(entities, 'lod', shape.lod, ['near', 'mid', 'far', 'aggregate'])
   const unavailable = entities.find(row => row.activity === 'unavailable')
@@ -149,6 +260,15 @@ export function buildPopulationContract(population: LunarCityPopulation): Popula
   if (unavailable && unavailableProfile && unavailable.kind !== 'profile') {
     unavailable.activity = unavailableProfile.activity
     unavailableProfile.activity = 'unavailable'
+  }
+
+  for (const worker of entities.filter(row => row.kind === 'worker' && row.activity !== 'active')) {
+    const donor = entities.find(row => row.kind !== 'worker' && row.activity === 'active')
+
+    if (donor) {
+      donor.activity = worker.activity
+      worker.activity = 'active'
+    }
   }
 
   const unsigned = {
@@ -189,7 +309,14 @@ export interface LunarCityPopulationFixture {
   hermesHome: string
   root: string
   sourceHomes: Readonly<Record<string, string>>
+  subagentFrames: readonly StandardSubagentFrame[]
   userDataDir: string
+}
+
+export interface StandardSubagentFrame {
+  payload: Readonly<Record<string, unknown>>
+  session_id: string
+  type: 'subagent.start'
 }
 
 export function createLunarCityPopulationFixture(population: LunarCityPopulation): LunarCityPopulationFixture {
@@ -219,7 +346,7 @@ export function createLunarCityPopulationFixture(population: LunarCityPopulation
 
     for (const entity of contract.entities.filter(row => row.kind === 'profile')) {
       const home = sourceHomes[entity.connectionId as keyof typeof sourceHomes]
-      const profileDir = path.join(home, 'profiles', entity.profile)
+      const profileDir = entity.profile === 'default' ? home : path.join(home, 'profiles', entity.profile)
       fs.mkdirSync(profileDir, { recursive: true })
       fs.writeFileSync(
         path.join(profileDir, 'SOUL.md'),
@@ -232,6 +359,24 @@ export function createLunarCityPopulationFixture(population: LunarCityPopulation
     fs.writeFileSync(contractPath, `${JSON.stringify(contract, null, 2)}\n`, 'utf8')
     seedStandardStores(contractPath, sourceHomes)
 
+    const subagentFrames = deepFreeze(
+      contract.entities
+        .filter(row => row.kind === 'subagent')
+        .map(row => ({
+          payload: {
+            child_session_id: `${row.sessionId}-child`,
+            goal: row.title,
+            parent_id: row.sessionId,
+            status: 'running',
+            subagent_id: row.subagentId,
+            task_count: 1,
+            task_index: 0
+          },
+          session_id: row.sessionId!,
+          type: 'subagent.start' as const
+        }))
+    )
+
     return {
       cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
       contract,
@@ -239,10 +384,167 @@ export function createLunarCityPopulationFixture(population: LunarCityPopulation
       hermesHome: sourceHomes.local,
       root,
       sourceHomes: deepFreeze({ ...sourceHomes }),
+      subagentFrames,
       userDataDir
     }
   } catch (error) {
     fs.rmSync(root, { recursive: true, force: true })
+    throw error
+  }
+}
+
+export interface StandardGatewaySource {
+  close: () => Promise<void>
+  connectionId: string
+  pid: number
+  token: string
+  url: string
+}
+
+export interface PopulationGateways {
+  close: () => Promise<void>
+  sources: readonly StandardGatewaySource[]
+}
+
+const SAFE_GATEWAY_ENV = ['PATH', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'SHELL', 'USER', 'LOGNAME'] as const
+
+function standardHermesBinary(): string {
+  const candidates = [
+    path.join(REPO_ROOT, '.venv', 'bin', 'hermes'),
+    path.join(os.homedir(), '.hermes', 'hermes-agent', 'venv', 'bin', 'hermes')
+  ]
+
+  const binary = candidates.find(candidate => fs.existsSync(candidate))
+
+  if (!binary) {
+    throw new Error('A verified Hermes venv binary is required for standard-route fixtures')
+  }
+
+  return binary
+}
+
+async function reservePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address() as net.AddressInfo
+      server.close(error => (error ? reject(error) : resolve(address.port)))
+    })
+  })
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (!child.pid || child.exitCode !== null) {
+    return
+  }
+
+  try {
+    process.kill(-child.pid, 'SIGTERM')
+  } catch {
+    child.kill('SIGTERM')
+  }
+
+  await new Promise<void>(resolve => {
+    const timer = setTimeout(resolve, 2_000)
+    child.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+}
+
+/** Start credential-free real `hermes serve` sources and register their standard desktop routes. */
+export async function startPopulationGateways(fixture: LunarCityPopulationFixture): Promise<PopulationGateways> {
+  const sources: StandardGatewaySource[] = []
+
+  try {
+    for (const connectionId of Object.keys(fixture.sourceHomes)) {
+      const port = await reservePort()
+      const url = `http://127.0.0.1:${port}`
+      const token = `lunar-city-e2e-${connectionId}`
+
+      const env = Object.fromEntries(
+        SAFE_GATEWAY_ENV.flatMap(key => (process.env[key] === undefined ? [] : [[key, process.env[key]!]]))
+      )
+
+      const child = spawn(
+        standardHermesBinary(),
+        ['serve', '--host', '127.0.0.1', '--port', String(port), '--skip-build'],
+        {
+          cwd: REPO_ROOT,
+          detached: true,
+          env: {
+            ...env,
+            HERMES_DASHBOARD_SESSION_TOKEN: token,
+            HERMES_HOME: fixture.sourceHomes[connectionId]!,
+            HERMES_KANBAN_HOME: fixture.sourceHomes[connectionId]!
+          },
+          stdio: ['ignore', 'pipe', 'pipe']
+        }
+      )
+
+      let log = ''
+      child.stdout?.on('data', chunk => (log += String(chunk)))
+      child.stderr?.on('data', chunk => (log += String(chunk)))
+      const deadline = Date.now() + 60_000
+
+      while (Date.now() < deadline) {
+        if (child.exitCode !== null) {
+          throw new Error(`${connectionId} gateway exited (${child.exitCode}):\n${log}`)
+        }
+
+        try {
+          const response = await fetch(`${url}/api/status`, { headers: { 'X-Hermes-Session-Token': token } })
+
+          if (response.ok) {
+            break
+          }
+        } catch {
+          // Standard gateway is still starting.
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 250))
+      }
+
+      if (Date.now() >= deadline) {
+        throw new Error(`${connectionId} gateway did not become ready:\n${log}`)
+      }
+
+      sources.push({ close: () => stopChild(child), connectionId, pid: child.pid!, token, url })
+    }
+
+    fs.writeFileSync(
+      path.join(fixture.userDataDir, 'connections.json'),
+      `${JSON.stringify(
+        {
+          version: 2,
+          primary: 'local',
+          launchMode: 'primary',
+          lastUsed: 'local',
+          connections: sources.map(source => ({
+            id: source.connectionId,
+            kind: source.connectionId === 'local' ? 'local' : 'remote',
+            label: source.connectionId,
+            ...(source.connectionId === 'local'
+              ? {}
+              : { authMode: 'token', token: { encoding: 'plain', value: source.token }, url: source.url })
+          }))
+        },
+        null,
+        2
+      )}\n`,
+      { encoding: 'utf8', mode: 0o600 }
+    )
+
+    return {
+      sources,
+      close: async () => {
+        await Promise.allSettled(sources.map(source => source.close()))
+      }
+    }
+  } catch (error) {
+    await Promise.allSettled(sources.map(source => source.close()))
     throw error
   }
 }
@@ -256,7 +558,8 @@ function profileYaml(entity: PopulationEntity): string {
 description: Deterministic Lunar City population fixture
 ui_meta:
   hermes-bots:
-    title: ${JSON.stringify(entity.title)}${groups}
+    title: ${JSON.stringify(entity.title)}
+    leader_family: ${JSON.stringify(entity.leaderFamily)}${groups}
 _ui_meta_revisions:
   hermes-bots: 1
 `
@@ -277,30 +580,25 @@ for connection_id, home_raw in homes.items():
     os.environ["HERMES_HOME"] = str(home)
     os.environ["HERMES_KANBAN_HOME"] = str(home)
     for row in rows:
-        if row["connectionId"] != connection_id or row["kind"] not in ("session", "subagent"):
+        if row["connectionId"] != connection_id or row["kind"] != "session":
             continue
-        profile_home = home / "profiles" / row["profile"]
+        profile_home = home if row["profile"] == "default" else home / "profiles" / row["profile"]
         profile_home.mkdir(parents=True, exist_ok=True)
         db = SessionDB(db_path=profile_home / "state.db")
         try:
-            source = "tool" if row["kind"] == "subagent" else "desktop"
-            db.create_session(row["durableId"], source, profile_name=row["profile"], cwd=str(home))
+            db.create_session(row["sessionId"], "desktop", profile_name=row["profile"], cwd=str(home))
             if row["activity"] != "active":
-                db.end_session(row["durableId"], "completed")
+                db.end_session(row["sessionId"], "completed")
         finally:
             db.close()
-
-    if connection_id != "local":
-        SessionDB(db_path=home / "state.db").close()
-        continue
 
     db = SessionDB(db_path=home / "state.db")
     db.close()
     conn = kanban_db.connect(db_path=home / "kanban.db")
     try:
         now = 1788172800
-        task_rows = [row for row in rows if row["kind"] == "task"]
-        workers = [row for row in rows if row["kind"] == "worker"]
+        task_rows = [row for row in rows if row["connectionId"] == connection_id and row["kind"] == "task"]
+        workers = [row for row in rows if row["connectionId"] == connection_id and row["kind"] == "worker"]
         for index, row in enumerate(task_rows):
             status = "running" if row["activity"] == "active" else "ready"
             conn.execute(
@@ -308,15 +606,14 @@ for connection_id, home_raw in homes.items():
                 (row["durableId"], row["title"], row["profile"], status, now + index, "scratch", "fixture-project", f"session-{index:03d}"),
             )
         for index, row in enumerate(workers):
-            task = task_rows[index % len(task_rows)]
-            run_id = 1000 + index
-            status = "running" if row["activity"] == "active" else "done"
+            task = next(task_row for task_row in task_rows if task_row["taskId"] == row["taskId"])
+            run_id = int(row["runId"])
+            status = "running"
             conn.execute(
                 "INSERT INTO task_runs (id,task_id,profile,status,claim_lock,worker_pid,last_heartbeat_at,started_at,ended_at,outcome) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (run_id, task["durableId"], row["profile"], status, row["durableId"] if status == "running" else None, None, now, now, None if status == "running" else now + 1, None if status == "running" else "completed"),
+                (run_id, task["durableId"], row["profile"], status, row["durableId"], int(sys.argv[3]), now, now, None, None),
             )
-            if status == "running":
-                conn.execute("UPDATE tasks SET status='running', current_run_id=?, claim_lock=?, last_heartbeat_at=? WHERE id=?", (run_id, row["durableId"], now, task["durableId"]))
+            conn.execute("UPDATE tasks SET status='running', current_run_id=?, claim_lock=?, last_heartbeat_at=? WHERE id=?", (run_id, row["durableId"], now, task["durableId"]))
         conn.commit()
     finally:
         conn.close()
@@ -326,7 +623,7 @@ for connection_id, home_raw in homes.items():
   const fallbackPython = path.join(os.homedir(), '.hermes', 'hermes-agent', 'venv', 'bin', 'python')
   const executable = fs.existsSync(python) ? python : fallbackPython
 
-  const result = spawnSync(executable, ['-c', script, contractPath, JSON.stringify(sourceHomes)], {
+  const result = spawnSync(executable, ['-c', script, contractPath, JSON.stringify(sourceHomes), String(process.pid)], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     env: { ...process.env, PYTHONPATH: REPO_ROOT }
@@ -338,16 +635,24 @@ for connection_id, home_raw in homes.items():
 }
 
 export interface PackagedBuildStamp {
+  builtAt: string
   commit: string
-  dirty: boolean
-  source: string
+  dirty: false
+  schemaVersion: 1
+  source: 'ci' | 'local'
 }
 
 export interface GpuPackagedEligibilityInput {
   binaryExists: boolean
   binaryPath: string
   headSha: string
-  stamp: PackagedBuildStamp
+  stamp: {
+    builtAt?: string
+    commit: string
+    dirty: boolean
+    schemaVersion?: number
+    source: string
+  }
 }
 
 export function assertGpuPackagedEligibility(input: GpuPackagedEligibilityInput): {
@@ -366,8 +671,16 @@ export function assertGpuPackagedEligibility(input: GpuPackagedEligibilityInput)
     throw new Error('Refusing dirty packaged build stamp')
   }
 
-  if (input.stamp.source === 'fallback' || /^0{40}$/u.test(input.stamp.commit)) {
+  if (!['ci', 'local'].includes(input.stamp.source) || /^0{40}$/u.test(input.stamp.commit)) {
     throw new Error('Refusing fallback packaged build stamp')
+  }
+
+  if (
+    input.stamp.schemaVersion !== 1 ||
+    typeof input.stamp.builtAt !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(input.stamp.builtAt)
+  ) {
+    throw new Error('Refusing non-canonical packaged build stamp')
   }
 
   if (!EXACT_SHA.test(input.stamp.commit) || !EXACT_SHA.test(input.headSha)) {
@@ -386,11 +699,16 @@ export function gpuPackagedLaunchOptions(input: {
   executablePath: string
   userDataDir?: string
 }): { args: string[]; env: Record<string, string>; executablePath: string } {
-  const env = Object.fromEntries(
-    Object.entries(input.env).filter(
-      ([key]) => !/(?:_API_KEY|_TOKEN|_SECRET|_PASSWORD|_CREDENTIALS|_ACCESS_KEY|_PRIVATE_KEY)$/u.test(key)
-    )
-  )
+  const allowed = new Set([
+    ...SAFE_GATEWAY_ENV,
+    'HERMES_HOME',
+    'HERMES_DESKTOP_APP_NAME',
+    'HERMES_DESKTOP_SKIP_QUIT_CONFIRM',
+    'HERMES_LUNAR_CITY_PERF_ACCEPTANCE',
+    'HERMES_LUNAR_CITY_PERF_NONCE'
+  ])
+
+  const env = Object.fromEntries(Object.entries(input.env).filter(([key]) => allowed.has(key)))
 
   const args = ['--no-sandbox', ...(input.userDataDir ? [`--user-data-dir=${input.userDataDir}`] : [])]
 
