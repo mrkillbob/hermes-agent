@@ -5183,7 +5183,8 @@ def release_stale_claims(
             continue
 
         termination = _terminate_reclaimed_worker(
-            row["worker_pid"], row["claim_lock"], signal_fn=signal_fn,
+            row["worker_pid"], row["claim_lock"],
+            task_id=row["id"], signal_fn=signal_fn,
         )
         # Never release a claim while our own worker is still alive: that would
         # spawn a duplicate beside it. Hold the claim and retry next tick.
@@ -5283,7 +5284,8 @@ def reclaim_task(
         return False
     prev_lock = row["claim_lock"]
     termination = _terminate_reclaimed_worker(
-        row["worker_pid"], prev_lock, signal_fn=signal_fn,
+        row["worker_pid"], prev_lock,
+        task_id=task_id, signal_fn=signal_fn,
     )
     # Manual reclaim is an external stop operation. Never release a live
     # claim unless its host-local worker is proven gone; otherwise the next
@@ -5372,7 +5374,9 @@ def suspend_task_for_watchdog(
         return False
 
     terminate = termination_fn or (
-        lambda pid, lock: _terminate_reclaimed_worker(pid, lock)
+        lambda pid, lock: _terminate_reclaimed_worker(
+            pid, lock, task_id=task_id
+        )
     )
     termination = terminate(row["worker_pid"], row["claim_lock"])
     if not (
@@ -7865,7 +7869,7 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
     termination: Optional[dict[str, Any]] = None
     if row["status"] == "running":
         termination = _terminate_reclaimed_worker(
-            row["worker_pid"], row["claim_lock"]
+            row["worker_pid"], row["claim_lock"], task_id=task_id
         )
         if not termination.get("terminated"):
             _defer_reclaim_for_live_worker(
@@ -8689,10 +8693,59 @@ def _pid_alive(pid: Optional[int]) -> bool:
     return True
 
 
+def _pid_matches_task_worker(pid: int, task_id: str) -> bool:
+    """Prove that a local PID is the Hermes worker for ``task_id``."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(int(pid))],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, TimeoutError, ValueError):
+        return False
+    command = (proc.stdout or "").strip()
+    return (
+        proc.returncode == 0
+        and "hermes" in command
+        and f"kanban task {task_id}" in command
+    )
+
+
+def _claim_is_host_local(
+    claim_lock: Optional[str],
+    *,
+    pid: Optional[int] = None,
+    task_id: Optional[str] = None,
+) -> bool:
+    """Recognize local claims without trusting a mutable hostname alone.
+
+    macOS ComputerName/HostName can change while a gateway is running, so an
+    older claim prefix may no longer equal ``socket.gethostname()``. A PID is
+    still safe to signal when its command line proves it is the Hermes worker
+    for this exact Kanban task.
+    """
+    if not claim_lock:
+        return False
+    current_host = _claimer_id().split(":", 1)[0]
+    if str(claim_lock).startswith(f"{current_host}:"):
+        return True
+    return bool(
+        pid
+        and task_id
+        and _pid_matches_task_worker(int(pid), str(task_id))
+    )
+
+
 def _terminate_reclaimed_worker(
     pid: Optional[int],
     claim_lock: Optional[str],
     *,
+    task_id: Optional[str] = None,
     signal_fn=None,
 ) -> dict[str, Any]:
     """Best-effort host-local worker termination for reclaim paths."""
@@ -8708,8 +8761,7 @@ def _terminate_reclaimed_worker(
     if not pid or pid <= 0 or not claim_lock:
         return info
 
-    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
-    if not str(claim_lock).startswith(host_prefix):
+    if not _claim_is_host_local(claim_lock, pid=pid, task_id=task_id):
         return info
     info["host_local"] = True
 
@@ -9097,7 +9149,7 @@ def detect_stale_running(
 
         # Terminate the worker if it's still host-local.
         termination = _terminate_reclaimed_worker(
-            pid, lock, signal_fn=signal_fn,
+            pid, lock, task_id=tid, signal_fn=signal_fn,
         )
 
         # Never release a claim while our own worker is still alive: that would
