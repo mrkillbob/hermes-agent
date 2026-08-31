@@ -175,9 +175,20 @@ Robot-worker animation supports:
 - heartbeat, rest, and done.
 
 All models, rigs, materials, and clips must preserve the approved robot-child
-and animal leader designs. Leaders use distinct models. Workers share an
-optimized modular rig with approved color and accessory variations for role
-and state. Generic replacement characters are not acceptable.
+and animal leader designs. The six leader families use genuinely distinct
+species, silhouettes, and presented model identities; no two leader families
+may reuse the same visible model. Workers share one optimized low-poly rig and
+GPU buffers, but each of the 19 declared Hermes groups has a visibly distinct
+kit. Every exact-source profile receives a deterministic, collision-free near
+signature assembled from body, head, silhouette accessory, palette, and
+emblem. Invisible rig, mesh-buffer, and animation-clip reuse is encouraged;
+reuse of the complete presented signature for different exact profiles is
+forbidden. Generic replacement characters are not acceptable.
+
+The asset validator rejects duplicate leader visual identities, missing group
+kits, duplicate complete worker signatures, and material, texture-atlas,
+triangle, or draw-call budgets that would turn profile diversity into one
+heavy model per worker.
 
 ### Asset manifest
 
@@ -236,6 +247,8 @@ intents. Camera motion does not create authoritative Hermes events.
 `LunarCityAdapter` combines existing desktop and plugin data sources:
 
 - the connection-scoped profile fleet roster;
+- exact-source profile presentation metadata, including each bot's configured
+  inherent job title and every durable group membership;
 - standard profile and session data;
 - native `subagent.*` events and stored child-session identities;
 - Kanban board, task, run, worker, comment, diagnostic, and live-event data;
@@ -244,6 +257,15 @@ intents. Camera motion does not create authoritative Hermes events.
 The adapter publishes immutable `LunarCitySnapshot` values plus ordered deltas.
 Snapshots are keyed by typed canonical identity. They contain presentation-safe
 state only and exclude secrets, raw credentials, and unbounded logs.
+
+Every profile returned by an enumerated source remains represented, including
+inactive, unreachable, and unavailable profiles. Titles and group memberships
+are descriptive metadata only: they never replace `{connectionId, profile}` as
+identity or authority. Stable city placement is derived deterministically from
+that exact identity and declared group/district anchors, with bounded overflow;
+it is never inferred from display-name keywords or frozen to one observed local
+roster. The same profile may belong to multiple groups, and same-named profiles
+on different connections remain separate inhabitants.
 
 Gateway events update the city immediately. Bounded reconciliation rereads
 authoritative state after connection recovery, sequence gaps, or explicit user
@@ -352,9 +374,19 @@ only when those fields are actually available.
 - Static terrain and building meshes are merged where that preserves occlusion
   groups. Repeated workers, furniture, vegetation, and building parts use
   hardware instances or thin instances.
+- Worker variety is encoded as instance palette/emblem data plus a bounded set
+  of modular silhouette parts on one shared low-poly rig; it does not allocate
+  a unique heavyweight mesh, skeleton, texture set, or material graph per
+  profile.
+- Worker and leader materials use compact baked-light texture atlases and a
+  bounded shared material set. Balanced quality keeps real-time shadows and
+  costly post-processing disabled by default.
 - Off-camera meshes, animation, and path updates are culled or suspended.
 - Distant populations use truthful aggregate activity at the project or room
   level or simplified LODs rather than hundreds of full animation rigs.
+- Only selected and near-camera characters may evaluate full animation rigs.
+  Mid-distance characters use reduced clips or poses; far characters use
+  static low-poly instances or truthful aggregates with exact counts.
 - Lighting is primarily baked into textures and vertex colors. At most one
   restrained real-time directional light is used. Dynamic shadows are limited
   to the near camera tier and disabled by lower quality tiers.

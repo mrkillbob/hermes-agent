@@ -1,5 +1,13 @@
 # Design QA
 
+> **Current status (2026-08-31):** The historical image-backed QA below is superseded. The runtime is now a genuine Babylon 3D scene using `apps/desktop/public/lunar-city/v2/`; `moon-settlement-approved.jpg` is a reference asset only. Current source/unit implementation is review-clean at `HEAD b40e67825121cd0edb99b64e3a1bedcfbd19ec96`, but no clean packaged visual, GPU/CPU, 30-minute, or supervised-live acceptance has been performed.
+
+## Current 3D QA disposition
+
+- Source contracts cover arranged camera orbit/pan/tilt/zoom/focus/follow, 3D picking, exact connection/profile collision selection, persistent leader dialogue, live source health, real teardown, six leader families, 19 group kits, shared low-power resources, LOD/aggregation, and multi-connection sessions/subagents/Kanban.
+- Automated source/unit receipts are current; they are not a substitute for packaged visual approval. The strongest interaction E2E is source-level/GPU-enabled test coverage, while this checkout cannot currently launch a fresh Electron runtime because its packaged Electron installation is incomplete.
+- Required next visual run: build a clean exact-SHA `Hermes.app`, capture overview/turntable/focus/interior/occlusion/leader-dialogue states, compare against the approved reference direction, and retain screenshots as packaged evidence. Do not mark this file “passed” until that run completes.
+
 final result: passed
 
 ## Scope

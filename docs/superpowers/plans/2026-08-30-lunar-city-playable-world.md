@@ -882,6 +882,78 @@ Assert request logs never contain moon-settlement-approved.jpg after the route l
     git add apps/desktop/src/app/lunar-city apps/desktop/e2e/lunar-city.spec.ts apps/desktop/e2e/fixtures/lunar-city-overview-mask.png
     git commit -m "test(desktop): verify accessible Lunar City 3D world"
 
+### Task 11C: Represent the complete Hermes Bots roster
+
+**Files:**
+- Create: apps/desktop/src/app/lunar-city/adapters/bot-roster-details.ts
+- Create: apps/desktop/src/app/lunar-city/adapters/bot-roster-details.test.ts
+- Modify: apps/desktop/src/app/lunar-city/model.ts
+- Modify: apps/desktop/src/app/lunar-city/adapters/reconciler.ts
+- Modify: apps/desktop/src/app/lunar-city/world/entities.ts
+- Modify: apps/desktop/src/app/lunar-city/components/entity-list.tsx
+
+**Interfaces:**
+- Produces: immutable, exact-source title/group presentation metadata and deterministic bounded placement for every enumerated profile, without changing profile identity or command authority.
+
+- [ ] **Step 1: Write failing full-roster and collision tests**
+
+Cover every profile returned by the fleet source, multiple group memberships, a profile with no group, same-named profiles on two connections, retained unavailable profiles, malformed metadata, and deterministic overflow beyond a district's near-worker budget.
+
+- [ ] **Step 2: Read exact-source profile metadata**
+
+Use the existing scoped standard profile request path for each enumerated `{connectionId, profile}` source. Normalize only presentation-safe configured title and group fields. Do not import Hermes Bots plugin internals into the Lunar City route, use ambient active-profile state, or make title/group values authoritative identifiers.
+
+- [ ] **Step 3: Place and expose every profile**
+
+Map declared groups to manifest districts through an explicit table, then assign stable slots by canonical entity key with bounded overflow/aggregate LOD. Profiles in several groups receive one primary physical placement plus all memberships in the accessible inspector. Profiles with no valid group use the general garden; unavailable profiles remain visible in the unavailable district.
+
+- [ ] **Step 4: Verify and commit**
+
+    npm run test:ui --workspace apps/desktop -- src/app/lunar-city/adapters/bot-roster-details.test.ts src/app/lunar-city/adapters/fleet.test.ts src/app/lunar-city/adapters/reconciler.test.ts src/app/lunar-city/components/entity-list.test.tsx src/app/lunar-city/world/entities.test.ts
+    npm run typecheck --workspace apps/desktop
+    npm run lint --workspace apps/desktop
+    git add apps/desktop/src/app/lunar-city
+    git commit -m "feat(desktop): represent the complete Hermes Bots roster"
+
+### Task 11D: Add collision-free low-power leader and worker identities
+
+**Files:**
+- Modify: apps/desktop/scripts/lunar-city/build-models.mjs
+- Modify: apps/desktop/scripts/lunar-city/build-models.test.mjs
+- Modify: apps/desktop/scripts/lunar-city/modeling/characters.mjs
+- Modify: apps/desktop/scripts/lunar-city/validate-assets.mjs
+- Modify: apps/desktop/scripts/lunar-city/validate-assets.test.mjs
+- Modify: apps/desktop/public/lunar-city/v2/world-manifest.v2.json
+- Modify: apps/desktop/src/app/lunar-city/manifest.ts
+- Modify: apps/desktop/src/app/lunar-city/world/entities.ts
+- Modify: focused Lunar City asset/entity tests as required
+
+**Interfaces:**
+- Produces: six non-reused leader visual identities, 19 distinct group worker kits, and a deterministic collision-free near signature for every exact-source profile while retaining shared low-poly rigs, GPU buffers, atlases, materials, clips, and bounded LOD cost.
+
+- [ ] **Step 1: Write failing identity and budget tests**
+
+Cover duplicate leader visual IDs, missing or reused group kits, complete worker-signature collisions across exact profile keys, deterministic signatures across reorder/reconnect, and a roster larger than the available near slots. Prove the validator rejects a design that achieves uniqueness by allocating a heavyweight mesh, skeleton, material, or texture set per profile.
+
+- [ ] **Step 2: Build bounded modular variation**
+
+Keep one shared low-poly robot-child rig and shared GPU buffers. Define a bounded body/head/accessory/palette/emblem vocabulary, one visibly distinct kit for each of the 19 declared groups, and six genuinely distinct leader species/silhouettes. Use baked-light texture atlases, a bounded shared material set, hardware/thin instances, and per-instance palette/emblem data. Reuse of invisible internals is expected; reuse of a complete presented signature for two different exact profiles is forbidden.
+
+- [ ] **Step 3: Connect three-tier character LOD**
+
+Selected and near characters may evaluate full animation. Mid-distance characters use reduced clips or poses. Far characters use static low-poly instances or truthful aggregates with exact counts and state distributions. Hidden, minimized, idle, and route-unmounted behavior must preserve the existing frame scheduler. Balanced remains capped at 30 FPS with real-time shadows and expensive post-processing disabled by default.
+
+- [ ] **Step 4: Validate and commit**
+
+    node --test apps/desktop/scripts/lunar-city/build-models.test.mjs apps/desktop/scripts/lunar-city/validate-assets.test.mjs
+    node apps/desktop/scripts/lunar-city/validate-assets.mjs apps/desktop/public/lunar-city/v2/world-manifest.v2.json
+    npm run test:ui --workspace apps/desktop -- src/app/lunar-city/manifest.test.ts src/app/lunar-city/world/entities.test.ts
+    npm run typecheck --workspace apps/desktop
+    npm run lint --workspace apps/desktop
+    git diff --check
+    git add apps/desktop/scripts/lunar-city apps/desktop/public/lunar-city/v2 apps/desktop/src/app/lunar-city/world
+    git commit -m "feat(desktop): diversify Lunar City characters efficiently"
+
 ### Task 12: Enforce packaged-Electron 3D performance and live acceptance
 
 **Files:**

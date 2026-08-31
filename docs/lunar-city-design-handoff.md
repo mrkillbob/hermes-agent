@@ -1,5 +1,23 @@
 # Lunar City Visualizer Handoff
 
+> **Current 3D handoff (2026-08-31):** This file's original image-backed notes below are historical and superseded by the current implementation record in this banner and the linked design QA addendum. The runtime is a genuine Babylon 3D world; the approved JPG is a visual reference only, never the runtime background. Current source `HEAD` is `b40e67825121cd0edb99b64e3a1bedcfbd19ec96`. Source/unit lanes are review-clean, but no clean packaged GPU/CPU, visual-regression, 30-minute, or supervised-live acceptance receipt exists.
+
+## Current implementation addendum
+
+- `/lunar-city` is a dedicated left-sidebar destination immediately after Kanban. Arranged Sim-City/StarCraft-like 3D camera controls support orbit, pan, tilt, zoom, focus, follow, occlusion, interiors, visibility pausing, context recovery, and real world teardown.
+- Runtime assets are `apps/desktop/public/lunar-city/v2/` (terrain, buildings, leaders, workers, textures, and manifest). The approved JPG at `apps/desktop/public/lunar-city/moon-settlement-approved.jpg` is not rendered as a background.
+- Six leader families, 19 group kits, and 2,888 modular worker signatures use shared low-cost resources. A global 24 animated-visual cap, LOD/culling/aggregation, parked resting workers, bounded readers, and demand-driven scheduling protect CPU/GPU.
+- Profiles, groups, sessions, subagents, Kanban tasks, runs, and workers merge across bounded registered connection/profile owners. Canonical identities preserve duplicate IDs across connections; stale/failed/empty/oversized/null rosters fail closed.
+- Physical leader picks and collision-only accessibility selectors invoke the same production handler, show exact connection/profile identity, focus the selected node, and open the persistent exact-owner conversation. Text/voice and commands remain exact-owner and authority/readback gated.
+- The old simulated timer, fabricated progress/rooms/quotes, hidden DOM actors, grid, and disconnected CSS animation layer were removed. Renderer `degraded` is reported as `DEGRADED`, not `STARTING`.
+
+### Evidence and blockers
+
+- Review-clean source/unit receipts include full Lunar suites through 538/538, focused authority/multi-source/bridge/asset lanes, typecheck after npm dependency restoration, and scoped lint/format/diff checks.
+- Packaged acceptance remains pending: no clean electron-builder package from this final SHA, no GPU-enabled CPU/RSS/FPS/GPU allocation receipt, no 30-minute stability receipt, and no supervised-live receipt.
+- Exact packaged 25/100/250 scenarios remain blocked until an owned authenticated three-gateway lifecycle emits real subagent evidence. Remote Hermes Desktop is unreachable, so the duplicate `test-contract-steward` profile has not been compared or deleted.
+- The detailed historical sections below are retained for provenance only; do not use their old SHA, image-backed behavior, six-test receipt, or `dirty:false` stamp as current evidence.
+
 ## Purpose
 
 This handoff records the current Lunar City visualizer implementation and the approved design direction so future work does not replace the agreed artwork with a different generated scene or a spreadsheet-like dashboard.
