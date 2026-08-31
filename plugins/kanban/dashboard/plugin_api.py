@@ -3040,11 +3040,20 @@ async def stream_events(ws: WebSocket):
             event_conn = None
 
     try:
-        since_raw = ws.query_params.get("since", "0")
-        try:
-            cursor = int(since_raw)
-        except ValueError:
-            cursor = 0
+        since_raw = ws.query_params.get("since")
+        cursor: Optional[int]
+        if since_raw is None:
+            # A fresh UI subscriber wants changes from NOW onward, not a replay
+            # of the board's entire append-only history. Replaying from zero
+            # makes every historical batch look live to the renderer and can
+            # repeatedly invalidate an expensive full-board query. Callers
+            # that deliberately need history can still pass ``?since=0``.
+            cursor = None
+        else:
+            try:
+                cursor = int(since_raw)
+            except ValueError:
+                cursor = None
 
         # Board selection — pinned at the WS handshake; re-subscribe to
         # switch boards. Changing boards mid-stream would require
@@ -3056,10 +3065,15 @@ async def stream_events(ws: WebSocket):
         except ValueError:
             ws_board = None
 
-        def _fetch_new(cursor_val: int) -> tuple[int, list[dict]]:
+        def _fetch_new(cursor_val: Optional[int]) -> tuple[int, list[dict]]:
             nonlocal event_conn
             if event_conn is None:
                 event_conn = kanban_db.connect(board=ws_board)
+            if cursor_val is None:
+                row = event_conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
+                ).fetchone()
+                return int(row["m"]), []
             rows = event_conn.execute(
                 "SELECT id, task_id, run_id, kind, payload, created_at "
                 "FROM task_events WHERE id > ? ORDER BY id ASC LIMIT 200",
