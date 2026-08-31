@@ -349,6 +349,203 @@ describe('worker GLB presentation', () => {
     ).toThrow(/missing manifest-declared physical signature root/)
   })
 
+  it.each(['missing', 'duplicate'] as const)('fails closed when a manifest-declared kit root is %s', fault => {
+    const assets = parseWorldManifest(structuredClone(actualManifest)).characterAssets
+
+    const engineeringAssets = {
+      ...assets,
+      groupKits: assets.groupKits.filter(kit => kit.kitId === 'engineering-guild')
+    }
+
+    const signatureRoots = [
+      ...Object.values(assets.physicalVariantRoots.body),
+      ...Object.values(assets.physicalVariantRoots.head),
+      ...Object.values(assets.physicalVariantRoots.palette)
+    ].map(name => ({ name, setEnabled: vi.fn() }))
+
+    const kitNames = [
+      'worker:group-kit:engineering-guild',
+      'worker:group-kit:engineering-guild:silhouette',
+      'worker:group-kit:engineering-guild:emblem',
+      'worker:group-kit:engineering-guild:identity-accent'
+    ]
+
+    const kitRoots = kitNames.map(name => ({ name, setEnabled: vi.fn() }))
+
+    if (fault === 'missing') {
+      kitRoots.pop()
+    } else {
+      kitRoots.push({ name: kitNames[1]!, setEnabled: vi.fn() })
+    }
+
+    const result: BabylonImportResultLike = {
+      animationGroups: [],
+      meshes: [],
+      transformNodes: [{ name: 'workers:root', setEnabled: vi.fn() }, ...signatureRoots, ...kitRoots]
+    }
+
+    expect(() =>
+      createBabylonEntityFactory(
+        {
+          id: 'workers',
+          instancing: { eligible: true, variants: [] },
+          lods: [],
+          occlusionGroup: 'workers'
+        } as unknown as ModelManifestEntry,
+        result,
+        { TransformNode: class {} } as unknown as LunarCityWorldModules,
+        {} as never,
+        engineeringAssets
+      )
+    ).toThrow(/missing or duplicate manifest-declared kit roots/)
+  })
+
+  it('instances a shared mid-LOD base and exact identity accent without allocating profile resources', () => {
+    const assets = parseWorldManifest(structuredClone(actualManifest)).characterAssets
+
+    const engineeringAssets = {
+      ...assets,
+      groupKits: assets.groupKits.filter(kit => kit.kitId === 'engineering-guild')
+    }
+
+    const template = { name: 'workers:root', setEnabled: vi.fn() }
+    const near = { name: 'workers:lod:near', setEnabled: vi.fn() }
+    const mid = { name: 'workers:lod:mid', setEnabled: vi.fn() }
+    const far = { name: 'workers:lod:far', setEnabled: vi.fn() }
+    const bodyCompact = { name: 'worker:body-variant:compact', setEnabled: vi.fn() }
+    const bodyStandard = { name: 'worker:body-variant:standard', setEnabled: vi.fn() }
+    const headOrb = { name: 'worker:head-variant:orb', setEnabled: vi.fn() }
+    const headVisor = { name: 'worker:head-variant:visor', setEnabled: vi.fn() }
+
+    const paletteRust = {
+      name: 'worker:palette:rust-bone',
+      rotation: { set: vi.fn() },
+      scaling: { set: vi.fn() },
+      setEnabled: vi.fn()
+    }
+
+    const paletteViolet = { name: 'worker:palette:violet-cyan', setEnabled: vi.fn() }
+    const kit = { name: 'worker:group-kit:engineering-guild', setEnabled: vi.fn() }
+
+    const silhouette = {
+      name: 'worker:group-kit:engineering-guild:silhouette',
+      parent: kit,
+      setEnabled: vi.fn()
+    }
+
+    const emblem = { name: 'worker:group-kit:engineering-guild:emblem', parent: kit, setEnabled: vi.fn() }
+
+    const accent = {
+      name: 'worker:group-kit:engineering-guild:identity-accent',
+      parent: emblem,
+      setEnabled: vi.fn()
+    }
+
+    const baseInstance = { dispose: vi.fn(), name: 'mid-base:instance', parent: null, setEnabled: vi.fn() }
+
+    const accentInstance = {
+      dispose: vi.fn(),
+      name: 'mid-accent:instance',
+      parent: null,
+      rotation: { set: vi.fn() },
+      scaling: { set: vi.fn() },
+      setEnabled: vi.fn()
+    }
+
+    const midBase = {
+      createInstance: vi.fn(() => baseInstance),
+      name: 'workers:lod:mid:body',
+      parent: mid,
+      setEnabled: vi.fn()
+    }
+
+    const accentMesh = {
+      createInstance: vi.fn(() => accentInstance),
+      name: 'worker:group-kit:engineering-guild:identity-accent:mesh',
+      parent: accent,
+      setEnabled: vi.fn()
+    }
+
+    const result: BabylonImportResultLike = {
+      animationGroups: [],
+      meshes: [midBase, accentMesh],
+      transformNodes: [
+        template,
+        near,
+        mid,
+        far,
+        bodyCompact,
+        bodyStandard,
+        headOrb,
+        headVisor,
+        paletteRust,
+        paletteViolet,
+        kit,
+        silhouette,
+        emblem,
+        accent
+      ]
+    }
+
+    class TransformNode {
+      dispose = vi.fn()
+      name: string
+      position = { set: vi.fn() }
+      constructor(name: string) {
+        this.name = name
+      }
+    }
+
+    const factory = createBabylonEntityFactory(
+      {
+        id: 'workers',
+        instancing: { eligible: true, variants: [] },
+        lods: [
+          { distance: 0, node: near.name },
+          { distance: 28, node: mid.name },
+          { distance: 80, node: far.name }
+        ],
+        occlusionGroup: 'workers'
+      } as unknown as ModelManifestEntry,
+      result,
+      { TransformNode } as unknown as LunarCityWorldModules,
+      {} as never,
+      engineeringAssets
+    )
+
+    const group = factory.createInstancedGroup('worker:idle:kit:engineering-guild:lod:1')
+
+    group.sync([
+      {
+        animation: 'idle',
+        character: {
+          accentCode: 42,
+          identityAccent: 'deadbeef',
+          kitId: 'engineering-guild',
+          lod: 'mid',
+          renderMode: 'instanced',
+          signature: {
+            body: 'standard',
+            emblem: 'engineering-bridge',
+            head: 'visor',
+            palette: 'violet-cyan',
+            silhouetteAccessory: 'engineering-hammer'
+          },
+          visibleSignature: 'standard:visor:engineering-hammer:violet-cyan:engineering-bridge:deadbeef'
+        },
+        identity: { connectionId: 'local', kind: 'profile', profile: 'worker' },
+        key: 'profile:worker' as never,
+        position: { x: 1, y: 0, z: 2 },
+        variant: undefined
+      }
+    ])
+
+    expect(midBase.createInstance).toHaveBeenCalledOnce()
+    expect(accentMesh.createInstance).toHaveBeenCalledOnce()
+    expect(accentInstance.rotation.set).toHaveBeenCalledOnce()
+    expect(accentInstance.scaling.set).toHaveBeenCalledOnce()
+  })
+
   it('activates exactly the selected physical variant subtree and releases cloned animation groups', () => {
     const orbital = { name: 'worker:variant:orbital', setEnabled: vi.fn() }
     const builder = { name: 'worker:variant:builder', setEnabled: vi.fn() }
@@ -356,15 +553,33 @@ describe('worker GLB presentation', () => {
     const far = { name: 'workers:lod:far', setEnabled: vi.fn() }
     const engineering = { name: 'worker:group-kit:engineering-guild', setEnabled: vi.fn() }
     const research = { name: 'worker:group-kit:research-lab', setEnabled: vi.fn() }
+    const engineeringSilhouette = { name: 'worker:group-kit:engineering-guild:silhouette', setEnabled: vi.fn() }
+    const engineeringEmblem = { name: 'worker:group-kit:engineering-guild:emblem', setEnabled: vi.fn() }
+    const researchSilhouette = { name: 'worker:group-kit:research-lab:silhouette', setEnabled: vi.fn() }
+    const researchEmblem = { name: 'worker:group-kit:research-lab:emblem', setEnabled: vi.fn() }
     const bodyCompact = { name: 'worker:body-variant:compact', setEnabled: vi.fn() }
     const bodyStandard = { name: 'worker:body-variant:standard', setEnabled: vi.fn() }
     const headOrb = { name: 'worker:head-variant:orb', setEnabled: vi.fn() }
     const headVisor = { name: 'worker:head-variant:visor', setEnabled: vi.fn() }
-    const paletteRust = { name: 'worker:palette:rust-bone', setEnabled: vi.fn() }
+
+    const paletteRust = {
+      name: 'worker:palette:rust-bone',
+      rotation: { set: vi.fn() },
+      scaling: { set: vi.fn() },
+      setEnabled: vi.fn()
+    }
+
     const paletteViolet = { name: 'worker:palette:violet-cyan', setEnabled: vi.fn() }
 
     const accent = {
       name: 'worker:group-kit:engineering-guild:identity-accent',
+      rotation: { set: vi.fn() },
+      scaling: { set: vi.fn() },
+      setEnabled: vi.fn()
+    }
+
+    const researchAccent = {
+      name: 'worker:group-kit:research-lab:identity-accent',
       rotation: { set: vi.fn() },
       scaling: { set: vi.fn() },
       setEnabled: vi.fn()
@@ -388,13 +603,18 @@ describe('worker GLB presentation', () => {
           far,
           engineering,
           research,
+          engineeringSilhouette,
+          engineeringEmblem,
+          researchSilhouette,
+          researchEmblem,
           bodyCompact,
           bodyStandard,
           headOrb,
           headVisor,
           paletteRust,
           paletteViolet,
-          accent
+          accent,
+          researchAccent
         ]) {
           const clone = {
             name: `${source.name}:clone`,
@@ -443,13 +663,18 @@ describe('worker GLB presentation', () => {
         far,
         engineering,
         research,
+        engineeringSilhouette,
+        engineeringEmblem,
+        researchSilhouette,
+        researchEmblem,
         bodyCompact,
         bodyStandard,
         headOrb,
         headVisor,
         paletteRust,
         paletteViolet,
-        accent
+        accent,
+        researchAccent
       ]
     }
 
@@ -477,7 +702,12 @@ describe('worker GLB presentation', () => {
       result,
       { TransformNode } as unknown as LunarCityWorldModules,
       { animationGroups: sceneAnimationGroups } as never,
-      parseWorldManifest(structuredClone(actualManifest)).characterAssets
+      {
+        ...parseWorldManifest(structuredClone(actualManifest)).characterAssets,
+        groupKits: parseWorldManifest(structuredClone(actualManifest)).characterAssets.groupKits.filter(kit =>
+          ['engineering-guild', 'research-lab'].includes(kit.kitId)
+        )
+      }
     )
 
     const entity = {
@@ -540,5 +770,22 @@ describe('worker GLB presentation', () => {
     expect(clonedAnimation.start).toHaveBeenCalledOnce()
     expect(clonedAnimation.dispose).toHaveBeenCalledOnce()
     expect(sceneAnimationGroups).toHaveLength(0)
+
+    const neutral = factory.createAnimated(entity, 'builder', {
+      accentCode: 7,
+      identityAccent: 'neutral-key',
+      lod: 'near',
+      renderMode: 'animated',
+      signature: { body: 'standard', head: 'orb', palette: 'rust-bone' },
+      visibleSignature: 'standard:orb:neutral:rust-bone:neutral:neutral-key'
+    })
+
+    const neutralPalette = variantClones.get(paletteRust) as
+      { rotation?: { set: ReturnType<typeof vi.fn> }; scaling?: { set: ReturnType<typeof vi.fn> } } | undefined
+
+    expect(variantClones.get(engineering)?.setEnabled).toHaveBeenCalledWith(false)
+    expect(neutralPalette?.rotation?.set).toHaveBeenCalledOnce()
+    expect(neutralPalette?.scaling?.set).toHaveBeenCalledOnce()
+    neutral.dispose?.()
   })
 })

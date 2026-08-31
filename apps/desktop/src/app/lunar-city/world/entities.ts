@@ -65,22 +65,20 @@ export interface LodSelection {
 }
 
 export function selectLodIndex(entries: readonly Pick<LodEntry, 'distance'>[], selection: LodSelection): number {
-  const ordered = [...entries].sort((left, right) => left.distance - right.distance)
-
-  if (ordered.length === 0) {
+  if (entries.length === 0) {
     return -1
   }
 
   let index = 0
 
   if (!selection.selected) {
-    for (let candidate = 1; candidate < ordered.length; candidate += 1) {
-      if (selection.distance >= ordered[candidate]!.distance) {
+    for (let candidate = 1; candidate < entries.length; candidate += 1) {
+      if (selection.distance >= entries[candidate]!.distance) {
         index = candidate
       }
     }
 
-    index = Math.min(ordered.length - 1, index + Math.max(0, selection.lodAdvance))
+    index = Math.min(entries.length - 1, index + Math.max(0, selection.lodAdvance))
   }
 
   return index
@@ -130,7 +128,7 @@ function groupKey(record: RetainedEntity, lodIndex = record.lodIndex): string {
     ? `worker:${record.entity.variant}:${record.animation}`
     : `worker:${record.animation}`
 
-  const character = record.character ? `:kit:${record.character.kitId}` : ''
+  const character = record.character?.kitId ? `:kit:${record.character.kitId}` : ''
 
   return lodIndex === 0 ? `${base}${character}` : `${base}${character}:lod:${lodIndex}`
 }
@@ -185,10 +183,9 @@ function immutableAggregate(total: number, animations: Map<string, number>): Agg
  * removed by a quality downgrade.
  */
 export function applyLodSelection(entries: readonly LodEntry[], selection: LodSelection): number {
-  const ordered = [...entries].sort((left, right) => left.distance - right.distance)
-  const index = selectLodIndex(ordered, selection)
+  const index = selectLodIndex(entries, selection)
 
-  for (const [candidate, entry] of ordered.entries()) {
+  for (const [candidate, entry] of entries.entries()) {
     entry.node.setEnabled?.(candidate === index)
   }
 

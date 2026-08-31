@@ -4,7 +4,7 @@ import actualManifest from '../../../../public/lunar-city/v2/world-manifest.v2.j
 import { parseWorldManifest } from '../manifest'
 import type { EntityKey, LunarCitySnapshot, LunarEntity, Vec3 } from '../model'
 
-import { applyLodSelection, createEntityRegistry, type EntityPresentationFactory } from './entities'
+import { applyLodSelection, createEntityRegistry, type EntityPresentationFactory, selectLodIndex } from './entities'
 
 function entity(index: number, overrides: Partial<LunarEntity> = {}): LunarEntity {
   const key = `session:connection=${index}:worker` as EntityKey
@@ -63,6 +63,17 @@ function factory(): EntityPresentationFactory & {
 }
 
 describe('EntityRegistry', () => {
+  it('does not sort LOD thresholds during repeated frame selection', () => {
+    const entries = Object.freeze([{ distance: 0 }, { distance: 28 }, { distance: 64 }])
+    const sort = vi.spyOn(Array.prototype, 'sort')
+
+    for (let index = 0; index < 100; index += 1) {
+      expect(selectLodIndex(entries, { distance: 40, lodAdvance: 0, selected: false })).toBe(1)
+    }
+
+    expect(sort).not.toHaveBeenCalled()
+    sort.mockRestore()
+  })
   it('passes exact group-kit identity data through shared batches without allocating a group per profile', () => {
     const presentationFactory = factory()
     const assets = parseWorldManifest(structuredClone(actualManifest)).characterAssets

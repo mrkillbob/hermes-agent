@@ -25,6 +25,11 @@ interface FakeNode {
   scaling: { set: ReturnType<typeof vi.fn> }
   setEnabled: ReturnType<typeof vi.fn>
   setPivotPoint: ReturnType<typeof vi.fn>
+  instantiateHierarchy?(
+    parent: FakeNode,
+    options: unknown,
+    onNewNodeCreated: (source: FakeNode, clone: FakeNode) => void
+  ): FakeNode
 }
 
 interface FakeAnimationGroup {
@@ -76,6 +81,7 @@ function fakeRuntime({
   const leaderNodes = new Map<string, FakeNode>()
   const leaderAnimationGroups = new Map<string, FakeAnimationGroup>()
   const lights: FakeDirectionalLight[] = []
+  const workerClones = new Map<string, FakeNode>()
 
   const frozenMeshes: Array<FakeNode & { freezeWorldMatrix: ReturnType<typeof vi.fn>; modelId: string }> = []
 
@@ -220,6 +226,31 @@ function fakeRuntime({
       ].map(name => fakeNode(name))
 
       transformNodes.push(...workerSignatureNodes)
+
+      for (const kit of actualManifest.characterAssets.groupKits) {
+        const kitRoot = fakeNode(`worker:group-kit:${kit.kitId}`)
+        const silhouette = fakeNode(`worker:group-kit:${kit.kitId}:silhouette`)
+        const emblem = fakeNode(`worker:group-kit:${kit.kitId}:emblem`)
+        const accent = fakeNode(`worker:group-kit:${kit.kitId}:identity-accent`)
+        silhouette.parent = kitRoot
+        emblem.parent = kitRoot
+        accent.parent = emblem
+        transformNodes.push(kitRoot, silhouette, emblem, accent)
+      }
+
+      root.instantiateHierarchy = (parent, _options, onNewNodeCreated) => {
+        const cloneRoot = fakeNode('workers:profile-clone')
+        cloneRoot.parent = parent
+        onNewNodeCreated(root, cloneRoot)
+
+        for (const source of transformNodes.filter(node => node !== root)) {
+          const clone = fakeNode(`${source.name}:clone`)
+          workerClones.set(source.name, clone)
+          onNewNodeCreated(source, clone)
+        }
+
+        return cloneRoot
+      }
     }
 
     if (modelId === 'garden') {
@@ -328,7 +359,8 @@ function fakeRuntime({
     modules,
     placements,
     roots,
-    scenes
+    scenes,
+    workerClones
   }
 }
 
@@ -349,6 +381,35 @@ function workerSnapshot(authority: 'authoritative' | 'stale' = 'authoritative'):
           key,
           observedAt: 1,
           position: { x: 0, y: 0, z: -1 }
+        }
+      ]
+    ]),
+    observedAt: 1,
+    revision: 1,
+    sources: []
+  }
+}
+
+function profileSnapshot(): LunarCitySnapshot {
+  const key = 'profile:connection=local:profile=engineer' as EntityKey
+
+  return {
+    entities: new Map([
+      [
+        key,
+        {
+          animation: 'idle',
+          authority: 'authoritative',
+          destination: 'project',
+          identity: { kind: 'profile', connectionId: 'local', profile: 'engineer' },
+          key,
+          observedAt: 1,
+          position: { x: 18, y: 0, z: 38 },
+          presentation: {
+            groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+            metadata: { source: 'profiles:local', state: 'fresh' },
+            placement: { lodHint: 0, overflow: false, primaryGroupId: 'engineering', slot: 7 }
+          }
         }
       ]
     ]),
@@ -398,6 +459,23 @@ afterEach(() => {
 })
 
 describe('createLunarCityWorld', () => {
+  it('admits an exact profile inhabitant and enables its complete physical near signature', async () => {
+    const runtime = fakeRuntime()
+    const world = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+
+    world.applySnapshot(profileSnapshot())
+
+    expect(runtime.workerClones.get('worker:body-variant:standard')?.setEnabled).toHaveBeenCalledWith(true)
+    expect(runtime.workerClones.get('worker:head-variant:visor')?.setEnabled).toHaveBeenCalledWith(true)
+    expect(runtime.workerClones.get('worker:palette:violet-cyan')?.setEnabled).toHaveBeenCalledWith(true)
+    expect(runtime.workerClones.get('worker:group-kit:engineering-guild')?.setEnabled).toHaveBeenCalledWith(true)
+    expect(
+      runtime.workerClones.get('worker:group-kit:engineering-guild:identity-accent')?.rotation.set
+    ).toHaveBeenCalledOnce()
+
+    world.destroy()
+  })
+
   it('creates one low-power engine and one static scene for a canvas', async () => {
     const runtime = fakeRuntime()
     const canvas = document.createElement('canvas')

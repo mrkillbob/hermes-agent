@@ -130,10 +130,10 @@ export interface ProjectSlotManifestEntry {
 
 export interface WorkerCharacterSignature {
   body: string
-  emblem: string
+  emblem?: string
   head: string
   palette: string
-  silhouetteAccessory: string
+  silhouetteAccessory?: string
 }
 
 export interface WorkerCharacterKit {
@@ -183,14 +183,14 @@ export interface CharacterAssetManifest {
 
 export interface WorkerCharacterPresentation {
   /** Stable district slot encoded by the shared identity-accent transform. */
-  accentCode: number
+  accentCode?: number
   /** Exact-key-derived, resource-free visible accent token. */
-  identityAccent: string
-  kitId: string
+  identityAccent?: string
+  kitId?: string
   lod: 'near' | 'mid' | 'far'
   renderMode: 'animated' | 'instanced' | 'aggregate'
-  signature: WorkerCharacterSignature
-  visibleSignature: string
+  signature?: WorkerCharacterSignature
+  visibleSignature?: string
 }
 
 export interface QualityBudget {

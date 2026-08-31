@@ -235,6 +235,21 @@ function modelEntry(value: unknown, index: number): ModelManifestEntry {
   const collision = record(item.collision, `${path}.collision`)
   const instancingValue = item.instancing === undefined ? undefined : record(item.instancing, `${path}.instancing`)
 
+  const lods = array(item.lods, `${path}.lods`)
+    .map((lod, lodIndex) => {
+      const entry = record(lod, `${path}.lods[${lodIndex}]`)
+
+      return {
+        distance: finite(entry.distance, `${path}.lods[${lodIndex}].distance`),
+        node: string(entry.node, `${path}.lods[${lodIndex}].node`)
+      }
+    })
+    .sort((left, right) => left.distance - right.distance)
+
+  if (new Set(lods.map(lod => lod.distance)).size !== lods.length) {
+    throw new Error(`${path}.lods LOD distances must be distinct`)
+  }
+
   return {
     id: string(item.id, `${path}.id`),
     uri: runtimeAssetUri(item.uri, `${path}.uri`, 'model'),
@@ -245,14 +260,7 @@ function modelEntry(value: unknown, index: number): ModelManifestEntry {
     maxGpuMiB: finite(item.maxGpuMiB, `${path}.maxGpuMiB`),
     requiredNodes: strings(item.requiredNodes, `${path}.requiredNodes`),
     requiredClips: strings(item.requiredClips, `${path}.requiredClips`),
-    lods: array(item.lods, `${path}.lods`).map((lod, lodIndex) => {
-      const entry = record(lod, `${path}.lods[${lodIndex}]`)
-
-      return {
-        distance: finite(entry.distance, `${path}.lods[${lodIndex}].distance`),
-        node: string(entry.node, `${path}.lods[${lodIndex}].node`)
-      }
-    }),
+    lods: Object.freeze(lods),
     transform: {
       position: vec3(transform.position, `${path}.transform.position`),
       rotation: vec3(transform.rotation, `${path}.transform.rotation`),
@@ -480,6 +488,12 @@ function characterAssets(value: unknown): CharacterAssetManifest {
     new Set(groupKits.map(kit => kit.kitId)).size !== groupKits.length
   ) {
     throw new Error(`${path}.groupKits must contain 19 distinct kit ids`)
+  }
+
+  const completeSignatures = groupKits.map(kit => JSON.stringify(kit.signature))
+
+  if (new Set(completeSignatures).size !== completeSignatures.length) {
+    throw new Error(`${path}.groupKits characterAssets signatures must be distinct`)
   }
 
   const strategyValue = record(item.sharedResourceStrategy, `${path}.sharedResourceStrategy`)

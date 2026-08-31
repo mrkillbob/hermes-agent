@@ -74,6 +74,13 @@ describe('parseWorldManifest', () => {
       'duplicate group kit',
       (fixture: any) => (fixture.characterAssets.groupKits[1].kitId = fixture.characterAssets.groupKits[0].kitId)
     ],
+    [
+      'duplicate complete kit signature',
+      (fixture: any) =>
+        (fixture.characterAssets.groupKits[1].signature = structuredClone(
+          fixture.characterAssets.groupKits[0].signature
+        ))
+    ],
     ['unknown group name', (fixture: any) => (fixture.characterAssets.groupKits[0].group = 'Display Name Guess')],
     ['insufficient fleet floor', (fixture: any) => (fixture.characterAssets.fleetIdentityFloor = 127)],
     [
@@ -85,6 +92,18 @@ describe('parseWorldManifest', () => {
     mutate(fixture)
 
     expect(() => parseWorldManifest(fixture)).toThrow(/characterAssets/)
+  })
+
+  it('sorts and freezes LOD thresholds once while rejecting duplicate distances', () => {
+    const fixture = structuredClone(actualManifest) as any
+    fixture.models[0].lods.reverse()
+    const manifest = parseWorldManifest(fixture)
+
+    expect(manifest.models[0]?.lods.map(lod => lod.distance)).toEqual([0, 96])
+    expect(Object.isFrozen(manifest.models[0]?.lods)).toBe(true)
+
+    fixture.models[0].lods[1].distance = fixture.models[0].lods[0].distance
+    expect(() => parseWorldManifest(fixture)).toThrow(/LOD distances must be distinct/)
   })
 
   it.each([

@@ -34,7 +34,7 @@ describe('characterPresentationForEntity', () => {
     )
 
     expect(presentations.map(value => value?.kitId)).toEqual(manifest.characterAssets.groupKits.map(kit => kit.kitId))
-    expect(presentations.every(value => value?.signature.silhouetteAccessory)).toBe(true)
+    expect(presentations.every(value => value?.signature?.silhouetteAccessory)).toBe(true)
   })
 
   it('gives 320 exact profiles collision-free signatures that survive reorder and incremental additions', () => {
@@ -70,18 +70,25 @@ describe('characterPresentationForEntity', () => {
     )
   })
 
-  it('assigns a declared neutral kit to an exact profile whose source has no configured primary group', () => {
+  it('keeps a no-group exact profile neutral while retaining a physical base accent', () => {
     const entity = profile(4, 'Research Lab')
     entity.presentation = {
-      groups: [],
+      groups: [{ id: 'still-present-but-unavailable', name: 'Research Lab' }],
       metadata: { source: 'profiles:local', state: 'unavailable' },
-      placement: { lodHint: 2, overflow: true }
+      placement: { lodHint: 0, overflow: false, primaryGroupId: 'still-present-but-unavailable', slot: 7 }
     }
 
     const result = characterPresentationForEntity(entity, manifest.characterAssets)
 
-    expect(result?.kitId).toBe(manifest.characterAssets.groupKits[0]?.kitId)
-    expect(result).toMatchObject({ lod: 'far', renderMode: 'aggregate' })
+    expect(result?.kitId).toBeUndefined()
+    expect(result?.signature).toMatchObject({
+      body: expect.any(String),
+      head: expect.any(String),
+      palette: expect.any(String)
+    })
+    expect(result?.signature?.emblem).toBeUndefined()
+    expect(result?.signature?.silhouetteAccessory).toBeUndefined()
+    expect(result?.accentCode).toBe(7)
   })
 
   it('keeps aggregate-only unavailable rows identifiable without promoting their LOD', () => {
@@ -95,6 +102,6 @@ describe('characterPresentationForEntity', () => {
 
     const result = characterPresentationForEntity(entity, manifest.characterAssets)
 
-    expect(result).toMatchObject({ lod: 'far', renderMode: 'aggregate', kitId: 'research-review-board' })
+    expect(result).toEqual({ lod: 'far', renderMode: 'aggregate' })
   })
 })

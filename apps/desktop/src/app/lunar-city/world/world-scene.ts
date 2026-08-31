@@ -876,6 +876,15 @@ function deterministicWorkerVariant(key: EntityKey, variants: readonly string[])
   return variants[hash % variants.length]
 }
 
+function applyIdentityAccent(node: BabylonNodeLike, accentCode: number): void {
+  const low = accentCode & 0x1ff
+  const high = (accentCode >>> 9) & 0x1ff
+  const rotation = (low / 512) * Math.PI * 2
+  const scaleX = 0.75 + high / 1024
+  node.rotation?.set(0, 0, rotation)
+  node.scaling?.set(scaleX, 1.5 - scaleX, 1)
+}
+
 export function createBabylonEntityFactory(
   model: ModelManifestEntry,
   result: BabylonImportResultLike,
@@ -953,6 +962,32 @@ export function createBabylonEntityFactory(
     })
   )
 
+  if (characterAssets) {
+    const allNodes = allImportedNodes(result)
+    const suffixes = characterAssets.physicalVariantRoots.groupKit
+
+    const requiredKitNodes = characterAssets.groupKits.flatMap(kit => [
+      `worker:group-kit:${kit.kitId}`,
+      `worker:group-kit:${kit.kitId}:${suffixes.silhouetteSuffix}`,
+      `worker:group-kit:${kit.kitId}:${suffixes.emblemSuffix}`,
+      `worker:group-kit:${kit.kitId}:${suffixes.identityAccentSuffix}`
+    ])
+
+    const counts = new Map<string, number>()
+
+    for (const node of allNodes) {
+      counts.set(node.name, (counts.get(node.name) ?? 0) + 1)
+    }
+
+    const invalid = requiredKitNodes.filter(node => counts.get(node) !== 1)
+
+    if (invalid.length > 0) {
+      throw new Error(
+        `Lunar City workers GLB has missing or duplicate manifest-declared kit roots: ${invalid.join(', ')}`
+      )
+    }
+  }
+
   const meshesForLod = (lodIndex: number): readonly BabylonInstancedMeshLike[] => {
     const lodRoot = sourceLodNodes[lodIndex] ?? sourceLodNodes[0]
     const matching = lodRoot ? candidateMeshes.filter(mesh => belongsToLeader(mesh, lodRoot)) : []
@@ -1028,7 +1063,7 @@ export function createBabylonEntityFactory(
       }
 
       const enabledSignatureNodes = new Set(
-        character
+        character?.signature
           ? [
               `body:${character.signature.body}`,
               `head:${character.signature.head}`,
@@ -1046,13 +1081,17 @@ export function createBabylonEntityFactory(
         const enabled = kitId === character?.kitId
         accent?.setEnabled?.(enabled)
 
-        if (enabled && character && accent) {
-          const low = character.accentCode & 0x1ff
-          const high = (character.accentCode >>> 9) & 0x1ff
-          const rotation = (low / 512) * Math.PI * 2
-          const scaleX = 0.75 + high / 1024
-          accent.rotation?.set(0, 0, rotation)
-          accent.scaling?.set(scaleX, 1.5 - scaleX, 1)
+        if (enabled && character?.accentCode !== undefined && accent) {
+          applyIdentityAccent(accent, character.accentCode)
+        }
+      }
+
+      if (!character?.kitId && character?.signature && character.accentCode !== undefined) {
+        const neutralAccentSource = sourceSignatureNodes.get(`palette:${character.signature.palette}`)
+        const neutralAccent = neutralAccentSource ? clone.nodeMap.get(neutralAccentSource) : undefined
+
+        if (neutralAccent) {
+          applyIdentityAccent(neutralAccent, character.accentCode)
         }
       }
 
@@ -1105,11 +1144,33 @@ export function createBabylonEntityFactory(
       const variant = variants.find(candidate => groupKey.startsWith(`worker:${candidate}:`))
       const kitId = /:kit:([^:]+)(?::lod:\d+)?$/u.exec(groupKey)?.[1]
       const sourceMeshes = meshesForCharacterKit(meshesForVariant(meshesForLod(lodIndex), variant), kitId)
-      const members = new Map<EntityKey, { instances: BabylonNodeLike[]; root: BabylonNodeLike }>()
+      const kitNode = kitId ? sourceGroupKitNodes.get(kitId) : undefined
+      const accentNode = kitId ? sourceAccentNodes.get(kitId) : undefined
 
-      const disposeMember = (member: { instances: BabylonNodeLike[]; root: BabylonNodeLike }): void => {
+      const midKitMeshes =
+        lodIndex === 1 && kitNode ? candidateMeshes.filter(mesh => belongsToLeader(mesh, kitNode)) : []
+
+      const instanceSources = [
+        ...sourceMeshes.map(mesh => ({
+          accent: !kitId && lodIndex === 1 && /(?:^|:)face$/u.test(mesh.name),
+          mesh
+        })),
+        ...midKitMeshes
+          .filter(mesh => !sourceMeshes.includes(mesh))
+          .map(mesh => ({ accent: accentNode ? belongsToLeader(mesh, accentNode) : false, mesh }))
+      ]
+
+      const members = new Map<
+        EntityKey,
+        { instances: { accent: boolean; node: BabylonNodeLike }[]; root: BabylonNodeLike }
+      >()
+
+      const disposeMember = (member: {
+        instances: { accent: boolean; node: BabylonNodeLike }[]
+        root: BabylonNodeLike
+      }): void => {
         for (const instance of member.instances) {
-          instance.dispose?.()
+          instance.node.dispose?.()
         }
 
         member.root.dispose?.()
@@ -1139,13 +1200,13 @@ export function createBabylonEntityFactory(
             if (!visual) {
               const root = new modules.TransformNode(`lunar-city:instance:${groupKey}:${member.key}`, scene)
 
-              const instances = sourceMeshes.flatMap(mesh => {
+              const instances = instanceSources.flatMap(({ accent, mesh }) => {
                 const instance = mesh.createInstance?.(`lunar-city:instance-mesh:${member.key}:${mesh.name}`)
 
                 if (instance) {
                   instance.parent = root
 
-                  return [instance]
+                  return [{ accent, node: instance }]
                 }
 
                 return []
@@ -1159,7 +1220,11 @@ export function createBabylonEntityFactory(
             tagWorkerNode(visual.root, metadata)
 
             for (const instance of visual.instances) {
-              tagWorkerNode(instance, metadata)
+              tagWorkerNode(instance.node, metadata)
+
+              if (instance.accent && member.character?.accentCode !== undefined) {
+                applyIdentityAccent(instance.node, member.character.accentCode)
+              }
             }
 
             setNodePosition(visual.root, member.position)
@@ -1625,7 +1690,9 @@ export async function createWorldScene(
           const dynamicEntities = new Map(
             [...snapshot.entities].filter(
               ([, entity]) =>
-                entity.identity.kind !== 'profile' && !(entity.identity.kind === 'kanban' && !entity.position)
+                !(entity.identity.kind === 'kanban' && !entity.position) &&
+                (entity.identity.kind !== 'profile' ||
+                  (entity.position !== undefined && entity.presentation?.placement.slot !== undefined))
             )
           )
 

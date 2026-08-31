@@ -4,7 +4,7 @@ function exactPrimaryKit(entity: LunarEntity, assets: CharacterAssetManifest): W
   const presentation = entity.presentation
   const primaryGroupId = presentation?.placement.primaryGroupId
 
-  if (!presentation || !primaryGroupId) {
+  if (!presentation || presentation.metadata.state === 'unavailable' || !primaryGroupId) {
     return undefined
   }
 
@@ -36,42 +36,42 @@ export function characterPresentationForEntity(
     return undefined
   }
 
-  const kit = exactPrimaryKit(entity, assets) ?? assets.groupKits[0]
-
-  if (!kit) {
-    return undefined
-  }
-
   const placement = entity.presentation!.placement
   const lod = placement.slot === undefined || placement.lodHint >= 2 ? 'far' : placement.lodHint === 1 ? 'mid' : 'near'
   const renderMode = placement.slot === undefined ? 'aggregate' : lod === 'near' ? 'animated' : 'instanced'
+
+  if (placement.slot === undefined) {
+    return Object.freeze({ lod, renderMode })
+  }
+
+  const kit = exactPrimaryKit(entity, assets)
   const accent = identityAccent(entity.key)
-  const accentCode = placement.slot ?? 0
+  const accentCode = placement.slot
 
   const signature = {
-    ...kit.signature,
-    body: assets.workerVocabulary.bodies[accentCode % assets.workerVocabulary.bodies.length] ?? kit.signature.body,
+    ...(kit?.signature ?? {}),
+    body: assets.workerVocabulary.bodies[accentCode % assets.workerVocabulary.bodies.length]!,
     head:
       assets.workerVocabulary.heads[Math.floor(accentCode / 2) % assets.workerVocabulary.heads.length] ??
-      kit.signature.head,
+      assets.workerVocabulary.heads[0]!,
     palette:
       assets.workerVocabulary.palettes[Math.floor(accentCode / 4) % assets.workerVocabulary.palettes.length] ??
-      kit.signature.palette
+      assets.workerVocabulary.palettes[0]!
   }
 
   return Object.freeze({
     accentCode,
     identityAccent: accent,
-    kitId: kit.kitId,
+    ...(kit ? { kitId: kit.kitId } : {}),
     lod,
     renderMode,
     signature: Object.freeze(signature),
     visibleSignature: [
       signature.body,
       signature.head,
-      signature.silhouetteAccessory,
+      signature.silhouetteAccessory ?? 'neutral',
       signature.palette,
-      signature.emblem,
+      signature.emblem ?? 'neutral',
       accent
     ].join(':')
   })
