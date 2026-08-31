@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
@@ -98,6 +99,39 @@ test('fixture entity keys have byte parity with production EntityIdentity for ev
   }
 })
 
+test('worker keys and immutable digests are byte-identical across fresh processes', () => {
+  const script = `
+    const fixture = await import('./e2e/lunar-city-fixtures.ts')
+    const contract = fixture.buildPopulationContract(250)
+    process.stdout.write(JSON.stringify({
+      contractDigest: contract.digest,
+      projectionDigest: fixture.expectedStandardProjection(contract).digest,
+      workerKeys: contract.entities.filter(row => row.kind === 'worker').map(row => row.exactKey)
+    }))
+  `
+
+  const run = (): string => {
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
+      cwd: path.resolve(import.meta.dirname, '..'),
+      encoding: 'utf8'
+    })
+
+    expect(result.status, result.stderr || result.stdout).toBe(0)
+
+    return result.stdout
+  }
+
+  const first = run()
+  const second = run()
+
+  expect(first).toBe(second)
+  expect(JSON.parse(first)).toMatchObject({
+    contractDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    projectionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    workerKeys: expect.arrayContaining([expect.stringContaining('kind:string:6:kanban')])
+  })
+})
+
 test('seed uses isolated standard Hermes files, contains no secrets, and cleans up', () => {
   const fixture = createLunarCityPopulationFixture(25)
 
@@ -174,7 +208,15 @@ for (const population of [25, 100, 250] as const) {
         observed.session += sessions.total
         observed.task += board.columns.reduce((sum, column) => sum + column.tasks.length, 0)
         observed.worker += workers.count
-        expect(workers.workers.every(row => row.worker_pid === process.pid && row.ended_at == null)).toBe(true)
+
+        const expectedWorkerIds = new Set(
+          fixture.contract.entities
+            .filter(row => row.kind === 'worker' && row.connectionId === source.connectionId)
+            .map(row => row.workerId)
+        )
+
+        expect(new Set(workers.workers.map(row => `pid:${row.worker_pid}`))).toEqual(expectedWorkerIds)
+        expect(workers.workers.every(row => row.ended_at == null)).toBe(true)
       }
 
       expect(observed).toEqual({

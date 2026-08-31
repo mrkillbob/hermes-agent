@@ -6,7 +6,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..', '..')
-const CONTRACT_VERSION = 'lunar-city-population-v2' as const
+const CONTRACT_VERSION = 'lunar-city-population-v3' as const
 const EXACT_SHA = /^[a-f0-9]{40}$/u
 
 export const GROUP_DISTRICTS = Object.freeze([
@@ -157,6 +157,16 @@ const SHAPES: Readonly<Record<LunarCityPopulation, ScenarioShape>> = Object.free
   }
 })
 
+const FIXTURE_PID_BASE: Readonly<Record<string, number>> = Object.freeze({
+  local: 41_000,
+  'remote-lab': 42_000,
+  'remote-archive': 43_000
+})
+
+function deterministicWorkerId(connectionId: string, ordinal: number): string {
+  return `pid:${(FIXTURE_PID_BASE[connectionId] ?? 49_000) + ordinal + 1}`
+}
+
 export function buildPopulationContract(population: LunarCityPopulation): PopulationContract {
   const shape = SHAPES[population]
   const entities: PopulationEntity[] = []
@@ -190,7 +200,7 @@ export function buildPopulationContract(population: LunarCityPopulation): Popula
       const ownerSession = `session-${String(index % Math.max(1, shape.kinds.session)).padStart(3, '0')}`
       const taskId = `task-${String(index % Math.max(1, shape.kinds.task)).padStart(3, '0')}`
       const runId = kind === 'worker' ? String(1000 + index) : undefined
-      const workerId = kind === 'worker' ? `pid:${process.pid}` : undefined
+      const workerId = kind === 'worker' ? deterministicWorkerId(connectionId, index) : undefined
 
       const identity = {
         kind,
@@ -835,7 +845,7 @@ for connection_id, home_raw in homes.items():
             status = "running"
             conn.execute(
                 "INSERT INTO task_runs (id,task_id,profile,status,claim_lock,worker_pid,last_heartbeat_at,started_at,ended_at,outcome) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (run_id, task["durableId"], row["profile"], status, row["durableId"], int(sys.argv[3]), now, now, None, None),
+                (run_id, task["durableId"], row["profile"], status, row["durableId"], int(row["workerId"].split(":", 1)[1]), now, now, None, None),
             )
             conn.execute("UPDATE tasks SET status='running', current_run_id=?, claim_lock=?, last_heartbeat_at=? WHERE id=?", (run_id, row["durableId"], now, task["durableId"]))
         conn.commit()
@@ -847,7 +857,7 @@ for connection_id, home_raw in homes.items():
   const fallbackPython = path.join(os.homedir(), '.hermes', 'hermes-agent', 'venv', 'bin', 'python')
   const executable = fs.existsSync(python) ? python : fallbackPython
 
-  const result = spawnSync(executable, ['-c', script, contractPath, JSON.stringify(sourceHomes), String(process.pid)], {
+  const result = spawnSync(executable, ['-c', script, contractPath, JSON.stringify(sourceHomes)], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     env: { ...process.env, PYTHONPATH: REPO_ROOT }
