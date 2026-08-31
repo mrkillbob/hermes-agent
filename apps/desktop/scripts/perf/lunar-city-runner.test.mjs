@@ -72,6 +72,7 @@ function rendererMetrics(overrides = {}) {
     dialogueState: 'idle',
     dialogueActions: { opened: 0, messagesSent: 0, responsesReceived: 0 },
     lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 0 },
+    qualityActions: { transitions: 0 },
     sceneMount: { id: 'scene-1', generation: 1, startedAtMs: 2_000 },
     lifecycleState: 'mounted',
     environment: {
@@ -91,7 +92,18 @@ function boundAction(action, payload, metrics, handshake, result = {}, sequence 
     ...result,
     bridgeBinding: {
       action: 'scenario-action',
-      requestId: `7:${metrics.rendererPid}:${metrics.rendererGeneration}:${sequence}`,
+      requestId: [
+        'lcperf-v1',
+        handshake.buildSha,
+        handshake.launchNonce,
+        handshake.mainPid,
+        7,
+        3,
+        metrics.rendererPid,
+        metrics.rendererGeneration,
+        metrics.rendererStartedAtMs,
+        sequence
+      ].join(':'),
       payload: { action, payload },
       identity: {
         bridgeVersion: handshake.bridgeVersion,
@@ -343,46 +355,123 @@ test('requires an exact versioned packaged bridge handshake bound to nonce, buil
 
 test('executes and awaits one real non-disposal bridge action exactly once', async () => {
   const evaluations = []
+  const handshake = { bridgeVersion: 1, buildSha: SHA, launchNonce: 'nonce-7', mainPid: 999 }
+  const before = rendererMetrics({
+    internalRenderScale: 1.25,
+    qualityTier: 'Detailed',
+    rendererGeneration: 1
+  })
+  const results = [
+    boundAction(
+      'quality',
+      { tier: 'balanced' },
+      before,
+      handshake,
+      {
+        from: { internalRenderScale: 1.25, tier: 'detailed' },
+        to: { internalRenderScale: 1, tier: 'balanced' }
+      },
+      1
+    ),
+    boundAction(
+      'quality',
+      { tier: 'efficient' },
+      before,
+      handshake,
+      {
+        from: { internalRenderScale: 1, tier: 'balanced' },
+        proof: 2,
+        to: { internalRenderScale: 0.75, tier: 'efficient' }
+      },
+      3
+    )
+  ]
+  const observations = [
+    rendererMetrics({
+      internalRenderScale: 1,
+      qualityActions: { transitions: 1 },
+      qualityTier: 'Balanced',
+      rendererGeneration: 1
+    }),
+    rendererMetrics({
+      internalRenderScale: 0.75,
+      qualityActions: { transitions: 2 },
+      qualityTier: 'Efficient',
+      rendererGeneration: 1
+    })
+  ]
   const result = await runScenarioThroughBridge(
     {
       eval: async expression => {
         evaluations.push(expression)
 
-        return {
-          action: 'quality',
-          proof: 1,
-          tier: 'efficient',
-          bridgeBinding: {
-            action: 'scenario-action',
-            requestId: '7:20:1:1',
-            payload: { action: 'quality', payload: { tier: 'efficient' } },
-            identity: {
-              bridgeVersion: 1,
-              buildSha: SHA,
-              frameId: 3,
-              launchNonce: 'nonce-7',
-              mainPid: 999,
-              rendererGeneration: 1,
-              rendererPid: 20,
-              rendererStartedAtMs: 1_000,
-              senderId: 7
-            }
-          }
-        }
+        return results.shift()
       }
     },
     'tier-efficient',
-    rendererMetrics({ rendererGeneration: 1 }),
-    { bridgeVersion: 1, buildSha: SHA, launchNonce: 'nonce-7', mainPid: 999 }
+    before,
+    handshake,
+    async () => observations.shift()
   )
 
-  assert.equal(evaluations.length, 1)
-  assert.match(evaluations[0], /probe[.]runAction\("quality",\s*\{"tier":"efficient"\}\)/u)
-  assert.deepEqual(result, {
-    actions: [{ action: 'quality', result: evaluations.length && result.actions[0].result }],
-    before: rendererMetrics({ rendererGeneration: 1 }),
-    scenario: 'tier-efficient'
-  })
+  assert.equal(evaluations.length, 2)
+  assert.match(evaluations[0], /probe[.]runAction\("quality",\s*\{"tier":"balanced"\}\)/u)
+  assert.match(evaluations[1], /probe[.]runAction\("quality",\s*\{"tier":"efficient"\}\)/u)
+  assert.equal(result.actions.length, 2)
+  assert.equal(result.actions[0].observed.qualityTier, 'Balanced')
+  assert.equal(result.actions[1].observed.qualityTier, 'Efficient')
+  assert.deepEqual(result.before, before)
+})
+
+test('tier-balanced establishes an authoritative Efficient prestate before one Balanced transition', async () => {
+  const handshake = { bridgeVersion: 1, buildSha: SHA, launchNonce: 'nonce-7', mainPid: 999 }
+  const initial = rendererMetrics({ qualityTier: 'Balanced' })
+  const results = [
+    boundAction(
+      'quality',
+      { tier: 'efficient' },
+      initial,
+      handshake,
+      {
+        from: { internalRenderScale: 1, tier: 'balanced' },
+        to: { internalRenderScale: 0.75, tier: 'efficient' }
+      },
+      1
+    ),
+    boundAction(
+      'quality',
+      { tier: 'balanced' },
+      initial,
+      handshake,
+      {
+        from: { internalRenderScale: 0.75, tier: 'efficient' },
+        proof: 2,
+        to: { internalRenderScale: 1, tier: 'balanced' }
+      },
+      3
+    )
+  ]
+  const observed = [
+    rendererMetrics({
+      internalRenderScale: 0.75,
+      qualityActions: { transitions: 1 },
+      qualityTier: 'Efficient'
+    }),
+    rendererMetrics({ qualityActions: { transitions: 2 }, qualityTier: 'Balanced' })
+  ]
+  const execution = await runScenarioThroughBridge(
+    { eval: async () => results.shift() },
+    'tier-balanced',
+    initial,
+    handshake,
+    async () => observed.shift()
+  )
+  assert.equal(execution.preparation.result.to.tier, 'efficient')
+  assert.equal(execution.before.qualityTier, 'Efficient')
+  assert.deepEqual(
+    execution.actions.map(entry => entry.result.to.tier),
+    ['balanced']
+  )
 })
 
 test('rejects actionless, duplicated, wrong-target, and wrong-lifetime scenario evidence', async () => {
@@ -449,7 +538,9 @@ test('provenance rejects spliced actions, duplicate requests, wrong targets, lif
   const action = boundAction('focus', { entityKey: 'worker-1' }, before, handshake, { entityKey: 'worker-1' })
   raw.mountedCity.scenarioExecution = {
     actions: [{ action: 'focus', result: action }],
+    authority: { frameId: 3, senderId: 7 },
     before,
+    initial: before,
     scenario: 'balanced-worker-focus'
   }
   assert.doesNotThrow(() => deriveRawSamplesFromProvenance(raw, { scenario: 'balanced-worker-focus' }))
@@ -472,13 +563,33 @@ test('provenance rejects spliced actions, duplicate requests, wrong targets, lif
       'wrong lifetime',
       value => (value.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.identity.rendererGeneration = 2)
     ],
-    ['seeded counter', value => (value.mountedCity.scenarioExecution.before.cameraActions.focus = 1)]
+    ['seeded counter', value => (value.mountedCity.scenarioExecution.before.cameraActions.focus = 1)],
+    [
+      'same-lifetime sender splice',
+      value => {
+        const binding = value.mountedCity.scenarioExecution.actions[0].result.bridgeBinding
+        binding.identity.senderId = 8
+        binding.requestId = binding.requestId.replace(':7:3:20:', ':8:3:20:')
+      }
+    ],
+    [
+      'same-lifetime frame splice',
+      value => {
+        const binding = value.mountedCity.scenarioExecution.actions[0].result.bridgeBinding
+        binding.identity.frameId = 4
+        binding.requestId = binding.requestId.replace(':7:3:20:', ':7:4:20:')
+      }
+    ],
+    [
+      'malformed request id',
+      value => (value.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.requestId = 'not-canonical')
+    ]
   ]) {
     const adversarial = structuredClone(raw)
     mutate(adversarial)
     assert.throws(
       () => deriveRawSamplesFromProvenance(adversarial, { scenario: 'balanced-worker-focus' }),
-      /action|proof|identity|payload|target|counter|plan/i,
+      /action|proof|identity|payload|target|counter|plan|request|sender|frame/i,
       label
     )
   }
@@ -498,7 +609,13 @@ test('hidden, minimized, and route-unmounted require authoritative state transit
         action === 'window-hidden' ? { minimized: false, visible: false } : { minimized: true, visible: false },
       windowTrace: []
     })
-    raw.mountedCity.scenarioExecution = { actions: [{ action, result }], before, scenario }
+    raw.mountedCity.scenarioExecution = {
+      actions: [{ action, result }],
+      authority: { frameId: 3, senderId: 7 },
+      before,
+      initial: before,
+      scenario
+    }
     assert.throws(() => deriveRawSamplesFromProvenance(raw, { scenario }), /window state|transition/i)
   }
 
@@ -507,13 +624,104 @@ test('hidden, minimized, and route-unmounted require authoritative state transit
   const before = structuredClone(route.mountedCity.samples[0].rendererMetrics)
   route.mountedCity.scenarioExecution = {
     actions: [{ action: 'dispose', result: boundAction('dispose', {}, before, handshake) }],
+    authority: { frameId: 3, senderId: 7 },
     before,
+    initial: before,
     scenario: 'route-unmounted'
   }
   assert.throws(
     () => deriveRawSamplesFromProvenance(route, { scenario: 'route-unmounted' }),
     /disposal|route-unmounted/i
   )
+})
+
+test('quality provenance rejects no-op, preseeded counters, wrong plans, and out-of-order requests', () => {
+  const raw = provenance()
+  const handshake = { bridgeVersion: 1, buildSha: SHA, launchNonce: 'nonce-7', mainPid: 999 }
+  raw.bridgeHandshake = handshake
+  const before = rendererMetrics({
+    internalRenderScale: 1.25,
+    qualityActions: { transitions: 1 },
+    qualityTier: 'Detailed'
+  })
+  const balanced = rendererMetrics({
+    internalRenderScale: 1,
+    qualityActions: { transitions: 2 },
+    qualityTier: 'Balanced'
+  })
+  const efficient = rendererMetrics({
+    internalRenderScale: 0.75,
+    qualityActions: { transitions: 3 },
+    qualityTier: 'Efficient'
+  })
+  raw.mountedCity.samples.forEach(sample => Object.assign(sample.rendererMetrics, efficient))
+  raw.mountedCity.scenarioExecution = {
+    actions: [
+      {
+        action: 'quality',
+        observed: balanced,
+        result: boundAction(
+          'quality',
+          { tier: 'balanced' },
+          before,
+          handshake,
+          {
+            from: { internalRenderScale: 1.25, tier: 'detailed' },
+            proof: 2,
+            to: { internalRenderScale: 1, tier: 'balanced' }
+          },
+          1
+        )
+      },
+      {
+        action: 'quality',
+        observed: efficient,
+        result: boundAction(
+          'quality',
+          { tier: 'efficient' },
+          before,
+          handshake,
+          {
+            from: { internalRenderScale: 1, tier: 'balanced' },
+            proof: 3,
+            to: { internalRenderScale: 0.75, tier: 'efficient' }
+          },
+          3
+        )
+      }
+    ],
+    authority: { frameId: 3, senderId: 7 },
+    before,
+    initial: before,
+    scenario: 'tier-efficient'
+  }
+  assert.doesNotThrow(() => deriveRawSamplesFromProvenance(raw, { scenario: 'tier-efficient' }))
+
+  for (const [label, mutate] of [
+    [
+      'no-op',
+      value =>
+        (value.mountedCity.scenarioExecution.actions[0].result.from = {
+          internalRenderScale: 1,
+          tier: 'balanced'
+        })
+    ],
+    ['preseeded counter', value => (value.mountedCity.scenarioExecution.before.qualityActions.transitions = 2)],
+    ['wrong plan', value => value.mountedCity.scenarioExecution.actions.reverse()],
+    [
+      'out-of-order request',
+      value =>
+        (value.mountedCity.scenarioExecution.actions[1].result.bridgeBinding.requestId = `lcperf-v1:${SHA}:nonce-7:999:7:3:20:1:1000:1`)
+    ]
+  ]) {
+    const adversarial = structuredClone(raw)
+    mutate(adversarial)
+    assert.throws(
+      () => deriveRawSamplesFromProvenance(adversarial, { scenario: 'tier-efficient' }),
+      /quality|counter|action|plan|request|proof/i,
+      label
+    )
+  }
 })
 
 test('derives CPU, renderer RSS, and GPU deltas from retained baseline and city samples', () => {
@@ -587,6 +795,7 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
   const scenarioRuns = []
   let now = 0
   let qualityTier = 'Balanced'
+  let qualityTransitions = 0
   const result = await runPackagedLunarCityMeasurement(
     {
       binaryPath: BINARY,
@@ -620,21 +829,88 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
       }),
       preparePhase: async (_cdp, name) => phases.push(name),
       processProbe: async () => processRows(20, phases.length === 1 ? 1 : 2),
-      rendererProbe: async () => rendererMetrics({ gpuMemoryMiB: phases.length === 1 ? 40 : 50, qualityTier }),
+      rendererProbe: async () =>
+        rendererMetrics({
+          gpuMemoryMiB: phases.length === 1 ? 40 : 50,
+          internalRenderScale: qualityTier === 'Efficient' ? 0.75 : 1,
+          qualityActions: { transitions: qualityTransitions },
+          qualityTier
+        }),
       runScenario: async (_cdp, scenario, before, handshake) => {
         scenarioRuns.push(scenario)
+        const detailed = rendererMetrics({
+          gpuMemoryMiB: 50,
+          internalRenderScale: 1.25,
+          qualityActions: { transitions: 1 },
+          qualityTier: 'Detailed'
+        })
+        const balanced = rendererMetrics({
+          gpuMemoryMiB: 50,
+          qualityActions: { transitions: 2 },
+          qualityTier: 'Balanced'
+        })
+        const efficient = rendererMetrics({
+          gpuMemoryMiB: 50,
+          internalRenderScale: 0.75,
+          qualityActions: { transitions: 3 },
+          qualityTier: 'Efficient'
+        })
         qualityTier = 'Efficient'
+        qualityTransitions = 3
 
         return {
           actions: [
             {
               action: 'quality',
-              result: boundAction('quality', { tier: 'efficient' }, before, handshake, {
-                tier: 'efficient'
-              })
+              observed: balanced,
+              result: boundAction(
+                'quality',
+                { tier: 'balanced' },
+                before,
+                handshake,
+                {
+                  from: { internalRenderScale: 1.25, tier: 'detailed' },
+                  proof: 2,
+                  to: { internalRenderScale: 1, tier: 'balanced' }
+                },
+                3
+              )
+            },
+            {
+              action: 'quality',
+              observed: efficient,
+              result: boundAction(
+                'quality',
+                { tier: 'efficient' },
+                before,
+                handshake,
+                {
+                  from: { internalRenderScale: 1, tier: 'balanced' },
+                  proof: 3,
+                  to: { internalRenderScale: 0.75, tier: 'efficient' }
+                },
+                5
+              )
             }
           ],
-          before,
+          authority: { frameId: 3, senderId: 7 },
+          before: detailed,
+          initial: before,
+          preparation: {
+            action: 'quality',
+            observed: detailed,
+            result: boundAction(
+              'quality',
+              { tier: 'detailed' },
+              before,
+              handshake,
+              {
+                from: { internalRenderScale: 1, tier: 'balanced' },
+                to: { internalRenderScale: 1.25, tier: 'detailed' }
+              },
+              1
+            )
+          },
           scenario
         }
       },
@@ -654,9 +930,12 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
   assert.deepEqual(phases, ['baseline-shell', 'mounted-city'])
   assert.deepEqual(scenarioRuns, ['tier-efficient'])
   assert.equal(result.rawProvenance.mountedCity.scenarioExecution.scenario, 'tier-efficient')
-  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.actions.length, 1)
-  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.requestId, '7:20:1:1')
-  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.before.qualityTier, 'Balanced')
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.actions.length, 2)
+  assert.equal(
+    result.rawProvenance.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.requestId,
+    `lcperf-v1:${SHA}:nonce-7:999:7:3:20:1:1000:3`
+  )
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.before.qualityTier, 'Detailed')
   assert.equal(result.rawProvenance.mountedCity.samples.length, 2)
   assert.equal(
     result.rawProvenance.mountedCity.samples.every(sample => sample.rendererMetrics.qualityTier === 'Efficient'),
@@ -736,7 +1015,9 @@ test('captures mounted disposal samples followed by exactly one truthful termina
 
         return {
           actions: [{ action: 'dispose', result: boundAction('dispose', {}, before, handshake) }],
+          authority: { frameId: 3, senderId: 7 },
           before,
+          initial: before,
           scenario
         }
       },
@@ -766,7 +1047,10 @@ test('captures mounted disposal samples followed by exactly one truthful termina
   })
   assert.equal(result.rawProvenance.mountedCity.scenarioExecution.scenario, 'disposal')
   assert.equal(result.rawProvenance.mountedCity.scenarioExecution.actions.length, 1)
-  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.requestId, '7:20:1:1')
+  assert.equal(
+    result.rawProvenance.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.requestId,
+    `lcperf-v1:${SHA}:nonce-7:999:7:3:20:1:1000:1`
+  )
   assert.equal(result.rawProvenance.mountedCity.scenarioExecution.before.lifecycleState, 'mounted')
 })
 

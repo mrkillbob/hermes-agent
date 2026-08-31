@@ -399,6 +399,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
         dialogueState: 'idle',
         dialogueActions: { opened: 0, messagesSent: 0, responsesReceived: 0 },
         lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 0 },
+        qualityActions: { transitions: 0 },
         sceneMount: { id: 'scene-1', generation: 1, startedAtMs: 2_000 },
         lifecycleState: 'mounted',
         environment: {
@@ -438,7 +439,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
           ...result,
           bridgeBinding: {
             action: 'scenario-action',
-            requestId: '7:20:1:1',
+            requestId: `lcperf-v1:${SHA}:nonce-7:999:7:3:20:1:1000:1`,
             payload: { action, payload },
             identity: {
               bridgeVersion: 1,
@@ -455,7 +456,9 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
         }
       }
     ],
-    before: structuredClone(before)
+    authority: { frameId: 3, senderId: 7 },
+    before: structuredClone(before),
+    initial: structuredClone(before)
   })
   rawProvenance.mountedCity.scenarioExecution = {
     actions: [
@@ -472,7 +475,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
           ],
           bridgeBinding: {
             action: 'scenario-action',
-            requestId: '7:20:1:1',
+            requestId: `lcperf-v1:${SHA}:nonce-7:999:7:3:20:1:1000:1`,
             payload: { action: 'window-visible-cycle', payload: {} },
             identity: {
               bridgeVersion: 1,
@@ -489,7 +492,9 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
         }
       }
     ],
+    authority: { frameId: 3, senderId: 7 },
     before: balancedBefore,
+    initial: balancedBefore,
     scenario: 'balanced-overview'
   }
   const valid = validateReceipt(receipt({ rawSamples, rawProvenance }))

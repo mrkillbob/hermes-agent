@@ -489,7 +489,7 @@ test('controller binds scenario results to the exact request and owns hidden win
         senderId: 7
       },
       payload: { action: 'window-hidden', payload: {} },
-      requestId: '7:82:1:1'
+      requestId: `lcperf-v1:${stamp.commit}:nonce-0123456789abcdef-unique:41:7:3:82:1:1234:1`
     }
   })
 
@@ -499,6 +499,7 @@ test('controller binds scenario results to the exact request and owns hidden win
   })
 
   const request = sent.at(-1)?.payload as Record<string, unknown>
+  assert.equal(request.requestId, `lcperf-v1:${stamp.commit}:nonce-0123456789abcdef-unique:41:7:3:82:1:1234:2`)
   assert.equal(controller.resolveRendererResponse(event, { ...request, value: { action: 'orbit', proof: 2 } }), true)
   const orbit = await orbitPending
   assert.deepEqual((orbit as { bridgeBinding: unknown }).bridgeBinding, {

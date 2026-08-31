@@ -17,7 +17,8 @@ const GPU_MEMORY_SOURCES = new Set(['chromium-memory-infra-v1'])
 const COUNTER_GROUPS = Object.freeze({
   cameraActions: ['overview', 'focus', 'orbit', 'zoom', 'indoor'],
   dialogueActions: ['opened', 'messagesSent', 'responsesReceived'],
-  lifecycleActions: ['contextLosses', 'recoveries', 'disposals']
+  lifecycleActions: ['contextLosses', 'recoveries', 'disposals'],
+  qualityActions: ['transitions']
 })
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -110,7 +111,8 @@ function validateRendererMetrics(metrics, identity, label, allowEmpty) {
   for (const [field, keys] of [
     ['cameraActions', ['overview', 'focus', 'orbit', 'zoom', 'indoor']],
     ['dialogueActions', ['opened', 'messagesSent', 'responsesReceived']],
-    ['lifecycleActions', ['contextLosses', 'recoveries', 'disposals']]
+    ['lifecycleActions', ['contextLosses', 'recoveries', 'disposals']],
+    ['qualityActions', ['transitions']]
   ]) {
     if (
       !isRecord(metrics[field]) ||
@@ -159,13 +161,16 @@ function scenarioPlan(scenario, before) {
     minimized: [['window-minimized', {}]],
     'indoor-occlusion': [['interior', {}]],
     'tier-detailed': [['quality', { tier: 'detailed' }]],
-    'tier-efficient': [['quality', { tier: 'efficient' }]],
+    'tier-efficient': [
+      ['quality', { tier: 'balanced' }],
+      ['quality', { tier: 'efficient' }]
+    ],
     'visible-idle': [['window-visible-cycle', {}]],
     '25-active': [['window-visible-cycle', {}]],
     '100-active': [['window-visible-cycle', {}]],
     '250-lod': [['window-visible-cycle', {}]],
     'balanced-overview': [['window-visible-cycle', {}]],
-    'tier-balanced': [['window-visible-cycle', {}]],
+    'tier-balanced': [['quality', { tier: 'balanced' }]],
     '30-minute-stability': [['window-visible-cycle', {}]]
   }
   return plans[scenario]
@@ -192,11 +197,28 @@ function validateScenarioExecution(execution, scenario, provenance) {
     fail('mounted-city scenario before snapshot has the wrong renderer lifetime')
   const handshake = provenance.bridgeHandshake
   const requestIds = new Set()
+  let lastSequence = 0
+  let authority
 
-  for (const [index, entry] of execution.actions.entries()) {
-    const [expectedAction, expectedPayload] = plan[index]
+  const validateBinding = (entry, expectedAction, expectedPayload, index) => {
     const binding = entry?.result?.bridgeBinding
     const identity = binding?.identity
+    const prefix = [
+      'lcperf-v1',
+      handshake?.buildSha,
+      handshake?.launchNonce,
+      handshake?.mainPid,
+      identity?.senderId,
+      identity?.frameId,
+      provenance.mountedCity.rendererIdentity.pid,
+      provenance.mountedCity.rendererIdentity.generation,
+      provenance.mountedCity.rendererIdentity.startedAtMs
+    ].join(':')
+    const sequence =
+      typeof binding?.requestId === 'string' && binding.requestId.startsWith(`${prefix}:`)
+        ? Number(binding.requestId.slice(prefix.length + 1))
+        : Number.NaN
+
     if (
       !isRecord(entry) ||
       entry.action !== expectedAction ||
@@ -216,16 +238,78 @@ function validateScenarioExecution(execution, scenario, provenance) {
       identity.mainPid !== handshake?.mainPid ||
       identity.rendererPid !== provenance.mountedCity.rendererIdentity.pid ||
       identity.rendererStartedAtMs !== provenance.mountedCity.rendererIdentity.startedAtMs ||
-      identity.rendererGeneration !== provenance.mountedCity.rendererIdentity.generation
+      identity.rendererGeneration !== provenance.mountedCity.rendererIdentity.generation ||
+      !Number.isInteger(identity.senderId) ||
+      identity.senderId <= 0 ||
+      !Number.isInteger(identity.frameId) ||
+      identity.frameId < 0 ||
+      !Number.isSafeInteger(sequence) ||
+      sequence <= lastSequence ||
+      binding.requestId !== `${prefix}:${sequence}` ||
+      (authority && (identity.senderId !== authority.senderId || identity.frameId !== authority.frameId))
     ) {
       fail(`mounted-city scenario action ${index} lacks exact causal proof`)
     }
+    authority ??= { frameId: identity.frameId, senderId: identity.senderId }
+    lastSequence = sequence
     requestIds.add(binding.requestId)
   }
 
+  if (execution.preparation) {
+    const prestateTier = scenario === 'tier-balanced' ? 'efficient' : scenario === 'tier-efficient' ? 'detailed' : null
+    if (!prestateTier || !isRecord(execution.initial)) fail('mounted-city scenario has an unsupported preparation')
+    validateBinding(execution.preparation, 'quality', { tier: prestateTier }, 'preparation')
+  }
+
+  for (const [index, entry] of execution.actions.entries()) {
+    const [expectedAction, expectedPayload] = plan[index]
+    validateBinding(entry, expectedAction, expectedPayload, index)
+  }
+
+  if (
+    !isRecord(execution.authority) ||
+    execution.authority.senderId !== authority?.senderId ||
+    execution.authority.frameId !== authority?.frameId
+  )
+    fail('mounted-city scenario authority does not match the responder sender and frame')
+
   const delta = (group, key) => after[group][key] - before[group][key]
-  for (const [action, payload] of plan) {
-    const result = execution.actions.find(entry => entry.action === action)?.result
+  const validateQualityTransition = (entry, previous, target) => {
+    const result = entry?.result
+    const observed = entry?.observed
+    if (
+      !isRecord(previous) ||
+      !isRecord(observed) ||
+      result?.from?.tier !== previous.qualityTier.toLowerCase() ||
+      result.from?.internalRenderScale !== previous.internalRenderScale ||
+      result.to?.tier !== target ||
+      result.to?.internalRenderScale !== observed.internalRenderScale ||
+      observed.qualityTier.toLowerCase() !== target ||
+      result.from.tier === result.to.tier ||
+      result.from.internalRenderScale === result.to.internalRenderScale ||
+      observed.qualityActions.transitions - previous.qualityActions.transitions !== 1 ||
+      result.proof !== observed.qualityActions.transitions
+    )
+      fail('quality proof does not match the observed tier, render scale, and counter transition')
+  }
+
+  if (execution.preparation) {
+    validateQualityTransition(
+      execution.preparation,
+      execution.initial,
+      scenario === 'tier-balanced' ? 'efficient' : 'detailed'
+    )
+    if (
+      execution.before.qualityTier !== execution.preparation.observed.qualityTier ||
+      execution.before.internalRenderScale !== execution.preparation.observed.internalRenderScale ||
+      execution.before.qualityActions.transitions !== execution.preparation.observed.qualityActions.transitions
+    )
+      fail('quality scenario preparation does not establish the authoritative prestate')
+  }
+
+  for (const [index, [action, payload]] of plan.entries()) {
+    const entry = execution.actions[index]
+    const result = entry?.result
     if (action === 'orbit' && (delta('cameraActions', 'orbit') !== 1 || result.proof !== after.cameraActions.orbit))
       fail('orbit proof does not match the exact camera counter delta')
     if (action === 'zoom' && (delta('cameraActions', 'zoom') !== 1 || result.proof !== after.cameraActions.zoom))
@@ -245,8 +329,9 @@ function validateScenarioExecution(execution, scenario, provenance) {
         after.cameraState !== 'indoor')
     )
       fail('interior proof does not match the exact camera transition')
-    if (action === 'quality' && (result.tier !== payload.tier || after.qualityTier.toLowerCase() !== payload.tier))
-      fail('quality proof does not match the requested tier transition')
+    if (action === 'quality') {
+      validateQualityTransition(entry, index === 0 ? before : execution.actions[index - 1].observed, payload.tier)
+    }
     if (action === 'leader-dialogue') {
       if (
         delta('dialogueActions', 'opened') <= 0 ||
@@ -301,6 +386,19 @@ function validateScenarioExecution(execution, scenario, provenance) {
               sampled?.minimized === false
       if (!expected) fail(`${action} lacks the authoritative Electron window state transition`)
     }
+  }
+
+  if (scenario === 'tier-balanced' || scenario === 'tier-efficient') {
+    const expectedPrestate = scenario === 'tier-balanced' ? 'Efficient' : 'Detailed'
+    const final = execution.actions.at(-1)?.observed
+    if (
+      before.qualityTier !== expectedPrestate ||
+      !isRecord(final) ||
+      final.qualityTier !== after.qualityTier ||
+      final.internalRenderScale !== after.internalRenderScale ||
+      final.qualityActions.transitions !== after.qualityActions.transitions
+    )
+      fail('quality scenario prestate or sampled final state is not authoritative')
   }
 }
 

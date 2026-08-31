@@ -250,12 +250,14 @@ describe('Lunar City route-local packaged metrics runtime', () => {
                     senderId: 7
                   },
                   payload: { action: 'dispose', payload: {} },
-                  requestId: '7:20:1:1'
+                  requestId: `lcperf-v1:${'a'.repeat(40)}:nonce-7:999:7:3:20:1:1000:1`
                 }
               }
             }
           ],
+          authority: { frameId: 3, senderId: 7 },
           before: firstMounted,
+          initial: firstMounted,
           scenario: 'disposal'
         }
       },
@@ -282,6 +284,7 @@ describe('Lunar City route-local packaged metrics runtime', () => {
     let camera = { alpha: 1, beta: 1, focusedEntityKey: undefined as EntityKey | undefined, radius: 10 }
     let inside = false
     let qualityTier: 'balanced' | 'efficient' = 'balanced'
+    let internalRenderScale = 1
 
     const worldAction = vi.fn(intent => {
       if (intent.kind === 'orbit') {
@@ -299,6 +302,7 @@ describe('Lunar City route-local packaged metrics runtime', () => {
 
     const setQuality = vi.fn(tier => {
       qualityTier = tier
+      internalRenderScale = tier === 'efficient' ? 0.75 : 1
     })
 
     const performLeaderDialogue = vi.fn(async () => ({ opened: 1, received: 1, sent: 1 }))
@@ -318,7 +322,7 @@ describe('Lunar City route-local packaged metrics runtime', () => {
       getCitySnapshot: () => city,
       getDialogueState: () => (performLeaderDialogue.mock.calls.length > 0 ? 'active' : 'idle'),
       getInteriorState: () => inside,
-      getQuality: () => ({ internalRenderScale: 1, qualityTier }),
+      getQuality: () => ({ internalRenderScale, qualityTier }),
       getWorldGeneration: () => 1,
       getWorldMetrics: () => ({
         activeAnimations: 0,
@@ -344,12 +348,21 @@ describe('Lunar City route-local packaged metrics runtime', () => {
       worldAction
     })
 
-    expect(await request('scenario-action', { action: 'quality', payload: { tier: 'efficient' } })).toMatchObject({
+    expect(await request('scenario-action', { action: 'quality', payload: { tier: 'efficient' } })).toEqual({
       action: 'quality',
-      proof: 1
+      from: { internalRenderScale: 1, tier: 'balanced' },
+      proof: 1,
+      to: { internalRenderScale: 0.75, tier: 'efficient' }
     })
     expect(setQuality).toHaveBeenCalledWith('efficient')
-    expect(await request('snapshot', undefined)).toMatchObject({ qualityTier: 'Efficient' })
+    expect(await request('snapshot', undefined)).toMatchObject({
+      internalRenderScale: 0.75,
+      qualityActions: { transitions: 1 },
+      qualityTier: 'Efficient'
+    })
+    await expect(request('scenario-action', { action: 'quality', payload: { tier: 'efficient' } })).rejects.toThrow(
+      /already.*efficient|nonzero.*transition/i
+    )
     expect(
       await request('scenario-action', { action: 'orbit', payload: { deltaAlpha: 0.5, deltaBeta: 0.1 } })
     ).toMatchObject({

@@ -44,6 +44,7 @@ interface ActionCounters {
   cameraActions: { overview: number; focus: number; orbit: number; zoom: number; indoor: number }
   dialogueActions: { opened: number; messagesSent: number; responsesReceived: number }
   lifecycleActions: { contextLosses: number; recoveries: number; disposals: number }
+  qualityActions: { transitions: number }
 }
 
 interface RouteState {
@@ -157,7 +158,8 @@ export function createLunarCityPerfRuntime(
   const counters: ActionCounters = {
     cameraActions: { overview: 0, focus: 0, orbit: 0, zoom: 0, indoor: 0 },
     dialogueActions: { opened: 0, messagesSent: 0, responsesReceived: 0 },
-    lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 0 }
+    lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 0 },
+    qualityActions: { transitions: 0 }
   }
 
   let generation = 0
@@ -247,6 +249,7 @@ export function createLunarCityPerfRuntime(
       lifecycleActions: structuredClone(counters.lifecycleActions),
       lifecycleState,
       qualityTier,
+      qualityActions: structuredClone(counters.qualityActions),
       scenarioTargets: {
         ...(leaderTarget ? { leaderId: leaderModelIdForOwner(leaderTarget) } : {}),
         ...(workerTarget ? { workerEntityKey: workerTarget.key } : {})
@@ -281,10 +284,28 @@ export function createLunarCityPerfRuntime(
           throw new Error('Unsupported quality tier')
         }
 
+        const before = registration.getQuality()
+
+        if (before.qualityTier === tier) {
+          throw new Error(`Quality tier is already ${tier}; a nonzero transition is required`)
+        }
+
         registration.setQuality(tier as QualityTier)
         await waitFor(() => registration.getQuality().qualityTier === tier, 'quality transition')
+        const after = registration.getQuality()
 
-        return { action: request.action, proof: 1, tier }
+        if (after.internalRenderScale === before.internalRenderScale) {
+          throw new Error('Quality transition did not change the internal render scale')
+        }
+
+        counters.qualityActions.transitions += 1
+
+        return {
+          action: request.action,
+          from: { internalRenderScale: before.internalRenderScale, tier: before.qualityTier },
+          proof: counters.qualityActions.transitions,
+          to: { internalRenderScale: after.internalRenderScale, tier: after.qualityTier }
+        }
       }
 
       case 'orbit': {

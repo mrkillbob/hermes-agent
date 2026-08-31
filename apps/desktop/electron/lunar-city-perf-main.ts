@@ -503,7 +503,18 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
       return Promise.resolve(undefined)
     }
 
-    const requestId = `${current.senderId}:${current.identity.rendererPid}:${current.identity.rendererGeneration}:${++requestSequence}`
+    const requestId = [
+      'lcperf-v1',
+      current.identity.buildSha,
+      current.identity.launchNonce,
+      current.identity.mainPid,
+      current.identity.senderId,
+      current.identity.frameId,
+      current.identity.rendererPid,
+      current.identity.rendererGeneration,
+      current.identity.rendererStartedAtMs,
+      ++requestSequence
+    ].join(':')
 
     const bindScenarioResult = (result: unknown) => {
       if (action !== 'scenario-action' || !result || typeof result !== 'object' || Array.isArray(result)) {

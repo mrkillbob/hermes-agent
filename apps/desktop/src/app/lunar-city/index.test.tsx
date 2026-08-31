@@ -615,15 +615,15 @@ describe('LunarCity', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Talk to owl leader' }))
 
-    await waitFor(() =>
+    await waitFor(() => {
       expect(screen.getByRole('status', { name: 'owl leader conversation error' }).textContent).toContain(
         'owner route unavailable'
       )
-    )
-    expect(leaderAnimation).toHaveBeenCalledWith(
-      leaderModelIdForOwner({ connectionId: 'source-a', profile: 'owl' }),
-      'unavailable'
-    )
+      expect(leaderAnimation).toHaveBeenCalledWith(
+        leaderModelIdForOwner({ connectionId: 'source-a', profile: 'owl' }),
+        'unavailable'
+      )
+    })
   })
 
   it('advances task progress while the simulation is playing', async () => {

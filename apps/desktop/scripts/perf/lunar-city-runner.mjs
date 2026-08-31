@@ -261,13 +261,16 @@ function scenarioActionPlan(scenario, metrics) {
     minimized: [['window-minimized', {}]],
     'indoor-occlusion': [['interior', {}]],
     'tier-detailed': [['quality', { tier: 'detailed' }]],
-    'tier-efficient': [['quality', { tier: 'efficient' }]],
+    'tier-efficient': [
+      ['quality', { tier: 'balanced' }],
+      ['quality', { tier: 'efficient' }]
+    ],
     'visible-idle': [['window-visible-cycle', {}]],
     '25-active': [['window-visible-cycle', {}]],
     '100-active': [['window-visible-cycle', {}]],
     '250-lod': [['window-visible-cycle', {}]],
     'balanced-overview': [['window-visible-cycle', {}]],
-    'tier-balanced': [['window-visible-cycle', {}]],
+    'tier-balanced': [['quality', { tier: 'balanced' }]],
     '30-minute-stability': [['window-visible-cycle', {}]]
   }
 
@@ -284,11 +287,47 @@ function sameJson(left, right) {
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-export async function runScenarioThroughBridge(cdp, scenario, metrics, handshake) {
+function parseCanonicalRequestId(binding, handshake, metrics) {
+  const identity = binding?.identity
+  if (
+    !Number.isInteger(identity?.senderId) ||
+    identity.senderId <= 0 ||
+    !Number.isInteger(identity.frameId) ||
+    identity.frameId < 0
+  ) {
+    return undefined
+  }
+  const prefix = [
+    'lcperf-v1',
+    handshake?.buildSha,
+    handshake?.launchNonce,
+    handshake?.mainPid,
+    identity.senderId,
+    identity.frameId,
+    metrics?.rendererPid,
+    metrics?.rendererGeneration,
+    metrics?.rendererStartedAtMs
+  ].join(':')
+  if (typeof binding.requestId !== 'string' || !binding.requestId.startsWith(`${prefix}:`)) return undefined
+  const sequence = Number(binding.requestId.slice(prefix.length + 1))
+  return Number.isSafeInteger(sequence) && sequence > 0 && binding.requestId === `${prefix}:${sequence}`
+    ? { frameId: identity.frameId, senderId: identity.senderId, sequence }
+    : undefined
+}
+
+export async function runScenarioThroughBridge(
+  cdp,
+  scenario,
+  metrics,
+  handshake,
+  snapshotProbe = defaultRendererProbe
+) {
   const actions = []
   const requestIds = new Set()
+  let authority
+  let lastSequence = 0
 
-  for (const [action, payload] of scenarioActionPlan(scenario, metrics)) {
+  const run = async (action, payload, current) => {
     const result = await cdp.eval(`(() => {
       const probe = window.__LUNAR_CITY_PERF__
       if (!probe || typeof probe.runAction !== 'function') {
@@ -299,6 +338,7 @@ export async function runScenarioThroughBridge(cdp, scenario, metrics, handshake
 
     const binding = result?.bridgeBinding
     const identity = binding?.identity
+    const canonical = parseCanonicalRequestId(binding, handshake, current)
     if (
       !result ||
       result.action !== action ||
@@ -312,18 +352,49 @@ export async function runScenarioThroughBridge(cdp, scenario, metrics, handshake
       identity?.buildSha !== handshake?.buildSha ||
       identity?.launchNonce !== handshake?.launchNonce ||
       identity?.mainPid !== handshake?.mainPid ||
-      identity?.rendererPid !== metrics?.rendererPid ||
-      identity?.rendererStartedAtMs !== metrics?.rendererStartedAtMs ||
-      identity?.rendererGeneration !== metrics?.rendererGeneration
+      identity?.rendererPid !== current?.rendererPid ||
+      identity?.rendererStartedAtMs !== current?.rendererStartedAtMs ||
+      identity?.rendererGeneration !== current?.rendererGeneration ||
+      !canonical ||
+      canonical.sequence <= lastSequence ||
+      (authority && (canonical.senderId !== authority.senderId || canonical.frameId !== authority.frameId))
     ) {
       throw new Error(`Lunar City scenario action ${action} did not return causal proof`)
     }
 
+    authority ??= { frameId: canonical.frameId, senderId: canonical.senderId }
+    lastSequence = canonical.sequence
     requestIds.add(binding.requestId)
-    actions.push({ action, result })
+    const observed = await snapshotProbe(cdp)
+
+    return { action, observed, result }
   }
 
-  return { actions, before: structuredClone(metrics), scenario }
+  let before = structuredClone(metrics)
+  let preparation
+  const requiredPrestate =
+    scenario === 'tier-balanced' ? 'Efficient' : scenario === 'tier-efficient' ? 'Detailed' : null
+  if (requiredPrestate && before.qualityTier !== requiredPrestate) {
+    const tier = requiredPrestate.toLowerCase()
+    preparation = await run('quality', { tier }, before)
+    before = structuredClone(preparation.observed)
+  }
+
+  for (const [action, payload] of scenarioActionPlan(scenario, metrics)) {
+    const entry = await run(action, payload, before)
+    actions.push(entry)
+    before = structuredClone(entry.observed)
+  }
+
+  const authoritativeBefore = preparation ? structuredClone(preparation.observed) : structuredClone(metrics)
+  return {
+    actions,
+    authority,
+    before: authoritativeBefore,
+    initial: structuredClone(metrics),
+    ...(preparation ? { preparation } : {}),
+    scenario
+  }
 }
 
 const defaultClock = {
@@ -502,7 +573,8 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
         cdp,
         options.scenario,
         await deps.rendererProbe(cdp),
-        connected.handshake
+        connected.handshake,
+        deps.rendererProbe
       )
     }
 
@@ -518,7 +590,8 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
       scenarioExecution,
       terminalAction:
         options.scenario === 'disposal'
-          ? firstRenderer => deps.runScenario(cdp, options.scenario, firstRenderer, connected.handshake)
+          ? firstRenderer =>
+              deps.runScenario(cdp, options.scenario, firstRenderer, connected.handshake, deps.rendererProbe)
           : undefined
     })
     const rawProvenance = {
