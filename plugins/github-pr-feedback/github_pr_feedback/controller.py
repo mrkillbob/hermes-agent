@@ -229,6 +229,27 @@ def _bind_pooled_worktree_task(
         bind_task(receipt, task_id, board)
 
 
+def _prepare_receipt_worktree_with_overflow(
+    local_git: LocalGit,
+    repository: Path,
+    receipt: FeedbackReceipt,
+    overflow_root: Path,
+) -> PreparedWorktree:
+    """Prepare an exact-head workspace, falling back when the pool is full.
+
+    Retryable cards intentionally retain their pooled leases.  A bounded
+    overflow worktree lets a new receipt reach its fixer without reclaiming
+    those leases or weakening the exact-head checks.
+    """
+
+    try:
+        return local_git.prepare_receipt_worktree(repository, receipt)
+    except WorktreePoolExhausted:
+        return LocalGitRepository(overflow_root).prepare_receipt_worktree(
+            repository, receipt
+        )
+
+
 def _claim_with_orphan_recovery(
     ledger: FeedbackLedger,
     kanban: KanbanClient,
@@ -1308,8 +1329,11 @@ class ScanController:
             return "duplicate"
         self._ledger.record_expected_head(receipt, lease, receipt.head_sha)
         try:
-            prepared = self._local_git.prepare_receipt_worktree(
-                admission.target.local_path, receipt
+            prepared = _prepare_receipt_worktree_with_overflow(
+                self._local_git,
+                admission.target.local_path,
+                receipt,
+                self._ledger.path.parent / "overflow-worktrees",
             )
             if prepared.expected_sha.casefold() != receipt.head_sha.casefold():
                 raise RuntimeError("prepared worktree expected SHA does not match receipt")
@@ -1395,8 +1419,11 @@ class ScanController:
             return "duplicate"
         self._ledger.record_expected_head(receipt, lease, receipt.head_sha)
         try:
-            prepared = self._local_git.prepare_receipt_worktree(
-                admission.target.local_path, receipt
+            prepared = _prepare_receipt_worktree_with_overflow(
+                self._local_git,
+                admission.target.local_path,
+                receipt,
+                self._ledger.path.parent / "overflow-worktrees",
             )
             if prepared.expected_sha.casefold() != receipt.head_sha.casefold():
                 raise RuntimeError(
@@ -1612,8 +1639,11 @@ class ScanController:
         internal_intent_review: bool = False,
     ) -> str | None:
         try:
-            prepared = self._local_git.prepare_receipt_worktree(
-                target.local_path, receipt
+            prepared = _prepare_receipt_worktree_with_overflow(
+                self._local_git,
+                target.local_path,
+                receipt,
+                self._ledger.path.parent / "overflow-worktrees",
             )
             if prepared.expected_sha.casefold() != receipt.head_sha.casefold():
                 raise RuntimeError(

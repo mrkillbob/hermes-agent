@@ -22,6 +22,7 @@ from .controller import (
     ScanController,
     _bind_pooled_worktree_task,
     _claim_with_orphan_recovery,
+    _prepare_receipt_worktree_with_overflow,
     _receipt_idempotency_key,
     _worker_capability_preflight,
 )
@@ -302,8 +303,11 @@ class RepairController:
                 if base_refresh_required:
                     base_refresh_slots_used += 1
                 try:
-                    prepared = self._local_git.prepare_receipt_worktree(
-                        target.local_path, receipt
+                    prepared = _prepare_receipt_worktree_with_overflow(
+                        self._local_git,
+                        target.local_path,
+                        receipt,
+                        self._ledger.path.parent / "overflow-worktrees",
                     )
                     if (
                         not configured.report_only
