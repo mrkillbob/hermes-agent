@@ -1,5 +1,16 @@
 # Design QA
 
+> **2026-08-31 lighting pass:** A lighting/material addendum (key/rim/fill
+> lights, glow layer, tuned PBR recipes) landed on top of the 3D world
+> below. It is a real, visible improvement but does **not** close the gap
+> to the approved reference art — the authored building geometry itself
+> still reads as thin pillar/beam clusters rather than solid walled
+> volumes. Full gap analysis, verification receipts, and a prioritized
+> follow-up plan are in
+> `.superpowers/sdd/2026-08-31-lunar-city-lighting-pass/report.md`, with a
+> real-WebGL screenshot (`webgl-preview.png` in that same folder) for
+> visual comparison against `moon-settlement-approved.jpg`.
+
 > **Current status (2026-08-31):** The historical image-backed QA below is superseded. The runtime is now a genuine Babylon 3D scene using `apps/desktop/public/lunar-city/v2/`; `moon-settlement-approved.jpg` is a reference asset only. The final 3D implementation source tip is `b40e67825121cd0edb99b64e3a1bedcfbd19ec96`; this documentation update is committed at `3c16a086d745ca44d7a57af75dcfe15f301123d8`. Source/unit implementation is review-clean, but no clean packaged visual, GPU/CPU, 30-minute, or supervised-live acceptance has been performed.
 
 ## Current 3D QA disposition

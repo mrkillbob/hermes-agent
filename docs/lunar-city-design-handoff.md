@@ -2,6 +2,20 @@
 
 > **Current 3D handoff (2026-08-31):** This file's original image-backed notes below are historical and superseded by the current implementation record in this banner and the linked design QA addendum. The runtime is a genuine Babylon 3D world; the approved JPG is a visual reference only, never the runtime background. The final 3D implementation source tip is `b40e67825121cd0edb99b64e3a1bedcfbd19ec96`; this documentation update is committed at `3c16a086d745ca44d7a57af75dcfe15f301123d8`. Source/unit lanes are review-clean, but no clean packaged GPU/CPU, visual-regression, 30-minute, or supervised-live acceptance receipt exists.
 
+## 2026-08-31 lighting/material addendum
+
+The 3D world (below) is still far short of the approved reference art and
+the user's inspiration video/PNGs. `.superpowers/sdd/2026-08-31-lunar-city-lighting-pass/report.md`
+records a lighting/material pass over the existing geometry (key/rim/fill
+lights, a glow layer for the emissive accents, PBR material recipes tuned
+per material instead of one recipe for everything) plus a gap analysis and
+a prioritized follow-up plan. Read that report before starting further
+visual work on this route — in particular, it explains why the next real
+gains have to come from `scripts/lunar-city/modeling/buildings.mjs`
+(thin pillar/beam silhouettes, not lighting) and introduces
+`scripts/lunar-city/render-webgl-preview.mjs`, a real-WebGL screenshot tool
+for grading geometry/material changes without an Electron packaging cycle.
+
 ## Current implementation addendum
 
 - `/lunar-city` is a dedicated left-sidebar destination immediately after Kanban. Arranged Sim-City/StarCraft-like 3D camera controls support orbit, pan, tilt, zoom, focus, follow, occlusion, interiors, visibility pausing, context recovery, and real world teardown.

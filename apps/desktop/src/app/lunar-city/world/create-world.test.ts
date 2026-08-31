@@ -92,6 +92,8 @@ function fakeRuntime({
   const leaderNodes = new Map<string, FakeNode>()
   const leaderAnimationGroups = new Map<string, FakeAnimationGroup>()
   const lights: FakeDirectionalLight[] = []
+  const hemisphericLights: FakeHemisphericLight[] = []
+  const glowLayers: FakeGlowLayer[] = []
   const workerClones = new Map<string, FakeNode>()
 
   const frozenMeshes: Array<FakeNode & { freezeWorldMatrix: ReturnType<typeof vi.fn>; modelId: string }> = []
@@ -162,6 +164,7 @@ function fakeRuntime({
 
   class FakeDirectionalLight {
     intensity = 1
+    diffuse?: FakeColor3
     shadowEnabled = true
 
     constructor(
@@ -170,6 +173,35 @@ function fakeRuntime({
       public readonly scene: FakeScene
     ) {
       lights.push(this)
+    }
+  }
+
+  class FakeHemisphericLight {
+    intensity = 1
+    diffuse?: FakeColor3
+    groundColor?: FakeColor3
+    specular?: FakeColor3
+    shadowEnabled = true
+
+    constructor(
+      public readonly name: string,
+      public readonly direction: FakeVector3,
+      public readonly scene: FakeScene
+    ) {
+      hemisphericLights.push(this)
+    }
+  }
+
+  class FakeGlowLayer {
+    intensity = 1
+    dispose = vi.fn()
+
+    constructor(
+      public readonly name: string,
+      public readonly scene: FakeScene,
+      public readonly options?: { mainTextureRatio?: number }
+    ) {
+      glowLayers.push(this)
     }
   }
 
@@ -362,6 +394,8 @@ function fakeRuntime({
     ArcRotateCamera: FakeArcRotateCamera,
     Color3: FakeColor3,
     DirectionalLight: FakeDirectionalLight,
+    HemisphericLight: FakeHemisphericLight,
+    GlowLayer: FakeGlowLayer,
     Engine: FakeEngine,
     ImportMeshAsync,
     Scene: FakeScene,
@@ -373,6 +407,8 @@ function fakeRuntime({
     engines,
     frozenMaterials,
     frozenMeshes,
+    glowLayers,
+    hemisphericLights,
     ImportMeshAsync,
     loadedUrls,
     lodNodes,
@@ -672,6 +708,36 @@ describe('createLunarCityWorld', () => {
     expect(runtime.lodNodes.get('garden:plants')?.setEnabled).toHaveBeenLastCalledWith(false)
     expect(runtime.scenes).toHaveLength(1)
     handle.destroy()
+  })
+
+  it('lights the approved silhouettes with a key/rim/fill rig and ties the glow pass to decorations', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+
+    // Key light stays first so the existing shadow-toggle test keeps
+    // addressing the correct light; the rim light never grows a shadow map.
+    expect(runtime.lights).toHaveLength(2)
+    expect(runtime.lights[0]?.name).toBe('lunar-city:key-light')
+    expect(runtime.lights[1]?.name).toBe('lunar-city:rim-light')
+    expect(runtime.lights[1]?.shadowEnabled).toBe(false)
+
+    expect(runtime.hemisphericLights).toHaveLength(1)
+    expect(runtime.hemisphericLights[0]?.name).toBe('lunar-city:fill-light')
+    expect(runtime.hemisphericLights[0]?.shadowEnabled).toBe(false)
+    expect(runtime.hemisphericLights[0]?.specular).toEqual({ x: 0, y: 0, z: 0 })
+
+    expect(runtime.glowLayers).toHaveLength(1)
+    // Efficient is the boot tier, which starts with decorations disabled.
+    expect(runtime.glowLayers[0]?.intensity).toBe(0)
+
+    handle.setQuality('detailed')
+    expect(runtime.glowLayers[0]?.intensity).toBeGreaterThan(0)
+
+    handle.setQuality('efficient')
+    expect(runtime.glowLayers[0]?.intensity).toBe(0)
+
+    handle.destroy()
+    expect(runtime.glowLayers[0]?.dispose).toHaveBeenCalledOnce()
   })
 
   it('halts the unified frame authority when the WebGL context is lost', async () => {

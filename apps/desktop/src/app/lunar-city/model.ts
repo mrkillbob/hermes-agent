@@ -445,6 +445,13 @@ export interface BabylonSceneLike {
   _activeIndices?: { current?: number }
   activeCamera?: unknown
   ambientColor?: unknown
+  imageProcessingConfiguration?: {
+    contrast?: number
+    exposure?: number
+    vignetteColor?: unknown
+    vignetteEnabled?: boolean
+    vignetteWeight?: number
+  }
   materials?: readonly BabylonMaterialLike[]
   meshes?: readonly BabylonMeshLike[]
   textures?: readonly unknown[]
@@ -462,7 +469,18 @@ export interface BabylonImportResultLike {
 
 export interface BabylonLightLike {
   intensity: number
+  diffuse?: unknown
   shadowEnabled?: boolean
+  specular?: unknown
+}
+
+export interface BabylonHemisphericLightLike extends BabylonLightLike {
+  groundColor?: unknown
+}
+
+export interface BabylonGlowLayerLike {
+  intensity: number
+  dispose?(): void
 }
 
 export interface RecastPathLike {
@@ -521,6 +539,16 @@ export interface LunarCityWorldModules {
     scene: BabylonSceneLike
   ) => unknown
   DirectionalLight: new (name: string, direction: BabylonVector3Like, scene: BabylonSceneLike) => BabylonLightLike
+  HemisphericLight?: new (
+    name: string,
+    direction: BabylonVector3Like,
+    scene: BabylonSceneLike
+  ) => BabylonHemisphericLightLike
+  GlowLayer?: new (
+    name: string,
+    scene: BabylonSceneLike,
+    options?: { mainTextureRatio?: number }
+  ) => BabylonGlowLayerLike
   TransformNode: new (name: string, scene: BabylonSceneLike) => BabylonNodeLike
   ImportMeshAsync(source: string, scene: BabylonSceneLike): Promise<BabylonImportResultLike>
   createRecastNavigation?(): Promise<RecastRuntimeLike>

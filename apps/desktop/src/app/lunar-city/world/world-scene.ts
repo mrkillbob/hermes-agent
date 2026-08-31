@@ -1,5 +1,6 @@
 import { projectCompoundKey } from '../identity'
 import type {
+  BabylonGlowLayerLike,
   BabylonImportResultLike,
   BabylonMeshLike,
   BabylonNodeLike,
@@ -1442,6 +1443,7 @@ export async function createWorldScene(
   let navigation: ReturnType<typeof createNavigationController> | undefined
   let entityRegistry: ReturnType<typeof createEntityRegistry> | undefined
   let occlusion: ReturnType<typeof createOcclusionController> | undefined
+  let glowLayer: BabylonGlowLayerLike | undefined
   const projectCompoundNodes = new Map<string, BabylonNodeLike>()
   const activeLeaderAnimations = new Map<LeaderId, BabylonAnimationGroupLike>()
   const desiredLeaderStates = new Map<LeaderId, LeaderAnimationState>()
@@ -1472,6 +1474,7 @@ export async function createWorldScene(
     }
 
     projectCompoundNodes.clear()
+    glowLayer?.dispose?.()
     perfAdapter.dispose()
     scene.dispose()
   }
@@ -1493,7 +1496,56 @@ export async function createWorldScene(
 
     const keyLight = new modules.DirectionalLight('lunar-city:key-light', new modules.Vector3(-0.45, -1, 0.35), scene)
 
-    keyLight.intensity = 0.72
+    keyLight.intensity = 0.85
+    keyLight.diffuse = new modules.Color3(1, 0.86, 0.68)
+
+    // A cool back-left rim light carves the approved silhouettes away from the
+    // charcoal interiors, the same StarCraft-style two-tone read as the
+    // reference art, without a second shadow map: it never toggles
+    // shadowEnabled and stays on across every quality tier.
+    const rimLight = new modules.DirectionalLight('lunar-city:rim-light', new modules.Vector3(0.6, -0.25, -0.55), scene)
+
+    rimLight.intensity = 0.28
+    rimLight.diffuse = new modules.Color3(0.55, 0.72, 0.95)
+    rimLight.shadowEnabled = false
+
+    // A soft top-down/ground-bounce fill keeps unlit faces out of pure black
+    // once the key/rim pair adds contrast. HemisphericLight has no shadow map
+    // and no specular term here, so it costs one extra ambient term per pixel.
+    const fillLight = modules.HemisphericLight
+      ? new modules.HemisphericLight('lunar-city:fill-light', new modules.Vector3(0, 1, 0), scene)
+      : undefined
+
+    if (fillLight) {
+      fillLight.intensity = 0.32
+      fillLight.diffuse = new modules.Color3(0.55, 0.64, 0.82)
+      fillLight.groundColor = new modules.Color3(0.34, 0.24, 0.22)
+      fillLight.specular = new modules.Color3(0, 0, 0)
+      fillLight.shadowEnabled = false
+    }
+
+    // A low-resolution glow pass blooms the authored emissive materials
+    // (signal-emissive, archive-emissive, the amber/green accent glows) so
+    // they read as lit signage instead of flat colored panels. It rides the
+    // existing `decorations` quality flag so the efficient tier's most
+    // aggressive degradation step turns it off with everything else.
+    glowLayer = modules.GlowLayer
+      ? new modules.GlowLayer('lunar-city:glow', scene, { mainTextureRatio: 0.5 })
+      : undefined
+
+    if (glowLayer) {
+      glowLayer.intensity = 0.6
+    }
+
+    const imageProcessing = scene.imageProcessingConfiguration
+
+    if (imageProcessing) {
+      imageProcessing.contrast = 1.18
+      imageProcessing.exposure = 1.08
+      imageProcessing.vignetteEnabled = true
+      imageProcessing.vignetteWeight = 1.6
+      imageProcessing.vignetteColor = new modules.Color3(0.04, 0.02, 0.04)
+    }
 
     const leaderStateClips = new Map<string, LeaderStateClipMap>()
     const leaderAnimationGroups = new Map<LeaderId, ReadonlyMap<LeaderAnimationState, BabylonAnimationGroupLike>>()
@@ -1567,6 +1619,10 @@ export async function createWorldScene(
 
       applyQualitySettings(engine, settings)
       keyLight.shadowEnabled = settings.dynamicShadows === 'near'
+
+      if (glowLayer) {
+        glowLayer.intensity = settings.decorations ? 0.6 : 0
+      }
 
       for (const node of decorationNodes) {
         node.setEnabled?.(settings.decorations)
