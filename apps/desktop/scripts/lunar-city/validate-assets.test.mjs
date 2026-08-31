@@ -378,7 +378,7 @@ test('rejects malformed generated statistics and contradictory generated budgets
     ]
   ]
 
-  for (const [_label, mutation, expected] of cases) {
+  for (const [, mutation, expected] of cases) {
     const statistics = { ...modelFixture().statistics, ...mutation }
     const result = await validateAssetPack(fixture({ models: [modelFixture({ statistics })] }), fakeIo)
     assert.equal(result.ok, false)
