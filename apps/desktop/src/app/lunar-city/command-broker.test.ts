@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   type CommandEffect,
+  type CommandExecutor,
   type CommandExecutors,
   type CommandIntent,
   type CommandOperation,
@@ -208,7 +209,18 @@ function matchingRow(operation: CommandOperation, identityKind: IdentityKind): V
 }
 
 function bridge(readback: CommandReadback | null) {
-  return { readback: vi.fn().mockResolvedValue(readback), send: vi.fn().mockResolvedValue({ accepted: true }) }
+  const currentAuthority: NonNullable<CommandExecutor['currentAuthority']> = async plan => ({
+    authority: 'authoritative',
+    identity: plan.identity,
+    observedAt: plan.plannedAt,
+    owner: plan.owner
+  })
+
+  return {
+    currentAuthority: vi.fn(currentAuthority),
+    readback: vi.fn().mockResolvedValue(readback),
+    send: vi.fn().mockResolvedValue({ accepted: true })
+  }
 }
 
 function executors(selected: ReturnType<typeof bridge>, kind: CommandPlan['readback']['kind']): CommandExecutors {
@@ -243,10 +255,6 @@ async function run(
   confirmed = true
 ) {
   const selected = bridge(result)
-
-  if (plan.operation !== 'open-session' && plan.operation !== 'inspect-evidence') {
-    selected.readback.mockResolvedValueOnce(readback(plan, { effect: undefined, outcome: 'unknown' }))
-  }
 
   const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
     confirmed,
@@ -447,6 +455,12 @@ describe('LunarCityCommandBroker canonical plan integrity', () => {
     })
 
     const selected = {
+      currentAuthority: vi.fn(async (canonicalPlan: CommandPlan) => ({
+        authority: 'authoritative' as const,
+        identity: canonicalPlan.identity,
+        observedAt: canonicalPlan.plannedAt,
+        owner: canonicalPlan.owner
+      })),
       readback: vi.fn(async (canonicalPlan: CommandPlan) => readback(canonicalPlan)),
       send: vi.fn(async (_canonicalPlan: CommandPlan) => {
         markSendStarted()
@@ -582,9 +596,7 @@ describe('LunarCityCommandBroker causal readback', () => {
 
     expect(fresh.receipt.verification).toBe('verified')
     expect(fresh.selected.send).toHaveBeenCalledTimes(1)
-    expect(fresh.selected.readback).toHaveBeenCalledTimes(
-      operation === 'open-session' || operation === 'inspect-evidence' ? 1 : 2
-    )
+    expect(fresh.selected.readback).toHaveBeenCalledOnce()
   })
 
   it.each(ALL_OPERATIONS)('does not verify %s from a boolean outcome without its canonical effect', async operation => {
@@ -641,6 +653,7 @@ describe('LunarCityCommandBroker failure boundaries', () => {
     const planningSnapshot = snapshot(identity)
     const plan = planCommand(intent('send-guidance', identity), planningSnapshot)
     const selected = bridge(null)
+    selected.currentAuthority.mockResolvedValueOnce(null)
 
     const blocked = await executeCommand(plan, executors(selected, plan.readback.kind), {
       latestSnapshot: () => planningSnapshot
@@ -650,9 +663,13 @@ describe('LunarCityCommandBroker failure boundaries', () => {
     expect(blocked.error).toContain('Exact current authority')
     expect(selected.send).not.toHaveBeenCalled()
 
-    selected.readback
-      .mockResolvedValueOnce(readback(plan, { effect: undefined, outcome: 'unknown' }))
-      .mockResolvedValueOnce(readback(plan))
+    selected.currentAuthority.mockResolvedValueOnce({
+      authority: 'authoritative',
+      identity: plan.identity,
+      observedAt: plan.plannedAt,
+      owner: plan.owner
+    })
+    selected.readback.mockResolvedValueOnce(readback(plan))
 
     const restored = await executeCommand(plan, executors(selected, plan.readback.kind), {
       latestSnapshot: () => planningSnapshot
@@ -667,7 +684,13 @@ describe('LunarCityCommandBroker failure boundaries', () => {
     const planningSnapshot = snapshot(identity)
     const plan = planCommand(intent('interrupt-session', identity), planningSnapshot)
     const foreignIdentity = { ...identity, connectionId: 'connection-b' }
-    const selected = bridge(readback(plan, { effect: undefined, identity: foreignIdentity, outcome: 'unknown' }))
+    const selected = bridge(readback(plan))
+    selected.currentAuthority.mockResolvedValueOnce({
+      authority: 'authoritative',
+      identity: foreignIdentity,
+      observedAt: plan.plannedAt,
+      owner: { connectionId: 'connection-b', profile: 'worker' }
+    })
 
     const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
       confirmed: true,
@@ -715,7 +738,6 @@ describe('LunarCityCommandBroker failure boundaries', () => {
     const planningSnapshot = snapshot(identity)
     const plan = planCommand(intent('interrupt-session', identity), planningSnapshot)
     const selected = bridge(null)
-    selected.readback.mockResolvedValueOnce(readback(plan, { effect: undefined, outcome: 'unknown' }))
     selected.send.mockRejectedValueOnce(error)
 
     const receipt = await executeCommand(plan, executors(selected, plan.readback.kind), {
@@ -725,6 +747,7 @@ describe('LunarCityCommandBroker failure boundaries', () => {
 
     expect(receipt.verification).toBe(verification)
     expect(selected.send).toHaveBeenCalledTimes(1)
-    expect(selected.readback).toHaveBeenCalledOnce()
+    expect(selected.currentAuthority).toHaveBeenCalledOnce()
+    expect(selected.readback).not.toHaveBeenCalled()
   })
 })

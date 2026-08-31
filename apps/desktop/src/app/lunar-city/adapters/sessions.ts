@@ -38,7 +38,9 @@ function sourceObservation(
   connectionId: string,
   observation: Pick<SessionObservation, 'fresh' | 'observedAt' | 'sourceObservations'>
 ): Pick<SessionSourceObservation, 'fresh' | 'observedAt'> {
-  return observation.sourceObservations?.get(connectionId) ?? observation
+  const source = observation.sourceObservations?.get(connectionId)
+
+  return source ?? { fresh: observation.fresh !== false, observedAt: observation.observedAt }
 }
 
 function exactSessionOwner(
@@ -168,14 +170,41 @@ export interface OwnedSubagentRows {
   rows: readonly SubagentProgress[]
 }
 
+export interface OwnedSubagentLimits {
+  maxOwners: number
+  maxRows: number
+  maxRowsPerOwner: number
+}
+
+const DEFAULT_OWNED_SUBAGENT_LIMITS: OwnedSubagentLimits = Object.freeze({
+  maxOwners: 64,
+  maxRows: 512,
+  maxRowsPerOwner: 64
+})
+
+function conflictingEntity(entity: LunarEntity): LunarEntity {
+  return { ...entity, animation: 'unavailable', authority: 'partial', destination: 'unknown' }
+}
+
 /**
  * Canonical bounded merge for callers that already retain exact parent
  * ownership. Duplicate parent/child ids on other connections remain distinct.
  */
 export function normalizeOwnedSubagents(
   batches: readonly OwnedSubagentRows[],
-  observation: Pick<SessionObservation, 'fresh' | 'observedAt' | 'sourceObservations'>
+  observation: Pick<SessionObservation, 'fresh' | 'observedAt' | 'sourceObservations'>,
+  limits: OwnedSubagentLimits = DEFAULT_OWNED_SUBAGENT_LIMITS
 ): NormalizedSubagents {
+  const totalRows = batches.reduce((total, batch) => total + batch.rows.length, 0)
+
+  if (
+    batches.length > limits.maxOwners ||
+    totalRows > limits.maxRows ||
+    batches.some(batch => batch.rows.length > limits.maxRowsPerOwner)
+  ) {
+    return { entities: [] }
+  }
+
   const entities = new Map<string, LunarEntity>()
 
   for (const batch of batches) {
@@ -189,7 +218,18 @@ export function normalizeOwnedSubagents(
       const entity = normalizeSubagent(row, batch.owner, source)
 
       if (entity) {
-        entities.set(entity.key, entity)
+        const prior = entities.get(entity.key)
+
+        if (!prior) {
+          entities.set(entity.key, entity)
+        } else if (
+          prior.animation !== entity.animation ||
+          prior.authority !== entity.authority ||
+          prior.destination !== entity.destination ||
+          prior.observedAt !== entity.observedAt
+        ) {
+          entities.set(entity.key, conflictingEntity(prior))
+        }
       }
     }
   }

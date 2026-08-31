@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ClientSessionState } from '@/app/types'
 import { $sessionStates, $sessionTiles } from '@/store/session-states'
 
-import { type CommandPlanningSnapshot, CommandRejectedError, planCommand } from './command-broker'
+import { type CommandPlanningSnapshot, CommandRejectedError, executeCommand, planCommand } from './command-broker'
 import { createLunarCityCommandExecutors } from './command-executors'
 import { entityKey } from './identity'
 import type { EntityIdentity, LunarCitySnapshot, LunarEntity, SourceHealth } from './model'
@@ -120,6 +120,82 @@ describe('createLunarCityCommandExecutors', () => {
     expect(requestForSessionProfile.mock.calls[0]?.[0]).toEqual({ connectionId: 'source-b', profile: 'builder' })
     expect(requestForSessionProfile.mock.calls[0]?.[2]).toBe('prompt.submit')
     expect(requestForSessionProfile.mock.calls[0]?.[3]).toEqual({ session_id: 'runtime-b', text: 'Check.' })
+  })
+
+  it.each([
+    ['send-guidance', false, 'prompt.submit'],
+    ['interrupt-session', true, 'session.interrupt']
+  ] as const)(
+    'proves exact current authority before %s reaches the production route',
+    async (kind, confirmed, method) => {
+      requestForSessionProfile
+        .mockResolvedValueOnce({ sessions: [{ id: 'same' }] })
+        .mockResolvedValueOnce({ status: 'queued' })
+      const identity = { connectionId: 'source-b', kind: 'session', profile: 'builder', sessionId: 'same' } as const
+      const snapshot = planning(identity)
+      const plan = planCommand(
+        kind === 'send-guidance'
+          ? { entityKey: entityKey(identity), kind, text: 'Check.' }
+          : { entityKey: entityKey(identity), kind },
+        {
+          ...snapshot,
+          targets: new Map([
+            [
+              entityKey(identity),
+              {
+                ...snapshot.targets.get(entityKey(identity))!,
+                availableOperations: [kind]
+              }
+            ]
+          ])
+        }
+      )
+      const executors = createLunarCityCommandExecutors({ resolveLiveRuntime: () => 'runtime-b' })
+      const receipt = await executeCommand(plan, executors, {
+        confirmed,
+        latestSnapshot: () => ({
+          ...snapshot,
+          targets: new Map([
+            [
+              entityKey(identity),
+              {
+                ...snapshot.targets.get(entityKey(identity))!,
+                availableOperations: [kind]
+              }
+            ]
+          ])
+        })
+      })
+
+      expect(receipt.verification).toBe('verification_required')
+      expect(requestForSessionProfile.mock.calls.map(call => call[2])).toEqual(['session.list', method])
+      expect(requestForSessionProfile.mock.calls[1]?.[3]).toMatchObject({ session_id: 'runtime-b' })
+    }
+  )
+
+  it('does not send when the exact authority list is stale, foreign, or unreachable', async () => {
+    const identity = { connectionId: 'source-b', kind: 'session', profile: 'builder', sessionId: 'same' } as const
+    const snapshot = planning(identity)
+    const plan = planCommand({ entityKey: entityKey(identity), kind: 'send-guidance', text: 'Check.' }, snapshot)
+
+    for (const response of [{ sessions: [{ id: 'foreign' }] }, new Error('unreachable')]) {
+      requestForSessionProfile.mockReset()
+      if (response instanceof Error) {
+        requestForSessionProfile.mockRejectedValueOnce(response)
+      } else {
+        requestForSessionProfile.mockResolvedValueOnce(response)
+      }
+
+      const receipt = await executeCommand(
+        plan,
+        createLunarCityCommandExecutors({ resolveLiveRuntime: () => 'runtime-b' }),
+        { latestSnapshot: () => snapshot }
+      )
+
+      expect(receipt.verification).toBe('rejected')
+      expect(requestForSessionProfile).toHaveBeenCalledOnce()
+      expect(requestForSessionProfile.mock.calls[0]?.[2]).toBe('session.list')
+    }
   })
 
   it('does not send a stored DB id when no exact-owner live runtime is authoritative', async () => {

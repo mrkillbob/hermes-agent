@@ -60,6 +60,12 @@ function verifiedReadback(plan: CommandPlan, verification: CommandVerification =
 
 function executors(send: CommandExecutor['send'] = vi.fn(async () => ({ accepted: true }))): CommandExecutors {
   const executor: CommandExecutor = {
+    currentAuthority: vi.fn(async plan => ({
+      authority: 'authoritative' as const,
+      identity: plan.identity,
+      observedAt: plan.plannedAt,
+      owner: plan.owner
+    })),
     readback: vi.fn(async plan => verifiedReadback(plan)),
     send
   }
@@ -271,6 +277,12 @@ describe('LunarCityCommandRuntime', () => {
     const before = publish([entity], [source('connection-a')])
 
     const executor: CommandExecutor = {
+      currentAuthority: vi.fn(async plan => ({
+        authority: 'authoritative' as const,
+        identity: plan.identity,
+        observedAt: plan.plannedAt,
+        owner: plan.owner
+      })),
       readback: vi.fn(async plan => verifiedReadback(plan)),
       send: vi.fn(async () => {
         throw error

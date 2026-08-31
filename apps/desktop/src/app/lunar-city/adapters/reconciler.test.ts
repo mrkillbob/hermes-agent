@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { DesktopAgentRoster } from '@/global'
 import { _resetFleetRosterForTests } from '@/store/fleet-roster'
+import type { SessionInfo } from '@/types/hermes'
 
 import { entityKey } from '../identity'
 import { $lunarCitySnapshot, createLunarCitySnapshot, type LunarDelta } from '../store'
@@ -26,8 +27,9 @@ const currentRead = () => ({
 })
 
 async function flush(): Promise<void> {
-  await Promise.resolve()
-  await Promise.resolve()
+  for (let index = 0; index < 8; index += 1) {
+    await Promise.resolve()
+  }
 }
 
 afterEach(() => {
@@ -878,14 +880,15 @@ describe('Lunar City reconciler', () => {
   it('keeps expired cached sessions stale across unrelated reconciliation until an exact store reread', async () => {
     vi.useFakeTimers()
     let now = 100
-    const local = {
+    const sessionRow = {
       connection_id: 'local',
       ended_at: null,
       id: 'shared-session',
       is_active: true,
       profile: 'worker'
-    } as never
-    const remote = { ...local, connection_id: 'ssh-1' } as never
+    }
+    const local = { ...sessionRow } as unknown as SessionInfo
+    const remote = { ...sessionRow, connection_id: 'ssh-1' } as unknown as SessionInfo
     const sessions = atom([local, remote])
     const fleet = atom({
       agents: [],
@@ -894,6 +897,7 @@ describe('Lunar City reconciler', () => {
         { connectionId: 'ssh-1', kind: 'ssh' as const, label: 'relay', reachable: true }
       ]
     })
+    let readEnabled = false
     let focus!: () => void
     const stop = startLunarCityReconciler({
       freshnessMs: 50,
@@ -907,6 +911,13 @@ describe('Lunar City reconciler', () => {
           focus = listener
           return () => undefined
         },
+        readSessionList: async connectionId => {
+          if (!readEnabled) {
+            throw new Error('exact list unavailable')
+          }
+
+          return { sessions: [connectionId === 'local' ? local : remote] }
+        },
         refreshFleet: async () => ({ observedAt: now, status: 'refreshed' })
       }
     })
@@ -918,7 +929,24 @@ describe('Lunar City reconciler', () => {
         .map(entity => entity.authority)
     ).toEqual(['stale', 'stale'])
 
-    sessions.set([local, remote])
+    const staleRevision = $lunarCitySnapshot.get().revision
+    sessions.set([
+      { ...local, git_repo_root: '/optimistic/project', title: 'optimistic local title' },
+      { ...remote, title: 'optimistic remote title' }
+    ])
+    await flush()
+    expect($lunarCitySnapshot.get().revision).toBe(staleRevision)
+    expect(
+      [...$lunarCitySnapshot.get().entities.values()]
+        .filter(entity => entity.identity.kind === 'session')
+        .map(entity => [entity.identity.connectionId, entity.authority, entity.observedAt, entity.projectId])
+    ).toEqual([
+      ['local', 'stale', 0, undefined],
+      ['ssh-1', 'stale', 0, undefined]
+    ])
+
+    readEnabled = true
+    focus()
     await flush()
     expect(
       [...$lunarCitySnapshot.get().entities.values()]
@@ -931,6 +959,7 @@ describe('Lunar City reconciler', () => {
 
     now = 150
     await vi.advanceTimersByTimeAsync(50)
+    readEnabled = false
     focus()
     await flush()
 
@@ -944,7 +973,8 @@ describe('Lunar City reconciler', () => {
     ])
 
     now = 160
-    sessions.set([local, remote])
+    readEnabled = true
+    focus()
     await flush()
     expect(
       [...$lunarCitySnapshot.get().entities.values()]
@@ -958,9 +988,7 @@ describe('Lunar City reconciler', () => {
     now = 170
     fleet.set({
       ...fleet.get(),
-      sources: fleet
-        .get()
-        .sources.map(source => (source.connectionId === 'local' ? { ...source, reachable: false } : source))
+      sources: fleet.get().sources.filter(source => source.connectionId !== 'local')
     })
     await flush()
     expect(
@@ -969,11 +997,11 @@ describe('Lunar City reconciler', () => {
         .map(entity => [entity.identity.connectionId, entity.authority, entity.observedAt])
     ).toEqual([
       ['local', 'stale', 160],
-      ['ssh-1', 'authoritative', 160]
+      ['ssh-1', 'authoritative', 170]
     ])
 
     now = 180
-    sessions.set([local, remote])
+    focus()
     await flush()
     expect(
       [...$lunarCitySnapshot.get().entities.values()]
@@ -985,11 +1013,13 @@ describe('Lunar City reconciler', () => {
     ])
 
     now = 190
+    readEnabled = false
     fleet.set({
       ...fleet.get(),
-      sources: fleet
-        .get()
-        .sources.map(source => (source.connectionId === 'local' ? { ...source, reachable: true } : source))
+      sources: [
+        { connectionId: 'local', kind: 'local' as const, label: 'this Mac', reachable: true },
+        ...fleet.get().sources
+      ]
     })
     await flush()
     expect(
@@ -1002,7 +1032,8 @@ describe('Lunar City reconciler', () => {
     ])
 
     now = 200
-    sessions.set([local, remote])
+    readEnabled = true
+    focus()
     await flush()
     expect(
       [...$lunarCitySnapshot.get().entities.values()]
@@ -1048,6 +1079,7 @@ describe('Lunar City reconciler', () => {
     }
     let mode: 'authoritative' | 'unavailable' | 'empty' = 'authoritative'
     let invalidateOptional!: () => void
+    let emit!: (event: unknown) => void
     const optionalSource = {
       read: async () => {
         if (mode === 'authoritative') {
@@ -1088,11 +1120,19 @@ describe('Lunar City reconciler', () => {
     const stop = startLunarCityReconciler({
       now: () => 900,
       sources: {
-        $fleetRoster: atom(null),
+        $fleetRoster: atom({
+          agents: [],
+          sources: [{ connectionId: 'source-a', kind: 'local' as const, label: 'source a', reachable: true }]
+        }),
         $sessions: sessions,
         $subagentsBySession: atom({}),
         legacySingleBackend: () => false,
+        onEvent: listener => {
+          emit = listener
+          return () => undefined
+        },
         optionalSources: [optionalSource],
+        readSessionList: async () => ({ sessions: sessions.get() }),
         refreshFleet: async () => ({ status: 'retained' })
       }
     })
@@ -1102,6 +1142,7 @@ describe('Lunar City reconciler', () => {
 
     mode = 'unavailable'
     sessions.set([secondSession])
+    emit({ connectionId: 'source-a', profile: 'worker', session_id: 'session-two', type: 'session.changed' })
     await flush()
 
     const unavailableSnapshot = $lunarCitySnapshot.get()

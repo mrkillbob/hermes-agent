@@ -3,7 +3,8 @@ import type { DesktopAgentRoster } from '@/global'
 import { $connectionsRegistry, hasRegistryTopology } from '@/store/connection-registry-state'
 import { $fleetRoster, refreshFleetRoster } from '@/store/fleet-roster'
 import { requestGatewayForAgent } from '@/store/gateway'
-import { $connection, $cronSessions, $messagingSessions, $sessions, ownerLookupSessionRows } from '@/store/session'
+import { $connection, $sessions, ownerLookupSessionRows } from '@/store/session'
+import { sessionOwnerRouteFromRow } from '@/store/session-request-router'
 import { $subagentsBySession, type SubagentProgress } from '@/store/subagents'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -74,13 +75,13 @@ export interface LunarCityLiveSources {
   legacyConnectionId?: () => string | undefined
   legacySingleBackend: () => boolean
   readProfileRoster?: ScopedProfilesListRequest
+  readSessionList?: (connectionId: string, profile: string) => Promise<unknown>
   onEvent?: (listener: (event: unknown) => void) => () => void
   onFocus?: (listener: () => void) => () => void
   onRegistryChange?: (listener: () => void) => () => void
   optionalSources?: readonly LunarCityOptionalSource[]
   refreshFleet: (options: { force: boolean }) => Promise<FleetRefreshResult | void>
   sessionRows?: () => readonly SessionInfo[]
-  sessionStores?: readonly ReadableAtom<readonly SessionInfo[]>[]
 }
 
 export interface StartLunarCityReconcilerOptions {
@@ -445,6 +446,8 @@ function defaultLiveSources(): LunarCityLiveSources {
     legacyConnectionId: () => $connection.get()?.connectionId,
     legacySingleBackend: () => !hasRegistryTopology() && $connection.get()?.connectionId === 'local',
     readProfileRoster: (connectionId, profile) => requestGatewayForAgent(connectionId, profile, 'profiles.list', {}),
+    readSessionList: (connectionId, profile) =>
+      requestGatewayForAgent(connectionId, profile, 'session.list', { include_hidden: true, limit: 200 }),
     onEvent: listener => onGatewayEvent('*', listener as never),
     onFocus: listener => {
       const onVisibility = () => {
@@ -471,8 +474,7 @@ function defaultLiveSources(): LunarCityLiveSources {
       }
     },
     refreshFleet: refreshFleetRoster,
-    sessionRows: ownerLookupSessionRows,
-    sessionStores: [$sessions, $cronSessions, $messagingSessions]
+    sessionRows: ownerLookupSessionRows
   }
 }
 
@@ -514,7 +516,6 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   const optionalSources = options.optionalSources ?? sources.optionalSources ?? []
   const now = options.now ?? Date.now
   const sessionRows = sources.sessionRows ?? (() => sources.$sessions?.get() ?? [])
-  const sessionStores = sources.sessionStores ?? (sources.$sessions ? [sources.$sessions] : [])
   let fleetReference = sources.$fleetRoster.get()
   let fleetObservedAt = 0
   let forceFleetRefresh = true
@@ -550,9 +551,10 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   }
 
   const sessionConnectionReachable = (connectionId: string): boolean => {
-    const source = sources.$fleetRoster.get()?.sources.find(candidate => candidate.connectionId === connectionId)
+    const roster = sources.$fleetRoster.get()
+    const source = roster?.sources.find(candidate => candidate.connectionId === connectionId)
 
-    return source === undefined || (source.reachable && !source.error)
+    return Boolean(roster && source?.reachable && !source.error)
   }
 
   const readBotMetadata: ScopedProfilesListRequest = async (connectionId, representativeProfile) => {
@@ -691,6 +693,95 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       const reachableConnections = new Map(
         roster?.sources.map(source => [source.connectionId, source.reachable && !source.error]) ?? []
       )
+      const cachedSessionRows = sessionRows()
+      const cachedOwners = new Map<string, { connectionId: string; profile: string; rows: SessionInfo[] }>()
+
+      for (const row of cachedSessionRows) {
+        const owner = sessionOwnerRouteFromRow(row)
+
+        if (!owner) {
+          continue
+        }
+
+        const key = JSON.stringify([owner.connectionId, owner.profile])
+        const batch = cachedOwners.get(key) ?? { ...owner, rows: [] }
+        batch.rows.push(row)
+        cachedOwners.set(key, batch)
+      }
+
+      const authoritativeRowsByConnection = new Map<string, SessionInfo[]>()
+      const successfulOwnersByConnection = new Map<string, number>()
+      const expectedOwnersByConnection = new Map<string, number>()
+
+      for (const owner of cachedOwners.values()) {
+        expectedOwnersByConnection.set(
+          owner.connectionId,
+          (expectedOwnersByConnection.get(owner.connectionId) ?? 0) + 1
+        )
+      }
+
+      if (sources.readSessionList && cachedOwners.size <= 64) {
+        for (const owner of cachedOwners.values()) {
+          if (!sessionConnectionReachable(owner.connectionId) || owner.rows.length > 200) {
+            continue
+          }
+
+          try {
+            const payload = record(await sources.readSessionList(owner.connectionId, owner.profile))
+            const rows = Array.isArray(payload.sessions) ? payload.sessions : undefined
+
+            if (!rows) {
+              continue
+            }
+
+            const expectedIds = new Set(owner.rows.map(row => row.id))
+            const matched = rows
+              .filter(row => expectedIds.has(optionalString(record(row).id) ?? ''))
+              .map(row => ({
+                ...(row as SessionInfo),
+                connection_id: owner.connectionId,
+                profile: owner.profile
+              }))
+
+            if (matched.length !== expectedIds.size || new Set(matched.map(row => row.id)).size !== expectedIds.size) {
+              continue
+            }
+
+            authoritativeRowsByConnection.set(owner.connectionId, [
+              ...(authoritativeRowsByConnection.get(owner.connectionId) ?? []),
+              ...matched
+            ])
+            successfulOwnersByConnection.set(
+              owner.connectionId,
+              (successfulOwnersByConnection.get(owner.connectionId) ?? 0) + 1
+            )
+          } catch {
+            // Cached renderer rows remain visible but cannot refresh authority.
+          }
+        }
+      }
+
+      for (const [connectionId, expectedOwners] of expectedOwnersByConnection) {
+        if (successfulOwnersByConnection.get(connectionId) === expectedOwners) {
+          sessionSourceGeneration += 1
+          sessionSourceObservations.set(connectionId, {
+            generation: sessionSourceGeneration,
+            observedAt: sessionNow
+          })
+        } else {
+          authoritativeRowsByConnection.delete(connectionId)
+        }
+      }
+
+      const authoritativeConnections = new Set(authoritativeRowsByConnection.keys())
+      const effectiveSessionRows = [
+        ...[...authoritativeRowsByConnection.values()].flat(),
+        ...cachedSessionRows.filter(row => {
+          const owner = sessionOwnerRouteFromRow(row)
+
+          return !owner || !authoritativeConnections.has(owner.connectionId)
+        })
+      ]
       const observedSessionConnections = new Set([...sessionSourceObservations.keys(), ...priorSessionSources.keys()])
       const currentSessionObservations = new Map<string, SessionSourceObservation>()
 
@@ -698,7 +789,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         const observed = sessionSourceObservations.get(connectionId)
         const prior = priorSessionSources.get(connectionId)
         const observedAt = observed?.observedAt ?? prior?.observedAt ?? 0
-        const reachable = reachableConnections.get(connectionId) !== false
+        const reachable = reachableConnections.get(connectionId) === true
         const fresh = Boolean(observed && reachable && observedAt + freshnessMs > sessionNow)
 
         currentSessionObservations.set(connectionId, {
@@ -708,7 +799,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         })
       }
 
-      const sessions = normalizeSessions(sessionRows(), {
+      const sessions = normalizeSessions(effectiveSessionRows, {
         fresh: false,
         legacyConnectionId: sources.legacyConnectionId?.(),
         legacySingleBackend: sources.legacySingleBackend(),
@@ -774,6 +865,14 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         fleetObservedAt = now()
         requestedBotMetadataGeneration += 1
 
+        const currentConnections = new Set((roster?.sources ?? []).map(source => source.connectionId))
+
+        for (const connectionId of sessionSourceObservations.keys()) {
+          if (!currentConnections.has(connectionId)) {
+            sessionSourceObservations.delete(connectionId)
+          }
+        }
+
         for (const source of roster?.sources ?? []) {
           if (!source.reachable || source.error) {
             sessionSourceObservations.delete(source.connectionId)
@@ -787,31 +886,6 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
     })
   )
   disposers.push(sources.$subagentsBySession.listen(() => reconciler.invalidate('subagents')))
-
-  for (const store of sessionStores) {
-    disposers.push(
-      store.listen(rows => {
-        sessionSourceGeneration += 1
-        const observedAt = now()
-        const observedConnections = new Set(
-          normalizeSessions(rows, {
-            fresh: false,
-            legacyConnectionId: sources.legacyConnectionId?.(),
-            legacySingleBackend: sources.legacySingleBackend(),
-            observedAt
-          }).entities.map(entity => entity.identity.connectionId)
-        )
-
-        for (const connectionId of observedConnections) {
-          if (sessionConnectionReachable(connectionId)) {
-            sessionSourceObservations.set(connectionId, { generation: sessionSourceGeneration, observedAt })
-          }
-        }
-
-        reconciler.invalidate('sessions')
-      })
-    )
-  }
 
   if (sources.onFocus) {
     disposers.push(

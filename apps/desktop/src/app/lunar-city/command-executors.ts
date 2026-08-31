@@ -3,6 +3,7 @@ import { requestForSessionProfile } from '@/store/session-request-router'
 import { $sessionStates, $sessionTiles } from '@/store/session-states'
 
 import {
+  type CommandCurrentAuthority,
   type CommandExecutor,
   type CommandExecutors,
   type CommandPlan,
@@ -143,6 +144,32 @@ function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecu
   const resolveLiveRuntime = options.resolveLiveRuntime ?? defaultLiveRuntime
 
   return {
+    async currentAuthority(plan) {
+      const identity = plan.identity
+
+      if (identity.kind !== 'session') {
+        return null
+      }
+
+      const liveRuntimeId = resolveLiveRuntime(plan.owner, identity.sessionId)
+
+      if (!liveRuntimeId) {
+        return null
+      }
+
+      const response = await requestForSessionProfile<unknown>(plan.owner, rejectAmbientRequest, 'session.list', {
+        include_hidden: true,
+        limit: 200
+      })
+      const sessions = Array.isArray(record(response).sessions) ? (record(response).sessions as unknown[]) : []
+      const matches = sessions.filter(row => identifier(record(row).id) === identity.sessionId)
+
+      if (matches.length !== 1) {
+        return null
+      }
+
+      return currentAuthority(plan)
+    },
     async readback(plan) {
       if (localReceipts.delete(plan.digest)) {
         return localReadback(plan)
@@ -205,6 +232,15 @@ function sessionExecutor(options: LunarCityCommandExecutorOptions): CommandExecu
   }
 }
 
+function currentAuthority(plan: CommandPlan): CommandCurrentAuthority {
+  return {
+    authority: 'authoritative',
+    identity: plan.identity,
+    observedAt: Date.now(),
+    owner: plan.owner
+  }
+}
+
 function exactTask(plan: CommandPlan, response: unknown): Record<string, unknown> | undefined {
   if (plan.identity.kind !== 'kanban') {
     return undefined
@@ -263,6 +299,19 @@ function taskEffectVerified(plan: CommandPlan, task: Record<string, unknown>): b
 
 function kanbanTaskExecutor(): CommandExecutor {
   return {
+    async currentAuthority(plan) {
+      if (plan.identity.kind !== 'kanban') {
+        return null
+      }
+
+      const response = await pluginRest<unknown>(
+        'kanban',
+        withBoard(`/tasks/${encodeURIComponent(plan.identity.taskId)}`, plan.identity.board),
+        { method: 'GET', scope: exactScope(plan) }
+      )
+
+      return exactTask(plan, response) ? currentAuthority(plan) : null
+    },
     async readback(plan) {
       if (plan.operation === 'inspect-evidence') {
         return null
@@ -363,6 +412,22 @@ function kanbanTaskExecutor(): CommandExecutor {
 
 function kanbanRunExecutor(): CommandExecutor {
   return {
+    async currentAuthority(plan) {
+      if (plan.identity.kind !== 'kanban' || !plan.identity.runId) {
+        return null
+      }
+
+      const response = await pluginRest<unknown>(
+        'kanban',
+        withBoard(`/runs/${encodeURIComponent(plan.identity.runId)}`, plan.identity.board),
+        { method: 'GET', scope: exactScope(plan) }
+      )
+      const run = record(record(response).run)
+
+      return identifier(run.id) === plan.identity.runId && identifier(run.task_id) === plan.identity.taskId
+        ? currentAuthority(plan)
+        : null
+    },
     async readback(plan) {
       if (plan.identity.kind !== 'kanban' || !plan.identity.runId) {
         return null

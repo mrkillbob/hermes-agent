@@ -187,6 +187,7 @@ describe('session live adapter', () => {
         { owner: remoteOwner, rows: [row] }
       ],
       {
+        observedAt: 0,
         sourceObservations: new Map([
           ['local', { fresh: true, generation: 3, observedAt: 80 }],
           ['ssh-1', { fresh: false, generation: 1, observedAt: 30 }]
@@ -201,6 +202,73 @@ describe('session live adapter', () => {
       ['ssh-1', 'stale', 30]
     ])
     expect(new Set(normalized.entities.map(entity => entity.key)).size).toBe(2)
+  })
+
+  it('fails closed when an owned child batch exceeds its explicit bounds', () => {
+    const owner = {
+      connectionId: 'local',
+      kind: 'session' as const,
+      profile: 'worker',
+      sessionId: 'parent'
+    }
+    const rows = ['one', 'two'].map(id => ({
+      filesRead: [],
+      filesWritten: [],
+      goal: 'work',
+      id,
+      parentId: 'parent',
+      startedAt: 10,
+      status: 'running' as const,
+      stream: [],
+      taskCount: 1,
+      taskIndex: 0,
+      updatedAt: 20
+    }))
+
+    expect(
+      normalizeOwnedSubagents([{ owner, rows }], { observedAt: 20 }, { maxOwners: 1, maxRows: 1, maxRowsPerOwner: 1 })
+        .entities
+    ).toEqual([])
+  })
+
+  it('marks conflicting observations for one exact child partial regardless of input order', () => {
+    const owner = {
+      connectionId: 'local',
+      kind: 'session' as const,
+      profile: 'worker',
+      sessionId: 'parent'
+    }
+    const row = (status: 'completed' | 'running') => ({
+      filesRead: [],
+      filesWritten: [],
+      goal: 'work',
+      id: 'child',
+      parentId: 'parent',
+      startedAt: 10,
+      status,
+      stream: [],
+      taskCount: 1,
+      taskIndex: 0,
+      updatedAt: 20
+    })
+    const options = { maxOwners: 2, maxRows: 4, maxRowsPerOwner: 2 }
+    const forward = normalizeOwnedSubagents(
+      [{ owner, rows: [row('running'), row('completed')] }],
+      { observedAt: 20 },
+      options
+    )
+    const reversed = normalizeOwnedSubagents(
+      [{ owner, rows: [row('completed'), row('running')] }],
+      { observedAt: 20 },
+      options
+    )
+
+    expect(forward).toEqual(reversed)
+    expect(forward.entities[0]).toMatchObject({
+      animation: 'unavailable',
+      authority: 'partial',
+      destination: 'unknown'
+    })
   })
 
   it('fails closed when a subagent row claims a different parent than its map key', () => {

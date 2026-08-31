@@ -129,6 +129,13 @@ export interface CommandCausalReceipt {
   planDigest: string
 }
 
+export interface CommandCurrentAuthority {
+  authority: 'authoritative'
+  identity: EntityIdentity
+  observedAt: number
+  owner: LeaderOwner
+}
+
 export interface CommandReadback {
   authority: AuthorityState
   effect?: CommandEffect
@@ -142,6 +149,8 @@ export interface CommandReadback {
 }
 
 export interface CommandExecutor {
+  /** Performs one exact-owner source read immediately before a mutation. */
+  currentAuthority?: (plan: CommandPlan) => Promise<CommandCurrentAuthority | null>
   readback(plan: CommandPlan): Promise<CommandReadback | null>
   send(plan: CommandPlan): Promise<unknown>
 }
@@ -850,13 +859,12 @@ function readbackBaseMatches(plan: CommandPlan, value: CommandReadback): boolean
   )
 }
 
-function currentAuthorityMatches(plan: CommandPlan, value: CommandReadback): boolean {
+function currentAuthorityMatches(plan: CommandPlan, value: CommandCurrentAuthority): boolean {
   return (
     value.authority === 'authoritative' &&
-    value.operation === plan.operation &&
     sameIdentity(value.identity, plan.identity) &&
     sameOwner(value.owner, plan.owner) &&
-    (value.observedAt > plan.plannedAt || value.revision > plan.plannedRevision)
+    value.observedAt >= plan.plannedAt
   )
 }
 
@@ -911,10 +919,16 @@ export async function executeCommand(
   const executor = executorFor(canonicalPlan, executors)
 
   if (mutationRequiresAuthoritativeState(canonicalPlan.operation)) {
-    let authority: CommandReadback | null
+    if (!executor.currentAuthority) {
+      return receipt(canonicalPlan, 'rejected', {
+        error: 'Exact current authority reader is unavailable; nothing was sent.'
+      })
+    }
+
+    let authority: CommandCurrentAuthority | null
 
     try {
-      authority = await executor.readback(canonicalPlan)
+      authority = await executor.currentAuthority(canonicalPlan)
     } catch (error) {
       return receipt(canonicalPlan, 'rejected', {
         error: `Exact current authority read failed before send: ${errorMessage(error)}`
@@ -923,8 +937,7 @@ export async function executeCommand(
 
     if (!authority || !currentAuthorityMatches(canonicalPlan, authority)) {
       return receipt(canonicalPlan, 'rejected', {
-        error: 'Exact current authority was unavailable, stale, cached, or owned by another route; nothing was sent.',
-        readback: authority
+        error: 'Exact current authority was unavailable, stale, cached, or owned by another route; nothing was sent.'
       })
     }
   }
