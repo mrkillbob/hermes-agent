@@ -8429,6 +8429,9 @@ class DispatchResult:
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
+    workspace_collisions: list[tuple[str, str, str]] = field(default_factory=list)
+    """Tasks blocked before spawn because another running task owns the same
+    physical workspace. Entries are ``(task_id, owner_task_id, resolved_path)``."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
     stale: list[str] = field(default_factory=list)
@@ -11060,6 +11063,40 @@ def _dispatch_once_locked(
             provider = (provider_value or "").strip()
             model = (model_value or "").strip()
             return (provider, model) if provider and model else None
+
+    def _block_workspace_collision(claimed: Task, workspace: Path) -> bool:
+        """Fail closed before spawning two workers in one checkout."""
+        resolved = str(workspace.expanduser().resolve(strict=False))
+        owners = conn.execute(
+            "SELECT id, workspace_path FROM tasks "
+            "WHERE status = 'running' AND id != ? "
+            "AND workspace_path IS NOT NULL AND workspace_path != ''",
+            (claimed.id,),
+        ).fetchall()
+        for owner in owners:
+            owner_path = str(
+                Path(owner["workspace_path"]).expanduser().resolve(strict=False)
+            )
+            if owner_path != resolved:
+                continue
+            reason = (
+                f"workspace collision: running task {owner['id']} already owns "
+                f"{resolved}; allocate a distinct checkout before retrying"
+            )
+            if block_task(
+                conn,
+                claimed.id,
+                reason=reason,
+                kind="capability",
+                expected_run_id=claimed.current_run_id,
+            ):
+                result.workspace_collisions.append(
+                    (claimed.id, owner["id"], resolved)
+                )
+                result.auto_blocked.append(claimed.id)
+            return True
+        return False
+
     # Normalize default_assignee once: empty/whitespace string → None so the
     # rest of the loop can use ``if default_assignee:`` as a single check.
     # We also resolve profile_exists once here for the same reason.
@@ -11270,6 +11307,8 @@ def _dispatch_once_locked(
         set_workspace_path(conn, claimed.id, str(workspace))
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
+        if _block_workspace_collision(claimed, workspace):
+            continue
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
@@ -11418,6 +11457,8 @@ def _dispatch_once_locked(
         set_workspace_path(conn, claimed.id, str(workspace))
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
+        if _block_workspace_collision(claimed, workspace):
+            continue
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         # Force-load the sdlc-review skill for review agents — it carries
         # the review logic (AC verification, merge, etc.). The mandatory
