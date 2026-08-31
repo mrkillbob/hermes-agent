@@ -59,6 +59,7 @@ class RepairScanResult:
 
 
 _ACTIVE_BASE_REFRESH_TASK_STATUSES = frozenset({"ready", "running", "review"})
+_MAX_REPAIR_SNAPSHOTS_PER_SCAN = 12
 
 
 def _has_active_base_refresh_binding(
@@ -175,7 +176,17 @@ class RepairController:
                 skipped["github_state_unavailable"] += 1
                 degraded = True
                 continue
-            with ThreadPoolExecutor(max_workers=min(6, max(1, len(pulls)))) as executor:
+            pulls = tuple(
+                sorted(
+                    pulls,
+                    key=lambda pull: (
+                        pull.updated_at or datetime.min.replace(tzinfo=UTC),
+                        pull.number,
+                    ),
+                    reverse=True,
+                )[:_MAX_REPAIR_SNAPSHOTS_PER_SCAN]
+            )
+            with ThreadPoolExecutor(max_workers=min(2, max(1, len(pulls)))) as executor:
                 snapshots = executor.map(
                     lambda listed: self._read_snapshot(repository, listed), pulls
                 )
@@ -194,7 +205,7 @@ class RepairController:
                     ),
                 )
             )
-            refresh_executor = ThreadPoolExecutor(max_workers=4)
+            refresh_executor = ThreadPoolExecutor(max_workers=2)
             pending_refreshes: list[tuple[object, object, object, object, object, object, object]] = []
             for listed, snapshot in repair_candidates:
                 if snapshot is _STILL_COMPUTING:
