@@ -1886,7 +1886,14 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
 
         # ── Perform the read ──────────────────────────────────────────
         file_ops = _get_file_ops(task_id)
-        result = file_ops.read_file(path, offset, limit)
+        # Host-backed environments can be shared by several sessions whose
+        # authoritative cwd records differ.  Resolve relative paths once at
+        # the tool boundary and pass that exact absolute target downstream;
+        # otherwise ShellFileOperations re-resolves against the shared
+        # backend's stale cwd and can read a different checkout than the path
+        # used for guards, tracking, and source-provenance verification.
+        read_path = str(_resolved) if _file_ops_uses_host_paths(file_ops) else path
+        result = file_ops.read_file(read_path, offset, limit)
         result_dict = result.to_dict()
 
         # ── Populate negative-result cache on not-found ───────────────
