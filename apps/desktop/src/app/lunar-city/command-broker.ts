@@ -158,6 +158,8 @@ export interface ExecuteCommandOptions {
   latestSnapshot: () => CommandPlanningSnapshot | Promise<CommandPlanningSnapshot>
 }
 
+export type CommandPlanRevalidation = { canonicalPlan: CommandPlan; ok: true } | { error: string; ok: false }
+
 export class CommandRejectedError extends Error {
   constructor(message: string) {
     super(message)
@@ -629,8 +631,44 @@ function planPayload(plan: Omit<CommandPlan, 'digest'> | CommandPlan): Omit<Comm
   return payload
 }
 
-function freezeIntent(intent: CommandIntent): CommandIntent {
-  return Object.freeze({ ...intent }) as CommandIntent
+function cloneAndDeepFreeze<T>(value: T, ancestors = new WeakSet<object>()): T {
+  if (value === null || value === undefined || ['boolean', 'number', 'string'].includes(typeof value)) {
+    return value
+  }
+
+  if (typeof value !== 'object') {
+    fail('invalid-command-plan', `unsupported canonical value type ${typeof value}`)
+  }
+
+  const objectValue = value as object
+
+  if (ancestors.has(objectValue)) {
+    fail('invalid-command-plan', 'cyclic canonical values are not allowed')
+  }
+
+  ancestors.add(objectValue)
+
+  try {
+    if (Array.isArray(value)) {
+      return Object.freeze(value.map(item => cloneAndDeepFreeze(item, ancestors))) as T
+    }
+
+    const prototype = Object.getPrototypeOf(objectValue)
+
+    if (prototype !== Object.prototype && prototype !== null) {
+      fail('invalid-command-plan', 'canonical values must contain only plain objects and primitives')
+    }
+
+    const clone: Record<string, unknown> = {}
+
+    for (const key of Object.keys(objectValue).sort()) {
+      clone[key] = cloneAndDeepFreeze((value as Record<string, unknown>)[key], ancestors)
+    }
+
+    return Object.freeze(clone) as T
+  } finally {
+    ancestors.delete(objectValue)
+  }
 }
 
 function buildPlan(
@@ -642,32 +680,29 @@ function buildPlan(
   snapshot: CommandPlanningSnapshot,
   compatibility: Compatibility
 ): CommandPlan {
-  const payload: Omit<CommandPlan, 'digest'> = {
+  const payload = cloneAndDeepFreeze<Omit<CommandPlan, 'digest'>>({
     confirmation: compatibility.confirmation,
     consequence: compatibility.consequence,
-    context: Object.freeze({
+    context: {
       canonicalProjectId: target.canonicalProjectId,
       currentState: target.observedState.value,
       repositoryId: target.repositoryId,
-      source: Object.freeze({ ...source }),
-      sourceOwner: Object.freeze({ ...target.sourceOwner })
-    }),
+      source,
+      sourceOwner: target.sourceOwner
+    },
     entityKey: intent.entityKey,
-    identity: Object.freeze({ ...identity }) as EntityIdentity,
-    intent: freezeIntent(intent),
+    identity,
+    intent,
     method: compatibility.method,
     operation: intent.kind,
-    owner: Object.freeze({ ...owner }),
-    params: Object.freeze({ ...compatibility.params }),
+    owner,
+    params: compatibility.params,
     plannedAt: Math.max(target.entity.observedAt, source.observedAt),
     plannedRevision: snapshot.city.revision,
-    readback: Object.freeze({
-      ...compatibility.readback,
-      expectedEffect: Object.freeze({ ...compatibility.readback.expectedEffect })
-    })
-  }
+    readback: compatibility.readback
+  })
 
-  return Object.freeze({ ...payload, digest: digest(payload) })
+  return cloneAndDeepFreeze({ ...payload, digest: digest(payload) })
 }
 
 export function planCommand(intent: CommandIntent, snapshot: CommandPlanningSnapshot): CommandPlan {
@@ -715,29 +750,62 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Rebuilds every canonical field from the latest immutable semantic inputs. */
-export function revalidateCommandPlan(plan: CommandPlan, latest: CommandPlanningSnapshot): string | undefined {
-  if (digest(planPayload(plan)) !== plan.digest) {
-    return 'Invalid command plan: canonical digest mismatch.'
+/** Reads each caller-owned plan field once into an isolated, deeply frozen value. */
+function snapshotCallerPlan(plan: CommandPlan): CommandPlan {
+  return cloneAndDeepFreeze({
+    confirmation: plan.confirmation,
+    consequence: plan.consequence,
+    context: plan.context,
+    digest: plan.digest,
+    entityKey: plan.entityKey,
+    identity: plan.identity,
+    intent: plan.intent,
+    method: plan.method,
+    operation: plan.operation,
+    owner: plan.owner,
+    params: plan.params,
+    plannedAt: plan.plannedAt,
+    plannedRevision: plan.plannedRevision,
+    readback: plan.readback
+  })
+}
+
+function revalidateSnapshotPlan(received: CommandPlan, latest: CommandPlanningSnapshot): CommandPlanRevalidation {
+  if (digest(planPayload(received)) !== received.digest) {
+    return { error: 'Invalid command plan: canonical digest mismatch.', ok: false }
   }
 
   let rebuilt: CommandPlan
 
   try {
-    rebuilt = planCommand(plan.intent, latest)
+    rebuilt = planCommand(received.intent, latest)
   } catch (error) {
-    return `target-changed-since-plan: ${errorMessage(error)}`
+    return { error: `target-changed-since-plan: ${errorMessage(error)}`, ok: false }
   }
 
-  if (stableValue(plan) !== stableValue(rebuilt)) {
-    return 'target-changed-since-plan: canonical plan fields no longer match the latest target.'
+  if (stableValue(received) !== stableValue(rebuilt)) {
+    return {
+      error: 'target-changed-since-plan: canonical plan fields no longer match the latest target.',
+      ok: false
+    }
   }
 
-  return undefined
+  return { canonicalPlan: rebuilt, ok: true }
+}
+
+/** Rebuilds and returns a newly isolated canonical plan from the latest target. */
+export function revalidateCommandPlan(plan: CommandPlan, latest: CommandPlanningSnapshot): CommandPlanRevalidation {
+  try {
+    return revalidateSnapshotPlan(snapshotCallerPlan(plan), latest)
+  } catch (error) {
+    return { error: `Invalid command plan: ${errorMessage(error)}`, ok: false }
+  }
 }
 
 export function commandPlanIntegrityError(plan: CommandPlan, latest: CommandPlanningSnapshot): string | undefined {
-  return revalidateCommandPlan(plan, latest)
+  const result = revalidateCommandPlan(plan, latest)
+
+  return result.ok ? undefined : result.error
 }
 
 function executorFor(plan: CommandPlan, executors: CommandExecutors): CommandExecutor {
@@ -794,12 +862,24 @@ export async function executeCommand(
   executors: CommandExecutors,
   options: ExecuteCommandOptions
 ): Promise<CommandReceipt> {
-  if (plan.confirmation && options.confirmed !== true) {
-    return receipt(plan, 'rejected', { error: 'Command confirmation was not granted.' })
+  let receivedPlan: CommandPlan
+
+  try {
+    receivedPlan = snapshotCallerPlan(plan)
+  } catch (error) {
+    return {
+      error: `Invalid command plan: ${errorMessage(error)}`,
+      identity: { connectionId: 'invalid-command-plan', kind: 'profile', profile: 'invalid-command-plan' },
+      verification: 'rejected'
+    }
+  }
+
+  if (receivedPlan.confirmation && options.confirmed !== true) {
+    return receipt(receivedPlan, 'rejected', { error: 'Command confirmation was not granted.' })
   }
 
   if (!options?.latestSnapshot) {
-    return receipt(plan, 'rejected', { error: 'Invalid command plan: latest target revalidation is required.' })
+    return receipt(receivedPlan, 'rejected', { error: 'Invalid command plan: latest target revalidation is required.' })
   }
 
   let latest: CommandPlanningSnapshot
@@ -807,42 +887,43 @@ export async function executeCommand(
   try {
     latest = await options.latestSnapshot()
   } catch (error) {
-    return receipt(plan, 'rejected', { error: `Latest target revalidation failed: ${errorMessage(error)}` })
+    return receipt(receivedPlan, 'rejected', { error: `Latest target revalidation failed: ${errorMessage(error)}` })
   }
 
-  const integrityError = revalidateCommandPlan(plan, latest)
+  const validation = revalidateSnapshotPlan(receivedPlan, latest)
 
-  if (integrityError) {
-    return receipt(plan, 'rejected', { error: integrityError })
+  if (!validation.ok) {
+    return receipt(receivedPlan, 'rejected', { error: validation.error })
   }
 
-  const executor = executorFor(plan, executors)
+  const canonicalPlan = validation.canonicalPlan
+  const executor = executorFor(canonicalPlan, executors)
   let response: unknown
 
   try {
-    response = await executor.send(plan)
+    response = await executor.send(canonicalPlan)
   } catch (error) {
     if (error instanceof CommandRejectedError) {
-      return receipt(plan, 'rejected', { error: error.message })
+      return receipt(canonicalPlan, 'rejected', { error: error.message })
     }
 
     if (error instanceof CommandTimeoutError && !error.possiblyApplied) {
-      return receipt(plan, 'timed_out', { error: error.message })
+      return receipt(canonicalPlan, 'timed_out', { error: error.message })
     }
 
-    return receipt(plan, 'verification_required', { error: errorMessage(error) })
+    return receipt(canonicalPlan, 'verification_required', { error: errorMessage(error) })
   }
 
   let readbackValue: CommandReadback | null
 
   try {
-    readbackValue = await executor.readback(plan)
+    readbackValue = await executor.readback(canonicalPlan)
   } catch (error) {
-    return receipt(plan, 'verification_required', { error: errorMessage(error), response })
+    return receipt(canonicalPlan, 'verification_required', { error: errorMessage(error), response })
   }
 
-  if (!readbackValue || !readbackBaseMatches(plan, readbackValue)) {
-    return receipt(plan, 'verification_required', {
+  if (!readbackValue || !readbackBaseMatches(canonicalPlan, readbackValue)) {
+    return receipt(canonicalPlan, 'verification_required', {
       error: 'Authoritative causal readback was missing, cached, stale, or mismatched.',
       readback: readbackValue,
       response
@@ -852,16 +933,19 @@ export async function executeCommand(
   // A canonical authoritative rejection is terminal even when the requested
   // effect is absent or differs; rejection means the effect did not occur.
   if (readbackValue.outcome === 'rejected') {
-    return receipt(plan, 'rejected', { readback: readbackValue, response })
+    return receipt(canonicalPlan, 'rejected', { readback: readbackValue, response })
   }
 
-  if (readbackValue.outcome !== 'verified' || !sameEffect(readbackValue.effect, plan.readback.expectedEffect)) {
-    return receipt(plan, 'verification_required', {
+  if (
+    readbackValue.outcome !== 'verified' ||
+    !sameEffect(readbackValue.effect, canonicalPlan.readback.expectedEffect)
+  ) {
+    return receipt(canonicalPlan, 'verification_required', {
       error: 'Authoritative readback did not contain the expected canonical effect.',
       readback: readbackValue,
       response
     })
   }
 
-  return receipt(plan, 'verified', { readback: readbackValue, response })
+  return receipt(canonicalPlan, 'verified', { readback: readbackValue, response })
 }

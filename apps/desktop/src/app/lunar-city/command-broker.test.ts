@@ -287,8 +287,17 @@ describe('LunarCityCommandBroker immutable target binding', () => {
     const plan = planCommand(intent('interrupt-session', identity), initial)
     const changed = snapshot(identity, { revision: 4, state: 'completed', time: 2_100 })
 
-    expect(revalidateCommandPlan(plan, initial)).toBeUndefined()
-    expect(revalidateCommandPlan(plan, changed)).toMatch(/target-changed-since-plan/)
+    const valid = revalidateCommandPlan(plan, initial)
+    const invalid = revalidateCommandPlan(plan, changed)
+
+    expect(valid.ok).toBe(true)
+    expect(invalid.ok).toBe(false)
+
+    if (invalid.ok) {
+      throw new Error('Expected changed target revalidation to fail')
+    }
+
+    expect(invalid.error).toMatch(/target-changed-since-plan/)
 
     const selected = bridge(readback(plan))
 
@@ -391,6 +400,125 @@ describe('LunarCityCommandBroker compatibility matrix', () => {
 })
 
 describe('LunarCityCommandBroker canonical plan integrity', () => {
+  it('returns a newly rebuilt deeply frozen canonical plan', () => {
+    const identity = IDENTITIES.kanban
+    const planningSnapshot = snapshot(identity)
+    const callerPlan = structuredClone(planCommand(intent('reassign-task', identity), planningSnapshot)) as CommandPlan
+    const result = revalidateCommandPlan(callerPlan, planningSnapshot)
+
+    expect(result.ok).toBe(true)
+
+    if (!result.ok) {
+      throw new Error(result.error)
+    }
+
+    expect(result.canonicalPlan).toEqual(callerPlan)
+    expect(result.canonicalPlan).not.toBe(callerPlan)
+    expect(Object.isFrozen(result.canonicalPlan)).toBe(true)
+    expect(Object.isFrozen(result.canonicalPlan.identity)).toBe(true)
+    expect(Object.isFrozen(result.canonicalPlan.intent)).toBe(true)
+    expect(Object.isFrozen(result.canonicalPlan.owner)).toBe(true)
+    expect(Object.isFrozen(result.canonicalPlan.params)).toBe(true)
+    expect(Object.isFrozen(result.canonicalPlan.context)).toBe(true)
+    expect(Object.isFrozen(result.canonicalPlan.context.source)).toBe(true)
+    expect(Object.isFrozen(result.canonicalPlan.context.sourceOwner)).toBe(true)
+    expect(Object.isFrozen(result.canonicalPlan.readback)).toBe(true)
+    expect(Object.isFrozen(result.canonicalPlan.readback.expectedEffect)).toBe(true)
+  })
+
+  it('uses only the rebuilt canonical plan after revalidation while the caller mutates its aliases', async () => {
+    const identity = IDENTITIES.session
+    const planningSnapshot = snapshot(identity)
+    const original = planCommand(intent('interrupt-session', identity), planningSnapshot)
+    const callerPlan = structuredClone(original) as CommandPlan
+    let releaseSend!: () => void
+    let markSendStarted!: () => void
+
+    const sendStarted = new Promise<void>(resolve => {
+      markSendStarted = resolve
+    })
+
+    const sendGate = new Promise<void>(resolve => {
+      releaseSend = resolve
+    })
+
+    const selected = {
+      readback: vi.fn(async (canonicalPlan: CommandPlan) => readback(canonicalPlan)),
+      send: vi.fn(async (_canonicalPlan: CommandPlan) => {
+        markSendStarted()
+        await sendGate
+
+        return { accepted: true }
+      })
+    }
+
+    const execution = executeCommand(callerPlan, executors(selected, original.readback.kind), {
+      confirmed: true,
+      latestSnapshot: () => planningSnapshot
+    })
+
+    await sendStarted
+
+    const mutable = callerPlan as unknown as {
+      identity: { sessionId: string }
+      method: string
+      params: Record<string, unknown>
+      readback: { expectedEffect: { targetId: string }; kind: string }
+    }
+
+    mutable.method = 'kanban.task.patch'
+    mutable.params.session_id = 'foreign-session'
+    mutable.readback.kind = 'kanban-task'
+    mutable.readback.expectedEffect.targetId = 'foreign-session'
+    mutable.identity.sessionId = 'foreign-session'
+    releaseSend()
+
+    const receipt = await execution
+    const sentPlan = selected.send.mock.calls[0]?.[0]
+
+    expect(receipt.verification).toBe('verified')
+    expect(sentPlan).toEqual(original)
+    expect(sentPlan).not.toBe(callerPlan)
+    expect(Object.isFrozen(sentPlan)).toBe(true)
+    expect(Object.isFrozen(sentPlan?.identity)).toBe(true)
+    expect(Object.isFrozen(sentPlan?.params)).toBe(true)
+    expect(Object.isFrozen(sentPlan?.readback.expectedEffect)).toBe(true)
+    expect(selected.readback).toHaveBeenCalledWith(sentPlan)
+    expect(receipt.identity).toEqual(original.identity)
+  })
+
+  it('snapshots a hostile proxy once deterministically before canonical execution', async () => {
+    const identity = IDENTITIES.session
+    const planningSnapshot = snapshot(identity)
+    const original = planCommand(intent('interrupt-session', identity), planningSnapshot)
+    const reads = new Map<PropertyKey, number>()
+
+    const hostile = new Proxy(structuredClone(original) as CommandPlan, {
+      get(target, property, receiver) {
+        const count = (reads.get(property) ?? 0) + 1
+        reads.set(property, count)
+
+        if (count > 1) {
+          throw new Error(`caller plan ${String(property)} was read more than once`)
+        }
+
+        return Reflect.get(target, property, receiver)
+      }
+    })
+
+    const selected = bridge(readback(original))
+
+    const receipt = await executeCommand(hostile, executors(selected, original.readback.kind), {
+      confirmed: true,
+      latestSnapshot: () => planningSnapshot
+    })
+
+    expect(receipt.verification).toBe('verified')
+    expect([...reads.values()].every(count => count === 1)).toBe(true)
+    expect(selected.send.mock.calls[0]?.[0]).toEqual(original)
+    expect(selected.send.mock.calls[0]?.[0] === hostile).toBe(false)
+  })
+
   it.each([
     ['consequence', (plan: CommandPlan) => ({ ...plan, consequence: 'Everything is already complete.' })],
     ['current state', (plan: CommandPlan) => ({ ...plan, context: { ...plan.context, currentState: 'done' } })],

@@ -130,23 +130,41 @@ function exactOwningSession(
   identity: EntityIdentity,
   target: InspectorSessionTarget | undefined
 ): InspectorSessionTarget | undefined {
+  const connectionId = target?.connectionId.trim() ?? ''
+  const profile = target?.profile.trim() ?? ''
+  const sessionId = target?.sessionId.trim() ?? ''
+  const runtimeSessionId = target?.runtimeSessionId?.trim()
+  const storedSessionId = target?.storedSessionId?.trim()
+  const targetProfile = target?.targetProfile?.trim()
+
   if (
-    !target?.connectionId.trim() ||
-    !target.profile.trim() ||
-    !target.sessionId.trim() ||
-    target.connectionId !== identity.connectionId ||
-    target.profile !== identity.profile ||
-    (target.storedSessionId !== undefined && !target.storedSessionId.trim()) ||
-    (target.runtimeSessionId !== undefined && !target.runtimeSessionId.trim())
+    !target ||
+    !connectionId ||
+    !profile ||
+    !sessionId ||
+    connectionId !== identity.connectionId ||
+    profile !== identity.profile ||
+    (target.storedSessionId !== undefined && !storedSessionId) ||
+    (target.runtimeSessionId !== undefined && !runtimeSessionId) ||
+    (target.targetProfile !== undefined && !targetProfile) ||
+    (target.mode !== undefined && target.mode !== 'local' && target.mode !== 'remote')
   ) {
     return undefined
   }
 
-  if ((identity.kind === 'session' || identity.kind === 'subagent') && target.sessionId !== identity.sessionId) {
+  if ((identity.kind === 'session' || identity.kind === 'subagent') && sessionId !== identity.sessionId) {
     return undefined
   }
 
-  return target
+  return Object.freeze({
+    connectionId,
+    ...(target.mode === undefined ? {} : { mode: target.mode }),
+    profile,
+    ...(runtimeSessionId === undefined ? {} : { runtimeSessionId }),
+    sessionId,
+    ...(storedSessionId === undefined ? {} : { storedSessionId }),
+    ...(targetProfile === undefined ? {} : { targetProfile })
+  })
 }
 
 export function EntityInspector({ data, onInspectEvidence, onOpenSession }: EntityInspectorProps) {

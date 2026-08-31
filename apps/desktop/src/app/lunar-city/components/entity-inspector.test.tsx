@@ -18,10 +18,12 @@ const IDENTITY: EntityIdentity = {
 
 const SESSION: InspectorSessionTarget = {
   connectionId: 'connection-a',
+  mode: 'remote',
   profile: 'worker',
   runtimeSessionId: 'runtime-1',
   sessionId: 'session-1',
-  storedSessionId: 'stored-1'
+  storedSessionId: 'stored-1',
+  targetProfile: 'backend-worker'
 }
 
 const SOURCE: SourceHealth = {
@@ -118,6 +120,36 @@ describe('EntityInspector', () => {
 
     expect(onOpenSession).toHaveBeenCalledWith(SESSION)
     expect(onInspectEvidence).toHaveBeenCalledWith('diagnostics', IDENTITY)
+  })
+
+  it('labels and opens only its frozen canonical owner-route copy after the input mutates', () => {
+    const mutableSession = { ...SESSION }
+    const onOpenSession = vi.fn()
+
+    render(<EntityInspector data={data({ owningSession: mutableSession })} onOpenSession={onOpenSession} />)
+
+    const button = screen.getByRole('button', {
+      name: 'Open session session-1 on connection connection-a with profile worker'
+    })
+
+    mutableSession.connectionId = 'connection-z'
+    mutableSession.mode = 'local'
+    mutableSession.profile = 'foreign'
+    mutableSession.sessionId = 'session-z'
+    mutableSession.runtimeSessionId = 'runtime-z'
+    mutableSession.storedSessionId = 'stored-z'
+    mutableSession.targetProfile = 'foreign-backend'
+    fireEvent.click(button)
+
+    expect(button.getAttribute('aria-label')).toBe(
+      'Open session session-1 on connection connection-a with profile worker'
+    )
+    expect(onOpenSession).toHaveBeenCalledWith(SESSION)
+
+    const opened = onOpenSession.mock.calls[0]?.[0]
+
+    expect(opened).not.toBe(mutableSession)
+    expect(Object.isFrozen(opened)).toBe(true)
   })
 
   it('keeps duplicate session IDs on different connections distinct', () => {
