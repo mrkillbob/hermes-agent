@@ -274,6 +274,18 @@ export class LunarCityReconciler {
     const previous = $lunarCitySnapshot.get()
     const candidates = result.authoritative === false ? new Map(previous.entities) : new Map<string, LunarEntity>()
 
+    const stalePartialSources = new Set(
+      result.authoritative === false
+        ? result.sources.filter(source => source.authority === 'stale').map(source => source.source)
+        : []
+    )
+
+    for (const [key, entity] of candidates) {
+      if (stalePartialSources.has(healthSourceFor(entity))) {
+        candidates.set(key, staleEntity(entity))
+      }
+    }
+
     for (const entity of result.entities) {
       candidates.set(entity.key, entity)
     }
@@ -506,8 +518,31 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
 
       const roster = sources.$fleetRoster.get()
 
+      const previousFleetSourceObservedAt = new Map(
+        $lunarCitySnapshot
+          .get()
+          .sources.filter(source => source.source.startsWith('fleet:'))
+          .map(source => [source.source, source.observedAt])
+      )
+
+      const fleetReadPartial =
+        fleetReadFailed || Boolean(roster?.sources.some(source => !source.reachable || Boolean(source.error)))
+
+      const fleetSourceObservedAt = new Map(
+        roster?.sources.map(source => [
+          source.connectionId,
+          source.reachable && !source.error
+            ? fleetObservedAt
+            : (previousFleetSourceObservedAt.get(`fleet:${source.connectionId}`) ?? 0)
+        ])
+      )
+
       const fleet = roster
-        ? normalizeRoster(roster, { fresh: !fleetReadFailed && fleetObservedAt > 0, observedAt: fleetObservedAt })
+        ? normalizeRoster(roster, {
+            fresh: !fleetReadFailed && fleetObservedAt > 0,
+            observedAt: fleetObservedAt,
+            sourceObservedAt: fleetSourceObservedAt
+          })
         : { entities: [], sources: [] as readonly SourceHealth[] }
 
       const sessions = normalizeSessions(sessionRows(), {
@@ -519,7 +554,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
       const subagents = normalizeSubagents(sources.$subagentsBySession.get(), sessions.entities, { observedAt: now() })
 
       return {
-        authoritative: !fleetReadFailed,
+        authoritative: !fleetReadPartial,
         entities: [...fleet.entities, ...sessions.entities, ...subagents.entities],
         sources: [
           ...fleet.sources.map(source =>

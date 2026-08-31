@@ -11,6 +11,7 @@ export interface NormalizedFleet {
 export interface FleetObservation {
   fresh?: boolean
   observedAt: number
+  sourceObservedAt?: ReadonlyMap<string, number>
 }
 
 function sourceHealth(source: DesktopAgentRoster['sources'][number], observedAt: number): SourceHealth {
@@ -30,10 +31,13 @@ export function normalizeRoster(roster: DesktopAgentRoster, observation: FleetOb
   const fresh = observation.fresh !== false
   const healthByConnection = new Map(roster.sources.map(source => [source.connectionId, source]))
 
+  const observedAtFor = (connectionId: string) =>
+    observation.sourceObservedAt?.get(connectionId) ?? observation.observedAt
+
   const sources = [...roster.sources]
     .sort((left, right) => left.connectionId.localeCompare(right.connectionId))
     .map(source => ({
-      ...sourceHealth(source, observation.observedAt),
+      ...sourceHealth(source, observedAtFor(source.connectionId)),
       ...(fresh ? {} : { authority: 'stale' as const })
     }))
 
@@ -52,7 +56,7 @@ export function normalizeRoster(roster: DesktopAgentRoster, observation: FleetOb
         destination: available ? 'garden' : source ? 'unavailable' : 'unknown',
         identity,
         key: entityKey(identity),
-        observedAt: observation.observedAt
+        observedAt: observedAtFor(agent.connectionId)
       } satisfies LunarEntity
     })
 

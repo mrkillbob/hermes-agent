@@ -406,4 +406,101 @@ describe('Lunar City reconciler', () => {
     }
   })
 
+  it('treats a resolved mixed fleet roster as partial and retains rows from its unreachable source', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(42)
+    _resetFleetRosterForTests()
+    const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDesktop'] }
+    const priorDesktop = desktopWindow.hermesDesktop
+    const fullRoster: DesktopAgentRoster = {
+      agents: [
+        {
+          connectionId: 'local',
+          connectionKind: 'local',
+          connectionLabel: 'this Mac',
+          handle: '@worker-local',
+          profile: 'worker'
+        },
+        {
+          connectionId: 'ssh-1',
+          connectionKind: 'ssh',
+          connectionLabel: 'moon relay',
+          handle: '@worker-moon',
+          profile: 'worker'
+        },
+        {
+          connectionId: 'ssh-2',
+          connectionKind: 'ssh',
+          connectionLabel: 'sun relay',
+          handle: '@worker-sun',
+          profile: 'worker'
+        }
+      ],
+      sources: [
+        { connectionId: 'local', kind: 'local', label: 'this Mac', reachable: true },
+        { connectionId: 'ssh-1', kind: 'ssh', label: 'moon relay', reachable: true },
+        { connectionId: 'ssh-2', kind: 'ssh', label: 'sun relay', reachable: true }
+      ]
+    }
+    const partialRoster: DesktopAgentRoster = {
+      agents: [fullRoster.agents[0]!],
+      sources: [
+        { connectionId: 'local', kind: 'local', label: 'this Mac', reachable: true },
+        { connectionId: 'ssh-1', kind: 'ssh', label: 'moon relay', reachable: false },
+        { connectionId: 'ssh-2', error: 'degraded', kind: 'ssh', label: 'sun relay', reachable: true }
+      ]
+    }
+    const getAgentRoster = vi
+      .fn<() => Promise<DesktopAgentRoster>>()
+      .mockResolvedValueOnce(fullRoster)
+      .mockResolvedValueOnce(partialRoster)
+    desktopWindow.hermesDesktop = { getAgentRoster } as unknown as Window['hermesDesktop']
+    let stop: (() => void) | undefined
+    const localKey = entityKey({ connectionId: 'local', kind: 'profile', profile: 'worker' })
+    const unreachableKey = entityKey({ connectionId: 'ssh-1', kind: 'profile', profile: 'worker' })
+    const erroredKey = entityKey({ connectionId: 'ssh-2', kind: 'profile', profile: 'worker' })
+
+    try {
+      stop = startLunarCityReconciler()
+      await flush()
+      await flush()
+      await vi.advanceTimersByTimeAsync(0)
+
+      vi.setSystemTime(60_043)
+      window.dispatchEvent(new Event('focus'))
+      await flush()
+      await flush()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(getAgentRoster).toHaveBeenCalledTimes(2)
+      expect($lunarCitySnapshot.get().entities.get(localKey)).toMatchObject({
+        authority: 'authoritative',
+        observedAt: 60_043
+      })
+      expect($lunarCitySnapshot.get().entities.get(unreachableKey)).toMatchObject({
+        animation: 'unavailable',
+        authority: 'stale',
+        observedAt: 42
+      })
+      expect($lunarCitySnapshot.get().entities.get(erroredKey)).toMatchObject({
+        animation: 'unavailable',
+        authority: 'stale',
+        observedAt: 42
+      })
+      expect($lunarCitySnapshot.get().sources).toEqual([
+        { authority: 'authoritative', observedAt: 60_043, source: 'fleet:local' },
+        { authority: 'stale', observedAt: 42, source: 'fleet:ssh-1' },
+        { authority: 'stale', error: 'degraded', observedAt: 42, source: 'fleet:ssh-2' }
+      ])
+    } finally {
+      stop?.()
+      _resetFleetRosterForTests()
+
+      if (priorDesktop) {
+        desktopWindow.hermesDesktop = priorDesktop
+      } else {
+        delete desktopWindow.hermesDesktop
+      }
+    }
+  })
 })
