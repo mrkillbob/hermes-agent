@@ -194,4 +194,27 @@ describe('Recast NavigationQuery adapter', () => {
     query.dispose?.()
     expect(destroy).toHaveBeenCalledOnce()
   })
+
+  it('releases every temporary Recast wrapper even when a malformed path fails closed', () => {
+    const start = { destroy: vi.fn(), x: 1, y: 0, z: 2 }
+    const end = { destroy: vi.fn(), x: 9, y: 0, z: 2 }
+    const validPoint = { destroy: vi.fn(), x: 1, y: 0, z: 2 }
+    const invalidPoint = { destroy: vi.fn(), x: Number.NaN, y: 0, z: 2 }
+    const path = {
+      destroy: vi.fn(),
+      getPoint: (index: number) => [validPoint, invalidPoint][index],
+      getPointCount: () => 2
+    }
+    const query = createRecastNavigationQuery(
+      { computePath: vi.fn(() => path) },
+      (x, y, z) => (x === 1 ? start : end)
+    )
+
+    expect(query.computePath({ x: 1, y: 0, z: 2 }, { x: 9, y: 0, z: 2 })).toBeUndefined()
+    expect(start.destroy).toHaveBeenCalledOnce()
+    expect(end.destroy).toHaveBeenCalledOnce()
+    expect(validPoint.destroy).toHaveBeenCalledOnce()
+    expect(invalidPoint.destroy).toHaveBeenCalledOnce()
+    expect(path.destroy).toHaveBeenCalledOnce()
+  })
 })

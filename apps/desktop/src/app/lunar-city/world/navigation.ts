@@ -69,12 +69,15 @@ export function createRecastNavigationQuery(
         for (let index = 0; index < path.getPointCount(); index += 1) {
           const point = path.getPoint(index) as (Vec3 & RecastWrapperLike) | undefined
 
-          if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
-            return undefined
-          }
+          try {
+            if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
+              return undefined
+            }
 
-          points.push({ x: point.x, y: point.y, z: point.z })
-          disposeRecastWrapper(point)
+            points.push({ x: point.x, y: point.y, z: point.z })
+          } finally {
+            disposeRecastWrapper(point)
+          }
         }
       } finally {
         disposeRecastWrapper(path)
