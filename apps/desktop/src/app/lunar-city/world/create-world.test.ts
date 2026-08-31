@@ -3,7 +3,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // @vitest-environment jsdom
 import actualManifest from '../../../../public/lunar-city/v2/world-manifest.v2.json'
 import { parseWorldManifest } from '../manifest'
-import type { LeaderStateClipMap, LunarCityLeaderPickMetadata, LunarCityWorldModules, WorldManifestV2 } from '../model'
+import type {
+  EntityKey,
+  LeaderStateClipMap,
+  LunarCityLeaderPickMetadata,
+  LunarCitySnapshot,
+  LunarCityWorldModules,
+  WorldManifestV2
+} from '../model'
 
 import { createLunarCityWorld } from './create-world'
 
@@ -15,6 +22,7 @@ interface FakeNode {
   position: { set: ReturnType<typeof vi.fn> }
   rotation: { set: ReturnType<typeof vi.fn> }
   scaling: { set: ReturnType<typeof vi.fn> }
+  setEnabled: ReturnType<typeof vi.fn>
   setPivotPoint: ReturnType<typeof vi.fn>
 }
 
@@ -34,6 +42,7 @@ function fakeNode(name: string, metadata?: Record<string, unknown>): FakeNode {
     position: { set: vi.fn() },
     rotation: { set: vi.fn() },
     scaling: { set: vi.fn() },
+    setEnabled: vi.fn(),
     setPivotPoint: vi.fn()
   }
 }
@@ -55,6 +64,8 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
   class FakeEngine {
     dispose = vi.fn()
     resize = vi.fn()
+    setHardwareScalingLevel = vi.fn()
+    stopRenderLoop = vi.fn()
     options: Record<string, unknown>
 
     constructor(
@@ -120,6 +131,7 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
     position = { set: vi.fn() }
     rotation = { set: vi.fn() }
     scaling = { set: vi.fn() }
+    setEnabled = vi.fn()
     setPivotPoint = vi.fn()
 
     constructor(
@@ -222,6 +234,30 @@ function fakeRuntime({ opaqueLeaderNames = false }: { opaqueLeaderNames?: boolea
 
 const manifest = parseWorldManifest(structuredClone(actualManifest))
 
+function workerSnapshot(authority: 'authoritative' | 'stale' = 'authoritative'): LunarCitySnapshot {
+  const key = 'session:connection=local:profile=worker:session=s1' as EntityKey
+
+  return {
+    entities: new Map([
+      [
+        key,
+        {
+          animation: 'walk',
+          authority,
+          destination: 'bus',
+          identity: { kind: 'session', connectionId: 'local', profile: 'worker', sessionId: 's1' },
+          key,
+          observedAt: 1,
+          position: { x: 0, y: 0, z: -1 }
+        }
+      ]
+    ]),
+    observedAt: 1,
+    revision: 1,
+    sources: []
+  }
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -276,9 +312,52 @@ describe('createLunarCityWorld', () => {
     expect(runtime.lodNodes.get('library:lod:far')?.metadata).toMatchObject({
       lunarCity: { kind: 'lod', modelId: 'library', distance: 48 }
     })
+    // Efficient is the default tier, so its aggressive LOD policy may choose
+    // far detail; the safety contract is that the two subtrees never coexist.
+    expect(runtime.lodNodes.get('library:lod:near')?.setEnabled).toHaveBeenLastCalledWith(false)
+    expect(runtime.lodNodes.get('library:lod:far')?.setEnabled).toHaveBeenLastCalledWith(true)
     expect(runtime.frozenMeshes.find(mesh => mesh.modelId === 'terrain')?.freezeWorldMatrix).toHaveBeenCalledOnce()
     expect(runtime.frozenMaterials.find(material => material.modelId === 'terrain')?.freeze).toHaveBeenCalledOnce()
     expect(runtime.frozenMeshes.find(mesh => mesh.modelId === 'leaders')?.freezeWorldMatrix).not.toHaveBeenCalled()
+    handle.destroy()
+  })
+
+  it('applies quality tiers through hardware scaling without recreating the scene', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+
+    handle.setQuality('balanced')
+
+    expect(runtime.engines[0]?.setHardwareScalingLevel).toHaveBeenCalledWith(1 / 0.85)
+    expect(runtime.scenes).toHaveLength(1)
+    handle.destroy()
+  })
+
+  it('halts the unified frame authority when the WebGL context is lost', async () => {
+    const runtime = fakeRuntime()
+    const canvas = document.createElement('canvas')
+    const handle = await createLunarCityWorld(canvas, manifest, vi.fn(), runtime.modules)
+
+    canvas.dispatchEvent(new Event('webglcontextlost', { cancelable: true }))
+
+    expect(runtime.engines[0]?.stopRenderLoop).toHaveBeenCalledOnce()
+    handle.destroy()
+  })
+
+  it('registers live exact-key worker anchors and rejects stale follow without recreating the city', async () => {
+    const runtime = fakeRuntime()
+    const handle = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    const snapshot = workerSnapshot()
+    const key = [...snapshot.entities.keys()][0]!
+
+    handle.applySnapshot(snapshot)
+    handle.dispatchCamera({ kind: 'focus', entityKey: key, follow: true })
+    expect(handle.getCameraState()).toEqual({ focusedEntityKey: key, following: true })
+
+    handle.applySnapshot(workerSnapshot('stale'))
+    handle.dispatchCamera({ kind: 'focus', entityKey: key, follow: true })
+    expect(handle.getCameraState()).toEqual({ focusedEntityKey: undefined, following: false })
+    expect(runtime.scenes).toHaveLength(1)
     handle.destroy()
   })
 

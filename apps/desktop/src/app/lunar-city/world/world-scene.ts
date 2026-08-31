@@ -25,7 +25,20 @@ import {
   type CameraPickTarget,
   createCameraController
 } from './camera-controller'
+import {
+  applyLodSelection,
+  createEntityRegistry,
+  type EntityPresentationFactory,
+  type EntityVisual,
+  type InstancedEntityGroup,
+  type InstancedEntityMember,
+  type LodEntry,
+  selectLodIndex
+} from './entities'
+import { createNavigationController, type NavigationQuery } from './navigation'
 import { createOcclusionController, type OcclusionCandidate, type OcclusionSelection } from './occlusion'
+import { applyQualitySettings, createQualityController } from './quality'
+import { createFrameScheduler } from './scheduler'
 
 const LEADER_STATES: readonly LeaderAnimationState[] = [
   'acknowledging',
@@ -44,6 +57,7 @@ export interface LunarCitySceneHandle {
   dispatchCamera(intent: CameraIntent): void
   getCameraState(): CameraControlState
   pick(clientX: number, clientY: number): CameraPickTarget | undefined
+  setVisible(visible: boolean): void
   setQuality(tier: QualityTier): void
   render(): void
   dispose(): void
@@ -53,8 +67,90 @@ interface FocusMetadata extends OcclusionSelection {
   focusEntityKey: EntityKey
 }
 
+interface PlacedModel {
+  focus: FocusMetadata
+  lods: readonly LodEntry[]
+}
+
 function staticFocusKey(kind: 'leader' | 'model', value: string): EntityKey {
   return `lunar-city:${kind}:${encodeURIComponent(value)}` as EntityKey
+}
+
+function navigationPointKey(point: Vec3): string {
+  return `${point.x},${point.y},${point.z}`
+}
+
+/**
+ * A fail-closed traversal boundary for the manifest's declared links. Recast
+ * may replace this query when its route-local navmesh is ready, but no worker
+ * is ever sent on an inferred straight line in the meantime.
+ */
+export function createManifestNavigationQuery(
+  manifest: Pick<WorldManifestV2, 'navigation'>['navigation']
+): NavigationQuery {
+  const points = new Map<string, Vec3>()
+  const edges = new Map<string, string[]>()
+
+  const addEdge = (from: Vec3, to: Vec3): void => {
+    const fromKey = navigationPointKey(from)
+    const toKey = navigationPointKey(to)
+    points.set(fromKey, { ...from })
+    points.set(toKey, { ...to })
+    const adjacent = edges.get(fromKey) ?? []
+    adjacent.push(toKey)
+    edges.set(fromKey, adjacent)
+  }
+
+  for (const link of manifest.links) {
+    addEdge(link.from, link.to)
+
+    if (link.bidirectional) {
+      addEdge(link.to, link.from)
+    }
+  }
+
+  return {
+    computePath(from, to) {
+      const start = navigationPointKey(from)
+      const destination = navigationPointKey(to)
+
+      if (!points.has(start) || !points.has(destination)) {
+        return undefined
+      }
+
+      const previous = new Map<string, string | undefined>([[start, undefined]])
+      const pending = [start]
+
+      while (pending.length > 0) {
+        const current = pending.shift()!
+
+        if (current === destination) {
+          break
+        }
+
+        for (const adjacent of edges.get(current) ?? []) {
+          if (!previous.has(adjacent)) {
+            previous.set(adjacent, current)
+            pending.push(adjacent)
+          }
+        }
+      }
+
+      if (!previous.has(destination)) {
+        return undefined
+      }
+
+      const path: Vec3[] = []
+      let current: string | undefined = destination
+
+      while (current !== undefined) {
+        path.push({ ...points.get(current)! })
+        current = previous.get(current)
+      }
+
+      return path.reverse()
+    }
+  }
 }
 
 interface BabylonQuaternion {
@@ -62,6 +158,25 @@ interface BabylonQuaternion {
   x: number
   y: number
   z: number
+}
+
+interface BabylonAnimationGroupLike {
+  clone?(name: string, targetConverter?: (target: unknown) => unknown): BabylonAnimationGroupLike | null
+  name: string
+  start?(loop?: boolean, speedRatio?: number, from?: number, to?: number): void
+  stop?(): void
+}
+
+interface BabylonHierarchyNodeLike extends BabylonNodeLike {
+  instantiateHierarchy?(
+    parent?: BabylonNodeLike | null,
+    options?: unknown,
+    onNewNodeCreated?: (source: unknown, clone: BabylonNodeLike) => void
+  ): BabylonNodeLike | null
+}
+
+interface BabylonInstancedMeshLike extends BabylonMeshLike {
+  createInstance?(name: string): BabylonNodeLike
 }
 
 function manifestRotationQuaternion(rotation: Vec3): BabylonQuaternion {
@@ -159,7 +274,7 @@ function placeModel(
   model: ModelManifestEntry,
   modules: LunarCityWorldModules,
   scene: ConstructorParameters<LunarCityWorldModules['TransformNode']>[1]
-): FocusMetadata {
+): PlacedModel {
   const root = findNode(result, `${model.id}:root`)
 
   if (!root) {
@@ -188,6 +303,8 @@ function placeModel(
     selectable: model.id !== 'terrain'
   })
 
+  const lods: LodEntry[] = []
+
   for (const lod of model.lods) {
     const node = findNode(result, lod.node)
 
@@ -196,7 +313,12 @@ function placeModel(
     }
 
     tagNode(node, { distance: lod.distance, kind: 'lod', modelId: model.id })
+    lods.push({ distance: lod.distance, node })
   }
+
+  // glTF imports commonly enable both subtrees.  Lunar City never does: one
+  // declared representation is active for every model from the first frame.
+  applyLodSelection(lods, { distance: 0, lodAdvance: 0, selected: false })
 
   for (const mesh of result.meshes) {
     tagNode(mesh, {
@@ -209,7 +331,7 @@ function placeModel(
     })
   }
 
-  return { cameraAnchor, focusEntityKey, occlusionGroup: model.occlusionGroup }
+  return { focus: { cameraAnchor, focusEntityKey, occlusionGroup: model.occlusionGroup }, lods }
 }
 
 function gltfExtras(node: BabylonNodeLike): Record<string, unknown> {
@@ -370,6 +492,207 @@ function freezeStaticResources(
   }
 }
 
+function setNodePosition(node: BabylonNodeLike, position: Vec3): void {
+  node.position?.set(position.x, position.y, position.z)
+}
+
+function workerAnimationGroups(result: BabylonImportResultLike): ReadonlyMap<string, BabylonAnimationGroupLike> {
+  const groups = new Map<string, BabylonAnimationGroupLike>()
+
+  for (const candidate of result.animationGroups) {
+    if (
+      candidate &&
+      typeof candidate === 'object' &&
+      'name' in candidate &&
+      typeof (candidate as { name?: unknown }).name === 'string'
+    ) {
+      const group = candidate as BabylonAnimationGroupLike
+      groups.set(group.name, group)
+    }
+  }
+
+  return groups
+}
+
+function cloneWorkerHierarchy(
+  template: BabylonNodeLike,
+  parent: BabylonNodeLike,
+  sourceGroups: ReadonlyMap<string, BabylonAnimationGroupLike>,
+  name: string
+): {
+  animations: ReadonlyMap<string, BabylonAnimationGroupLike>
+  nodeMap: ReadonlyMap<unknown, BabylonNodeLike>
+  root: BabylonNodeLike
+} {
+  const nodeMap = new Map<unknown, BabylonNodeLike>()
+  const hierarchy = template as BabylonHierarchyNodeLike
+
+  const root =
+    hierarchy.instantiateHierarchy?.(parent, undefined, (source, clone) => nodeMap.set(source, clone)) ??
+    template.clone?.(`lunar-city:worker-clone:${name}`, parent) ??
+    parent
+
+  const animations = new Map<string, BabylonAnimationGroupLike>()
+
+  for (const [name, group] of sourceGroups) {
+    const cloned = group.clone?.(`lunar-city:worker:${name}`, target => nodeMap.get(target) ?? target)
+
+    if (cloned) {
+      animations.set(name, cloned)
+    }
+  }
+
+  return { animations, nodeMap, root }
+}
+
+function deterministicWorkerVariant(key: EntityKey, variants: readonly string[]): string | undefined {
+  if (variants.length === 0) {
+    return undefined
+  }
+
+  let hash = 0
+
+  for (const character of key) {
+    hash = (hash * 31 + character.codePointAt(0)!) >>> 0
+  }
+
+  return variants[hash % variants.length]
+}
+
+function createBabylonEntityFactory(
+  model: ModelManifestEntry,
+  result: BabylonImportResultLike,
+  modules: LunarCityWorldModules,
+  scene: ConstructorParameters<LunarCityWorldModules['TransformNode']>[1]
+): EntityPresentationFactory {
+  const template = findNode(result, `${model.id}:root`)
+  const sourceGroups = workerAnimationGroups(result)
+  const variants = model.instancing?.variants ?? []
+  const candidateMeshes = result.meshes.filter(mesh => mesh.name !== '__root__') as readonly BabylonInstancedMeshLike[]
+  const sourceLodNodes = model.lods.map(lod => findNode(result, lod.node))
+
+  const meshesForLod = (lodIndex: number): readonly BabylonInstancedMeshLike[] => {
+    const lodRoot = sourceLodNodes[lodIndex] ?? sourceLodNodes[0]
+    const matching = lodRoot ? candidateMeshes.filter(mesh => belongsToLeader(mesh, lodRoot)) : []
+
+    return matching.length > 0 ? matching : candidateMeshes
+  }
+
+  if (!template) {
+    throw new Error('Lunar City workers GLB is missing its runtime root')
+  }
+
+  // The imported GLB is a template only. Every observable worker below is a
+  // clone or hardware instance of its genuine low-poly meshes, never a CSS
+  // substitute or a node-name animation.
+  template.setEnabled?.(false)
+
+  return {
+    createAnimated(entity, declaredVariant): EntityVisual {
+      const anchor = new modules.TransformNode(`lunar-city:entity:${entity.key}`, scene)
+      const clone = cloneWorkerHierarchy(template, anchor, sourceGroups, entity.key)
+      const variant = declaredVariant ?? deterministicWorkerVariant(entity.key, variants)
+      anchor.metadata = { ...metadataRecord(anchor.metadata), lunarCityWorkerVariant: variant }
+      clone.root.setEnabled?.(true)
+      let active: BabylonAnimationGroupLike | undefined
+
+      return {
+        dispose() {
+          active?.stop?.()
+          active = undefined
+          clone.root.dispose?.()
+          anchor.dispose?.()
+        },
+        setAnimation(clip) {
+          const next = clone.animations.get(clip)
+
+          if (!next) {
+            return
+          }
+
+          if (active !== next) {
+            active?.stop?.()
+            active = next
+          }
+
+          active.start?.(true)
+        },
+        setLod(lodIndex) {
+          for (const [index, sourceNode] of sourceLodNodes.entries()) {
+            const node = sourceNode ? clone.nodeMap.get(sourceNode) : undefined
+            node?.setEnabled?.(index === lodIndex)
+          }
+        },
+        setPosition(position) {
+          setNodePosition(anchor, position)
+        },
+        setStaticPose() {
+          active?.stop?.()
+          active = undefined
+        }
+      }
+    },
+    createInstancedGroup(groupKey): InstancedEntityGroup {
+      const lodIndex = Number(/:lod:(\d+)$/u.exec(groupKey)?.[1] ?? 0)
+      const sourceMeshes = meshesForLod(lodIndex)
+      const members = new Map<EntityKey, { instances: BabylonNodeLike[]; root: BabylonNodeLike }>()
+
+      const disposeMember = (member: { instances: BabylonNodeLike[]; root: BabylonNodeLike }): void => {
+        for (const instance of member.instances) {
+          instance.dispose?.()
+        }
+
+        member.root.dispose?.()
+      }
+
+      return {
+        dispose() {
+          for (const member of members.values()) {
+            disposeMember(member)
+          }
+
+          members.clear()
+        },
+        sync(nextMembers: readonly InstancedEntityMember[]) {
+          const nextKeys = new Set(nextMembers.map(member => member.key))
+
+          for (const [key, member] of members) {
+            if (!nextKeys.has(key)) {
+              disposeMember(member)
+              members.delete(key)
+            }
+          }
+
+          for (const member of nextMembers) {
+            let visual = members.get(member.key)
+
+            if (!visual) {
+              const root = new modules.TransformNode(`lunar-city:instance:${groupKey}:${member.key}`, scene)
+
+              const instances = sourceMeshes.flatMap(mesh => {
+                const instance = mesh.createInstance?.(`lunar-city:instance-mesh:${member.key}:${mesh.name}`)
+
+                if (instance) {
+                  instance.parent = root
+
+                  return [instance]
+                }
+
+                return []
+              })
+
+              visual = { instances, root }
+              members.set(member.key, visual)
+            }
+
+            setNodePosition(visual.root, member.position)
+          }
+        }
+      }
+    }
+  }
+}
+
 function intersectsBounds(start: Vec3, end: Vec3, bounds: WorldBounds): boolean {
   let minimum = 0
   let maximum = 1
@@ -516,9 +839,11 @@ export async function createWorldScene(
 
     const leaderStateClips = new Map<string, LeaderStateClipMap>()
     const camera = scene.activeCamera as CameraLike
-    const focusAnchors = new Map<EntityKey, () => Vec3>()
+    const focusAnchors = new Map<EntityKey, () => Vec3 | undefined>()
     const focusMetadata = new Map<EntityKey, FocusMetadata>()
     const occlusionCandidates: OcclusionCandidate[] = []
+    const staticLods: Array<{ focus: FocusMetadata; lods: readonly LodEntry[] }> = []
+    let workerAsset: { model: ModelManifestEntry; result: BabylonImportResultLike } | undefined
 
     const cameraController: CameraController = createCameraController(camera, overview, manifest.camera.bounds, {
       focusAnchors,
@@ -528,10 +853,12 @@ export async function createWorldScene(
     for (const model of manifest.models) {
       const materialStart = scene.materials?.length ?? 0
       const result = await modules.ImportMeshAsync(resolveAssetUrl(model.uri), scene)
-      const focus = placeModel(result, model, modules, scene)
+      const placed = placeModel(result, model, modules, scene)
+      const focus = placed.focus
 
       focusAnchors.set(focus.focusEntityKey, () => focus.cameraAnchor)
       focusMetadata.set(focus.focusEntityKey, focus)
+      staticLods.push({ focus, lods: placed.lods })
       occlusionCandidates.push(...buildOcclusionCandidates(result, model))
 
       if (model.id === 'leaders') {
@@ -544,12 +871,36 @@ export async function createWorldScene(
         }
       }
 
+      if (model.id === 'workers') {
+        workerAsset = { model, result }
+      }
+
       freezeStaticResources(result, scene.materials?.slice(materialStart) ?? [], model)
     }
 
     const occlusion = createOcclusionController(occlusionCandidates)
-    let animationFrame: number | undefined
-    let previousAnimationTime: number | undefined
+    const quality = createQualityController('efficient')
+
+    if (!workerAsset) {
+      throw new Error('Lunar City manifest has no workers model')
+    }
+
+    const workerClipNames = new Set(workerAnimationGroups(workerAsset.result).keys())
+
+    const entityRegistry = createEntityRegistry({
+      factory: createBabylonEntityFactory(workerAsset.model, workerAsset.result, modules, scene),
+      focusAnchors,
+      workerClips: workerClipNames
+    })
+
+    const navigation = createNavigationController({
+      destinations: manifest.destinations,
+      query: createManifestNavigationQuery(manifest.navigation),
+      workerClips: workerClipNames
+    })
+
+    const destinationByEntity = new Map<EntityKey, string>()
+    const activeNavigation = new Set<EntityKey>()
 
     const applyOcclusion = (): void => {
       const focusedEntityKey = cameraController.getState().focusedEntityKey
@@ -558,36 +909,115 @@ export async function createWorldScene(
       occlusion.update({ position: cameraPosition(camera) }, selection)
     }
 
-    const scheduleCameraTransition = (): void => {
-      if (
-        animationFrame !== undefined ||
-        !cameraController.isTransitioning() ||
-        typeof requestAnimationFrame === 'undefined'
-      ) {
-        return
-      }
+    const scheduler = createFrameScheduler({
+      onFrame(frame) {
+        const previousCameraState = cameraController.getState()
+        cameraController.update(frame.elapsedMs)
+        const cameraState = cameraController.getState()
 
-      animationFrame = requestAnimationFrame(now => {
-        animationFrame = undefined
-        const elapsedMs = previousAnimationTime === undefined ? 16 : now - previousAnimationTime
-        previousAnimationTime = now
-        cameraController.update(elapsedMs)
-        applyOcclusion()
-
-        if (!disposed) {
-          scene.render()
+        if (
+          previousCameraState.focusedEntityKey !== cameraState.focusedEntityKey ||
+          previousCameraState.following !== cameraState.following
+        ) {
+          entityRegistry.setSelection(cameraState.focusedEntityKey)
+          emit({ kind: 'camera-state', state: cameraState })
         }
 
-        scheduleCameraTransition()
-      })
-    }
+        const settings = quality.settings()
+        const currentCameraPosition = cameraPosition(camera)
+
+        navigation.tick(frame.elapsedMs)
+        entityRegistry.syncMotion()
+
+        for (const key of [...activeNavigation]) {
+          if (!navigation.isMoving(key)) {
+            activeNavigation.delete(key)
+            entityRegistry.setMoving(key, false)
+          }
+        }
+
+        for (const staticModel of staticLods) {
+          applyLodSelection(staticModel.lods, {
+            distance: Math.hypot(
+              currentCameraPosition.x - staticModel.focus.cameraAnchor.x,
+              currentCameraPosition.y - staticModel.focus.cameraAnchor.y,
+              currentCameraPosition.z - staticModel.focus.cameraAnchor.z
+            ),
+            lodAdvance: settings.lodAdvance,
+            selected: cameraState.focusedEntityKey === staticModel.focus.focusEntityKey
+          })
+        }
+
+        entityRegistry.applyLodPolicy((_key, position, isSelected) =>
+          selectLodIndex(workerAsset.model.lods, {
+            distance: Math.hypot(
+              currentCameraPosition.x - position.x,
+              currentCameraPosition.y - position.y,
+              currentCameraPosition.z - position.z
+            ),
+            lodAdvance: settings.lodAdvance,
+            selected: isSelected
+          })
+        )
+
+        applyOcclusion()
+        const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
+        scene.render()
+        const finishedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
+
+        if (
+          quality.noteFrame({ elapsedMs: Math.max(0, finishedAt - startedAt), interactive: frame.targetFps === 30 })
+        ) {
+          applyQualitySettings(engine, quality.settings())
+        }
+
+        return cameraController.isTransitioning()
+      },
+      renderer: engine
+    })
+
+    scheduler.bindRendererPauseState()
 
     await scene.whenReadyAsync()
 
     return {
       leaderStateClips,
       applySnapshot(snapshot) {
-        void snapshot
+        if (!disposed) {
+          const dynamicEntities = new Map(
+            [...snapshot.entities].filter(([, entity]) => entity.identity.kind !== 'profile')
+          )
+
+          entityRegistry.reconcile({ ...snapshot, entities: dynamicEntities })
+
+          for (const [key, entity] of dynamicEntities) {
+            const previousDestination = destinationByEntity.get(key)
+            destinationByEntity.set(key, entity.destination)
+
+            if (previousDestination === entity.destination) {
+              continue
+            }
+
+            const presentation = entityRegistry.navigationEntity(key)
+
+            if (presentation && navigation.move(presentation, entity.destination)) {
+              activeNavigation.add(key)
+              entityRegistry.setMoving(key, true)
+            } else {
+              activeNavigation.delete(key)
+              entityRegistry.setMoving(key, false)
+            }
+          }
+
+          for (const key of destinationByEntity.keys()) {
+            if (!dynamicEntities.has(key)) {
+              destinationByEntity.delete(key)
+              activeNavigation.delete(key)
+            }
+          }
+
+          scheduler.requestRender()
+        }
       },
       dispatchCamera(intent) {
         if (disposed) {
@@ -595,11 +1025,10 @@ export async function createWorldScene(
         }
 
         cameraController.dispatch(intent)
-        previousAnimationTime = undefined
-        applyOcclusion()
-        emit({ kind: 'camera-state', state: cameraController.getState() })
-        scene.render()
-        scheduleCameraTransition()
+        const cameraState = cameraController.getState()
+        entityRegistry.setSelection(cameraState.focusedEntityKey)
+        emit({ kind: 'camera-state', state: cameraState })
+        scheduler.noteInteraction(typeof performance === 'undefined' ? Date.now() : performance.now())
       },
       getCameraState() {
         return cameraController.getState()
@@ -616,11 +1045,17 @@ export async function createWorldScene(
         return target
       },
       setQuality(tier) {
-        void tier
+        quality.setTier(tier)
+        applyQualitySettings(engine, quality.settings())
+        scheduler.requestRender()
+      },
+      setVisible(visible) {
+        scheduler.setVisible(visible)
       },
       render() {
         if (!disposed) {
-          scene.render()
+          scheduler.requestRender()
+          scheduler.tick(typeof performance === 'undefined' ? Date.now() : performance.now())
         }
       },
       dispose() {
@@ -630,11 +1065,9 @@ export async function createWorldScene(
 
         disposed = true
 
-        if (animationFrame !== undefined && typeof cancelAnimationFrame !== 'undefined') {
-          cancelAnimationFrame(animationFrame)
-        }
-
-        animationFrame = undefined
+        scheduler.dispose()
+        navigation.dispose()
+        entityRegistry.dispose()
         occlusion.clear()
         scene.dispose()
       }

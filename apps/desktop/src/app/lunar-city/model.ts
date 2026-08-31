@@ -151,7 +151,11 @@ export interface LunarEntity {
   authority: AuthorityState
   destination: DestinationId
   animation: string
+  /** Presentation position only; it never represents work progress. */
+  position?: Vec3
   projectId?: string
+  /** Declared worker colour/accessory variant, never a display-name identity. */
+  variant?: string
 }
 
 export interface LunarCitySnapshot {
@@ -252,6 +256,10 @@ export interface BabylonNodeLike {
   position?: BabylonMutableVectorLike
   rotation?: BabylonMutableVectorLike
   scaling?: BabylonMutableVectorLike
+  clone?(name: string, parent?: BabylonNodeLike | null, doNotCloneChildren?: boolean): BabylonNodeLike | null
+  dispose?(): void
+  isEnabled?(): boolean
+  setEnabled?(enabled: boolean): void
   setPivotPoint?(point: BabylonVector3Like): void
 }
 
@@ -271,6 +279,8 @@ export interface BabylonMaterialLike {
 export interface BabylonEngineLike {
   dispose(): void
   resize(): void
+  setHardwareScalingLevel?(level: number): void
+  stopRenderLoop?(): void
 }
 
 export interface BabylonSceneLike {

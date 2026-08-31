@@ -141,6 +141,22 @@ describe('createCameraController', () => {
 
     expect(controller.getState()).toEqual({ focusedEntityKey: undefined, following: false })
   })
+
+  it('truthfully rejects missing or stale dynamic focus anchors instead of following an unrelated position', () => {
+    const workerKey = key('session:local:worker:session-1')
+    const anchors = new Map<EntityKey, () => Vec3 | undefined>([[workerKey, () => undefined]])
+    const controller = createCameraController(fakeCamera(), overview, bounds, { focusAnchors: anchors })
+
+    controller.dispatch({ kind: 'focus', entityKey: workerKey, follow: true })
+    expect(controller.getState()).toEqual({ focusedEntityKey: undefined, following: false })
+
+    anchors.set(workerKey, () => ({ x: 4, y: 0, z: 2 }))
+    controller.dispatch({ kind: 'focus', entityKey: workerKey, follow: true })
+    anchors.delete(workerKey)
+    controller.update(16)
+
+    expect(controller.getState()).toEqual({ focusedEntityKey: undefined, following: false })
+  })
 })
 
 describe('bindCameraInput', () => {

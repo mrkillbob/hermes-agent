@@ -62,6 +62,8 @@ export async function createLunarCityWorld(
   let observer: ResizeObserver | undefined
   let resizeListener: (() => void) | undefined
   let releaseCameraInput: (() => void) | undefined
+  let contextLostListener: ((event: Event) => void) | undefined
+  let contextRestoredListener: (() => void) | undefined
   let destroyed = false
 
   try {
@@ -74,6 +76,15 @@ export async function createLunarCityWorld(
         return world?.pick(clientX, clientY)
       }
     })
+
+    contextLostListener = event => {
+      event.preventDefault()
+      world?.setVisible(false)
+    }
+
+    contextRestoredListener = () => world?.setVisible(true)
+    canvas.addEventListener('webglcontextlost', contextLostListener)
+    canvas.addEventListener('webglcontextrestored', contextRestoredListener)
 
     const resize = () => {
       if (destroyed) {
@@ -120,6 +131,15 @@ export async function createLunarCityWorld(
         }
 
         releaseCameraInput?.()
+
+        if (contextLostListener) {
+          canvas.removeEventListener('webglcontextlost', contextLostListener)
+        }
+
+        if (contextRestoredListener) {
+          canvas.removeEventListener('webglcontextrestored', contextRestoredListener)
+        }
+
         observer?.disconnect()
         world?.dispose()
         engine.dispose()
@@ -127,6 +147,8 @@ export async function createLunarCityWorld(
         observer = undefined
         resizeListener = undefined
         releaseCameraInput = undefined
+        contextLostListener = undefined
+        contextRestoredListener = undefined
       }
     }
 
@@ -139,6 +161,15 @@ export async function createLunarCityWorld(
     }
 
     releaseCameraInput?.()
+
+    if (contextLostListener) {
+      canvas.removeEventListener('webglcontextlost', contextLostListener)
+    }
+
+    if (contextRestoredListener) {
+      canvas.removeEventListener('webglcontextrestored', contextRestoredListener)
+    }
+
     observer?.disconnect()
     world?.dispose()
     engine.dispose()

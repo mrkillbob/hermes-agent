@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ModelManifestEntry, Vec3, WorldBounds } from '../model'
+import type { ModelManifestEntry, NavigationManifest, Vec3, WorldBounds } from '../model'
 
-import { transformManifestPoint, worldBoundsFromModel } from './world-scene'
+import { createManifestNavigationQuery, transformManifestPoint, worldBoundsFromModel } from './world-scene'
 
 const model = {
   transform: {
@@ -41,5 +41,28 @@ describe('manifest world transforms', () => {
       min: { x: 1.5535336136817932, y: -12.51904046535492, z: 1.6066522002220154 },
       max: { x: 19.773607850074768, y: 5.084729433059692, z: 20.330265641212463 }
     })
+  })
+})
+
+describe('manifest navigation query', () => {
+  const navigation: NavigationManifest = {
+    areas: ['walkable'],
+    links: [
+      { bidirectional: true, from: { x: 0, y: 0, z: 0 }, to: { x: 2, y: 0, z: 0 } },
+      { bidirectional: false, from: { x: 2, y: 0, z: 0 }, to: { x: 4, y: 0, z: 0 } }
+    ],
+    meshUri: 'models/navigation.glb'
+  }
+
+  it('uses only declared navigation links and never invents a direct route through city geometry', () => {
+    const query = createManifestNavigationQuery(navigation)
+
+    expect(query.computePath({ x: 0, y: 0, z: 0 }, { x: 4, y: 0, z: 0 })).toEqual([
+      { x: 0, y: 0, z: 0 },
+      { x: 2, y: 0, z: 0 },
+      { x: 4, y: 0, z: 0 }
+    ])
+    expect(query.computePath({ x: 4, y: 0, z: 0 }, { x: 0, y: 0, z: 0 })).toBeUndefined()
+    expect(query.computePath({ x: 1, y: 0, z: 0 }, { x: 4, y: 0, z: 0 })).toBeUndefined()
   })
 })

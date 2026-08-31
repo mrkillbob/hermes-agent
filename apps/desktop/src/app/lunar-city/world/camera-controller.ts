@@ -20,7 +20,7 @@ export interface CameraPose {
 }
 
 export interface CameraControllerOptions {
-  focusAnchors?: ReadonlyMap<EntityKey, () => Vec3>
+  focusAnchors?: ReadonlyMap<EntityKey, () => Vec3 | undefined>
   followOffset?: Vec3
   transitionMs?: number
 }
@@ -139,7 +139,7 @@ export function createCameraController(
   options: CameraControllerOptions = {}
 ): CameraController {
   camera.inertia = 0
-  const focusAnchors = options.focusAnchors ?? new Map<EntityKey, () => Vec3>()
+  const focusAnchors = options.focusAnchors ?? new Map<EntityKey, () => Vec3 | undefined>()
   const followOffset = options.followOffset
   const transitionMs = options.transitionMs ?? DEFAULT_TRANSITION_MS
   let focusedEntityKey: EntityKey | undefined
@@ -169,6 +169,13 @@ export function createCameraController(
         : { ...from, target: clampTarget(anchor, bounds) }
 
     transition = { elapsedMs: 0, from, to }
+  }
+
+  const clearFocus = (): void => {
+    focusedEntityKey = undefined
+    following = false
+    transition = undefined
+    lastFollowAnchor = undefined
   }
 
   return {
@@ -205,30 +212,27 @@ export function createCameraController(
       if (intent.kind === 'focus') {
         const anchor = focusAnchors.get(intent.entityKey)?.()
 
+        if (!anchor) {
+          clearFocus()
+
+          return
+        }
+
         focusedEntityKey = intent.entityKey
         following = intent.follow
-
-        if (anchor) {
-          startFocusTransition(anchor, following)
-          lastFollowAnchor = { ...anchor }
-        }
+        startFocusTransition(anchor, following)
+        lastFollowAnchor = { ...anchor }
 
         return
       }
 
       if (intent.kind === 'clear-focus') {
-        focusedEntityKey = undefined
-        following = false
-        transition = undefined
-        lastFollowAnchor = undefined
+        clearFocus()
 
         return
       }
 
-      focusedEntityKey = undefined
-      following = false
-      transition = undefined
-      lastFollowAnchor = undefined
+      clearFocus()
       writePose(camera, poseFromLandmark(overview))
     },
     getState() {
@@ -241,7 +245,13 @@ export function createCameraController(
       if (following && focusedEntityKey) {
         const anchor = focusAnchors.get(focusedEntityKey)?.()
 
-        if (anchor && !sameVector(lastFollowAnchor, anchor)) {
+        if (!anchor) {
+          clearFocus()
+
+          return
+        }
+
+        if (!sameVector(lastFollowAnchor, anchor)) {
           startFocusTransition(anchor, true)
           lastFollowAnchor = { ...anchor }
         }
