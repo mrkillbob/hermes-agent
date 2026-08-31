@@ -12,7 +12,7 @@ describe('LunarCity', () => {
 
     expect(screen.getByRole('heading', { name: 'Lunar City' })).toBeTruthy()
     expect(screen.getByAltText(/isometric lunar settlement/i).getAttribute('src')).toBe(
-      './lunar-city/moon-settlement-board.png'
+      './lunar-city/moon-settlement-approved.jpg'
     )
     expect(screen.getByRole('button', { name: /Open Research Lab/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Inspect Fox Scientist' }).getAttribute('data-character-kind')).toBe(
