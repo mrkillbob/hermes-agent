@@ -588,6 +588,11 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   const profileLeaderEntitiesRef = useRef(profileLeaderEntities)
   const selectedLeaderOwnerRef = useRef(selectedLeaderOwner)
   const leaderSessionRef = useRef(leaderSession)
+
+  const leaderPerfScenarioRef = useRef<
+    ((text: string) => Promise<{ opened: number; received: number; sent: number }>) | undefined
+  >(undefined)
+
   const insideRef = useRef(inside)
   const openLeaderRef = useRef<(entity: LunarEntity) => void>(() => undefined)
   const stopReconcilerRef = useRef<(() => void) | undefined>(undefined)
@@ -958,22 +963,15 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
                 await new Promise(resolve => setTimeout(resolve, 10))
               }
 
-              const observed = { opened: 1, received: 0, sent: 0 }
+              while (!leaderPerfScenarioRef.current) {
+                if (Date.now() >= deadline) {
+                  throw new Error(`Leader ${leaderId} dialogue runtime did not become ready`)
+                }
 
-              const onSent = (): void => {
-                observed.sent += 1
+                await new Promise(resolve => setTimeout(resolve, 10))
               }
 
-              const onReceived = (): void => {
-                observed.received += 1
-              }
-
-              canvas.addEventListener('lunar-city-perf-fake-voice-sent', onSent, { once: true })
-              canvas.addEventListener('lunar-city-perf-fake-voice-received', onReceived, { once: true })
-              canvas.dispatchEvent(new CustomEvent('lunar-city-perf-fake-voice-sent'))
-              canvas.dispatchEvent(new CustomEvent('lunar-city-perf-fake-voice-received'))
-
-              return observed
+              return leaderPerfScenarioRef.current('Lunar City packaged fake-backend voice acceptance turn.')
             },
             routeMountKey: 'lunar-city-route',
             setInterior: value => setInside(value),
@@ -1472,6 +1470,9 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
                 onClose={closeLeaderDialogue}
                 onLeaderStateChange={onLeaderStateChange}
                 onOpenFullChat={openSelectedLeaderFullChat}
+                onPerfScenarioReady={run => {
+                  leaderPerfScenarioRef.current = run
+                }}
                 owner={selectedLeaderOwner}
                 session={leaderSession}
                 voiceAvailable={voiceAvailable}

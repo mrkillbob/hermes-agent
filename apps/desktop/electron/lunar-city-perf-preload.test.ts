@@ -41,12 +41,50 @@ function fakeIpc(bootstrap: unknown) {
   }
 }
 
+function fakeRuntimePort() {
+  const posted: unknown[] = []
+
+  const port = {
+    closed: false,
+    close: () => {
+      port.closed = true
+    },
+    emit: (data: unknown) => port.onmessage?.({ data }),
+    onmessage: null as ((event: { data: unknown }) => void) | null,
+    postMessage: (value: unknown) => posted.push(value),
+    posted,
+    start: () => undefined
+  }
+
+  return port
+}
+
 test('preload bridge is wholly absent when main does not authorize launch', () => {
-  assert.equal(createLunarCityPerfPreload(fakeIpc(undefined)), undefined)
+  const port = fakeRuntimePort()
+  assert.equal(createLunarCityPerfPreload(fakeIpc(undefined), port), undefined)
+})
+
+test('claims the isolated responder before readiness and exposes no public registration capability', async () => {
+  const ipc = fakeIpc(handshake)
+  const port = fakeRuntimePort()
+  const bridge = createLunarCityPerfPreload(ipc, port)!
+  let becameReady = false
+  void bridge.ready.then(() => {
+    becameReady = true
+  })
+
+  assert.equal('renderer' in bridge, false)
+  assert.equal('onRequest' in bridge.surface, false)
+  assert.equal(becameReady, false)
+  assert.equal(ipc.listeners.has('hermes:lunar-city-perf:request'), true)
+
+  port.emit({ type: 'ready' })
+  await bridge.ready
+  assert.equal(becameReady, true)
 })
 
 test('handshake rejects the wrong nonce or bridge version and returns an immutable copy', () => {
-  const bridge = createLunarCityPerfPreload(fakeIpc(handshake))!
+  const bridge = createLunarCityPerfPreload(fakeIpc(handshake), fakeRuntimePort())!
 
   assert.equal(bridge.surface.handshake({ bridgeVersion: 1, launchNonce: 'wrong' }), null)
   assert.equal(bridge.surface.handshake({ bridgeVersion: 2, launchNonce: 'nonce-0123456789abcdef-unique' }), null)
@@ -58,7 +96,7 @@ test('handshake rejects the wrong nonce or bridge version and returns an immutab
 })
 
 test('all capabilities stay blocked until the exact one-shot handshake succeeds', async () => {
-  const bridge = createLunarCityPerfPreload(fakeIpc(handshake))!
+  const bridge = createLunarCityPerfPreload(fakeIpc(handshake), fakeRuntimePort())!
 
   assert.throws(() => bridge.surface.snapshot(), /handshake/u)
   assert.throws(() => bridge.surface.processMetrics(), /handshake/u)
@@ -68,7 +106,7 @@ test('all capabilities stay blocked until the exact one-shot handshake succeeds'
 })
 
 test('surface exposes only bounded read and scenario operations', async () => {
-  const bridge = createLunarCityPerfPreload(fakeIpc(handshake))!
+  const bridge = createLunarCityPerfPreload(fakeIpc(handshake), fakeRuntimePort())!
   assert.ok(bridge.surface.handshake({ bridgeVersion: 1, launchNonce: handshake.launchNonce }))
 
   assert.deepEqual(await bridge.surface.processMetrics(), {
@@ -93,11 +131,12 @@ test('surface exposes only bounded read and scenario operations', async () => {
   })
 })
 
-test('renderer endpoint replies to bound requests and removes its listener on teardown', async () => {
+test('isolated runtime port replies once with the original bound request identity', async () => {
   const ipc = fakeIpc(handshake)
-  const bridge = createLunarCityPerfPreload(ipc)!
-  const release = bridge.renderer.onRequest(async (action, payload) => ({ action, payload, proof: 1 }))
-  assert.throws(() => bridge.renderer.onRequest(async () => undefined), /already registered/u)
+  const port = fakeRuntimePort()
+  const bridge = createLunarCityPerfPreload(ipc, port)!
+  port.emit({ type: 'ready' })
+  await bridge.ready
   assert.ok(bridge.surface.handshake({ bridgeVersion: 1, launchNonce: handshake.launchNonce }))
   const listener = ipc.listeners.get('hermes:lunar-city-perf:request')!
 
@@ -113,7 +152,15 @@ test('renderer endpoint replies to bound requests and removes its listener on te
     senderId: 7
   }
 
-  await listener({}, { action: 'snapshot', identity, payload: { exact: true }, requestId: '7:82:1:1' })
+  listener({}, { action: 'snapshot', identity, payload: { exact: true }, requestId: '7:82:1:1' })
+  assert.deepEqual(port.posted, [
+    { action: 'snapshot', payload: { exact: true }, requestId: '7:82:1:1', type: 'request' }
+  ])
+  port.emit({
+    requestId: '7:82:1:1',
+    type: 'response',
+    value: { action: 'snapshot', payload: { exact: true }, proof: 1 }
+  })
   assert.deepEqual(ipc.sent, [
     {
       channel: 'hermes:lunar-city-perf:response',
@@ -135,6 +182,6 @@ test('renderer endpoint replies to bound requests and removes its listener on te
     }
   ])
 
-  release()
-  assert.equal(ipc.listeners.has('hermes:lunar-city-perf:request'), false)
+  port.emit({ requestId: '7:82:1:1', type: 'response', value: { forged: true } })
+  assert.equal(ipc.sent.length, 1)
 })

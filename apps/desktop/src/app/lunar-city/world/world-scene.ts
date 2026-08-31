@@ -1413,7 +1413,7 @@ export async function createWorldScene(
   resolveAssetUrl: (uri: string) => string
 ): Promise<LunarCitySceneHandle> {
   const scene = new modules.Scene(engine)
-  const capturePerf = typeof window !== 'undefined' && window.hermesDesktop?.lunarCityPerf !== undefined
+  const capturePerf = typeof window !== 'undefined' && window.__LUNAR_CITY_PERF__ !== undefined
 
   const perfAdapter = createBabylonPerfAdapter(
     scene,

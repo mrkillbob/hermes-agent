@@ -109,6 +109,53 @@ afterEach(() => {
 })
 
 describe('LeaderDialogueRuntime', () => {
+  it('reports perf dialogue proof only after real submit acceptance and a new authoritative assistant message', async () => {
+    let runScenario: ((text: string) => Promise<{ opened: number; received: number; sent: number }>) | undefined
+    $sessionStates.set({ 'runtime-owl': sessionState() })
+
+    render(
+      <LeaderDialogueRuntime
+        clips={clips}
+        leaderLabel="owl leader"
+        onClose={vi.fn()}
+        onLeaderStateChange={vi.fn()}
+        onOpenFullChat={vi.fn()}
+        onPerfScenarioReady={run => {
+          runScenario = run
+        }}
+        owner={{ connectionId: 'source-a', profile: 'owl' }}
+        session={{ runtimeId: 'runtime-owl', storedId: 'stored-owl' }}
+        voiceAvailable={false}
+      />
+    )
+
+    await waitFor(() => expect(runScenario).toBeTypeOf('function'))
+    const pending = runScenario!('Acceptance fake voice turn')
+
+    await waitFor(() =>
+      expect(requestForSessionProfile).toHaveBeenCalledWith(
+        { connectionId: 'source-a', profile: 'owl' },
+        expect.any(Function),
+        'prompt.submit',
+        { session_id: 'runtime-owl', text: 'Acceptance fake voice turn' }
+      )
+    )
+    $sessionStates.set({
+      'runtime-owl': sessionState({
+        messages: [
+          {
+            hidden: false,
+            id: 'assistant-new',
+            parts: [{ text: 'Authoritative fixture reply', type: 'text' }],
+            role: 'assistant'
+          }
+        ] as never
+      })
+    })
+
+    await expect(pending).resolves.toEqual({ opened: 1, received: 1, sent: 1 })
+  })
+
   it('submits and interrupts only through the exact profile owner while projecting observed session state', async () => {
     const onLeaderStateChange = vi.fn()
     $sessionStates.set({ 'runtime-owl': sessionState() })

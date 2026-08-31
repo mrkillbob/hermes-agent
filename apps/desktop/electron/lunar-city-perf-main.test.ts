@@ -170,7 +170,7 @@ describe('chromium-memory-infra-v1 GPU parser', () => {
     )
   })
 
-  test('rejects multi-process, duplicate, and out-of-order GPU dump attribution', () => {
+  test('rejects multi-process and out-of-order GPU dump attribution', () => {
     const gpuEvent = (id: string, pid: number, ts: number) => ({
       args: { dumps: { allocators: { 'gpu/gl': { attrs: { effective_size: { units: 'bytes', value: '100000' } } } } } },
       cat: 'disabled-by-default-memory-infra',
@@ -182,7 +182,6 @@ describe('chromium-memory-infra-v1 GPU parser', () => {
 
     for (const traceEvents of [
       [gpuEvent('a', 82, 100), gpuEvent('b', 83, 110)],
-      [gpuEvent('a', 82, 100), gpuEvent('a', 82, 100)],
       [gpuEvent('a', 82, 110), gpuEvent('b', 82, 100)]
     ]) {
       assert.deepEqual(parseChromiumMemoryInfraGpuAllocation({ traceEvents }), {
@@ -190,6 +189,67 @@ describe('chromium-memory-infra-v1 GPU parser', () => {
         gpuMemorySource: 'unavailable'
       })
     }
+  })
+
+  test('coalesces one dump across timestamped fragments and de-duplicates exact allocator repeats', () => {
+    const allocator = { attrs: { effective_size: { units: 'bytes', value: '200000' } } }
+
+    assert.deepEqual(
+      parseChromiumMemoryInfraGpuAllocation({
+        traceEvents: [
+          {
+            args: { dumps: { allocators: { 'gpu/gl': allocator } } },
+            cat: 'disabled-by-default-memory-infra',
+            id: 'dump-1',
+            ph: 'v',
+            pid: 82,
+            ts: 100
+          },
+          {
+            args: { dumps: { allocators: { 'gpu/gl': structuredClone(allocator) } } },
+            cat: 'disabled-by-default-memory-infra',
+            id: 'dump-1',
+            ph: 'v',
+            pid: 82,
+            ts: 101
+          },
+          {
+            args: {
+              dumps: {
+                allocators: {
+                  'gpu/gl/textures': { attrs: { effective_size: { units: 'bytes', value: '100000' } } }
+                }
+              }
+            },
+            cat: 'disabled-by-default-memory-infra',
+            id: 'dump-1',
+            ph: 'v',
+            pid: 82,
+            ts: 102
+          }
+        ]
+      }),
+      { gpuMemoryMiB: 2, gpuMemorySource: 'chromium-memory-infra-v1' }
+    )
+  })
+
+  test('rejects conflicting allocator fragments for the same dump identity', () => {
+    const event = (value: string, ts: number) => ({
+      args: { dumps: { allocators: { 'gpu/gl': { attrs: { effective_size: { units: 'bytes', value } } } } } },
+      cat: 'disabled-by-default-memory-infra',
+      id: 'dump-1',
+      ph: 'v',
+      pid: 82,
+      ts
+    })
+
+    assert.deepEqual(
+      parseChromiumMemoryInfraGpuAllocation({ traceEvents: [event('100000', 100), event('200000', 101)] }),
+      {
+        gpuMemoryMiB: null,
+        gpuMemorySource: 'unavailable'
+      }
+    )
   })
 })
 

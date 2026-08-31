@@ -1,4 +1,5 @@
 import type { CameraControlState, CameraIntent, EntityKey, LeaderId, LunarCitySnapshot, QualityTier } from './model'
+import { lunarCityPerfRuntimeEndpoint } from './perf-runtime-channel'
 
 export interface LunarCityWorldPerfMetrics {
   activeAnimations: number
@@ -361,6 +362,7 @@ export function createLunarCityPerfRuntime(
         const beforeGeneration = registration.getWorldGeneration()
         let lost = false
         let restored = false
+        let restoreAttempted = false
 
         const onLost = (): void => {
           lost = true
@@ -372,20 +374,35 @@ export function createLunarCityPerfRuntime(
 
         registration.canvas.addEventListener('webglcontextlost', onLost, { once: true })
         registration.canvas.addEventListener('webglcontextrestored', onRestored, { once: true })
-        extension.loseContext()
-        await waitFor(() => lost, 'WEBGL context loss event')
-        counters.lifecycleActions.contextLosses += 1
-        lifecycleState = 'contextLost'
-        extension.restoreContext()
-        await waitFor(() => restored, 'WEBGL context restore event')
-        await waitFor(
-          () => (route?.registration.getWorldGeneration() ?? 0) > beforeGeneration,
-          'restored world generation'
-        )
-        counters.lifecycleActions.recoveries += 1
-        lifecycleState = 'recovered'
 
-        return { action: request.action, proof: counters.lifecycleActions.recoveries }
+        try {
+          extension.loseContext()
+          await waitFor(() => lost, 'WEBGL context loss event')
+          counters.lifecycleActions.contextLosses += 1
+          lifecycleState = 'contextLost'
+          restoreAttempted = true
+          extension.restoreContext()
+          await waitFor(() => restored, 'WEBGL context restore event')
+          await waitFor(
+            () => (route?.registration.getWorldGeneration() ?? 0) > beforeGeneration,
+            'restored world generation'
+          )
+          counters.lifecycleActions.recoveries += 1
+          lifecycleState = 'recovered'
+
+          return { action: request.action, proof: counters.lifecycleActions.recoveries }
+        } finally {
+          if (!restoreAttempted) {
+            try {
+              extension.restoreContext()
+            } catch {
+              // Best-effort bounded recovery after a loss-event timeout.
+            }
+          }
+
+          registration.canvas.removeEventListener('webglcontextlost', onLost)
+          registration.canvas.removeEventListener('webglcontextrestored', onRestored)
+        }
       }
 
       case 'dispose':
@@ -475,5 +492,7 @@ export function createLunarCityPerfRuntime(
 }
 
 export const lunarCityPerfRuntime = createLunarCityPerfRuntime(
-  typeof window === 'undefined' ? undefined : window.hermesDesktop?.lunarCityPerf
+  typeof window === 'undefined' || window.__LUNAR_CITY_PERF_AUTHORIZED__ !== true
+    ? undefined
+    : lunarCityPerfRuntimeEndpoint
 )

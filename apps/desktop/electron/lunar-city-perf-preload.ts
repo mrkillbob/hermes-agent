@@ -6,6 +6,13 @@ interface IpcRendererLike {
   sendSync(channel: string, ...values: unknown[]): unknown
 }
 
+export interface LunarCityPerfRuntimePort {
+  close?(): void
+  onmessage: ((event: { data: unknown }) => void) | null
+  postMessage(value: unknown): void
+  start?(): void
+}
+
 export interface LunarCityPerfHandshake {
   bridgeVersion: 1
   buildSha: string
@@ -59,19 +66,31 @@ function isHandshake(value: unknown): value is LunarCityPerfHandshake {
 
 const copyHandshake = (handshake: LunarCityPerfHandshake): LunarCityPerfHandshake => structuredClone(handshake)
 
-export function createLunarCityPerfPreload(ipcRenderer: IpcRendererLike) {
+export function createLunarCityPerfPreload(ipcRenderer: IpcRendererLike, runtimePort: LunarCityPerfRuntimePort) {
   const handshake = ipcRenderer.sendSync('hermes:lunar-city-perf:bootstrap')
 
   if (!isHandshake(handshake)) {
     return undefined
   }
 
+  if (ipcRenderer.sendSync('hermes:lunar-city-perf:register-responder', handshake) !== true) {
+    runtimePort.close?.()
+
+    return undefined
+  }
+
   let activated = false
-  let responderClaimed = false
-  let responder: ((action: string, payload: unknown) => Promise<unknown> | unknown) | undefined
+  let runtimeReady = false
+  let resolveReady: (() => void) | undefined
+
+  const ready = new Promise<void>(resolve => {
+    resolveReady = resolve
+  })
+
+  const pending = new Map<string, { action: string; identity: Record<string, unknown>; requestId: string }>()
 
   const listener = async (_event: unknown, request: unknown): Promise<void> => {
-    if (!activated || !responder || !request || typeof request !== 'object' || Array.isArray(request)) {
+    if (!activated || !runtimeReady || !request || typeof request !== 'object' || Array.isArray(request)) {
       return
     }
 
@@ -101,70 +120,94 @@ export function createLunarCityPerfPreload(ipcRenderer: IpcRendererLike) {
       return
     }
 
-    try {
-      const result = await responder(value.action, value.payload)
-      let responseValue = result
+    if (pending.has(value.requestId)) {
+      return
+    }
 
-      if (value.action === 'snapshot') {
-        if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    pending.set(value.requestId, { action: value.action, identity, requestId: value.requestId })
+    runtimePort.postMessage({
+      action: value.action,
+      payload: value.payload,
+      requestId: value.requestId,
+      type: 'request'
+    })
+  }
+
+  runtimePort.onmessage = event => {
+    const message = event.data
+
+    if (!message || typeof message !== 'object' || Array.isArray(message)) {
+      return
+    }
+
+    const value = message as { requestId?: unknown; type?: unknown; value?: unknown }
+
+    if (value.type === 'ready' && !runtimeReady) {
+      runtimeReady = true
+      resolveReady?.()
+      resolveReady = undefined
+
+      return
+    }
+
+    if (value.type !== 'response' || typeof value.requestId !== 'string') {
+      return
+    }
+
+    const request = pending.get(value.requestId)
+
+    if (!request) {
+      return
+    }
+
+    pending.delete(value.requestId)
+    let responseValue = value.value
+
+    try {
+      if (request.action === 'snapshot') {
+        if (!responseValue || typeof responseValue !== 'object' || Array.isArray(responseValue)) {
           throw new Error('Lunar City performance snapshot response is malformed')
         }
 
-        const metrics = result as Record<string, unknown>
+        const metrics = responseValue as Record<string, unknown>
 
         if (
-          (metrics.rendererPid !== undefined && metrics.rendererPid !== identity.rendererPid) ||
-          (metrics.rendererStartedAtMs !== undefined && metrics.rendererStartedAtMs !== identity.rendererStartedAtMs) ||
-          (metrics.rendererGeneration !== undefined && metrics.rendererGeneration !== identity.rendererGeneration)
+          (metrics.rendererPid !== undefined && metrics.rendererPid !== request.identity.rendererPid) ||
+          (metrics.rendererStartedAtMs !== undefined &&
+            metrics.rendererStartedAtMs !== request.identity.rendererStartedAtMs) ||
+          (metrics.rendererGeneration !== undefined &&
+            metrics.rendererGeneration !== request.identity.rendererGeneration)
         ) {
           throw new Error('Lunar City performance snapshot identity mismatch')
         }
 
         responseValue = {
           ...metrics,
-          rendererGeneration: identity.rendererGeneration,
-          rendererPid: identity.rendererPid,
-          rendererStartedAtMs: identity.rendererStartedAtMs
+          rendererGeneration: request.identity.rendererGeneration,
+          rendererPid: request.identity.rendererPid,
+          rendererStartedAtMs: request.identity.rendererStartedAtMs
         }
       }
 
       ipcRenderer.send('hermes:lunar-city-perf:response', {
-        action: value.action,
-        identity,
-        requestId: value.requestId,
+        action: request.action,
+        identity: request.identity,
+        requestId: request.requestId,
         value: responseValue
       })
     } catch (error) {
       ipcRenderer.send('hermes:lunar-city-perf:response', {
-        action: value.action,
-        identity,
-        requestId: value.requestId,
+        action: request.action,
+        identity: request.identity,
+        requestId: request.requestId,
         value: { error: error instanceof Error ? error.message : String(error) }
       })
     }
   }
 
+  runtimePort.start?.()
+
   ipcRenderer.on('hermes:lunar-city-perf:request', listener)
-
-  const renderer = {
-    onRequest(callback: (action: string, payload: unknown) => Promise<unknown> | unknown): () => void {
-      if (responderClaimed) {
-        throw new Error('Lunar City performance responder already registered')
-      }
-
-      if (ipcRenderer.sendSync('hermes:lunar-city-perf:register-responder', handshake) !== true) {
-        throw new Error('Lunar City performance responder registration rejected')
-      }
-
-      responderClaimed = true
-      responder = callback
-
-      return () => {
-        responder = undefined
-        ipcRenderer.removeListener('hermes:lunar-city-perf:request', listener)
-      }
-    }
-  }
 
   const requireHandshake = (): void => {
     if (!activated) {
@@ -179,7 +222,7 @@ export function createLunarCityPerfPreload(ipcRenderer: IpcRendererLike) {
   }
 
   return {
-    renderer,
+    ready,
     surface: {
       handshake(expected: { bridgeVersion?: unknown; launchNonce?: unknown }): LunarCityPerfHandshake | null {
         if (

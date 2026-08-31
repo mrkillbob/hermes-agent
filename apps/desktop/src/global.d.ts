@@ -14,6 +14,7 @@ export {}
 
 declare global {
   interface Window {
+    __LUNAR_CITY_PERF_AUTHORIZED__?: true
     __LUNAR_CITY_PERF__?: {
       handshake: (expected: { bridgeVersion: number; launchNonce: string }) => unknown
       mountCity: () => Promise<unknown>
@@ -80,9 +81,6 @@ declare global {
       // reply). Resolves true for the first window to claim a key, false for
       // peers — so N open windows don't all fire the same cue.
       claimAmbientCue: (key: string) => Promise<boolean>
-      lunarCityPerf?: {
-        onRequest: (callback: (action: string, payload: unknown) => Promise<unknown> | unknown) => () => void
-      }
       wakeIndicator?: {
         getState: () => Promise<WakeIndicatorState>
         setState: (state: WakeIndicatorState) => void

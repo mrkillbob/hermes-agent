@@ -12,10 +12,24 @@ import { createLunarCityPerfPreload } from './lunar-city-perf-preload'
 const translucencySupport = ipcRenderer.sendSync('hermes:translucency:support')
 const hudWindowing = ipcRenderer.sendSync('hermes:hud:windowing')
 const hudNativeDrag = hudWindowing?.nativeDrag === true
-const lunarCityPerf = createLunarCityPerfPreload(ipcRenderer)
+const lunarCityPerfChannel = new MessageChannel()
+const lunarCityPerf = createLunarCityPerfPreload(ipcRenderer, lunarCityPerfChannel.port1)
 
 if (lunarCityPerf) {
-  contextBridge.exposeInMainWorld('__LUNAR_CITY_PERF__', lunarCityPerf.surface)
+  contextBridge.exposeInMainWorld('__LUNAR_CITY_PERF_AUTHORIZED__', true)
+  window.addEventListener(
+    'DOMContentLoaded',
+    () => {
+      window.postMessage({ type: 'hermes:lunar-city-perf-runtime-port-v1' }, '*', [lunarCityPerfChannel.port2])
+    },
+    { once: true }
+  )
+  void lunarCityPerf.ready.then(() => {
+    contextBridge.exposeInMainWorld('__LUNAR_CITY_PERF__', lunarCityPerf.surface)
+  })
+} else {
+  lunarCityPerfChannel.port1.close()
+  lunarCityPerfChannel.port2.close()
 }
 
 contextBridge.exposeInMainWorld('hermesDesktop', {
@@ -44,7 +58,6 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     return () => ipcRenderer.removeListener('hermes:browser-popout:closed', listener)
   },
   claimAmbientCue: key => ipcRenderer.invoke('hermes:ambient:claim', key),
-  lunarCityPerf: lunarCityPerf?.renderer,
   wakeIndicator: {
     getState: () => ipcRenderer.invoke('hermes:wake-indicator:get'),
     setState: state => ipcRenderer.send('hermes:wake-indicator:set', state),

@@ -21,6 +21,9 @@ interface LeaderDialogueRuntimeProps {
   onClose(): void
   onLeaderStateChange(state: LeaderAnimationState): void
   onOpenFullChat(storedId: string, owner: LeaderOwner): Promise<void> | void
+  onPerfScenarioReady?(
+    run: ((text: string) => Promise<{ opened: number; received: number; sent: number }>) | undefined
+  ): void
   owner: LeaderOwner
   session: LeaderSession
   voiceAvailable: boolean
@@ -116,11 +119,14 @@ export function LeaderDialogueRuntime({
   onClose,
   onLeaderStateChange,
   onOpenFullChat,
+  onPerfScenarioReady,
   owner,
   session,
   voiceAvailable
 }: LeaderDialogueRuntimeProps) {
   const sessionState = useLeaderSessionState(session.runtimeId)
+  const sessionStateRef = useRef(sessionState)
+  sessionStateRef.current = sessionState
   const [voiceRequested, setVoiceRequested] = useState(false)
   const [voiceError, setVoiceError] = useState<string | undefined>(undefined)
   const consumedVoiceResponsesRef = useRef<Set<string>>(new Set())
@@ -173,6 +179,42 @@ export function LeaderDialogueRuntime({
     },
     [owner, session.runtimeId]
   )
+
+  const runPerfScenario = useCallback(
+    async (text: string) => {
+      const baselineAssistantIds = new Set(
+        sessionStateRef.current.messages.filter(message => message.role === 'assistant').map(message => message.id)
+      )
+
+      await submit(text)
+      const deadline = Date.now() + 4_000
+
+      while (Date.now() < deadline) {
+        const response = sessionStateRef.current.messages.find(
+          message =>
+            message.role === 'assistant' &&
+            !message.hidden &&
+            !baselineAssistantIds.has(message.id) &&
+            chatMessageText(message).trim().length > 0
+        )
+
+        if (response) {
+          return { opened: 1, received: 1, sent: 1 }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+
+      throw new Error('Timed out waiting for authoritative leader assistant response')
+    },
+    [submit]
+  )
+
+  useEffect(() => {
+    onPerfScenarioReady?.(runPerfScenario)
+
+    return () => onPerfScenarioReady?.(undefined)
+  }, [onPerfScenarioReady, runPerfScenario])
 
   const interrupt = useCallback(async () => {
     await requestForSessionProfile(owner, rejectAmbientRequest, 'session.interrupt', { session_id: session.runtimeId })

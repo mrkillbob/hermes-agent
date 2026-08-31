@@ -229,4 +229,65 @@ describe('Lunar City route-local packaged metrics runtime', () => {
     ).rejects.toThrow(/existing exact worker/u)
     await expect(request('scenario-action', { action: 'send-command', payload: {} })).rejects.toThrow(/unsupported/i)
   })
+
+  it('restores context and removes temporary listeners when context-loss observation times out', async () => {
+    let request!: (action: string, payload: unknown) => Promise<unknown>
+    const canvas = document.createElement('canvas')
+    const loseContext = vi.fn()
+    const restoreContext = vi.fn()
+    const remove = vi.spyOn(canvas, 'removeEventListener')
+
+    vi.spyOn(canvas, 'getContext').mockReturnValue({ getExtension: () => ({ loseContext, restoreContext }) } as never)
+
+    const runtime = createLunarCityPerfRuntime(
+      {
+        onRequest: callback => {
+          request = callback
+
+          return vi.fn()
+        }
+      },
+      { actionTimeoutMs: 20 }
+    )
+
+    runtime.registerRoute!({
+      canvas,
+      getCameraPose: () => ({ alpha: 1, beta: 1, radius: 10 }),
+      getCameraState: () => ({ focusedEntityKey: undefined, following: false }),
+      getCitySnapshot: () => city,
+      getDialogueState: () => 'idle',
+      getInteriorState: () => false,
+      getQuality: () => ({ internalRenderScale: 1, qualityTier: 'balanced' }),
+      getWorldGeneration: () => 1,
+      getWorldMetrics: () => ({
+        activeAnimations: 0,
+        drawCalls: 0,
+        entities: 0,
+        frameMs: 0,
+        frameTimestampsMs: [],
+        listeners: 0,
+        rafs: 0,
+        renderFrames: 0,
+        targetFps: 0,
+        textures: 0,
+        timers: 0,
+        visibleTriangles: 0,
+        worldUpdateMs: 0,
+        worldUpdateTimestampsMs: []
+      }),
+      performLeaderDialogue: vi.fn(),
+      setInterior: vi.fn(),
+      setQuality: vi.fn(),
+      worldAction: vi.fn()
+    })
+
+    await expect(request('scenario-action', { action: 'context-loss-restore', payload: {} })).rejects.toThrow(
+      /context loss event/u
+    )
+    expect(loseContext).toHaveBeenCalledOnce()
+    expect(restoreContext).toHaveBeenCalledOnce()
+    expect(remove.mock.calls.map(([type]) => type)).toEqual(
+      expect.arrayContaining(['webglcontextlost', 'webglcontextrestored'])
+    )
+  })
 })

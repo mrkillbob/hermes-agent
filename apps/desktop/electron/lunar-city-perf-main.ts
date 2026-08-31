@@ -149,7 +149,7 @@ export function parseChromiumMemoryInfraGpuAllocation(trace: { traceEvents?: rea
   gpuMemorySource: typeof LUNAR_CITY_GPU_MEMORY_SOURCE | 'unavailable'
 } {
   const unavailable = { gpuMemoryMiB: null, gpuMemorySource: 'unavailable' as const }
-  const groups = new Map<string, { allocators: Map<string, unknown>; ts: number }>()
+  const groups = new Map<string, { allocators: Map<string, unknown>; lastTimestamp: number }>()
   const processIds = new Set<number>()
   let previousTimestamp = Number.NEGATIVE_INFINITY
 
@@ -192,17 +192,29 @@ export function parseChromiumMemoryInfraGpuAllocation(trace: { traceEvents?: rea
       return unavailable
     }
 
-    const key = `${String(event.id)}:${event.pid}:${event.ts}`
-    const group = groups.get(key) ?? { allocators: new Map<string, unknown>(), ts: event.ts }
+    const key = `${String(event.id)}:${event.pid}`
+    const group = groups.get(key) ?? { allocators: new Map<string, unknown>(), lastTimestamp: event.ts }
 
     for (const [name, allocator] of gpuAllocators) {
-      if (group.allocators.has(name)) {
-        return unavailable
+      const existing = group.allocators.get(name) as
+        { attrs?: { effective_size?: { units?: unknown; value?: unknown } } } | undefined
+
+      const next = allocator.attrs?.effective_size
+
+      if (existing) {
+        const current = existing.attrs?.effective_size
+
+        if (current?.units !== next?.units || current?.value !== next?.value) {
+          return unavailable
+        }
+
+        continue
       }
 
       group.allocators.set(name, allocator)
     }
 
+    group.lastTimestamp = event.ts
     groups.set(key, group)
   }
 
@@ -210,8 +222,8 @@ export function parseChromiumMemoryInfraGpuAllocation(trace: { traceEvents?: rea
     return unavailable
   }
 
-  const newestTimestamp = Math.max(...[...groups.values()].map(group => group.ts))
-  const newestGroups = [...groups.values()].filter(group => group.ts === newestTimestamp)
+  const newestTimestamp = Math.max(...[...groups.values()].map(group => group.lastTimestamp))
+  const newestGroups = [...groups.values()].filter(group => group.lastTimestamp === newestTimestamp)
 
   if (newestGroups.length !== 1) {
     return unavailable
