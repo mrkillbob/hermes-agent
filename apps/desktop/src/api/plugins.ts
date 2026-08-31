@@ -2,7 +2,7 @@ import type { HermesConnection } from '@/global'
 import { reconnectBackoffDelayMs } from '@/lib/reconnect-backoff'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 
-import { getApiRequestConnection, getApiRequestProfile, hermesApi, profileScoped } from './client'
+import { capabilityScoped, getApiRequestConnection, getApiRequestProfile, hermesApi, profileScoped } from './client'
 
 /** Resolve the ACTIVE backend's connection descriptor, (connectionId,
  *  profile)-scoped — mirroring how store/profile resolves $connection: a
@@ -38,6 +38,28 @@ export async function activeConnection(): Promise<HermesConnection> {
   )
 }
 
+/** A stable owner for a plugin capability. Profile names are only unique
+ * within a registered connection, so both fields are required. */
+export interface PluginSourceScope {
+  readonly connectionId: string
+  readonly profile: string
+}
+
+function normalizePluginSourceScope(scope: PluginSourceScope, caller: string): Readonly<PluginSourceScope> {
+  const connectionId = scope?.connectionId?.trim()
+  const profile = scope?.profile?.trim()
+
+  if (!connectionId) {
+    throw new Error(`${caller}: scope.connectionId must not be empty`)
+  }
+
+  if (!profile) {
+    throw new Error(`${caller}: scope.profile must not be empty`)
+  }
+
+  return Object.freeze({ connectionId, profile })
+}
+
 /** Options for a plugin REST call — mirrors the app's own `hermesDesktop.api`
  *  shape, minus the path (which is namespace-derived). */
 export interface PluginRestOptions {
@@ -46,6 +68,13 @@ export interface PluginRestOptions {
   /** Single-file multipart upload (see HermesApiRequest.upload). */
   upload?: { filename: string; contentType?: string; bytes: ArrayBuffer }
   timeoutMs?: number
+  /** Pin this request to one registered Hermes backend. */
+  scope?: PluginSourceScope
+}
+
+export interface PluginSocketOptions {
+  /** Pin this socket, including every reconnect, to one registered backend. */
+  scope?: PluginSourceScope
 }
 
 // Normalize `path` to a leading-slash suffix relative to `/api/plugins/<id>`.
@@ -74,6 +103,7 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
   }
 
   const suffix = pluginPathSuffix('pluginRest', path)
+  const scope = opts.scope === undefined ? undefined : normalizePluginSourceScope(opts.scope, 'pluginRest')
 
   return hermesApi<T>({
     path: `/api/plugins/${pluginId}${suffix}`,
@@ -81,8 +111,32 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
     body: opts.body,
     upload: opts.upload,
     timeoutMs: opts.timeoutMs,
-    ...profileScoped()
+    ...(scope ? capabilityScoped(scope) : profileScoped())
   })
+}
+
+async function explicitPluginConnection(scope: Readonly<PluginSourceScope>): Promise<HermesConnection | null> {
+  const getConnectionFor = window.hermesDesktop?.getConnectionFor
+
+  if (!getConnectionFor) {
+    return null
+  }
+
+  const connection = await withTimeout(
+    getConnectionFor({ connectionId: scope.connectionId, profile: scope.profile }),
+    RECONNECT_ATTEMPT_TIMEOUT_MS,
+    `Timed out connecting to connection "${scope.connectionId}" profile "${scope.profile}"`
+  )
+
+  if (
+    connection.registryScoped !== true ||
+    connection.connectionId !== scope.connectionId ||
+    connection.profile !== scope.profile
+  ) {
+    return null
+  }
+
+  return connection
 }
 
 /** The plugin WebSocket door — the live twin of `pluginRest`, scoped the same
@@ -91,15 +145,24 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
  *  credential the app's own sockets use; OAuth remotes resolve null (callers
  *  keep their polling fallback — every consumer must have one anyway, since a
  *  socket can drop). Auto-reconnects with backoff until disposed. */
-export function pluginSocket(pluginId: string, path: string, onMessage: (data: unknown) => void): () => void {
+export function pluginSocket(
+  pluginId: string,
+  path: string,
+  onMessage: (data: unknown) => void,
+  opts: PluginSocketOptions = {}
+): () => void {
   const suffix = pluginPathSuffix('pluginSocket', path)
+  const scope = opts.scope === undefined ? undefined : normalizePluginSourceScope(opts.scope, 'pluginSocket')
 
   let socket: null | WebSocket = null
   let disposed = false
   let attempt = 0
+  let retryTimer: number | null = null
 
   const connect = async () => {
-    const connection = await activeConnection().catch(() => null)
+    retryTimer = null
+
+    const connection = await (scope ? explicitPluginConnection(scope) : activeConnection()).catch(() => null)
 
     // No bridge / OAuth cookie auth (WS tickets are single-use, core-managed):
     // stay on the polling fallback rather than half-working.
@@ -114,6 +177,10 @@ export function pluginSocket(pluginId: string, path: string, onMessage: (data: u
     )
 
     socket.onmessage = event => {
+      if (disposed) {
+        return
+      }
+
       attempt = 0
 
       try {
@@ -131,7 +198,10 @@ export function pluginSocket(pluginId: string, path: string, onMessage: (data: u
         // socket reconnect loops — an immediate-retry loop across many
         // desktop clients floods the gateway with connection attempts
         // during a restart.
-        window.setTimeout(() => void connect(), reconnectBackoffDelayMs(attempt, { baseDelayMs: 500, capMs: 30_000 }))
+        retryTimer = window.setTimeout(
+          () => void connect(),
+          reconnectBackoffDelayMs(attempt, { baseDelayMs: 500, capMs: 30_000 })
+        )
         attempt += 1
       }
     }
@@ -141,6 +211,12 @@ export function pluginSocket(pluginId: string, path: string, onMessage: (data: u
 
   return () => {
     disposed = true
+
+    if (retryTimer !== null) {
+      window.clearTimeout(retryTimer)
+      retryTimer = null
+    }
+
     socket?.close()
   }
 }
