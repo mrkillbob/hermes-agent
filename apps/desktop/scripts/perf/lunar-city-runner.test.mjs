@@ -309,6 +309,57 @@ test('builds an isolated packaged launch without disabling the GPU', () => {
   }
 })
 
+test('binds an explicit isolated fixture home and connection registry without inheriting secrets', () => {
+  const plan = createIsolatedLaunchPlan({
+    binaryPath: BINARY,
+    debugPort: 49321,
+    tempRoot: '/private/tmp/lunar-city-run-7',
+    runId: 'run-7',
+    launchNonce: 'nonce-7',
+    fixture: {
+      contractVersion: 1,
+      evidenceClass: 'fake-backend-packaged',
+      expectedPopulation: 25,
+      hermesHome: '/private/tmp/lunar-city-fixture/hermes-home',
+      populationContractPath: '/private/tmp/lunar-city-fixture/population.json',
+      root: '/private/tmp/lunar-city-fixture',
+      subagentEmission: 'supported',
+      userDataDir: '/private/tmp/lunar-city-fixture/user-data'
+    }
+  })
+
+  assert.equal(plan.paths.hermesHome, '/private/tmp/lunar-city-fixture/hermes-home')
+  assert.equal(plan.paths.userDataDir, '/private/tmp/lunar-city-fixture/user-data')
+  assert.equal(plan.fixture.populationContractPath, '/private/tmp/lunar-city-fixture/population.json')
+  assert.equal('HERMES_LUNAR_CITY_FIXTURE_CONTRACT' in plan.env, false)
+  assert.equal('OPENAI_API_KEY' in plan.env, false)
+  assert.equal('GITHUB_TOKEN' in plan.env, false)
+})
+
+test('rejects fixture paths that escape their declared isolated root', () => {
+  assert.throws(
+    () =>
+      createIsolatedLaunchPlan({
+        binaryPath: BINARY,
+        debugPort: 49321,
+        tempRoot: '/private/tmp/lunar-city-run-7',
+        runId: 'run-7',
+        launchNonce: 'nonce-7',
+        fixture: {
+          contractVersion: 1,
+          evidenceClass: 'fake-backend-packaged',
+          expectedPopulation: 25,
+          hermesHome: '/Users/operator/.hermes',
+          populationContractPath: '/private/tmp/lunar-city-fixture/population.json',
+          root: '/private/tmp/lunar-city-fixture',
+          subagentEmission: 'supported',
+          userDataDir: '/private/tmp/lunar-city-fixture/user-data'
+        }
+      }),
+    /escapes.*root|isolated fixture/i
+  )
+})
+
 test('reserves distinct free loopback debug ports until each reservation is released', async () => {
   const first = await reserveUniqueDebugPort()
   const second = await reserveUniqueDebugPort()

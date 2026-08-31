@@ -310,7 +310,7 @@ const SCENARIO_PROFILE_DEFINITIONS = {
   }
 }
 
-const SCENARIO_PROFILES = Object.freeze(
+export const SCENARIO_PROFILES = Object.freeze(
   Object.fromEntries(
     Object.entries(SCENARIO_PROFILE_DEFINITIONS).map(([scenario, profile]) => [
       scenario,
@@ -1037,6 +1037,11 @@ function validateMonotonicStability(rawSamples, errors) {
   }
 }
 
+export function isAcceptancePopulationState(scenario, cityPopulated, observed) {
+  if (scenario === 'route-unmounted') return cityPopulated === false && observed === 0
+  return cityPopulated === true && Number.isInteger(observed) && observed > 0
+}
+
 function validateAcceptanceGate(receipt, scenario, errors) {
   const environment = receipt.environment
   const stamp = receipt.buildStamp
@@ -1048,6 +1053,11 @@ function validateAcceptanceGate(receipt, scenario, errors) {
   const gpuEnabled = isRecord(environment) && environment.gpuEnabled === true
   const populated = isRecord(environment) && environment.cityPopulated === true
   const hasPopulation = Number.isInteger(receipt.population?.observed) && receipt.population.observed > 0
+  const populationStateEligible = isAcceptancePopulationState(
+    scenario,
+    environment?.cityPopulated,
+    receipt.population?.observed
+  )
   const cleanPinnedBuild = isRecord(stamp) && stamp.dirty === false && stamp.source !== 'fallback'
   const hasRawProvenance = Object.hasOwn(receipt, 'rawProvenance')
   const bridge = receipt.rawProvenance?.bridgeHandshake
@@ -1067,8 +1077,7 @@ function validateAcceptanceGate(receipt, scenario, errors) {
     profile &&
     packaged &&
     gpuEnabled &&
-    populated &&
-    hasPopulation &&
+    populationStateEligible &&
     cleanPinnedBuild &&
     hasRawProvenance &&
     hasBridgeProvenance
@@ -1078,9 +1087,15 @@ function validateAcceptanceGate(receipt, scenario, errors) {
     errors.push(`receipt is not eligible for packaged performance acceptance (${scenario ?? 'unknown scenario'})`)
     if (!packaged) errors.push('packaged performance requires packaged Electron, not dev Electron')
     if (!gpuEnabled) errors.push('packaged performance requires GPU enabled')
-    if (!populated) errors.push('packaged performance requires a real populated city, not an empty fake boot')
-    if (!hasPopulation)
-      errors.push('packaged performance requires a populated population snapshot, not an empty fake boot')
+    if (!populationStateEligible) {
+      if (scenario === 'route-unmounted') {
+        errors.push('route-unmounted acceptance requires a truthful zero-population unmounted city')
+      } else {
+        if (!populated) errors.push('packaged performance requires a real populated city, not an empty fake boot')
+        if (!hasPopulation)
+          errors.push('packaged performance requires a populated population snapshot, not an empty fake boot')
+      }
+    }
     if (!cleanPinnedBuild) errors.push('packaged performance requires a clean pinned buildStamp')
     if (!hasRawProvenance) errors.push('packaged performance requires versioned rawProvenance')
     if (!hasBridgeProvenance) errors.push('packaged performance requires a versioned bound bridge handshake')

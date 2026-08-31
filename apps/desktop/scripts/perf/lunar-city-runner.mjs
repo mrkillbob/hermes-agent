@@ -111,14 +111,43 @@ export function inspectPackagedTarget(
 }
 
 /** Build the direct packaged-binary launch contract without mutating the filesystem. */
-export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runId, launchNonce }) {
+export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runId, launchNonce, fixture }) {
   if (!Number.isInteger(debugPort) || debugPort < 1024 || debugPort > 65535) {
     throw new Error('isolated CDP debug port must be an integer from 1024 through 65535')
   }
   if (typeof tempRoot !== 'string' || tempRoot.length === 0) throw new Error('isolated temp root is required')
   const safeRunId = String(runId || 'run').replace(/[^a-z0-9._-]/giu, '-')
-  const hermesHome = join(tempRoot, 'hermes-home')
-  const userDataDir = join(tempRoot, 'user-data')
+  let hermesHome = join(tempRoot, 'hermes-home')
+  let userDataDir = join(tempRoot, 'user-data')
+  let fixtureBinding
+  if (fixture) {
+    if (
+      fixture.contractVersion !== 1 ||
+      fixture.evidenceClass !== 'fake-backend-packaged' ||
+      ![25, 100, 250].includes(fixture.expectedPopulation)
+    ) {
+      throw new Error('isolated fixture contract is malformed')
+    }
+    const fixtureRoot = resolve(fixture.root ?? '')
+    if (fixtureRoot === resolve('/') || fixtureRoot.length < 2) throw new Error('isolated fixture root is invalid')
+    const withinFixture = (path, field) => {
+      const resolved = resolve(path ?? '')
+      if (resolved !== fixtureRoot && !resolved.startsWith(`${fixtureRoot}/`)) {
+        throw new Error(`isolated fixture ${field} escapes its root`)
+      }
+      return resolved
+    }
+    hermesHome = withinFixture(fixture.hermesHome, 'hermesHome')
+    userDataDir = withinFixture(fixture.userDataDir, 'userDataDir')
+    fixtureBinding = {
+      contractVersion: fixture.contractVersion,
+      evidenceClass: fixture.evidenceClass,
+      expectedPopulation: fixture.expectedPopulation,
+      populationContractPath: withinFixture(fixture.populationContractPath, 'populationContractPath'),
+      root: fixtureRoot,
+      subagentEmission: fixture.subagentEmission
+    }
+  }
   const launchEnv = {}
   for (const key of [
     'PATH',
@@ -151,6 +180,7 @@ export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runI
       HERMES_LUNAR_CITY_PERF_ACCEPTANCE: '1',
       HERMES_LUNAR_CITY_PERF_NONCE: launchNonce
     },
+    ...(fixtureBinding ? { fixture: fixtureBinding } : {}),
     paths: { hermesHome, userDataDir, tempRoot }
   }
 }
@@ -531,7 +561,8 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     debugPort: reservation.port,
     tempRoot,
     runId,
-    launchNonce
+    launchNonce,
+    fixture: options.fixture
   })
   let child
   let cdp
@@ -610,6 +641,7 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     return {
       buildStamp: target.buildStamp,
       package: { binaryPath: target.binaryPath },
+      ...(plan.fixture ? { fixture: plan.fixture } : {}),
       bridgeHandshake: connected.handshake,
       rawProvenance,
       ...derived,
