@@ -144,6 +144,106 @@ describe('createCameraController', () => {
 })
 
 describe('bindCameraInput', () => {
+  it('converts viewport coordinates to current canvas-local Babylon pick coordinates', () => {
+    const canvas = document.createElement('canvas')
+    canvas.width = 600
+    canvas.height = 300
+    const dispatch = vi.fn()
+    const pick = vi.fn()
+    let rect = new DOMRect(100, 50, 200, 100)
+
+    vi.spyOn(canvas, 'getBoundingClientRect').mockImplementation(() => rect)
+
+    const release = bindCameraInput(canvas, { dispatch, pick })
+
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 150, clientY: 75, pointerId: 1 }))
+    rect = new DOMRect(120, 60, 200, 100)
+    canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 170, clientY: 85, pointerId: 1 }))
+
+    expect(pick).toHaveBeenCalledWith(50, 25)
+    expect(dispatch).toHaveBeenCalledWith({ kind: 'clear-focus' })
+    release()
+  })
+
+  it.each([
+    ['stationary touch release first', false, [31, 32]],
+    ['stationary touch release second', false, [32, 31]],
+    ['moving touch release first', true, [31, 32]],
+    ['moving touch release second', true, [32, 31]]
+  ])('does not turn a %s in a pinch into a selection tap', (_label, movesSecondTouch, releaseOrder) => {
+    const canvas = document.createElement('canvas')
+    const dispatch = vi.fn()
+    const pick = vi.fn().mockReturnValue({ kind: 'entity', entityKey: key('session:local:worker:session-1') })
+    const release = bindCameraInput(canvas, { dispatch, pick })
+
+    canvas.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerType: 'touch', button: 0, clientX: 10, clientY: 10, pointerId: 31 })
+    )
+    canvas.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerType: 'touch', button: 0, clientX: 50, clientY: 10, pointerId: 32 })
+    )
+
+    if (movesSecondTouch) {
+      canvas.dispatchEvent(
+        new PointerEvent('pointermove', { pointerType: 'touch', button: 0, clientX: 70, clientY: 10, pointerId: 32 })
+      )
+    }
+
+    for (const pointerId of releaseOrder) {
+      canvas.dispatchEvent(
+        new PointerEvent('pointerup', { pointerType: 'touch', button: 0, clientX: 10, clientY: 10, pointerId })
+      )
+    }
+
+    expect(pick).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'focus' }))
+    expect(dispatch).not.toHaveBeenCalledWith({ kind: 'clear-focus' })
+
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 30, clientY: 30, pointerId: 33 }))
+    canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 30, clientY: 30, pointerId: 33 }))
+
+    expect(pick).toHaveBeenCalledTimes(1)
+    expect(dispatch).toHaveBeenCalledWith({
+      kind: 'focus',
+      entityKey: key('session:local:worker:session-1'),
+      follow: true
+    })
+    release()
+  })
+
+  it('does not carry a cancelled multi-touch gesture into the next genuine single tap', () => {
+    const canvas = document.createElement('canvas')
+    const dispatch = vi.fn()
+    const pick = vi.fn().mockReturnValue({ kind: 'entity', entityKey: key('session:local:worker:session-1') })
+    const release = bindCameraInput(canvas, { dispatch, pick })
+
+    canvas.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerType: 'touch', button: 0, clientX: 10, clientY: 10, pointerId: 41 })
+    )
+    canvas.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerType: 'touch', button: 0, clientX: 50, clientY: 10, pointerId: 42 })
+    )
+    canvas.dispatchEvent(
+      new PointerEvent('pointercancel', { pointerType: 'touch', button: 0, clientX: 10, clientY: 10, pointerId: 41 })
+    )
+    canvas.dispatchEvent(
+      new PointerEvent('pointerup', { pointerType: 'touch', button: 0, clientX: 50, clientY: 10, pointerId: 42 })
+    )
+
+    expect(pick).not.toHaveBeenCalled()
+
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 30, clientY: 30, pointerId: 43 }))
+    canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 30, clientY: 30, pointerId: 43 }))
+
+    expect(pick).toHaveBeenCalledOnce()
+    expect(dispatch).toHaveBeenCalledWith({
+      kind: 'focus',
+      entityKey: key('session:local:worker:session-1'),
+      follow: true
+    })
+    release()
+  })
+
   it('maps primary drag, secondary drag, wheel, pinch, typed picks, and empty terrain to shared intents', () => {
     const canvas = document.createElement('canvas')
     const dispatch = vi.fn()
@@ -171,7 +271,15 @@ describe('bindCameraInput', () => {
     canvas.dispatchEvent(
       new PointerEvent('pointermove', { pointerType: 'touch', clientX: 60, clientY: 0, pointerId: 4 })
     )
+    canvas.dispatchEvent(
+      new PointerEvent('pointerup', { pointerType: 'touch', button: 0, clientX: 0, clientY: 0, pointerId: 3 })
+    )
+    canvas.dispatchEvent(
+      new PointerEvent('pointerup', { pointerType: 'touch', button: 0, clientX: 60, clientY: 0, pointerId: 4 })
+    )
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 5, clientY: 5, pointerId: 5 }))
     canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 5, clientY: 5, pointerId: 5 }))
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 6, clientY: 6, pointerId: 6 }))
     canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 6, clientY: 6, pointerId: 6 }))
 
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ kind: 'orbit' }))

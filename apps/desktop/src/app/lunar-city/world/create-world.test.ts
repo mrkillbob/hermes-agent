@@ -327,22 +327,27 @@ describe('createLunarCityWorld', () => {
     const runtime = fakeRuntime({ opaqueLeaderNames: true })
     const emit = vi.fn()
     const canvas = document.createElement('canvas')
+    canvas.width = 600
+    canvas.height = 300
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(100, 50, 200, 100))
     const handle = await createLunarCityWorld(canvas, manifest, emit, runtime.modules)
     const foxMesh = runtime.leaderMeshes.get('fox')!
 
     runtime.scenes[0]?.pick.mockReturnValueOnce({ pickedMesh: foxMesh }).mockReturnValueOnce(undefined)
-    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 10, clientY: 10, pointerId: 1 }))
-    canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 10, clientY: 10, pointerId: 1 }))
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 150, clientY: 75, pointerId: 1 }))
+    canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 150, clientY: 75, pointerId: 1 }))
 
     expect(foxMesh.name).not.toContain('fox')
     expect(handle.getCameraState()).toEqual({ focusedEntityKey: 'lunar-city:leader:fox', following: true })
     expect(emit).toHaveBeenCalledWith({ kind: 'select-focus', entityKey: 'lunar-city:leader:fox' })
+    expect(runtime.scenes[0]?.pick).toHaveBeenCalledWith(50, 25)
 
-    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 14, clientY: 14, pointerId: 2 }))
-    canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 14, clientY: 14, pointerId: 2 }))
+    canvas.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 175, clientY: 100, pointerId: 2 }))
+    canvas.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 175, clientY: 100, pointerId: 2 }))
 
     expect(handle.getCameraState()).toEqual({ focusedEntityKey: undefined, following: false })
     expect(emit).toHaveBeenCalledWith({ kind: 'clear-selection' })
+    expect(runtime.scenes[0]?.pick).toHaveBeenLastCalledWith(75, 50)
     handle.destroy()
   })
 

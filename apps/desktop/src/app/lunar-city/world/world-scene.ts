@@ -57,12 +57,85 @@ function staticFocusKey(kind: 'leader' | 'model', value: string): EntityKey {
   return `lunar-city:${kind}:${encodeURIComponent(value)}` as EntityKey
 }
 
-function worldCameraAnchor(model: ModelManifestEntry): Vec3 {
+interface BabylonQuaternion {
+  w: number
+  x: number
+  y: number
+  z: number
+}
+
+function manifestRotationQuaternion(rotation: Vec3): BabylonQuaternion {
+  // TransformNode.rotation is Babylon's y-x-z Euler convention: yaw(y),
+  // pitch(x), and roll(z). Keep this in sync with Vector3.toQuaternion().
+  const halfRoll = rotation.z * 0.5
+  const halfPitch = rotation.x * 0.5
+  const halfYaw = rotation.y * 0.5
+  const sinRoll = Math.sin(halfRoll)
+  const cosRoll = Math.cos(halfRoll)
+  const sinPitch = Math.sin(halfPitch)
+  const cosPitch = Math.cos(halfPitch)
+  const sinYaw = Math.sin(halfYaw)
+  const cosYaw = Math.cos(halfYaw)
+
   return {
-    x: model.transform.position.x + model.cameraAnchor.x,
-    y: model.transform.position.y + model.cameraAnchor.y,
-    z: model.transform.position.z + model.cameraAnchor.z
+    x: cosYaw * sinPitch * cosRoll + sinYaw * cosPitch * sinRoll,
+    y: sinYaw * cosPitch * cosRoll - cosYaw * sinPitch * sinRoll,
+    z: cosYaw * cosPitch * sinRoll - sinYaw * sinPitch * cosRoll,
+    w: cosYaw * cosPitch * cosRoll + sinYaw * sinPitch * sinRoll
   }
+}
+
+export function transformManifestPoint(model: Pick<ModelManifestEntry, 'transform'>, local: Vec3): Vec3 {
+  const quaternion = manifestRotationQuaternion(model.transform.rotation)
+  const x2 = quaternion.x + quaternion.x
+  const y2 = quaternion.y + quaternion.y
+  const z2 = quaternion.z + quaternion.z
+  const xx = quaternion.x * x2
+  const xy = quaternion.x * y2
+  const xz = quaternion.x * z2
+  const yy = quaternion.y * y2
+  const yz = quaternion.y * z2
+  const zz = quaternion.z * z2
+  const wx = quaternion.w * x2
+  const wy = quaternion.w * y2
+  const wz = quaternion.w * z2
+
+  const scaled = {
+    x: local.x * model.transform.scale.x,
+    y: local.y * model.transform.scale.y,
+    z: local.z * model.transform.scale.z
+  }
+
+  return {
+    x: model.transform.position.x + (1 - (yy + zz)) * scaled.x + (xy - wz) * scaled.y + (xz + wy) * scaled.z,
+    y: model.transform.position.y + (xy + wz) * scaled.x + (1 - (xx + zz)) * scaled.y + (yz - wx) * scaled.z,
+    z: model.transform.position.z + (xz - wy) * scaled.x + (yz + wx) * scaled.y + (1 - (xx + yy)) * scaled.z
+  }
+}
+
+export function worldBoundsFromModel(model: Pick<ModelManifestEntry, 'bounds' | 'transform'>): WorldBounds {
+  const corners = [model.bounds.min.x, model.bounds.max.x].flatMap(x =>
+    [model.bounds.min.y, model.bounds.max.y].flatMap(y =>
+      [model.bounds.min.z, model.bounds.max.z].map(z => transformManifestPoint(model, { x, y, z }))
+    )
+  )
+
+  return {
+    min: {
+      x: Math.min(...corners.map(point => point.x)),
+      y: Math.min(...corners.map(point => point.y)),
+      z: Math.min(...corners.map(point => point.z))
+    },
+    max: {
+      x: Math.max(...corners.map(point => point.x)),
+      y: Math.max(...corners.map(point => point.y)),
+      z: Math.max(...corners.map(point => point.z))
+    }
+  }
+}
+
+function worldCameraAnchor(model: ModelManifestEntry): Vec3 {
+  return transformManifestPoint(model, model.cameraAnchor)
 }
 
 function metadataRecord(value: unknown): Record<string, unknown> {
@@ -297,23 +370,6 @@ function freezeStaticResources(
   }
 }
 
-function translatedBounds(model: ModelManifestEntry): WorldBounds {
-  const { bounds, transform } = model
-
-  return {
-    min: {
-      x: transform.position.x + bounds.min.x * transform.scale.x,
-      y: transform.position.y + bounds.min.y * transform.scale.y,
-      z: transform.position.z + bounds.min.z * transform.scale.z
-    },
-    max: {
-      x: transform.position.x + bounds.max.x * transform.scale.x,
-      y: transform.position.y + bounds.max.y * transform.scale.y,
-      z: transform.position.z + bounds.max.z * transform.scale.z
-    }
-  }
-}
-
 function intersectsBounds(start: Vec3, end: Vec3, bounds: WorldBounds): boolean {
   let minimum = 0
   let maximum = 1
@@ -378,7 +434,7 @@ function buildOcclusionCandidates(
     return []
   }
 
-  const bounds = translatedBounds(model)
+  const bounds = worldBoundsFromModel(model)
 
   return result.meshes.flatMap(mesh => {
     if (!mesh.material?.clone) {

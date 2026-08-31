@@ -39,7 +39,7 @@ export interface CameraPickTarget {
 
 export interface CameraInputBindings {
   dispatch(intent: CameraIntent): void
-  pick(clientX: number, clientY: number): CameraPickTarget | undefined
+  pick(canvasX: number, canvasY: number): CameraPickTarget | undefined
 }
 
 interface FocusTransition {
@@ -266,6 +266,7 @@ export function createCameraController(
 interface PointerSample {
   clientX: number
   clientY: number
+  gesture: boolean
   moved: boolean
   pointerType: string
 }
@@ -274,8 +275,27 @@ function distance(first: PointerSample, second: PointerSample): number {
   return Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY)
 }
 
-function dispatchPick(bindings: CameraInputBindings, clientX: number, clientY: number): void {
-  const target = bindings.pick(clientX, clientY)
+function touchPointers(activePointers: ReadonlyMap<number, PointerSample>): PointerSample[] {
+  return [...activePointers.values()].filter(pointer => pointer.pointerType === 'touch')
+}
+
+function canvasLocalCoordinates(canvas: HTMLCanvasElement, clientX: number, clientY: number): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect()
+
+  // Babylon's InputManager derives scene.pointerX/Y from client coordinates by
+  // subtracting this same input-element rectangle; Scene.pick consumes those
+  // CSS-pixel local coordinates rather than the backing-store dimensions.
+  return { x: clientX - rect.left, y: clientY - rect.top }
+}
+
+function dispatchPick(
+  canvas: HTMLCanvasElement,
+  bindings: CameraInputBindings,
+  clientX: number,
+  clientY: number
+): void {
+  const coordinates = canvasLocalCoordinates(canvas, clientX, clientY)
+  const target = bindings.pick(coordinates.x, coordinates.y)
 
   if (target) {
     bindings.dispatch({ kind: 'focus', entityKey: target.entityKey, follow: true })
@@ -294,13 +314,18 @@ export function bindCameraInput(canvas: HTMLCanvasElement, bindings: CameraInput
     activePointers.set(event.pointerId, {
       clientX: event.clientX,
       clientY: event.clientY,
+      gesture: false,
       moved: false,
       pointerType: event.pointerType
     })
 
-    const touches = [...activePointers.values()].filter(pointer => pointer.pointerType === 'touch')
+    const touches = touchPointers(activePointers)
 
-    if (touches.length === 2) {
+    if (touches.length >= 2) {
+      for (const touch of touches) {
+        touch.gesture = true
+      }
+
       pinchDistance = distance(touches[0]!, touches[1]!)
     }
   }
@@ -318,9 +343,13 @@ export function bindCameraInput(canvas: HTMLCanvasElement, bindings: CameraInput
     pointer.clientX = event.clientX
     pointer.clientY = event.clientY
 
-    const touches = [...activePointers.values()].filter(active => active.pointerType === 'touch')
+    const touches = touchPointers(activePointers)
 
-    if (touches.length === 2) {
+    if (touches.length >= 2) {
+      for (const touch of touches) {
+        touch.gesture = true
+      }
+
       const nextDistance = distance(touches[0]!, touches[1]!)
 
       if (pinchDistance !== undefined) {
@@ -329,6 +358,10 @@ export function bindCameraInput(canvas: HTMLCanvasElement, bindings: CameraInput
 
       pinchDistance = nextDistance
 
+      return
+    }
+
+    if (pointer.gesture && pointer.pointerType === 'touch') {
       return
     }
 
@@ -346,11 +379,20 @@ export function bindCameraInput(canvas: HTMLCanvasElement, bindings: CameraInput
   const pointerUp = (event: PointerEvent): void => {
     const pointer = activePointers.get(event.pointerId)
     activePointers.delete(event.pointerId)
-    pinchDistance = undefined
+    const touches = touchPointers(activePointers)
 
-    if ((!pointer || !pointer.moved) && event.button !== 2) {
-      dispatchPick(bindings, event.clientX, event.clientY)
+    pinchDistance = touches.length >= 2 ? distance(touches[0]!, touches[1]!) : undefined
+
+    if (pointer && !pointer.gesture && !pointer.moved && event.button !== 2) {
+      dispatchPick(canvas, bindings, event.clientX, event.clientY)
     }
+  }
+
+  const pointerCancel = (event: PointerEvent): void => {
+    activePointers.delete(event.pointerId)
+    const touches = touchPointers(activePointers)
+
+    pinchDistance = touches.length >= 2 ? distance(touches[0]!, touches[1]!) : undefined
   }
 
   const wheel = (event: WheelEvent): void => {
@@ -363,7 +405,7 @@ export function bindCameraInput(canvas: HTMLCanvasElement, bindings: CameraInput
   canvas.addEventListener('pointerdown', pointerDown)
   canvas.addEventListener('pointermove', pointerMove)
   canvas.addEventListener('pointerup', pointerUp)
-  canvas.addEventListener('pointercancel', pointerUp)
+  canvas.addEventListener('pointercancel', pointerCancel)
   canvas.addEventListener('wheel', wheel, { passive: false })
   canvas.addEventListener('contextmenu', contextMenu)
 
@@ -371,7 +413,7 @@ export function bindCameraInput(canvas: HTMLCanvasElement, bindings: CameraInput
     canvas.removeEventListener('pointerdown', pointerDown)
     canvas.removeEventListener('pointermove', pointerMove)
     canvas.removeEventListener('pointerup', pointerUp)
-    canvas.removeEventListener('pointercancel', pointerUp)
+    canvas.removeEventListener('pointercancel', pointerCancel)
     canvas.removeEventListener('wheel', wheel)
     canvas.removeEventListener('contextmenu', contextMenu)
   }
