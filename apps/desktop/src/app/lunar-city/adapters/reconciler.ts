@@ -539,6 +539,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   const now = options.now ?? Date.now
   const sessionRows = sources.sessionRows ?? (() => sources.$sessions?.get() ?? [])
   let fleetReference = sources.$fleetRoster.get()
+  let hasObservedBoundedRoster = Boolean(fleetReference && fleetReference.agents.length <= 256)
   let fleetObservedAt = 0
   let forceFleetRefresh = true
   let requestedBotMetadataGeneration = 1
@@ -740,7 +741,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
               observedAt: fleetObservedAt,
               sourceObservedAt: fleetSourceObservedAt
             })
-          : rosterOversized
+          : rosterOversized || (roster === null && hasObservedBoundedRoster)
             ? {
                 entities: [...$lunarCitySnapshot.get().entities.values()]
                   .filter(entity => entity.identity.kind === 'profile')
@@ -824,7 +825,14 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
 
       const registeredOwners =
         roster === null
-          ? new Map(cachedOwners)
+          ? hasObservedBoundedRoster
+            ? new Map(
+                [...registeredSessionOwners].map(([key, owner]) => [
+                  key,
+                  { ...owner, rows: sessionOwnerCache.get(key)?.rows ?? [] }
+                ])
+              )
+            : new Map(cachedOwners)
           : rosterOversized
             ? new Map(
                 [...registeredSessionOwners].map(([key, owner]) => [
@@ -835,6 +843,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
             : rosterOwners
 
       if (roster !== null && !rosterOversized) {
+        hasObservedBoundedRoster = true
         for (const [key, owner] of registeredSessionOwners) {
           if (!rosterOwners.has(key)) {
             retiredSessionOwners.set(key, owner)
@@ -871,7 +880,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         }
       }
 
-      if (sources.readSessionList && ownerSetBounded) {
+      if (sources.readSessionList && ownerSetBounded && roster !== null) {
         const jobs = [...registeredOwners].flatMap(([key, owner]) => {
           if (
             (!dirtySessionOwners.has(key) && !dirtyDelegationOwners.has(key)) ||
@@ -1183,7 +1192,12 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
           ...registryHealth,
           ...optionalReads.flatMap(read => [...read.sources])
         ],
-        staleUnlistedSourcePrefixes: [...new Set(optionalReads.flatMap(read => read.staleUnlistedSourcePrefixes ?? []))]
+        staleUnlistedSourcePrefixes: [
+          ...new Set([
+            ...(roster === null && hasObservedBoundedRoster ? ['fleet:', 'session:', 'delegation:'] : []),
+            ...optionalReads.flatMap(read => read.staleUnlistedSourcePrefixes ?? [])
+          ])
+        ]
       }
     }
   })

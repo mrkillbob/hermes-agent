@@ -1598,6 +1598,84 @@ describe('Lunar City reconciler', () => {
     stop()
   })
 
+  it('downgrades retained exact profile, session, and subagent rows when a healthy roster becomes unavailable', async () => {
+    const fleet = atom<DesktopAgentRoster | null>({
+      agents: [
+        {
+          connectionId: 'source-a',
+          connectionKind: 'local',
+          connectionLabel: 'source a',
+          handle: '@worker',
+          profile: 'worker'
+        }
+      ],
+      sources: [{ connectionId: 'source-a', kind: 'local', label: 'source a', reachable: true }]
+    })
+    const sessionReads = vi.fn(async () => ({
+      sessions: [{ ended_at: null, id: 'parent', is_active: true, profile: 'worker' }]
+    }))
+    const delegationReads = vi.fn(async () => ({
+      active: [
+        {
+          goal: 'child',
+          owner_agent_session_id: 'parent',
+          started_at: 1,
+          status: 'running',
+          subagent_id: 'child',
+          tool_count: 0
+        }
+      ]
+    }))
+    const stop = startLunarCityReconciler({
+      now: () => 900,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        readDelegationStatus: delegationReads,
+        readSessionList: sessionReads,
+        refreshFleet: async () => ({ observedAt: 900, status: 'refreshed' })
+      }
+    })
+    await flush()
+    const exactKeys = [
+      entityKey({ connectionId: 'source-a', kind: 'profile', profile: 'worker' }),
+      entityKey({ connectionId: 'source-a', kind: 'session', profile: 'worker', sessionId: 'parent' }),
+      entityKey({
+        connectionId: 'source-a',
+        kind: 'subagent',
+        profile: 'worker',
+        sessionId: 'parent',
+        subagentId: 'child'
+      })
+    ]
+    expect(exactKeys.map(key => $lunarCitySnapshot.get().entities.get(key)?.authority)).toEqual([
+      'authoritative',
+      'authoritative',
+      'authoritative'
+    ])
+
+    fleet.set(null)
+    await flush()
+    expect(exactKeys.map(key => $lunarCitySnapshot.get().entities.get(key)?.authority)).toEqual([
+      'stale',
+      'stale',
+      'stale'
+    ])
+    expect(sessionReads).toHaveBeenCalledOnce()
+    expect(delegationReads).toHaveBeenCalledOnce()
+    expect($lunarCitySnapshot.get().sources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ authority: 'stale', source: 'fleet:source-a' }),
+        expect.objectContaining({ authority: 'stale', source: 'session:source-a:worker' }),
+        expect.objectContaining({ authority: 'stale', source: 'delegation:source-a:worker' }),
+        expect.objectContaining({ authority: 'partial', source: 'session-registry:unavailable' })
+      ])
+    )
+    stop()
+  })
+
   it('replaces a healthy sibling profile while retaining the failed sibling stale on one connection', async () => {
     const fleet = atom<DesktopAgentRoster>({
       agents: ['scout', 'worker'].map(profileName => ({
