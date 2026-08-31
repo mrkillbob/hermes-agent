@@ -44,9 +44,14 @@ function runStopCommand(
     let timer: ReturnType<typeof setTimeout> | undefined
 
     const finish = (ok: boolean) => {
-      if (settled) return
+      if (settled) {
+        return
+      }
       settled = true
-      if (timer) clearTimeout(timer)
+
+      if (timer) {
+        clearTimeout(timer)
+      }
       resolve(ok)
     }
 
@@ -55,17 +60,20 @@ function runStopCommand(
     } catch (error) {
       onError(`Failed to start ${command.label}: ${String(error)}`)
       resolve(false)
+
       return
     }
 
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
         onError(`${command.label} exceeded ${timeoutMs}ms; terminating the stop helper`)
+
         try {
           child.kill('SIGTERM')
         } catch {
           // The helper may have exited between the timeout and kill.
         }
+
         finish(false)
       }, timeoutMs)
     }
@@ -97,6 +105,7 @@ export function stopDesktopBackgroundServices({
 
   if (!backend?.command || backend.kind === 'bootstrap-needed') {
     onError('No runnable local Hermes command was available for gateway stop --all --drain')
+
     return Promise.resolve(false)
   }
 
@@ -131,11 +140,16 @@ export function stopDesktopBackgroundServices({
   }
 
   const [gateway, ...afterDrain] = commands
+
   return runStopCommand(spawnFn, gateway, 0, onError).then(async gatewayStopped => {
-    if (!gatewayStopped) return false
+    if (!gatewayStopped) {
+      return false
+    }
+
     const results = await Promise.all(
       afterDrain.map(command => runStopCommand(spawnFn, command, timeoutMs, onError))
     )
+
     return results.every(Boolean)
   })
 }

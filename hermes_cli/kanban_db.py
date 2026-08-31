@@ -11857,7 +11857,16 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
         token = set_hermes_home_override(hermes_home)
         try:
             cfg = load_config()
-            toolsets = sorted(_get_platform_tools(cfg, "cli"))
+            # ``_get_platform_tools`` expands the platform selection but also
+            # preserves unknown explicit entries.  ``all``/``*`` are special
+            # one-shot sentinels rather than real toolsets: forwarding either
+            # makes the child discard this resolved CLI allowlist and load
+            # every registered surface, including desktop-only tools.
+            toolsets = sorted(
+                name
+                for name in _get_platform_tools(cfg, "cli")
+                if name not in {"all", "*"}
+            )
         finally:
             reset_hermes_home_override(token)
         return toolsets or None

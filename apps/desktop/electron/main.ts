@@ -88,7 +88,6 @@ import {
 } from './browser-windows'
 import { detectBundleSkew } from './bundle-skew'
 import { applyConnectionChange, teardownSshState } from './connection-apply'
-import { stopDesktopBackgroundServices } from './desktop-background-shutdown'
 import {
   apiRequestRegistryConnectionId,
   authModeFromStatus,
@@ -154,6 +153,7 @@ import {
 import type { RosterProfileMetadata } from './connection-registry'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
+import { stopDesktopBackgroundServices } from './desktop-background-shutdown'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import { formatDesktopLogLine } from './desktop-log-line'
 import { resolveDesktopRemoteRoute } from './desktop-remote-route'
@@ -230,7 +230,7 @@ import { createHudSnapShortcut } from './hud-snap-shortcut'
 import { buildHudWindowUrl } from './hud-url'
 import { resolveHudWindowing } from './hud-windowing'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
-import { ensureMainWindow, shouldQuitAfterWindowAllClosed } from './main-window-lifecycle'
+import { closeWindowsForDrain, ensureMainWindow, shouldQuitAfterWindowAllClosed } from './main-window-lifecycle'
 import {
   assertManagedUpdatePreflightClear,
   executeManagedRemoteUpdate,
@@ -2897,10 +2897,12 @@ async function resolveHealedBranch(updateRoot, branch) {
 
   const current = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: updateRoot })
   const currentBranch = current.code === 0 ? current.stdout.trim() : ''
+
   if (!shouldHealMissingUpdateBranch({ configuredBranch: branch, currentBranch })) {
     rememberLog(
       `[updates] origin/${branch} is gone, but it is the active local checkout; retaining it instead of falling back to main`
     )
+
     return branch
   }
 
@@ -12191,6 +12193,7 @@ const backendShutdown = createBackendShutdownCoordinator(async () => {
 
   stopBackendChild(primary)
   const pooledStops = stopAllPoolBackends()
+
   const backgroundServicesStop = stopDesktopBackgroundServices({
     resolveBackend: resolveHermesBackend,
     spawnFn: spawn,
@@ -17550,6 +17553,10 @@ app.on('before-quit', event => {
 
   if (!backendQuitTeardownDone) {
     event.preventDefault()
+    // before-quit is deferred while gateway-owned workers drain. Stop every
+    // renderer first so its autosaves, Kanban polls, and reconnect loops cannot
+    // race the backend teardown and surface expected ECONNRESET/offline errors.
+    closeWindowsForDrain(BrowserWindow.getAllWindows())
     void backendShutdown.run().finally(() => {
       backendQuitTeardownDone = true
       app.quit()
