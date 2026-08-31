@@ -1,38 +1,16 @@
 import { Bone, Matrix, Skeleton, VertexBuffer } from './babylon.mjs'
-import { stateClips } from './animation.mjs'
+import { poseClip } from './animation.mjs'
 import { box, capsule, cone, cylinder, group, sphere, torus } from './primitives.mjs'
-import { addAnimalTail, addAntler, addRobotLimb, addRobotTool } from './props.mjs'
+import { addAnimalTail, addAntler, addRobotLimb } from './props.mjs'
 
-const WORKER_CLIPS = Object.freeze([
-  'idle',
-  'walk',
-  'talk',
-  'listen',
-  'work',
-  'tool-use',
-  'carry',
-  'handoff',
-  'queue',
-  'wait',
-  'blocked',
-  'failed',
-  'review',
-  'triage',
-  'heartbeat',
-  'rest',
-  'done'
-])
-const LEADER_CLIPS = Object.freeze([
-  'idle',
-  'listening',
-  'talking',
-  'thinking',
-  'acknowledging',
-  'unavailable',
-  'listen',
-  'talk',
-  'think',
-  'acknowledge'
+const WORKER_VARIANTS = Object.freeze([
+  'orbital',
+  'archivist',
+  'builder',
+  'artist',
+  'dispatcher',
+  'verifier',
+  'courier'
 ])
 
 function createRobotSkeleton(scene, rig) {
@@ -49,24 +27,248 @@ function createRobotSkeleton(scene, rig) {
   rootBone.linkTransformNode(rig.body)
   for (const [name, node, parent] of links) new Bone(name, skeleton, parent, Matrix.Identity()).linkTransformNode(node)
   skeleton.metadata = { gltf: { extras: { rig: 'modular-robot-child' } } }
-  return skeleton
+  return {
+    boneIndex: { attachment: 6, body: 0, head: 1, leftArm: 2, leftLeg: 4, rightArm: 3, rightLeg: 5 },
+    skeleton
+  }
 }
 
-function bindRobotBody(mesh, skeleton) {
-  const vertexCount = mesh.getTotalVertices()
-  const indices = new Float32Array(vertexCount * 4)
-  const weights = new Float32Array(vertexCount * 4)
-  for (let vertex = 0; vertex < vertexCount; vertex += 1) weights[vertex * 4] = 1
-  mesh.setVerticesData(VertexBuffer.MatricesIndicesKind, indices, false, 4)
-  mesh.setVerticesData(VertexBuffer.MatricesWeightsKind, weights, false, 4)
-  mesh.skeleton = skeleton
-  mesh.metadata = { ...(mesh.metadata ?? {}), keepSeparate: true }
+function bindRobotPart(meshes, skeleton, boneIndex) {
+  for (const mesh of meshes) {
+    const vertexCount = mesh.getTotalVertices()
+    const indices = new Float32Array(vertexCount * 4)
+    const weights = new Float32Array(vertexCount * 4)
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      indices[vertex * 4] = boneIndex
+      weights[vertex * 4] = 1
+    }
+    mesh.setVerticesData(VertexBuffer.MatricesIndicesKind, indices, false, 4)
+    mesh.setVerticesData(VertexBuffer.MatricesWeightsKind, weights, false, 4)
+    mesh.skeleton = skeleton
+  }
 }
 
-export function buildWorker(scene, variant = { id: 'orbital' }) {
-  const root = group(scene, `worker:${variant.id}`)
+function addWorkerVariantAccessories(scene, attachment) {
+  const variants = group(scene, 'worker:role-accessories', attachment)
+  let template = null
+  const piece = (role, name, position, scale, rotation = [0, 0, 0]) => {
+    const mesh = template
+      ? template.createInstance(`${role.name}:piece:${name}`)
+      : box(scene, `${role.name}:piece:${name}`, {
+          material: 'signal-emissive',
+          parent: role
+        })
+    template ??= mesh
+    mesh.parent = role
+    mesh.position.set(...position)
+    mesh.rotation.set(...rotation)
+    mesh.scaling.set(...scale)
+    mesh.isPickable = false
+    mesh.metadata = { ...(mesh.metadata ?? {}), keepSeparate: true }
+    return mesh
+  }
+  const recipes = {
+    archivist: [
+      ['satchel', [0, -0.2, 0.14], [0.62, 0.5, 0.2]],
+      ['flap', [0, 0.12, 0.02], [0.52, 0.12, 0.24], [0.18, 0, 0]]
+    ],
+    artist: [
+      ['palette', [0, -0.12, 0.1], [0.58, 0.08, 0.42], [0.25, 0, 0.35]],
+      ['brush', [0.34, 0.22, -0.02], [0.08, 0.68, 0.08], [0, 0, -0.32]]
+    ],
+    builder: [
+      ['hammer-handle', [0, -0.04, 0], [0.1, 0.72, 0.1], [0, 0, -0.22]],
+      ['hammer-head', [-0.12, 0.33, 0], [0.58, 0.16, 0.18], [0, 0, -0.22]]
+    ],
+    courier: [
+      ['pack', [0.08, -0.12, 0.28], [0.66, 0.7, 0.24]],
+      ['pack-top', [0.08, 0.3, 0.22], [0.5, 0.16, 0.28]],
+      ['strap', [-0.36, -0.08, 0.04], [0.08, 0.88, 0.08], [0, 0, 0.12]]
+    ],
+    dispatcher: [
+      ['baton', [0, 0.02, 0], [0.1, 0.82, 0.1], [0, 0, -0.12]],
+      ['flag', [0.25, 0.33, 0], [0.5, 0.3, 0.08], [0, 0, -0.12]]
+    ],
+    orbital: [
+      ['mast', [0, 0.02, 0], [0.11, 0.82, 0.11]],
+      ['beacon', [0, 0.46, 0], [0.5, 0.14, 0.14]]
+    ],
+    verifier: [
+      ['check-a', [-0.16, -0.06, 0], [0.1, 0.5, 0.1], [0, 0, -0.7]],
+      ['check-b', [0.18, 0.08, 0], [0.1, 0.82, 0.1], [0, 0, 0.55]]
+    ]
+  }
+  for (const id of WORKER_VARIANTS) {
+    const variant = group(scene, `worker:variant:${id}`, variants)
+    variant.metadata = {
+      gltf: {
+        extras: {
+          activationScale: [1, 1, 1],
+          defaultActive: id === 'orbital',
+          exclusiveGroup: 'worker-role',
+          semantic: variant.name,
+          variantId: id
+        }
+      }
+    }
+    if (id !== 'orbital') variant.scaling.set(0, 0, 0)
+    const role = group(scene, `worker:role:${id}`, variant)
+    for (const [name, position, scale, rotation] of recipes[id]) piece(role, name, position, scale, rotation)
+  }
+  return variants
+}
+
+function buildWorkerClips(scene, rig) {
+  const { attachment, body, head, leftArm, leftLeg, rightArm, rightLeg } = rig
+  const clips = [
+    [
+      'idle',
+      [
+        [head, [0, 0.12, 0]],
+        [body, [0, 0, 0.025]]
+      ]
+    ],
+    [
+      'walk',
+      [
+        [leftArm, [0.65, 0, -0.18]],
+        [rightArm, [-0.65, 0, 0.18]],
+        [leftLeg, [-0.58, 0, 0]],
+        [rightLeg, [0.58, 0, 0]]
+      ]
+    ],
+    [
+      'talk',
+      [
+        [head, [0.08, -0.22, 0.05]],
+        [rightArm, [-0.4, 0, -0.72]]
+      ]
+    ],
+    [
+      'listen',
+      [
+        [head, [0.18, 0.28, -0.16]],
+        [leftArm, [0.1, 0, -0.4]]
+      ]
+    ],
+    [
+      'work',
+      [
+        [leftArm, [-0.65, 0, 0.45]],
+        [rightArm, [-0.65, 0, -0.45]]
+      ]
+    ],
+    [
+      'tool-use',
+      [
+        [rightArm, [-0.9, 0, -0.65]],
+        [attachment, [0.18, 0.3, -0.12]]
+      ]
+    ],
+    [
+      'carry',
+      [
+        [leftArm, [-0.82, 0, 0.34]],
+        [rightArm, [-0.82, 0, -0.34]],
+        [head, [0.12, 0, 0]]
+      ]
+    ],
+    [
+      'handoff',
+      [
+        [rightArm, [-1.05, 0, -0.52]],
+        [head, [0.06, -0.28, 0]],
+        [attachment, [0, 0.42, 0]]
+      ]
+    ],
+    [
+      'queue',
+      [
+        [leftLeg, [0.12, 0, 0]],
+        [rightLeg, [-0.12, 0, 0]],
+        [head, [0, -0.16, 0]]
+      ]
+    ],
+    [
+      'wait',
+      [
+        [leftArm, [0.2, 0, -0.2]],
+        [head, [0, 0.35, 0]]
+      ]
+    ],
+    [
+      'blocked',
+      [
+        [leftArm, [-0.15, 0, -1.1]],
+        [rightArm, [-0.15, 0, 1.1]],
+        [body, [0, 0, -0.08]]
+      ]
+    ],
+    [
+      'failed',
+      [
+        [head, [0.42, 0, 0]],
+        [body, [0.12, 0, 0]],
+        [leftLeg, [0.16, 0, 0]]
+      ]
+    ],
+    [
+      'review',
+      [
+        [head, [0, -0.32, 0]],
+        [attachment, [0, -0.25, 0.2]],
+        [leftArm, [-0.45, 0, 0.22]]
+      ]
+    ],
+    [
+      'triage',
+      [
+        [head, [-0.08, 0.3, 0]],
+        [leftArm, [-0.75, 0, 0.62]],
+        [attachment, [0.12, 0, 0]]
+      ]
+    ],
+    [
+      'heartbeat',
+      [
+        [body, [1.08, 1.04, 1.08], 'scaling'],
+        [head, [1.04, 1.04, 1.04], 'scaling'],
+        [attachment, [0, 0.12, 0]]
+      ]
+    ],
+    [
+      'rest',
+      [
+        [head, [0.36, 0, 0]],
+        [leftLeg, [0.2, 0, 0]],
+        [rightLeg, [0.2, 0, 0]],
+        [body, [0.08, 0, 0]]
+      ]
+    ],
+    [
+      'done',
+      [
+        [leftArm, [0, 0, -1.35]],
+        [rightArm, [0, 0, 1.35]],
+        [head, [-0.12, 0, 0]],
+        [body, [0, 0, 0.06]]
+      ]
+    ]
+  ]
+  return clips.map(([name, channels], index) =>
+    poseClip(
+      scene,
+      name,
+      channels.map(([target, middle, property]) => ({ middle, property, target })),
+      { duration: 30 + (index % 4) * 6 }
+    )
+  )
+}
+
+export function buildWorker(scene) {
+  const root = group(scene, 'worker:base')
   const body = group(scene, 'worker:body', root, { position: [0, 1.15, 0] })
-  const bodyMesh = capsule(scene, 'worker:body:shell', {
+  capsule(scene, 'worker:body:shell', {
     height: 1.15,
     material: 'bone-metal',
     parent: body,
@@ -134,14 +336,16 @@ export function buildWorker(scene, variant = { id: 'orbital' }) {
   const leftLeg = addRobotLimb(scene, 'worker:limb:left-leg', root, [-0.23, 0.52, 0], [0, 0, 0.02])
   const rightLeg = addRobotLimb(scene, 'worker:limb:right-leg', root, [0.23, 0.52, 0], [0, 0, -0.02])
   const attachment = group(scene, 'worker:attachment', root, { position: [0.64, 1.42, 0] })
-  const accessories = group(scene, 'worker:role-accessories', attachment)
-  addRobotTool(scene, 'worker:role:orbital', accessories, 'antenna', [0, 0.22, 0])
-  addRobotTool(scene, 'worker:role:archivist', accessories, 'satchel', [-0.12, -0.38, 0.08])
-  addRobotTool(scene, 'worker:role:builder', accessories, 'hammer', [0.16, -0.32, -0.03])
-  addRobotTool(scene, 'worker:role:verifier', accessories, 'ring', [0.02, -0.68, 0.1])
-  const skeleton = createRobotSkeleton(scene, { attachment, body, head, leftArm, leftLeg, rightArm, rightLeg })
-  bindRobotBody(bodyMesh, skeleton)
-  return { clips: stateClips(scene, root, WORKER_CLIPS), root }
+  addWorkerVariantAccessories(scene, attachment)
+  const rig = { attachment, body, head, leftArm, leftLeg, rightArm, rightLeg }
+  const { boneIndex, skeleton } = createRobotSkeleton(scene, rig)
+  bindRobotPart(body.getChildMeshes(true), skeleton, boneIndex.body)
+  bindRobotPart(head.getChildMeshes(true), skeleton, boneIndex.head)
+  bindRobotPart(leftArm.getChildMeshes(true), skeleton, boneIndex.leftArm)
+  bindRobotPart(rightArm.getChildMeshes(true), skeleton, boneIndex.rightArm)
+  bindRobotPart(leftLeg.getChildMeshes(true), skeleton, boneIndex.leftLeg)
+  bindRobotPart(rightLeg.getChildMeshes(true), skeleton, boneIndex.rightLeg)
+  return { clips: buildWorkerClips(scene, rig), root }
 }
 
 export function buildWorkers(scene) {
@@ -183,12 +387,48 @@ function animalBase(
 ) {
   const root = group(scene, `leader:${id}`, parent, { position })
   capsule(scene, `leader:${id}:body`, { height, material: robe, parent: root, radius: width * 0.48, tessellation: 8 })
-  sphere(scene, `leader:${id}:head`, {
+  cone(scene, `leader:${id}:layered-robe`, {
+    diameterBottom: width * 1.22,
+    diameterTop: width * 0.72,
+    height: height * 0.82,
+    material: robe,
+    parent: root,
+    position: [0, -height * 0.11, 0.12],
+    tessellation: 8
+  })
+  const headRig = group(scene, `leader:${id}:head-rig`, root, { position: [0, height * 0.52, 0] })
+  const headMesh = sphere(scene, `leader:${id}:head`, {
     diameter: width,
     material: bodyMaterial,
-    parent: root,
-    position: [0, height * 0.52, 0],
+    parent: headRig,
     segments: 8
+  })
+  for (const side of [-1, 1]) {
+    capsule(scene, `leader:${id}:arm:${side}`, {
+      height: height * 0.62,
+      material: robe,
+      parent: root,
+      position: [side * width * 0.58, 0.02, -0.03],
+      radius: width * 0.13,
+      rotation: [0, 0, side * -0.16],
+      tessellation: 7
+    })
+    sphere(scene, `leader:${id}:hand:${side}`, {
+      diameter: width * 0.28,
+      material: bodyMaterial,
+      parent: root,
+      position: [side * width * 0.68, -height * 0.28, -0.08],
+      segments: 6
+    })
+  }
+  torus(scene, `leader:${id}:mantle`, {
+    diameter: width * 1.22,
+    material: 'bone-metal',
+    parent: root,
+    position: [0, height * 0.22, 0],
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 10,
+    thickness: width * 0.07
   })
   box(scene, `leader:${id}:chest`, {
     depth: 0.2,
@@ -198,6 +438,7 @@ function animalBase(
     position: [0, 0.18, -width * 0.46],
     width: width * 0.55
   })
+  root.leaderRig = { head: headRig, headMesh }
   return root
 }
 
@@ -209,6 +450,7 @@ function buildOwl(scene, parent) {
     robe: 'archive-emissive',
     width: 1.5
   })
+  owl.leaderRig.headMesh.metadata = { ...(owl.leaderRig.headMesh.metadata ?? {}), keepSeparate: true }
   for (const x of [-0.38, 0.38]) {
     sphere(scene, `leader:owl:eye:${x}`, {
       diameter: 0.42,
@@ -219,7 +461,7 @@ function buildOwl(scene, parent) {
     })
     sphere(scene, `leader:owl:pupil:${x}`, {
       diameter: 0.16,
-      material: 'signal-emissive',
+      material: 'archive-emissive',
       parent: owl,
       position: [x, 1.43, -0.81],
       segments: 6
@@ -252,7 +494,7 @@ function buildFox(scene, parent) {
     bodyMaterial: 'lunar-rust',
     height: 2.75,
     position: [-4.4, 1.55, 2.1],
-    robe: 'signal-emissive',
+    robe: 'archive-emissive',
     width: 1.25
   })
   for (const side of [-1, 1])
@@ -273,7 +515,11 @@ function buildFox(scene, parent) {
     rotation: [Math.PI / 2, 0, 0],
     tessellation: 6
   })
-  addAnimalTail(scene, 'leader:fox:tail', fox, { position: [0.58, 0.2, 0.5], scale: [1.3, 1.15, 1.3] })
+  const tail = addAnimalTail(scene, 'leader:fox:tail', fox, {
+    position: [0.58, 0.2, 0.5],
+    scale: [1.3, 1.15, 1.3]
+  })
+  tail.getChildMeshes(true)[0].metadata = { keepSeparate: true }
   return fox
 }
 
@@ -282,7 +528,7 @@ function buildBadger(scene, parent) {
     bodyMaterial: 'charcoal-structure',
     height: 2.45,
     position: [-1.45, 1.45, -2],
-    robe: 'signal-emissive',
+    robe: 'archive-emissive',
     width: 1.65
   })
   box(scene, 'leader:badger:stripe', {
@@ -318,7 +564,7 @@ function buildOtter(scene, parent) {
     bodyMaterial: 'lunar-rust',
     height: 2.5,
     position: [1.7, 1.5, 2.1],
-    robe: 'triage-amber',
+    robe: 'lunar-rust',
     width: 1.28
   })
   sphere(scene, 'leader:otter:muzzle', {
@@ -340,17 +586,18 @@ function buildOtter(scene, parent) {
   box(scene, 'leader:otter:dispatch-baton', {
     depth: 0.12,
     height: 1.6,
-    material: 'signal-emissive',
+    material: 'archive-emissive',
     parent: otter,
     position: [0.78, 0.1, -0.2],
     rotation: [0, 0, -0.3],
     width: 0.12
   })
-  addAnimalTail(scene, 'leader:otter:tail', otter, {
+  const tail = addAnimalTail(scene, 'leader:otter:tail', otter, {
     material: 'lunar-rust',
     position: [0.4, -0.3, 0.55],
     scale: [0.75, 1.05, 0.75]
   })
+  tail.getChildMeshes(true)[0].metadata = { keepSeparate: true }
   return otter
 }
 
@@ -365,7 +612,7 @@ function buildBird(scene, parent) {
   cone(scene, 'leader:bird:beak', {
     diameterBottom: 0.58,
     height: 0.95,
-    material: 'triage-amber',
+    material: 'lunar-rust',
     parent: bird,
     position: [0, 1.45, -0.88],
     rotation: [Math.PI / 2, 0, 0],
@@ -383,9 +630,19 @@ function buildBird(scene, parent) {
       tessellation: 6
     })
   }
+  const wingRig = group(scene, 'leader:bird:wing-rig', bird, { position: [0, 0.2, 0.25] })
+  const wingMantle = sphere(scene, 'leader:bird:wing-rig:mantle', {
+    diameter: 2.6,
+    material: 'archive-emissive',
+    parent: wingRig,
+    scale: [1.25, 0.42, 0.38],
+    segments: 8
+  })
+  wingMantle.metadata = { keepSeparate: true }
+  bird.leaderRig.wings = wingRig
   torus(scene, 'leader:bird:verifier-ring', {
     diameter: 1.6,
-    material: 'signal-emissive',
+    material: 'archive-emissive',
     parent: bird,
     position: [0, -0.65, -0.45],
     rotation: [Math.PI / 2, 0, 0],
@@ -417,7 +674,7 @@ function buildStag(scene, parent) {
   box(scene, 'leader:stag:coordinator-tablet', {
     depth: 0.18,
     height: 1.05,
-    material: 'signal-emissive',
+    material: 'archive-emissive',
     parent: stag,
     position: [0.8, 0.08, -0.52],
     rotation: [0, 0, -0.18],
@@ -429,11 +686,12 @@ function buildStag(scene, parent) {
 export function buildLeaders(scene) {
   const root = group(scene, 'leaders:root')
   const near = group(scene, 'leaders:lod:near', root)
-  buildOwl(scene, near)
-  buildFox(scene, near)
+  near.scaling.set(1.28, 1.36, 1.28)
+  const owl = buildOwl(scene, near)
+  const fox = buildFox(scene, near)
   buildBadger(scene, near)
-  buildOtter(scene, near)
-  buildBird(scene, near)
+  const otter = buildOtter(scene, near)
+  const bird = buildBird(scene, near)
   buildStag(scene, near)
 
   const far = group(scene, 'leaders:lod:far', root)
@@ -448,7 +706,7 @@ export function buildLeaders(scene) {
   positions.forEach((position, index) => {
     capsule(scene, `leaders:far:body:${index}`, {
       height: 2.5 + (index % 3) * 0.2,
-      material: index % 2 ? 'lunar-rust' : 'charcoal-structure',
+      material: 'charcoal-structure',
       parent: far,
       position,
       radius: 0.62,
@@ -456,12 +714,99 @@ export function buildLeaders(scene) {
     })
     sphere(scene, `leaders:far:head:${index}`, {
       diameter: 1.05,
-      material: 'bone-metal',
+      material: 'charcoal-structure',
       parent: far,
       position: [position[0], position[1] + 1.35, position[2]],
       segments: 6
     })
   })
-  stateClips(scene, near, LEADER_CLIPS)
+  const parts = {
+    birdWing: bird.leaderRig.wings,
+    foxTail: fox.getChildTransformNodes(true).find(node => node.name === 'leader:fox:tail'),
+    otterTail: otter.getChildTransformNodes(true).find(node => node.name === 'leader:otter:tail'),
+    owlHead: owl.leaderRig.head
+  }
+  const leaderPoses = [
+    [
+      'idle',
+      [
+        [parts.owlHead, [0.02, 0.16, 0]],
+        [parts.birdWing, [0, 0.08, 0.06]]
+      ]
+    ],
+    [
+      'listening',
+      [
+        [parts.owlHead, [0.12, -0.32, -0.12]],
+        [parts.foxTail, [0.8, 0.14, -1.05]]
+      ]
+    ],
+    [
+      'talking',
+      [
+        [parts.owlHead, [-0.08, 0.28, 0.08]],
+        [parts.otterTail, [0.62, 0.2, -0.5]]
+      ]
+    ],
+    [
+      'thinking',
+      [
+        [parts.owlHead, [0.2, -0.18, 0.16]],
+        [parts.birdWing, [0.18, 0, -0.16]]
+      ]
+    ],
+    [
+      'acknowledging',
+      [
+        [parts.foxTail, [0.58, 0.2, -0.42]],
+        [parts.otterTail, [0.92, 0, -1.12]]
+      ]
+    ],
+    [
+      'unavailable',
+      [
+        [parts.birdWing, [0.38, 0, 0]],
+        [parts.owlHead, [0.28, 0, 0]]
+      ]
+    ],
+    [
+      'listen',
+      [
+        [parts.owlHead, [0.1, 0.34, -0.08]],
+        [parts.otterTail, [0.7, -0.2, -0.8]]
+      ]
+    ],
+    [
+      'talk',
+      [
+        [parts.birdWing, [-0.22, 0.12, 0.18]],
+        [parts.foxTail, [0.55, 0.32, -0.62]]
+      ]
+    ],
+    [
+      'think',
+      [
+        [parts.owlHead, [0.18, -0.24, 0.18]],
+        [parts.foxTail, [0.9, 0.1, -1.18]],
+        [parts.birdWing, [0.12, 0, 0]]
+      ]
+    ],
+    [
+      'acknowledge',
+      [
+        [parts.owlHead, [-0.14, 0, 0]],
+        [parts.otterTail, [0.52, 0.32, -0.42]],
+        [parts.birdWing, [-0.15, 0, 0.14]]
+      ]
+    ]
+  ]
+  leaderPoses.map(([name, channels], index) =>
+    poseClip(
+      scene,
+      name,
+      channels.map(([target, middle]) => ({ middle, target })),
+      { duration: 36 + (index % 4) * 8 }
+    )
+  )
   return root
 }

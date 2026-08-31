@@ -41,6 +41,28 @@ export function scalarClip(scene, name, target, property, middle, { duration = 3
   return animationGroup
 }
 
+export function poseClip(scene, name, channels, { duration = 30 } = {}) {
+  const animationGroup = new AnimationGroup(name, scene)
+  channels.forEach(({ middle, property = 'rotation', start = null, target }, index) => {
+    const initial = start ? new Vector3(...start) : target[property].clone()
+    const animation = new Animation(
+      `${name}:${index}:${target.name}`,
+      property,
+      FRAME_RATE,
+      Animation.ANIMATIONTYPE_VECTOR3,
+      Animation.ANIMATIONLOOPMODE_CYCLE
+    )
+    animation.setKeys([
+      { frame: 0, value: initial.clone() },
+      { frame: duration / 2, value: new Vector3(...middle) },
+      { frame: duration, value: initial.clone() }
+    ])
+    animationGroup.addTargetedAnimation(animation, target)
+  })
+  animationGroup.normalize(0, duration)
+  return animationGroup
+}
+
 export function stateClips(scene, target, names) {
   return names.map((name, index) => {
     const amplitude = 0.025 + (index % 5) * 0.0125

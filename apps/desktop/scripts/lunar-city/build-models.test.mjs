@@ -57,11 +57,94 @@ const MIN_TRIANGLES = {
   triage: 140,
   workers: 220
 }
+const SPECIALIST_DETAIL_FLOORS = {
+  council: 900,
+  depot: 900,
+  library: 1500,
+  'research-lab': 1400,
+  'review-office': 1100,
+  triage: 420
+}
+const SILHOUETTE_PAIRS = [
+  ['library', 'depot'],
+  ['research-lab', 'review-office'],
+  ['review-office', 'council']
+]
 
 let firstRoot
 let secondRoot
 let firstReceipt
 let secondReceipt
+
+function isDescendantOf(node, ancestor) {
+  for (let current = node; current; current = current.getParentNode()) if (current === ancestor) return true
+  return false
+}
+
+function transformPoint([x, y, z], matrix) {
+  return [
+    matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
+    matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
+    matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14]
+  ]
+}
+
+function worldTriangles(root, ancestorName) {
+  const ancestor = root.listNodes().find(node => node.getName() === ancestorName)
+  assert.ok(ancestor, `missing geometry ancestor ${ancestorName}`)
+  const triangles = []
+  for (const node of root.listNodes()) {
+    const mesh = node.getMesh()
+    if (!mesh || !isDescendantOf(node, ancestor)) continue
+    const world = node.getWorldMatrix()
+    for (const primitive of mesh.listPrimitives()) {
+      const positions = primitive.getAttribute('POSITION')
+      if (!positions) continue
+      const values = positions.getArray()
+      const indices =
+        primitive.getIndices()?.getArray() ?? Uint32Array.from({ length: positions.getCount() }, (_, i) => i)
+      for (let index = 0; index + 2 < indices.length; index += 3) {
+        triangles.push(
+          [indices[index], indices[index + 1], indices[index + 2]].map(vertex =>
+            transformPoint([values[vertex * 3], values[vertex * 3 + 1], values[vertex * 3 + 2]], world)
+          )
+        )
+      }
+    }
+  }
+  return triangles
+}
+
+function boundsOfTriangles(triangles) {
+  const points = triangles.flat()
+  return {
+    max: [0, 1, 2].map(axis => Math.max(...points.map(point => point[axis]))),
+    min: [0, 1, 2].map(axis => Math.min(...points.map(point => point[axis])))
+  }
+}
+
+function silhouetteEnvelope(triangles) {
+  const { max, min } = boundsOfTriangles(triangles)
+  const envelope = Array(12).fill(0)
+  for (const point of triangles.flat()) {
+    const x = Math.max(0, Math.min(11, Math.floor(((point[0] - min[0]) / (max[0] - min[0])) * 12)))
+    envelope[x] = Math.max(envelope[x], (point[1] - min[1]) / (max[1] - min[1]))
+  }
+  return envelope
+}
+
+function envelopeDistance(left, right) {
+  return left.reduce((sum, value, index) => sum + Math.abs(value - right[index]), 0) / left.length
+}
+
+function projectedAreaXY(triangle) {
+  const [a, b, c] = triangle
+  return Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2
+}
+
+function descendantsWithMeshes(root, ancestor) {
+  return root.listNodes().filter(node => node.getMesh() && isDescendantOf(node, ancestor))
+}
 
 before(async () => {
   firstRoot = await mkdtemp(join(tmpdir(), 'lunar-city-assets-a-'))
@@ -129,6 +212,204 @@ test('preserves approved specialist silhouettes and all declared animation/state
       }
     }
   }
+})
+
+test('exports physically distinct specialist massing with genuinely open room fronts', async () => {
+  const io = new NodeIO()
+  const signatures = new Map()
+  for (const [id, detailFloor] of Object.entries(SPECIALIST_DETAIL_FLOORS)) {
+    const root = (await io.read(join(firstRoot, 'models', `${id}.glb`))).getRoot()
+    const triangles = worldTriangles(root, `${id}:lod:near`)
+    assert.ok(triangles.length >= detailFloor, `${id} lacks approved specialist detail density`)
+    signatures.set(id, silhouetteEnvelope(triangles))
+  }
+
+  for (const [left, right] of SILHOUETTE_PAIRS) {
+    assert.ok(
+      envelopeDistance(signatures.get(left), signatures.get(right)) > 0.08,
+      `${left} and ${right} still share the same normalized hut silhouette`
+    )
+  }
+
+  const triageRoot = (await io.read(join(firstRoot, 'models', 'triage.glb'))).getRoot()
+  const triageTriangles = worldTriangles(triageRoot, 'triage:lod:near')
+  const solidFrontFaces = triageTriangles.filter(triangle => {
+    const center = [0, 1, 2].map(axis => triangle.reduce((sum, point) => sum + point[axis], 0) / 3)
+    return (
+      Math.abs(center[0]) < 2.5 &&
+      center[1] > 0.8 &&
+      center[1] < 4.2 &&
+      center[2] > 1.5 &&
+      projectedAreaXY(triangle) > 4
+    )
+  })
+  assert.equal(solidFrontFaces.length, 0, 'triage must expose a physical open-front interior, not a covered solid box')
+
+  const reviewRoot = (await io.read(join(firstRoot, 'models', 'review-office.glb'))).getRoot()
+  const portal = reviewRoot.listNodes().find(node => node.getName() === 'review-office:portal')
+  const portalGeometry = descendantsWithMeshes(reviewRoot, portal)
+  assert.ok(portalGeometry.length > 0, 'review portal state channel has no physical chamber geometry')
+  const portalTriangles = portalGeometry.flatMap(node => {
+    const world = node.getWorldMatrix()
+    return node
+      .getMesh()
+      .listPrimitives()
+      .flatMap(primitive => {
+        const positions = primitive.getAttribute('POSITION')
+        const values = positions.getArray()
+        const indices =
+          primitive.getIndices()?.getArray() ?? Uint32Array.from({ length: positions.getCount() }, (_, i) => i)
+        const triangles = []
+        for (let index = 0; index + 2 < indices.length; index += 3) {
+          triangles.push(
+            [indices[index], indices[index + 1], indices[index + 2]].map(vertex =>
+              transformPoint([values[vertex * 3], values[vertex * 3 + 1], values[vertex * 3 + 2]], world)
+            )
+          )
+        }
+        return triangles
+      })
+  })
+  const portalBounds = boundsOfTriangles(portalTriangles)
+  assert.ok(portalBounds.max[1] - portalBounds.min[1] > 3.4, 'review portal must read as a tall verification chamber')
+})
+
+test('exports seven exclusive selectable worker role variants with physical accessories', async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL('../../public/lunar-city/v2/world-manifest.v2.json', import.meta.url), 'utf8')
+  )
+  const variantIds = manifest.models.find(model => model.id === 'workers').instancing.variants
+  const root = (await new NodeIO().read(join(firstRoot, 'models', 'workers.glb'))).getRoot()
+  const variantNodes = new Map(
+    root
+      .listNodes()
+      .filter(node => node.getName().startsWith('worker:variant:'))
+      .map(node => [node.getName().slice('worker:variant:'.length), node])
+  )
+  assert.deepEqual([...variantNodes.keys()].toSorted(), variantIds.toSorted())
+
+  let activeVariants = 0
+  const accessorySignatures = new Set()
+  for (const id of variantIds) {
+    const variant = variantNodes.get(id)
+    const extras = variant.getExtras()
+    assert.equal(extras.variantId, id)
+    assert.equal(extras.exclusiveGroup, 'worker-role')
+    assert.deepEqual(extras.activationScale, [1, 1, 1])
+    if (variant.getScale().every(value => value > 0.9)) activeVariants += 1
+
+    const roleNodes = root
+      .listNodes()
+      .filter(node => /^worker:role:[^:]+$/.test(node.getName()) && isDescendantOf(node, variant))
+    assert.deepEqual(
+      roleNodes.map(node => node.getName()),
+      [`worker:role:${id}`]
+    )
+    const physicalParts = descendantsWithMeshes(root, roleNodes[0])
+    assert.ok(physicalParts.length > 0, `${id} accessory is named but has no exported geometry`)
+    accessorySignatures.add(
+      physicalParts
+        .map(
+          node =>
+            `${node.getTranslation().map(value => value.toFixed(2))}:${node.getScale().map(value => value.toFixed(2))}`
+        )
+        .toSorted()
+        .join('|')
+    )
+  }
+  assert.equal(activeVariants, 1, 'exactly one accessory variant may be active in the default worker')
+  assert.equal(
+    accessorySignatures.size,
+    variantIds.length,
+    'worker role variants must have distinct physical accessories'
+  )
+})
+
+test('targets genuine worker skin joints with materially distinct motion clips', async () => {
+  const root = (await new NodeIO().read(join(firstRoot, 'models', 'workers.glb'))).getRoot()
+  const skin = root.listSkins()[0]
+  const joints = skin.listJoints()
+  const jointNames = new Set(joints.map(joint => joint.getName()))
+  const influencedJoints = new Set()
+  for (const node of root.listNodes()) {
+    if (node.getSkin() !== skin || !node.getMesh()) continue
+    for (const primitive of node.getMesh().listPrimitives()) {
+      const indices = primitive.getAttribute('JOINTS_0')?.getArray()
+      const weights = primitive.getAttribute('WEIGHTS_0')?.getArray()
+      if (!indices || !weights) continue
+      for (let index = 0; index < weights.length; index += 1) {
+        if (weights[index] > 0.5) influencedJoints.add(joints[indices[index]].getName())
+      }
+    }
+  }
+  for (const name of [
+    'worker:body',
+    'worker:head',
+    'worker:limb:left-arm',
+    'worker:limb:right-arm',
+    'worker:limb:left-leg',
+    'worker:limb:right-leg'
+  ]) {
+    assert.ok(influencedJoints.has(name), `${name} does not deform exported worker geometry`)
+  }
+
+  const signatures = new Set()
+  for (const animation of root.listAnimations()) {
+    const targets = animation.listChannels().map(channel => channel.getTargetNode().getName())
+    assert.ok(targets.length >= 2, `${animation.getName()} is not a composed pose`)
+    assert.ok(
+      targets.every(target => jointNames.has(target)),
+      `${animation.getName()} targets a non-joint root node`
+    )
+    signatures.add(targets.toSorted().join('|'))
+  }
+  assert.ok(signatures.size >= 12, 'worker clips must encode materially distinct joint target combinations')
+})
+
+test('animates recognizable leader parts instead of rotating the whole leader collection', async () => {
+  const root = (await new NodeIO().read(join(firstRoot, 'models', 'leaders.glb'))).getRoot()
+  const triangles = worldTriangles(root, 'leaders:lod:near')
+  const bounds = boundsOfTriangles(triangles)
+  assert.ok(bounds.max[1] - bounds.min[1] >= 5.2, 'leaders need approved character presence beside the buildings')
+
+  const partTargets = new Set()
+  const signatures = new Set()
+  for (const animation of root.listAnimations()) {
+    const targetNodes = animation.listChannels().map(channel => channel.getTargetNode())
+    const targets = targetNodes.map(node => node.getName())
+    assert.ok(targets.length >= 2, `${animation.getName()} must pose multiple leader parts`)
+    assert.ok(targets.every(target => /^leader:.*:(head-rig|tail|wing-rig|antlers)$/.test(target)))
+    for (const target of targetNodes) {
+      assert.ok(
+        descendantsWithMeshes(root, target).length > 0,
+        `${target.getName()} animation has no physical geometry`
+      )
+    }
+    targets.forEach(target => partTargets.add(target))
+    signatures.add(targets.toSorted().join('|'))
+  }
+  assert.ok(partTargets.size >= 4, 'leader animation must cover multiple recognizable body parts')
+  assert.ok(signatures.size >= 6, 'leader clips must use distinct part combinations')
+})
+
+test('keeps every visible walkway aligned with a semantic navigation link', async () => {
+  const io = new NodeIO()
+  const terrain = (await io.read(join(firstRoot, 'models', 'terrain.glb'))).getRoot()
+  const navigation = (await io.read(join(firstRoot, 'models', 'navigation.glb'))).getRoot()
+  const visibleLinks = terrain
+    .listNodes()
+    .map(node => node.getName())
+    .filter(name => name.startsWith('terrain:walkway:'))
+    .map(name => name.slice('terrain:walkway:'.length))
+    .toSorted()
+  const navigationLinks = navigation
+    .listNodes()
+    .map(node => node.getName())
+    .filter(name => name.startsWith('navigation:link:'))
+    .map(name => name.slice('navigation:link:'.length))
+    .toSorted()
+  assert.ok(visibleLinks.includes('library-research'))
+  assert.deepEqual(navigationLinks, visibleLinks)
 })
 
 test('ships only generated palette texture data and an auxiliary navigation mesh', async () => {

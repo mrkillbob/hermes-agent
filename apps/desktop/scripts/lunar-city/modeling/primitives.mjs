@@ -143,9 +143,11 @@ export function mergeLodMeshes(scene, lodRoot, prefix) {
       index += 1
       continue
     }
+    const skeleton = meshes.every(mesh => mesh.skeleton === meshes[0].skeleton) ? meshes[0].skeleton : null
     for (const mesh of meshes) mesh.computeWorldMatrix(true)
     const merged = Mesh.MergeMeshes(meshes, true, true, undefined, false, true)
     if (!merged) throw new Error(`unable to merge ${prefix} geometry`)
+    if (skeleton) merged.skeleton = skeleton
     merged.name = `${prefix}:surface:${index}`
     merged.parent = lodRoot
     merged.isPickable = false

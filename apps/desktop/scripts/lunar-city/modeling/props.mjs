@@ -100,23 +100,34 @@ export function addTelescope(scene, parent) {
 
 export function addPortal(scene, parent) {
   const portal = group(scene, 'review-office:portal', parent, {
-    position: [-1.6, 2.35, -1.5],
-    rotation: [Math.PI / 2, 0, 0]
+    position: [-1.6, 2.5, -1.5]
   })
-  torus(scene, 'review-office:portal:ring', {
-    diameter: 3.4,
-    material: 'archive-emissive',
-    parent: portal,
-    tessellation: 14,
-    thickness: 0.28
-  })
-  cylinder(scene, 'review-office:portal:well', {
+  const chamber = cylinder(scene, 'review-office:portal:chamber', {
     diameter: 2.5,
-    height: 0.16,
+    height: 4.4,
     material: 'archive-emissive',
     parent: portal,
-    position: [0, -0.12, 0]
+    tessellation: 14
   })
+  chamber.metadata = { keepSeparate: true }
+  for (const y of [-2.15, -0.9, 0.9, 2.15])
+    torus(scene, `review-office:portal:ring:${y}`, {
+      diameter: y === 0 ? 2.8 : 3,
+      material: y % 2 ? 'archive-emissive' : 'bone-metal',
+      parent: portal,
+      position: [0, y, 0],
+      tessellation: 14,
+      thickness: 0.18
+    })
+  for (const side of [-1, 1])
+    box(scene, `review-office:portal:pillar:${side}`, {
+      depth: 0.5,
+      height: 4.8,
+      material: 'bone-metal',
+      parent: portal,
+      position: [side * 1.45, 0, 0],
+      width: 0.5
+    })
   scalarClip(scene, 'portal-idle', portal, 'rotation.y', Math.PI * 2, { duration: 120 })
   return portal
 }
@@ -169,7 +180,49 @@ export function addPlants(scene, parent) {
   return plants
 }
 
-export function addSign(scene, name, parent, { accent, position = [0, 0, 0], width = 3.4 } = {}) {
+function addSignGlyph(scene, name, parent, accent, glyph) {
+  const glyphRoot = group(scene, `${name}:identity-glyph`, parent, { position: [-1.1, 0, -0.15] })
+  const stroke = (suffix, position, width, height, rotation = [0, 0, 0]) =>
+    box(scene, `${name}:identity-glyph:${suffix}`, {
+      depth: 0.06,
+      height,
+      material: accent,
+      parent: glyphRoot,
+      position,
+      rotation,
+      width
+    })
+
+  if (glyph === 'book') {
+    stroke('left-cover', [-0.26, 0, 0], 0.48, 0.5, [0, 0, 0.12])
+    stroke('right-cover', [0.26, 0, 0], 0.48, 0.5, [0, 0, -0.12])
+    stroke('spine', [0, -0.02, -0.02], 0.08, 0.58)
+  } else if (glyph === 'flask') {
+    stroke('neck', [0, 0.17, 0], 0.16, 0.34)
+    stroke('bowl', [0, -0.14, 0], 0.62, 0.34)
+    stroke('liquid', [0, -0.2, -0.04], 0.46, 0.08)
+  } else if (glyph === 'crate') {
+    stroke('body', [0, 0, 0], 0.64, 0.56)
+    stroke('slash-a', [0, 0, -0.04], 0.09, 0.72, [0, 0, 0.75])
+    stroke('slash-b', [0, 0, -0.05], 0.09, 0.72, [0, 0, -0.75])
+  } else if (glyph === 'review') {
+    torus(scene, `${name}:identity-glyph:ring`, {
+      diameter: 0.65,
+      material: accent,
+      parent: glyphRoot,
+      rotation: [Math.PI / 2, 0, 0],
+      tessellation: 10,
+      thickness: 0.1
+    })
+    stroke('check', [0.08, -0.04, -0.06], 0.1, 0.58, [0, 0, -0.7])
+  } else if (glyph === 'council') {
+    stroke('dais', [0, -0.2, 0], 0.8, 0.12)
+    for (const [index, x] of [-0.28, 0, 0.28].entries()) stroke(`seat:${index}`, [x, 0.08, 0], 0.16, 0.45)
+  }
+  return glyphRoot
+}
+
+export function addSign(scene, name, parent, { accent, glyph = null, position = [0, 0, 0], width = 3.4 } = {}) {
   const sign = group(scene, name, parent, { position })
   box(scene, `${name}:panel`, { depth: 0.22, height: 0.86, material: 'charcoal-structure', parent: sign, width })
   box(scene, `${name}:glow`, {
@@ -177,17 +230,18 @@ export function addSign(scene, name, parent, { accent, position = [0, 0, 0], wid
     height: 0.16,
     material: accent,
     parent: sign,
-    position: [0, 0.14, -0.13],
-    width: width * 0.74
+    position: [glyph ? 0.62 : 0, 0.14, -0.13],
+    width: width * (glyph ? 0.52 : 0.74)
   })
   box(scene, `${name}:glyph`, {
     depth: 0.05,
     height: 0.14,
     material: accent,
     parent: sign,
-    position: [0, -0.18, -0.13],
-    width: width * 0.42
+    position: [glyph ? 0.62 : 0, -0.18, -0.13],
+    width: width * (glyph ? 0.32 : 0.42)
   })
+  if (glyph) addSignGlyph(scene, name, sign, accent, glyph)
   return sign
 }
 
@@ -268,6 +322,7 @@ export function buildTriage(scene) {
   const root = group(scene, 'triage:root')
   const near = group(scene, 'triage:lod:near', root)
   const far = group(scene, 'triage:lod:far', root)
+  const interior = group(scene, 'triage:open-interior', near)
   box(scene, 'triage:floor', {
     depth: 7.4,
     height: 0.5,
@@ -276,23 +331,60 @@ export function buildTriage(scene) {
     position: [0, 0.25, 0],
     width: 9.5
   })
-  box(scene, 'triage:body', {
-    depth: 5.7,
-    height: 4.5,
+  box(scene, 'triage:back-wall', {
+    depth: 0.55,
+    height: 4.4,
+    material: 'charcoal-structure',
+    parent: interior,
+    position: [0, 2.45, -3.05],
+    width: 7.6
+  })
+  for (const side of [-1, 1]) {
+    box(scene, `triage:side-wall:${side}`, {
+      depth: 5.9,
+      height: 4.15,
+      material: side < 0 ? 'triage-amber' : 'bone-metal',
+      parent: interior,
+      position: [side * 3.7, 2.32, -0.25],
+      width: 0.72
+    })
+    for (let rib = 0; rib < 3; rib += 1)
+      box(scene, `triage:side-rib:${side}:${rib}`, {
+        depth: 0.42,
+        height: 3.2 - rib * 0.35,
+        material: rib === 1 ? 'triage-amber' : 'charcoal-structure',
+        parent: interior,
+        position: [side * 4.02, 2.05, -2 + rib * 1.8],
+        rotation: [0, 0, side * 0.08],
+        width: 0.4
+      })
+  }
+  box(scene, 'triage:canopy', {
+    depth: 6.4,
+    height: 0.72,
     material: 'triage-amber',
     parent: near,
-    position: [0, 2.55, -0.5],
-    width: 7.4
+    position: [0, 4.92, -0.18],
+    width: 8.7
   })
-  box(scene, 'triage:open-front', {
-    depth: 0.28,
-    height: 3.15,
-    material: 'bone-metal',
+  box(scene, 'triage:front-header', {
+    depth: 0.62,
+    height: 0.82,
+    material: 'triage-amber',
     parent: near,
-    position: [0, 2.25, 2.42],
-    width: 5.3
+    position: [0, 4.25, 2.82],
+    width: 8.1
   })
-  const door = group(scene, 'triage:door', near, { position: [2.25, 1.75, 2.62] })
+  for (const side of [-1, 1])
+    cylinder(scene, `triage:front-post:${side}`, {
+      diameter: 0.7,
+      height: 4.1,
+      material: 'bone-metal',
+      parent: near,
+      position: [side * 3.65, 2.2, 2.72],
+      tessellation: 8
+    })
+  const door = group(scene, 'triage:door', near, { position: [3.32, 1.75, -0.2], rotation: [0, Math.PI / 2, 0] })
   box(scene, 'triage:door:panel', {
     depth: 0.22,
     height: 2.7,
@@ -300,16 +392,63 @@ export function buildTriage(scene) {
     parent: door,
     width: 1.35
   })
-  const cross = group(scene, 'triage:cross', near, { position: [0, 4.55, 2.68] })
+  const cross = group(scene, 'triage:cross', near, { position: [-2.25, 4.28, 3.16] })
   box(scene, 'triage:cross:h', { depth: 0.12, height: 0.34, material: 'bone-metal', parent: cross, width: 1.45 })
   box(scene, 'triage:cross:v', { depth: 0.12, height: 1.45, material: 'bone-metal', parent: cross, width: 0.34 })
-  const station = group(scene, 'triage:station', near)
+  const station = group(scene, 'triage:station', interior)
   addConsoleBank(scene, 'triage:station:consoles', station, {
     accent: 'triage-amber',
     count: 2,
-    position: [0, 1, -1.55],
-    width: 1.1
+    position: [1.55, 1.05, -2.55],
+    width: 1.25
   })
+  const bed = group(scene, 'triage:medical-bed', interior, { position: [-1.35, 1, -0.3] })
+  box(scene, 'triage:medical-bed:base', {
+    depth: 3.7,
+    height: 0.65,
+    material: 'bone-metal',
+    parent: bed,
+    rotation: [0, -0.14, 0],
+    width: 1.65
+  })
+  box(scene, 'triage:medical-bed:pad', {
+    depth: 3.35,
+    height: 0.28,
+    material: 'triage-amber',
+    parent: bed,
+    position: [0, 0.48, 0],
+    rotation: [0, -0.14, 0],
+    width: 1.45
+  })
+  const supplies = group(scene, 'triage:supply-bank', interior)
+  for (let index = 0; index < 8; index += 1) {
+    cylinder(scene, `triage:supply:${index}`, {
+      diameter: 0.52 + (index % 2) * 0.12,
+      height: 1.45 + (index % 3) * 0.24,
+      material: index % 3 ? 'bone-metal' : 'triage-amber',
+      parent: supplies,
+      position: [-2.8 + (index % 4) * 0.75, 1.15 + Math.floor(index / 4) * 1.55, -2.65],
+      tessellation: 8
+    })
+  }
+  for (let panel = 0; panel < 6; panel += 1)
+    box(scene, `triage:status-panel:${panel}`, {
+      depth: 0.12,
+      height: 0.5 + (panel % 2) * 0.25,
+      material: panel % 2 ? 'triage-amber' : 'bone-metal',
+      parent: interior,
+      position: [-2.5 + panel, 3.15 + (panel % 2) * 0.38, -2.72],
+      width: 0.68
+    })
+  for (let step = 0; step < 3; step += 1)
+    box(scene, `triage:front-step:${step}`, {
+      depth: 0.7 + step * 0.42,
+      height: 0.2,
+      material: step === 1 ? 'triage-amber' : 'charcoal-structure',
+      parent: near,
+      position: [0, 0.12 + step * 0.14, 3.2 + step * 0.2],
+      width: 5.9 - step * 0.45
+    })
   group(scene, 'triage:camera', root, { position: [0, 6, 10] })
   box(scene, 'triage:far:shell', {
     depth: 5.7,

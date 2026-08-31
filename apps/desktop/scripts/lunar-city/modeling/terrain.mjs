@@ -175,21 +175,23 @@ export function buildNavigation(scene) {
     })
   )
   const links = [
-    [DISTRICTS[0], DISTRICTS[7]],
-    [DISTRICTS[1], DISTRICTS[7]],
-    [DISTRICTS[2], DISTRICTS[5]],
-    [DISTRICTS[3], DISTRICTS[4]],
-    [DISTRICTS[4], DISTRICTS[5]],
-    [DISTRICTS[4], DISTRICTS[6]],
-    [DISTRICTS[7], DISTRICTS[4]]
+    ['library-research', DISTRICTS[0], DISTRICTS[1]],
+    ['library-bus', DISTRICTS[0], DISTRICTS[7]],
+    ['research-bus', DISTRICTS[1], DISTRICTS[7]],
+    ['depot-garden', DISTRICTS[2], DISTRICTS[5]],
+    ['review-triage', DISTRICTS[3], DISTRICTS[4]],
+    ['triage-garden', DISTRICTS[4], DISTRICTS[5]],
+    ['triage-council', DISTRICTS[4], DISTRICTS[6]],
+    ['bus-triage', DISTRICTS[7], DISTRICTS[4]]
   ]
-  links.forEach(([from, to], index) =>
-    beamBetween(scene, `navigation:link:${index}`, [from[0], from[1] + 1.75, from[2]], [to[0], to[1] + 1.75, to[2]], {
+  links.forEach(([id, from, to]) => {
+    const link = group(scene, `navigation:link:${id}`, walkable)
+    beamBetween(scene, `navigation:link:${id}:mesh`, [from[0], from[1] + 1.75, from[2]], [to[0], to[1] + 1.75, to[2]], {
       height: 0.14,
       material: 'charcoal-structure',
-      parent: walkable,
+      parent: link,
       width: 3.5
     })
-  )
+  })
   return root
 }
