@@ -48,6 +48,7 @@ function processRows(rendererPid, cpu = 1, rendererRssKiB = 204_800) {
 
 function rendererMetrics(overrides = {}) {
   return {
+    rendererGeneration: 1,
     rendererPid: 20,
     rendererStartedAtMs: 1_000,
     gpuMemoryMiB: 40,
@@ -73,9 +74,37 @@ function rendererMetrics(overrides = {}) {
     lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 0 },
     sceneMount: { id: 'scene-1', generation: 1, startedAtMs: 2_000 },
     lifecycleState: 'mounted',
-    environment: { electronMode: 'packaged', gpuEnabled: true },
+    environment: {
+      electronMode: 'packaged',
+      gpuEnabled: true,
+      windowState: { minimized: false, visible: true }
+    },
     gpuEnabled: true,
     ...overrides
+  }
+}
+
+function boundAction(action, payload, metrics, handshake, result = {}, sequence = 1) {
+  return {
+    action,
+    proof: 1,
+    ...result,
+    bridgeBinding: {
+      action: 'scenario-action',
+      requestId: `7:${metrics.rendererPid}:${metrics.rendererGeneration}:${sequence}`,
+      payload: { action, payload },
+      identity: {
+        bridgeVersion: handshake.bridgeVersion,
+        buildSha: handshake.buildSha,
+        frameId: 3,
+        launchNonce: handshake.launchNonce,
+        mainPid: handshake.mainPid,
+        rendererGeneration: metrics.rendererGeneration,
+        rendererPid: metrics.rendererPid,
+        rendererStartedAtMs: metrics.rendererStartedAtMs,
+        senderId: 7
+      }
+    }
   }
 }
 
@@ -84,7 +113,7 @@ function phase(name, points) {
     envelopeVersion: 3,
     phase: name,
     warmupDurationMs: 30_000,
-    rendererIdentity: { pid: 20, startedAtMs: 1_000 },
+    rendererIdentity: { generation: 1, pid: 20, startedAtMs: 1_000 },
     samples: points.map((point, index) => ({
       timestampMs: index * 1_000,
       processMetrics: processRows(20, point.cpu, point.rssKiB),
@@ -319,19 +348,172 @@ test('executes and awaits one real non-disposal bridge action exactly once', asy
       eval: async expression => {
         evaluations.push(expression)
 
-        return { action: 'quality', proof: 1, tier: 'efficient' }
+        return {
+          action: 'quality',
+          proof: 1,
+          tier: 'efficient',
+          bridgeBinding: {
+            action: 'scenario-action',
+            requestId: '7:20:1:1',
+            payload: { action: 'quality', payload: { tier: 'efficient' } },
+            identity: {
+              bridgeVersion: 1,
+              buildSha: SHA,
+              frameId: 3,
+              launchNonce: 'nonce-7',
+              mainPid: 999,
+              rendererGeneration: 1,
+              rendererPid: 20,
+              rendererStartedAtMs: 1_000,
+              senderId: 7
+            }
+          }
+        }
       }
     },
     'tier-efficient',
-    rendererMetrics()
+    rendererMetrics({ rendererGeneration: 1 }),
+    { bridgeVersion: 1, buildSha: SHA, launchNonce: 'nonce-7', mainPid: 999 }
   )
 
   assert.equal(evaluations.length, 1)
   assert.match(evaluations[0], /probe[.]runAction\("quality",\s*\{"tier":"efficient"\}\)/u)
   assert.deepEqual(result, {
-    actions: [{ action: 'quality', result: { action: 'quality', proof: 1, tier: 'efficient' } }],
+    actions: [{ action: 'quality', result: evaluations.length && result.actions[0].result }],
+    before: rendererMetrics({ rendererGeneration: 1 }),
     scenario: 'tier-efficient'
   })
+})
+
+test('rejects actionless, duplicated, wrong-target, and wrong-lifetime scenario evidence', async () => {
+  await assert.rejects(
+    runScenarioThroughBridge({ eval: async () => ({}) }, 'unknown-scenario', rendererMetrics(), {}),
+    /unsupported|action plan/i
+  )
+
+  const metrics = rendererMetrics({ rendererGeneration: 1 })
+  const handshake = { bridgeVersion: 1, buildSha: SHA, launchNonce: 'nonce-7', mainPid: 999 }
+  for (const [label, mutate] of [
+    ['wrong target', result => (result.bridgeBinding.payload.payload.entityKey = 'wrong-worker')],
+    ['wrong lifetime', result => (result.bridgeBinding.identity.rendererGeneration = 2)],
+    ['wrong nonce', result => (result.bridgeBinding.identity.launchNonce = 'wrong')]
+  ]) {
+    await assert.rejects(
+      runScenarioThroughBridge(
+        {
+          eval: async () => {
+            const result = {
+              action: 'focus',
+              proof: 1,
+              bridgeBinding: {
+                action: 'scenario-action',
+                requestId: '7:20:1:1',
+                payload: { action: 'focus', payload: { entityKey: metrics.scenarioTargets?.workerEntityKey } },
+                identity: {
+                  bridgeVersion: 1,
+                  buildSha: SHA,
+                  frameId: 3,
+                  launchNonce: 'nonce-7',
+                  mainPid: 999,
+                  rendererGeneration: 1,
+                  rendererPid: 20,
+                  rendererStartedAtMs: 1_000,
+                  senderId: 7
+                }
+              }
+            }
+            mutate(result)
+            return result
+          }
+        },
+        'balanced-worker-focus',
+        { ...metrics, scenarioTargets: { workerEntityKey: 'worker-1', leaderId: 'owl' } },
+        handshake
+      ),
+      /proof|binding|identity|payload|target/i,
+      label
+    )
+  }
+})
+
+test('provenance rejects spliced actions, duplicate requests, wrong targets, lifetimes, and seeded counters', () => {
+  const raw = provenance()
+  const handshake = { bridgeVersion: 1, buildSha: SHA, launchNonce: 'nonce-7', mainPid: 999 }
+  raw.bridgeHandshake = handshake
+  const before = structuredClone(raw.mountedCity.samples[0].rendererMetrics)
+  before.scenarioTargets = { workerEntityKey: 'worker-1', leaderId: 'owl' }
+  raw.mountedCity.samples.forEach(sample => {
+    sample.rendererMetrics.cameraActions.focus = 1
+    sample.rendererMetrics.cameraState = 'worker-focus'
+  })
+  const action = boundAction('focus', { entityKey: 'worker-1' }, before, handshake, { entityKey: 'worker-1' })
+  raw.mountedCity.scenarioExecution = {
+    actions: [{ action: 'focus', result: action }],
+    before,
+    scenario: 'balanced-worker-focus'
+  }
+  assert.doesNotThrow(() => deriveRawSamplesFromProvenance(raw, { scenario: 'balanced-worker-focus' }))
+
+  for (const [label, mutate] of [
+    ['spliced action', value => (value.mountedCity.scenarioExecution.actions[0].action = 'orbit')],
+    [
+      'duplicate request',
+      value =>
+        value.mountedCity.scenarioExecution.actions.push(
+          structuredClone(value.mountedCity.scenarioExecution.actions[0])
+        )
+    ],
+    [
+      'wrong target',
+      value =>
+        (value.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.payload.payload.entityKey = 'worker-2')
+    ],
+    [
+      'wrong lifetime',
+      value => (value.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.identity.rendererGeneration = 2)
+    ],
+    ['seeded counter', value => (value.mountedCity.scenarioExecution.before.cameraActions.focus = 1)]
+  ]) {
+    const adversarial = structuredClone(raw)
+    mutate(adversarial)
+    assert.throws(
+      () => deriveRawSamplesFromProvenance(adversarial, { scenario: 'balanced-worker-focus' }),
+      /action|proof|identity|payload|target|counter|plan/i,
+      label
+    )
+  }
+})
+
+test('hidden, minimized, and route-unmounted require authoritative state transitions', () => {
+  const handshake = { bridgeVersion: 1, buildSha: SHA, launchNonce: 'nonce-7', mainPid: 999 }
+  for (const [scenario, action] of [
+    ['hidden', 'window-hidden'],
+    ['minimized', 'window-minimized']
+  ]) {
+    const raw = provenance()
+    raw.bridgeHandshake = handshake
+    const before = structuredClone(raw.mountedCity.samples[0].rendererMetrics)
+    const result = boundAction(action, {}, before, handshake, {
+      windowState:
+        action === 'window-hidden' ? { minimized: false, visible: false } : { minimized: true, visible: false },
+      windowTrace: []
+    })
+    raw.mountedCity.scenarioExecution = { actions: [{ action, result }], before, scenario }
+    assert.throws(() => deriveRawSamplesFromProvenance(raw, { scenario }), /window state|transition/i)
+  }
+
+  const route = provenance()
+  route.bridgeHandshake = handshake
+  const before = structuredClone(route.mountedCity.samples[0].rendererMetrics)
+  route.mountedCity.scenarioExecution = {
+    actions: [{ action: 'dispose', result: boundAction('dispose', {}, before, handshake) }],
+    before,
+    scenario: 'route-unmounted'
+  }
+  assert.throws(
+    () => deriveRawSamplesFromProvenance(route, { scenario: 'route-unmounted' }),
+    /disposal|route-unmounted/i
+  )
 })
 
 test('derives CPU, renderer RSS, and GPU deltas from retained baseline and city samples', () => {
@@ -439,12 +621,20 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
       preparePhase: async (_cdp, name) => phases.push(name),
       processProbe: async () => processRows(20, phases.length === 1 ? 1 : 2),
       rendererProbe: async () => rendererMetrics({ gpuMemoryMiB: phases.length === 1 ? 40 : 50, qualityTier }),
-      runScenario: async (_cdp, scenario) => {
+      runScenario: async (_cdp, scenario, before, handshake) => {
         scenarioRuns.push(scenario)
         qualityTier = 'Efficient'
 
         return {
-          actions: [{ action: 'quality', result: { action: 'quality', proof: 1, tier: 'efficient' } }],
+          actions: [
+            {
+              action: 'quality',
+              result: boundAction('quality', { tier: 'efficient' }, before, handshake, {
+                tier: 'efficient'
+              })
+            }
+          ],
+          before,
           scenario
         }
       },
@@ -463,10 +653,10 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
   assert.equal(launches[0].env.HERMES_LUNAR_CITY_PERF_ACCEPTANCE, '1')
   assert.deepEqual(phases, ['baseline-shell', 'mounted-city'])
   assert.deepEqual(scenarioRuns, ['tier-efficient'])
-  assert.deepEqual(result.rawProvenance.mountedCity.scenarioExecution, {
-    actions: [{ action: 'quality', result: { action: 'quality', proof: 1, tier: 'efficient' } }],
-    scenario: 'tier-efficient'
-  })
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.scenario, 'tier-efficient')
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.actions.length, 1)
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.requestId, '7:20:1:1')
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.before.qualityTier, 'Balanced')
   assert.equal(result.rawProvenance.mountedCity.samples.length, 2)
   assert.equal(
     result.rawProvenance.mountedCity.samples.every(sample => sample.rendererMetrics.qualityTier === 'Efficient'),
@@ -540,11 +730,15 @@ test('captures mounted disposal samples followed by exactly one truthful termina
             })
           : rendererMetrics({ gpuMemoryMiB: phaseName === 'baseline-shell' ? 40 : 50 })
       },
-      runScenario: async (_cdp, scenario) => {
+      runScenario: async (_cdp, scenario, before, handshake) => {
         scenarioRuns += 1
         disposed = true
 
-        return { actions: [{ action: 'dispose', result: { action: 'dispose', proof: 1 } }], scenario }
+        return {
+          actions: [{ action: 'dispose', result: boundAction('dispose', {}, before, handshake) }],
+          before,
+          scenario
+        }
       },
       clock: {
         now: () => now,
@@ -570,10 +764,10 @@ test('captures mounted disposal samples followed by exactly one truthful termina
     lodMix: {},
     source: 'route-unmounted'
   })
-  assert.deepEqual(result.rawProvenance.mountedCity.scenarioExecution, {
-    actions: [{ action: 'dispose', result: { action: 'dispose', proof: 1 } }],
-    scenario: 'disposal'
-  })
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.scenario, 'disposal')
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.actions.length, 1)
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.actions[0].result.bridgeBinding.requestId, '7:20:1:1')
+  assert.equal(result.rawProvenance.mountedCity.scenarioExecution.before.lifecycleState, 'mounted')
 })
 
 test('cleanup attempts close, terminate, wait, kill, and removal despite earlier failures', async () => {

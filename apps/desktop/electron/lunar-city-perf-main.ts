@@ -303,6 +303,10 @@ export interface LunarCityPerfMainControllerOptions {
   now: () => number
   ownsSender: (sender: PerfSender) => boolean
   requestTimeoutMs?: number
+  scenarioWindowAction?: (
+    sender: PerfSender,
+    action: 'window-hidden' | 'window-minimized' | 'window-visible-cycle'
+  ) => Promise<Record<string, unknown>>
 }
 
 interface PendingRequest {
@@ -501,6 +505,38 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
 
     const requestId = `${current.senderId}:${current.identity.rendererPid}:${current.identity.rendererGeneration}:${++requestSequence}`
 
+    const bindScenarioResult = (result: unknown) => {
+      if (action !== 'scenario-action' || !result || typeof result !== 'object' || Array.isArray(result)) {
+        return result
+      }
+
+      return {
+        ...result,
+        bridgeBinding: {
+          action,
+          identity: { ...current.identity },
+          payload: structuredClone(payload),
+          requestId
+        }
+      }
+    }
+
+    if (
+      action === 'scenario-action' &&
+      payload &&
+      typeof payload === 'object' &&
+      !Array.isArray(payload) &&
+      ((payload as { action?: unknown }).action === 'window-hidden' ||
+        (payload as { action?: unknown }).action === 'window-minimized' ||
+        (payload as { action?: unknown }).action === 'window-visible-cycle')
+    ) {
+      const windowAction = (payload as { action: 'window-hidden' | 'window-minimized' | 'window-visible-cycle' }).action
+
+      return options.scenarioWindowAction
+        ? options.scenarioWindowAction(event.sender, windowAction).then(bindScenarioResult)
+        : Promise.reject(new Error(`Lunar City performance window action is unavailable: ${windowAction}`))
+    }
+
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(requestId)
@@ -516,7 +552,7 @@ export function createLunarCityPerfMainController(options: LunarCityPerfMainCont
       })
     }).then(async result => {
       if (action !== 'snapshot' || !result || typeof result !== 'object' || Array.isArray(result)) {
-        return result
+        return bindScenarioResult(result)
       }
 
       const metrics = result as Record<string, unknown>

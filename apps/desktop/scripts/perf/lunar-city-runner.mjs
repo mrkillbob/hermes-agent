@@ -256,16 +256,37 @@ function scenarioActionPlan(scenario, metrics) {
       ['leader-dialogue', { leaderId }]
     ],
     disposal: [['dispose', {}]],
+    'route-unmounted': [['dispose', {}]],
+    hidden: [['window-hidden', {}]],
+    minimized: [['window-minimized', {}]],
     'indoor-occlusion': [['interior', {}]],
     'tier-detailed': [['quality', { tier: 'detailed' }]],
-    'tier-efficient': [['quality', { tier: 'efficient' }]]
+    'tier-efficient': [['quality', { tier: 'efficient' }]],
+    'visible-idle': [['window-visible-cycle', {}]],
+    '25-active': [['window-visible-cycle', {}]],
+    '100-active': [['window-visible-cycle', {}]],
+    '250-lod': [['window-visible-cycle', {}]],
+    'balanced-overview': [['window-visible-cycle', {}]],
+    'tier-balanced': [['window-visible-cycle', {}]],
+    '30-minute-stability': [['window-visible-cycle', {}]]
   }
 
-  return plans[scenario] ?? []
+  const plan = plans[scenario]
+  if (!plan?.length) throw new Error(`Unsupported Lunar City scenario action plan: ${scenario}`)
+  if (plan.some(([, payload]) => Object.values(payload).some(value => value === undefined))) {
+    throw new Error(`Lunar City scenario ${scenario} is missing an exact action target`)
+  }
+
+  return plan
 }
 
-export async function runScenarioThroughBridge(cdp, scenario, metrics) {
+function sameJson(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+export async function runScenarioThroughBridge(cdp, scenario, metrics, handshake) {
   const actions = []
+  const requestIds = new Set()
 
   for (const [action, payload] of scenarioActionPlan(scenario, metrics)) {
     const result = await cdp.eval(`(() => {
@@ -276,14 +297,33 @@ export async function runScenarioThroughBridge(cdp, scenario, metrics) {
       return probe.runAction(${JSON.stringify(action)}, ${JSON.stringify(payload)})
     })()`)
 
-    if (!result || result.action !== action || !Number.isInteger(result.proof) || result.proof <= 0) {
+    const binding = result?.bridgeBinding
+    const identity = binding?.identity
+    if (
+      !result ||
+      result.action !== action ||
+      !Number.isInteger(result.proof) ||
+      result.proof <= 0 ||
+      binding?.action !== 'scenario-action' ||
+      typeof binding.requestId !== 'string' ||
+      requestIds.has(binding.requestId) ||
+      !sameJson(binding.payload, { action, payload }) ||
+      identity?.bridgeVersion !== handshake?.bridgeVersion ||
+      identity?.buildSha !== handshake?.buildSha ||
+      identity?.launchNonce !== handshake?.launchNonce ||
+      identity?.mainPid !== handshake?.mainPid ||
+      identity?.rendererPid !== metrics?.rendererPid ||
+      identity?.rendererStartedAtMs !== metrics?.rendererStartedAtMs ||
+      identity?.rendererGeneration !== metrics?.rendererGeneration
+    ) {
       throw new Error(`Lunar City scenario action ${action} did not return causal proof`)
     }
 
+    requestIds.add(binding.requestId)
     actions.push({ action, result })
   }
 
-  return { actions, scenario }
+  return { actions, before: structuredClone(metrics), scenario }
 }
 
 const defaultClock = {
@@ -348,7 +388,11 @@ async function capturePhase({
   terminalAction
 }) {
   const firstRenderer = await rendererProbe(cdp)
-  const rendererIdentity = { pid: firstRenderer.rendererPid, startedAtMs: firstRenderer.rendererStartedAtMs }
+  const rendererIdentity = {
+    generation: firstRenderer.rendererGeneration,
+    pid: firstRenderer.rendererPid,
+    startedAtMs: firstRenderer.rendererStartedAtMs
+  }
   const startedAt = clock.now()
   const samples = []
   for (let index = 0; index < sampleCount; index += 1) {
@@ -454,7 +498,12 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     let scenarioExecution
 
     if (options.scenario && options.scenario !== 'disposal') {
-      scenarioExecution = await deps.runScenario(cdp, options.scenario, await deps.rendererProbe(cdp))
+      scenarioExecution = await deps.runScenario(
+        cdp,
+        options.scenario,
+        await deps.rendererProbe(cdp),
+        connected.handshake
+      )
     }
 
     const mountedCity = await capturePhase({
@@ -469,10 +518,15 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
       scenarioExecution,
       terminalAction:
         options.scenario === 'disposal'
-          ? firstRenderer => deps.runScenario(cdp, options.scenario, firstRenderer)
+          ? firstRenderer => deps.runScenario(cdp, options.scenario, firstRenderer, connected.handshake)
           : undefined
     })
-    const rawProvenance = { provenanceVersion: LUNAR_CITY_PROVENANCE_VERSION, baselineShell, mountedCity }
+    const rawProvenance = {
+      provenanceVersion: LUNAR_CITY_PROVENANCE_VERSION,
+      baselineShell,
+      bridgeHandshake: connected.handshake,
+      mountedCity
+    }
     const derived = deriveRawSamplesFromProvenance(rawProvenance, { scenario: options.scenario })
     if (
       derived.rendererIdentity.pid !== connected.handshake.rendererIdentity.pid ||
@@ -480,7 +534,6 @@ export async function runPackagedLunarCityMeasurement(options, injected = {}) {
     ) {
       throw new Error('bridge_mismatch: sampled renderer lifetime differs from handshake')
     }
-    rawProvenance.bridgeHandshake = connected.handshake
     return {
       buildStamp: target.buildStamp,
       package: { binaryPath: target.binaryPath },

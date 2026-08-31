@@ -152,6 +152,7 @@ describe('Lunar City route-local packaged metrics runtime', () => {
       gpuEnabled: true,
       gpuMemoryMiB: 40,
       gpuMemorySource: 'chromium-memory-infra-v1',
+      rendererGeneration: 1,
       rendererPid: 20,
       rendererStartedAtMs: 1_000
     })
@@ -212,7 +213,7 @@ describe('Lunar City route-local packaged metrics runtime', () => {
     ) => ({
       envelopeVersion: 3,
       phase: name,
-      rendererIdentity: { pid: 20, startedAtMs: 1_000 },
+      rendererIdentity: { generation: 1, pid: 20, startedAtMs: 1_000 },
       samples: samples.map(sample => ({ ...sample, processMetrics })),
       warmupDurationMs: 30_000
     })
@@ -229,9 +230,40 @@ describe('Lunar City route-local packaged metrics runtime', () => {
           { rendererMetrics: terminal, timestampMs: 2 }
         ]),
         scenarioExecution: {
-          actions: [{ action: 'dispose', result: { action: 'dispose', proof: 1 } }],
+          actions: [
+            {
+              action: 'dispose',
+              result: {
+                action: 'dispose',
+                proof: 1,
+                bridgeBinding: {
+                  action: 'scenario-action',
+                  identity: {
+                    bridgeVersion: 1,
+                    buildSha: 'a'.repeat(40),
+                    frameId: 3,
+                    launchNonce: 'nonce-7',
+                    mainPid: 999,
+                    rendererGeneration: 1,
+                    rendererPid: 20,
+                    rendererStartedAtMs: 1_000,
+                    senderId: 7
+                  },
+                  payload: { action: 'dispose', payload: {} },
+                  requestId: '7:20:1:1'
+                }
+              }
+            }
+          ],
+          before: firstMounted,
           scenario: 'disposal'
         }
+      },
+      bridgeHandshake: {
+        bridgeVersion: 1,
+        buildSha: 'a'.repeat(40),
+        launchNonce: 'nonce-7',
+        mainPid: 999
       },
       provenanceVersion: 3
     }

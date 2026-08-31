@@ -32,7 +32,17 @@ export interface LunarCityPerfHandshake {
 }
 
 export type LunarCityPerfScenarioAction =
-  'context-loss-restore' | 'dispose' | 'focus' | 'interior' | 'leader-dialogue' | 'orbit' | 'quality' | 'zoom'
+  | 'context-loss-restore'
+  | 'dispose'
+  | 'focus'
+  | 'interior'
+  | 'leader-dialogue'
+  | 'orbit'
+  | 'quality'
+  | 'window-hidden'
+  | 'window-minimized'
+  | 'window-visible-cycle'
+  | 'zoom'
 
 const SCENARIO_ACTIONS = new Set<LunarCityPerfScenarioAction>([
   'context-loss-restore',
@@ -42,6 +52,9 @@ const SCENARIO_ACTIONS = new Set<LunarCityPerfScenarioAction>([
   'leader-dialogue',
   'orbit',
   'quality',
+  'window-hidden',
+  'window-minimized',
+  'window-visible-cycle',
   'zoom'
 ])
 

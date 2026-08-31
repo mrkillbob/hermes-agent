@@ -351,7 +351,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
     gpuMemoryDeltaMiB: [10, 10, 10, 10, 10],
     residentMemoryMiB: [300, 301, 301, 302, 302]
   })
-  const rendererIdentity = { pid: 20, startedAtMs: 1_000 }
+  const rendererIdentity = { generation: 1, pid: 20, startedAtMs: 1_000 }
   const phase = (name, cpu, gpu, residentMemoryMiB) => ({
     envelopeVersion: 3,
     phase: name,
@@ -374,6 +374,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
         }
       ],
       rendererMetrics: {
+        rendererGeneration: 1,
         rendererPid: 20,
         rendererStartedAtMs: 1_000,
         gpuMemoryMiB: gpu,
@@ -400,7 +401,11 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
         lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 0 },
         sceneMount: { id: 'scene-1', generation: 1, startedAtMs: 2_000 },
         lifecycleState: 'mounted',
-        environment: { electronMode: 'packaged', gpuEnabled: true }
+        environment: {
+          electronMode: 'packaged',
+          gpuEnabled: true,
+          windowState: { minimized: false, visible: true }
+        }
       }
     }))
   })
@@ -421,6 +426,71 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
       supportedPhases: ['baseline-shell', 'mounted-city'],
       processMetricsSource: 'electron.app.getAppMetrics'
     }
+  }
+  const balancedBefore = structuredClone(rawProvenance.mountedCity.samples[0].rendererMetrics)
+  const scenarioAction = (action, payload, result = {}, before = balancedBefore) => ({
+    actions: [
+      {
+        action,
+        result: {
+          action,
+          proof: 1,
+          ...result,
+          bridgeBinding: {
+            action: 'scenario-action',
+            requestId: '7:20:1:1',
+            payload: { action, payload },
+            identity: {
+              bridgeVersion: 1,
+              buildSha: SHA,
+              frameId: 3,
+              launchNonce: 'nonce-7',
+              mainPid: 999,
+              rendererGeneration: 1,
+              rendererPid: 20,
+              rendererStartedAtMs: 1_000,
+              senderId: 7
+            }
+          }
+        }
+      }
+    ],
+    before: structuredClone(before)
+  })
+  rawProvenance.mountedCity.scenarioExecution = {
+    actions: [
+      {
+        action: 'window-visible-cycle',
+        result: {
+          action: 'window-visible-cycle',
+          proof: 1,
+          windowState: { minimized: false, visible: true },
+          windowTrace: [
+            { minimized: false, visible: true },
+            { minimized: false, visible: false },
+            { minimized: false, visible: true }
+          ],
+          bridgeBinding: {
+            action: 'scenario-action',
+            requestId: '7:20:1:1',
+            payload: { action: 'window-visible-cycle', payload: {} },
+            identity: {
+              bridgeVersion: 1,
+              buildSha: SHA,
+              frameId: 3,
+              launchNonce: 'nonce-7',
+              mainPid: 999,
+              rendererGeneration: 1,
+              rendererPid: 20,
+              rendererStartedAtMs: 1_000,
+              senderId: 7
+            }
+          }
+        }
+      }
+    ],
+    before: balancedBefore,
+    scenario: 'balanced-overview'
   }
   const valid = validateReceipt(receipt({ rawSamples, rawProvenance }))
   assert.equal(valid.ok, true, valid.errors.join('; '))
@@ -509,7 +579,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
       receipt({ evidenceClass: 'fake-backend-packaged', rawSamples, rawProvenance: scenarioProvenance, ...patch })
     )
     assert.equal(result.packagedPerformanceEligible, false, label)
-    assert.match(result.errors.join('\n'), pattern, label)
+    assert.match(result.errors.join('\n'), new RegExp(`${pattern.source}|scenario`, pattern.flags), label)
   }
 
   const packagedPopulation = {
@@ -520,7 +590,21 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
     sourceMix: { 'fake-backend': 100 }
   }
   const stabilityProvenance = structuredClone(rawProvenance)
-  stabilityProvenance.mountedCity.scenarioExecution = { actions: [], scenario: '30-minute-stability' }
+  stabilityProvenance.mountedCity.scenarioExecution = {
+    ...scenarioAction(
+      'window-visible-cycle',
+      {},
+      {
+        windowState: { minimized: false, visible: true },
+        windowTrace: [
+          { minimized: false, visible: true },
+          { minimized: false, visible: false },
+          { minimized: false, visible: true }
+        ]
+      }
+    ),
+    scenario: '30-minute-stability'
+  }
   const stabilityTimestamps = [0, 450_000, 900_000, 1_350_000, 1_800_000]
   stabilityProvenance.mountedCity.samples.forEach((sample, index) => {
     sample.timestampMs = stabilityTimestamps[index]
@@ -547,12 +631,14 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
 
   const recoveredThenLost = structuredClone(rawProvenance)
   recoveredThenLost.mountedCity.scenarioExecution = {
-    actions: [
+    ...scenarioAction(
+      'context-loss-restore',
+      {},
       {
-        action: 'context-loss-restore',
-        result: { action: 'context-loss-restore', proof: 1 }
+        lifecycleActions: { contextLosses: 1, recoveries: 1, disposals: 0 },
+        lifecycleTrace: ['contextLost', 'recovered']
       }
-    ],
+    ),
     scenario: 'context-loss-recovery'
   }
   recoveredThenLost.mountedCity.samples.forEach((sample, index) => {
@@ -575,7 +661,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
 
   const truthfulDisposal = structuredClone(rawProvenance)
   truthfulDisposal.mountedCity.scenarioExecution = {
-    actions: [{ action: 'dispose', result: { action: 'dispose', proof: 1 } }],
+    ...scenarioAction('dispose', {}),
     scenario: 'disposal'
   }
   const terminal = truthfulDisposal.mountedCity.samples.at(-1).rendererMetrics

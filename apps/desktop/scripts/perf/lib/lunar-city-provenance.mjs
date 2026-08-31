@@ -34,10 +34,13 @@ function validateIdentity(identity, label) {
   if (!isFiniteNumber(identity.startedAtMs) || identity.startedAtMs < 0) {
     fail(`${label} renderer identity requires a nonnegative startedAtMs`)
   }
+  if (!Number.isInteger(identity.generation) || identity.generation < 1) {
+    fail(`${label} renderer identity requires a positive generation`)
+  }
 }
 
 function sameIdentity(left, right) {
-  return left.pid === right.pid && left.startedAtMs === right.startedAtMs
+  return left.pid === right.pid && left.startedAtMs === right.startedAtMs && left.generation === right.generation
 }
 
 function validateProcessRows(rows, label) {
@@ -84,6 +87,7 @@ function validateRendererMetrics(metrics, identity, label, allowEmpty) {
   if (metrics.rendererPid !== identity.pid || metrics.rendererStartedAtMs !== identity.startedAtMs) {
     fail(`${label} renderer lifetime identity changed`)
   }
+  if (metrics.rendererGeneration !== identity.generation) fail(`${label} renderer generation changed`)
   if (metrics.gpuEnabled !== true) fail(`${label} GPU is disabled; packaged performance requires GPU enabled`)
   if (!isFiniteNumber(metrics.gpuMemoryMiB)) fail(`${label} GPU memory metric is unavailable`)
   if (typeof metrics.gpuMemorySource !== 'string' || metrics.gpuMemorySource.length === 0) {
@@ -135,21 +139,167 @@ function validateRendererMetrics(metrics, identity, label, allowEmpty) {
     fail(`${label} lifecycle state is unavailable`)
 }
 
-function validateScenarioExecution(execution, scenario) {
+function scenarioPlan(scenario, before) {
+  const target = before?.scenarioTargets ?? {}
+  const plans = {
+    'balanced-worker-focus': [['focus', { entityKey: target.workerEntityKey }]],
+    'continuous-orbit-zoom': [
+      ['orbit', { deltaAlpha: 0.5, deltaBeta: 0.1 }],
+      ['zoom', { delta: -2 }]
+    ],
+    'context-loss-recovery': [['context-loss-restore', {}]],
+    'dialogue-camera': [
+      ['orbit', { deltaAlpha: 0.5, deltaBeta: 0.1 }],
+      ['zoom', { delta: -2 }],
+      ['leader-dialogue', { leaderId: target.leaderId }]
+    ],
+    disposal: [['dispose', {}]],
+    'route-unmounted': [['dispose', {}]],
+    hidden: [['window-hidden', {}]],
+    minimized: [['window-minimized', {}]],
+    'indoor-occlusion': [['interior', {}]],
+    'tier-detailed': [['quality', { tier: 'detailed' }]],
+    'tier-efficient': [['quality', { tier: 'efficient' }]],
+    'visible-idle': [['window-visible-cycle', {}]],
+    '25-active': [['window-visible-cycle', {}]],
+    '100-active': [['window-visible-cycle', {}]],
+    '250-lod': [['window-visible-cycle', {}]],
+    'balanced-overview': [['window-visible-cycle', {}]],
+    'tier-balanced': [['window-visible-cycle', {}]],
+    '30-minute-stability': [['window-visible-cycle', {}]]
+  }
+  return plans[scenario]
+}
+
+function validateScenarioExecution(execution, scenario, provenance) {
   if (!isRecord(execution) || execution.scenario !== scenario || !Array.isArray(execution.actions)) {
     fail('mounted-city scenario execution is unavailable or mismatched')
   }
 
+  const before = execution.before
+  if (!isRecord(before)) fail('mounted-city scenario before snapshot is unavailable')
+  const plan = scenarioPlan(scenario, before)
+  if (!plan?.length || execution.actions.length !== plan.length) {
+    fail('mounted-city scenario action count is not the exact authoritative plan')
+  }
+  const mounted = provenance.mountedCity.samples
+  const after = scenario === 'disposal' ? mounted.at(-1).rendererMetrics : mounted[0].rendererMetrics
+  if (
+    before.rendererPid !== provenance.mountedCity.rendererIdentity.pid ||
+    before.rendererStartedAtMs !== provenance.mountedCity.rendererIdentity.startedAtMs ||
+    before.rendererGeneration !== provenance.mountedCity.rendererIdentity.generation
+  )
+    fail('mounted-city scenario before snapshot has the wrong renderer lifetime')
+  const handshake = provenance.bridgeHandshake
+  const requestIds = new Set()
+
   for (const [index, entry] of execution.actions.entries()) {
+    const [expectedAction, expectedPayload] = plan[index]
+    const binding = entry?.result?.bridgeBinding
+    const identity = binding?.identity
     if (
       !isRecord(entry) ||
-      typeof entry.action !== 'string' ||
+      entry.action !== expectedAction ||
       !isRecord(entry.result) ||
       entry.result.action !== entry.action ||
       !Number.isInteger(entry.result.proof) ||
-      entry.result.proof <= 0
+      entry.result.proof <= 0 ||
+      !isRecord(binding) ||
+      binding.action !== 'scenario-action' ||
+      typeof binding.requestId !== 'string' ||
+      requestIds.has(binding.requestId) ||
+      JSON.stringify(binding.payload) !== JSON.stringify({ action: expectedAction, payload: expectedPayload }) ||
+      !isRecord(identity) ||
+      identity.bridgeVersion !== handshake?.bridgeVersion ||
+      identity.buildSha !== handshake?.buildSha ||
+      identity.launchNonce !== handshake?.launchNonce ||
+      identity.mainPid !== handshake?.mainPid ||
+      identity.rendererPid !== provenance.mountedCity.rendererIdentity.pid ||
+      identity.rendererStartedAtMs !== provenance.mountedCity.rendererIdentity.startedAtMs ||
+      identity.rendererGeneration !== provenance.mountedCity.rendererIdentity.generation
     ) {
       fail(`mounted-city scenario action ${index} lacks exact causal proof`)
+    }
+    requestIds.add(binding.requestId)
+  }
+
+  const delta = (group, key) => after[group][key] - before[group][key]
+  for (const [action, payload] of plan) {
+    const result = execution.actions.find(entry => entry.action === action)?.result
+    if (action === 'orbit' && (delta('cameraActions', 'orbit') !== 1 || result.proof !== after.cameraActions.orbit))
+      fail('orbit proof does not match the exact camera counter delta')
+    if (action === 'zoom' && (delta('cameraActions', 'zoom') !== 1 || result.proof !== after.cameraActions.zoom))
+      fail('zoom proof does not match the exact camera counter delta')
+    if (
+      action === 'focus' &&
+      (delta('cameraActions', 'focus') !== 1 ||
+        result.proof !== after.cameraActions.focus ||
+        result.entityKey !== payload.entityKey ||
+        after.cameraState !== 'worker-focus')
+    )
+      fail('focus proof does not match the exact target and camera transition')
+    if (
+      action === 'interior' &&
+      (delta('cameraActions', 'indoor') !== 1 ||
+        result.proof !== after.cameraActions.indoor ||
+        after.cameraState !== 'indoor')
+    )
+      fail('interior proof does not match the exact camera transition')
+    if (action === 'quality' && (result.tier !== payload.tier || after.qualityTier.toLowerCase() !== payload.tier))
+      fail('quality proof does not match the requested tier transition')
+    if (action === 'leader-dialogue') {
+      if (
+        delta('dialogueActions', 'opened') <= 0 ||
+        delta('dialogueActions', 'messagesSent') <= 0 ||
+        delta('dialogueActions', 'responsesReceived') <= 0 ||
+        result.proof !== after.dialogueActions.responsesReceived ||
+        result.leaderId !== payload.leaderId
+      )
+        fail('leader dialogue proof does not match authoritative message events')
+    }
+    if (action === 'context-loss-restore') {
+      if (
+        delta('lifecycleActions', 'contextLosses') !== 1 ||
+        delta('lifecycleActions', 'recoveries') !== 1 ||
+        result.proof !== after.lifecycleActions.recoveries ||
+        after.lifecycleState !== 'recovered'
+      )
+        fail('context recovery proof does not match lifecycle counter transitions')
+    }
+    if (action === 'dispose') {
+      if (
+        delta('lifecycleActions', 'disposals') !== 1 ||
+        result.proof !== after.lifecycleActions.disposals ||
+        after.lifecycleState !== 'disposed'
+      )
+        fail('disposal proof does not match the exact lifecycle transition')
+    }
+    if (action.startsWith('window-')) {
+      const state = result.windowState
+      const sampled = after.environment?.windowState
+      const trace = result.windowTrace
+      const expected =
+        action === 'window-hidden'
+          ? trace?.length === 2 &&
+            trace[0]?.visible === true &&
+            trace[1]?.visible === false &&
+            state?.visible === false &&
+            sampled?.visible === false
+          : action === 'window-minimized'
+            ? trace?.length === 2 &&
+              trace[0]?.minimized === false &&
+              trace[1]?.minimized === true &&
+              state?.minimized === true &&
+              sampled?.minimized === true
+            : trace?.length === 3 &&
+              trace[0]?.visible === true &&
+              trace[1]?.visible === false &&
+              trace[2]?.visible === true &&
+              state?.visible === true &&
+              state?.minimized === false &&
+              sampled?.visible === true &&
+              sampled?.minimized === false
+      if (!expected) fail(`${action} lacks the authoritative Electron window state transition`)
     }
   }
 }
@@ -165,10 +315,10 @@ function validatePhase(envelope, expectedPhase, scenario) {
     fail(`${expectedPhase} warmup duration is unavailable`)
   if (!Array.isArray(envelope.samples) || envelope.samples.length === 0)
     fail(`${expectedPhase} samples are unavailable`)
-  if (expectedPhase === 'mounted-city' && scenario) validateScenarioExecution(envelope.scenarioExecution, scenario)
 
   let previousTimestamp = -1
   const terminalDisposal = expectedPhase === 'mounted-city' && scenario === 'disposal'
+  const routeUnmounted = expectedPhase === 'mounted-city' && scenario === 'route-unmounted'
   for (const [index, sample] of envelope.samples.entries()) {
     const label = `${expectedPhase} sample ${index}`
     if (!isRecord(sample) || !isFiniteNumber(sample.timestampMs) || sample.timestampMs < 0) {
@@ -182,6 +332,7 @@ function validatePhase(envelope, expectedPhase, scenario) {
       envelope.rendererIdentity,
       label,
       expectedPhase === 'baseline-shell' ||
+        routeUnmounted ||
         (terminalDisposal &&
           index === envelope.samples.length - 1 &&
           sample.rendererMetrics?.lifecycleState === 'disposed')
@@ -236,6 +387,20 @@ function validatePhase(envelope, expectedPhase, scenario) {
       if (envelope.samples.some(sample => JSON.stringify(sample.rendererMetrics.sceneMount) !== mount))
         fail('disposal requires one unchanged scene mount with no remount')
     }
+    if (routeUnmounted) {
+      if (
+        envelope.samples.some(
+          sample =>
+            sample.rendererMetrics.lifecycleState !== 'disposed' ||
+            sample.rendererMetrics.lifecycleActions.disposals !== 1 ||
+            sample.rendererMetrics.population.observed !== 0 ||
+            sample.rendererMetrics.population.active !== 0 ||
+            Object.keys(sample.rendererMetrics.population.lodMix).length !== 0 ||
+            sample.rendererMetrics.population.source !== 'route-unmounted'
+        )
+      )
+        fail('route-unmounted requires an actual disposal transition and zero route population')
+    }
     const expected = JSON.stringify(mountedSamples[0].rendererMetrics.population)
     if (mountedSamples.some(sample => JSON.stringify(sample.rendererMetrics.population) !== expected)) {
       fail('mounted-city exact population must remain consistent across samples')
@@ -276,6 +441,7 @@ export function deriveRawSamplesFromProvenance(provenance, { scenario } = {}) {
   if (!sameIdentity(provenance.baselineShell.rendererIdentity, provenance.mountedCity.rendererIdentity)) {
     fail('renderer lifetime identity changed between baseline-shell and mounted-city')
   }
+  if (scenario) validateScenarioExecution(provenance.mountedCity.scenarioExecution, scenario, provenance)
 
   const baselineCpu = average(provenance.baselineShell.samples.map(sample => totalCpu(sample.processMetrics)))
   const baselineGpu = average(provenance.baselineShell.samples.map(sample => sample.rendererMetrics.gpuMemoryMiB))

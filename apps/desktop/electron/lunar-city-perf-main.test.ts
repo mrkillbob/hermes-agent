@@ -421,6 +421,94 @@ test('controller reports unavailable GPU attribution without substituting RSS', 
   })
 })
 
+test('controller binds scenario results to the exact request and owns hidden window transitions', async () => {
+  const sent: Array<{ channel: string; payload: unknown }> = []
+  const windowActions: unknown[] = []
+
+  const sender = {
+    getOSProcessId: () => 82,
+    id: 7,
+    isDestroyed: () => false,
+    send: (channel: string, payload: unknown) => sent.push({ channel, payload })
+  }
+
+  const event = { frameId: 3, sender }
+
+  const controller = createLunarCityPerfMainController({
+    appMetrics: () => [],
+    gpuSnapshot: async () => ({ gpuMemoryMiB: null, gpuMemorySource: 'unavailable' }),
+    launch: { buildStamp: stamp, launchNonce: 'nonce-0123456789abcdef-unique' },
+    mainPid: 41,
+    now: () => 1234,
+    ownsSender: candidate => candidate.id === 7,
+    scenarioWindowAction: async (_sender, action) => {
+      windowActions.push(action)
+
+      return {
+        action,
+        proof: 1,
+        windowState: { minimized: false, visible: false },
+        windowTrace: [
+          { minimized: false, visible: true },
+          { minimized: false, visible: false }
+        ]
+      }
+    }
+  })
+
+  const handshake = controller.bootstrap(event)
+  assert.equal(controller.registerResponder(event, handshake), true)
+  assert.equal(controller.activate(event, handshake), true)
+
+  const hidden = await controller.requestRenderer(event, 'scenario-action', {
+    action: 'window-hidden',
+    payload: {}
+  })
+
+  assert.deepEqual(windowActions, ['window-hidden'])
+  assert.equal(sent.length, 0)
+  assert.deepEqual(hidden, {
+    action: 'window-hidden',
+    proof: 1,
+    windowState: { minimized: false, visible: false },
+    windowTrace: [
+      { minimized: false, visible: true },
+      { minimized: false, visible: false }
+    ],
+    bridgeBinding: {
+      action: 'scenario-action',
+      identity: {
+        bridgeVersion: 1,
+        buildSha: stamp.commit,
+        frameId: 3,
+        launchNonce: 'nonce-0123456789abcdef-unique',
+        mainPid: 41,
+        rendererGeneration: 1,
+        rendererPid: 82,
+        rendererStartedAtMs: 1234,
+        senderId: 7
+      },
+      payload: { action: 'window-hidden', payload: {} },
+      requestId: '7:82:1:1'
+    }
+  })
+
+  const orbitPending = controller.requestRenderer(event, 'scenario-action', {
+    action: 'orbit',
+    payload: { deltaAlpha: 0.5, deltaBeta: 0.1 }
+  })
+
+  const request = sent.at(-1)?.payload as Record<string, unknown>
+  assert.equal(controller.resolveRendererResponse(event, { ...request, value: { action: 'orbit', proof: 2 } }), true)
+  const orbit = await orbitPending
+  assert.deepEqual((orbit as { bridgeBinding: unknown }).bridgeBinding, {
+    action: 'scenario-action',
+    identity: request.identity,
+    payload: { action: 'orbit', payload: { deltaAlpha: 0.5, deltaBeta: 0.1 } },
+    requestId: request.requestId
+  })
+})
+
 test('GPU probe requests only Chromium memory-infra and fails closed on capture errors', async () => {
   let requested: unknown
 

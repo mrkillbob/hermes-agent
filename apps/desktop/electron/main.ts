@@ -1455,14 +1455,73 @@ const lunarCityPerfController = lunarCityPerfLaunch
             gpuFeatureStatus.gpu_compositing !== 'disabled_off',
           gpuFeatureStatus,
           gpuInfo,
-          windowBounds: bounds
+          windowBounds: bounds,
+          windowState:
+            win && !win.isDestroyed()
+              ? { minimized: win.isMinimized(), visible: win.isVisible() }
+              : { minimized: false, visible: false }
         }
       },
       gpuSnapshot: createChromiumMemoryInfraGpuProbe(captureLunarCityGpuTrace),
       launch: lunarCityPerfLaunch,
       mainPid: process.pid,
       now: () => Date.now(),
-      ownsSender: sender => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === sender.id)
+      ownsSender: sender => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === sender.id),
+      scenarioWindowAction: async (sender, action) => {
+        const contents = electronWebContents.fromId(sender.id)
+        const win = contents ? BrowserWindow.fromWebContents(contents) : null
+
+        if (!win || win.isDestroyed()) {
+          throw new Error('Lunar City performance window is unavailable')
+        }
+
+        const before = { minimized: win.isMinimized(), visible: win.isVisible() }
+
+        if (
+          (action === 'window-hidden' && !before.visible) ||
+          (action === 'window-minimized' && before.minimized) ||
+          (action === 'window-visible-cycle' && (!before.visible || before.minimized))
+        ) {
+          throw new Error(`Lunar City performance window action has no nonzero transition: ${action}`)
+        }
+
+        const windowTrace = [before]
+
+        if (action === 'window-hidden') {
+          win.hide()
+        } else if (action === 'window-minimized') {
+          win.minimize()
+        } else {
+          win.hide()
+          await new Promise(resolve => setImmediate(resolve))
+          const hidden = { minimized: win.isMinimized(), visible: win.isVisible() }
+
+          if (hidden.visible) {
+            throw new Error('Lunar City performance visible-window hide transition was not observed')
+          }
+
+          windowTrace.push(hidden)
+          win.show()
+        }
+
+        await new Promise(resolve => setImmediate(resolve))
+        const windowState = { minimized: win.isMinimized(), visible: win.isVisible() }
+
+        const observed =
+          action === 'window-hidden'
+            ? !windowState.visible
+            : action === 'window-minimized'
+              ? windowState.minimized
+              : windowState.visible && !windowState.minimized
+
+        if (!observed) {
+          throw new Error(`Lunar City performance window transition was not observed: ${action}`)
+        }
+
+        windowTrace.push(windowState)
+
+        return { action, proof: 1, windowState, windowTrace }
+      }
     })
   : undefined
 
