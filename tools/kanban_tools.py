@@ -32,7 +32,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
@@ -497,14 +497,23 @@ _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0
 
 
-def heartbeat_current_worker_from_env() -> bool:
+def heartbeat_current_worker_from_env(
+    *,
+    on_lease_lost: Callable[[str], None] | None = None,
+) -> bool:
     """Best-effort: extend the kanban claim + bump board heartbeat for the
     current dispatcher-spawned worker, using identity from env vars.
 
     Returns True if a write was attempted (whether or not it succeeded);
     False if the call was skipped (not a kanban worker, rate-limited, or
-    swallowed exception). The boolean is informational — callers should
-    not branch on it.
+    swallowed exception). The boolean is informational.
+
+    When the board explicitly rejects either the claim heartbeat or the
+    run-pinned worker heartbeat, this process has been reclaimed or
+    superseded. ``on_lease_lost`` is called once for that attempt so the agent
+    can self-fence even if the dispatcher's termination signal did not land.
+    Transport/database exceptions remain fail-open: unavailable board state is
+    not evidence that a valid worker lost ownership.
 
     Identity comes from:
       * ``HERMES_KANBAN_TASK`` — task id (required; absence means no-op)
@@ -529,10 +538,12 @@ def heartbeat_current_worker_from_env() -> bool:
     _auto_heartbeat_last_attempt = now
     try:
         kb, conn = _connect()
+        lease_lost = False
         try:
             claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
             try:
-                kb.heartbeat_claim(conn, tid, claimer=claim_lock)
+                claim_owned = kb.heartbeat_claim(conn, tid, claimer=claim_lock)
+                lease_lost = claim_owned is False
             except Exception:
                 logger.debug("auto-heartbeat: heartbeat_claim failed", exc_info=True)
             run_id_raw = os.environ.get("HERMES_KANBAN_RUN_ID")
@@ -542,7 +553,13 @@ def heartbeat_current_worker_from_env() -> bool:
             except (TypeError, ValueError):
                 run_id = None
             try:
-                kb.heartbeat_worker(conn, tid, note=None, expected_run_id=run_id)
+                run_owned = kb.heartbeat_worker(
+                    conn,
+                    tid,
+                    note=None,
+                    expected_run_id=run_id,
+                )
+                lease_lost = lease_lost or run_owned is False
             except Exception:
                 logger.debug("auto-heartbeat: heartbeat_worker failed", exc_info=True)
         finally:
@@ -550,6 +567,11 @@ def heartbeat_current_worker_from_env() -> bool:
                 conn.close()
             except Exception:
                 pass
+        if lease_lost and on_lease_lost is not None:
+            try:
+                on_lease_lost(tid)
+            except Exception:
+                logger.debug("auto-heartbeat: lease-loss callback failed", exc_info=True)
         return True
     except Exception:
         logger.debug("auto-heartbeat: bridge failed", exc_info=True)

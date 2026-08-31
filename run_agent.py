@@ -4121,7 +4121,13 @@ class AIAgent:
                     heartbeat_current_worker_from_env,
                     inject_new_comments_from_env,
                 )
-                heartbeat_current_worker_from_env()
+                heartbeat_current_worker_from_env(
+                    on_lease_lost=lambda task_id: request_hard_interrupt(
+                        self,
+                        f"Kanban lease lost for {task_id}; stopping superseded worker.",
+                        tool_reason="kanban lease lost",
+                    )
+                )
                 # Fold any new operator notes into the running turn (OUT-OF-BAND
                 # steer) so the user can talk to a live task without a restart.
                 inject_new_comments_from_env(self)
