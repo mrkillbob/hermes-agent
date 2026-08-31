@@ -128,6 +128,71 @@ export interface ProjectSlotManifestEntry {
   navigationLink: { from: Vec3; to: Vec3; bidirectional: boolean }
 }
 
+export interface WorkerCharacterSignature {
+  body: string
+  emblem: string
+  head: string
+  palette: string
+  silhouetteAccessory: string
+}
+
+export interface WorkerCharacterKit {
+  group: string
+  kitId: string
+  signature: WorkerCharacterSignature
+}
+
+export interface LeaderCharacterAsset {
+  id: LeaderId
+  silhouetteId: string
+  species: string
+  visualId: string
+}
+
+export interface CharacterAssetManifest {
+  fleetIdentityFloor: number
+  groupKits: readonly WorkerCharacterKit[]
+  leaders: readonly LeaderCharacterAsset[]
+  lodRepresentations: readonly {
+    animated: boolean
+    id: 'near' | 'mid' | 'far'
+    representation: 'full' | 'reduced' | 'static-or-aggregate'
+  }[]
+  physicalVariantRoots: {
+    body: Readonly<Record<string, string>>
+    groupKit: { emblemSuffix: string; identityAccentSuffix: string; silhouetteSuffix: string }
+    head: Readonly<Record<string, string>>
+    palette: Readonly<Record<string, string>>
+  }
+  sharedResourceStrategy: {
+    animationClips: 'shared'
+    gpuBuffers: 'shared'
+    materials: 'shared'
+    perProfile: { materials: 0; meshes: 0; skeletons: 0; textures: 0 }
+    rig: string
+    textureAtlas: string
+  }
+  workerVocabulary: {
+    bodies: readonly string[]
+    emblems: readonly string[]
+    heads: readonly string[]
+    palettes: readonly string[]
+    silhouetteAccessories: readonly string[]
+  }
+}
+
+export interface WorkerCharacterPresentation {
+  /** Stable district slot encoded by the shared identity-accent transform. */
+  accentCode: number
+  /** Exact-key-derived, resource-free visible accent token. */
+  identityAccent: string
+  kitId: string
+  lod: 'near' | 'mid' | 'far'
+  renderMode: 'animated' | 'instanced' | 'aggregate'
+  signature: WorkerCharacterSignature
+  visibleSignature: string
+}
+
 export interface QualityBudget {
   drawCalls: number
   visibleTriangles: number
@@ -138,6 +203,7 @@ export interface WorldManifestV2 {
   version: 2
   assetVersion: '2.0.0'
   source: { sha256: string }
+  characterAssets: CharacterAssetManifest
   materials: readonly MaterialManifestEntry[]
   models: readonly ModelManifestEntry[]
   textures: readonly TextureManifestEntry[]
@@ -258,6 +324,7 @@ export interface LunarCityLeaderPickMetadata {
 /** Exact worker identity attached to every clone and hardware instance. */
 export interface LunarCityWorkerPickMetadata {
   cameraAnchor: Vec3
+  character?: WorkerCharacterPresentation
   entityKey: EntityKey
   focusEntityKey: EntityKey
   identity: EntityIdentity

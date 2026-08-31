@@ -5,6 +5,7 @@ import type {
   BabylonNodeLike,
   CameraControlState,
   CameraIntent,
+  CharacterAssetManifest,
   EntityKey,
   LeaderAnimationState,
   LeaderId,
@@ -20,6 +21,7 @@ import type {
   RecastConfigLike,
   RecastRuntimeLike,
   Vec3,
+  WorkerCharacterPresentation,
   WorldBounds,
   WorldManifestV2
 } from '../model'
@@ -544,10 +546,12 @@ function copiedPoint(point: Vec3 | undefined): Vec3 {
 function workerPickMetadata(
   entity: { identity: LunarEntity['identity']; key: EntityKey; position?: Vec3; variant?: string },
   model: Pick<ModelManifestEntry, 'occlusionGroup'>,
-  variant: string | undefined
+  variant: string | undefined,
+  character?: WorkerCharacterPresentation
 ): LunarCityWorkerPickMetadata {
   return {
     cameraAnchor: copiedPoint(entity.position),
+    ...(character ? { character } : {}),
     entityKey: entity.key,
     focusEntityKey: entity.key,
     identity: entity.identity,
@@ -876,7 +880,8 @@ export function createBabylonEntityFactory(
   model: ModelManifestEntry,
   result: BabylonImportResultLike,
   modules: LunarCityWorldModules,
-  scene: ConstructorParameters<LunarCityWorldModules['TransformNode']>[1]
+  scene: ConstructorParameters<LunarCityWorldModules['TransformNode']>[1],
+  characterAssets?: CharacterAssetManifest
 ): EntityPresentationFactory {
   const template = findNode(result, `${model.id}:root`)
   const sourceGroups = workerAnimationGroups(result)
@@ -889,6 +894,62 @@ export function createBabylonEntityFactory(
       const node = findNode(result, `worker:variant:${variant}`)
 
       return node ? [[variant, node] as const] : []
+    })
+  )
+
+  const sourceGroupKitNodes = new Map(
+    allImportedNodes(result).flatMap(node => {
+      const match = /^worker:group-kit:([^:]+)$/u.exec(node.name)
+
+      return match?.[1] ? [[match[1], node] as const] : []
+    })
+  )
+
+  const declaredSignatureNodes = new Map(
+    characterAssets
+      ? [
+          ...Object.entries(characterAssets.physicalVariantRoots.body).map(
+            ([id, node]) => [node, `body:${id}`] as const
+          ),
+          ...Object.entries(characterAssets.physicalVariantRoots.head).map(
+            ([id, node]) => [node, `head:${id}`] as const
+          ),
+          ...Object.entries(characterAssets.physicalVariantRoots.palette).map(
+            ([id, node]) => [node, `palette:${id}`] as const
+          )
+        ]
+      : []
+  )
+
+  const sourceSignatureNodes = new Map(
+    allImportedNodes(result).flatMap(node => {
+      const id = declaredSignatureNodes.get(node.name)
+
+      return id ? [[id, node] as const] : []
+    })
+  )
+
+  if (characterAssets && sourceSignatureNodes.size !== declaredSignatureNodes.size) {
+    const found = new Set(allImportedNodes(result).map(node => node.name))
+    const missing = [...declaredSignatureNodes.keys()].filter(node => !found.has(node))
+
+    throw new Error(
+      `Lunar City workers GLB is missing manifest-declared physical signature root: ${missing.join(', ')}`
+    )
+  }
+
+  const sourceAccentNodes = new Map(
+    allImportedNodes(result).flatMap(node => {
+      const suffix = characterAssets?.physicalVariantRoots.groupKit.identityAccentSuffix
+      const prefix = 'worker:group-kit:'
+      const ending = suffix ? `:${suffix}` : ':identity-accent'
+
+      const kitId =
+        node.name.startsWith(prefix) && node.name.endsWith(ending)
+          ? node.name.slice(prefix.length, -ending.length)
+          : undefined
+
+      return kitId ? [[kitId, node] as const] : []
     })
   )
 
@@ -913,6 +974,22 @@ export function createBabylonEntityFactory(
     )
   }
 
+  const meshesForCharacterKit = (meshes: readonly BabylonInstancedMeshLike[], kitId: string | undefined) => {
+    if (!kitId || !sourceGroupKitNodes.has(kitId)) {
+      return meshes.filter(
+        mesh => ![...sourceGroupKitNodes.values()].some(groupKitNode => belongsToLeader(mesh, groupKitNode))
+      )
+    }
+
+    const selectedKit = sourceGroupKitNodes.get(kitId)!
+
+    return meshes.filter(
+      mesh =>
+        ![...sourceGroupKitNodes.values()].some(groupKitNode => belongsToLeader(mesh, groupKitNode)) ||
+        belongsToLeader(mesh, selectedKit)
+    )
+  }
+
   if (!template) {
     throw new Error('Lunar City workers GLB is missing its runtime root')
   }
@@ -923,12 +1000,16 @@ export function createBabylonEntityFactory(
   template.setEnabled?.(false)
 
   return {
-    createAnimated(entity, declaredVariant): EntityVisual {
+    createAnimated(entity, declaredVariant, character): EntityVisual {
       const anchor = new modules.TransformNode(`lunar-city:entity:${entity.key}`, scene)
       const clone = cloneWorkerHierarchy(template, anchor, sourceGroups, entity.key)
       const variant = declaredVariant ?? deterministicWorkerVariant(entity.key, variants)
-      const metadata = workerPickMetadata(entity, model, variant)
-      anchor.metadata = { ...metadataRecord(anchor.metadata), lunarCityWorkerVariant: variant }
+      const metadata = workerPickMetadata(entity, model, variant, character)
+      anchor.metadata = {
+        ...metadataRecord(anchor.metadata),
+        ...(character ? { lunarCityCharacter: character } : {}),
+        lunarCityWorkerVariant: variant
+      }
       tagWorkerNode(anchor, metadata)
       tagWorkerNode(clone.root, metadata)
 
@@ -940,6 +1021,39 @@ export function createBabylonEntityFactory(
 
       for (const [variantId, sourceNode] of sourceVariantNodes) {
         clone.nodeMap.get(sourceNode)?.setEnabled?.(variantId === variant)
+      }
+
+      for (const [kitId, sourceNode] of sourceGroupKitNodes) {
+        clone.nodeMap.get(sourceNode)?.setEnabled?.(kitId === character?.kitId)
+      }
+
+      const enabledSignatureNodes = new Set(
+        character
+          ? [
+              `body:${character.signature.body}`,
+              `head:${character.signature.head}`,
+              `palette:${character.signature.palette}`
+            ]
+          : []
+      )
+
+      for (const [signatureId, sourceNode] of sourceSignatureNodes) {
+        clone.nodeMap.get(sourceNode)?.setEnabled?.(enabledSignatureNodes.has(signatureId))
+      }
+
+      for (const [kitId, sourceNode] of sourceAccentNodes) {
+        const accent = clone.nodeMap.get(sourceNode)
+        const enabled = kitId === character?.kitId
+        accent?.setEnabled?.(enabled)
+
+        if (enabled && character && accent) {
+          const low = character.accentCode & 0x1ff
+          const high = (character.accentCode >>> 9) & 0x1ff
+          const rotation = (low / 512) * Math.PI * 2
+          const scaleX = 0.75 + high / 1024
+          accent.rotation?.set(0, 0, rotation)
+          accent.scaling?.set(scaleX, 1.5 - scaleX, 1)
+        }
       }
 
       let active: BabylonAnimationGroupLike | undefined
@@ -989,7 +1103,8 @@ export function createBabylonEntityFactory(
     createInstancedGroup(groupKey): InstancedEntityGroup {
       const lodIndex = Number(/:lod:(\d+)$/u.exec(groupKey)?.[1] ?? 0)
       const variant = variants.find(candidate => groupKey.startsWith(`worker:${candidate}:`))
-      const sourceMeshes = meshesForVariant(meshesForLod(lodIndex), variant)
+      const kitId = /:kit:([^:]+)(?::lod:\d+)?$/u.exec(groupKey)?.[1]
+      const sourceMeshes = meshesForCharacterKit(meshesForVariant(meshesForLod(lodIndex), variant), kitId)
       const members = new Map<EntityKey, { instances: BabylonNodeLike[]; root: BabylonNodeLike }>()
 
       const disposeMember = (member: { instances: BabylonNodeLike[]; root: BabylonNodeLike }): void => {
@@ -1040,7 +1155,7 @@ export function createBabylonEntityFactory(
               members.set(member.key, visual)
             }
 
-            const metadata = workerPickMetadata(member, model, member.variant ?? variant)
+            const metadata = workerPickMetadata(member, model, member.variant ?? variant, member.character)
             tagWorkerNode(visual.root, metadata)
 
             for (const instance of visual.instances) {
@@ -1321,7 +1436,14 @@ export async function createWorldScene(
     const workerClipNames = new Set(workerAnimationGroups(workerAsset.result).keys())
 
     const entityRegistryController = createEntityRegistry({
-      factory: createBabylonEntityFactory(workerAsset.model, workerAsset.result, modules, scene),
+      characterAssets: manifest.characterAssets,
+      factory: createBabylonEntityFactory(
+        workerAsset.model,
+        workerAsset.result,
+        modules,
+        scene,
+        manifest.characterAssets
+      ),
       focusAnchors,
       focusMetadata,
       workerClips: workerClipNames

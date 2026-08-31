@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import actualManifest from '../../../../public/lunar-city/v2/world-manifest.v2.json'
+import { parseWorldManifest } from '../manifest'
 import type { EntityKey, LunarCitySnapshot, LunarEntity, Vec3 } from '../model'
 
 import { applyLodSelection, createEntityRegistry, type EntityPresentationFactory } from './entities'
@@ -38,6 +40,7 @@ function factory(): EntityPresentationFactory & {
   groups: Map<string, { dispose: ReturnType<typeof vi.fn>; sync: ReturnType<typeof vi.fn> }>
 } {
   const groups = new Map<string, { dispose: ReturnType<typeof vi.fn>; sync: ReturnType<typeof vi.fn> }>()
+
   const animated = vi.fn(() => ({
     dispose: vi.fn(),
     setAnimation: vi.fn(),
@@ -60,6 +63,67 @@ function factory(): EntityPresentationFactory & {
 }
 
 describe('EntityRegistry', () => {
+  it('passes exact group-kit identity data through shared batches without allocating a group per profile', () => {
+    const presentationFactory = factory()
+    const assets = parseWorldManifest(structuredClone(actualManifest)).characterAssets
+
+    const workers = Array.from({ length: 90 }, (_, index) =>
+      entity(index, {
+        identity: { kind: 'profile', connectionId: 'local', profile: `worker-${index}` },
+        presentation: {
+          groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+          metadata: { source: 'profiles:local', state: 'fresh' },
+          placement: { lodHint: 1, overflow: true, primaryGroupId: 'engineering', slot: index }
+        }
+      })
+    )
+
+    const registry = createEntityRegistry({
+      characterAssets: assets,
+      factory: presentationFactory,
+      workerClips: new Set(['idle', 'walk'])
+    })
+
+    registry.reconcile(snapshot(...workers))
+
+    expect(presentationFactory.groups).toHaveLength(1)
+    const members = [...presentationFactory.groups.values()][0]!.sync.mock.calls.at(-1)?.[0]
+    expect(members).toHaveLength(90)
+    expect(new Set(members.map((member: any) => member.character.visibleSignature))).toHaveLength(90)
+    expect(members.every((member: any) => member.character.kitId === 'engineering-guild')).toBe(true)
+  })
+
+  it('renders only the global 24 near exact profiles with full animated signatures and leaves mid profiles instanced', () => {
+    const presentationFactory = factory()
+    const assets = parseWorldManifest(structuredClone(actualManifest)).characterAssets
+
+    const workers = Array.from({ length: 32 }, (_, index) =>
+      entity(index, {
+        identity: { kind: 'profile', connectionId: 'local', profile: `worker-${index}` },
+        presentation: {
+          groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+          metadata: { source: 'profiles:local', state: 'fresh' },
+          placement: {
+            lodHint: index < 24 ? 0 : 1,
+            overflow: index >= 24,
+            primaryGroupId: 'engineering',
+            slot: index
+          }
+        }
+      })
+    )
+
+    const registry = createEntityRegistry({
+      characterAssets: assets,
+      factory: presentationFactory,
+      workerClips: new Set(['idle', 'walk'])
+    })
+
+    registry.reconcile(snapshot(...workers))
+
+    expect(presentationFactory.animated).toHaveBeenCalledTimes(24)
+    expect(registry.instancedGroup('worker:idle:kit:engineering-guild:lod:1')?.count).toBe(8)
+  })
   it('retains keyed objects and a single hardware-instanced idle group across identical snapshots', () => {
     const presentationFactory = factory()
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
@@ -106,6 +170,7 @@ describe('EntityRegistry', () => {
 
   it('starts bounded district overflow at its declared aggregate LOD without per-frame promotion work', () => {
     const presentationFactory = factory()
+
     const overflow = entity(1, {
       presentation: {
         groups: [{ id: 'engineering', name: 'Engineering Guild' }],
@@ -113,6 +178,7 @@ describe('EntityRegistry', () => {
         placement: { lodHint: 1, overflow: true, primaryGroupId: 'engineering', slot: 24 }
       }
     })
+
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
 
     registry.reconcile(snapshot(overflow))
@@ -123,6 +189,7 @@ describe('EntityRegistry', () => {
 
   it('counts a capacity-exhausted profile without inventing an origin render or navigation slot', () => {
     const presentationFactory = factory()
+
     const aggregateOnly = entity(1, {
       identity: { kind: 'profile', connectionId: 'local', profile: 'aggregate-only' },
       position: undefined,
@@ -132,6 +199,7 @@ describe('EntityRegistry', () => {
         placement: { lodHint: 1, overflow: true }
       }
     })
+
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
     const resolveIndex = vi.fn(() => 0)
     const isNearby = vi.fn(() => true)
@@ -152,6 +220,7 @@ describe('EntityRegistry', () => {
   it('does not let selected aggregate-only rows displace a worker from the global 24-visual budget', () => {
     const presentationFactory = factory()
     const workers = Array.from({ length: 24 }, (_, index) => entity(index, { animation: 'walk' }))
+
     const aggregateOnly = entity(100, {
       identity: { kind: 'profile', connectionId: 'local', profile: 'aggregate-only' },
       position: undefined,
@@ -161,10 +230,12 @@ describe('EntityRegistry', () => {
         placement: { lodHint: 1, overflow: true }
       }
     })
+
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
 
     registry.reconcile(snapshot(...workers, aggregateOnly))
     registry.setSelection(aggregateOnly.key)
+
     const activeVisuals = presentationFactory.animated.mock.results
       .map(result => result.value)
       .filter(visual => !visual.dispose.mock.calls.length)
@@ -177,6 +248,7 @@ describe('EntityRegistry', () => {
     const presentationFactory = factory()
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
     const near = entity(1)
+
     const overflow = entity(1, {
       presentation: {
         groups: [{ id: 'engineering', name: 'Engineering Guild' }],
@@ -193,6 +265,7 @@ describe('EntityRegistry', () => {
 
   it('promotes one selected overflow worker to LOD0 by replacing a near worker within the strict district budget', () => {
     const presentationFactory = factory()
+
     const workers = Array.from({ length: 26 }, (_, index) =>
       entity(index, {
         animation: index === 24 ? 'walk' : 'idle',
@@ -203,6 +276,7 @@ describe('EntityRegistry', () => {
         }
       })
     )
+
     const selectedOverflow = workers[25]!
     const otherOverflow = workers[24]!
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
@@ -227,6 +301,7 @@ describe('EntityRegistry', () => {
 
   it('caps mixed profile, session, subagent, and Kanban workers at 24 animated visuals globally across districts', () => {
     const presentationFactory = factory()
+
     const workers = Array.from({ length: 32 }, (_, index) => {
       const base = entity(index, { animation: 'walk', destination: index % 2 ? 'lab' : 'project' })
 
@@ -265,6 +340,7 @@ describe('EntityRegistry', () => {
         }
       }
     })
+
     const selected = workers[31]!
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
 
@@ -275,6 +351,7 @@ describe('EntityRegistry', () => {
     expect(registry.entity(selected.key)?.visual).toBeUndefined()
 
     registry.setSelection(selected.key)
+
     const activeVisuals = presentationFactory.animated.mock.results
       .map(result => result.value)
       .filter(visual => !visual.dispose.mock.calls.length)
@@ -333,6 +410,7 @@ describe('EntityRegistry', () => {
     const presentationFactory = factory()
     const diagnostic = vi.fn()
     const worker = entity(1, { animation: 'made-up' })
+
     const registry = createEntityRegistry({
       diagnostic,
       factory: presentationFactory,
@@ -351,10 +429,12 @@ describe('EntityRegistry', () => {
     const focusAnchors = new Map<EntityKey, () => Vec3 | undefined>()
     const presentationFactory = factory()
     const first = entity(1, { animation: 'walk', position: { x: 1, y: 0, z: 0 } })
+
     const replacement = entity(2, {
       animation: 'walk',
       identity: { kind: 'session', connectionId: 'connection-2', profile: 'worker', sessionId: 'session-2' }
     })
+
     const registry = createEntityRegistry({
       focusAnchors,
       factory: presentationFactory,
@@ -375,8 +455,10 @@ describe('EntityRegistry', () => {
       EntityKey,
       () => { cameraAnchor: Vec3; focusEntityKey: EntityKey; occlusionGroup: string } | undefined
     >()
+
     const presentationFactory = factory()
     const worker = entity(1, { position: { x: 2, y: 0, z: 3 } })
+
     const registry = createEntityRegistry({
       focusMetadata,
       factory: presentationFactory,
@@ -418,6 +500,7 @@ describe('EntityRegistry', () => {
   it('keeps the authoritative arrival clip while navigation temporarily presents the declared walk clip', () => {
     const presentationFactory = factory()
     const worker = entity(1, { animation: 'work' })
+
     const registry = createEntityRegistry({
       factory: presentationFactory,
       workerClips: new Set(['idle', 'walk', 'work'])

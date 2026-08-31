@@ -200,13 +200,27 @@ function fakeRuntime({
     const model = actualManifest.models.find(candidate => candidate.id === modelId)
     const modelLods = model?.lods ?? []
     roots.set(modelId, root)
+
     const lods = modelLods.map(lod => {
       const node = fakeNode(lod.node)
       lodNodes.set(node.name, node)
+
       return node
     })
 
     const transformNodes: FakeNode[] = [root, ...lods]
+
+    if (modelId === 'workers') {
+      const physicalRoots = actualManifest.characterAssets.physicalVariantRoots
+
+      const workerSignatureNodes = [
+        ...Object.values(physicalRoots.body),
+        ...Object.values(physicalRoots.head),
+        ...Object.values(physicalRoots.palette)
+      ].map(name => fakeNode(name))
+
+      transformNodes.push(...workerSignatureNodes)
+    }
 
     if (modelId === 'garden') {
       const plants = fakeNode('garden:plants', { gltf: { extras: { semantic: 'garden:plants' } } })

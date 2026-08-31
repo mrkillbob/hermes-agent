@@ -50,6 +50,41 @@ describe('parseWorldManifest', () => {
       uri: 'textures/approved-palette.png',
       source: 'generated-approved-palette'
     })
+    expect(manifest.characterAssets).toMatchObject({
+      fleetIdentityFloor: 128,
+      sharedResourceStrategy: {
+        animationClips: 'shared',
+        gpuBuffers: 'shared',
+        materials: 'shared',
+        rig: 'worker:shared-rig'
+      }
+    })
+    expect(manifest.characterAssets.leaders).toHaveLength(6)
+    expect(manifest.characterAssets.groupKits).toHaveLength(19)
+  })
+
+  it.each([
+    [
+      'duplicate leader silhouette',
+      (fixture: any) =>
+        (fixture.characterAssets.leaders[1].silhouetteId = fixture.characterAssets.leaders[0].silhouetteId)
+    ],
+    ['unknown group body', (fixture: any) => (fixture.characterAssets.groupKits[0].signature.body = 'not-declared')],
+    [
+      'duplicate group kit',
+      (fixture: any) => (fixture.characterAssets.groupKits[1].kitId = fixture.characterAssets.groupKits[0].kitId)
+    ],
+    ['unknown group name', (fixture: any) => (fixture.characterAssets.groupKits[0].group = 'Display Name Guess')],
+    ['insufficient fleet floor', (fixture: any) => (fixture.characterAssets.fleetIdentityFloor = 127)],
+    [
+      'per-profile material allocation',
+      (fixture: any) => (fixture.characterAssets.sharedResourceStrategy.perProfile.materials = 1)
+    ]
+  ])('rejects an unsafe character asset contract: %s', (_label, mutate) => {
+    const fixture = structuredClone(actualManifest)
+    mutate(fixture)
+
+    expect(() => parseWorldManifest(fixture)).toThrow(/characterAssets/)
   })
 
   it.each([

@@ -1,5 +1,6 @@
 import type {
   CameraLandmark,
+  CharacterAssetManifest,
   MaterialManifestEntry,
   ModelManifestEntry,
   ModelStatistics,
@@ -11,6 +12,36 @@ import type {
   WorldBounds,
   WorldManifestV2
 } from './model'
+
+const LEADER_IDS = new Set(['owl', 'fox', 'badger', 'otter', 'bird', 'stag'])
+
+const LOD_REPRESENTATIONS = new Map([
+  ['near', ['full', true]],
+  ['mid', ['reduced', false]],
+  ['far', ['static-or-aggregate', false]]
+] as const)
+
+const CHARACTER_GROUPS = new Set([
+  'Acceptance & Release',
+  'Archive and Acquisition',
+  'Arts Studio',
+  'CI Repair Triage',
+  'Community Intake',
+  'Content Studio',
+  'Control Plane Incidents',
+  'Core Runtime & UX Repairs',
+  'Data & Performance Repairs',
+  'Editorial Desk',
+  'Engineering Guild',
+  'Federation Council',
+  'Knowledge Commons',
+  'Memory Stewardship',
+  'Operations and Release',
+  'PR Merge Train',
+  'Research Lab',
+  'Research Review Board',
+  'Upstream Hermes Maintenance'
+])
 
 export const APPROVED_SOURCE_SHA256 = '248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590'
 const APPROVED_SOURCE_FILENAME = 'moon-settlement-approved.jpg'
@@ -333,6 +364,219 @@ function qualityBudget(value: unknown, path: string): QualityBudget {
   }
 }
 
+function characterAssets(value: unknown): CharacterAssetManifest {
+  const path = 'characterAssets'
+  const item = record(value, path)
+  const vocabularyValue = record(item.workerVocabulary, `${path}.workerVocabulary`)
+
+  const vocabulary = {
+    bodies: strings(vocabularyValue.bodies, `${path}.workerVocabulary.bodies`),
+    emblems: strings(vocabularyValue.emblems, `${path}.workerVocabulary.emblems`),
+    heads: strings(vocabularyValue.heads, `${path}.workerVocabulary.heads`),
+    palettes: strings(vocabularyValue.palettes, `${path}.workerVocabulary.palettes`),
+    silhouetteAccessories: strings(
+      vocabularyValue.silhouetteAccessories,
+      `${path}.workerVocabulary.silhouetteAccessories`
+    )
+  }
+
+  const vocabularySets = {
+    body: new Set(vocabulary.bodies),
+    emblem: new Set(vocabulary.emblems),
+    head: new Set(vocabulary.heads),
+    palette: new Set(vocabulary.palettes),
+    silhouetteAccessory: new Set(vocabulary.silhouetteAccessories)
+  }
+
+  const physicalRootsValue = record(item.physicalVariantRoots, `${path}.physicalVariantRoots`)
+
+  const physicalRoots = (field: 'body' | 'head' | 'palette', ids: readonly string[]) => {
+    const entries = record(physicalRootsValue[field], `${path}.physicalVariantRoots.${field}`)
+
+    const result = Object.fromEntries(
+      Object.entries(entries).map(([id, node]) => {
+        if (!ids.includes(id)) {
+          throw new Error(`${path}.physicalVariantRoots.${field}.${id} is not declared in workerVocabulary`)
+        }
+
+        const nodeName = string(node, `${path}.physicalVariantRoots.${field}.${id}`)
+
+        if (!/^worker:[a-z0-9][a-z0-9:-]*$/u.test(nodeName)) {
+          throw new Error(`${path}.physicalVariantRoots.${field}.${id} must be a worker node name`)
+        }
+
+        return [id, nodeName]
+      })
+    )
+
+    if (Object.keys(result).length !== ids.length || new Set(Object.values(result)).size !== ids.length) {
+      throw new Error(`${path}.physicalVariantRoots.${field} must map every vocabulary id exactly once`)
+    }
+
+    return result
+  }
+
+  const leaders = array(item.leaders, `${path}.leaders`).map((value, index) => {
+    const leader = record(value, `${path}.leaders[${index}]`)
+    const id = string(leader.id, `${path}.leaders[${index}].id`)
+
+    if (!LEADER_IDS.has(id)) {
+      throw new Error(`${path}.leaders[${index}].id is not a declared leader`)
+    }
+
+    return {
+      id: id as CharacterAssetManifest['leaders'][number]['id'],
+      silhouetteId: string(leader.silhouetteId, `${path}.leaders[${index}].silhouetteId`),
+      species: string(leader.species, `${path}.leaders[${index}].species`),
+      visualId: string(leader.visualId, `${path}.leaders[${index}].visualId`)
+    }
+  })
+
+  for (const field of ['id', 'silhouetteId', 'species', 'visualId'] as const) {
+    if (new Set(leaders.map(leader => leader[field])).size !== leaders.length) {
+      throw new Error(`${path}.leaders must have distinct ${field}`)
+    }
+  }
+
+  if (leaders.length !== 6) {
+    throw new Error(`${path}.leaders must contain six distinct leaders`)
+  }
+
+  const groupKits = array(item.groupKits, `${path}.groupKits`).map((value, index) => {
+    const kitPath = `${path}.groupKits[${index}]`
+    const kit = record(value, kitPath)
+    const signatureValue = record(kit.signature, `${kitPath}.signature`)
+
+    const signature = {
+      body: string(signatureValue.body, `${kitPath}.signature.body`),
+      emblem: string(signatureValue.emblem, `${kitPath}.signature.emblem`),
+      head: string(signatureValue.head, `${kitPath}.signature.head`),
+      palette: string(signatureValue.palette, `${kitPath}.signature.palette`),
+      silhouetteAccessory: string(signatureValue.silhouetteAccessory, `${kitPath}.signature.silhouetteAccessory`)
+    }
+
+    for (const [field, declared] of Object.entries(vocabularySets)) {
+      if (!declared.has(signature[field as keyof typeof signature])) {
+        throw new Error(`${kitPath}.signature.${field} is not declared in ${path}.workerVocabulary`)
+      }
+    }
+
+    const group = string(kit.group, `${kitPath}.group`)
+
+    if (!CHARACTER_GROUPS.has(group)) {
+      throw new Error(`${kitPath}.group is not an exact configured Hermes group`)
+    }
+
+    return {
+      group,
+      kitId: string(kit.kitId, `${kitPath}.kitId`),
+      signature
+    }
+  })
+
+  if (
+    groupKits.length !== 19 ||
+    new Set(groupKits.map(kit => kit.group)).size !== CHARACTER_GROUPS.size ||
+    new Set(groupKits.map(kit => kit.kitId)).size !== groupKits.length
+  ) {
+    throw new Error(`${path}.groupKits must contain 19 distinct kit ids`)
+  }
+
+  const strategyValue = record(item.sharedResourceStrategy, `${path}.sharedResourceStrategy`)
+  const perProfileValue = record(strategyValue.perProfile, `${path}.sharedResourceStrategy.perProfile`)
+
+  const zero = (field: string): 0 => {
+    const value = natural(perProfileValue[field], `${path}.sharedResourceStrategy.perProfile.${field}`)
+
+    if (value !== 0) {
+      throw new Error(`${path}.sharedResourceStrategy.perProfile.${field} must equal 0`)
+    }
+
+    return 0
+  }
+
+  const shared = (field: string): 'shared' => {
+    if (strategyValue[field] !== 'shared') {
+      throw new Error(`${path}.sharedResourceStrategy.${field} must equal shared`)
+    }
+
+    return 'shared'
+  }
+
+  const lodRepresentations = array(item.lodRepresentations, `${path}.lodRepresentations`).map((value, index) => {
+    const lodPath = `${path}.lodRepresentations[${index}]`
+    const lod = record(value, lodPath)
+    const id = string(lod.id, `${lodPath}.id`)
+    const expected = LOD_REPRESENTATIONS.get(id as 'near' | 'mid' | 'far')
+    const representation = string(lod.representation, `${lodPath}.representation`)
+    const animated = boolean(lod.animated, `${lodPath}.animated`)
+
+    if (!expected || expected[0] !== representation || expected[1] !== animated) {
+      throw new Error(`${lodPath} is not a supported low-power representation`)
+    }
+
+    return {
+      animated,
+      id: id as 'near' | 'mid' | 'far',
+      representation: representation as 'full' | 'reduced' | 'static-or-aggregate'
+    }
+  })
+
+  if (new Set(lodRepresentations.map(lod => lod.id)).size !== 3) {
+    throw new Error(`${path}.lodRepresentations must declare near, mid, and far exactly once`)
+  }
+
+  const fleetIdentityFloor = natural(item.fleetIdentityFloor, `${path}.fleetIdentityFloor`)
+
+  if (fleetIdentityFloor < 128) {
+    throw new Error(`${path}.fleetIdentityFloor must cover at least 128 exact profiles`)
+  }
+
+  return {
+    fleetIdentityFloor,
+    groupKits,
+    leaders,
+    lodRepresentations,
+    physicalVariantRoots: {
+      body: physicalRoots('body', vocabulary.bodies),
+      groupKit: {
+        emblemSuffix: string(
+          record(physicalRootsValue.groupKit, `${path}.physicalVariantRoots.groupKit`).emblemSuffix,
+          `${path}.physicalVariantRoots.groupKit.emblemSuffix`
+        ),
+        identityAccentSuffix: string(
+          record(physicalRootsValue.groupKit, `${path}.physicalVariantRoots.groupKit`).identityAccentSuffix,
+          `${path}.physicalVariantRoots.groupKit.identityAccentSuffix`
+        ),
+        silhouetteSuffix: string(
+          record(physicalRootsValue.groupKit, `${path}.physicalVariantRoots.groupKit`).silhouetteSuffix,
+          `${path}.physicalVariantRoots.groupKit.silhouetteSuffix`
+        )
+      },
+      head: physicalRoots('head', vocabulary.heads),
+      palette: physicalRoots('palette', vocabulary.palettes)
+    },
+    sharedResourceStrategy: {
+      animationClips: shared('animationClips'),
+      gpuBuffers: shared('gpuBuffers'),
+      materials: shared('materials'),
+      perProfile: {
+        materials: zero('materials'),
+        meshes: zero('meshes'),
+        skeletons: zero('skeletons'),
+        textures: zero('textures')
+      },
+      rig: string(strategyValue.rig, `${path}.sharedResourceStrategy.rig`),
+      textureAtlas: runtimeAssetUri(
+        strategyValue.textureAtlas,
+        `${path}.sharedResourceStrategy.textureAtlas`,
+        'texture'
+      )
+    },
+    workerVocabulary: vocabulary
+  }
+}
+
 export function assertWorldManifestRuntimeAssets(
   manifest: Pick<WorldManifestV2, 'models' | 'navigation' | 'textures'>
 ): void {
@@ -379,6 +623,7 @@ export function parseWorldManifest(value: unknown): WorldManifestV2 {
     version: 2,
     assetVersion: '2.0.0',
     source: { sha256: APPROVED_SOURCE_SHA256 },
+    characterAssets: characterAssets(root.characterAssets),
     materials: array(root.materials, 'materials').map(material),
     models,
     textures: array(root.textures, 'textures').map(texture),

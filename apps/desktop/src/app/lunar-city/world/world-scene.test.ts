@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import actualManifest from '../../../../public/lunar-city/v2/world-manifest.v2.json'
+import { parseWorldManifest } from '../manifest'
 import type {
   BabylonImportResultLike,
   BabylonNodeLike,
@@ -14,8 +16,8 @@ import type {
 } from '../model'
 
 import {
-  createManifestNavigationQuery,
   createBabylonEntityFactory,
+  createManifestNavigationQuery,
   createRouteNavigationQuery,
   projectCompoundsForSnapshot,
   transformManifestPoint,
@@ -149,6 +151,7 @@ describe('manifest navigation query', () => {
       ],
       transformNodes: []
     }
+
     const modules = {
       ImportMeshAsync: vi.fn(async () => result),
       createRecastNavigation: vi.fn(async () => ({ NavMesh: FakeNavMesh, Vec3: FakeVector3, rcConfig: FakeConfig }))
@@ -224,6 +227,7 @@ describe('manifest navigation query', () => {
       ],
       transformNodes: []
     }
+
     const modules = {
       ImportMeshAsync: vi.fn(async () => result),
       createRecastNavigation: vi.fn(async () => ({ ...runtime, NavMesh: TrackingNavMesh }))
@@ -320,12 +324,54 @@ describe('retained project compounds', () => {
 })
 
 describe('worker GLB presentation', () => {
+  it('fails closed when a manifest-declared physical signature root is absent from the worker GLB', () => {
+    const assets = parseWorldManifest(structuredClone(actualManifest)).characterAssets
+
+    const result: BabylonImportResultLike = {
+      animationGroups: [],
+      meshes: [],
+      transformNodes: [{ name: 'workers:root', setEnabled: vi.fn() }]
+    }
+
+    expect(() =>
+      createBabylonEntityFactory(
+        {
+          id: 'workers',
+          instancing: { eligible: true, variants: [] },
+          lods: [],
+          occlusionGroup: 'workers'
+        } as unknown as ModelManifestEntry,
+        result,
+        { TransformNode: class {} } as unknown as LunarCityWorldModules,
+        {} as never,
+        assets
+      )
+    ).toThrow(/missing manifest-declared physical signature root/)
+  })
+
   it('activates exactly the selected physical variant subtree and releases cloned animation groups', () => {
     const orbital = { name: 'worker:variant:orbital', setEnabled: vi.fn() }
     const builder = { name: 'worker:variant:builder', setEnabled: vi.fn() }
     const near = { name: 'workers:lod:near', setEnabled: vi.fn() }
     const far = { name: 'workers:lod:far', setEnabled: vi.fn() }
+    const engineering = { name: 'worker:group-kit:engineering-guild', setEnabled: vi.fn() }
+    const research = { name: 'worker:group-kit:research-lab', setEnabled: vi.fn() }
+    const bodyCompact = { name: 'worker:body-variant:compact', setEnabled: vi.fn() }
+    const bodyStandard = { name: 'worker:body-variant:standard', setEnabled: vi.fn() }
+    const headOrb = { name: 'worker:head-variant:orb', setEnabled: vi.fn() }
+    const headVisor = { name: 'worker:head-variant:visor', setEnabled: vi.fn() }
+    const paletteRust = { name: 'worker:palette:rust-bone', setEnabled: vi.fn() }
+    const paletteViolet = { name: 'worker:palette:violet-cyan', setEnabled: vi.fn() }
+
+    const accent = {
+      name: 'worker:group-kit:engineering-guild:identity-accent',
+      rotation: { set: vi.fn() },
+      scaling: { set: vi.fn() },
+      setEnabled: vi.fn()
+    }
+
     const variantClones = new Map<object, { name: string; setEnabled: ReturnType<typeof vi.fn> }>()
+
     const template = {
       instantiateHierarchy: (
         parent: BabylonNodeLike,
@@ -335,8 +381,28 @@ describe('worker GLB presentation', () => {
         const root = { name: 'worker-clone', dispose: vi.fn(), parent, setEnabled: vi.fn() }
         onNewNodeCreated(template, root)
 
-        for (const source of [orbital, builder, near, far]) {
-          const clone = { name: `${source.name}:clone`, setEnabled: vi.fn() }
+        for (const source of [
+          orbital,
+          builder,
+          near,
+          far,
+          engineering,
+          research,
+          bodyCompact,
+          bodyStandard,
+          headOrb,
+          headVisor,
+          paletteRust,
+          paletteViolet,
+          accent
+        ]) {
+          const clone = {
+            name: `${source.name}:clone`,
+            rotation: 'rotation' in source ? { set: vi.fn() } : undefined,
+            scaling: 'scaling' in source ? { set: vi.fn() } : undefined,
+            setEnabled: vi.fn()
+          }
+
           variantClones.set(source, clone)
           onNewNodeCreated(source, clone)
         }
@@ -346,7 +412,9 @@ describe('worker GLB presentation', () => {
       name: 'workers:root',
       setEnabled: vi.fn()
     }
+
     const sceneAnimationGroups: unknown[] = []
+
     const clonedAnimation = {
       dispose: vi.fn(() => {
         sceneAnimationGroups.splice(sceneAnimationGroups.indexOf(clonedAnimation), 1)
@@ -354,6 +422,7 @@ describe('worker GLB presentation', () => {
       start: vi.fn(),
       stop: vi.fn()
     }
+
     const animation = {
       clone: vi.fn(() => {
         sceneAnimationGroups.push(clonedAnimation)
@@ -362,11 +431,28 @@ describe('worker GLB presentation', () => {
       }),
       name: 'work'
     }
+
     const result: BabylonImportResultLike = {
       animationGroups: [animation],
       meshes: [],
-      transformNodes: [template, orbital, builder, near, far]
+      transformNodes: [
+        template,
+        orbital,
+        builder,
+        near,
+        far,
+        engineering,
+        research,
+        bodyCompact,
+        bodyStandard,
+        headOrb,
+        headVisor,
+        paletteRust,
+        paletteViolet,
+        accent
+      ]
     }
+
     const model = {
       id: 'workers',
       instancing: { eligible: true, variants: ['orbital', 'builder'] },
@@ -376,6 +462,7 @@ describe('worker GLB presentation', () => {
       ],
       occlusionGroup: 'workers'
     } as Pick<ModelManifestEntry, 'id' | 'instancing' | 'lods'>
+
     class TransformNode {
       dispose = vi.fn()
       name: string
@@ -384,12 +471,15 @@ describe('worker GLB presentation', () => {
         this.name = name
       }
     }
+
     const factory = createBabylonEntityFactory(
       model as ModelManifestEntry,
       result,
       { TransformNode } as unknown as LunarCityWorldModules,
-      { animationGroups: sceneAnimationGroups } as never
+      { animationGroups: sceneAnimationGroups } as never,
+      parseWorldManifest(structuredClone(actualManifest)).characterAssets
     )
+
     const entity = {
       animation: 'work',
       authority: 'authoritative',
@@ -399,19 +489,50 @@ describe('worker GLB presentation', () => {
       observedAt: 1
     } as LunarEntity
 
-    const visual = factory.createAnimated(entity, 'builder')
+    const character = {
+      accentCode: 42,
+      identityAccent: 'deadbeef',
+      kitId: 'engineering-guild',
+      lod: 'near' as const,
+      renderMode: 'animated' as const,
+      signature: {
+        body: 'standard',
+        emblem: 'engineering-bridge',
+        head: 'orb',
+        palette: 'rust-bone',
+        silhouetteAccessory: 'engineering-hammer'
+      },
+      visibleSignature: 'standard:orb:engineering-hammer:rust-bone:engineering-bridge:deadbeef'
+    }
+
+    const visual = factory.createAnimated(entity, 'builder', character)
     visual.setAnimation?.('work')
     expect(sceneAnimationGroups).toHaveLength(1)
     visual.dispose?.()
 
     expect(variantClones.get(builder)?.setEnabled).toHaveBeenCalledWith(true)
     expect(variantClones.get(orbital)?.setEnabled).toHaveBeenCalledWith(false)
+    expect(variantClones.get(engineering)?.setEnabled).toHaveBeenCalledWith(true)
+    expect(variantClones.get(research)?.setEnabled).toHaveBeenCalledWith(false)
+    expect(variantClones.get(bodyStandard)?.setEnabled).toHaveBeenCalledWith(true)
+    expect(variantClones.get(bodyCompact)?.setEnabled).toHaveBeenCalledWith(false)
+    expect(variantClones.get(headOrb)?.setEnabled).toHaveBeenCalledWith(true)
+    expect(variantClones.get(headVisor)?.setEnabled).toHaveBeenCalledWith(false)
+    expect(variantClones.get(paletteRust)?.setEnabled).toHaveBeenCalledWith(true)
+    expect(variantClones.get(paletteViolet)?.setEnabled).toHaveBeenCalledWith(false)
+
+    const accentClone = variantClones.get(accent) as
+      { rotation?: { set: ReturnType<typeof vi.fn> }; scaling?: { set: ReturnType<typeof vi.fn> } } | undefined
+
+    expect(accentClone?.rotation?.set).toHaveBeenCalledTimes(1)
+    expect(accentClone?.scaling?.set).toHaveBeenCalledTimes(1)
     expect((variantClones.get(builder) as { metadata?: Record<string, unknown> } | undefined)?.metadata).toMatchObject({
       lunarCity: {
         entityKey: entity.key,
         focusEntityKey: entity.key,
         identity: entity.identity,
         kind: 'worker',
+        character,
         occlusionGroup: 'workers',
         selectable: true
       }

@@ -1,11 +1,14 @@
+import { characterPresentationForEntity } from '../character-presentation'
 import type {
   AuthorityState,
+  CharacterAssetManifest,
   DestinationId,
   EntityIdentity,
   EntityKey,
   LunarCitySnapshot,
   LunarEntity,
-  Vec3
+  Vec3,
+  WorkerCharacterPresentation
 } from '../model'
 
 export interface EntityVisual {
@@ -18,6 +21,7 @@ export interface EntityVisual {
 
 export interface InstancedEntityMember {
   animation: string
+  character?: WorkerCharacterPresentation
   identity: EntityIdentity
   key: EntityKey
   position: Vec3
@@ -37,7 +41,11 @@ export interface InstancedEntityGroup {
 }
 
 export interface EntityPresentationFactory {
-  createAnimated(entity: LunarEntity, variant: string | undefined): EntityVisual
+  createAnimated(
+    entity: LunarEntity,
+    variant: string | undefined,
+    character?: WorkerCharacterPresentation
+  ): EntityVisual
   createInstancedGroup(groupKey: string): InstancedEntityGroup
 }
 
@@ -79,6 +87,7 @@ export function selectLodIndex(entries: readonly Pick<LodEntry, 'distance'>[], s
 }
 
 export interface EntityRegistryOptions {
+  characterAssets?: CharacterAssetManifest
   diagnostic?: (message: string) => void
   factory: EntityPresentationFactory
   focusAnchors?: Map<EntityKey, () => Vec3 | undefined>
@@ -89,6 +98,7 @@ export interface EntityRegistryOptions {
 interface RetainedEntity {
   animation: string
   authority: AuthorityState
+  character?: WorkerCharacterPresentation
   entity: LunarEntity
   lodFloor: number
   lodIndex: number
@@ -120,7 +130,9 @@ function groupKey(record: RetainedEntity, lodIndex = record.lodIndex): string {
     ? `worker:${record.entity.variant}:${record.animation}`
     : `worker:${record.animation}`
 
-  return lodIndex === 0 ? base : `${base}:lod:${lodIndex}`
+  const character = record.character ? `:kit:${record.character.kitId}` : ''
+
+  return lodIndex === 0 ? `${base}${character}` : `${base}${character}:lod:${lodIndex}`
 }
 
 function isOverflow(record: RetainedEntity): boolean {
@@ -137,7 +149,11 @@ function wantsIndividualVisual(record: RetainedEntity, selection: EntityKey | un
   return (
     hasPhysicalPlacement(record) &&
     (record.entity.key === selection ||
-      (!isOverflow(record) && (record.moving || record.nearby || record.animation === 'walk')))
+      (!isOverflow(record) &&
+        (record.moving ||
+          record.nearby ||
+          record.animation === 'walk' ||
+          (record.character !== undefined && record.lodFloor === 0))))
   )
 }
 
@@ -226,10 +242,12 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       for (const key of activeKeys) {
         if (!nextActiveKeys.has(key)) {
           changed = true
+
           break
         }
       }
     }
+
     const previous = activeKeys
     activeKeys = nextActiveKeys
     nextActiveKeys = previous
@@ -288,6 +306,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       if (!hasPhysicalPlacement(record)) {
         record.visual?.dispose?.()
         record.visual = undefined
+
         continue
       }
 
@@ -295,7 +314,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
 
       if (activeKeys.has(record.entity.key)) {
         if (!record.visual) {
-          record.visual = options.factory.createAnimated(record.entity, record.entity.variant)
+          record.visual = options.factory.createAnimated(record.entity, record.entity.variant, record.character)
         }
 
         record.visual.setPosition?.(copied(record.position))
@@ -320,6 +339,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       const members = nextGroups.get(key) ?? []
       members.push({
         animation: record.animation,
+        ...(record.character ? { character: record.character } : {}),
         identity: record.entity.identity,
         key: record.entity.key,
         position: copied(record.position),
@@ -361,6 +381,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       }
 
       let changed = false
+
       for (const record of records.values()) {
         if (!hasPhysicalPlacement(record)) {
           const nextIndex = record.lodFloor
@@ -486,6 +507,9 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
         const record: RetainedEntity = previous ?? {
           animation: entity.animation,
           authority: entity.authority,
+          character: options.characterAssets
+            ? characterPresentationForEntity(entity, options.characterAssets)
+            : undefined,
           entity,
           lodFloor: entity.presentation?.placement.lodHint ?? 0,
           lodIndex: entity.presentation?.placement.lodHint ?? 0,
@@ -499,11 +523,15 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
         record.entity = entity
         record.animation = entity.animation
         record.authority = entity.authority
+        record.character = options.characterAssets
+          ? characterPresentationForEntity(entity, options.characterAssets)
+          : undefined
         record.lodFloor = entity.presentation?.placement.lodHint ?? 0
 
         if (record.lodIndex === previousLodFloor || record.lodIndex < record.lodFloor) {
           record.lodIndex = record.lodFloor
         }
+
         record.position = copied(entity.position ?? record.position)
         record.moving ||= entity.animation === 'walk'
         records.set(entity.key, record)
