@@ -36,6 +36,8 @@ interface CommandLifetime {
   generation: number
 }
 
+const READY_PATCH_SOURCE_STATES = new Set(['archived', 'blocked', 'done', 'review', 'scheduled', 'todo', 'triage'])
+
 function sourceName(identity: EntityIdentity): string {
   if (identity.kind === 'profile') {
     return `fleet:${identity.connectionId}`
@@ -52,11 +54,11 @@ function compatibleOperations(entity: LunarEntity): readonly CommandOperation[] 
   const identity = entity.identity
 
   if (identity.kind === 'session') {
-    return ['open-session', 'inspect-evidence', 'send-guidance', 'interrupt-session']
+    return ['open-session', 'send-guidance', 'interrupt-session']
   }
 
   if (identity.kind === 'subagent') {
-    return ['open-session', 'inspect-evidence', 'send-guidance', 'interrupt-subagent']
+    return ['open-session', 'send-guidance', 'interrupt-subagent']
   }
 
   if (identity.kind === 'kanban') {
@@ -70,7 +72,7 @@ function compatibleOperations(entity: LunarEntity): readonly CommandOperation[] 
       'inspect-evidence',
       ...(running && identity.runId ? (['terminate-run'] as const) : []),
       ...(running ? (['reclaim-task'] as const) : []),
-      ...(!running ? (['change-task-state'] as const) : [])
+      ...(READY_PATCH_SOURCE_STATES.has(entity.sourceState) ? (['change-task-state'] as const) : [])
     ]
   }
 
@@ -208,6 +210,7 @@ function disruptiveChoices(entity: LunarEntity): readonly CommandChoice[] {
   }
 
   const running = entity.sourceState === 'running'
+  const canMoveToReady = entity.sourceState ? READY_PATCH_SOURCE_STATES.has(entity.sourceState) : false
 
   if (!entity.sourceState) {
     return []
@@ -219,12 +222,14 @@ function disruptiveChoices(entity: LunarEntity): readonly CommandChoice[] {
       : []),
     ...(running
       ? [{ intent: { entityKey: entity.key, kind: 'reclaim-task' } as const, label: 'Reclaim task' }]
-      : [
-          {
-            intent: { entityKey: entity.key, kind: 'change-task-state', state: 'ready' } as const,
-            label: 'Move task to ready'
-          }
-        ])
+      : canMoveToReady
+        ? [
+            {
+              intent: { entityKey: entity.key, kind: 'change-task-state', state: 'ready' } as const,
+              label: 'Move task to ready'
+            }
+          ]
+        : [])
   ]
 }
 
@@ -333,7 +338,11 @@ export function LunarCityCommandRuntime({
     >
       <EntityInspector
         data={inspectorData(entity, target.source)}
-        onInspectEvidence={kind => stageOrRun({ entityKey: entity.key, evidence: kind, kind: 'inspect-evidence' })}
+        onInspectEvidence={
+          entity.identity.kind === 'kanban'
+            ? kind => stageOrRun({ entityKey: entity.key, evidence: kind, kind: 'inspect-evidence' })
+            : undefined
+        }
         onOpenSession={session => {
           if (onOpenSession) {
             stageOrRun({ entityKey: entity.key, kind: 'open-session' })
@@ -347,13 +356,15 @@ export function LunarCityCommandRuntime({
 
       {entity.identity.kind !== 'profile' ? (
         <div className="mt-3 space-y-2 border-t border-(--ui-stroke-tertiary) pt-3">
-          <Button
-            onClick={() => stageOrRun({ entityKey: entity.key, evidence: 'task', kind: 'inspect-evidence' })}
-            size="xs"
-            variant="secondary"
-          >
-            Inspect evidence
-          </Button>
+          {entity.identity.kind === 'kanban' ? (
+            <Button
+              onClick={() => stageOrRun({ entityKey: entity.key, evidence: 'task', kind: 'inspect-evidence' })}
+              size="xs"
+              variant="secondary"
+            >
+              Inspect evidence
+            </Button>
+          ) : null}
 
           {entity.identity.kind === 'session' || entity.identity.kind === 'subagent' ? (
             <>

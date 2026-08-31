@@ -1,6 +1,6 @@
 import { pluginRest, type PluginSourceScope } from '@/api/plugins'
 import { requestForSessionProfile } from '@/store/session-request-router'
-import { $sessionStates, knownOwnerForSession } from '@/store/session-states'
+import { $sessionStates, $sessionTiles } from '@/store/session-states'
 
 import {
   type CommandExecutor,
@@ -10,6 +10,19 @@ import {
   CommandRejectedError
 } from './command-broker'
 import type { InspectorSessionTarget } from './components/entity-inspector'
+
+const KANBAN_LOG_TAIL_BYTES = 65_536
+
+const KANBAN_NON_RUNNING_TASK_STATES = new Set([
+  'archived',
+  'blocked',
+  'done',
+  'ready',
+  'review',
+  'scheduled',
+  'todo',
+  'triage'
+])
 
 export interface LunarCityCommandExecutorOptions {
   onOpenSession?: (target: InspectorSessionTarget) => void
@@ -71,8 +84,10 @@ function exactScope(plan: CommandPlan): PluginSourceScope {
   return Object.freeze({ connectionId: plan.owner.connectionId, profile: plan.owner.profile })
 }
 
-function withBoard(path: string, board: string): string {
-  return `${path}?board=${encodeURIComponent(board)}`
+function withBoard(path: string, board: string, extra: Readonly<Record<string, string>> = {}): string {
+  const query = new URLSearchParams({ board, ...extra })
+
+  return `${path}?${query.toString()}`
 }
 
 function localReadback(plan: CommandPlan): CommandReadback {
@@ -93,19 +108,30 @@ function defaultLiveRuntime(
   owner: Readonly<{ connectionId: string; profile: string }>,
   storedSessionId: string
 ): string | undefined {
-  const known = knownOwnerForSession(storedSessionId)
-
-  if (
-    !known ||
-    typeof known !== 'object' ||
-    known.connectionId !== owner.connectionId ||
-    known.profile !== owner.profile
-  ) {
-    return undefined
-  }
-
   const matches = Object.entries($sessionStates.get())
     .filter(([, state]) => state?.storedSessionId === storedSessionId)
+    .filter(([runtimeId, state]) => {
+      const provenance = state?.transcriptProvenance
+
+      if (provenance) {
+        return (
+          provenance.connectionId === owner.connectionId &&
+          provenance.profile === owner.profile &&
+          provenance.storedSessionId === storedSessionId
+        )
+      }
+
+      return $sessionTiles.get().some(tile => {
+        const route = tile.ownerRoute
+
+        return (
+          tile.runtimeId === runtimeId &&
+          tile.storedSessionId === storedSessionId &&
+          route?.connectionId === owner.connectionId &&
+          route.profile === owner.profile
+        )
+      })
+    })
     .map(([runtimeId]) => runtimeId.trim())
     .filter(Boolean)
 
@@ -189,11 +215,39 @@ function exactTask(plan: CommandPlan, response: unknown): Record<string, unknown
   return identifier(task.id) === plan.identity.taskId ? task : undefined
 }
 
+function exactTaskLog(plan: CommandPlan, response: unknown): Record<string, unknown> | undefined {
+  if (plan.identity.kind !== 'kanban') {
+    return undefined
+  }
+
+  const log = record(response)
+  const content = log.content
+  const sizeBytes = log.size_bytes
+
+  if (
+    identifier(log.task_id) !== plan.identity.taskId ||
+    typeof log.exists !== 'boolean' ||
+    typeof log.path !== 'string' ||
+    typeof content !== 'string' ||
+    typeof log.truncated !== 'boolean' ||
+    typeof sizeBytes !== 'number' ||
+    !Number.isSafeInteger(sizeBytes) ||
+    sizeBytes < 0 ||
+    new TextEncoder().encode(content).byteLength > KANBAN_LOG_TAIL_BYTES
+  ) {
+    return undefined
+  }
+
+  return log
+}
+
 function taskEffectVerified(plan: CommandPlan, task: Record<string, unknown>): boolean {
   const expected = plan.readback.expectedEffect
 
   if (expected.kind === 'task-reclaimed') {
-    return typeof task.status === 'string' && task.status !== 'running' && task.current_run_id === null
+    return (
+      typeof task.status === 'string' && KANBAN_NON_RUNNING_TASK_STATES.has(task.status) && task.current_run_id === null
+    )
   }
 
   if (expected.kind === 'task-reassigned') {
@@ -253,15 +307,24 @@ function kanbanTaskExecutor(): CommandExecutor {
       const board = plan.identity.board
 
       if (plan.operation === 'inspect-evidence') {
-        const path = plan.intent.kind === 'inspect-evidence' && plan.intent.evidence === 'log' ? `${base}/log` : base
+        const logEvidence = plan.intent.kind === 'inspect-evidence' && plan.intent.evidence === 'log'
+        const path = logEvidence ? `${base}/log` : base
 
-        const response = await pluginRest('kanban', withBoard(path, board), {
-          method: 'GET',
-          scope: exactScope(plan)
-        })
+        const response = await pluginRest(
+          'kanban',
+          withBoard(path, board, logEvidence ? { tail: String(KANBAN_LOG_TAIL_BYTES) } : {}),
+          {
+            method: 'GET',
+            scope: exactScope(plan)
+          }
+        )
 
-        if (!exactTask(plan, response)) {
-          throw new Error('Authoritative exact-task evidence is unavailable from the Kanban source.')
+        if (logEvidence ? !exactTaskLog(plan, response) : !exactTask(plan, response)) {
+          throw new Error(
+            logEvidence
+              ? 'Authoritative exact worker-log evidence is unavailable from the Kanban source.'
+              : 'Authoritative exact-task evidence is unavailable from the Kanban source.'
+          )
         }
 
         return response

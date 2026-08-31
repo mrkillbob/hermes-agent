@@ -10,7 +10,7 @@ import type {
   CommandReadback,
   CommandVerification
 } from './command-broker'
-import { LunarCityCommandRuntime } from './command-runtime'
+import { buildLunarCityCommandSnapshot, LunarCityCommandRuntime } from './command-runtime'
 import { entityKey } from './identity'
 import type { EntityIdentity, LunarCitySnapshot, LunarEntity, SourceHealth } from './model'
 import { $lunarCitySnapshot, applyLunarDelta, createLunarCitySnapshot } from './store'
@@ -106,6 +106,19 @@ describe('LunarCityCommandRuntime', () => {
     expect(screen.queryByRole('button', { name: 'Reclaim task' })).toBeNull()
   })
 
+  it('does not advertise unsupported session evidence inspection', () => {
+    const entity = sessionEntity('connection-a')
+    const city = publish([entity], [source('connection-a')])
+
+    render(<LunarCityCommandRuntime executors={executors()} selectedEntityKey={entity.key} />)
+
+    expect(buildLunarCityCommandSnapshot(city).targets.get(entity.key)?.availableOperations).not.toContain(
+      'inspect-evidence'
+    )
+    expect(screen.queryByRole('button', { name: /inspect evidence/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /inspect diagnostics/i })).toBeNull()
+  })
+
   it('shows only Kanban mutations compatible with the exact current authoritative state', () => {
     const identity = {
       board: 'main',
@@ -161,6 +174,31 @@ describe('LunarCityCommandRuntime', () => {
     expect(screen.getByRole('button', { name: 'Move task to ready' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Reclaim task' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Terminate run' })).toBeNull()
+  })
+
+  it('does not advertise a no-op move when the exact Kanban state is already ready', () => {
+    const identity = {
+      board: 'main',
+      connectionId: 'connection-a',
+      kind: 'kanban',
+      profile: 'default',
+      taskId: 'T-ready'
+    } as const
+
+    const entity: LunarEntity = {
+      animation: 'idle',
+      authority: 'authoritative',
+      destination: 'project',
+      identity,
+      key: entityKey(identity),
+      observedAt: 100,
+      sourceState: 'ready'
+    }
+
+    publish([entity], [{ authority: 'authoritative', observedAt: 100, source: 'kanban:connection-a:default' }])
+    render(<LunarCityCommandRuntime executors={executors()} selectedEntityKey={entity.key} />)
+
+    expect(screen.queryByRole('button', { name: 'Move task to ready' })).toBeNull()
   })
 
   it('renders the exact authoritative evidence response instead of a manufactured receipt', async () => {

@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { ClientSessionState } from '@/app/types'
+import { $sessionStates, $sessionTiles } from '@/store/session-states'
+
 import { type CommandPlanningSnapshot, CommandRejectedError, planCommand } from './command-broker'
 import { createLunarCityCommandExecutors } from './command-executors'
 import { entityKey } from './identity'
@@ -15,6 +18,23 @@ vi.mock('@/store/session-request-router', () => ({ requestForSessionProfile }))
 
 function frozenMap<K, V>(entries: readonly (readonly [K, V])[]): ReadonlyMap<K, V> {
   return new Map(entries)
+}
+
+function runtimeState(
+  storedSessionId: string,
+  owner: Readonly<{ connectionId: string; profile: string }>
+): ClientSessionState {
+  return {
+    storedSessionId,
+    transcriptProvenance: {
+      connectionId: owner.connectionId,
+      coverage: 'latest-page',
+      lineageRootId: null,
+      profile: owner.profile,
+      source: 'persisted-display',
+      storedSessionId
+    }
+  } as ClientSessionState
 }
 
 function planning(identity: EntityIdentity, state = 'working'): CommandPlanningSnapshot {
@@ -78,7 +98,11 @@ function planning(identity: EntityIdentity, state = 'working'): CommandPlanningS
   }
 }
 
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  $sessionStates.set({})
+  $sessionTiles.set([])
+})
 
 describe('createLunarCityCommandExecutors', () => {
   it('sends session guidance only through the immutable exact owner route', async () => {
@@ -113,6 +137,69 @@ describe('createLunarCityCommandExecutors', () => {
       createLunarCityCommandExecutors({ resolveLiveRuntime: () => undefined }).session.send(plan)
     ).rejects.toThrow(/live runtime.*unavailable/i)
     expect(requestForSessionProfile).not.toHaveBeenCalled()
+  })
+
+  it('production-default routing resolves duplicate stored ids by exact owner-tagged runtime provenance', async () => {
+    requestForSessionProfile.mockResolvedValue({ status: 'queued' })
+    $sessionStates.set({
+      'runtime-a': runtimeState('same', { connectionId: 'source-a', profile: 'builder' }),
+      'runtime-b': runtimeState('same', { connectionId: 'source-b', profile: 'builder' })
+    })
+    const identity = { connectionId: 'source-b', kind: 'session', profile: 'builder', sessionId: 'same' } as const
+
+    const plan = planCommand(
+      { entityKey: entityKey(identity), kind: 'send-guidance', text: 'Exact.' },
+      planning(identity)
+    )
+
+    await createLunarCityCommandExecutors().session.send(plan)
+
+    expect(requestForSessionProfile.mock.calls[0]?.[3]).toEqual({ session_id: 'runtime-b', text: 'Exact.' })
+  })
+
+  it('production-default routing rejects a lone foreign runtime despite an owner hint for the stored id', async () => {
+    $sessionStates.set({
+      'runtime-a': runtimeState('same', { connectionId: 'source-a', profile: 'builder' })
+    })
+    $sessionTiles.set([
+      {
+        ownerRoute: { connectionId: 'source-b', profile: 'builder' },
+        storedSessionId: 'same'
+      }
+    ])
+    const identity = { connectionId: 'source-b', kind: 'session', profile: 'builder', sessionId: 'same' } as const
+
+    const plan = planCommand(
+      { entityKey: entityKey(identity), kind: 'send-guidance', text: 'Exact.' },
+      planning(identity)
+    )
+
+    await expect(createLunarCityCommandExecutors().session.send(plan)).rejects.toThrow(/live runtime.*unavailable/i)
+    expect(requestForSessionProfile).not.toHaveBeenCalled()
+  })
+
+  it('production-default routing accepts an exact owner-tagged live tile binding', async () => {
+    requestForSessionProfile.mockResolvedValue({ status: 'queued' })
+    $sessionStates.set({
+      'runtime-b': { storedSessionId: 'same' } as ClientSessionState
+    })
+    $sessionTiles.set([
+      {
+        ownerRoute: { connectionId: 'source-b', profile: 'builder' },
+        runtimeId: 'runtime-b',
+        storedSessionId: 'same'
+      }
+    ])
+    const identity = { connectionId: 'source-b', kind: 'session', profile: 'builder', sessionId: 'same' } as const
+
+    const plan = planCommand(
+      { entityKey: entityKey(identity), kind: 'send-guidance', text: 'Exact.' },
+      planning(identity)
+    )
+
+    await createLunarCityCommandExecutors().session.send(plan)
+
+    expect(requestForSessionProfile.mock.calls[0]?.[3]).toEqual({ session_id: 'runtime-b', text: 'Exact.' })
   })
 
   it('uses only exact scoped Kanban endpoints and verifies from authoritative task readback', async () => {
@@ -228,6 +315,65 @@ describe('createLunarCityCommandExecutors', () => {
     await expect(executor.readback(plan)).resolves.toBeNull()
   })
 
+  it('validates the bounded top-level worker-log contract for the exact task', async () => {
+    pluginRest.mockResolvedValue({
+      content: 'exact worker tail',
+      exists: true,
+      path: '/tmp/T-4.log',
+      size_bytes: 17,
+      task_id: 'T-4',
+      truncated: false
+    })
+
+    const identity = {
+      board: 'main',
+      connectionId: 'source-a',
+      kind: 'kanban',
+      profile: 'default',
+      taskId: 'T-4'
+    } as const
+
+    const plan = planCommand(
+      { entityKey: entityKey(identity), evidence: 'log', kind: 'inspect-evidence' },
+      planning(identity, 'blocked')
+    )
+
+    await expect(createLunarCityCommandExecutors().kanbanTask.send(plan)).resolves.toMatchObject({
+      content: 'exact worker tail',
+      task_id: 'T-4'
+    })
+    expect(pluginRest).toHaveBeenCalledWith('kanban', '/tasks/T-4/log?board=main&tail=65536', {
+      method: 'GET',
+      scope: { connectionId: 'source-a', profile: 'default' }
+    })
+  })
+
+  it.each([
+    ['wrong task', { content: 'tail', exists: true, size_bytes: 4, task_id: 'T-other', truncated: false }],
+    [
+      'oversized tail',
+      { content: 'x'.repeat(65_537), exists: true, size_bytes: 65_537, task_id: 'T-4', truncated: true }
+    ],
+    ['untyped tail', { content: 9, exists: true, size_bytes: 1, task_id: 'T-4', truncated: false }]
+  ])('rejects malformed worker-log evidence with %s', async (_label, response) => {
+    pluginRest.mockResolvedValue(response)
+
+    const identity = {
+      board: 'main',
+      connectionId: 'source-a',
+      kind: 'kanban',
+      profile: 'default',
+      taskId: 'T-4'
+    } as const
+
+    const plan = planCommand(
+      { entityKey: entityKey(identity), evidence: 'log', kind: 'inspect-evidence' },
+      planning(identity, 'blocked')
+    )
+
+    await expect(createLunarCityCommandExecutors().kanbanTask.send(plan)).rejects.toThrow(/worker-log evidence/i)
+  })
+
   it('classifies an authoritative Kanban conflict as rejected instead of ambiguous', async () => {
     pluginRest.mockRejectedValue({ message: 'already ended', status: 409 })
 
@@ -272,6 +418,27 @@ describe('createLunarCityCommandExecutors', () => {
     const readback = await executor.readback(plan)
 
     expect(readback).not.toMatchObject({ effect: plan.readback.expectedEffect, outcome: 'verified' })
+  })
+
+  it('does not verify reclaim from an arbitrary non-running status string', async () => {
+    pluginRest
+      .mockResolvedValueOnce({ ok: true, task_id: 'T-6' })
+      .mockResolvedValueOnce({ task: { current_run_id: null, id: 'T-6', status: 'definitely-finished' } })
+
+    const identity = {
+      board: 'main',
+      connectionId: 'source-a',
+      kind: 'kanban',
+      profile: 'default',
+      runId: '8',
+      taskId: 'T-6'
+    } as const
+
+    const plan = planCommand({ entityKey: entityKey(identity), kind: 'reclaim-task' }, planning(identity, 'work'))
+    const executor = createLunarCityCommandExecutors().kanbanTask
+
+    await executor.send(plan)
+    await expect(executor.readback(plan)).resolves.not.toMatchObject({ outcome: 'verified' })
   })
 
   it.each([
