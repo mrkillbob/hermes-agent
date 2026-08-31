@@ -8761,6 +8761,13 @@ def _terminate_reclaimed_worker(
     if not pid or pid <= 0 or not claim_lock:
         return info
 
+    # A missing PID cannot be an orphan. Check this before claim-host
+    # locality: hostname aliases may drift while a gateway is running, but a
+    # process that no longer exists is safe to release on every topology.
+    if not _pid_alive(pid):
+        info["terminated"] = True
+        return info
+
     if not _claim_is_host_local(claim_lock, pid=pid, task_id=task_id):
         return info
     info["host_local"] = True
