@@ -159,6 +159,7 @@ export interface CharacterAssetManifest {
     representation: 'full' | 'reduced' | 'static-or-aggregate'
   }[]
   physicalVariantRoots: {
+    activationScale: Readonly<Record<string, Vec3>>
     body: Readonly<Record<string, string>>
     groupKit: { emblemSuffix: string; identityAccentSuffix: string; silhouetteSuffix: string }
     head: Readonly<Record<string, string>>
@@ -367,6 +368,22 @@ export interface LunarCityWorldHandle {
   dispatchCamera(intent: CameraIntent): void
   getEntityCameraOrder(): readonly EntityKey[]
   getCameraState(): CameraControlState
+  getPerfSnapshot?(): {
+    activeAnimations: number
+    drawCalls: number
+    entities: number
+    frameMs: number
+    frameTimestampsMs: readonly number[]
+    listeners: number
+    rafs: number
+    renderFrames: number
+    targetFps: 0 | 15 | 30
+    textures: number
+    timers: number
+    visibleTriangles: number
+    worldUpdateMs: number
+    worldUpdateTimestampsMs: readonly number[]
+  }
   /** Plays only a state clip declared by the selected leader's GLB metadata. */
   setLeaderAnimation(leaderId: LeaderId, state: LeaderAnimationState): void
   setQuality(tier: QualityTier): void
@@ -425,9 +442,12 @@ export interface BabylonEngineLike {
 }
 
 export interface BabylonSceneLike {
+  _activeIndices?: { current?: number }
   activeCamera?: unknown
   ambientColor?: unknown
   materials?: readonly BabylonMaterialLike[]
+  meshes?: readonly BabylonMeshLike[]
+  textures?: readonly unknown[]
   dispose(): void
   render(): void
   whenReadyAsync(): Promise<void>
@@ -489,6 +509,9 @@ export interface LunarCityWorldModules {
     options: { powerPreference: 'low-power'; preserveDrawingBuffer: false; stencil: false }
   ) => BabylonEngineLike
   Scene: new (engine: BabylonEngineLike) => BabylonSceneLike
+  SceneInstrumentation?: new (
+    scene: BabylonSceneLike
+  ) => { dispose(): void; drawCallsCounter?: { current?: number } }
   Vector3: new (x: number, y: number, z: number) => BabylonVector3Like
   Color3: new (red: number, green: number, blue: number) => unknown
   ArcRotateCamera: new (

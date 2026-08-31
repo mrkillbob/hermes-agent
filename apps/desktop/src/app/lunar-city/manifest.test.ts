@@ -86,6 +86,15 @@ describe('parseWorldManifest', () => {
     [
       'per-profile material allocation',
       (fixture: any) => (fixture.characterAssets.sharedResourceStrategy.perProfile.materials = 1)
+    ],
+    [
+      'missing physical activation scale',
+      (fixture: any) => delete fixture.characterAssets.physicalVariantRoots.activationScale['worker:head-variant:visor']
+    ],
+    [
+      'collapsed physical activation scale',
+      (fixture: any) =>
+        (fixture.characterAssets.physicalVariantRoots.activationScale['worker:head-variant:visor'] = [0, 1, 1])
     ]
   ])('rejects an unsafe character asset contract: %s', (_label, mutate) => {
     const fixture = structuredClone(actualManifest)

@@ -546,13 +546,51 @@ function characterAssets(value: unknown): CharacterAssetManifest {
     throw new Error(`${path}.fleetIdentityFloor must cover at least 128 exact profiles`)
   }
 
+  const bodyRoots = physicalRoots('body', vocabulary.bodies)
+  const headRoots = physicalRoots('head', vocabulary.heads)
+  const paletteRoots = physicalRoots('palette', vocabulary.palettes)
+
+  const requiredActivationRoots = [
+    ...Object.values(bodyRoots),
+    ...Object.values(headRoots),
+    ...Object.values(paletteRoots),
+    ...groupKits.map(kit => `worker:group-kit:${kit.kitId}`)
+  ]
+
+  const activationScaleValue = record(
+    physicalRootsValue.activationScale,
+    `${path}.physicalVariantRoots.activationScale`
+  )
+
+  const activationScale = Object.fromEntries(
+    Object.entries(activationScaleValue).map(([node, value]) => {
+      const scale = vec3(value, `${path}.physicalVariantRoots.activationScale.${node}`)
+
+      if (scale.x <= 0 || scale.y <= 0 || scale.z <= 0) {
+        throw new Error(`${path}.physicalVariantRoots.activationScale.${node} must be nonzero on every axis`)
+      }
+
+      return [node, Object.freeze(scale)]
+    })
+  )
+
+  if (
+    Object.keys(activationScale).length !== requiredActivationRoots.length ||
+    requiredActivationRoots.some(node => activationScale[node] === undefined)
+  ) {
+    throw new Error(
+      `${path}.physicalVariantRoots.activationScale must declare every physical variant root exactly once`
+    )
+  }
+
   return {
     fleetIdentityFloor,
     groupKits,
     leaders,
     lodRepresentations,
     physicalVariantRoots: {
-      body: physicalRoots('body', vocabulary.bodies),
+      activationScale: Object.freeze(activationScale),
+      body: bodyRoots,
       groupKit: {
         emblemSuffix: string(
           record(physicalRootsValue.groupKit, `${path}.physicalVariantRoots.groupKit`).emblemSuffix,
@@ -567,8 +605,8 @@ function characterAssets(value: unknown): CharacterAssetManifest {
           `${path}.physicalVariantRoots.groupKit.silhouetteSuffix`
         )
       },
-      head: physicalRoots('head', vocabulary.heads),
-      palette: physicalRoots('palette', vocabulary.palettes)
+      head: headRoots,
+      palette: paletteRoots
     },
     sharedResourceStrategy: {
       animationClips: shared('animationClips'),

@@ -22,7 +22,7 @@ interface FakeNode {
   isPickable?: boolean
   position: { set: ReturnType<typeof vi.fn> }
   rotation: { set: ReturnType<typeof vi.fn> }
-  scaling: { set: ReturnType<typeof vi.fn> }
+  scaling: { set: ReturnType<typeof vi.fn>; x: number; y: number; z: number }
   setEnabled: ReturnType<typeof vi.fn>
   setPivotPoint: ReturnType<typeof vi.fn>
   instantiateHierarchy?(
@@ -52,13 +52,24 @@ const leaderStateClips = (leaderId: string): LeaderStateClipMap => ({
 })
 
 function fakeNode(name: string, metadata?: Record<string, unknown>): FakeNode {
+  const scaling = {
+    x: 1,
+    y: 1,
+    z: 1,
+    set: vi.fn((x: number, y: number, z: number) => {
+      scaling.x = x
+      scaling.y = y
+      scaling.z = z
+    })
+  }
+
   return {
     dispose: vi.fn(),
     name,
     metadata,
     position: { set: vi.fn() },
     rotation: { set: vi.fn() },
-    scaling: { set: vi.fn() },
+    scaling,
     setEnabled: vi.fn(),
     setPivotPoint: vi.fn()
   }
@@ -168,7 +179,7 @@ function fakeRuntime({
     parent?: FakeNode | null
     position = { set: vi.fn() }
     rotation = { set: vi.fn() }
-    scaling = { set: vi.fn() }
+    scaling = { set: vi.fn(), x: 1, y: 1, z: 1 }
     setEnabled = vi.fn()
     setPivotPoint = vi.fn()
 
@@ -223,12 +234,22 @@ function fakeRuntime({
         ...Object.values(physicalRoots.body),
         ...Object.values(physicalRoots.head),
         ...Object.values(physicalRoots.palette)
-      ].map(name => fakeNode(name))
+      ].map(name => {
+        const node = fakeNode(name)
+        node.scaling.x = 0
+        node.scaling.y = 0
+        node.scaling.z = 0
+
+        return node
+      })
 
       transformNodes.push(...workerSignatureNodes)
 
       for (const kit of actualManifest.characterAssets.groupKits) {
         const kitRoot = fakeNode(`worker:group-kit:${kit.kitId}`)
+        kitRoot.scaling.x = 0
+        kitRoot.scaling.y = 0
+        kitRoot.scaling.z = 0
         const silhouette = fakeNode(`worker:group-kit:${kit.kitId}:silhouette`)
         const emblem = fakeNode(`worker:group-kit:${kit.kitId}:emblem`)
         const accent = fakeNode(`worker:group-kit:${kit.kitId}:identity-accent`)
@@ -245,6 +266,9 @@ function fakeRuntime({
 
         for (const source of transformNodes.filter(node => node !== root)) {
           const clone = fakeNode(`${source.name}:clone`)
+          clone.scaling.x = source.scaling.x
+          clone.scaling.y = source.scaling.y
+          clone.scaling.z = source.scaling.z
           workerClones.set(source.name, clone)
           onNewNodeCreated(source, clone)
         }
@@ -419,6 +443,32 @@ function profileSnapshot(): LunarCitySnapshot {
   }
 }
 
+function profileFleetSnapshot(animation: 'idle' | 'work', count = 90): LunarCitySnapshot {
+  const entities = Array.from({ length: count }, (_, index) => {
+    const key = `profile:connection=local:profile=resting-${index}` as EntityKey
+
+    return [
+      key,
+      {
+        animation,
+        authority: 'authoritative' as const,
+        destination: 'project' as const,
+        identity: { kind: 'profile' as const, connectionId: 'local', profile: `resting-${index}` },
+        key,
+        observedAt: 1,
+        position: { x: 18 + (index % 10), y: 0, z: 38 + Math.floor(index / 10) },
+        presentation: {
+          groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+          metadata: { source: 'profiles:local', state: 'fresh' as const },
+          placement: { lodHint: 0, overflow: false, primaryGroupId: 'engineering', slot: index }
+        }
+      }
+    ] as const
+  })
+
+  return { entities: new Map(entities), observedAt: 1, revision: 1, sources: [] }
+}
+
 function kanbanSnapshot(position: { x: number; y: number; z: number }): LunarCitySnapshot {
   const key = 'kanban:connection=source-a:profile=default:board=main:task=task-1:run=run-1:worker=worker-1' as EntityKey
 
@@ -459,6 +509,59 @@ afterEach(() => {
 })
 
 describe('createLunarCityWorld', () => {
+  it('renders one state-change frame for 90 resting profiles, parks, and resumes only for active work', async () => {
+    vi.useFakeTimers()
+    let now = 0
+    const requestedFrames: FrameRequestCallback[] = []
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        requestedFrames.push(callback)
+
+        return requestedFrames.length
+      })
+    )
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+
+    const runtime = fakeRuntime()
+    const world = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
+    const scene = runtime.scenes[0]!
+
+    requestedFrames.shift()?.(now)
+    scene.render.mockClear()
+    world.applySnapshot(profileFleetSnapshot('idle'))
+    now = 100
+    requestedFrames.shift()?.(now)
+    expect(scene.render).toHaveBeenCalledOnce()
+
+    now = 1_000
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(requestedFrames).toHaveLength(0)
+    expect(scene.render).toHaveBeenCalledOnce()
+
+    world.applySnapshot(profileFleetSnapshot('work'))
+    now = 1_100
+    requestedFrames.shift()?.(now)
+    expect(scene.render).toHaveBeenCalledTimes(2)
+
+    now = 1_167
+    await vi.advanceTimersByTimeAsync(67)
+    requestedFrames.shift()?.(now)
+    expect(scene.render).toHaveBeenCalledTimes(3)
+
+    world.applySnapshot(profileFleetSnapshot('idle'))
+    now = 1_234
+    await vi.advanceTimersByTimeAsync(67)
+    requestedFrames.shift()?.(now)
+    const parkedAt = scene.render.mock.calls.length
+    now = 2_000
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(requestedFrames).toHaveLength(0)
+    expect(scene.render).toHaveBeenCalledTimes(parkedAt)
+    world.destroy()
+  })
+
   it('admits an exact profile inhabitant and enables its complete physical near signature', async () => {
     const runtime = fakeRuntime()
     const world = await createLunarCityWorld(document.createElement('canvas'), manifest, vi.fn(), runtime.modules)
@@ -472,6 +575,15 @@ describe('createLunarCityWorld', () => {
     expect(
       runtime.workerClones.get('worker:group-kit:engineering-guild:identity-accent')?.rotation.set
     ).toHaveBeenCalledOnce()
+    expect(runtime.workerClones.get('worker:body-variant:standard')?.scaling).toMatchObject({ x: 1, y: 1, z: 1 })
+    expect(runtime.workerClones.get('worker:head-variant:visor')?.scaling).toMatchObject({ x: 1, y: 1, z: 1 })
+    expect(runtime.workerClones.get('worker:palette:violet-cyan')?.scaling).toMatchObject({ x: 1, y: 1, z: 1 })
+    expect(runtime.workerClones.get('worker:group-kit:engineering-guild')?.scaling).toMatchObject({ x: 1, y: 1, z: 1 })
+
+    const accentScale = runtime.workerClones.get('worker:group-kit:engineering-guild:identity-accent')?.scaling
+    expect(accentScale?.x).toBeGreaterThan(0)
+    expect(accentScale?.y).toBeGreaterThan(0)
+    expect(accentScale?.z).toBeGreaterThan(0)
 
     world.destroy()
   })

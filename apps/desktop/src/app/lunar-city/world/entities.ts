@@ -107,6 +107,7 @@ interface RetainedEntity {
 }
 
 const MAX_ANIMATED_WORKERS = 24
+const CONTINUOUS_WORKER_ANIMATIONS = new Set(['listen', 'talk', 'think', 'walk', 'work'])
 
 export interface AggregatePopulation {
   animations: Readonly<Record<string, number>>
@@ -444,7 +445,15 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       return records.get(key)
     },
     hasActiveAnimations(): boolean {
-      return activeKeys.size > 0
+      for (const key of activeKeys) {
+        const record = records.get(key)
+
+        if (record && (record.moving || CONTINUOUS_WORKER_ANIMATIONS.has(presentedAnimation(record)))) {
+          return true
+        }
+      }
+
+      return false
     },
     instancedGroup(key: string): { count: number } | undefined {
       const group = groups.get(key)

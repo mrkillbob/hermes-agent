@@ -63,6 +63,75 @@ function factory(): EntityPresentationFactory & {
 }
 
 describe('EntityRegistry', () => {
+  it('separates the 24-visual budget from continuous worker animation activity', () => {
+    const presentationFactory = factory()
+    const assets = parseWorldManifest(structuredClone(actualManifest)).characterAssets
+
+    const registry = createEntityRegistry({
+      characterAssets: assets,
+      factory: presentationFactory,
+      workerClips: new Set(['idle', 'walk', 'work'])
+    })
+
+    const resting = Array.from({ length: 90 }, (_, index) =>
+      entity(index, {
+        animation: 'idle',
+        identity: { kind: 'profile', connectionId: 'local', profile: `resting-${index}` },
+        presentation: {
+          groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+          metadata: { source: 'profiles:local', state: 'fresh' },
+          placement: { lodHint: 0, overflow: false, primaryGroupId: 'engineering', slot: index }
+        }
+      })
+    )
+
+    registry.reconcile(snapshot(...resting))
+
+    expect(presentationFactory.animated).toHaveBeenCalledTimes(24)
+    expect(registry.hasActiveAnimations()).toBe(false)
+
+    registry.reconcile(snapshot({ ...resting[0]!, animation: 'work' }, ...resting.slice(1)))
+    expect(registry.hasActiveAnimations()).toBe(true)
+
+    registry.reconcile(snapshot(...resting))
+    expect(registry.hasActiveAnimations()).toBe(false)
+  })
+
+  it('retains beyond-capacity exact profiles only in truthful aggregate counts', () => {
+    const presentationFactory = factory()
+    const assets = parseWorldManifest(structuredClone(actualManifest)).characterAssets
+
+    const registry = createEntityRegistry({
+      characterAssets: assets,
+      factory: presentationFactory,
+      workerClips: new Set(['idle', 'walk'])
+    })
+
+    const profiles = Array.from({ length: 140 }, (_, index) =>
+      entity(index, {
+        identity: { kind: 'profile', connectionId: 'local', profile: `worker-${index}` },
+        position: index < 128 ? { x: index, y: 0, z: 0 } : undefined,
+        presentation: {
+          groups: [{ id: 'engineering', name: 'Engineering Guild' }],
+          metadata: { source: 'profiles:local', state: 'fresh' },
+          placement: {
+            lodHint: index < 128 ? 1 : 2,
+            overflow: index >= 128,
+            primaryGroupId: 'engineering',
+            ...(index < 128 ? { slot: index } : {})
+          }
+        }
+      })
+    )
+
+    registry.reconcile(snapshot(...profiles))
+
+    expect(registry.aggregate('garden')).toEqual({ animations: { idle: 140 }, total: 140 })
+    expect(registry.entity(profiles[139]!.key)).toBeDefined()
+    expect(registry.entity(profiles[139]!.key)?.visual).toBeUndefined()
+    expect(registry.navigationEntity(profiles[139]!.key)).toBeUndefined()
+  })
+
   it('does not sort LOD thresholds during repeated frame selection', () => {
     const entries = Object.freeze([{ distance: 0 }, { distance: 28 }, { distance: 64 }])
     const sort = vi.spyOn(Array.prototype, 'sort')

@@ -885,6 +885,14 @@ function applyIdentityAccent(node: BabylonNodeLike, accentCode: number): void {
   node.scaling?.set(scaleX, 1.5 - scaleX, 1)
 }
 
+function validActivationScale(value: unknown): value is readonly [number, number, number] {
+  return (
+    Array.isArray(value) &&
+    value.length === 3 &&
+    value.every(component => typeof component === 'number' && Number.isFinite(component) && component > 0)
+  )
+}
+
 export function createBabylonEntityFactory(
   model: ModelManifestEntry,
   result: BabylonImportResultLike,
@@ -937,6 +945,28 @@ export function createBabylonEntityFactory(
       return id ? [[id, node] as const] : []
     })
   )
+
+  const activationScaleFor = (node: BabylonNodeLike): readonly [number, number, number] => {
+    const declared = characterAssets?.physicalVariantRoots.activationScale[node.name]
+    const fromExtras = gltfExtras(node).activationScale
+    const value = declared ? [declared.x, declared.y, declared.z] : fromExtras
+
+    if (!validActivationScale(value)) {
+      throw new Error(`Lunar City workers GLB is missing a valid activationScale for ${node.name}`)
+    }
+
+    return value
+  }
+
+  const sourceActivationScales = new Map<BabylonNodeLike, readonly [number, number, number]>()
+
+  for (const node of [
+    ...sourceVariantNodes.values(),
+    ...sourceGroupKitNodes.values(),
+    ...sourceSignatureNodes.values()
+  ]) {
+    sourceActivationScales.set(node, activationScaleFor(node))
+  }
 
   if (characterAssets && sourceSignatureNodes.size !== declaredSignatureNodes.size) {
     const found = new Set(allImportedNodes(result).map(node => node.name))
@@ -1055,11 +1085,23 @@ export function createBabylonEntityFactory(
       clone.root.setEnabled?.(true)
 
       for (const [variantId, sourceNode] of sourceVariantNodes) {
-        clone.nodeMap.get(sourceNode)?.setEnabled?.(variantId === variant)
+        const cloneNode = clone.nodeMap.get(sourceNode)
+        const scale = sourceActivationScales.get(sourceNode)
+
+        if (cloneNode && scale) {
+          cloneNode.scaling?.set(...(variantId === variant ? scale : ([0, 0, 0] as const)))
+          cloneNode.setEnabled?.(variantId === variant)
+        }
       }
 
       for (const [kitId, sourceNode] of sourceGroupKitNodes) {
-        clone.nodeMap.get(sourceNode)?.setEnabled?.(kitId === character?.kitId)
+        const cloneNode = clone.nodeMap.get(sourceNode)
+        const scale = sourceActivationScales.get(sourceNode)
+
+        if (cloneNode && scale) {
+          cloneNode.scaling?.set(...(kitId === character?.kitId ? scale : ([0, 0, 0] as const)))
+          cloneNode.setEnabled?.(kitId === character?.kitId)
+        }
       }
 
       const enabledSignatureNodes = new Set(
@@ -1073,7 +1115,14 @@ export function createBabylonEntityFactory(
       )
 
       for (const [signatureId, sourceNode] of sourceSignatureNodes) {
-        clone.nodeMap.get(sourceNode)?.setEnabled?.(enabledSignatureNodes.has(signatureId))
+        const cloneNode = clone.nodeMap.get(sourceNode)
+        const scale = sourceActivationScales.get(sourceNode)
+
+        if (cloneNode && scale) {
+          const active = enabledSignatureNodes.has(signatureId)
+          cloneNode.scaling?.set(...(active ? scale : ([0, 0, 0] as const)))
+          cloneNode.setEnabled?.(active)
+        }
       }
 
       for (const [kitId, sourceNode] of sourceAccentNodes) {
@@ -1688,15 +1737,16 @@ export async function createWorldScene(
           reconcileProjectCompounds(snapshot)
 
           const dynamicEntities = new Map(
-            [...snapshot.entities].filter(
-              ([, entity]) =>
-                !(entity.identity.kind === 'kanban' && !entity.position) &&
-                (entity.identity.kind !== 'profile' ||
-                  (entity.position !== undefined && entity.presentation?.placement.slot !== undefined))
-            )
+            [...snapshot.entities].filter(([, entity]) => !(entity.identity.kind === 'kanban' && !entity.position))
           )
 
-          currentEntityKeys = [...dynamicEntities.keys()]
+          currentEntityKeys = [...dynamicEntities.values()]
+            .filter(
+              entity =>
+                entity.position !== undefined &&
+                (entity.identity.kind !== 'profile' || entity.presentation?.placement.slot !== undefined)
+            )
+            .map(entity => entity.key)
 
           for (const key of destinationByEntity.keys()) {
             if (!dynamicEntities.has(key)) {

@@ -547,8 +547,18 @@ describe('worker GLB presentation', () => {
   })
 
   it('activates exactly the selected physical variant subtree and releases cloned animation groups', () => {
-    const orbital = { name: 'worker:variant:orbital', setEnabled: vi.fn() }
-    const builder = { name: 'worker:variant:builder', setEnabled: vi.fn() }
+    const orbital = {
+      metadata: { gltf: { extras: { activationScale: [1, 1, 1] } } },
+      name: 'worker:variant:orbital',
+      setEnabled: vi.fn()
+    }
+
+    const builder = {
+      metadata: { gltf: { extras: { activationScale: [1, 1, 1] } } },
+      name: 'worker:variant:builder',
+      setEnabled: vi.fn()
+    }
+
     const near = { name: 'workers:lod:near', setEnabled: vi.fn() }
     const far = { name: 'workers:lod:far', setEnabled: vi.fn() }
     const engineering = { name: 'worker:group-kit:engineering-guild', setEnabled: vi.fn() }
@@ -785,7 +795,7 @@ describe('worker GLB presentation', () => {
 
     expect(variantClones.get(engineering)?.setEnabled).toHaveBeenCalledWith(false)
     expect(neutralPalette?.rotation?.set).toHaveBeenCalledOnce()
-    expect(neutralPalette?.scaling?.set).toHaveBeenCalledOnce()
+    expect(neutralPalette?.scaling?.set).toHaveBeenCalledTimes(2)
     neutral.dispose?.()
   })
 })
