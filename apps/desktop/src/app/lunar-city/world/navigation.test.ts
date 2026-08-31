@@ -125,6 +125,49 @@ describe('NavigationController', () => {
     expect(controller.move(worker(), 'review')).toBe(false)
     expect(navQuery.dispose).toHaveBeenCalledOnce()
   })
+
+  it('recomputes an active route after an authoritative origin correction and preserves the walk clip until arrival', () => {
+    const navQuery = query([
+      { x: 4, y: 0, z: 2 },
+      { x: 9, y: 0, z: 2 }
+    ])
+    const controller = createNavigationController({
+      destinations,
+      query: navQuery,
+      speedUnitsPerSecond: 100,
+      workerClips: new Set(['idle', 'walk', 'work', 'review'])
+    })
+    const entity = worker()
+
+    expect(controller.move(entity, 'review', 'work')).toBe(true)
+    entity.position = { x: 4, y: 0, z: 2 }
+    expect(controller.move(entity, 'review', 'review')).toBe(true)
+    expect(entity.animation).toBe('walk')
+    expect(navQuery.computePath).toHaveBeenCalledTimes(2)
+
+    controller.tick(1_000)
+
+    expect(entity.position).toEqual(destinations.review)
+    expect(entity.animation).toBe('review')
+    expect(controller.isMoving(workerKey)).toBe(false)
+  })
+
+  it('cancels a removed entity path without changing its presentation after reconciliation releases it', () => {
+    const navQuery = query()
+    const controller = createNavigationController({
+      destinations,
+      query: navQuery,
+      workerClips: new Set(['idle', 'walk'])
+    })
+    const entity = worker()
+
+    controller.move(entity, 'review')
+    controller.cancel(entity.key)
+    controller.tick(1_000)
+
+    expect(entity.position).toEqual({ x: 1, y: 0, z: 2 })
+    expect(controller.isMoving(entity.key)).toBe(false)
+  })
 })
 
 describe('Recast NavigationQuery adapter', () => {

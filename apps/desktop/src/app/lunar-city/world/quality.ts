@@ -16,6 +16,17 @@ export interface HardwareScalingEngine {
   setHardwareScalingLevel?(level: number): void
 }
 
+const ANIMATION_DISTANCE_UNITS: Readonly<Record<AnimationDistance, number>> = Object.freeze({
+  long: 48,
+  normal: 28,
+  short: 14
+})
+
+/** Bounded camera distance for genuine rig animation; farther workers instance statically. */
+export function animationDistanceUnits(distance: AnimationDistance): number {
+  return ANIMATION_DISTANCE_UNITS[distance]
+}
+
 const QUALITY_BY_TIER: Readonly<Record<QualityTier, QualitySettings>> = Object.freeze({
   balanced: {
     animationDistance: 'normal',

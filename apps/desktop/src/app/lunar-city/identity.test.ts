@@ -47,14 +47,35 @@ describe('entityKey', () => {
     })
 
     expect(special).not.toBe(ambiguous)
-    expect(special).toContain('connection=')
-    expect(special).toContain('run=%40empty')
-    expect(ambiguous).toContain('run=%40absent')
+    expect(special).toContain('connection:string:')
+    expect(special).toContain('run:string:0:')
+    expect(ambiguous).toContain('run:undefined')
   })
 
   it('fails closed when a required canonical identity field is missing instead of using a display name', () => {
     expect(() =>
       entityKey({ kind: 'session', connectionId: 'local', profile: 'worker', sessionId: ' ' } as EntityIdentity)
     ).toThrow(/sessionId is required/i)
+  })
+
+  it('distinguishes absent, empty, literal legacy sentinels, delimiters, and Unicode optional IDs', () => {
+    const base = {
+      board: 'board:=/✓',
+      connectionId: 'connection:=/✓',
+      kind: 'kanban' as const,
+      taskId: 'task:=/✓'
+    }
+    const keys = [
+      entityKey(base),
+      entityKey({ ...base, runId: '', workerId: '' }),
+      entityKey({ ...base, runId: '@absent' }),
+      entityKey({ ...base, workerId: '@absent' }),
+      entityKey({ ...base, runId: '@empty' }),
+      entityKey({ ...base, workerId: '@empty' }),
+      entityKey({ ...base, runId: '::=/% ✓', workerId: '::=/% ✓' })
+    ]
+
+    expect(new Set(keys).size).toBe(keys.length)
+    expect(keys.every(key => key.includes(':'))).toBe(true)
   })
 })

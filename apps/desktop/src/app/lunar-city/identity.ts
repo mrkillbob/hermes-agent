@@ -10,22 +10,25 @@ function required(name: FieldName, value: string): string {
   return value
 }
 
-function optional(value: string | undefined): string {
-  if (value === undefined) {
-    return '@absent'
-  }
+function field(name: FieldName, value: string): string {
+  const encoded = encodeURIComponent(value)
 
-  return value.length === 0 ? '@empty' : value
+  return `${name}:string:${value.length}:${encoded}`
 }
 
-function field(name: FieldName, value: string): string {
-  return `${name}=${encodeURIComponent(value)}`
+function optionalField(name: FieldName, value: string | undefined): string {
+  if (value === undefined) {
+    return `${name}:undefined`
+  }
+
+  return field(name, value)
 }
 
 /**
  * Builds an opaque, canonical key from typed source identity only.  The field
- * labels and explicit optional-value sentinels make the representation safe
- * even when external IDs contain the delimiter, URL syntax, or Unicode.
+ * labels, types, and length-prefixed values make the representation safe even
+ * when external IDs contain the delimiter, URL syntax, Unicode, or the legacy
+ * sentinel spellings used by earlier versions.
  */
 export function entityKey(identity: EntityIdentity): EntityKey {
   const common = [field('kind', identity.kind), field('connection', required('connection', identity.connectionId))]
@@ -55,7 +58,7 @@ export function entityKey(identity: EntityIdentity): EntityKey {
     ...common,
     field('board', required('board', identity.board)),
     field('task', required('task', identity.taskId)),
-    field('run', optional(identity.runId)),
-    field('worker', optional(identity.workerId))
+    optionalField('run', identity.runId),
+    optionalField('worker', identity.workerId)
   ].join(':') as EntityKey
 }

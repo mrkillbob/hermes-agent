@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { applyQualitySettings, createQualityController, qualitySettings } from './quality'
+import { animationDistanceUnits, applyQualitySettings, createQualityController, qualitySettings } from './quality'
 
 describe('qualitySettings', () => {
+  it('maps short, normal, and long animation tiers to monotonically increasing runtime distances', () => {
+    expect(animationDistanceUnits('short')).toBeLessThan(animationDistanceUnits('normal'))
+    expect(animationDistanceUnits('normal')).toBeLessThan(animationDistanceUnits('long'))
+  })
+
   it.each([
     ['efficient', 0.7, 'none', 'short', 1],
     ['balanced', 0.85, 'near', 'normal', 0],

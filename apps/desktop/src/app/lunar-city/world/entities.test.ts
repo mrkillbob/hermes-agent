@@ -187,6 +187,43 @@ describe('EntityRegistry', () => {
       z: 0
     })
   })
+
+  it('keeps the authoritative arrival clip while navigation temporarily presents the declared walk clip', () => {
+    const presentationFactory = factory()
+    const worker = entity(1, { animation: 'work' })
+    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk', 'work']) })
+
+    registry.setSelection(worker.key)
+    registry.reconcile(snapshot(worker))
+    const navigationEntity = registry.navigationEntity(worker.key)!
+    navigationEntity.animation = 'walk'
+    registry.reconcile(snapshot({ ...worker, animation: 'work' }))
+    registry.syncMotion()
+
+    expect(presentationFactory.animated.mock.results[0]?.value.setAnimation).toHaveBeenLastCalledWith('walk')
+
+    navigationEntity.animation = 'work'
+    registry.setMoving(worker.key, false)
+    registry.syncMotion()
+
+    expect(presentationFactory.animated.mock.results[0]?.value.setAnimation).toHaveBeenLastCalledWith('work')
+  })
+
+  it('uses the supplied quality animation-distance policy to promote nearby workers and demote distant workers', () => {
+    const presentationFactory = factory()
+    const worker = entity(1, { animation: 'idle' })
+    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
+
+    registry.reconcile(snapshot(worker))
+    registry.applyLodPolicy(() => 0, () => true)
+    expect(presentationFactory.animated).toHaveBeenCalledOnce()
+
+    const visual = presentationFactory.animated.mock.results[0]?.value
+    registry.applyLodPolicy(() => 1, () => false)
+
+    expect(visual.dispose).toHaveBeenCalledOnce()
+    expect(registry.instancedGroup('worker:idle:lod:1')?.count).toBe(1)
+  })
 })
 
 describe('LOD selection', () => {

@@ -41,6 +41,7 @@ const AUTHORITATIVE_STATES: Readonly<Record<string, Omit<SpatialState, 'authorit
   heartbeat: { animation: 'heartbeat', destination: 'garden' },
   idle: { animation: 'rest', destination: 'garden' },
   orchestration: { animation: 'handoff', destination: 'council' },
+  pause: { animation: 'rest', destination: 'garden' },
   paused: { animation: 'rest', destination: 'garden' },
   queued: { animation: 'queue', destination: 'bus' },
   ready: { animation: 'queue', destination: 'bus' },
@@ -48,6 +49,7 @@ const AUTHORITATIVE_STATES: Readonly<Record<string, Omit<SpatialState, 'authorit
   resource_wait: { animation: 'wait', destination: 'depot' },
   review: { animation: 'review', destination: 'review' },
   running: { animation: 'work', destination: 'project' },
+  triage: { animation: 'triage', destination: 'triage' },
   waiting_for_resource: { animation: 'wait', destination: 'depot' },
   working: { animation: 'work', destination: 'project' }
 })

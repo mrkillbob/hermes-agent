@@ -76,6 +76,7 @@ export interface NavigationControllerOptions {
 }
 
 interface ActivePath {
+  arrivalAnimation: string
   destination: DestinationId
   entity: NavigationEntity
   points: readonly Vec3[]
@@ -140,6 +141,10 @@ export function createNavigationController(options: NavigationControllerOptions)
   }
 
   return {
+    cancel(key: EntityKey): void {
+      active.delete(key)
+      lastSignature.delete(key)
+    },
     dispose(): void {
       if (disposed) {
         return
@@ -152,7 +157,7 @@ export function createNavigationController(options: NavigationControllerOptions)
     isMoving(key: EntityKey): boolean {
       return active.has(key)
     },
-    move(entity: NavigationEntity, destination: DestinationId): boolean {
+    move(entity: NavigationEntity, destination: DestinationId, arrivalAnimation = entity.animation): boolean {
       if (disposed || destination === 'unknown' || destination === 'unavailable') {
         return failClosed(entity, `navigation unavailable for ${destination}`)
       }
@@ -194,6 +199,7 @@ export function createNavigationController(options: NavigationControllerOptions)
       }
 
       active.set(entity.key, {
+        arrivalAnimation,
         destination,
         entity,
         points: points.map(copied),
@@ -206,8 +212,12 @@ export function createNavigationController(options: NavigationControllerOptions)
       return true
     },
     setWalkabilityRevision(revision: number): void {
-      if (Number.isFinite(revision) && revision >= 0) {
+      if (Number.isFinite(revision) && revision >= 0 && revision !== walkabilityRevision) {
         walkabilityRevision = revision
+
+        for (const entry of [...active.values()]) {
+          this.move(entry.entity, entry.destination, entry.arrivalAnimation)
+        }
       }
     },
     tick(elapsedMs: number): boolean {
@@ -236,12 +246,23 @@ export function createNavigationController(options: NavigationControllerOptions)
             entry.entity.position = copied(destination)
           }
 
-          entry.entity.animation = options.workerClips.has(staticPose) ? staticPose : 'unavailable'
+          entry.entity.animation = options.workerClips.has(entry.arrivalAnimation)
+            ? entry.arrivalAnimation
+            : options.workerClips.has(staticPose)
+              ? staticPose
+              : 'unavailable'
           active.delete(entry.entity.key)
         }
       }
 
       return active.size > 0
+    },
+    updateArrivalAnimation(key: EntityKey, animation: string): void {
+      const entry = active.get(key)
+
+      if (entry) {
+        entry.arrivalAnimation = animation
+      }
     }
   }
 }

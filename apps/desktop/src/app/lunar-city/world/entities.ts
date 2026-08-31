@@ -75,6 +75,7 @@ interface RetainedEntity {
   entity: LunarEntity
   lodIndex: number
   moving: boolean
+  nearby: boolean
   position: Vec3
   visual: EntityVisual | undefined
 }
@@ -103,7 +104,11 @@ function groupKey(record: RetainedEntity): string {
 }
 
 function isIndividuallyAnimated(record: RetainedEntity, selection: EntityKey | undefined): boolean {
-  return record.entity.key === selection || record.moving || record.animation === 'walk'
+  return record.entity.key === selection || record.moving || record.nearby || record.animation === 'walk'
+}
+
+function presentedAnimation(record: RetainedEntity): string {
+  return record.moving ? 'walk' : record.animation
 }
 
 function immutableAggregate(total: number, animations: Map<string, number>): AggregatePopulation {
@@ -184,11 +189,13 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
         record.visual.setPosition?.(copied(record.position))
         record.visual.setLod?.(record.lodIndex)
 
-        if (options.workerClips.has(record.animation)) {
-          record.visual.setAnimation?.(record.animation)
+        const animation = presentedAnimation(record)
+
+        if (options.workerClips.has(animation)) {
+          record.visual.setAnimation?.(animation)
         } else {
           record.visual.setStaticPose?.('idle')
-          diagnoseOnce(`worker animation clip unavailable: ${record.animation}`)
+          diagnoseOnce(`worker animation clip unavailable: ${animation}`)
         }
 
         continue
@@ -231,7 +238,10 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
     aggregate(destination: DestinationId): AggregatePopulation | undefined {
       return aggregates.get(destination)
     },
-    applyLodPolicy(resolveIndex: (key: EntityKey, position: Vec3, isSelected: boolean) => number): void {
+    applyLodPolicy(
+      resolveIndex: (key: EntityKey, position: Vec3, isSelected: boolean) => number,
+      isNearby?: (key: EntityKey, position: Vec3, isSelected: boolean) => boolean
+    ): void {
       if (disposed) {
         return
       }
@@ -248,6 +258,14 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
           record.lodIndex = nextIndex
           changed = true
         }
+
+        const nextNearby = isNearby?.(record.entity.key, record.position, record.entity.key === selected) ?? false
+
+        if (record.nearby !== nextNearby) {
+          record.nearby = nextNearby
+          changed = true
+        }
+
       }
 
       if (changed) {
@@ -275,6 +293,9 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
     },
     entity(key: EntityKey): Readonly<RetainedEntity> | undefined {
       return records.get(key)
+    },
+    hasActiveAnimations(): boolean {
+      return [...records.values()].some(record => isIndividuallyAnimated(record, selected))
     },
     instancedGroup(key: string): { count: number } | undefined {
       const group = groups.get(key)
@@ -307,10 +328,14 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
 
       return {
         get animation() {
-          return record.animation
+          return presentedAnimation(record)
         },
         set animation(value: string) {
-          record.animation = value
+          if (value === 'walk') {
+            record.moving = true
+          } else {
+            record.animation = value
+          }
         },
         get key() {
           return record.entity.key
@@ -346,6 +371,7 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
           entity,
           lodIndex: 0,
           moving: false,
+          nearby: false,
           position: copied(entity.position),
           visual: undefined
         }
@@ -397,8 +423,10 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
       for (const record of records.values()) {
         record.visual?.setPosition?.(copied(record.position))
 
-        if (record.visual && options.workerClips.has(record.animation)) {
-          record.visual.setAnimation?.(record.animation)
+        const animation = presentedAnimation(record)
+
+        if (record.visual && options.workerClips.has(animation)) {
+          record.visual.setAnimation?.(animation)
         }
       }
     }

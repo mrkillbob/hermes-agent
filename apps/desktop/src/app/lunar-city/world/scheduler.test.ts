@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { createNavigationController, type NavigationEntity } from './navigation'
 import { createFrameScheduler, type FrameTick } from './scheduler'
 
 function schedulerHarness() {
@@ -99,5 +100,69 @@ describe('FrameScheduler', () => {
     expect(harness.cancelFrame).toHaveBeenCalledOnce()
     expect(harness.clearTimer).toHaveBeenCalledOnce()
     expect(harness.onFrame).not.toHaveBeenCalled()
+  })
+
+  it('never exceeds 30 FPS while dirty at a 120 Hz source cadence', () => {
+    const harness = schedulerHarness()
+    harness.scheduler.noteInteraction(0)
+
+    for (let now = 0; now <= 1_000; now += 1000 / 120) {
+      harness.scheduler.requestRender()
+      harness.scheduler.tick(now)
+    }
+
+    expect(harness.frames.length).toBeLessThanOrEqual(30)
+    expect(harness.frames.length).toBeGreaterThan(25)
+  })
+
+  it('keeps context loss paused when document visibility returns until every reason clears', () => {
+    const harness = schedulerHarness()
+
+    harness.scheduler.setPauseReason('document-hidden', true)
+    harness.scheduler.setPauseReason('context-lost', true)
+    harness.scheduler.setPauseReason('document-hidden', false)
+
+    expect(harness.scheduler.targetFps(10)).toBe(0)
+    expect(harness.renderer.stopRenderLoop).toHaveBeenCalledOnce()
+
+    harness.scheduler.setPauseReason('context-lost', false)
+    harness.scheduler.tick(10)
+
+    expect(harness.scheduler.targetFps(10)).toBe(15)
+    expect(harness.onFrame).toHaveBeenCalledOnce()
+  })
+
+  it('continues a worker over multiple frames without a camera transition and parks after its arrival', () => {
+    const worker: NavigationEntity = {
+      animation: 'idle',
+      key: 'session:worker' as never,
+      position: { x: 0, y: 0, z: 0 }
+    }
+    const navigation = createNavigationController({
+      destinations: { review: { x: 1, y: 0, z: 0 } },
+      query: { computePath: () => [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }] },
+      speedUnitsPerSecond: 1,
+      workerClips: new Set(['idle', 'walk', 'work'])
+    })
+    const harness = schedulerHarness()
+    harness.onFrame.mockImplementation(frame => {
+      harness.frames.push(frame)
+
+      return navigation.tick(frame.elapsedMs)
+    })
+
+    navigation.move(worker, 'review', 'work')
+    harness.scheduler.requestRender()
+
+    for (let now = 0; now <= 1_100; now += 34) {
+      harness.scheduler.tick(now)
+    }
+
+    expect(worker.position).toEqual({ x: 1, y: 0, z: 0 })
+    expect(worker.animation).toBe('work')
+    expect(harness.frames.length).toBeGreaterThan(2)
+    const completedFrames = harness.frames.length
+    harness.scheduler.tick(2_000)
+    expect(harness.frames).toHaveLength(completedFrames)
   })
 })

@@ -10,6 +10,8 @@ export interface FrameTick {
   targetFps: 0 | 15 | 30
 }
 
+export type FramePauseReason = 'context-lost' | 'document-hidden' | 'window-minimized'
+
 export interface FrameSchedulerOptions {
   cancelFrame?: (handle: number) => void
   clearTimer?: (handle: number) => void
@@ -55,7 +57,7 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
   const cancelFrame = options.cancelFrame ?? defaultCancelFrame
   const setTimer = options.setTimer ?? defaultSetTimer
   const clearTimer = options.clearTimer ?? defaultClearTimer
-  let visible = true
+  const pauseReasons = new Set<FramePauseReason>()
   let disposed = false
   let dirty = false
   let interactiveUntil = Number.NEGATIVE_INFINITY
@@ -67,6 +69,7 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
   let releaseVisibility: (() => void) | undefined
 
   const targetFpsAt = (now: number): 15 | 30 => (now < interactiveUntil ? 30 : 15)
+  const canRender = (): boolean => !disposed && pauseReasons.size === 0
 
   const cancelPending = (): void => {
     if (frameHandle !== undefined) {
@@ -105,7 +108,7 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
   }
 
   const wake = (): void => {
-    if (disposed || !visible) {
+    if (!canRender()) {
       return
     }
 
@@ -142,7 +145,7 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
       visualDeadline = deadline
     }
 
-    if (visible && !disposed) {
+    if (canRender()) {
       ensureTimer(visualDeadline!, clock())
     }
 
@@ -150,7 +153,7 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
   }
 
   const tick = (now: number): boolean => {
-    if (disposed || !visible) {
+    if (!canRender()) {
       return false
     }
 
@@ -158,8 +161,14 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
     const interval = 1_000 / targetFps
     const due = dirty || (visualDeadline !== undefined && now >= visualDeadline)
 
-    if (!due || (lastFrameAt !== undefined && now - lastFrameAt < interval && !dirty)) {
+    if (!due) {
       wake()
+
+      return false
+    }
+
+    if (lastFrameAt !== undefined && now - lastFrameAt < interval) {
+      scheduleAt(lastFrameAt + interval)
 
       return false
     }
@@ -177,14 +186,20 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
     return true
   }
 
-  const setVisible = (nextVisible: boolean): void => {
-    if (disposed || visible === nextVisible) {
+  const setPauseReason = (reason: FramePauseReason, paused: boolean): void => {
+    if (disposed || pauseReasons.has(reason) === paused) {
       return
     }
 
-    visible = nextVisible
+    const wasRunnable = canRender()
 
-    if (!visible) {
+    if (paused) {
+      pauseReasons.add(reason)
+    } else {
+      pauseReasons.delete(reason)
+    }
+
+    if (wasRunnable && !canRender()) {
       dirty = false
       visualDeadline = undefined
       cancelPending()
@@ -193,11 +208,15 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
       return
     }
 
-    // A resumed world receives one up-to-date snapshot frame, rather than
-    // replaying an animation backlog accumulated while it was hidden.
-    dirty = true
-    wake()
+    if (!wasRunnable && canRender()) {
+      // A resumed world receives one up-to-date snapshot frame, rather than
+      // replaying an animation backlog accumulated while it was paused.
+      dirty = true
+      wake()
+    }
   }
+
+  const setVisible = (nextVisible: boolean): void => setPauseReason('context-lost', !nextVisible)
 
   return {
     bindRendererPauseState(): () => void {
@@ -208,12 +227,12 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
       let controller: ReturnType<typeof createRendererLoopPauseController>
       controller = createRendererLoopPauseController(
         () => {
-          setVisible(!controller.isPaused())
+          setPauseReason('document-hidden', controller.isPaused())
         },
         { pauseWhenUnfocused: false }
       )
       releaseVisibility = () => controller.dispose()
-      setVisible(!controller.isPaused())
+      setPauseReason('document-hidden', controller.isPaused())
 
       return () => {
         releaseVisibility?.()
@@ -255,9 +274,10 @@ export function createFrameScheduler(options: FrameSchedulerOptions) {
       scheduleAt(deadline)
     },
     setVisible,
+    setPauseReason,
     tick,
     targetFps(now = clock()): 0 | 15 | 30 {
-      return disposed || !visible ? 0 : targetFpsAt(now)
+      return canRender() ? targetFpsAt(now) : 0
     }
   }
 }

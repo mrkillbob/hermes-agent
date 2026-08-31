@@ -37,7 +37,7 @@ import {
 } from './entities'
 import { createNavigationController, createRecastNavigationQuery, type NavigationQuery } from './navigation'
 import { createOcclusionController, type OcclusionCandidate, type OcclusionSelection } from './occlusion'
-import { applyQualitySettings, createQualityController } from './quality'
+import { animationDistanceUnits, applyQualitySettings, createQualityController } from './quality'
 import { createFrameScheduler } from './scheduler'
 
 const LEADER_STATES: readonly LeaderAnimationState[] = [
@@ -78,6 +78,10 @@ function staticFocusKey(kind: 'leader' | 'model', value: string): EntityKey {
 
 function navigationPointKey(point: Vec3): string {
   return `${point.x},${point.y},${point.z}`
+}
+
+function samePoint(left: Vec3 | undefined, right: Vec3 | undefined): boolean {
+  return left?.x === right?.x && left?.y === right?.y && left?.z === right?.z
 }
 
 /**
@@ -304,6 +308,7 @@ interface BabylonQuaternion {
 
 interface BabylonAnimationGroupLike {
   clone?(name: string, targetConverter?: (target: unknown) => unknown): BabylonAnimationGroupLike | null
+  dispose?(): void
   name: string
   start?(loop?: boolean, speedRatio?: number, from?: number, to?: number): void
   stop?(): void
@@ -701,7 +706,7 @@ function deterministicWorkerVariant(key: EntityKey, variants: readonly string[])
   return variants[hash % variants.length]
 }
 
-function createBabylonEntityFactory(
+export function createBabylonEntityFactory(
   model: ModelManifestEntry,
   result: BabylonImportResultLike,
   modules: LunarCityWorldModules,
@@ -712,12 +717,33 @@ function createBabylonEntityFactory(
   const variants = model.instancing?.variants ?? []
   const candidateMeshes = result.meshes.filter(mesh => mesh.name !== '__root__') as readonly BabylonInstancedMeshLike[]
   const sourceLodNodes = model.lods.map(lod => findNode(result, lod.node))
+  const sourceVariantNodes = new Map(
+    variants.flatMap(variant => {
+      const node = findNode(result, `worker:variant:${variant}`)
+
+      return node ? [[variant, node] as const] : []
+    })
+  )
 
   const meshesForLod = (lodIndex: number): readonly BabylonInstancedMeshLike[] => {
     const lodRoot = sourceLodNodes[lodIndex] ?? sourceLodNodes[0]
     const matching = lodRoot ? candidateMeshes.filter(mesh => belongsToLeader(mesh, lodRoot)) : []
 
     return matching.length > 0 ? matching : candidateMeshes
+  }
+
+  const meshesForVariant = (meshes: readonly BabylonInstancedMeshLike[], variant: string | undefined) => {
+    if (!variant || !sourceVariantNodes.has(variant)) {
+      return meshes
+    }
+
+    const selectedVariant = sourceVariantNodes.get(variant)!
+
+    return meshes.filter(
+      mesh =>
+        ![...sourceVariantNodes.values()].some(variantNode => belongsToLeader(mesh, variantNode)) ||
+        belongsToLeader(mesh, selectedVariant)
+    )
   }
 
   if (!template) {
@@ -736,12 +762,21 @@ function createBabylonEntityFactory(
       const variant = declaredVariant ?? deterministicWorkerVariant(entity.key, variants)
       anchor.metadata = { ...metadataRecord(anchor.metadata), lunarCityWorkerVariant: variant }
       clone.root.setEnabled?.(true)
+
+      for (const [variantId, sourceNode] of sourceVariantNodes) {
+        clone.nodeMap.get(sourceNode)?.setEnabled?.(variantId === variant)
+      }
+
       let active: BabylonAnimationGroupLike | undefined
 
       return {
         dispose() {
           active?.stop?.()
           active = undefined
+          for (const group of clone.animations.values()) {
+            group.stop?.()
+            group.dispose?.()
+          }
           clone.root.dispose?.()
           anchor.dispose?.()
         },
@@ -776,7 +811,8 @@ function createBabylonEntityFactory(
     },
     createInstancedGroup(groupKey): InstancedEntityGroup {
       const lodIndex = Number(/:lod:(\d+)$/u.exec(groupKey)?.[1] ?? 0)
-      const sourceMeshes = meshesForLod(lodIndex)
+      const variant = variants.find(candidate => groupKey.startsWith(`worker:${candidate}:`))
+      const sourceMeshes = meshesForVariant(meshesForLod(lodIndex), variant)
       const members = new Map<EntityKey, { instances: BabylonNodeLike[]; root: BabylonNodeLike }>()
 
       const disposeMember = (member: { instances: BabylonNodeLike[]; root: BabylonNodeLike }): void => {
@@ -1042,6 +1078,7 @@ export async function createWorldScene(
     })
 
     const destinationByEntity = new Map<EntityKey, string>()
+    const authoritativeOriginByEntity = new Map<EntityKey, Vec3>()
     const activeNavigation = new Set<EntityKey>()
 
     const applyOcclusion = (): void => {
@@ -1053,6 +1090,7 @@ export async function createWorldScene(
 
     const scheduler = createFrameScheduler({
       onFrame(frame) {
+        const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
         const previousCameraState = cameraController.getState()
         cameraController.update(frame.elapsedMs)
         const cameraState = cameraController.getState()
@@ -1068,7 +1106,7 @@ export async function createWorldScene(
         const settings = quality.settings()
         const currentCameraPosition = cameraPosition(camera)
 
-        navigation.tick(frame.elapsedMs)
+        const navigationActive = navigation.tick(frame.elapsedMs)
         entityRegistry.syncMotion()
 
         for (const key of [...activeNavigation]) {
@@ -1090,20 +1128,27 @@ export async function createWorldScene(
           })
         }
 
-        entityRegistry.applyLodPolicy((_key, position, isSelected) =>
-          selectLodIndex(workerAsset.model.lods, {
-            distance: Math.hypot(
+        entityRegistry.applyLodPolicy(
+          (_key, position, isSelected) =>
+            selectLodIndex(workerAsset.model.lods, {
+              distance: Math.hypot(
+                currentCameraPosition.x - position.x,
+                currentCameraPosition.y - position.y,
+                currentCameraPosition.z - position.z
+              ),
+              lodAdvance: settings.lodAdvance,
+              selected: isSelected
+            }),
+          (_key, position, isSelected) =>
+            isSelected ||
+            Math.hypot(
               currentCameraPosition.x - position.x,
               currentCameraPosition.y - position.y,
               currentCameraPosition.z - position.z
-            ),
-            lodAdvance: settings.lodAdvance,
-            selected: isSelected
-          })
+            ) <= animationDistanceUnits(settings.animationDistance)
         )
 
         applyOcclusion()
-        const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
         scene.render()
         const finishedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
 
@@ -1113,7 +1158,13 @@ export async function createWorldScene(
           applyQualitySettings(engine, quality.settings())
         }
 
-        return cameraController.isTransitioning()
+        return (
+          navigationActive ||
+          activeNavigation.size > 0 ||
+          cameraController.isTransitioning() ||
+          cameraState.following ||
+          entityRegistry.hasActiveAnimations()
+        )
       },
       renderer: engine
     })
@@ -1130,31 +1181,50 @@ export async function createWorldScene(
             [...snapshot.entities].filter(([, entity]) => entity.identity.kind !== 'profile')
           )
 
+          for (const key of destinationByEntity.keys()) {
+            if (!dynamicEntities.has(key)) {
+              navigation.cancel(key)
+              destinationByEntity.delete(key)
+              authoritativeOriginByEntity.delete(key)
+              activeNavigation.delete(key)
+            }
+          }
+
           entityRegistry.reconcile({ ...snapshot, entities: dynamicEntities })
 
           for (const [key, entity] of dynamicEntities) {
             const previousDestination = destinationByEntity.get(key)
+            const previousOrigin = authoritativeOriginByEntity.get(key)
+            const authoritativeOrigin = entity.authority === 'authoritative' ? entity.position : undefined
+            const hasOriginCorrection = authoritativeOrigin !== undefined && !samePoint(previousOrigin, authoritativeOrigin)
             destinationByEntity.set(key, entity.destination)
 
-            if (previousDestination === entity.destination) {
+            if (authoritativeOrigin) {
+              authoritativeOriginByEntity.set(key, { ...authoritativeOrigin })
+            }
+
+            navigation.updateArrivalAnimation(key, entity.animation)
+
+            if (entity.authority !== 'authoritative') {
+              navigation.cancel(key)
+              activeNavigation.delete(key)
+              entityRegistry.setMoving(key, false)
+
               continue
             }
 
             const presentation = entityRegistry.navigationEntity(key)
 
-            if (presentation && navigation.move(presentation, entity.destination)) {
+            if (
+              presentation &&
+              (previousDestination !== entity.destination || hasOriginCorrection) &&
+              navigation.move(presentation, entity.destination, entity.animation)
+            ) {
               activeNavigation.add(key)
               entityRegistry.setMoving(key, true)
-            } else {
+            } else if (previousDestination !== entity.destination || hasOriginCorrection) {
               activeNavigation.delete(key)
               entityRegistry.setMoving(key, false)
-            }
-          }
-
-          for (const key of destinationByEntity.keys()) {
-            if (!dynamicEntities.has(key)) {
-              destinationByEntity.delete(key)
-              activeNavigation.delete(key)
             }
           }
 
