@@ -80,6 +80,42 @@ function identityLabel(entity: LunarEntity): string {
   return `Task ${titleCase(identity.taskId)}`
 }
 
+/**
+ * Formats ownership fields without title-casing, trimming, or otherwise
+ * changing external identifiers. These fields are the assistive-technology
+ * identity for rows whose human labels may legitimately collide.
+ */
+function identityDetails(entity: LunarEntity): string {
+  const identity = entity.identity
+  const fields = [`kind ${identity.kind}`, `connectionId ${identity.connectionId}`, `profile ${identity.profile}`]
+
+  if (identity.kind === 'profile') {
+    return fields.join('; ')
+  }
+
+  if (identity.kind === 'session') {
+    fields.push(`sessionId ${identity.sessionId}`)
+  } else if (identity.kind === 'subagent') {
+    fields.push(
+      `sessionId ${identity.sessionId}`,
+      `parentSessionId ${identity.sessionId}`,
+      `subagentId ${identity.subagentId}`
+    )
+  } else {
+    fields.push(`board ${identity.board}`, `taskId ${identity.taskId}`)
+
+    if (identity.runId !== undefined) {
+      fields.push(`runId ${identity.runId}`)
+    }
+
+    if (identity.workerId !== undefined) {
+      fields.push(`workerId ${identity.workerId}`)
+    }
+  }
+
+  return fields.join('; ')
+}
+
 function destinationLabel(destination: string): string {
   return DESTINATION_LABELS[destination] ?? titleCase(destination)
 }
@@ -127,12 +163,14 @@ export function EntityList({ districtOrder, onSelect, selectedEntityKey, snapsho
             const authority = AUTHORITY_LABELS[entity.authority]
             const descriptionId = `lunar-city-entity-${entity.key.replace(/[^a-z0-9_-]/giu, '-')}`
             const description = `${state}; ${destination}; ${authority}`
+            const identity = identityDetails(entity)
+            const accessibleDescription = `${description}; Identity: ${identity}; Entity key ${entity.key}`
 
             return (
               <li key={entity.key}>
                 <button
                   aria-describedby={descriptionId}
-                  aria-label={`${name}, ${description}`}
+                  aria-label={`${name}, ${accessibleDescription}`}
                   aria-pressed={entity.key === selectedEntityKey}
                   onClick={() => onSelect(entity)}
                   type="button"
@@ -140,7 +178,7 @@ export function EntityList({ districtOrder, onSelect, selectedEntityKey, snapsho
                   {name}
                 </button>
                 <span className="lunar-city-entity-details" id={descriptionId}>
-                  {description}
+                  {accessibleDescription}
                 </span>
               </li>
             )

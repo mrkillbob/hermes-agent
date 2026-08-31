@@ -74,4 +74,43 @@ describe('EntityList', () => {
     expect(screen.getByRole('button', { name: /Worker 2.*Unavailable.*Unknown destination.*Stale/i })).toBeTruthy()
     expect(screen.getByText(/stale/i)).toBeTruthy()
   })
+
+  it('exposes exact typed identity fields so duplicate display IDs remain distinguishable', () => {
+    const left = entity('same-session', 'project', {
+      identity: {
+        connectionId: 'Remote-A',
+        kind: 'session',
+        profile: 'Profile-A',
+        sessionId: 'same-session'
+      },
+      key: key('session:remote-a:same-session')
+    })
+
+    const right = entity('same-session', 'project', {
+      identity: {
+        connectionId: 'Remote-B',
+        kind: 'session',
+        profile: 'Profile-B',
+        sessionId: 'same-session'
+      },
+      key: key('session:remote-b:same-session')
+    })
+
+    const onSelect = vi.fn()
+    render(<EntityList onSelect={onSelect} snapshot={snapshot([left, right])} />)
+
+    const buttons = screen.getAllByRole('button')
+    expect(buttons).toHaveLength(2)
+    expect(buttons[0]?.getAttribute('aria-label')).toContain('connectionId Remote-A')
+    expect(buttons[0]?.getAttribute('aria-label')).toContain('profile Profile-A')
+    expect(buttons[0]?.getAttribute('aria-label')).toContain('sessionId same-session')
+    expect(buttons[1]?.getAttribute('aria-label')).toContain('connectionId Remote-B')
+    expect(buttons[1]?.getAttribute('aria-label')).toContain('profile Profile-B')
+    expect(screen.getByText(/Identity:.*connectionId Remote-A.*sessionId same-session/i)).toBeTruthy()
+    expect(screen.getByText(/Identity:.*connectionId Remote-B.*sessionId same-session/i)).toBeTruthy()
+
+    fireEvent.click(buttons[1]!)
+    expect(onSelect).toHaveBeenCalledWith(right)
+    expect(onSelect).not.toHaveBeenCalledWith(left)
+  })
 })
