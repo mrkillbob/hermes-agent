@@ -265,6 +265,8 @@ export interface BabylonNodeLike {
 
 export interface BabylonMeshLike extends BabylonNodeLike {
   freezeWorldMatrix?(): void
+  getIndices?(): readonly number[] | null
+  getVerticesData?(kind: string): readonly number[] | null
   isPickable?: boolean
   material?: {
     alpha?: number
@@ -303,6 +305,29 @@ export interface BabylonLightLike {
   intensity: number
 }
 
+export interface RecastPathLike {
+  getPoint(index: number): BabylonVector3Like | undefined
+  getPointCount(): number
+}
+
+export interface RecastNavMeshLike {
+  build(
+    positions: Float32Array,
+    positionCount: number,
+    indices: Uint32Array,
+    indexCount: number,
+    configuration: unknown
+  ): void
+  computePath(from: unknown, to: unknown): RecastPathLike
+  destroy?(): void
+}
+
+export interface RecastRuntimeLike {
+  NavMesh: new () => RecastNavMeshLike
+  Vec3: new (x: number, y: number, z: number) => BabylonVector3Like
+  rcConfig: new () => Record<string, unknown>
+}
+
 export interface LunarCityWorldModules {
   Engine: new (
     canvas: HTMLCanvasElement,
@@ -323,4 +348,5 @@ export interface LunarCityWorldModules {
   DirectionalLight: new (name: string, direction: BabylonVector3Like, scene: BabylonSceneLike) => BabylonLightLike
   TransformNode: new (name: string, scene: BabylonSceneLike) => BabylonNodeLike
   ImportMeshAsync(source: string, scene: BabylonSceneLike): Promise<BabylonImportResultLike>
+  createRecastNavigation?(): Promise<RecastRuntimeLike>
 }

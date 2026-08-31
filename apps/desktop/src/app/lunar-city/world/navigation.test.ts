@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { EntityKey, Vec3 } from '../model'
 
-import { createNavigationController, type NavigationEntity, type NavigationQuery } from './navigation'
+import {
+  createNavigationController,
+  createRecastNavigationQuery,
+  type NavigationEntity,
+  type NavigationQuery
+} from './navigation'
 
 const workerKey = 'session:worker' as EntityKey
 
@@ -119,5 +124,31 @@ describe('NavigationController', () => {
 
     expect(controller.move(worker(), 'review')).toBe(false)
     expect(navQuery.dispose).toHaveBeenCalledOnce()
+  })
+})
+
+describe('Recast NavigationQuery adapter', () => {
+  it('reads an actual Recast path and disposes the underlying navmesh once', () => {
+    const destroy = vi.fn()
+    const navMesh = {
+      computePath: vi.fn(() => ({
+        getPoint: (index: number) =>
+          [
+            { x: 1, y: 0, z: 2 },
+            { x: 9, y: 0, z: 2 }
+          ][index],
+        getPointCount: () => 2
+      })),
+      destroy
+    }
+    const query = createRecastNavigationQuery(navMesh, (x, y, z) => ({ x, y, z }))
+
+    expect(query.computePath({ x: 1, y: 0, z: 2 }, { x: 9, y: 0, z: 2 })).toEqual([
+      { x: 1, y: 0, z: 2 },
+      { x: 9, y: 0, z: 2 }
+    ])
+    query.dispose?.()
+    query.dispose?.()
+    expect(destroy).toHaveBeenCalledOnce()
   })
 })

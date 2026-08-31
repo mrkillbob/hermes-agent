@@ -5,6 +5,60 @@ export interface NavigationQuery {
   dispose?(): void
 }
 
+export interface RecastPathLike {
+  getPoint(index: number): Vec3 | undefined
+  getPointCount(): number
+}
+
+export interface RecastNavMeshLike {
+  computePath(from: unknown, to: unknown): RecastPathLike
+  destroy?(): void
+}
+
+/** Adapts Recast's route-local navmesh to the narrow fail-closed query seam. */
+export function createRecastNavigationQuery(
+  navMesh: RecastNavMeshLike,
+  vector: (x: number, y: number, z: number) => unknown
+): NavigationQuery {
+  let disposed = false
+
+  return {
+    computePath(from, to) {
+      if (disposed) {
+        return undefined
+      }
+
+      let path: RecastPathLike
+
+      try {
+        path = navMesh.computePath(vector(from.x, from.y, from.z), vector(to.x, to.y, to.z))
+      } catch {
+        return undefined
+      }
+
+      const points: Vec3[] = []
+
+      for (let index = 0; index < path.getPointCount(); index += 1) {
+        const point = path.getPoint(index)
+
+        if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
+          return undefined
+        }
+
+        points.push({ x: point.x, y: point.y, z: point.z })
+      }
+
+      return points.length > 0 ? points : undefined
+    },
+    dispose() {
+      if (!disposed) {
+        disposed = true
+        navMesh.destroy?.()
+      }
+    }
+  }
+}
+
 export interface NavigationEntity {
   animation: string
   key: EntityKey

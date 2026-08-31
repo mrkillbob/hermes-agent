@@ -35,7 +35,7 @@ import {
   type LodEntry,
   selectLodIndex
 } from './entities'
-import { createNavigationController, type NavigationQuery } from './navigation'
+import { createNavigationController, createRecastNavigationQuery, type NavigationQuery } from './navigation'
 import { createOcclusionController, type OcclusionCandidate, type OcclusionSelection } from './occlusion'
 import { applyQualitySettings, createQualityController } from './quality'
 import { createFrameScheduler } from './scheduler'
@@ -149,6 +149,148 @@ export function createManifestNavigationQuery(
       }
 
       return path.reverse()
+    }
+  }
+}
+
+interface NavigationGeometry {
+  bounds: WorldBounds
+  indices: Uint32Array
+  positions: Float32Array
+}
+
+/** Extracts valid, indexed geometry only; malformed navigation assets fail closed. */
+function navigationGeometry(result: BabylonImportResultLike): NavigationGeometry | undefined {
+  const positions: number[] = []
+  const indices: number[] = []
+
+  for (const mesh of result.meshes) {
+    const meshPositions = mesh.getVerticesData?.('position')
+    const meshIndices = mesh.getIndices?.()
+
+    if (!meshPositions || !meshIndices || meshPositions.length === 0 || meshPositions.length % 3 !== 0) {
+      continue
+    }
+
+    const vertexCount = meshPositions.length / 3
+
+    if (
+      !Array.from(meshPositions).every(Number.isFinite) ||
+      !Array.from(meshIndices).every(index => Number.isSafeInteger(index) && index >= 0 && index < vertexCount)
+    ) {
+      continue
+    }
+
+    const vertexOffset = positions.length / 3
+    positions.push(...meshPositions)
+    indices.push(...Array.from(meshIndices, index => vertexOffset + index))
+  }
+
+  if (positions.length === 0 || indices.length === 0) {
+    return undefined
+  }
+
+  const xs = positions.filter((_value, index) => index % 3 === 0)
+  const ys = positions.filter((_value, index) => index % 3 === 1)
+  const zs = positions.filter((_value, index) => index % 3 === 2)
+
+  return {
+    bounds: {
+      min: { x: Math.min(...xs), y: Math.min(...ys), z: Math.min(...zs) },
+      max: { x: Math.max(...xs), y: Math.max(...ys), z: Math.max(...zs) }
+    },
+    indices: Uint32Array.from(indices),
+    positions: Float32Array.from(positions)
+  }
+}
+
+function disposeNavigationImport(result: BabylonImportResultLike): void {
+  for (const node of new Set<BabylonNodeLike>([...result.meshes, ...result.transformNodes])) {
+    node.setEnabled?.(false)
+    node.dispose?.()
+  }
+}
+
+function recastConfig(
+  Runtime: NonNullable<LunarCityWorldModules['createRecastNavigation']> extends () => Promise<infer T> ? T : never,
+  bounds: WorldBounds
+): Record<string, unknown> {
+  const config = new Runtime.rcConfig()
+
+  // These are Recast voxelization inputs, not hand-authored city coordinates;
+  // the actual navigable extent is extracted from the declared navigation GLB.
+  Object.assign(config, {
+    bmax: new Runtime.Vec3(bounds.max.x, bounds.max.y, bounds.max.z),
+    bmin: new Runtime.Vec3(bounds.min.x, bounds.min.y, bounds.min.z),
+    ch: 0.2,
+    cs: 0.2,
+    detailSampleDist: 6,
+    detailSampleMaxError: 1,
+    maxEdgeLen: 12,
+    maxSimplificationError: 1.3,
+    maxVertsPerPoly: 6,
+    mergeRegionArea: 20,
+    minRegionArea: 8,
+    walkableClimb: 1,
+    walkableHeight: 2,
+    walkableRadius: 0.25,
+    walkableSlopeAngle: 45
+  })
+
+  return config
+}
+
+/**
+ * Builds a route-local Recast query from the manifest navigation GLB. The
+ * imported geometry is released immediately after the navmesh has been built;
+ * declared links remain a fail-closed fallback if Recast/WASM cannot start.
+ */
+export async function createRouteNavigationQuery(
+  navigation: Pick<WorldManifestV2, 'navigation'>['navigation'],
+  modules: Pick<LunarCityWorldModules, 'ImportMeshAsync' | 'createRecastNavigation'>,
+  scene: Parameters<LunarCityWorldModules['ImportMeshAsync']>[1],
+  resolveAssetUrl: (uri: string) => string
+): Promise<NavigationQuery> {
+  const fallback = createManifestNavigationQuery(navigation)
+
+  if (!modules.createRecastNavigation) {
+    return fallback
+  }
+
+  let imported: BabylonImportResultLike | undefined
+  let releaseNavMesh: (() => void) | undefined
+
+  try {
+    imported = await modules.ImportMeshAsync(resolveAssetUrl(navigation.meshUri), scene)
+    const geometry = navigationGeometry(imported)
+
+    if (!geometry) {
+      return fallback
+    }
+
+    const Runtime = await modules.createRecastNavigation()
+    const navMesh = new Runtime.NavMesh()
+    releaseNavMesh = () => navMesh.destroy?.()
+    navMesh.build(
+      geometry.positions,
+      geometry.positions.length / 3,
+      geometry.indices,
+      geometry.indices.length,
+      recastConfig(Runtime, geometry.bounds)
+    )
+    const query = createRecastNavigationQuery(navMesh, (x, y, z) => new Runtime.Vec3(x, y, z))
+
+    // The query now owns navMesh and its idempotent destroy lifecycle.
+    releaseNavMesh = undefined
+
+    return query
+  } catch {
+    releaseNavMesh?.()
+
+    return fallback
+  } finally {
+    if (imported) {
+      disposeNavigationImport(imported)
     }
   }
 }
@@ -895,7 +1037,7 @@ export async function createWorldScene(
 
     const navigation = createNavigationController({
       destinations: manifest.destinations,
-      query: createManifestNavigationQuery(manifest.navigation),
+      query: await createRouteNavigationQuery(manifest.navigation, modules, scene, resolveAssetUrl),
       workerClips: workerClipNames
     })
 

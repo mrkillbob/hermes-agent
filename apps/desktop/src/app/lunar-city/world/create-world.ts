@@ -7,17 +7,19 @@ import { createWorldScene } from './world-scene'
 const DEFAULT_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
 
 export async function loadBabylonModules(): Promise<LunarCityWorldModules> {
-  const [engine, scene, sceneLoader, camera, vector, color, directionalLight, transformNode] = await Promise.all([
-    import('@babylonjs/core/Engines/engine'),
-    import('@babylonjs/core/scene'),
-    import('@babylonjs/core/Loading/sceneLoader'),
-    import('@babylonjs/core/Cameras/arcRotateCamera'),
-    import('@babylonjs/core/Maths/math.vector'),
-    import('@babylonjs/core/Maths/math.color'),
-    import('@babylonjs/core/Lights/directionalLight'),
-    import('@babylonjs/core/Meshes/transformNode'),
-    import('@babylonjs/loaders/glTF')
-  ])
+  const [engine, scene, sceneLoader, camera, vector, color, directionalLight, transformNode, , recast] =
+    await Promise.all([
+      import('@babylonjs/core/Engines/engine'),
+      import('@babylonjs/core/scene'),
+      import('@babylonjs/core/Loading/sceneLoader'),
+      import('@babylonjs/core/Cameras/arcRotateCamera'),
+      import('@babylonjs/core/Maths/math.vector'),
+      import('@babylonjs/core/Maths/math.color'),
+      import('@babylonjs/core/Lights/directionalLight'),
+      import('@babylonjs/core/Meshes/transformNode'),
+      import('@babylonjs/loaders/glTF'),
+      import('recast-detour')
+    ])
 
   return {
     ArcRotateCamera: camera.ArcRotateCamera,
@@ -27,7 +29,8 @@ export async function loadBabylonModules(): Promise<LunarCityWorldModules> {
     ImportMeshAsync: sceneLoader.ImportMeshAsync,
     Scene: scene.Scene,
     TransformNode: transformNode.TransformNode,
-    Vector3: vector.Vector3
+    Vector3: vector.Vector3,
+    createRecastNavigation: recast.default
   } as unknown as LunarCityWorldModules
 }
 
