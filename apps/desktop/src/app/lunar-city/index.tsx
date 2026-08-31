@@ -1,6 +1,6 @@
 import './lunar-city.css'
 
-import { type CSSProperties, useEffect, useMemo, useState } from 'react'
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -25,6 +25,12 @@ import {
   ZoomOut
 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+
+import { loadWorldManifest } from './manifest'
+import type { LunarCityWorldHandle } from './model'
+import { createLunarCityWorld } from './world/create-world'
+
+const LUNAR_CITY_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
 
 type WorkerState = 'blocked' | 'break' | 'done' | 'heartbeat' | 'ready' | 'resource' | 'review' | 'triage' | 'working'
 
@@ -449,11 +455,51 @@ function roomSnapshot(room: Room, task: Task, tick: number) {
 }
 
 export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
   const [selectedId, setSelectedId] = useState('research')
   const [inside, setInside] = useState(false)
   const [playing, setPlaying] = useState(true)
   const [tick, setTick] = useState(0)
   const [cameraZoom, setCameraZoom] = useState(0)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+
+    if (!canvas) {
+      return
+    }
+
+    canvas.dataset.worldStatus = 'loading'
+
+    const abortController = new AbortController()
+    let disposed = false
+    let world: LunarCityWorldHandle | undefined
+
+    void (async () => {
+      try {
+        const manifest = await loadWorldManifest(LUNAR_CITY_MANIFEST_URL, abortController.signal)
+        const created = await createLunarCityWorld(canvas, manifest, () => {}, undefined, LUNAR_CITY_MANIFEST_URL)
+
+        if (disposed) {
+          created.destroy()
+        } else {
+          world = created
+          canvas.dataset.worldStatus = 'ready'
+        }
+      } catch (error) {
+        if (!disposed && !(error instanceof DOMException && error.name === 'AbortError')) {
+          canvas.dataset.worldStatus = 'unavailable'
+        }
+      }
+    })()
+
+    return () => {
+      disposed = true
+      abortController.abort()
+      world?.destroy()
+      world = undefined
+    }
+  }, [])
 
   useEffect(() => {
     if (!playing) {
@@ -552,12 +598,12 @@ export function LunarCity({ onOpenMemoryGraph }: { onOpenMemoryGraph: () => void
       >
         <div
           className="lunar-city-world absolute inset-[-4%]"
-          style={{ transform: `rotateX(6deg) rotateY(-2deg) scale(${1.03 + cameraZoom * 0.08})` }}
+          style={{ transform: `scale(${1.03 + cameraZoom * 0.08})` }}
         >
-          <img
-            alt="Isometric lunar settlement with Hermes buildings, leaders, and helper workers"
+          <canvas
+            aria-label="Interactive 3D Lunar City"
             className="lunar-city-terrain absolute inset-0 size-full object-cover object-center"
-            src="./lunar-city/moon-settlement-approved.jpg"
+            ref={canvasRef}
           />
           <div aria-hidden="true" className="lunar-city-atmosphere absolute inset-0" />
           <div aria-hidden="true" className="lunar-city-grid absolute inset-0" />

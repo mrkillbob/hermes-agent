@@ -1,0 +1,258 @@
+export type EntityKey = string & { readonly entityKey: unique symbol }
+export type AuthorityState = 'authoritative' | 'partial' | 'stale' | 'unknown'
+export type DestinationId =
+  | 'bus'
+  | 'council'
+  | 'depot'
+  | 'garden'
+  | 'lab'
+  | 'library'
+  | 'project'
+  | 'review'
+  | 'triage'
+  | 'unavailable'
+  | 'unknown'
+export type QualityTier = 'efficient' | 'balanced' | 'detailed'
+
+export interface Vec3 {
+  x: number
+  y: number
+  z: number
+}
+
+export type EntityIdentity =
+  | { kind: 'profile'; connectionId: string; profile: string }
+  | { kind: 'session'; connectionId: string; profile: string; sessionId: string }
+  | { kind: 'subagent'; connectionId: string; profile: string; sessionId: string; subagentId: string }
+  | { kind: 'kanban'; connectionId: string; board: string; taskId: string; runId?: string; workerId?: string }
+
+export interface SourceHealth {
+  source: string
+  authority: AuthorityState
+  observedAt: number
+  error?: string
+}
+
+export interface CameraLandmark {
+  id: string
+  alpha: number
+  beta: number
+  radius: number
+  target: Vec3
+  minBeta: number
+  maxBeta: number
+  minRadius: number
+  maxRadius: number
+}
+
+export interface WorldBounds {
+  min: Vec3
+  max: Vec3
+}
+
+export interface ModelStatistics {
+  animationClips: readonly string[]
+  drawCalls: number
+  materials: number
+  meshes: number
+  nodes: number
+  textures: number
+  triangles: number
+  budget: {
+    maxDrawCalls: number
+    maxGpuMiB: number
+    maxMaterials: number
+    maxTextures: number
+    maxTriangles: number
+  }
+  bytes: number
+  extent: readonly [number, number, number]
+  gpuMiB: number
+  sha256: string
+}
+
+export interface ModelManifestEntry {
+  id: string
+  uri: string
+  maxTriangles: number
+  maxDrawCalls: number
+  maxMaterials: number
+  maxTextures: number
+  maxGpuMiB: number
+  requiredNodes: readonly string[]
+  requiredClips: readonly string[]
+  lods: readonly { distance: number; node: string }[]
+  transform: { position: Vec3; rotation: Vec3; scale: Vec3 }
+  pivot: Vec3
+  bounds: WorldBounds
+  anchors: Readonly<Record<string, Vec3>>
+  cameraAnchor: Vec3
+  occlusionGroup: string
+  collision: { kind: string; navigationArea: string }
+  materialSlots: readonly string[]
+  instancing?: { eligible: boolean; variants: readonly string[] }
+  statistics: ModelStatistics
+}
+
+export interface NavigationManifest {
+  meshUri: string
+  areas: readonly string[]
+  links: readonly { from: Vec3; to: Vec3; bidirectional: boolean }[]
+}
+
+export interface TextureManifestEntry {
+  bytes: number
+  sha256: string
+  source: string
+  uri: string
+}
+
+export interface MaterialManifestEntry {
+  id: string
+  palette: string
+  maxTextures: number
+}
+
+export interface ProjectSlotManifestEntry {
+  id: string
+  position: Vec3
+  bounds: WorldBounds
+  navigationLink: { from: Vec3; to: Vec3; bidirectional: boolean }
+}
+
+export interface QualityBudget {
+  drawCalls: number
+  visibleTriangles: number
+  gpuMiB: number
+}
+
+export interface WorldManifestV2 {
+  version: 2
+  assetVersion: '2.0.0'
+  source: { sha256: string }
+  materials: readonly MaterialManifestEntry[]
+  models: readonly ModelManifestEntry[]
+  textures: readonly TextureManifestEntry[]
+  camera: { overview: CameraLandmark; bounds: WorldBounds; followOffset: Vec3 }
+  navigation: NavigationManifest
+  destinations: Readonly<Record<string, Vec3>>
+  projectSlots: readonly ProjectSlotManifestEntry[]
+  qualityBudgets: {
+    balancedOverview: QualityBudget
+    balancedWorkerFocus: QualityBudget
+  }
+  generatedAssetPack: Readonly<Record<string, unknown>>
+}
+
+export interface LunarEntity {
+  key: EntityKey
+  identity: EntityIdentity
+  observedAt: number
+  authority: AuthorityState
+  destination: DestinationId
+  animation: string
+  projectId?: string
+}
+
+export interface LunarCitySnapshot {
+  revision: number
+  observedAt: number
+  entities: ReadonlyMap<EntityKey, LunarEntity>
+  sources: readonly SourceHealth[]
+}
+
+export type CameraIntent =
+  | { kind: 'orbit'; deltaAlpha: number; deltaBeta: number }
+  | { kind: 'pan'; deltaX: number; deltaZ: number }
+  | { kind: 'zoom'; delta: number }
+  | { kind: 'focus'; entityKey: EntityKey; follow: boolean }
+  | { kind: 'clear-focus' }
+  | { kind: 'return-to-city' }
+
+export type LunarCityIntent = { kind: 'select-landmark'; landmarkId: string } | { kind: 'clear-selection' }
+
+export type LeaderAnimationState = 'acknowledging' | 'idle' | 'listening' | 'talking' | 'thinking' | 'unavailable'
+
+export type LeaderStateClipMap = Readonly<Record<LeaderAnimationState, string>>
+
+export interface LunarCityWorldHandle {
+  readonly leaderStateClips: ReadonlyMap<string, LeaderStateClipMap>
+  applySnapshot(snapshot: LunarCitySnapshot): void
+  dispatchCamera(intent: CameraIntent): void
+  setQuality(tier: QualityTier): void
+  destroy(): void
+}
+
+export interface BabylonVector3Like {
+  readonly x: number
+  readonly y: number
+  readonly z: number
+}
+
+export interface BabylonMutableVectorLike {
+  set(x: number, y: number, z: number): void
+}
+
+export interface BabylonNodeLike {
+  name: string
+  metadata?: unknown
+  parent?: unknown
+  position?: BabylonMutableVectorLike
+  rotation?: BabylonMutableVectorLike
+  scaling?: BabylonMutableVectorLike
+  setPivotPoint?(point: BabylonVector3Like): void
+}
+
+export interface BabylonMeshLike extends BabylonNodeLike {
+  freezeWorldMatrix?(): void
+}
+
+export interface BabylonMaterialLike {
+  freeze?(): void
+}
+
+export interface BabylonEngineLike {
+  dispose(): void
+  resize(): void
+}
+
+export interface BabylonSceneLike {
+  activeCamera?: unknown
+  ambientColor?: unknown
+  materials?: readonly BabylonMaterialLike[]
+  dispose(): void
+  render(): void
+  whenReadyAsync(): Promise<void>
+}
+
+export interface BabylonImportResultLike {
+  meshes: readonly BabylonMeshLike[]
+  transformNodes: readonly BabylonNodeLike[]
+  animationGroups: readonly unknown[]
+}
+
+export interface BabylonLightLike {
+  intensity: number
+}
+
+export interface LunarCityWorldModules {
+  Engine: new (
+    canvas: HTMLCanvasElement,
+    antialias: boolean,
+    options: { powerPreference: 'low-power'; preserveDrawingBuffer: false; stencil: false }
+  ) => BabylonEngineLike
+  Scene: new (engine: BabylonEngineLike) => BabylonSceneLike
+  Vector3: new (x: number, y: number, z: number) => BabylonVector3Like
+  Color3: new (red: number, green: number, blue: number) => unknown
+  ArcRotateCamera: new (
+    name: string,
+    alpha: number,
+    beta: number,
+    radius: number,
+    target: BabylonVector3Like,
+    scene: BabylonSceneLike
+  ) => unknown
+  DirectionalLight: new (name: string, direction: BabylonVector3Like, scene: BabylonSceneLike) => BabylonLightLike
+  TransformNode: new (name: string, scene: BabylonSceneLike) => BabylonNodeLike
+  ImportMeshAsync(source: string, scene: BabylonSceneLike): Promise<BabylonImportResultLike>
+}

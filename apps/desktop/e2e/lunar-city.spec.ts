@@ -20,14 +20,26 @@ test.afterAll(async () => {
 
 test('renders the lunar city and opens a building detail view', async ({ page: _page }, testInfo) => {
   const page = fixture!.page
+  const lunarRequests: string[] = []
+
+  const recordLunarRequest = (request: { url(): string }) => {
+    if (request.url().includes('/lunar-city/')) {
+      lunarRequests.push(request.url())
+    }
+  }
 
   await waitForAppReady(fixture!, 120_000)
+  page.on('request', recordLunarRequest)
   await page.evaluate(() => {
-    window.location.hash = '#/starmap'
+    window.location.hash = '#/lunar-city'
   })
 
   await expect(page.getByRole('heading', { name: 'Lunar City' })).toBeVisible()
-  await expect(page.getByAltText(/isometric lunar settlement/i)).toBeVisible()
+  const canvas = page.getByLabel('Interactive 3D Lunar City')
+  await expect(canvas).toBeVisible()
+  await expect(canvas).toHaveAttribute('data-world-status', 'ready', { timeout: 30_000 })
+  expect(lunarRequests.some(url => /\/v2\/models\/terrain\.glb(?:[?#]|$)/.test(url))).toBe(true)
+  expect(lunarRequests.some(url => /moon-settlement-approved\.jpg/i.test(url))).toBe(false)
   await expect(page.getByRole('button', { name: /Open Library/i })).toBeVisible()
   await expect(page.getByRole('button', { name: /Open Research Lab/i })).toBeVisible()
   await expect(page.getByText('MISSIONS')).toBeVisible()
@@ -49,4 +61,5 @@ test('renders the lunar city and opens a building detail view', async ({ page: _
   await expect(page.getByText('Observatory', { exact: true })).toBeVisible()
 
   await page.screenshot({ path: testInfo.outputPath('lunar-city-building.png'), fullPage: true })
+  page.off('request', recordLunarRequest)
 })

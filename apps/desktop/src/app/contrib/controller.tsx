@@ -87,6 +87,7 @@ import {
 } from '../chat/session-tile'
 import { AppContextMenu } from '../context-menu/app-context-menu'
 import { HudShell } from '../hud/hud-shell'
+import { registerLunarCityContributions } from '../lunar-city/contribution'
 import { $terminalTakeover, setTerminalTakeover } from '../right-sidebar/store'
 import { $workspaceIsPage } from '../routes'
 
@@ -440,6 +441,11 @@ registry.registerMany([
 ])
 
 declareDefaultTree(DEFAULT_TREE)
+
+// Lunar City is a core route contribution so its left-sidebar destination is
+// always present. Its page component and Babylon runtime remain lazy until the
+// dedicated route mounts.
+registerLunarCityContributions()
 
 // Bundled plugins load AFTER core, so a same-id contribution from a plugin
 // deliberately overrides the core default (last writer wins). Third-party

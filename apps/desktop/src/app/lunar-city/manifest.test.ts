@@ -1,0 +1,121 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import actualManifest from '../../../public/lunar-city/v2/world-manifest.v2.json'
+
+import { APPROVED_SOURCE_SHA256, loadWorldManifest, parseWorldManifest } from './manifest'
+
+const cloneActualManifest = (): unknown => structuredClone(actualManifest)
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+describe('parseWorldManifest', () => {
+  it('normalizes the actual v2 asset contract without discarding placement, LOD, animation, or budget metadata', () => {
+    const manifest = parseWorldManifest(cloneActualManifest())
+    const library = manifest.models.find(model => model.id === 'library')
+    const leaders = manifest.models.find(model => model.id === 'leaders')
+
+    expect(manifest.version).toBe(2)
+    expect(manifest.assetVersion).toBe('2.0.0')
+    expect(manifest.source.sha256).toBe(APPROVED_SOURCE_SHA256)
+    expect(library).toMatchObject({
+      uri: 'models/library.glb',
+      transform: {
+        position: { x: -28, y: 4, z: -18 },
+        rotation: { x: 0, y: 0.28, z: 0 },
+        scale: { x: 1, y: 1, z: 1 }
+      },
+      lods: [
+        { distance: 0, node: 'library:lod:near' },
+        { distance: 48, node: 'library:lod:far' }
+      ],
+      requiredClips: ['lights-idle'],
+      maxTriangles: 28_000,
+      maxDrawCalls: 8
+    })
+    expect(leaders?.statistics.animationClips).toContain('leader:fox:talking')
+    expect(manifest.navigation.meshUri).toBe('models/navigation.glb')
+    expect(manifest.destinations.review).toEqual({ x: 33, y: 0, z: 10 })
+    expect(manifest.projectSlots[0]).toMatchObject({
+      id: 'compound-inner-1',
+      position: { x: 16, y: 0, z: 38 }
+    })
+    expect(manifest.qualityBudgets.balancedOverview).toEqual({
+      drawCalls: 180,
+      visibleTriangles: 1_500_000,
+      gpuMiB: 256
+    })
+    expect(manifest.textures[0]).toMatchObject({
+      uri: 'textures/approved-palette.png',
+      source: 'generated-approved-palette'
+    })
+  })
+
+  it.each([
+    ['model', (fixture: any) => (fixture.models[0].uri = '../moon-settlement-approved.jpg?cache=1')],
+    ['navigation', (fixture: any) => (fixture.navigation.meshUri = './MOON-SETTLEMENT-APPROVED.JPG#nav')],
+    ['texture', (fixture: any) => (fixture.textures[0].uri = 'moon-settlement-approved.jpg?cache=1')],
+    [
+      'future runtime URI',
+      (fixture: any) => (fixture.runtimeExtension = { billboardUri: 'moon-settlement-approved.jpg' })
+    ]
+  ])('rejects the approved JPG in the %s runtime URI field', (_label, mutate) => {
+    const fixture = structuredClone(actualManifest)
+    mutate(fixture)
+
+    expect(() => parseWorldManifest(fixture)).toThrow(/approved source cannot be a runtime asset/)
+  })
+
+  it.each([
+    ['remote model URL', (fixture: any) => (fixture.models[0].uri = 'https://example.test/terrain.glb')],
+    ['model traversal', (fixture: any) => (fixture.models[0].uri = '../models/terrain.glb')],
+    ['wrong model family', (fixture: any) => (fixture.models[0].uri = 'textures/terrain.glb')],
+    ['navigation traversal', (fixture: any) => (fixture.navigation.meshUri = 'models/../navigation.glb')],
+    ['wrong texture family', (fixture: any) => (fixture.textures[0].uri = 'models/approved-palette.png')]
+  ])('rejects a runtime asset outside the declared v2 pack: %s', (_label, mutate) => {
+    const fixture = structuredClone(actualManifest)
+    mutate(fixture)
+
+    expect(() => parseWorldManifest(fixture)).toThrow(/must be a relative v2 (model|texture) asset/)
+  })
+
+  it('rejects malformed transforms instead of silently replacing them', () => {
+    const fixture = structuredClone(actualManifest) as any
+    fixture.models[0].transform.position = [0, Number.NaN, 0]
+
+    expect(() => parseWorldManifest(fixture)).toThrow(/models\[0\]\.transform\.position\[1\] must be a finite number/)
+  })
+
+  it('rejects duplicate model identities', () => {
+    const fixture = structuredClone(actualManifest) as any
+    fixture.models[1].id = fixture.models[0].id
+
+    expect(() => parseWorldManifest(fixture)).toThrow(/model id terrain is duplicated/)
+  })
+})
+
+describe('loadWorldManifest', () => {
+  it('fetches and parses the manifest through the provided URL', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(actualManifest), { status: 200 }))
+    vi.stubGlobal('fetch', fetcher)
+
+    const manifest = await loadWorldManifest('./lunar-city/v2/world-manifest.v2.json')
+
+    expect(fetcher).toHaveBeenCalledWith('./lunar-city/v2/world-manifest.v2.json', {
+      signal: undefined
+    })
+    expect(manifest.models).toHaveLength(11)
+  })
+
+  it('reports an unsuccessful manifest response without parsing it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('missing', { status: 404, statusText: 'Not Found' }))
+    )
+
+    await expect(loadWorldManifest('./lunar-city/v2/world-manifest.v2.json')).rejects.toThrow(
+      /Lunar City manifest request failed: 404 Not Found/
+    )
+  })
+})

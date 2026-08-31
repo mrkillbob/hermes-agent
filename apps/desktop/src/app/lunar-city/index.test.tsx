@@ -1,24 +1,66 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { LunarCity } from './index'
 
-afterEach(() => cleanup())
+const { createWorld, destroyWorld, loadManifest, worldDeferred } = vi.hoisted(() => {
+  let resolveWorld!: (handle: { destroy: () => void }) => void
+
+  const deferred = new Promise<{ destroy: () => void }>(resolve => {
+    resolveWorld = resolve
+  })
+
+  const destroy = vi.fn()
+  const create = vi.fn((_canvas: unknown): Promise<{ destroy: () => void }> => Promise.resolve({ destroy }))
+
+  return {
+    createWorld: create,
+    destroyWorld: destroy,
+    loadManifest: vi.fn(async () => ({ models: [] })),
+    worldDeferred: { promise: deferred, resolve: resolveWorld }
+  }
+})
+
+vi.mock('./manifest', () => ({ loadWorldManifest: loadManifest }))
+vi.mock('./world/create-world', () => ({ createLunarCityWorld: createWorld }))
+
+afterEach(() => {
+  cleanup()
+  vi.clearAllMocks()
+})
 
 describe('LunarCity', () => {
-  it('opens the world with buildings, group leaders, and the moon asset', () => {
+  it('opens the world with one ready 3D canvas and no runtime source-art image', async () => {
     render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
 
     expect(screen.getByRole('heading', { name: 'Lunar City' })).toBeTruthy()
-    expect(screen.getByAltText(/isometric lunar settlement/i).getAttribute('src')).toBe(
-      './lunar-city/moon-settlement-approved.jpg'
-    )
+    const canvas = screen.getByLabelText('Interactive 3D Lunar City')
+
+    await waitFor(() => expect(canvas.getAttribute('data-world-status')).toBe('ready'))
+    expect(globalThis.document.querySelectorAll('canvas')).toHaveLength(1)
+    expect(globalThis.document.querySelector('img[src*="moon-settlement-approved.jpg"]')).toBeNull()
     expect(screen.getByRole('button', { name: /Open Research Lab/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Inspect Fox Scientist' }).getAttribute('data-character-kind')).toBe(
       'leader'
     )
     expect(screen.getByText('SIMULATION')).toBeTruthy()
+  })
+
+  it('destroys a world that finishes creating after the route unmounts', async () => {
+    createWorld.mockReturnValueOnce(worldDeferred.promise)
+    const { unmount } = render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    unmount()
+    await act(async () => {
+      worldDeferred.resolve({ destroy: destroyWorld })
+      await worldDeferred.promise
+    })
+
+    expect(destroyWorld).toHaveBeenCalledOnce()
   })
 
   it('lets the user enter a building and inspect its rooms', () => {
