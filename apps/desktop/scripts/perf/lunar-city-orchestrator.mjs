@@ -137,25 +137,27 @@ export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps)
     if (typeof deps?.[name] !== 'function') throw new Error(`gateway lifecycle ${name} boundary is unavailable`)
   }
   const uid = currentUid()
-  const spawnedHandles = []
-  const acceptedHandles = []
+  const spawnedRecords = []
+  const acceptedRecords = []
   const identities = []
   const throwAfterCleanup = async primaryError => {
-    const terminateResults = await Promise.allSettled(spawnedHandles.map(handle => deps.terminateGateway(handle)))
-    const waitResults = await Promise.allSettled(spawnedHandles.map(handle => deps.waitGateway(handle)))
-    const inspectResults = await Promise.allSettled(spawnedHandles.map(handle => deps.inspectProcess(handle.pid)))
+    const terminateResults = await Promise.allSettled(
+      spawnedRecords.map(record => deps.terminateGateway(record.handle))
+    )
+    const waitResults = await Promise.allSettled(spawnedRecords.map(record => deps.waitGateway(record.handle)))
+    const inspectResults = await Promise.allSettled(spawnedRecords.map(record => deps.inspectProcess(record.handle)))
     const teardownFailures = []
-    for (const [index, handle] of spawnedHandles.entries()) {
+    for (const [index, record] of spawnedRecords.entries()) {
       const terminateResult = terminateResults[index]
       const waitResult = waitResults[index]
       const inspectResult = inspectResults[index]
       if (terminateResult.status === 'rejected') teardownFailures.push(terminateResult.reason)
       if (waitResult.status === 'rejected') teardownFailures.push(waitResult.reason)
       else if (waitResult.value?.exited !== true)
-        teardownFailures.push(new Error(`gateway child process ${handle.pid} cleanup wait was unverified`))
+        teardownFailures.push(new Error(`gateway child process ${record.pid} cleanup wait was unverified`))
       if (inspectResult.status === 'rejected') teardownFailures.push(inspectResult.reason)
       else if (inspectResult.value?.alive === true)
-        teardownFailures.push(new Error(`gateway child process ${handle.pid} remained alive after cleanup`))
+        teardownFailures.push(new Error(`gateway child process ${record.pid} remained alive after cleanup`))
     }
     if (teardownFailures.length > 0) {
       const detail = teardownFailures.map(error => (error instanceof Error ? error.message : String(error))).join('; ')
@@ -171,26 +173,26 @@ export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps)
     for (const sourceId of sourceIds) {
       const handle = await deps.spawnGateway(sourceId, { runNonce })
       const pid = handle?.pid
-      const spawnedHandle = { ...handle, pid, sourceId }
-      spawnedHandles.push(spawnedHandle)
+      const spawnedRecord = { handle, pid, sourceId }
+      spawnedRecords.push(spawnedRecord)
       if (!Number.isInteger(pid) || pid <= 0) throw new Error(`gateway ${sourceId} has no positive child PID`)
-      if (acceptedHandles.some(existing => existing.pid === pid)) throw new Error('gateway child PID is duplicated')
-      const observed = await deps.inspectProcess(pid)
+      if (acceptedRecords.some(existing => existing.pid === pid)) throw new Error('gateway child PID is duplicated')
+      const observed = await deps.inspectProcess(handle)
       if (!observed) throw new Error(`gateway child process ${pid} is missing`)
       if (observed.alive !== true) throw new Error(`gateway child process ${pid} is not alive`)
       if (observed.parentPid !== process.pid) throw new Error(`gateway process ${pid} is not an orchestrator child`)
       if (observed.uid !== uid) throw new Error(`gateway process ${pid} does not match current uid`)
       if (typeof observed.startToken !== 'string' || observed.startToken.length === 0)
         throw new Error(`gateway process ${pid} start token is unavailable`)
-      acceptedHandles.push(spawnedHandle)
+      acceptedRecords.push(spawnedRecord)
       identities.push({ pid, sourceId, parentPid: observed.parentPid, startToken: observed.startToken, uid })
     }
   } catch (error) {
     await throwAfterCleanup(error)
   }
 
-  const inspectIdentity = async identity => {
-    const observed = await deps.inspectProcess(identity.pid)
+  const inspectIdentity = async (identity, index) => {
+    const observed = await deps.inspectProcess(acceptedRecords[index].handle)
     return Boolean(
       observed?.alive === true &&
       observed.parentPid === identity.parentPid &&
@@ -205,7 +207,9 @@ export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps)
   let observation
   try {
     await assertLive()
-    observation = await deps.probePopulation(acceptedHandles, { runNonce })
+    // Population probes receive the exact original handles in source order. Only
+    // the container is immutable; handle prototypes/private state are untouched.
+    observation = await deps.probePopulation(Object.freeze(acceptedRecords.map(record => record.handle)), { runNonce })
     if (
       observation?.authenticated !== true ||
       !Number.isInteger(observation.observedPopulation) ||
@@ -223,10 +227,12 @@ export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps)
     async stop() {
       stopPromise ??= (async () => {
         const livenessResults = await Promise.allSettled(identities.map(inspectIdentity))
-        const terminateResults = await Promise.allSettled(acceptedHandles.map(handle => deps.terminateGateway(handle)))
-        const waitResults = await Promise.allSettled(acceptedHandles.map(handle => deps.waitGateway(handle)))
-        const inspections = await Promise.allSettled(acceptedHandles.map(handle => deps.inspectProcess(handle.pid)))
-        const terminations = acceptedHandles.map((handle, index) => {
+        const terminateResults = await Promise.allSettled(
+          acceptedRecords.map(record => deps.terminateGateway(record.handle))
+        )
+        const waitResults = await Promise.allSettled(acceptedRecords.map(record => deps.waitGateway(record.handle)))
+        const inspections = await Promise.allSettled(acceptedRecords.map(record => deps.inspectProcess(record.handle)))
+        const terminations = acceptedRecords.map((record, index) => {
           const terminateResult = terminateResults[index]
           const waitResult = waitResults[index]
           const inspection = inspections[index]
@@ -239,7 +245,7 @@ export async function createOwnedGatewayLifecycle({ runNonce, sourceIds }, deps)
             waited?.exited !== true ||
             after?.alive === true
           ) {
-            throw new Error(`gateway child process ${handle.pid} did not terminate with verified wait evidence`)
+            throw new Error(`gateway child process ${record.pid} did not terminate with verified wait evidence`)
           }
           return {
             exitCode: waited.exitCode ?? null,

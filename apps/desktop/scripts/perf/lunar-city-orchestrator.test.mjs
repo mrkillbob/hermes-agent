@@ -312,7 +312,7 @@ test('owned gateway lifecycle observes child identity, liveness, authenticated p
   const lifecycle = await createOwnedGatewayLifecycle(
     { runNonce: 'run-nonce', sourceIds: handles.map(handle => handle.sourceId) },
     {
-      inspectProcess: async pid => states.get(pid),
+      inspectProcess: async handle => states.get(handle.pid),
       probePopulation: async () => ({
         authenticated: true,
         entityKeys: ['subagent-key'],
@@ -362,19 +362,24 @@ test('owned lifecycle rejects nonexistent, foreign, duplicate, dead, and untermi
     [
       'foreign parent',
       async source => ({ pid: 101 + sources.indexOf(source) }),
-      async pid => ({ alive: true, parentPid: 1, startToken: `s-${pid}`, uid: process.getuid() }),
+      async handle => ({ alive: true, parentPid: 1, startToken: `s-${handle.pid}`, uid: process.getuid() }),
       /parent|child/i
     ],
     [
       'foreign uid',
       async source => ({ pid: 101 + sources.indexOf(source) }),
-      async pid => ({ alive: true, parentPid: process.pid, startToken: `s-${pid}`, uid: process.getuid() + 1 }),
+      async handle => ({
+        alive: true,
+        parentPid: process.pid,
+        startToken: `s-${handle.pid}`,
+        uid: process.getuid() + 1
+      }),
       /uid/i
     ],
     [
       'already dead',
       async source => ({ pid: 101 + sources.indexOf(source) }),
-      async pid => ({ alive: false, parentPid: process.pid, startToken: `s-${pid}`, uid: process.getuid() }),
+      async handle => ({ alive: false, parentPid: process.pid, startToken: `s-${handle.pid}`, uid: process.getuid() }),
       /alive/i
     ]
   ]) {
@@ -399,7 +404,7 @@ test('owned lifecycle rejects nonexistent, foreign, duplicate, dead, and untermi
     { runNonce: 'nonce', sourceIds: sources },
     {
       ...base,
-      inspectProcess: async pid => states.get(pid),
+      inspectProcess: async handle => states.get(handle.pid),
       spawnGateway: async source => ({ pid: 101 + sources.indexOf(source), sourceId: source })
     }
   )
@@ -436,7 +441,8 @@ test('identity rejection cleans every returned handle, including the newest fail
         createOwnedGatewayLifecycle(
           { runNonce: 'nonce', sourceIds: sources },
           {
-            inspectProcess: async pid => {
+            inspectProcess: async handle => {
+              const pid = handle.pid
               inspectCounts.set(pid, (inspectCounts.get(pid) ?? 0) + 1)
               if ((inspectCounts.get(pid) ?? 0) > 1) cleanupInspected.push(pid)
               if (pid === 101 + failingIndex) return failedObservation
@@ -475,10 +481,10 @@ test('identity rejection cleans every returned handle, including the newest fail
       createOwnedGatewayLifecycle(
         { runNonce: 'nonce', sourceIds: sources },
         {
-          inspectProcess: async pid =>
-            pid === 102
+          inspectProcess: async handle =>
+            handle.pid === 102
               ? { alive: true, parentPid: 1, startToken: 's-102', uid: process.getuid() }
-              : { alive: true, parentPid: process.pid, startToken: `s-${pid}`, uid: process.getuid() },
+              : { alive: true, parentPid: process.pid, startToken: `s-${handle.pid}`, uid: process.getuid() },
           probePopulation: async () => ({ authenticated: true, entityKeys: [], observedPopulation: 0, sourceMix: {} }),
           spawnGateway: async source => ({ pid: 101 + sources.indexOf(source), sourceId: source }),
           terminateGateway: async handle => {
@@ -508,7 +514,8 @@ test('identity rejection cleans every returned handle, including the newest fail
       createOwnedGatewayLifecycle(
         { runNonce: 'nonce', sourceIds: sources },
         {
-          inspectProcess: async pid => {
+          inspectProcess: async handle => {
+            const pid = handle.pid
             const count = (livenessInspections.get(pid) ?? 0) + 1
             livenessInspections.set(pid, count)
             return {
@@ -531,6 +538,124 @@ test('identity rejection cleans every returned handle, including the newest fail
   )
   assert.deepEqual(livenessTerminated.sort(), [101, 102, 103])
   assert.deepEqual(livenessWaited.sort(), [101, 102, 103])
+})
+
+test('gateway adapters receive exact opaque original handles on success, rejection, and aggregate cleanup', async () => {
+  class OpaqueHandle {
+    constructor(pid, sourceId) {
+      Object.defineProperties(this, {
+        pid: { enumerable: false, value: pid },
+        privateToken: { enumerable: false, value: `private-${pid}` },
+        sourceId: { enumerable: true, value: sourceId }
+      })
+    }
+
+    prototypeToken() {
+      return `prototype-${this.pid}`
+    }
+  }
+
+  const sources = ['local', 'remote-lab', 'remote-archive']
+  const makeHarness = ({ failIndex = -1, teardownFailure = false } = {}) => {
+    const originals = sources.map((source, index) => new OpaqueHandle(201 + index, source))
+    const alive = new WeakMap(originals.map(handle => [handle, true]))
+    const inspected = []
+    const terminated = []
+    const waited = []
+    const assertOriginal = handle => {
+      assert.equal(originals.includes(handle), true, 'adapter must receive an original handle object')
+      assert.equal(handle.privateToken, `private-${handle.pid}`)
+      assert.equal(handle.prototypeToken(), `prototype-${handle.pid}`)
+    }
+    return {
+      alive,
+      inspected,
+      originals,
+      terminated,
+      waited,
+      deps: {
+        inspectProcess: async handle => {
+          assertOriginal(handle)
+          inspected.push(handle)
+          const index = originals.indexOf(handle)
+          return {
+            alive: alive.get(handle),
+            parentPid: index === failIndex && alive.get(handle) ? 1 : process.pid,
+            startToken: `s-${handle.pid}`,
+            uid: process.getuid()
+          }
+        },
+        probePopulation: async handles => {
+          assert.deepEqual(handles, originals)
+          handles.forEach(assertOriginal)
+          return {
+            authenticated: true,
+            entityKeys: ['subagent-key'],
+            observedPopulation: 25,
+            sourceMix: { local: 9, 'remote-archive': 8, 'remote-lab': 8 }
+          }
+        },
+        spawnGateway: async source => originals[sources.indexOf(source)],
+        terminateGateway: async handle => {
+          assertOriginal(handle)
+          terminated.push(handle)
+          alive.set(handle, false)
+          if (teardownFailure && handle === originals[0]) throw new Error('opaque teardown failed')
+        },
+        waitGateway: async handle => {
+          assertOriginal(handle)
+          waited.push(handle)
+          return { exitCode: 0, exited: true, signal: 'SIGTERM' }
+        }
+      }
+    }
+  }
+
+  const successful = makeHarness()
+  const lifecycle = await createOwnedGatewayLifecycle(
+    { runNonce: 'opaque-success', sourceIds: sources },
+    successful.deps
+  )
+  await lifecycle.assertLive()
+  await lifecycle.stop()
+  assert.deepEqual(successful.terminated, successful.originals)
+  assert.deepEqual(successful.waited, successful.originals)
+  assert.equal(
+    successful.originals.every(handle => successful.alive.get(handle) === false),
+    true
+  )
+
+  for (const failIndex of [0, 1]) {
+    const rejected = makeHarness({ failIndex })
+    await assert.rejects(
+      () => createOwnedGatewayLifecycle({ runNonce: `opaque-reject-${failIndex}`, sourceIds: sources }, rejected.deps),
+      /parent|child/i
+    )
+    const returned = rejected.originals.slice(0, failIndex + 1)
+    assert.deepEqual(rejected.terminated, returned)
+    assert.deepEqual(rejected.waited, returned)
+    assert.equal(
+      returned.every(handle => rejected.alive.get(handle) === false),
+      true
+    )
+  }
+
+  const aggregate = makeHarness({ failIndex: 1, teardownFailure: true })
+  await assert.rejects(
+    () => createOwnedGatewayLifecycle({ runNonce: 'opaque-aggregate', sourceIds: sources }, aggregate.deps),
+    error => {
+      assert.match(String(error), /parent|child/i)
+      assert.match(String(error), /opaque teardown failed/i)
+      return true
+    }
+  )
+  const aggregateReturned = aggregate.originals.slice(0, 2)
+  assert.deepEqual(aggregate.terminated, aggregateReturned)
+  assert.deepEqual(aggregate.waited, aggregateReturned)
+  assert.equal(
+    aggregateReturned.every(handle => aggregate.alive.get(handle) === false),
+    true
+  )
 })
 
 test('fixture isolation rejects broad, real-home, and symlinked paths and requires a run-owned sentinel', () => {
