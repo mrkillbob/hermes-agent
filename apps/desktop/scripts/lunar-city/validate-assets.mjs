@@ -51,6 +51,22 @@ const MODEL_BUDGETS = Object.freeze([
   ['maxTextures', 'texture'],
   ['maxGpuMiB', 'GPU MiB']
 ])
+const GENERATED_STATISTICS_FIELDS = Object.freeze([
+  'accessorBytes',
+  'animationClips',
+  'budget',
+  'bytes',
+  'drawCalls',
+  'extent',
+  'gpuBytes',
+  'gpuMiB',
+  'materials',
+  'meshes',
+  'nodes',
+  'sha256',
+  'textures',
+  'triangles'
+])
 
 export function validationResult(errors) {
   return { ok: errors.length === 0, errors: Object.freeze(errors) }
@@ -125,6 +141,11 @@ export async function inspectGlb(io, uri) {
   const textureBytes = root.listTextures().reduce((total, texture) => total + bytesOf(texture.getImage?.()), 0)
   return {
     accessorBytes,
+    animationClips: root
+      .listAnimations()
+      .map(animation => animation.getName())
+      .filter(Boolean)
+      .toSorted(),
     bytes: bytes?.byteLength,
     clips: new Set(
       root
@@ -148,6 +169,8 @@ export async function inspectGlb(io, uri) {
     gpuBytes: accessorBytes + textureBytes,
     gpuMiB: Number(((accessorBytes + textureBytes) / (1024 * 1024)).toFixed(4)),
     materials: root.listMaterials().length,
+    meshes: root.listMeshes().length,
+    nodeCount: root.listNodes().length,
     sha256: bytes ? createHash('sha256').update(bytes).digest('hex') : undefined,
     skins: root.listSkins().length,
     textures: root.listTextures().length,
@@ -538,22 +561,92 @@ function validateActualModelCosts(model, stats, errors) {
       errors.push(`${model.id} exceeds ${model[budget]} ${label}`)
   }
 
-  const declared = model.statistics
-  if (!isRecord(declared)) return
+  const declared = isRecord(model.statistics) ? model.statistics : {}
+  validateGeneratedStatistics(model, declared, errors)
   for (const [key, actual] of Object.entries({
+    accessorBytes: stats.accessorBytes,
     bytes: stats.bytes,
     drawCalls: stats.drawCalls,
     gpuBytes: stats.gpuBytes,
     gpuMiB: stats.gpuMiB,
     materials: stats.materials,
+    meshes: stats.meshes,
+    nodes: stats.nodeCount,
     textures: stats.textures,
     triangles: stats.triangles
   })) {
-    if (Number.isFinite(declared[key]) && declared[key] !== actual)
-      errors.push(`${model.id} generated ${key} does not match its actual GLB`)
+    if (declared[key] !== actual) errors.push(`${model.id} generated ${key} does not match its actual GLB`)
   }
-  if (isNonEmptyString(declared.sha256) && stats.sha256 && declared.sha256 !== stats.sha256)
+  if (JSON.stringify(declared.animationClips) !== JSON.stringify(stats.animationClips))
+    errors.push(`${model.id} generated animationClips do not match its actual GLB`)
+  if (declared.sha256 !== stats.sha256)
     errors.push(`${model.id} artifact digest does not match its generated statistics`)
+}
+
+function isNonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0
+}
+
+function isGpuMiB(value) {
+  return Number.isFinite(value) && value >= 0
+}
+
+function isGeneratedExtent(value) {
+  return isVec3(value) && value.every(coordinate => coordinate >= 0)
+}
+
+function isSha256(value) {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+}
+
+function validateGeneratedStatistics(model, declared, errors) {
+  if (!isRecord(model.statistics)) {
+    errors.push(`${model.id} requires generated statistics`)
+    return
+  }
+  for (const key of GENERATED_STATISTICS_FIELDS)
+    if (!(key in declared)) errors.push(`${model.id} generated statistics ${key} is required`)
+  for (const key of Object.keys(declared))
+    if (!GENERATED_STATISTICS_FIELDS.includes(key))
+      errors.push(`${model.id} generated statistics ${key} is not supported`)
+
+  const integerFields = [
+    'accessorBytes',
+    'drawCalls',
+    'gpuBytes',
+    'materials',
+    'meshes',
+    'nodes',
+    'textures',
+    'triangles'
+  ]
+  for (const key of integerFields)
+    if (!isNonNegativeInteger(declared[key])) errors.push(`${model.id} generated statistics ${key} is invalid`)
+  if (!Number.isInteger(declared.bytes) || declared.bytes <= 0)
+    errors.push(`${model.id} generated statistics bytes is invalid`)
+  if (!isGpuMiB(declared.gpuMiB)) errors.push(`${model.id} generated statistics gpuMiB is invalid`)
+  if (!isSha256(declared.sha256)) errors.push(`${model.id} generated statistics sha256 is invalid`)
+  if (!Array.isArray(declared.animationClips) || !declared.animationClips.every(isNonEmptyString))
+    errors.push(`${model.id} generated statistics animationClips is invalid`)
+  if (!isGeneratedExtent(declared.extent)) errors.push(`${model.id} generated statistics extent is invalid`)
+
+  const budget = declared.budget
+  if (!isRecord(budget)) {
+    errors.push(`${model.id} generated statistics budget is invalid`)
+  } else {
+    for (const [key] of MODEL_BUDGETS) {
+      if (!Number.isFinite(budget[key]) || budget[key] < 0)
+        errors.push(`${model.id} generated budget ${key} is invalid`)
+      if (budget[key] !== model[key]) errors.push(`${model.id} generated budget ${key} does not match model budget`)
+    }
+    for (const key of Object.keys(budget))
+      if (!MODEL_BUDGETS.some(([budgetKey]) => budgetKey === key))
+        errors.push(`${model.id} generated budget ${key} is not supported`)
+  }
+  if (isNonNegativeInteger(declared.gpuBytes) && isGpuMiB(declared.gpuMiB)) {
+    const expectedGpuMiB = Number((declared.gpuBytes / (1024 * 1024)).toFixed(4))
+    if (declared.gpuMiB !== expectedGpuMiB) errors.push(`${model.id} generated gpuMiB is inconsistent with gpuBytes`)
+  }
 }
 
 function validateCharacterModelResources(model, characterAssets, stats, errors) {
