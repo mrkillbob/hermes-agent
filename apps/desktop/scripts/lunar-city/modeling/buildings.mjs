@@ -2,12 +2,121 @@ import { scalarClip } from './animation.mjs'
 import { box, cone, cylinder, group, prismRailing, sphere, torus } from './primitives.mjs'
 import { addConsoleBank, addPlants, addPortal, addSign, addTelescope, addWorkbenches } from './props.mjs'
 
-function openFrontShell(scene, id, { accent, depth, height, width }) {
+function buildingNodes(scene, id) {
   const root = group(scene, `${id}:root`)
   const near = group(scene, `${id}:lod:near`, root)
   const far = group(scene, `${id}:lod:far`, root)
   const shell = group(scene, `${id}:shell`, near)
-  box(scene, `${id}:floor`, {
+  const roof = group(scene, `${id}:roof`, near)
+  const entrance = group(scene, `${id}:entrance`, near)
+  group(scene, `${id}:camera`, root, { position: [0, 6, 18] })
+  return { entrance, far, near, roof, root, shell }
+}
+
+function keepIdentity(mesh) {
+  mesh.metadata = { ...(mesh.metadata ?? {}), keepSeparate: true }
+  return mesh
+}
+
+function addLibraryFrame(scene, { accent, depth, height, width }) {
+  const building = buildingNodes(scene, 'library')
+  const { entrance, far, near, roof, shell } = building
+  box(scene, 'library:floor', {
+    depth: depth + 1.2,
+    height: 0.7,
+    material: 'charcoal-structure',
+    parent: shell,
+    position: [0, 0.35, 0],
+    width: width + 1
+  })
+  for (const [index, [x, panelHeight, panelWidth]] of [
+    [-width * 0.27, height * 0.68, width * 0.22],
+    [0, height * 0.96, width * 0.28],
+    [width * 0.27, height * 0.68, width * 0.22]
+  ].entries())
+    box(scene, `library:archive-back:${index}`, {
+      depth: 0.75,
+      height: panelHeight,
+      material: 'charcoal-structure',
+      parent: shell,
+      position: [x, panelHeight / 2, -depth / 2],
+      width: panelWidth
+    })
+  for (const side of [-1, 1]) {
+    box(scene, `library:archive-wing:${side}`, {
+      depth: depth * 0.76,
+      height: height * 0.7,
+      material: 'charcoal-structure',
+      parent: shell,
+      position: [side * width * 0.43, height * 0.35, -depth * 0.11],
+      rotation: [0, side * 0.06, 0],
+      width: 1.1
+    })
+    box(scene, `library:roof:spire:${side}`, {
+      depth: depth * 0.3,
+      height: 0.62,
+      material: 'bone-metal',
+      parent: roof,
+      position: [side * width * 0.35, height * 0.86, -depth * 0.34],
+      rotation: [0, 0, side * 0.32],
+      width: width * 0.26
+    })
+  }
+  for (let tier = 0; tier < 3; tier += 1)
+    box(scene, `library:roof:stepped-gable:${tier}`, {
+      depth: 1.25 + tier * 0.25,
+      height: 0.65,
+      material: tier === 1 ? accent : 'lunar-rust',
+      parent: roof,
+      position: [0, height * 0.82 + tier * 0.74, -depth * 0.38],
+      width: width * (0.62 - tier * 0.14)
+    })
+  entrance.position.set(0, 2.1, depth / 2 + 0.5)
+  for (const side of [-1, 1])
+    box(scene, `library:entrance:tower:${side}`, {
+      depth: 1,
+      height: 4.2,
+      material: 'lunar-rust',
+      parent: entrance,
+      position: [side * width * 0.33, 0, 0],
+      width: 1.25
+    })
+  const identity = group(scene, 'library:city-identity', near)
+  keepIdentity(
+    box(scene, 'library:city-identity:great-book', {
+      depth: 0.52,
+      height: 1.65,
+      material: 'lunar-rust',
+      parent: identity,
+      position: [0, height * 0.74, depth / 2 + 0.2],
+      rotation: [0, 0, -0.04],
+      width: width * 0.52
+    })
+  )
+  for (const side of [-1, 1])
+    box(scene, `library:far:tower:${side}`, {
+      depth: depth * 0.52,
+      height: height * 0.82,
+      material: 'bone-metal',
+      parent: far,
+      position: [side * width * 0.39, height * 0.41, -depth * 0.18],
+      width: width * 0.2
+    })
+  box(scene, 'library:far:archive', {
+    depth: depth * 0.34,
+    height,
+    material: 'bone-metal',
+    parent: far,
+    position: [0, height / 2, -depth * 0.36],
+    width: width * 0.52
+  })
+  return building
+}
+
+function addLabFrame(scene, { accent, depth, height, width }) {
+  const building = buildingNodes(scene, 'research-lab')
+  const { entrance, far, near, roof, shell } = building
+  box(scene, 'research-lab:floor', {
     depth,
     height: 0.7,
     material: 'charcoal-structure',
@@ -15,136 +124,338 @@ function openFrontShell(scene, id, { accent, depth, height, width }) {
     position: [0, 0.35, 0],
     width
   })
-  box(scene, `${id}:back-wall`, {
-    depth: 0.6,
-    height,
+  box(scene, 'research-lab:west-wing', {
+    depth: 0.8,
+    height: height * 0.9,
     material: 'charcoal-structure',
     parent: shell,
-    position: [0, height / 2, -depth / 2],
-    width
+    position: [-width * 0.2, height * 0.45, -depth / 2],
+    rotation: [0, 0, -0.035],
+    width: width * 0.6
   })
-  box(scene, `${id}:left-wall`, {
-    depth,
-    height: height * 0.82,
+  box(scene, 'research-lab:east-wing', {
+    depth: 0.9,
+    height: height * 0.62,
     material: 'charcoal-structure',
     parent: shell,
-    position: [-width / 2, height * 0.41, 0],
-    width: 0.7
+    position: [width * 0.37, height * 0.31, -depth / 2],
+    rotation: [0, 0, 0.06],
+    width: width * 0.25
   })
-  box(scene, `${id}:right-wall`, {
-    depth,
-    height: height * 0.82,
-    material: 'charcoal-structure',
+  box(scene, 'research-lab:side-return', {
+    depth: depth * 0.72,
+    height: height * 0.52,
+    material: 'lunar-rust',
     parent: shell,
-    position: [width / 2, height * 0.41, 0],
-    width: 0.7
+    position: [width / 2, height * 0.26, -depth * 0.12],
+    width: 1.4
   })
-  const roof = group(scene, `${id}:roof`, near)
-  box(scene, `${id}:roof:center`, {
-    depth: depth + 0.3,
-    height: 0.48,
-    material: 'charcoal-structure',
-    parent: roof,
-    position: [0, height + 0.25, -0.1],
-    width: width + 0.45
+  box(scene, 'research-lab:service-stack', {
+    depth: 2.2,
+    height: height * 1.14,
+    material: 'lunar-rust',
+    parent: shell,
+    position: [-width * 0.46, height * 0.57, -depth * 0.24],
+    rotation: [0, 0, -0.04],
+    width: 1.9
   })
-  box(scene, `${id}:roof:left-bevel`, {
-    depth: depth + 0.9,
-    height: 0.42,
+  box(scene, 'research-lab:roof:west', {
+    depth: depth * 0.44,
+    height: 0.62,
     material: 'bone-metal',
     parent: roof,
-    position: [-width * 0.37, height - 0.02, -0.05],
-    rotation: [0, 0, -0.26],
+    position: [-width * 0.2, height * 0.92, -depth * 0.3],
+    rotation: [0, 0, -0.14],
+    width: width * 0.58
+  })
+  box(scene, 'research-lab:roof:east', {
+    depth: depth * 0.32,
+    height: 0.5,
+    material: accent,
+    parent: roof,
+    position: [width * 0.34, height * 0.66, -depth * 0.36],
+    rotation: [0, 0, 0.16],
     width: width * 0.28
   })
-  box(scene, `${id}:roof:right-bevel`, {
-    depth: depth + 0.9,
-    height: 0.42,
+  entrance.position.set(-width * 0.36, 2, depth / 2 + 0.3)
+  box(scene, 'research-lab:entrance:airlock', {
+    depth: 1,
+    height: 4,
+    material: 'lunar-rust',
+    parent: entrance,
+    width: 2.2
+  })
+  const identity = group(scene, 'research-lab:city-identity', near)
+  keepIdentity(
+    torus(scene, 'research-lab:city-identity:reactor-cradle', {
+      diameter: 5.6,
+      material: 'lunar-rust',
+      parent: identity,
+      position: [width * 0.31, 4.2, -depth / 2 + 0.85],
+      rotation: [Math.PI / 2, 0, 0],
+      tessellation: 14,
+      thickness: 0.42
+    })
+  )
+  box(scene, 'research-lab:far:west-wing', {
+    depth: depth * 0.46,
+    height: height * 0.9,
     material: 'bone-metal',
-    parent: roof,
-    position: [width * 0.37, height - 0.02, -0.05],
-    rotation: [0, 0, 0.26],
-    width: width * 0.28
+    parent: far,
+    position: [-width * 0.2, height * 0.45, -depth * 0.3],
+    width: width * 0.58
+  })
+  box(scene, 'research-lab:far:east-wing', {
+    depth: depth * 0.38,
+    height: height * 0.58,
+    material: 'bone-metal',
+    parent: far,
+    position: [width * 0.36, height * 0.29, -depth * 0.32],
+    width: width * 0.26
+  })
+  return building
+}
+
+function addDepotFrame(scene, { accent, depth, height, width }) {
+  const building = buildingNodes(scene, 'depot')
+  const { entrance, far, near, roof, shell } = building
+  box(scene, 'depot:floor', {
+    depth: depth + 1,
+    height: 0.62,
+    material: 'charcoal-structure',
+    parent: shell,
+    position: [0, 0.31, 0],
+    width: width + 2.5
+  })
+  box(scene, 'depot:warehouse-back', {
+    depth: 0.72,
+    height: height * 0.62,
+    material: 'charcoal-structure',
+    parent: shell,
+    position: [0, height * 0.31, -depth / 2],
+    width: width + 1.5
+  })
+  for (let bay = 0; bay < 4; bay += 1) {
+    const x = -width * 0.36 + bay * width * 0.24
+    box(scene, `depot:roof:sawtooth:${bay}`, {
+      depth: depth * 0.42,
+      height: 0.55,
+      material: bay % 2 ? accent : 'bone-metal',
+      parent: roof,
+      position: [x, height * (0.62 + (bay % 2) * 0.08), -depth * 0.28],
+      rotation: [0, 0, bay % 2 ? 0.18 : -0.18],
+      width: width * 0.28
+    })
+  }
+  entrance.position.set(-width * 0.38, 1.7, depth / 2 + 0.4)
+  box(scene, 'depot:entrance:loading-gate', {
+    depth: 0.8,
+    height: 3.4,
+    material: 'bone-metal',
+    parent: entrance,
+    width: 3.6
+  })
+  const identity = group(scene, 'depot:city-identity', near)
+  keepIdentity(
+    box(scene, 'depot:city-identity:cargo-crane', {
+      depth: 0.72,
+      height: 0.72,
+      material: 'lunar-rust',
+      parent: identity,
+      position: [0.7, height * 0.86, depth * 0.12],
+      rotation: [0, 0, -0.09],
+      width: width * 0.78
+    })
+  )
+  for (const side of [-1, 1])
+    box(scene, `depot:gantry-post:${side}`, {
+      depth: 0.6,
+      height: height * 0.72,
+      material: 'lunar-rust',
+      parent: near,
+      position: [side * width * 0.31, height * 0.36, depth * 0.12],
+      width: 0.65
+    })
+  box(scene, 'depot:cargo-lift-mast', {
+    depth: 1.2,
+    height: height * 1.34,
+    material: 'lunar-rust',
+    parent: near,
+    position: [width * 0.42, height * 0.67, depth * 0.12],
+    rotation: [0, 0, 0.035],
+    width: 1.15
+  })
+  box(scene, 'depot:far:warehouse', {
+    depth: depth * 0.62,
+    height: height * 0.6,
+    material: 'bone-metal',
+    parent: far,
+    position: [0, height * 0.3, -depth * 0.18],
+    width: width + 1.8
+  })
+  box(scene, 'depot:far:gantry', {
+    depth: 0.7,
+    height: 0.7,
+    material: 'bone-metal',
+    parent: far,
+    position: [0.7, height * 0.88, depth * 0.1],
+    rotation: [0, 0, -0.09],
+    width: width * 0.8
+  })
+  return building
+}
+
+function addReviewFrame(scene, { depth, height, width }) {
+  const building = buildingNodes(scene, 'review-office')
+  const { entrance, far, near, roof, shell } = building
+  cylinder(scene, 'review-office:octagonal-floor', {
+    diameter: width + 1.5,
+    height: 0.9,
+    material: 'charcoal-structure',
+    parent: shell,
+    position: [0, 0.45, -0.4],
+    tessellation: 8
   })
   for (const side of [-1, 1]) {
-    box(scene, `${id}:roof:front-rail:${side}`, {
-      depth: 0.28,
-      height: 0.4,
-      material: side < 0 ? 'bone-metal' : 'lunar-rust',
-      parent: roof,
-      position: [side * width * 0.25, height + 0.48, depth / 2 + 0.18],
-      width: width * 0.48
+    cylinder(scene, `review-office:judgement-pylon:${side}`, {
+      diameter: 2.35,
+      height: height * 0.95,
+      material: 'charcoal-structure',
+      parent: shell,
+      position: [side * width * 0.34, height * 0.48, -depth * 0.36],
+      tessellation: 8
     })
-    box(scene, `${id}:roof:side-rail:${side}`, {
-      depth: depth + 0.2,
-      height: 0.38,
-      material: 'bone-metal',
+    cone(scene, `review-office:roof:pylon-cap:${side}`, {
+      diameterBottom: 2.9,
+      diameterTop: 0.7,
+      height: 2.2,
+      material: 'lunar-rust',
       parent: roof,
-      position: [side * (width / 2 + 0.12), height + 0.36, -0.08],
-      width: 0.3
+      position: [side * width * 0.34, height + 0.6, -depth * 0.36],
+      tessellation: 8
     })
-    for (const z of [-depth * 0.34, 0, depth * 0.34])
-      box(scene, `${id}:frame-post:${side}:${z}`, {
-        depth: 0.52,
-        height: height * 0.76,
-        material: z === 0 ? 'lunar-rust' : 'bone-metal',
-        parent: shell,
-        position: [side * (width / 2 + 0.08), height * 0.39, z],
-        rotation: [0, 0, side * 0.035],
-        width: 0.5
-      })
   }
-  const entrance = group(scene, `${id}:entrance`, near, { position: [0, 1.9, depth / 2 + 0.14] })
-  box(scene, `${id}:entrance:left`, {
-    depth: 0.35,
-    height: 3.8,
+  entrance.position.set(0, 0.6, depth / 2 + 0.5)
+  for (let step = 0; step < 4; step += 1)
+    cylinder(scene, `review-office:entrance:step:${step}`, {
+      diameter: width * (0.6 - step * 0.07),
+      height: 0.24,
+      material: step % 2 ? 'archive-emissive' : 'bone-metal',
+      parent: entrance,
+      position: [0, step * 0.2, -step * 0.38],
+      tessellation: 8
+    })
+  const identity = group(scene, 'review-office:city-identity', near)
+  keepIdentity(
+    torus(scene, 'review-office:city-identity:verdict-halo', {
+      diameter: 7.1,
+      material: 'bone-metal',
+      parent: identity,
+      position: [0, height * 0.68, -depth * 0.42],
+      rotation: [Math.PI / 2, 0, 0],
+      tessellation: 16,
+      thickness: 0.5
+    })
+  )
+  cylinder(scene, 'review-office:far:floor', {
+    diameter: width + 1,
+    height: 0.9,
     material: 'bone-metal',
-    parent: entrance,
-    position: [-width * 0.29, 0, 0],
-    width: 0.55
+    parent: far,
+    position: [0, 0.45, -0.4],
+    tessellation: 8
   })
-  box(scene, `${id}:entrance:right`, {
-    depth: 0.35,
-    height: 3.8,
-    material: 'bone-metal',
-    parent: entrance,
-    position: [width * 0.29, 0, 0],
-    width: 0.55
-  })
-  box(scene, `${id}:entrance:header`, {
-    depth: 0.38,
-    height: 0.5,
-    material: accent,
-    parent: entrance,
-    position: [0, 1.65, 0],
-    width: width * 0.62
-  })
-  group(scene, `${id}:camera`, root, { position: [0, height * 0.58, depth + 5] })
-  box(scene, `${id}:far:shell`, {
-    depth,
-    height: height * 0.86,
+  for (const side of [-1, 1])
+    cylinder(scene, `review-office:far:pylon:${side}`, {
+      diameter: 2.4,
+      height: height,
+      material: 'bone-metal',
+      parent: far,
+      position: [side * width * 0.34, height / 2, -depth * 0.36],
+      tessellation: 8
+    })
+  return building
+}
+
+function addCouncilFrame(scene, { depth, height, width }) {
+  const building = buildingNodes(scene, 'council')
+  const { entrance, far, near, roof, shell } = building
+  cylinder(scene, 'council:amphitheater-floor', {
+    diameter: width + 2.4,
+    height: 0.85,
     material: 'charcoal-structure',
-    parent: far,
-    position: [0, height * 0.43, -0.25],
-    width
+    parent: shell,
+    position: [0, 0.42, -0.5],
+    tessellation: 16
   })
-  box(scene, `${id}:far:frame`, {
-    depth: depth + 0.3,
-    height: 0.5,
+  for (let column = 0; column < 7; column += 1) {
+    const angle = -1.22 + column * 0.407
+    cylinder(scene, `council:amphitheater-column:${column}`, {
+      diameter: 1.15,
+      height: height * (0.48 + (3 - Math.abs(column - 3)) * 0.07),
+      material: column % 2 ? 'archive-emissive' : 'bone-metal',
+      parent: shell,
+      position: [Math.sin(angle) * width * 0.48, height * 0.34, -depth * 0.1 + Math.cos(angle) * depth * 0.38],
+      tessellation: 8
+    })
+  }
+  torus(scene, 'council:roof:open-ring', {
+    diameter: width * 0.86,
+    material: 'archive-emissive',
+    parent: roof,
+    position: [0, height * 0.7, -depth * 0.28],
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 18,
+    thickness: 0.32
+  })
+  entrance.position.set(0, 0.65, depth / 2 + 0.4)
+  torus(scene, 'council:entrance:threshold', {
+    diameter: width * 0.48,
+    material: 'archive-emissive',
+    parent: entrance,
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 14,
+    thickness: 0.34
+  })
+  const identity = group(scene, 'council:city-identity', near)
+  keepIdentity(
+    torus(scene, 'council:city-identity:assembly-halo', {
+      diameter: width * 0.72,
+      material: 'lunar-rust',
+      parent: identity,
+      position: [0, height * 0.66, -depth * 0.35],
+      rotation: [Math.PI / 2, 0, 0],
+      tessellation: 18,
+      thickness: 0.48
+    })
+  )
+  cylinder(scene, 'council:far:amphitheater', {
+    diameter: width + 1.8,
+    height: 0.9,
     material: 'bone-metal',
     parent: far,
-    position: [0, height * 0.88, -0.2],
-    width: width + 0.5
+    position: [0, 0.45, -0.5],
+    tessellation: 14
   })
-  box(scene, `${id}:far:signal`, {
-    depth: 0.08,
-    height: 0.28,
-    material: accent,
+  torus(scene, 'council:far:ring', {
+    diameter: width * 0.82,
+    material: 'bone-metal',
     parent: far,
-    position: [0, height * 0.7, depth / 2 + 0.08],
-    width: width * 0.45
+    position: [0, height * 0.64, -depth * 0.32],
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 14,
+    thickness: 0.5
   })
-  return { entrance, far, near, roof, root, shell }
+  return building
+}
+
+function specialistFrame(scene, id, options) {
+  if (id === 'library') return addLibraryFrame(scene, options)
+  if (id === 'research-lab') return addLabFrame(scene, options)
+  if (id === 'depot') return addDepotFrame(scene, options)
+  if (id === 'review-office') return addReviewFrame(scene, options)
+  if (id === 'council') return addCouncilFrame(scene, options)
+  throw new Error(`unsupported specialist frame ${id}`)
 }
 
 function addLayeredRoomDetail(scene, id, parent, { accent, depth, height, width }) {
@@ -372,7 +683,12 @@ function addCouncilMassing(scene, building) {
 }
 
 export function buildLibrary(scene) {
-  const building = openFrontShell(scene, 'library', { accent: 'archive-emissive', depth: 12, height: 9.8, width: 15 })
+  const building = specialistFrame(scene, 'library', {
+    accent: 'archive-emissive',
+    depth: 12,
+    height: 9.8,
+    width: 15
+  })
   addLayeredRoomDetail(scene, 'library', building.near, {
     accent: 'archive-emissive',
     depth: 12,
@@ -453,7 +769,7 @@ export function buildLibrary(scene) {
 }
 
 export function buildResearchLab(scene) {
-  const building = openFrontShell(scene, 'research-lab', {
+  const building = specialistFrame(scene, 'research-lab', {
     accent: 'signal-emissive',
     depth: 14,
     height: 10.5,
@@ -533,7 +849,12 @@ export function buildResearchLab(scene) {
 }
 
 export function buildDepot(scene) {
-  const building = openFrontShell(scene, 'depot', { accent: 'signal-emissive', depth: 11, height: 8.5, width: 14.5 })
+  const building = specialistFrame(scene, 'depot', {
+    accent: 'signal-emissive',
+    depth: 11,
+    height: 8.5,
+    width: 14.5
+  })
   addLayeredRoomDetail(scene, 'depot', building.near, {
     accent: 'signal-emissive',
     depth: 11,
@@ -590,7 +911,7 @@ export function buildDepot(scene) {
 }
 
 export function buildReviewOffice(scene) {
-  const building = openFrontShell(scene, 'review-office', {
+  const building = specialistFrame(scene, 'review-office', {
     accent: 'archive-emissive',
     depth: 11.5,
     height: 9.2,
@@ -706,7 +1027,12 @@ export function buildGarden(scene) {
 }
 
 export function buildCouncil(scene) {
-  const building = openFrontShell(scene, 'council', { accent: 'archive-emissive', depth: 10.5, height: 8.8, width: 14 })
+  const building = specialistFrame(scene, 'council', {
+    accent: 'archive-emissive',
+    depth: 10.5,
+    height: 8.8,
+    width: 14
+  })
   addLayeredRoomDetail(scene, 'council', building.near, {
     accent: 'archive-emissive',
     depth: 10.5,

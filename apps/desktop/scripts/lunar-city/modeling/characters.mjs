@@ -470,7 +470,7 @@ function buildOwl(scene, parent) {
   cone(scene, 'leader:owl:beak', {
     diameterBottom: 0.44,
     height: 0.72,
-    material: 'triage-amber',
+    material: 'lunar-rust',
     parent: owl,
     position: [0, 1.1, -0.9],
     rotation: [Math.PI / 2, 0, 0],
@@ -685,14 +685,34 @@ function buildStag(scene, parent) {
 
 export function buildLeaders(scene) {
   const root = group(scene, 'leaders:root')
+  root.metadata.gltf.extras = {
+    ...root.metadata.gltf.extras,
+    authoritativeStateClips: 'leader:{leaderId}:{state}',
+    compatibilityAliases: {
+      acknowledging: 'leader:owl:acknowledging',
+      idle: 'leader:owl:idle',
+      listening: 'leader:owl:listening',
+      talking: 'leader:owl:talking',
+      thinking: 'leader:owl:thinking',
+      unavailable: 'leader:owl:unavailable'
+    },
+    defaultLeader: 'owl'
+  }
   const near = group(scene, 'leaders:lod:near', root)
   near.scaling.set(1.28, 1.36, 1.28)
   const owl = buildOwl(scene, near)
   const fox = buildFox(scene, near)
-  buildBadger(scene, near)
+  const badger = buildBadger(scene, near)
   const otter = buildOtter(scene, near)
   const bird = buildBird(scene, near)
-  buildStag(scene, near)
+  const stag = buildStag(scene, near)
+  badger.leaderRig.headMesh.dispose()
+  badger.leaderRig.headMesh = owl.leaderRig.headMesh.createInstance('leader:badger:head')
+  badger.leaderRig.headMesh.parent = badger.leaderRig.head
+  badger.leaderRig.headMesh.scaling.set(1.1, 1.1, 1.1)
+  badger.leaderRig.headMesh.isPickable = false
+  badger.leaderRig.headMesh.metadata = { keepSeparate: true }
+  stag.leaderRig.headMesh.metadata = { ...(stag.leaderRig.headMesh.metadata ?? {}), keepSeparate: true }
 
   const far = group(scene, 'leaders:lod:far', root)
   const positions = [
@@ -720,93 +740,78 @@ export function buildLeaders(scene) {
       segments: 6
     })
   })
+  const leaders = { badger, bird, fox, otter, owl, stag }
   const parts = {
-    birdWing: bird.leaderRig.wings,
-    foxTail: fox.getChildTransformNodes(true).find(node => node.name === 'leader:fox:tail'),
-    otterTail: otter.getChildTransformNodes(true).find(node => node.name === 'leader:otter:tail'),
-    owlHead: owl.leaderRig.head
+    badger: badger.leaderRig.head,
+    bird: bird.leaderRig.wings,
+    fox: fox.getChildTransformNodes(true).find(node => node.name === 'leader:fox:tail'),
+    otter: otter.getChildTransformNodes(true).find(node => node.name === 'leader:otter:tail'),
+    owl: owl.leaderRig.head,
+    stag: stag.leaderRig.head
   }
-  const leaderPoses = [
-    [
-      'idle',
-      [
-        [parts.owlHead, [0.02, 0.16, 0]],
-        [parts.birdWing, [0, 0.08, 0.06]]
-      ]
-    ],
-    [
-      'listening',
-      [
-        [parts.owlHead, [0.12, -0.32, -0.12]],
-        [parts.foxTail, [0.8, 0.14, -1.05]]
-      ]
-    ],
-    [
-      'talking',
-      [
-        [parts.owlHead, [-0.08, 0.28, 0.08]],
-        [parts.otterTail, [0.62, 0.2, -0.5]]
-      ]
-    ],
-    [
-      'thinking',
-      [
-        [parts.owlHead, [0.2, -0.18, 0.16]],
-        [parts.birdWing, [0.18, 0, -0.16]]
-      ]
-    ],
-    [
-      'acknowledging',
-      [
-        [parts.foxTail, [0.58, 0.2, -0.42]],
-        [parts.otterTail, [0.92, 0, -1.12]]
-      ]
-    ],
-    [
-      'unavailable',
-      [
-        [parts.birdWing, [0.38, 0, 0]],
-        [parts.owlHead, [0.28, 0, 0]]
-      ]
-    ],
-    [
-      'listen',
-      [
-        [parts.owlHead, [0.1, 0.34, -0.08]],
-        [parts.otterTail, [0.7, -0.2, -0.8]]
-      ]
-    ],
-    [
-      'talk',
-      [
-        [parts.birdWing, [-0.22, 0.12, 0.18]],
-        [parts.foxTail, [0.55, 0.32, -0.62]]
-      ]
-    ],
-    [
-      'think',
-      [
-        [parts.owlHead, [0.18, -0.24, 0.18]],
-        [parts.foxTail, [0.9, 0.1, -1.18]],
-        [parts.birdWing, [0.12, 0, 0]]
-      ]
-    ],
-    [
-      'acknowledge',
-      [
-        [parts.owlHead, [-0.14, 0, 0]],
-        [parts.otterTail, [0.52, 0.32, -0.42]],
-        [parts.birdWing, [-0.15, 0, 0.14]]
-      ]
-    ]
-  ]
-  leaderPoses.map(([name, channels], index) =>
+  const stateMotion = {
+    acknowledging: [-0.18, 0.04, 0.08, 1.08],
+    idle: [0.025, 0.12, 0.02, 1.025],
+    listening: [0.14, -0.28, -0.12, 1.04],
+    talking: [-0.1, 0.3, 0.1, 1.12],
+    thinking: [0.2, -0.18, 0.16, 0.96],
+    unavailable: [0.32, 0, -0.06, 0.92]
+  }
+  const stateNames = Object.keys(stateMotion)
+  for (const [leaderIndex, [id, leader]] of Object.entries(leaders).entries()) {
+    const stateClips = Object.fromEntries(stateNames.map(state => [state, `leader:${id}:${state}`]))
+    leader.metadata.gltf.extras = {
+      ...leader.metadata.gltf.extras,
+      authoritativeClipPattern: `leader:${id}:{state}`,
+      leaderId: id,
+      stateClips
+    }
+    for (const [stateIndex, state] of stateNames.entries()) {
+      const target = parts[id]
+      const [x, y, z, pulse] = stateMotion[state]
+      const direction = leaderIndex % 2 ? -1 : 1
+      poseClip(
+        scene,
+        stateClips[state],
+        [
+          { middle: [x, y * direction, z * direction], target },
+          {
+            middle: [target.scaling.x * pulse, target.scaling.y * (2 - pulse), target.scaling.z * pulse],
+            property: 'scaling',
+            target
+          }
+        ],
+        { duration: 32 + stateIndex * 6 + leaderIndex * 2 }
+      )
+    }
+  }
+  for (const [stateIndex, state] of stateNames.entries()) {
+    const [x, y, z, pulse] = stateMotion[state]
     poseClip(
       scene,
-      name,
-      channels.map(([target, middle]) => ({ middle, target })),
-      { duration: 36 + (index % 4) * 8 }
+      state,
+      [
+        { middle: [x, y, z], target: parts.owl },
+        {
+          middle: [pulse, 2 - pulse, pulse],
+          property: 'scaling',
+          target: parts.owl
+        }
+      ],
+      { duration: 32 + stateIndex * 6 }
     )
-  )
+  }
+  for (const [alias, state] of Object.entries({
+    acknowledge: 'acknowledging',
+    listen: 'listening',
+    talk: 'talking',
+    think: 'thinking'
+  })) {
+    const [x, y, z, pulse] = stateMotion[state]
+    poseClip(scene, alias, [
+      { middle: [x, y, z], target: parts.owl },
+      { middle: [pulse, 2 - pulse, pulse], property: 'scaling', target: parts.owl }
+    ])
+  }
   return root
 }

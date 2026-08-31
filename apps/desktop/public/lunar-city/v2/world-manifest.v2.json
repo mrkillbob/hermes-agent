@@ -246,12 +246,12 @@
         "animationClips": [
           "lights-idle"
         ],
-        "drawCalls": 7,
+        "drawCalls": 6,
         "materials": 4,
-        "meshes": 7,
+        "meshes": 6,
         "nodes": 22,
         "textures": 0,
-        "triangles": 3986,
+        "triangles": 3914,
         "budget": {
           "maxDrawCalls": 8,
           "maxGpuMiB": 10,
@@ -259,14 +259,14 @@
           "maxTextures": 3,
           "maxTriangles": 28000
         },
-        "bytes": 176376,
+        "bytes": 170820,
         "extent": [
           16.7884,
           11.505,
-          14.34
+          14.44
         ],
-        "gpuMiB": 0.1682,
-        "sha256": "a7394fdcaa44de6a81a632aee8d4f8798ce970f5d80bce8c0d23e530dc7dbb53"
+        "gpuMiB": 0.1629,
+        "sha256": "2ad6ca9d63445160a5cf8237414f440bcad5ca439da9ea5daf69a01d07b22eb2"
       }
     },
     {
@@ -377,12 +377,12 @@
           "telescope-scan",
           "workbench-cycle"
         ],
-        "drawCalls": 8,
+        "drawCalls": 7,
         "materials": 5,
-        "meshes": 8,
+        "meshes": 7,
         "nodes": 25,
         "textures": 0,
-        "triangles": 2048,
+        "triangles": 2342,
         "budget": {
           "maxDrawCalls": 9,
           "maxGpuMiB": 12,
@@ -390,14 +390,14 @@
           "maxTextures": 4,
           "maxTriangles": 32000
         },
-        "bytes": 119744,
+        "bytes": 118340,
         "extent": [
           21.4805,
           13.33,
-          16.34
+          16.29
         ],
-        "gpuMiB": 0.1142,
-        "sha256": "f16377a0cc95b1a5f21d2e75621798e9b60a8030c1200dedfb50a94cc21224b3"
+        "gpuMiB": 0.1129,
+        "sha256": "9dd409f1b733cfdbf6af122d8c52b19a3582403a64c6eac53a090d4f9502f5da"
       }
     },
     {
@@ -505,12 +505,12 @@
           "lights-idle",
           "workbench-cycle"
         ],
-        "drawCalls": 7,
+        "drawCalls": 6,
         "materials": 4,
-        "meshes": 7,
+        "meshes": 6,
         "nodes": 21,
         "textures": 0,
-        "triangles": 1396,
+        "triangles": 1276,
         "budget": {
           "maxDrawCalls": 7,
           "maxGpuMiB": 9,
@@ -518,14 +518,14 @@
           "maxTextures": 3,
           "maxTriangles": 24000
         },
-        "bytes": 99608,
+        "bytes": 90652,
         "extent": [
-          16.226,
-          10.1,
+          17,
+          11.4233,
           13.34
         ],
-        "gpuMiB": 0.095,
-        "sha256": "955e0c9fb28715f1ace66a1cd6055cdc467ef49438dfc16375204fe15a8571c3"
+        "gpuMiB": 0.0865,
+        "sha256": "f8ee2f075f9385b6840824c46bea2be9bd70ff0678bba68047ab3e8328f0f0d4"
       }
     },
     {
@@ -634,12 +634,12 @@
           "lights-idle",
           "portal-idle"
         ],
-        "drawCalls": 8,
+        "drawCalls": 7,
         "materials": 4,
-        "meshes": 8,
+        "meshes": 7,
         "nodes": 22,
         "textures": 0,
-        "triangles": 3802,
+        "triangles": 4488,
         "budget": {
           "maxDrawCalls": 8,
           "maxGpuMiB": 10,
@@ -647,14 +647,14 @@
           "maxTextures": 3,
           "maxTriangles": 26000
         },
-        "bytes": 136024,
+        "bytes": 145748,
         "extent": [
           17.2596,
-          9.9408,
-          13.84
+          10.9,
+          19.8
         ],
-        "gpuMiB": 0.1297,
-        "sha256": "6ecb69e70290052751e2b14706bae459c08bf5db782f4e3eb8bd7c1cd5d26120"
+        "gpuMiB": 0.139,
+        "sha256": "28bd0fa0b73cba10dc126de2a127b3a1fe9811e62ca2938597f1ad1c4295ce12"
       }
     },
     {
@@ -1002,12 +1002,12 @@
         "animationClips": [
           "lights-idle"
         ],
-        "drawCalls": 7,
+        "drawCalls": 6,
         "materials": 4,
-        "meshes": 7,
+        "meshes": 6,
         "nodes": 21,
         "textures": 0,
-        "triangles": 3318,
+        "triangles": 5730,
         "budget": {
           "maxDrawCalls": 7,
           "maxGpuMiB": 8,
@@ -1015,14 +1015,14 @@
           "maxTextures": 3,
           "maxTriangles": 22000
         },
-        "bytes": 126380,
+        "bytes": 172940,
         "extent": [
-          15.7404,
-          11.045,
-          12.84
+          16.4,
+          15.22,
+          16.4
         ],
-        "gpuMiB": 0.1205,
-        "sha256": "ee9a2467ca555e184123a99a00d8f38537e1b2c42cab49a808ae1727f41f9d9a"
+        "gpuMiB": 0.1649,
+        "sha256": "bd7fea9a37dfbf783f61ccd99f8712ddb2ddb2b2365ae276eb25faaf71896c5f"
       }
     },
     {
@@ -1262,6 +1262,42 @@
           "acknowledge",
           "acknowledging",
           "idle",
+          "leader:badger:acknowledging",
+          "leader:badger:idle",
+          "leader:badger:listening",
+          "leader:badger:talking",
+          "leader:badger:thinking",
+          "leader:badger:unavailable",
+          "leader:bird:acknowledging",
+          "leader:bird:idle",
+          "leader:bird:listening",
+          "leader:bird:talking",
+          "leader:bird:thinking",
+          "leader:bird:unavailable",
+          "leader:fox:acknowledging",
+          "leader:fox:idle",
+          "leader:fox:listening",
+          "leader:fox:talking",
+          "leader:fox:thinking",
+          "leader:fox:unavailable",
+          "leader:otter:acknowledging",
+          "leader:otter:idle",
+          "leader:otter:listening",
+          "leader:otter:talking",
+          "leader:otter:thinking",
+          "leader:otter:unavailable",
+          "leader:owl:acknowledging",
+          "leader:owl:idle",
+          "leader:owl:listening",
+          "leader:owl:talking",
+          "leader:owl:thinking",
+          "leader:owl:unavailable",
+          "leader:stag:acknowledging",
+          "leader:stag:idle",
+          "leader:stag:listening",
+          "leader:stag:talking",
+          "leader:stag:thinking",
+          "leader:stag:unavailable",
           "listen",
           "listening",
           "talk",
@@ -1271,11 +1307,11 @@
           "unavailable"
         ],
         "drawCalls": 10,
-        "materials": 5,
+        "materials": 4,
         "meshes": 10,
-        "nodes": 30,
+        "nodes": 31,
         "textures": 0,
-        "triangles": 13818,
+        "triangles": 13418,
         "budget": {
           "maxDrawCalls": 10,
           "maxGpuMiB": 14,
@@ -1283,14 +1319,14 @@
           "maxTextures": 4,
           "maxTriangles": 36000
         },
-        "bytes": 385060,
+        "bytes": 408368,
         "extent": [
           28.9478,
           7.7221,
-          10.5832
+          10.7553
         ],
-        "gpuMiB": 0.3672,
-        "sha256": "86faff28f31ae4fb05f7e11acf2b66183861df1ca550107ee5963fd97eefc96a"
+        "gpuMiB": 0.3895,
+        "sha256": "8f16689ab0e6a24184cf0955d7ad4d19dabfe489e470a0c9d1de8d2cfb85eb0d"
       }
     },
     {

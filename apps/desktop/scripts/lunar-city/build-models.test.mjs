@@ -65,11 +65,9 @@ const SPECIALIST_DETAIL_FLOORS = {
   'review-office': 1100,
   triage: 420
 }
-const SILHOUETTE_PAIRS = [
-  ['library', 'depot'],
-  ['research-lab', 'review-office'],
-  ['review-office', 'council']
-]
+const SPECIALIST_IDS = ['library', 'research-lab', 'depot', 'review-office', 'council']
+const LEADER_IDS = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag']
+const LEADER_STATES = ['idle', 'listening', 'talking', 'thinking', 'acknowledging', 'unavailable']
 
 let firstRoot
 let secondRoot
@@ -123,23 +121,76 @@ function boundsOfTriangles(triangles) {
   }
 }
 
-function silhouetteEnvelope(triangles) {
-  const { max, min } = boundsOfTriangles(triangles)
-  const envelope = Array(12).fill(0)
-  for (const point of triangles.flat()) {
-    const x = Math.max(0, Math.min(11, Math.floor(((point[0] - min[0]) / (max[0] - min[0])) * 12)))
-    envelope[x] = Math.max(envelope[x], (point[1] - min[1]) / (max[1] - min[1]))
-  }
-  return envelope
-}
-
-function envelopeDistance(left, right) {
-  return left.reduce((sum, value, index) => sum + Math.abs(value - right[index]), 0) / left.length
-}
-
 function projectedAreaXY(triangle) {
   const [a, b, c] = triangle
   return Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2
+}
+
+function triangleArea3d([a, b, c]) {
+  const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+  const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
+  const cross = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]]
+  return Math.hypot(...cross) / 2
+}
+
+function projectPoint(point, angle) {
+  return [point[0] * Math.cos(angle) - point[2] * Math.sin(angle), point[1]]
+}
+
+function projectedSilhouette(triangles, angle, columns = 30, rows = 20) {
+  const bounds = boundsOfTriangles(triangles)
+  const architecturalFloor = bounds.min[1] + (bounds.max[1] - bounds.min[1]) * 0.12
+  const dominant = triangles.filter(
+    triangle => triangleArea3d(triangle) >= 0.8 && Math.max(...triangle.map(point => point[1])) > architecturalFloor
+  )
+  const projected = dominant.flatMap(triangle => triangle.map(point => projectPoint(point, angle)))
+  const min = [0, 1].map(axis => Math.min(...projected.map(point => point[axis])))
+  const max = [0, 1].map(axis => Math.max(...projected.map(point => point[axis])))
+  const occupied = new Set()
+  for (const triangle of dominant) {
+    const [a, b, c] = triangle.map(point => projectPoint(point, angle))
+    for (let i = 0; i <= 8; i += 1) {
+      for (let j = 0; j <= 8 - i; j += 1) {
+        const u = i / 8
+        const v = j / 8
+        const point = [a[0] + (b[0] - a[0]) * u + (c[0] - a[0]) * v, a[1] + (b[1] - a[1]) * u + (c[1] - a[1]) * v]
+        const column = Math.min(
+          columns - 1,
+          Math.max(0, Math.floor(((point[0] - min[0]) / (max[0] - min[0])) * columns))
+        )
+        const row = Math.min(rows - 1, Math.max(0, Math.floor(((point[1] - min[1]) / (max[1] - min[1])) * rows)))
+        occupied.add(row * columns + column)
+      }
+    }
+  }
+  return occupied
+}
+
+function jaccardSimilarity(left, right) {
+  const intersection = [...left].filter(value => right.has(value)).length
+  return intersection / new Set([...left, ...right]).size
+}
+
+function nodeTriangles(root, ancestor) {
+  return descendantsWithMeshes(root, ancestor).flatMap(node => {
+    const triangles = []
+    const world = node.getWorldMatrix()
+    for (const primitive of node.getMesh().listPrimitives()) {
+      const positions = primitive.getAttribute('POSITION')
+      if (!positions) continue
+      const values = positions.getArray()
+      const indices =
+        primitive.getIndices()?.getArray() ?? Uint32Array.from({ length: positions.getCount() }, (_, i) => i)
+      for (let index = 0; index + 2 < indices.length; index += 3) {
+        triangles.push(
+          [indices[index], indices[index + 1], indices[index + 2]].map(vertex =>
+            transformPoint([values[vertex * 3], values[vertex * 3 + 1], values[vertex * 3 + 2]], world)
+          )
+        )
+      }
+    }
+    return triangles
+  })
 }
 
 function descendantsWithMeshes(root, ancestor) {
@@ -216,19 +267,10 @@ test('preserves approved specialist silhouettes and all declared animation/state
 
 test('exports physically distinct specialist massing with genuinely open room fronts', async () => {
   const io = new NodeIO()
-  const signatures = new Map()
   for (const [id, detailFloor] of Object.entries(SPECIALIST_DETAIL_FLOORS)) {
     const root = (await io.read(join(firstRoot, 'models', `${id}.glb`))).getRoot()
     const triangles = worldTriangles(root, `${id}:lod:near`)
     assert.ok(triangles.length >= detailFloor, `${id} lacks approved specialist detail density`)
-    signatures.set(id, silhouetteEnvelope(triangles))
-  }
-
-  for (const [left, right] of SILHOUETTE_PAIRS) {
-    assert.ok(
-      envelopeDistance(signatures.get(left), signatures.get(right)) > 0.08,
-      `${left} and ${right} still share the same normalized hut silhouette`
-    )
   }
 
   const triageRoot = (await io.read(join(firstRoot, 'models', 'triage.glb'))).getRoot()
@@ -272,6 +314,62 @@ test('exports physically distinct specialist massing with genuinely open room fr
   })
   const portalBounds = boundsOfTriangles(portalTriangles)
   assert.ok(portalBounds.max[1] - portalBounds.min[1] > 3.4, 'review portal must read as a tall verification chamber')
+})
+
+test('gives every specialist a unique dominant city-view silhouette and readable warm identity', async () => {
+  const io = new NodeIO()
+  const angles = [-Math.PI / 4, Math.PI / 4, Math.PI]
+  const silhouettes = new Map()
+  for (const id of SPECIALIST_IDS) {
+    const root = (await io.read(join(firstRoot, 'models', `${id}.glb`))).getRoot()
+    const triangles = worldTriangles(root, `${id}:lod:near`)
+    silhouettes.set(
+      id,
+      angles.map(angle => projectedSilhouette(triangles, angle))
+    )
+
+    const identity = root.listNodes().find(node => node.getName() === `${id}:city-identity`)
+    assert.ok(identity, `${id} lacks a city-scale physical identity anchor`)
+    const identityTriangles = nodeTriangles(root, identity)
+    assert.ok(identityTriangles.length > 0, `${id} city identity is metadata without physical geometry`)
+    const modelBounds = boundsOfTriangles(triangles)
+    const identityBounds = boundsOfTriangles(identityTriangles)
+    const modelSpan = modelBounds.max.map((value, axis) => value - modelBounds.min[axis])
+    const identitySpan = identityBounds.max.map((value, axis) => value - identityBounds.min[axis])
+    assert.ok(
+      identitySpan[0] / modelSpan[0] >= 0.28 || identitySpan[1] / modelSpan[1] >= 0.3,
+      `${id} identity equipment/signage is too small to read in the city view`
+    )
+    const identityMaterials = new Set(
+      descendantsWithMeshes(root, identity).flatMap(node =>
+        node
+          .getMesh()
+          .listPrimitives()
+          .map(primitive => primitive.getMaterial()?.getName())
+      )
+    )
+    assert.ok(
+      identityMaterials.has('lunar-rust') || identityMaterials.has('bone-metal'),
+      `${id} identity lacks prominent approved warm trim`
+    )
+  }
+
+  const sharedSilhouettes = []
+  for (let leftIndex = 0; leftIndex < SPECIALIST_IDS.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < SPECIALIST_IDS.length; rightIndex += 1) {
+      const left = SPECIALIST_IDS[leftIndex]
+      const right = SPECIALIST_IDS[rightIndex]
+      const similarities = silhouettes
+        .get(left)
+        .map((signature, angleIndex) => jaccardSimilarity(signature, silhouettes.get(right)[angleIndex]))
+      if (
+        Math.max(...similarities) >= 0.82 ||
+        similarities.reduce((sum, value) => sum + value, 0) / similarities.length >= 0.73
+      )
+        sharedSilhouettes.push(`${left}/${right}=${similarities.map(value => value.toFixed(3)).join(',')}`)
+    }
+  }
+  assert.deepEqual(sharedSilhouettes, [], `shared dominant city-scale silhouettes: ${sharedSilhouettes.join('; ')}`)
 })
 
 test('exports seven exclusive selectable worker role variants with physical accessories', async () => {
@@ -366,30 +464,46 @@ test('targets genuine worker skin joints with materially distinct motion clips',
   assert.ok(signatures.size >= 12, 'worker clips must encode materially distinct joint target combinations')
 })
 
-test('animates recognizable leader parts instead of rotating the whole leader collection', async () => {
+test('exports identity-qualified leader states without cross-wired character channels', async () => {
   const root = (await new NodeIO().read(join(firstRoot, 'models', 'leaders.glb'))).getRoot()
   const triangles = worldTriangles(root, 'leaders:lod:near')
   const bounds = boundsOfTriangles(triangles)
   assert.ok(bounds.max[1] - bounds.min[1] >= 5.2, 'leaders need approved character presence beside the buildings')
 
-  const partTargets = new Set()
-  const signatures = new Set()
-  for (const animation of root.listAnimations()) {
-    const targetNodes = animation.listChannels().map(channel => channel.getTargetNode())
-    const targets = targetNodes.map(node => node.getName())
-    assert.ok(targets.length >= 2, `${animation.getName()} must pose multiple leader parts`)
-    assert.ok(targets.every(target => /^leader:.*:(head-rig|tail|wing-rig|antlers)$/.test(target)))
-    for (const target of targetNodes) {
+  const animations = new Map(root.listAnimations().map(animation => [animation.getName(), animation]))
+  const leaderRoot = root.listNodes().find(node => node.getName() === 'leaders:root')
+  assert.equal(leaderRoot.getExtras().defaultLeader, 'owl')
+  for (const id of LEADER_IDS) {
+    const leader = root.listNodes().find(node => node.getName() === `leader:${id}`)
+    const stateClips = leader.getExtras().stateClips
+    assert.deepEqual(Object.keys(stateClips).toSorted(), LEADER_STATES.toSorted())
+    for (const state of LEADER_STATES) {
+      const clipName = `leader:${id}:${state}`
+      assert.equal(stateClips[state], clipName, `${id} ${state} does not select its authoritative identity clip`)
+      const animation = animations.get(clipName)
+      assert.ok(animation, `missing ${clipName}`)
+      const targetNodes = animation.listChannels().map(channel => channel.getTargetNode())
+      assert.ok(targetNodes.length >= 2, `${clipName} must animate a materially composed physical pose`)
       assert.ok(
-        descendantsWithMeshes(root, target).length > 0,
-        `${target.getName()} animation has no physical geometry`
+        targetNodes.every(node => node.getName().startsWith(`leader:${id}:`)),
+        `${clipName} cross-wires another leader identity`
+      )
+      assert.ok(
+        targetNodes.every(target => descendantsWithMeshes(root, target).length > 0),
+        `${clipName} targets named nodes without physical geometry`
       )
     }
-    targets.forEach(target => partTargets.add(target))
-    signatures.add(targets.toSorted().join('|'))
   }
-  assert.ok(partTargets.size >= 4, 'leader animation must cover multiple recognizable body parts')
-  assert.ok(signatures.size >= 6, 'leader clips must use distinct part combinations')
+
+  for (const state of LEADER_STATES) {
+    const animation = animations.get(state)
+    assert.ok(animation, `missing compatibility alias ${state}`)
+    const targetNodes = animation.listChannels().map(channel => channel.getTargetNode())
+    assert.ok(
+      targetNodes.every(node => node.getName().startsWith('leader:owl:')),
+      `${state} must be an owl-only alias`
+    )
+  }
 })
 
 test('keeps every visible walkway aligned with a semantic navigation link', async () => {
