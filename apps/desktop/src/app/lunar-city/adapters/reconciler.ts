@@ -102,6 +102,7 @@ export interface StartLunarCityReconcilerOptions {
 }
 
 export type ReconcileEventResult = 'accepted' | 'ignored'
+const MAX_RETIRED_SESSION_OWNERS = 256
 
 /** A backend gap, not a duplicate or ordinary next event, needs a reread. */
 export function shouldReconcile(currentRevision: number, incomingRevision: number): boolean {
@@ -803,6 +804,16 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
         for (const [key, owner] of registeredSessionOwners) {
           if (!rosterOwners.has(key)) {
             retiredSessionOwners.set(key, owner)
+            sessionOwnerCache.delete(key)
+            sessionOwnerObservations.delete(key)
+            delegationOwnerCache.delete(key)
+            dirtySessionOwners.delete(key)
+            dirtyDelegationOwners.delete(key)
+            failedSessionOwners.delete(key)
+            failedDelegationOwners.delete(key)
+            while (retiredSessionOwners.size > MAX_RETIRED_SESSION_OWNERS) {
+              retiredSessionOwners.delete(retiredSessionOwners.keys().next().value!)
+            }
           }
         }
 
@@ -1096,6 +1107,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
           retiredSessionOwners.size > 0 ||
           authoritativeSessionSources.length !== registeredOwners.size ||
           (Boolean(sources.readDelegationStatus) && authoritativeDelegationSources.length !== registeredOwners.size))
+      retiredSessionOwners.clear()
 
       return {
         authoritative:

@@ -14,6 +14,7 @@ import {
   compoundKey,
   createKanbanCitySource,
   createRegisteredKanbanCitySource,
+  type KanbanCitySourceOptions,
   kanbanDetailKey,
   type KanbanRest,
   type KanbanSocket,
@@ -920,47 +921,50 @@ describe('registered Kanban Lunar City source', () => {
       }))
     })
     const stops = new Map<string, ReturnType<typeof vi.fn>>()
+    const reads = new Map<string, ReturnType<typeof vi.fn>>()
     let remoteFails = true
     const createSource = vi.fn((options: { scope: PluginSourceScope }) => {
       const stop = vi.fn()
       stops.set(options.scope.connectionId, stop)
-
-      return {
-        onFrame: vi.fn(),
-        read: vi.fn(async () => {
-          if (options.scope.connectionId === 'source-b' && remoteFails) {
-            return {
-              authoritative: false,
-              compounds: [],
-              details: new Map(),
-              entities: [],
-              health: 'unavailable' as const,
-              sources: [
-                {
-                  authority: 'unknown' as const,
-                  error: 'Kanban plugin unavailable',
-                  observedAt: 42,
-                  source: 'kanban:source-b:worker'
-                }
-              ]
-            }
-          }
-
+      const read = vi.fn(async () => {
+        if (options.scope.connectionId === 'source-b' && remoteFails) {
           return {
-            authoritative: true,
+            authoritative: false,
             compounds: [],
             details: new Map(),
             entities: [],
-            health: 'authoritative' as const,
+            health: 'unavailable' as const,
             sources: [
               {
-                authority: 'authoritative' as const,
+                authority: 'unknown' as const,
+                error: 'Kanban plugin unavailable',
                 observedAt: 42,
-                source: `kanban:${options.scope.connectionId}:worker`
+                source: 'kanban:source-b:worker'
               }
             ]
           }
-        }),
+        }
+
+        return {
+          authoritative: true,
+          compounds: [],
+          details: new Map(),
+          entities: [],
+          health: 'authoritative' as const,
+          sources: [
+            {
+              authority: 'authoritative' as const,
+              observedAt: 42,
+              source: `kanban:${options.scope.connectionId}:worker`
+            }
+          ]
+        }
+      })
+      reads.set(options.scope.connectionId, read)
+
+      return {
+        onFrame: vi.fn(),
+        read,
         start: vi.fn(() => stop)
       }
     })
@@ -976,17 +980,188 @@ describe('registered Kanban Lunar City source', () => {
       replacementSources: ['kanban:source-a:worker']
     })
 
+    remoteFails = false
+    roster.set({ agents: [...roster.get().agents], sources: [...roster.get().sources] })
+    await expect(source.read()).resolves.toMatchObject({ authoritative: true })
+    expect(reads.get('source-a')).toHaveBeenCalledOnce()
+    expect(reads.get('source-b')).toHaveBeenCalledTimes(2)
+
     roster.set({
       agents: roster.get().agents.filter(agent => agent.connectionId === 'source-a'),
       sources: roster.get().sources.filter(item => item.connectionId === 'source-a')
     })
     expect(stops.get('source-b')).toHaveBeenCalledOnce()
 
-    remoteFails = false
     await expect(source.read()).resolves.toMatchObject({ authoritative: false })
+    await expect(source.read()).resolves.toMatchObject({ authoritative: true })
     expect(createSource).toHaveBeenCalledTimes(2)
     stop()
     expect(stops.get('source-a')).toHaveBeenCalledOnce()
+  })
+
+  it('recovers one initial boards failure on a roster refresh without rereading healthy owners', async () => {
+    const roster = atom<DesktopAgentRoster>({
+      agents: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        connectionKind: 'local' as const,
+        connectionLabel: connectionId,
+        handle: `@worker-${connectionId}`,
+        profile: 'worker'
+      })),
+      sources: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        kind: 'local' as const,
+        label: connectionId,
+        reachable: true
+      }))
+    })
+    const requests = new Map<string, string[]>()
+    let remoteBoardsFails = true
+    const fixtures = boardFixtures()
+    const createSource = (options: KanbanCitySourceOptions) => {
+      const rest: KanbanRest = async path => {
+        requests.set(options.scope.connectionId, [...(requests.get(options.scope.connectionId) ?? []), path])
+        if (options.scope.connectionId === 'source-b' && path === '/boards' && remoteBoardsFails) {
+          throw new Error('gateway unavailable')
+        }
+
+        return fixtures[path] as never
+      }
+
+      return createKanbanCitySource({ ...options, rest, socket: () => () => undefined })
+    }
+    const source = createRegisteredKanbanCitySource({ createSource, roster })
+    source.start(vi.fn())
+    await expect(source.read()).resolves.toMatchObject({ authoritative: false })
+    const healthyRequestCount = requests.get('source-a')!.length
+
+    remoteBoardsFails = false
+    roster.set({ agents: [...roster.get().agents], sources: [...roster.get().sources] })
+    await expect(source.read()).resolves.toMatchObject({ authoritative: true })
+    expect(requests.get('source-a')).toHaveLength(healthyRequestCount)
+    expect(requests.get('source-b')!.filter(path => path === '/boards')).toHaveLength(2)
+  })
+
+  it('keeps an exact owner dirty when its socket invalidates during an in-flight snapshot read', async () => {
+    const roster = atom<DesktopAgentRoster>({
+      agents: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        connectionKind: 'local' as const,
+        connectionLabel: connectionId,
+        handle: `@worker-${connectionId}`,
+        profile: 'worker'
+      })),
+      sources: ['source-a', 'source-b'].map(connectionId => ({
+        connectionId,
+        kind: 'local' as const,
+        label: connectionId,
+        reachable: true
+      }))
+    })
+    const invalidators = new Map<string, () => void>()
+    const reads = new Map<string, ReturnType<typeof vi.fn>>()
+    let releaseRemote!: () => void
+    const remoteGate = new Promise<void>(resolve => {
+      releaseRemote = resolve
+    })
+    const createSource = (options: { scope: PluginSourceScope }) => {
+      const read = vi.fn(async () => {
+        if (options.scope.connectionId === 'source-b' && read.mock.calls.length === 1) {
+          await remoteGate
+        }
+
+        return {
+          authoritative: true,
+          compounds: [],
+          details: new Map(),
+          entities: [],
+          health: 'authoritative' as const,
+          sources: [
+            {
+              authority: 'authoritative' as const,
+              observedAt: 42,
+              source: `kanban:${options.scope.connectionId}:worker`
+            }
+          ]
+        }
+      })
+      reads.set(options.scope.connectionId, read)
+
+      return {
+        onFrame: vi.fn(),
+        read,
+        start: (listener: () => void) => {
+          invalidators.set(options.scope.connectionId, listener)
+          return () => undefined
+        }
+      }
+    }
+    const source = createRegisteredKanbanCitySource({ createSource: createSource as never, roster })
+    source.start(vi.fn())
+    const initialRead = source.read()
+    await Promise.resolve()
+    invalidators.get('source-b')!()
+    releaseRemote()
+    await initialRead
+    await source.read()
+
+    expect(reads.get('source-a')).toHaveBeenCalledOnce()
+    expect(reads.get('source-b')).toHaveBeenCalledTimes(2)
+  })
+
+  it('bounds retired-owner churn and publishes each retained tombstone for only one read', async () => {
+    const ownerRoster = (index: number): DesktopAgentRoster => ({
+      agents: [
+        {
+          connectionId: `source-${index}`,
+          connectionKind: 'local',
+          connectionLabel: `source-${index}`,
+          handle: '@worker',
+          profile: 'worker'
+        }
+      ],
+      sources: [{ connectionId: `source-${index}`, kind: 'local', label: `source-${index}`, reachable: true }]
+    })
+    const roster = atom(ownerRoster(0))
+    const createSource = (options: { scope: PluginSourceScope }) => ({
+      onFrame: vi.fn(),
+      read: async () => ({
+        authoritative: true,
+        compounds: [],
+        details: new Map(),
+        entities: [],
+        health: 'authoritative' as const,
+        sources: [
+          {
+            authority: 'authoritative' as const,
+            observedAt: 42,
+            source: `kanban:${options.scope.connectionId}:worker`
+          }
+        ]
+      }),
+      start: () => () => undefined
+    })
+    const source = createRegisteredKanbanCitySource({ createSource: createSource as never, roster })
+    source.start(vi.fn())
+    await source.read()
+
+    for (let index = 1; index <= 300; index += 1) {
+      roster.set(ownerRoster(index))
+    }
+
+    const removalRead = await source.read()
+    expect(removalRead.authoritative).toBe(false)
+    expect(removalRead.sources).toHaveLength(257)
+    expect(removalRead.sources.some(item => item.source === 'kanban:source-1:worker')).toBe(false)
+    expect(removalRead.sources).toContainEqual(
+      expect.objectContaining({ source: 'kanban:source-299:worker', error: 'Registered Kanban owner removed' })
+    )
+
+    const acknowledged = await source.read()
+    expect(acknowledged.authoritative).toBe(true)
+    expect(acknowledged.sources).toEqual([
+      { authority: 'authoritative', observedAt: 42, source: 'kanban:source-300:worker' }
+    ])
   })
 
   it('rereads only the exact dirty owner and retains collision-safe detail entries', async () => {

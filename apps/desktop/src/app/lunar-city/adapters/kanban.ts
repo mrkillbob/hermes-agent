@@ -126,6 +126,7 @@ const EMPTY_FRAME_RESULT: KanbanFrameResult = Object.freeze({
   dirtyTaskIds: Object.freeze([]),
   needsReconcile: false
 })
+const MAX_RETIRED_KANBAN_SOURCES = 256
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
@@ -1030,7 +1031,14 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
   const now = options.now ?? Date.now
   const entries = new Map<
     string,
-    { cached?: KanbanReadResult; dirty: boolean; scope: PluginSourceScope; source: KanbanCitySource; stop?: () => void }
+    {
+      cached?: KanbanReadResult
+      dirty: boolean
+      generation: number
+      scope: PluginSourceScope
+      source: KanbanCitySource
+      stop?: () => void
+    }
   >()
   const retiredSources = new Set<string>()
   let active = false
@@ -1069,6 +1077,9 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
         entry.stop?.()
         entries.delete(key)
         retiredSources.add(sourceName(entry.scope))
+        while (retiredSources.size > MAX_RETIRED_KANBAN_SOURCES) {
+          retiredSources.delete(retiredSources.values().next().value!)
+        }
       }
     }
 
@@ -1089,12 +1100,14 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
       const entry: {
         cached?: KanbanReadResult
         dirty: boolean
+        generation: number
         scope: PluginSourceScope
         source: KanbanCitySource
         stop?: () => void
-      } = { dirty: true, scope, source }
+      } = { dirty: true, generation: 0, scope, source }
       if (active && invalidate) {
         entry.stop = source.start(result => {
+          entry.generation += 1
           entry.dirty = true
           invalidate?.(result)
         })
@@ -1107,6 +1120,7 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
     pending: readonly {
       cached?: KanbanReadResult
       dirty: boolean
+      generation: number
       scope: PluginSourceScope
       source: KanbanCitySource
     }[],
@@ -1119,8 +1133,9 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
         const index = next
         next += 1
         const entry = pending[index]!
+        const generation = entry.generation
         entry.cached = await entry.source.read()
-        entry.dirty = false
+        entry.dirty = entry.generation !== generation
       }
     }
 
@@ -1142,6 +1157,7 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
       source
     }))
     const authoritative = retiredSources.size === 0 && reads.every(({ result }) => result.authoritative)
+    retiredSources.clear()
 
     return {
       authoritative,
@@ -1175,6 +1191,7 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
       for (const entry of entries.values()) {
         if (!entry.stop) {
           entry.stop = entry.source.start(result => {
+            entry.generation += 1
             entry.dirty = true
             invalidate?.(result)
           })
@@ -1182,6 +1199,12 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
       }
       stopRoster = options.roster.listen(() => {
         sync()
+        for (const entry of entries.values()) {
+          if (entry.cached?.authoritative === false) {
+            entry.generation += 1
+            entry.dirty = true
+          }
+        }
         onInvalidate({ accepted: true, dirtyTaskIds: [], needsReconcile: true })
       })
 

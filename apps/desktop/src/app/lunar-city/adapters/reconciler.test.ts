@@ -1363,6 +1363,42 @@ describe('Lunar City reconciler', () => {
         )
     ).toMatchObject({ authority: 'stale' })
     expect(sessionReads.mock.calls.filter(call => call[0] === 'source-b')).toHaveLength(3)
+
+    emit({ connectionId: 'source-a', profile: 'worker', session_id: 'shared-session', type: 'session.changed' })
+    await flush()
+    await flush()
+    expect(
+      $lunarCitySnapshot
+        .get()
+        .entities.has(
+          entityKey({ connectionId: 'source-b', kind: 'session', profile: 'worker', sessionId: 'shared-session' })
+        )
+    ).toBe(false)
+    expect($lunarCitySnapshot.get().sources.some(source => source.source === 'session:source-b:worker')).toBe(false)
+
+    fleet.set({
+      agents: [
+        ...fleet.get().agents,
+        {
+          connectionId: 'source-b',
+          connectionKind: 'local',
+          connectionLabel: 'source-b',
+          handle: '@worker-source-b',
+          profile: 'worker'
+        }
+      ],
+      sources: [...fleet.get().sources, { connectionId: 'source-b', kind: 'local', label: 'source-b', reachable: true }]
+    })
+    await flush()
+    await flush()
+    expect(sessionReads.mock.calls.filter(call => call[0] === 'source-b')).toHaveLength(4)
+    expect(
+      $lunarCitySnapshot
+        .get()
+        .entities.get(
+          entityKey({ connectionId: 'source-b', kind: 'session', profile: 'worker', sessionId: 'shared-session' })
+        )
+    ).toMatchObject({ authority: 'authoritative' })
     stop()
   })
 
