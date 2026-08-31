@@ -16,6 +16,17 @@ export type BotMetadataProvenance = ReadonlyMap<string, LunarPresentationMetadat
 export interface BotRosterPlacementOptions {
   /** Power-of-two test seam; production always uses the declared 512-square lattice. */
   latticeSide?: number
+  /** Route-local assignments preserve exact-key placement across incremental roster changes. */
+  placementState?: BotRosterPlacementState
+}
+
+export interface BotRosterPlacementState {
+  assignments: Map<DestinationId, Map<EntityKey, number | undefined>>
+  capacity?: number
+}
+
+export function createBotRosterPlacementState(): BotRosterPlacementState {
+  return { assignments: new Map() }
 }
 
 interface RichProfileRow {
@@ -282,7 +293,8 @@ function hash(value: string): number {
 
 export function assignStablePlacementSlots(
   keys: readonly EntityKey[],
-  capacity = DISTRICT_LATTICE_CAPACITY
+  capacity = DISTRICT_LATTICE_CAPACITY,
+  previous: ReadonlyMap<EntityKey, number | undefined> = new Map()
 ): ReadonlyMap<EntityKey, number | undefined> {
   if (
     !Number.isSafeInteger(capacity) ||
@@ -295,8 +307,22 @@ export function assignStablePlacementSlots(
 
   const slots = new Map<EntityKey, number | undefined>()
   const occupied = new Uint8Array(capacity)
+  const orderedKeys = [...keys].sort()
 
-  for (const key of [...keys].sort()) {
+  for (const key of orderedKeys) {
+    const retained = previous.get(key)
+
+    if (retained !== undefined && retained >= 0 && retained < capacity && !occupied[retained]) {
+      occupied[retained] = 1
+      slots.set(key, retained)
+    }
+  }
+
+  for (const key of orderedKeys) {
+    if (slots.has(key)) {
+      continue
+    }
+
     let slot = hash(key) % capacity
     const step = capacity === 1 ? 1 : (hash(`probe:${key}`) % capacity) | 1
     let probes = 0
@@ -381,6 +407,12 @@ export async function enrichBotRosterEntities(
       ? options.latticeSide
       : DISTRICT_LATTICE_SIDE
   const latticeCapacity = latticeSide * latticeSide
+  const placementState = options.placementState
+
+  if (placementState && placementState.capacity !== latticeCapacity) {
+    placementState.assignments.clear()
+    placementState.capacity = latticeCapacity
+  }
   const representatives = new Map<string, string>()
 
   for (const agent of [...roster.agents].sort(
@@ -438,12 +470,24 @@ export async function enrichBotRosterEntities(
       .map((key, index) => [key, index])
   )
 
-  for (const destination of new Set(staged.map(value => value.destination))) {
+  const activeDestinations = new Set(staged.map(value => value.destination))
+
+  for (const destination of activeDestinations) {
     const keys = staged
       .filter(value => value.presentation !== undefined && value.destination === destination)
       .map(value => value.entity.key)
       .sort()
-    slotsByDestination.set(destination, assignStablePlacementSlots(keys, latticeCapacity))
+    const assigned = assignStablePlacementSlots(keys, latticeCapacity, placementState?.assignments.get(destination))
+    slotsByDestination.set(destination, assigned)
+    placementState?.assignments.set(destination, new Map(assigned))
+  }
+
+  if (placementState) {
+    for (const destination of placementState.assignments.keys()) {
+      if (!activeDestinations.has(destination)) {
+        placementState.assignments.delete(destination)
+      }
+    }
   }
 
   return staged.map(value => {

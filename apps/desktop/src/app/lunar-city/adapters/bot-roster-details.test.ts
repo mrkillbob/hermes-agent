@@ -4,7 +4,11 @@ import type { DesktopAgentRoster } from '@/global'
 
 import type { LunarEntity } from '../model'
 
-import { assignStablePlacementSlots, enrichBotRosterEntities } from './bot-roster-details'
+import {
+  assignStablePlacementSlots,
+  createBotRosterPlacementState,
+  enrichBotRosterEntities
+} from './bot-roster-details'
 import { normalizeRoster } from './fleet'
 
 function roster(profiles: readonly string[], connectionId = 'local'): DesktopAgentRoster {
@@ -275,6 +279,68 @@ describe('complete Hermes Bots roster details', () => {
     ).toBe(true)
   })
 
+  it('retains an existing colliding identity slot when an earlier exact key is added incrementally', async () => {
+    const placementState = createBotRosterPlacementState()
+    const firstRoster = roster(['worker-004592'])
+    const first = await enrichBotRosterEntities(
+      firstRoster,
+      entities(firstRoster),
+      async () => ({ profiles: [] }),
+      new Map(),
+      { placementState }
+    )
+    const expandedRoster = roster(['worker-000729', 'worker-004592'])
+    const expanded = await enrichBotRosterEntities(
+      expandedRoster,
+      entities(expandedRoster),
+      async () => ({ profiles: [] }),
+      new Map(),
+      { placementState }
+    )
+    const retained = expanded.find(entity => entity.identity.profile === 'worker-004592')
+    const inserted = expanded.find(entity => entity.identity.profile === 'worker-000729')
+
+    expect(first[0]?.presentation?.placement.slot).toBe(39024)
+    expect(retained?.presentation?.placement.slot).toBe(39024)
+    expect(retained?.position).toEqual(first[0]?.position)
+    expect(inserted?.presentation?.placement.slot).not.toBe(39024)
+  })
+
+  it('retains slots across reorder and removal/re-add, then cold-starts deterministically after reconnect', async () => {
+    const placementState = createBotRosterPlacementState()
+    const profiles = ['worker-000729', 'worker-004592']
+    const initialRoster = roster(profiles)
+    const read = async () => ({ profiles: [] })
+    const initial = await enrichBotRosterEntities(initialRoster, entities(initialRoster), read, new Map(), {
+      placementState
+    })
+    const reversedRoster = roster([...profiles].reverse())
+    const reversed = await enrichBotRosterEntities(reversedRoster, entities(reversedRoster), read, new Map(), {
+      placementState
+    })
+    const retainedRoster = roster(['worker-004592'])
+    const retained = await enrichBotRosterEntities(retainedRoster, entities(retainedRoster), read, new Map(), {
+      placementState
+    })
+    const readded = await enrichBotRosterEntities(initialRoster, entities(initialRoster), read, new Map(), {
+      placementState
+    })
+    const emptyRoster = roster([])
+    await enrichBotRosterEntities(emptyRoster, entities(emptyRoster), read, new Map(), { placementState })
+    const reconnected = await enrichBotRosterEntities(reversedRoster, entities(reversedRoster), read, new Map(), {
+      placementState
+    })
+    const slots = (rows: readonly LunarEntity[]) =>
+      new Map(rows.map(entity => [entity.key, entity.presentation?.placement.slot]))
+
+    expect(slots(reversed)).toEqual(slots(initial))
+    expect(retained[0]?.presentation?.placement.slot).toBe(
+      initial.find(entity => entity.identity.profile === 'worker-004592')?.presentation?.placement.slot
+    )
+    expect(slots(readded)).toEqual(slots(initial))
+    expect(slots(reconnected)).toEqual(slots(initial))
+  })
+
   it('keeps the generated negative-step cohort physically unique', async () => {
     const profiles = Array.from({ length: 8192 }, (_, index) => `worker-${index.toString().padStart(6, '0')}`)
     const source = roster(profiles)
@@ -333,6 +399,38 @@ describe('complete Hermes Bots roster details', () => {
     expect(aggregateOnly[0]?.presentation?.placement.slot).toBeUndefined()
     expect(reversedAggregateOnly.map(entity => entity.key)).toEqual(aggregateOnly.map(entity => entity.key))
     expect(result).toHaveLength(5)
+  })
+
+  it('keeps retained slots stable while a released slot promotes one aggregate-only identity', async () => {
+    const placementState = createBotRosterPlacementState()
+    const profiles = ['alpha', 'beta', 'gamma', 'delta', 'epsilon']
+    const enrich = async (active: readonly string[]) => {
+      const source = roster(active)
+
+      return enrichBotRosterEntities(source, entities(source), async () => ({ profiles: [] }), new Map(), {
+        latticeSide: 2,
+        placementState
+      })
+    }
+    const full = await enrich(profiles)
+    const aggregate = full.find(entity => entity.position === undefined)!
+    const removed = full.find(entity => entity.position !== undefined)!
+    const retainedSlots = new Map(
+      full
+        .filter(entity => entity.key !== removed.key && entity.position !== undefined)
+        .map(entity => [entity.key, entity.position])
+    )
+    const afterRemoval = await enrich(profiles.filter(profile => profile !== removed.identity.profile))
+
+    expect(afterRemoval.find(entity => entity.key === aggregate.key)?.position).toBeDefined()
+    expect(
+      afterRemoval
+        .filter(entity => retainedSlots.has(entity.key))
+        .every(entity => JSON.stringify(entity.position) === JSON.stringify(retainedSlots.get(entity.key)))
+    ).toBe(true)
+
+    const afterReadd = await enrich(profiles)
+    expect(afterReadd.find(entity => entity.key === removed.key)?.position).toBeUndefined()
   })
 
   it('does not bind unscoped projected members to another exact connection', async () => {

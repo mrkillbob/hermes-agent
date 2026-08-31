@@ -133,14 +133,44 @@ describe('EntityRegistry', () => {
       }
     })
     const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
+    const resolveIndex = vi.fn(() => 0)
+    const isNearby = vi.fn(() => true)
 
     registry.reconcile(snapshot(aggregateOnly))
     registry.setSelection(aggregateOnly.key)
+    registry.applyLodPolicy(resolveIndex, isNearby)
 
     expect(registry.aggregate('garden')).toEqual({ animations: { idle: 1 }, total: 1 })
     expect(registry.instancedGroup('worker:idle:lod:1')).toBeUndefined()
     expect(registry.navigationEntity(aggregateOnly.key)).toBeUndefined()
+    expect(registry.hasActiveAnimations()).toBe(false)
+    expect(resolveIndex).not.toHaveBeenCalled()
+    expect(isNearby).not.toHaveBeenCalled()
     expect(presentationFactory.animated).not.toHaveBeenCalled()
+  })
+
+  it('does not let selected aggregate-only rows displace a worker from the global 24-visual budget', () => {
+    const presentationFactory = factory()
+    const workers = Array.from({ length: 24 }, (_, index) => entity(index, { animation: 'walk' }))
+    const aggregateOnly = entity(100, {
+      identity: { kind: 'profile', connectionId: 'local', profile: 'aggregate-only' },
+      position: undefined,
+      presentation: {
+        groups: [],
+        metadata: { source: 'profiles:local', state: 'fresh' },
+        placement: { lodHint: 1, overflow: true }
+      }
+    })
+    const registry = createEntityRegistry({ factory: presentationFactory, workerClips: new Set(['idle', 'walk']) })
+
+    registry.reconcile(snapshot(...workers, aggregateOnly))
+    registry.setSelection(aggregateOnly.key)
+    const activeVisuals = presentationFactory.animated.mock.results
+      .map(result => result.value)
+      .filter(visual => !visual.dispose.mock.calls.length)
+
+    expect(activeVisuals).toHaveLength(24)
+    expect(registry.entity(aggregateOnly.key)?.visual).toBeUndefined()
   })
 
   it('moves a retained worker to aggregate LOD when a later roster makes its stable district rank overflow', () => {

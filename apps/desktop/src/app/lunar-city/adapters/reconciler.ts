@@ -10,7 +10,11 @@ import type { SessionInfo } from '@/types/hermes'
 import type { LunarEntity, LunarPresentationMetadata, SourceHealth } from '../model'
 import { $lunarCitySnapshot, applyLunarDelta, freezeLunarDelta, type LunarDelta } from '../store'
 
-import { enrichBotRosterEntities, type ScopedProfilesListRequest } from './bot-roster-details'
+import {
+  createBotRosterPlacementState,
+  enrichBotRosterEntities,
+  type ScopedProfilesListRequest
+} from './bot-roster-details'
 import { normalizeRoster } from './fleet'
 import { normalizeSessions, normalizeSubagents } from './sessions'
 
@@ -521,6 +525,7 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
   let disposed = false
   const botMetadataCache = new Map<string, { observedAt: number; payload: unknown; representativeProfile: string }>()
   const botMetadataProvenance = new Map<string, LunarPresentationMetadata>()
+  const botRosterPlacementState = createBotRosterPlacementState()
   let enrichedFleetCache:
     { base: readonly LunarEntity[]; entities: readonly LunarEntity[]; roster: DesktopAgentRoster } | undefined
 
@@ -648,7 +653,8 @@ export function startLunarCityReconciler(options: StartLunarCityReconcilerOption
             roster,
             normalizedFleet.entities,
             readBotMetadata,
-            botMetadataProvenance
+            botMetadataProvenance,
+            { placementState: botRosterPlacementState }
           )
           fleet = { ...normalizedFleet, entities }
           enrichedFleetCache = { base: normalizedFleet.entities, entities, roster }

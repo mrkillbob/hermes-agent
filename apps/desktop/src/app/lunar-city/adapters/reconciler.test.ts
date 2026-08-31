@@ -481,6 +481,47 @@ describe('Lunar City reconciler', () => {
     stop()
   })
 
+  it('retains a live exact profile slot when an earlier colliding profile joins the roster', async () => {
+    const makeRoster = (profiles: readonly string[]): DesktopAgentRoster => ({
+      agents: profiles.map(profileName => ({
+        connectionId: 'local',
+        connectionKind: 'local',
+        connectionLabel: 'This device',
+        handle: `@${profileName}`,
+        profile: profileName
+      })),
+      sources: [{ connectionId: 'local', kind: 'local', label: 'This device', reachable: true }]
+    })
+    const fleet = atom(makeRoster(['worker-004592']))
+    const stop = startLunarCityReconciler({
+      now: () => 42,
+      sources: {
+        $fleetRoster: fleet,
+        $sessions: atom([]),
+        $subagentsBySession: atom({}),
+        legacySingleBackend: () => false,
+        readProfileRoster: async () => ({ profiles: [] }),
+        refreshFleet: async () => ({ observedAt: 42, status: 'refreshed' })
+      }
+    })
+    await flush()
+    await flush()
+    const before = [...$lunarCitySnapshot.get().entities.values()][0]
+
+    fleet.set(makeRoster(['worker-000729', 'worker-004592']))
+    await flush()
+    await flush()
+    await flush()
+    const after = [...$lunarCitySnapshot.get().entities.values()].find(
+      entity => entity.identity.kind === 'profile' && entity.identity.profile === 'worker-004592'
+    )
+
+    expect(before?.presentation?.placement.slot).toBe(39024)
+    expect(after?.presentation?.placement.slot).toBe(39024)
+    expect(after?.position).toEqual(before?.position)
+    stop()
+  })
+
   it('does not let an in-flight metadata read consume a newer invalidation generation', async () => {
     const fleet = atom({
       agents: [

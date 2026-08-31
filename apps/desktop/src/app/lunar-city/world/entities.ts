@@ -200,8 +200,12 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
   const refreshActiveKeys = (): boolean => {
     nextActiveKeys.clear()
 
-    if (selected && records.has(selected)) {
-      nextActiveKeys.add(selected)
+    if (selected) {
+      const selectedRecord = records.get(selected)
+
+      if (selectedRecord && hasPhysicalPlacement(selectedRecord)) {
+        nextActiveKeys.add(selected)
+      }
     }
 
     for (const key of rankedKeys) {
@@ -358,6 +362,22 @@ export function createEntityRegistry(options: EntityRegistryOptions) {
 
       let changed = false
       for (const record of records.values()) {
+        if (!hasPhysicalPlacement(record)) {
+          const nextIndex = record.lodFloor
+
+          if (record.lodIndex !== nextIndex) {
+            record.lodIndex = nextIndex
+            changed = true
+          }
+
+          if (record.nearby) {
+            record.nearby = false
+            changed = true
+          }
+
+          continue
+        }
+
         const nextIndex = Math.max(
           record.lodFloor,
           Math.floor(resolveIndex(record.entity.key, record.position, record.entity.key === selected))
