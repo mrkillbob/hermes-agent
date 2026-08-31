@@ -349,10 +349,15 @@ export interface RecastWrapperLike {
   destroy?(): void
 }
 
+export interface RecastConfigLike extends Record<string, unknown>, RecastWrapperLike {
+  set_bmax?(index: number, value: number): void
+  set_bmin?(index: number, value: number): void
+}
+
 export interface RecastRuntimeLike {
   NavMesh: new () => RecastNavMeshLike
   Vec3: new (x: number, y: number, z: number) => BabylonVector3Like & RecastWrapperLike
-  rcConfig: new () => Record<string, unknown> & RecastWrapperLike
+  rcConfig: new () => RecastConfigLike
 }
 
 export interface LunarCityWorldModules {

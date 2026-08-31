@@ -126,6 +126,8 @@ describe('manifest navigation query', () => {
       }
 
       destroy = vi.fn()
+      set_bmax = vi.fn()
+      set_bmin = vi.fn()
     }
 
     const result: BabylonImportResultLike = {
@@ -154,13 +156,23 @@ describe('manifest navigation query', () => {
     expect(modules.ImportMeshAsync).toHaveBeenCalledWith('route/models/navigation.glb', expect.anything())
     expect(build).toHaveBeenCalledWith(expect.any(Float32Array), 3, expect.any(Uint32Array), 3, expect.any(FakeConfig))
     expect(Array.from(build.mock.calls[0]?.[0] ?? [])).toEqual([10, 0, 0, 14, 0, 0, 10, 0, 4])
+    expect(configs[0]?.set_bmin.mock.calls).toEqual([
+      [0, 10],
+      [1, 0],
+      [2, 0]
+    ])
+    expect(configs[0]?.set_bmax.mock.calls).toEqual([
+      [0, 14],
+      [1, 0],
+      [2, 4]
+    ])
     expect(configs[0]?.destroy).toHaveBeenCalledOnce()
     expect(query.computePath({ x: 0, y: 0, z: 0 }, { x: 4, y: 0, z: 0 })).toEqual([
       { x: 0, y: 0, z: 0 },
       { x: 4, y: 0, z: 0 }
     ])
     expect(dispose).toHaveBeenCalledOnce()
-    expect(vectors.map(vector => vector.destroy.mock.calls.length)).toEqual([1, 1, 1, 1, 1, 1])
+    expect(vectors.map(vector => vector.destroy.mock.calls.length)).toEqual([1, 1, 1, 1])
 
     query.dispose?.()
     expect(destroy).toHaveBeenCalledOnce()

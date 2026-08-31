@@ -17,6 +17,7 @@ import type {
   ModelManifestEntry,
   QualityTier,
   RecastRuntimeLike,
+  RecastConfigLike,
   RecastWrapperLike,
   Vec3,
   WorldBounds,
@@ -273,16 +274,21 @@ function disposeNavigationImport(result: BabylonImportResultLike): void {
 function recastConfig(
   Runtime: RecastRuntimeLike,
   bounds: WorldBounds
-): { config: Record<string, unknown> & RecastWrapperLike; wrappers: readonly RecastWrapperLike[] } {
+): RecastConfigLike {
   const config = new Runtime.rcConfig()
-  const bmin = new Runtime.Vec3(bounds.min.x, bounds.min.y, bounds.min.z)
-  const bmax = new Runtime.Vec3(bounds.max.x, bounds.max.y, bounds.max.z)
+
+  if (!config.set_bmin || !config.set_bmax) {
+    throw new Error('Lunar City Recast runtime does not expose indexed bounds setters')
+  }
+
+  for (const [index, axis] of ['x', 'y', 'z'].entries() as Iterable<[number, keyof Vec3]>) {
+    config.set_bmin(index, bounds.min[axis])
+    config.set_bmax(index, bounds.max[axis])
+  }
 
   // These are Recast voxelization inputs, not hand-authored city coordinates;
   // the actual navigable extent is extracted from the declared navigation GLB.
   Object.assign(config, {
-    bmax,
-    bmin,
     ch: 0.2,
     cs: 0.2,
     detailSampleDist: 6,
@@ -298,7 +304,7 @@ function recastConfig(
     walkableSlopeAngle: 45
   })
 
-  return { config, wrappers: [bmin, bmax] }
+  return config
 }
 
 /**
@@ -332,7 +338,7 @@ export async function createRouteNavigationQuery(
     const Runtime = await modules.createRecastNavigation()
     const navMesh = new Runtime.NavMesh()
     releaseNavMesh = () => navMesh.destroy?.()
-    const built = recastConfig(Runtime, geometry.bounds)
+    const configuration = recastConfig(Runtime, geometry.bounds)
 
     try {
       navMesh.build(
@@ -340,14 +346,10 @@ export async function createRouteNavigationQuery(
         geometry.positions.length / 3,
         geometry.indices,
         geometry.indices.length,
-        built.config
+        configuration
       )
     } finally {
-      disposeRecastWrapper(built.config)
-
-      for (const wrapper of built.wrappers) {
-        disposeRecastWrapper(wrapper)
-      }
+      disposeRecastWrapper(configuration)
     }
     const query = createRecastNavigationQuery(navMesh, (x, y, z) => new Runtime.Vec3(x, y, z))
 
