@@ -92,6 +92,7 @@ function receipt(overrides = {}) {
     population: { observed: 100, active: 100, lodMix: { near: 100 }, source: 'fake-backend' },
     cameraState: 'overview',
     dialogueState: 'idle',
+    lifecycleState: 'mounted',
     measurement: {
       durationMs,
       sampleIntervalMs: durationMs / 4,
@@ -352,7 +353,7 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
   })
   const rendererIdentity = { pid: 20, startedAtMs: 1_000 }
   const phase = (name, cpu, gpu, residentMemoryMiB) => ({
-    envelopeVersion: 2,
+    envelopeVersion: 3,
     phase: name,
     warmupDurationMs: 30_000,
     rendererIdentity,
@@ -397,12 +398,14 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
         dialogueState: 'idle',
         dialogueActions: { opened: 0, messagesSent: 0, responsesReceived: 0 },
         lifecycleActions: { contextLosses: 0, recoveries: 0, disposals: 0 },
+        sceneMount: { id: 'scene-1', generation: 1, startedAtMs: 2_000 },
+        lifecycleState: 'mounted',
         environment: { electronMode: 'packaged', gpuEnabled: true }
       }
     }))
   })
   const rawProvenance = {
-    provenanceVersion: 2,
+    provenanceVersion: 3,
     baselineShell: phase('baseline-shell', 3, 40, [200, 200, 200, 200, 200]),
     mountedCity: phase('mounted-city', 6, 50, rawSamples.residentMemoryMiB),
     bridgeHandshake: {
@@ -483,10 +486,14 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
     ],
     [
       'recovery without action',
-      { scenario: 'context-loss-recovery', recovery: 'recovered' },
+      { scenario: 'context-loss-recovery', recovery: 'recovered', lifecycleState: 'recovered' },
       /context.*recovery.*action|raw.*recovery/i
     ],
-    ['disposal without action', { scenario: 'disposal', disposal: 'disposed' }, /disposal.*action|raw.*disposal/i],
+    [
+      'disposal without action',
+      { scenario: 'disposal', disposal: 'disposed', lifecycleState: 'disposed' },
+      /disposal.*action|raw.*disposal/i
+    ],
     [
       'quality mismatch',
       { scenario: 'tier-efficient', qualityTier: 'Efficient' },
@@ -499,6 +506,76 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
     assert.equal(result.packagedPerformanceEligible, false, label)
     assert.match(result.errors.join('\n'), pattern, label)
   }
+
+  const packagedPopulation = {
+    observed: 100,
+    active: 100,
+    lodMix: { near: 100 },
+    source: 'fake-backend',
+    sourceMix: { 'fake-backend': 100 }
+  }
+  const stabilityProvenance = structuredClone(rawProvenance)
+  const stabilityTimestamps = [0, 450_000, 900_000, 1_350_000, 1_800_000]
+  stabilityProvenance.mountedCity.samples.forEach((sample, index) => {
+    sample.timestampMs = stabilityTimestamps[index]
+    sample.rendererMetrics.lifecycleActions.disposals = index < 2 ? 0 : 1
+    sample.rendererMetrics.lifecycleState = index === 2 ? 'disposed' : 'mounted'
+    if (index > 2) sample.rendererMetrics.sceneMount = { id: 'scene-2', generation: 2, startedAtMs: 900_001 }
+    sample.rendererMetrics.entities = [100, 101, 1, 2, 2][index]
+  })
+  const stabilitySamples = samples({
+    entities: [100, 101, 1, 2, 2],
+    residentMemoryMiB: [500, 501, 30, 31, 31]
+  })
+  const stability = validateReceipt(
+    receipt({
+      evidenceClass: 'fake-backend-packaged',
+      scenario: '30-minute-stability',
+      rawSamples: stabilitySamples,
+      rawProvenance: stabilityProvenance,
+      population: packagedPopulation
+    })
+  )
+  assert.equal(stability.packagedPerformanceEligible, false)
+  assert.match(stability.errors.join('\n'), /stability.*scene mount|disposal|resource.*continuity|counter.*reset/i)
+
+  const recoveredThenLost = structuredClone(rawProvenance)
+  recoveredThenLost.mountedCity.samples.forEach((sample, index) => {
+    sample.rendererMetrics.lifecycleActions.contextLosses = index === 0 ? 0 : index < 3 ? 1 : 2
+    sample.rendererMetrics.lifecycleActions.recoveries = index < 2 ? 0 : 1
+    sample.rendererMetrics.lifecycleState = ['mounted', 'contextLost', 'recovered', 'contextLost', 'contextLost'][index]
+  })
+  const recovered = validateReceipt(
+    receipt({
+      evidenceClass: 'fake-backend-packaged',
+      scenario: 'context-loss-recovery',
+      recovery: 'recovered',
+      lifecycleState: 'recovered',
+      rawSamples,
+      rawProvenance: recoveredThenLost,
+      population: packagedPopulation
+    })
+  )
+  assert.match(recovered.errors.join('\n'), /final.*recovered|later context loss|lifecycle/i)
+
+  const disposedThenRemounted = structuredClone(rawProvenance)
+  disposedThenRemounted.mountedCity.samples.forEach((sample, index) => {
+    sample.rendererMetrics.lifecycleActions.disposals = index < 2 ? 0 : 1
+    sample.rendererMetrics.lifecycleState = index === 2 ? 'disposed' : index > 2 ? 'mounted' : 'mounted'
+    if (index > 2) sample.rendererMetrics.sceneMount = { id: 'scene-2', generation: 2, startedAtMs: 20_000 }
+  })
+  const disposed = validateReceipt(
+    receipt({
+      evidenceClass: 'fake-backend-packaged',
+      scenario: 'disposal',
+      disposal: 'disposed',
+      lifecycleState: 'disposed',
+      rawSamples,
+      rawProvenance: disposedThenRemounted,
+      population: packagedPopulation
+    })
+  )
+  assert.match(disposed.errors.join('\n'), /final.*disposed|remount|lifecycle/i)
 })
 
 test('reports balanced overview draw calls over the hard limit', () => {

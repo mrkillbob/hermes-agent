@@ -491,6 +491,8 @@ function validateRawProvenance(receipt, errors) {
   for (const field of ['qualityTier', 'internalRenderScale', 'cameraState', 'dialogueState']) {
     if (receipt[field] !== claims[field]) errors.push(`${field} does not match raw mounted state`)
   }
+  if (receipt.lifecycleState !== claims.lifecycleState)
+    errors.push('top-level lifecycleState does not match final raw lifecycle state')
   if (receipt.environment?.gpuEnabled !== claims.environment.gpuEnabled)
     errors.push('environment GPU state does not match raw mounted state')
   if (receipt.environment?.electronMode !== claims.environment.electronMode)
@@ -526,6 +528,45 @@ function validateRawProvenance(receipt, errors) {
     )
   if (receipt.scenario === 'disposal')
     requireAction(claims.lifecycleActions.disposals > 0, 'disposal requires raw disposal action evidence')
+  const trace = claims.lifecycleTrace
+  const mountKey = entry => `${entry.sceneMount.id}:${entry.sceneMount.generation}:${entry.sceneMount.startedAtMs}`
+  const unchangedMount = trace.every(entry => mountKey(entry) === mountKey(trace[0]))
+  if (receipt.scenario === 'context-loss-recovery') {
+    const lastLoss = trace.findLastIndex(entry => entry.state === 'contextLost')
+    const lastRecovery = trace.findLastIndex(entry => entry.state === 'recovered')
+    if (
+      claims.lifecycleState !== 'recovered' ||
+      receipt.recovery !== 'recovered' ||
+      lastLoss < 0 ||
+      lastRecovery <= lastLoss ||
+      !unchangedMount
+    )
+      errors.push('context recovery claim requires final recovered lifecycle with no later context loss or remount')
+  }
+  if (receipt.scenario === 'disposal') {
+    if (claims.lifecycleState !== 'disposed' || receipt.disposal !== 'disposed')
+      errors.push('disposal claim requires final disposed raw lifecycle state with no remount')
+  }
+  if (receipt.scenario === '30-minute-stability') {
+    if (!unchangedMount) errors.push('stability requires one unchanged scene mount identity and generation')
+    if (trace.some(entry => entry.state !== 'mounted'))
+      errors.push('stability forbids disposal, remount, context loss, or replacement recovery')
+    if (
+      trace.some(
+        entry => entry.counters.contextLosses !== 0 || entry.counters.recoveries !== 0 || entry.counters.disposals !== 0
+      )
+    )
+      errors.push('stability requires zero lifecycle counters across the continuous mount')
+    for (const field of ['entities', 'textures', 'listeners', 'timers']) {
+      const values = claims.resourceContinuity[field]
+      if (values.some(value => value !== values[0])) errors.push(`stability resource continuity failed for ${field}`)
+    }
+    const resident = claims.resourceContinuity.residentMemoryMiB
+    if (resident.some(value => value < resident[0] * 0.5))
+      errors.push('stability resident memory reset indicates scene replacement')
+  }
+  if (!['context-loss-recovery', 'disposal'].includes(receipt.scenario) && claims.lifecycleState !== 'mounted')
+    errors.push(`${receipt.scenario} requires final mounted raw lifecycle state`)
   if (!isRecord(receipt.rawSamples)) return
   for (const field of RAW_FIELDS) {
     const retained = receipt.rawSamples[field]
@@ -602,6 +643,7 @@ function validateCommonShape(receipt, errors) {
   addRequired(errors, receipt, 'population')
   addRequired(errors, receipt, 'cameraState')
   addRequired(errors, receipt, 'dialogueState')
+  addRequired(errors, receipt, 'lifecycleState')
   addRequired(errors, receipt, 'rawSamples')
   addRequired(errors, receipt, 'summaries')
   for (const field of [
@@ -650,6 +692,11 @@ function validateCommonShape(receipt, errors) {
   if (receipt.qualityTier !== undefined && !['Efficient', 'Balanced', 'Detailed'].includes(receipt.qualityTier)) {
     errors.push('qualityTier must be Efficient, Balanced, or Detailed')
   }
+  if (
+    receipt.lifecycleState !== undefined &&
+    !['mounted', 'contextLost', 'recovered', 'disposed'].includes(receipt.lifecycleState)
+  )
+    errors.push('lifecycleState must be mounted, contextLost, recovered, or disposed')
   if (
     receipt.internalRenderScale !== undefined &&
     (!isFiniteNumber(receipt.internalRenderScale) ||

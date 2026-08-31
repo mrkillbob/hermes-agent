@@ -1,5 +1,5 @@
-export const LUNAR_CITY_PROVENANCE_VERSION = 2
-export const LUNAR_CITY_PHASE_ENVELOPE_VERSION = 2
+export const LUNAR_CITY_PROVENANCE_VERSION = 3
+export const LUNAR_CITY_PHASE_ENVELOPE_VERSION = 3
 
 const RAW_RENDERER_FIELDS = Object.freeze([
   'frameMs',
@@ -14,6 +14,11 @@ const RAW_RENDERER_FIELDS = Object.freeze([
   'timers'
 ])
 const GPU_MEMORY_SOURCES = new Set(['chromium-memory-infra-v1'])
+const COUNTER_GROUPS = Object.freeze({
+  cameraActions: ['overview', 'focus', 'orbit', 'zoom', 'indoor'],
+  dialogueActions: ['opened', 'messagesSent', 'responsesReceived'],
+  lifecycleActions: ['contextLosses', 'recoveries', 'disposals']
+})
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isFiniteNumber = value => typeof value === 'number' && Number.isFinite(value)
@@ -117,6 +122,17 @@ function validateRendererMetrics(metrics, identity, label, allowEmpty) {
     metrics.environment.gpuEnabled !== true
   )
     fail(`${label} packaged environment/GPU state is unavailable`)
+  if (
+    !isRecord(metrics.sceneMount) ||
+    typeof metrics.sceneMount.id !== 'string' ||
+    metrics.sceneMount.id.length === 0 ||
+    !Number.isInteger(metrics.sceneMount.generation) ||
+    metrics.sceneMount.generation < 1 ||
+    !isFiniteNumber(metrics.sceneMount.startedAtMs)
+  )
+    fail(`${label} scene mount identity is unavailable`)
+  if (!['mounted', 'contextLost', 'recovered', 'disposed'].includes(metrics.lifecycleState))
+    fail(`${label} lifecycle state is unavailable`)
 }
 
 function validatePhase(envelope, expectedPhase) {
@@ -148,6 +164,26 @@ function validatePhase(envelope, expectedPhase) {
     )
     if (!sample.processMetrics.some(row => row.pid === envelope.rendererIdentity.pid)) {
       fail(`${label} does not retain the renderer app.getAppMetrics row`)
+    }
+    if (index > 0) {
+      const previous = envelope.samples[index - 1].rendererMetrics
+      for (const [group, keys] of Object.entries(COUNTER_GROUPS)) {
+        for (const key of keys) {
+          if (sample.rendererMetrics[group][key] < previous[group][key])
+            fail(`${expectedPhase} ${group}.${key} counter decreased or reset`)
+        }
+      }
+      for (const [key, state] of [
+        ['contextLosses', 'contextLost'],
+        ['recoveries', 'recovered'],
+        ['disposals', 'disposed']
+      ]) {
+        const delta = sample.rendererMetrics.lifecycleActions[key] - previous.lifecycleActions[key]
+        if (delta > 1 || (delta === 1 && sample.rendererMetrics.lifecycleState !== state))
+          fail(`${expectedPhase} lifecycleActions.${key} does not match the lifecycle trace`)
+        if (sample.rendererMetrics.lifecycleState === state && previous.lifecycleState !== state && delta !== 1)
+          fail(`${expectedPhase} lifecycle state ${state} lacks a cumulative counter transition`)
+      }
     }
   }
   if (expectedPhase === 'mounted-city') {
@@ -219,6 +255,21 @@ export function deriveRawSamplesFromProvenance(provenance) {
       dialogueState: lastMetrics.dialogueState,
       dialogueActions: structuredClone(lastMetrics.dialogueActions),
       lifecycleActions: structuredClone(lastMetrics.lifecycleActions),
+      lifecycleState: lastMetrics.lifecycleState,
+      sceneMount: structuredClone(lastMetrics.sceneMount),
+      lifecycleTrace: city.map(sample => ({
+        timestampMs: sample.timestampMs,
+        state: sample.rendererMetrics.lifecycleState,
+        sceneMount: structuredClone(sample.rendererMetrics.sceneMount),
+        counters: structuredClone(sample.rendererMetrics.lifecycleActions)
+      })),
+      resourceContinuity: {
+        entities: city.map(sample => sample.rendererMetrics.entities),
+        textures: city.map(sample => sample.rendererMetrics.textures),
+        listeners: city.map(sample => sample.rendererMetrics.listeners),
+        timers: city.map(sample => sample.rendererMetrics.timers),
+        residentMemoryMiB
+      },
       environment: structuredClone(lastMetrics.environment),
       rendererIdentity: { ...identity }
     },
