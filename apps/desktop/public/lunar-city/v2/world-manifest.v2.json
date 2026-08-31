@@ -1015,9 +1015,9 @@
         "triangles": 12386,
         "gpuMiB": 0.2579,
         "budget": { "maxDrawCalls": 12, "maxGpuMiB": 14, "maxMaterials": 6, "maxTextures": 4, "maxTriangles": 36000 },
-        "bytes": 385032,
-        "extent": [77.8494, 13.0881, 78.1521],
-        "sha256": "c12723b8ef340d2322dcefeee8cca2fbba96d240acf73475d204f73fd0d2371e"
+        "bytes": 385212,
+        "extent": [86.1656, 13.0881, 71.4346],
+        "sha256": "4a2afff2f42e9b543be2c132e2652385ba2b34112f9023918955441b603cab09"
       }
     },
     {

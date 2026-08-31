@@ -868,22 +868,9 @@ export function buildLeaders(scene) {
   const otter = buildOtter(scene, near)
   const bird = buildBird(scene, near)
   const stag = buildStag(scene, near)
-  const authoredLocalPositions = [
-    [-7.5, 1.5, -2.2],
-    [-4.4, 1.55, 2.1],
-    [-1.45, 1.45, -2],
-    [1.7, 1.5, 2.1],
-    [4.7, 1.55, -2],
-    [7.7, 1.7, 2.1]
-  ]
   for (const [index, leader] of [owl, fox, badger, otter, bird, stag].entries()) {
-    const authored = authoredLocalPositions[index]
     const district = LEADER_DISTRICT_POSITIONS[index]
-    leader.position.set(
-      district[0] / near.scaling.x - authored[0],
-      district[1] / near.scaling.y - authored[1],
-      district[2] / near.scaling.z - authored[2]
-    )
+    leader.position.set(district[0] / near.scaling.x, district[1] / near.scaling.y, district[2] / near.scaling.z)
   }
   badger.leaderRig.headMesh.dispose()
   badger.leaderRig.headMesh = owl.leaderRig.headMesh.createInstance('leader:badger:head')
@@ -896,6 +883,12 @@ export function buildLeaders(scene) {
   const mid = group(scene, 'leaders:lod:mid', root)
   const far = group(scene, 'leaders:lod:far', root)
   const positions = LEADER_DISTRICT_POSITIONS
+  for (const lod of [mid, far]) {
+    lod.metadata.gltf.extras = {
+      ...lod.metadata.gltf.extras,
+      districtAnchors: positions.map(position => [...position])
+    }
+  }
   positions.forEach((position, index) => {
     const midLeader = capsule(scene, `leaders:mid:silhouette:${index}`, {
       height: 2.7 + (index % 3) * 0.22,

@@ -28,7 +28,7 @@ describe('parseWorldManifest', () => {
       },
       lods: [
         { distance: 0, node: 'library:lod:near' },
-        { distance: 48, node: 'library:lod:far' }
+        { distance: 112, node: 'library:lod:far' }
       ],
       requiredClips: ['lights-idle'],
       maxTriangles: 28_000,
@@ -168,7 +168,7 @@ describe('loadWorldManifest', () => {
     expect(fetcher).toHaveBeenCalledWith('./lunar-city/v2/world-manifest.v2.json', {
       signal: undefined
     })
-    expect(manifest.models).toHaveLength(11)
+    expect(manifest.models).toHaveLength(15)
   })
 
   it('reports an unsuccessful manifest response without parsing it', async () => {

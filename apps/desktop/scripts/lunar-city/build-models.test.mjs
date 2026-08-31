@@ -32,16 +32,33 @@ const MODEL_IDS = [
 ]
 const SEMANTIC_NODES = {
   archive: ['archive:stacks', 'archive:vault', 'archive:city-identity', 'archive:leader-anchor'],
-  'arts-studio': ['arts-studio:gallery', 'arts-studio:easels', 'arts-studio:palette', 'arts-studio:city-identity', 'arts-studio:leader-anchor'],
+  'arts-studio': [
+    'arts-studio:gallery',
+    'arts-studio:easels',
+    'arts-studio:palette',
+    'arts-studio:city-identity',
+    'arts-studio:leader-anchor'
+  ],
   bus: ['bus:cabin', 'bus:signal', 'bus:wheels'],
   council: ['council:console', 'council:dais', 'council:roost'],
   depot: ['depot:crates', 'depot:stocked-shelves', 'depot:workbench'],
-  'engineering-workshop': ['engineering-workshop:workbenches', 'engineering-workshop:gantry', 'engineering-workshop:gear', 'engineering-workshop:city-identity', 'engineering-workshop:leader-anchor'],
+  'engineering-workshop': [
+    'engineering-workshop:workbenches',
+    'engineering-workshop:gantry',
+    'engineering-workshop:gear',
+    'engineering-workshop:city-identity',
+    'engineering-workshop:leader-anchor'
+  ],
   garden: ['garden:bench', 'garden:cyan-fixture', 'garden:plants'],
   leaders: ['leader:badger', 'leader:bird', 'leader:fox', 'leader:otter', 'leader:owl', 'leader:stag'],
   library: ['library:archive-stacks', 'library:leader-anchor', 'library:violet-orb'],
   'research-lab': ['research-lab:consoles', 'research-lab:specimen', 'research-lab:telescope'],
-  'release-gatehouse': ['release-gatehouse:release-gate', 'release-gatehouse:beacon', 'release-gatehouse:city-identity', 'release-gatehouse:leader-anchor'],
+  'release-gatehouse': [
+    'release-gatehouse:release-gate',
+    'release-gatehouse:beacon',
+    'release-gatehouse:city-identity',
+    'release-gatehouse:leader-anchor'
+  ],
   'review-office': ['review-office:consoles', 'review-office:portal', 'review-office:verifier-dais'],
   terrain: ['terrain:bus-stop', 'terrain:cliffs', 'terrain:walkway:library-research'],
   triage: ['triage:cross', 'triage:door', 'triage:station'],
@@ -646,6 +663,31 @@ test('exports identity-qualified leader states without cross-wired character cha
       `${state} must be an owl-only alias`
     )
   }
+})
+
+test('keeps near leaders aligned with their district anchors across LODs', async () => {
+  const root = (await new NodeIO().read(join(firstRoot, 'models', 'leaders.glb'))).getRoot()
+  const expected = [
+    [-27.5, 5.5, -18],
+    [23, 6.5, -22],
+    [-31, 3.5, 12],
+    [0, 3.5, -1],
+    [27, 2.5, 31],
+    [33, 4.5, 10]
+  ]
+  const nearIds = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag']
+  const round = values => values.map(value => Number(value.toFixed(3)))
+  const nearGroup = root.listNodes().find(node => node.getName() === 'leaders:lod:near')
+
+  for (const [index, id] of nearIds.entries()) {
+    const near = root.listNodes().find(node => node.getName() === `leader:${id}`)
+    assert.deepEqual(round(near.getWorldTranslation()), expected[index], `${id} near anchor drifted`)
+  }
+  for (const lod of ['leaders:lod:mid', 'leaders:lod:far']) {
+    const group = root.listNodes().find(node => node.getName() === lod)
+    assert.deepEqual(group.getExtras().districtAnchors, expected, `${lod} anchor metadata drifted`)
+  }
+  assert.ok(nearGroup, 'missing near leader LOD group')
 })
 
 test('keeps every visible walkway aligned with a semantic navigation link', async () => {
