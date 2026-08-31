@@ -148,6 +148,7 @@ export function createIsolatedLaunchPlan({ binaryPath, debugPort, tempRoot, runI
       HERMES_HOME: hermesHome,
       HERMES_DESKTOP_APP_NAME: `Hermes Lunar City Perf ${safeRunId}`,
       HERMES_DESKTOP_CDP_PORT: String(debugPort),
+      HERMES_LUNAR_CITY_PERF_ACCEPTANCE: '1',
       HERMES_LUNAR_CITY_PERF_NONCE: launchNonce
     },
     paths: { hermesHome, userDataDir, tempRoot }

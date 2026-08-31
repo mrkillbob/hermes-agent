@@ -251,6 +251,7 @@ test('builds an isolated packaged launch without disabling the GPU', () => {
     assert.equal(forbidden in plan.env, false, forbidden)
   }
   assert.equal(plan.env.HERMES_LUNAR_CITY_PERF_NONCE, 'nonce-7')
+  assert.equal(plan.env.HERMES_LUNAR_CITY_PERF_ACCEPTANCE, '1')
   if (previousDevServer === undefined) delete process.env.HERMES_DESKTOP_DEV_SERVER
   else process.env.HERMES_DESKTOP_DEV_SERVER = previousDevServer
   if (previousRunAsNode === undefined) delete process.env.ELECTRON_RUN_AS_NODE
@@ -423,6 +424,8 @@ test('orchestrates injected packaged launcher, CDP, process, renderer, and clock
   )
 
   assert.equal(launches.length, 1)
+  assert.equal(launches[0].env.HERMES_LUNAR_CITY_PERF_NONCE, 'nonce-7')
+  assert.equal(launches[0].env.HERMES_LUNAR_CITY_PERF_ACCEPTANCE, '1')
   assert.deepEqual(phases, ['baseline-shell', 'mounted-city'])
   assert.equal(result.rawProvenance.provenanceVersion, 3)
   assert.deepEqual(result.rawSamples.cpuDeltaPp, [3, 3])

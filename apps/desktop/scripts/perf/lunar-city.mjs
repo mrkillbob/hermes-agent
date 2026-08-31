@@ -544,7 +544,7 @@ function validateRawProvenance(receipt, errors) {
       errors.push('context recovery claim requires final recovered lifecycle with no later context loss or remount')
   }
   if (receipt.scenario === 'disposal') {
-    if (claims.lifecycleState !== 'disposed' || receipt.disposal !== 'disposed')
+    if (claims.lifecycleState !== 'disposed' || receipt.disposal !== 'disposed' || !unchangedMount)
       errors.push('disposal claim requires final disposed raw lifecycle state with no remount')
   }
   if (receipt.scenario === '30-minute-stability') {

@@ -560,9 +560,9 @@ test('re-derives receipt arrays from versioned baseline-shell and mounted-city p
 
   const disposedThenRemounted = structuredClone(rawProvenance)
   disposedThenRemounted.mountedCity.samples.forEach((sample, index) => {
-    sample.rendererMetrics.lifecycleActions.disposals = index < 2 ? 0 : 1
-    sample.rendererMetrics.lifecycleState = index === 2 ? 'disposed' : index > 2 ? 'mounted' : 'mounted'
-    if (index > 2) sample.rendererMetrics.sceneMount = { id: 'scene-2', generation: 2, startedAtMs: 20_000 }
+    sample.rendererMetrics.lifecycleActions.disposals = [0, 1, 1, 2, 2][index]
+    sample.rendererMetrics.lifecycleState = ['mounted', 'disposed', 'mounted', 'disposed', 'disposed'][index]
+    if (index >= 2) sample.rendererMetrics.sceneMount = { id: 'scene-2', generation: 2, startedAtMs: 15_000 }
   })
   const disposed = validateReceipt(
     receipt({
