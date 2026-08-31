@@ -139,3 +139,31 @@ Start from the current clean `HEAD`. Inspect the approved asset and the current 
 - `apps/desktop/e2e/lunar-city.spec.ts` — packaged Electron visual/interaction coverage.
 - `apps/desktop/public/lunar-city/moon-settlement-approved.jpg` — canonical approved artwork.
 - `design-qa.md` — visual QA and source-of-truth record.
+
+## 2026-08-30 reconciliation record
+
+The approved Lunar City baseline was replayed into the linked implementation
+worktree before the planned 3D replacement work. The worktree started at
+`2d682fc76d6bcbf63d5d539e940a21a4fa886f91`; its merge base with the approved
+source tip `55ffea25bab4779cd3998744cae9975a054d2ec1` was
+`a35100ac50b7f0097dc26947e07b055c2137f5fb`.
+
+Replayed source commits, in order:
+
+1. `fd01048446`
+2. `9ba59f07de`
+3. `6cc1cd4276`
+4. `cb77643208`
+5. `d2f915c76c`
+6. `651ba8bba8`
+7. `8dcdaae576`
+8. `aee1ad9ca8`
+9. `55ffea25ba`
+
+The replay completed without conflicts. Its resulting baseline HEAD is
+`6e44f77fc1b531466aa76f04221e0e27fa912e6c`. The current Starmap shell retains
+its existing routing, panel ownership, and memory-graph overlay behavior; the
+replayed change adds only the Lunar City import, initial render branch, return
+callback, approved public artwork, associated tests, and handoff/QA records.
+No sessions, gateway, overlay implementation, or desktop boot behavior was
+manually changed during reconciliation.
