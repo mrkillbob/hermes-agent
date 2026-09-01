@@ -8555,8 +8555,56 @@ _RESPAWN_BLOCKER_RE = re.compile(
 )
 
 _PROVIDER_EGRESS_BLOCK_RE = re.compile(
-    r"LLM\s+egress\s+blocked\s*:\s*([A-Za-z0-9_.-]+)",
+    r"LLM\s+egress\s+blocked\s*:\s*([A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*)",
     re.IGNORECASE,
+)
+# These are the denial codes emitted by the egress firewall.  Supervisor
+# recovery must recognize real policy denials as terminal attention rather
+# than retrying the same unsafe request, but it must not trust arbitrary log
+# text that merely resembles an egress error.
+_KNOWN_PROVIDER_EGRESS_BLOCK_REASONS = frozenset(
+    {
+        "base64_payload",
+        "base64_scan_failed",
+        "exact_secret_detected",
+        "exact_secret_scan_failed",
+        "invalid_codex_reasoning_replay",
+        "invalid_display_path",
+        "invalid_generated_context_key",
+        "invalid_generated_context_segment",
+        "invalid_literal_segment",
+        "invalid_request_key",
+        "invalid_source_grant",
+        "invalid_source_presentation",
+        "invalid_source_segment",
+        "invalid_typed_request_root",
+        "missing_request_identity",
+        "payload_digest_mismatch",
+        "private_absolute_path",
+        "private_path_scan_failed",
+        "policy_digest_mismatch",
+        "receipt_unavailable",
+        "redaction_failed",
+        "sanitized_bytes_exceeded",
+        "sanitized_segment_bytes_exceeded",
+        "secret_detected",
+        "sensitive_path",
+        "serialized_bytes_exceeded",
+        "serialization_failed",
+        "source_bytes_in_literal",
+        "source_bytes_in_sanitized_segment",
+        "source_hash_mismatch",
+        "source_path_not_canonical",
+        "source_policy_unavailable",
+        "source_range_mismatch",
+        "source_segment_grant_mismatch",
+        "source_segment_not_text",
+        "source_unavailable",
+        "static_literal_not_allowed",
+        "token_cap_exceeded",
+        "typed_request_required",
+        "untrusted_provenance",
+    }
 )
 _PROVIDER_UNSUPPORTED_THINKING_RE = re.compile(
     r"(?:does\s+not\s+support\s+thinking|thinking\s+is\s+not\s+supported|unsupported\s+thinking)",
@@ -9502,7 +9550,7 @@ def _error_fingerprint(error_text: str) -> str:
 
 
 def _provider_egress_error_text(task_id: str) -> str | None:
-    """Classify the known provider egress failure before ordinary retry logic."""
+    """Classify a typed firewall denial before ordinary retry logic."""
 
     try:
         log_path = worker_log_path(task_id)
@@ -9513,9 +9561,14 @@ def _provider_egress_error_text(task_id: str) -> str | None:
     except (OSError, ValueError):
         return None
     match = _PROVIDER_EGRESS_BLOCK_RE.search(tail)
-    if match is None or match.group(1).casefold() != "base64_payload":
+    if match is None:
         return None
-    return "provider egress blocked: LLM egress blocked: base64_payload"
+    reasons = tuple(dict.fromkeys(match.group(1).casefold().split(",")))
+    if not reasons or not all(
+        reason in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS for reason in reasons
+    ):
+        return None
+    return f"provider egress blocked: LLM egress blocked: {','.join(reasons)}"
 
 
 def _provider_terminal_error_text(task_id: str) -> tuple[str, str] | None:
@@ -9530,9 +9583,15 @@ def _provider_terminal_error_text(task_id: str) -> tuple[str, str] | None:
     except (OSError, ValueError):
         return None
     match = _PROVIDER_EGRESS_BLOCK_RE.search(tail)
-    if match is not None and match.group(1).casefold() == "base64_payload":
+    if match is not None:
+        reasons = tuple(dict.fromkeys(match.group(1).casefold().split(",")))
+    else:
+        reasons = ()
+    if reasons and all(
+        reason in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS for reason in reasons
+    ):
         return (
-            "provider egress blocked: LLM egress blocked: base64_payload",
+            f"provider egress blocked: LLM egress blocked: {','.join(reasons)}",
             "provider_egress_blocked",
         )
     if _PROVIDER_UNSUPPORTED_THINKING_RE.search(tail):
