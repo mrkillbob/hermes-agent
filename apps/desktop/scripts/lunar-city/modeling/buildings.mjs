@@ -840,6 +840,27 @@ function secondaryDistrictFrame(scene, id, { accent, depth, height, width }) {
     position: [0, height * 0.36, -depth / 2],
     width: width
   })
+  // Shared facade construction kit: shallow inset windows and a lintel break
+  // up secondary shells at overview distance without changing their footprint
+  // or consuming new materials.
+  for (let panel = 0; panel < 3; panel += 1) {
+    box(scene, `${id}:back-window:${panel}`, {
+      depth: 0.12,
+      height: height * 0.18,
+      material: accent,
+      parent: shell,
+      position: [-width * 0.3 + panel * width * 0.3, height * 0.46, -depth / 2 - 0.38],
+      width: width * 0.16
+    })
+  }
+  box(scene, `${id}:back-lintel`, {
+    depth: 0.24,
+    height: 0.3,
+    material: 'bone-metal',
+    parent: shell,
+    position: [0, height * 0.66, -depth / 2 - 0.42],
+    width: width * 0.76
+  })
   for (const side of [-1, 1]) {
     box(scene, `${id}:side-wall:${side}`, {
       depth: depth * 0.7,
