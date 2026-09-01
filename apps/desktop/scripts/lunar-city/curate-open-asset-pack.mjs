@@ -5,14 +5,15 @@ import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 
-const [sourceArg, destinationArg = "/tmp/lunar-city-open-asset-curated"] = process.argv.slice(2);
+const [sourceArg, destinationArg = "/tmp/lunar-city-open-asset-curated", additionalRootArg] = process.argv.slice(2);
 if (!sourceArg) {
-  console.error("Usage: node curate-open-asset-pack.mjs <download-root> [destination]");
+  console.error("Usage: node curate-open-asset-pack.mjs <download-root> [destination] [additional-root]");
   process.exit(2);
 }
 
 const source = path.resolve(sourceArg);
 const destination = path.resolve(destinationArg);
+const additionalRoot = additionalRootArg ? path.resolve(additionalRootArg) : null;
 const allowedDirectories = [
   "kenney_space-station-kit", "kenney_modular-space-kit_1", "kenney_space-kit",
   "kenney_city-kit-roads", "kenney_city-kit-industrial_2", "kenney_factory-kit_3",
@@ -48,6 +49,20 @@ for (const name of allowedDirectories) {
     // A missing optional kit is fine; the receipt records only selected files.
   }
 }
+// Optional focused source (for example Kenney's Starter Kit City Builder).
+// Keep it additive and deterministic so existing large-pack curation remains
+// backwards compatible while preserving the source root in the receipt.
+if (additionalRoot) {
+  try {
+    for (const file of await walk(additionalRoot)) {
+      const stem = path.basename(file, path.extname(file));
+      const score = 100 + (keywords.test(stem) ? 10 : 0) + (path.extname(file).toLowerCase() === ".glb" ? 3 : 0);
+      candidates.push({ file, score, source: path.join(path.basename(additionalRoot), path.relative(additionalRoot, file)) });
+    }
+  } catch {
+    // An optional focused kit is allowed to be absent.
+  }
+}
 candidates.sort((a, b) => b.score - a.score || a.source.localeCompare(b.source));
 const selected = candidates.slice(0, maxFiles);
 await mkdir(destination, { recursive: true });
@@ -59,5 +74,5 @@ for (const [index, item] of selected.entries()) {
   const digest = createHash("sha256").update(await readFile(target)).digest("hex");
   receipt.push({ source: item.source, stagedFile: safeName, sha256: digest, licenseReviewRequired: true });
 }
-await writeFile(path.join(destination, "curation-receipt.json"), JSON.stringify({ source, selected: receipt.length, maxFiles, receipt }, null, 2) + "\n");
-console.log(JSON.stringify({ destination, selected: receipt.length, availableCandidates: candidates.length }, null, 2));
+await writeFile(path.join(destination, "curation-receipt.json"), JSON.stringify({ source, additionalRoot, selected: receipt.length, maxFiles, receipt }, null, 2) + "\n");
+console.log(JSON.stringify({ destination, selected: receipt.length, availableCandidates: candidates.length, additionalRoot }, null, 2));

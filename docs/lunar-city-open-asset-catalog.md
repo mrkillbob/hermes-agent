@@ -21,7 +21,8 @@ budgets, metadata, and provenance are recorded.
 ## Kenney Starter Kit City Builder review
 
 The [Starter-Kit-City-Builder repository](https://github.com/KenneyNL/Starter-Kit-City-Builder)
-is a strong diagnostic and optional source. Its code is MIT-licensed and its
+(staged at source revision `4535092b740b378b700efd9df9e27a631815b84a`) is a
+strong diagnostic and optional source. Its code is MIT-licensed and its
 included models, sprites, and sounds are CC0. It is a Godot 4.6 template with
 smooth camera movement, middle-mouse rotation, zoom, grid placement/removal,
 dynamic MeshLibrary creation, and save/load behavior.
@@ -102,8 +103,20 @@ node apps/desktop/scripts/lunar-city/curate-open-asset-pack.mjs \
 
 The curator selects up to 220 high-value GLB/GLTF/FBX/OBJ files from the space,
 city, factory, nature, fantasy, and Quaternius kits and writes
-`curation-receipt.json`. Every selected file remains marked for license review
-before distribution.
+`curation-receipt.json`. An optional third argument adds a focused kit (such as
+the Starter Kit City Builder) with a priority score while preserving its source
+root in the receipt:
+
+```bash
+node apps/desktop/scripts/lunar-city/curate-open-asset-pack.mjs \
+  "/Users/mikedemott/Downloads/Free OpenSource Game Assets" \
+  /tmp/lunar-city-open-asset-curated \
+  /tmp/kenney-starter-kit-city-builder/models
+```
+
+Every selected file remains marked for license review before distribution. The
+Starter Kit contributes its 15 CC0 GLBs (roads, pavements, small buildings,
+garage, lightposts, and grass) as a separately traceable benchmark subset.
 
 ## Blender staging bridge
 
