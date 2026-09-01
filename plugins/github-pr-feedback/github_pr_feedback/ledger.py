@@ -349,6 +349,13 @@ class FeedbackLedger:
             )
             """)
         self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS agent_label_selection_cursors (
+                repository TEXT PRIMARY KEY,
+                cursor INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS worktree_pool_slots (
                 slot_id INTEGER PRIMARY KEY,
                 status TEXT NOT NULL CHECK (status IN ('leased', 'free')),
@@ -768,6 +775,37 @@ class FeedbackLedger:
         with self._transaction():
             self._connection.execute(
                 "INSERT INTO local_ci_selection_cursors(repository, cursor, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(repository) DO UPDATE SET cursor = excluded.cursor, "
+                "updated_at = excluded.updated_at",
+                (repository, next_cursor, updated.isoformat()),
+            )
+
+    def agent_label_selection_cursor(self, repository: str) -> int:
+        """Return the durable offset for the advisory label catalogue."""
+
+        row = self._connection.execute(
+            "SELECT cursor FROM agent_label_selection_cursors WHERE repository = ?",
+            (repository,),
+        ).fetchone()
+        return max(0, int(row[0])) if row is not None else 0
+
+    def advance_agent_label_selection_cursor(
+        self,
+        repository: str,
+        *,
+        cursor: int,
+        candidate_count: int,
+        updated_at: datetime,
+    ) -> None:
+        """Persist progress through the bounded advisory-label catalogue."""
+
+        if candidate_count < 1:
+            raise ValueError("candidate_count must be positive")
+        updated = _aware_utc(updated_at, "updated_at")
+        next_cursor = int(cursor) % candidate_count
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO agent_label_selection_cursors(repository, cursor, updated_at) "
                 "VALUES (?, ?, ?) ON CONFLICT(repository) DO UPDATE SET cursor = excluded.cursor, "
                 "updated_at = excluded.updated_at",
                 (repository, next_cursor, updated.isoformat()),

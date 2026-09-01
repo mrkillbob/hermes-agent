@@ -612,6 +612,7 @@ def _scan(ctx: Any) -> int:
         merge_payload: dict[str, object] | None = None
         repair_payload: dict[str, object] | None = None
         maintenance_payload: dict[str, object] | None = None
+        label_payload: dict[str, object] | None = None
         try:
             try:
                 PooledLocalGitRepository(
@@ -621,7 +622,8 @@ def _scan(ctx: Any) -> int:
                 # never allowed to block the scan it runs ahead of; a slot left
                 # leased simply falls back to its lease timeout.
                 pass
-            result = _controller(policy, ledger).scan()
+            controller = _controller(policy, ledger)
+            result = controller.scan(apply_labels=False)
             # Required exact-head CI is a strict oldest-first merge train. Do
             # not fan out repair, merge, and release reads while any admitted
             # head still lacks its current passing receipt; doing so can spend
@@ -640,6 +642,7 @@ def _scan(ctx: Any) -> int:
                 merge_payload = _run_merge_scan(policy, ledger)
             if policy.release_maintenance is not None and not required_ci_backlog:
                 maintenance_payload = _run_release_maintenance_scan(policy, ledger)
+            label_payload = controller.apply_agent_labels()
         finally:
             ledger.close()
     payload = _scan_payload(result)
@@ -651,6 +654,10 @@ def _scan(ctx: Any) -> int:
         payload["repair"] = repair_payload
     if maintenance_payload is not None:
         payload["release_maintenance"] = maintenance_payload
+    if label_payload is not None and (
+        label_payload["updated"] or label_payload["skipped"]
+    ):
+        payload["labels"] = label_payload
     print(json.dumps(payload, sort_keys=True))
     return (
         1

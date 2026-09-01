@@ -95,6 +95,25 @@ def test_request_gate_shares_secondary_limit_cooldown_across_instances(tmp_path)
     assert sleeps == [30.0]
 
 
+def test_request_gate_fails_fast_when_cooldown_exceeds_wait_budget(tmp_path) -> None:
+    path = tmp_path / "github-request-gate.json"
+    path.write_text('{"cooldown_until": 1945.0}\n', encoding="utf-8")
+    sleeps: list[float] = []
+
+    with pytest.raises(GitHubClientError) as raised:
+        with GitHubRequestGate(
+            path,
+            sleeper=sleeps.append,
+            clock=lambda: 100.0,
+            max_wait_seconds=30.0,
+        ):
+            pass
+
+    assert raised.value.code == "rate_limited"
+    assert "cooldown" in str(raised.value)
+    assert sleeps == []
+
+
 def test_request_gate_spaces_shared_requests_at_a_conservative_rate(tmp_path) -> None:
     now = [100.0]
     sleeps: list[float] = []

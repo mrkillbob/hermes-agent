@@ -79,6 +79,7 @@ class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
         *,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.time,
+        max_wait_seconds: float = 30.0,
         # Keep the shared account below GitHub's primary hourly budget even
         # when several workers and profiles are scanning continuously.
         min_interval_seconds: float = 1.0,
@@ -88,6 +89,7 @@ class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
         self._lock_path = self._path.with_name(self._path.name + ".lock")
         self._sleeper = sleeper
         self._clock = clock
+        self._max_wait = max(0.0, min(float(max_wait_seconds), 900.0))
         self._min_interval = max(0.0, float(min_interval_seconds))
         self._handle: Any = None
         self._lock_handle: Any = None
@@ -110,7 +112,14 @@ class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
                 self._state.get("cooldown_until", 0.0),
             )
             if ready_at > now:
-                self._sleeper(ready_at - now)
+                wait_seconds = ready_at - now
+                if wait_seconds > self._max_wait:
+                    raise GitHubClientError(
+                        "GitHub request cooldown active; retry later "
+                        f"(wait={wait_seconds:.1f}s)",
+                        code="rate_limited",
+                    )
+                self._sleeper(wait_seconds)
             return self
         except BaseException:
             if self._handle is not None:

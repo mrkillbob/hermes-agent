@@ -306,6 +306,45 @@ def test_scan_applies_one_exact_branch_label_and_confirms_readback(
     assert github.current.labels == ("codex",)
 
 
+def test_scan_rotates_label_catalogue_across_bounded_scans(tmp_path: Path) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        agent_labels=True,
+    )
+    pull_requests = tuple(
+        PullRequest(
+            number,
+            "OPEN",
+            "acme/widgets",
+            "acme/widgets",
+            "owner",
+            f"codex/fix-{number}",
+            chr(96 + number) * 40,
+            updated_at=datetime(2026, 8, 26, 8, 0, tzinfo=UTC),
+        )
+        for number in (1, 2, 3)
+    )
+    github = FakeGitHub(pull_requests[0], (), pull_requests=pull_requests)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = ScanController(
+        policy,
+        ledger,
+        github,
+        RecordingKanban(),
+        RecordingLocalGit(),
+    )
+
+    controller.scan()
+    github.pull_requests = tuple(github.current_by_number.values())
+    controller.scan()
+
+    labeled_numbers = [number for _repository, number, _labels in github.label_calls]
+    assert len(labeled_numbers) == 3
+    assert sorted(labeled_numbers) == [1, 2, 3]
+
+
 def test_scan_stops_label_attempts_after_a_github_label_read_failure(
     tmp_path: Path,
 ) -> None:

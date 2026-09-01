@@ -184,9 +184,13 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
             return ScanResult(0, {"github_state_unavailable": 1}, degraded=True)
 
     class Feedback:
-        def scan(self) -> ScanResult:
+        def scan(self, *, apply_labels: bool) -> ScanResult:
+            assert apply_labels is False
             order.append("feedback")
             return ScanResult(0, {})
+
+        def apply_agent_labels(self) -> dict[str, object]:
+            return {"status": "ok", "updated": 0, "skipped": {}}
 
     monkeypatch.setattr("github_pr_feedback.cli._load_policy_from_context", lambda _ctx: Policy())
     monkeypatch.setattr("github_pr_feedback.cli._exclusive_scan_lock", lambda: Lock())
@@ -230,9 +234,14 @@ def _run_scan_with_primary_result(
         release_maintenance = object()
 
     class Primary:
-        def scan(self):
+        def scan(self, *, apply_labels: bool):
+            assert apply_labels is False
             order.append("primary")
             return primary_result
+
+        def apply_agent_labels(self):
+            order.append("labels")
+            return {"status": "ok", "updated": 0, "skipped": {}}
 
     class Repair:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -290,7 +299,7 @@ def test_scan_defers_secondary_fanout_for_required_ci_backlog_below_read_cap(
     )
 
     assert returncode == 0
-    assert order == ["primary"]
+    assert order == ["primary", "labels"]
     assert payload["required_local_ci_backlog"] == 2
     assert payload["deferred"] == ["repair", "merge", "release_maintenance"]
 
@@ -311,7 +320,7 @@ def test_scan_does_not_defer_secondary_fanout_for_read_cap_without_ci_backlog(
     )
 
     assert returncode == 0
-    assert order == ["primary", "repair", "merge", "release"]
+    assert order == ["primary", "repair", "merge", "release", "labels"]
     assert "required_local_ci_backlog" not in payload
     assert "deferred" not in payload
 
@@ -1551,8 +1560,12 @@ def test_scan_and_retry_exit_nonzero_and_report_degraded_on_incomplete_work(
     from github_pr_feedback.controller import ScanResult
 
     class DegradedController:
-        def scan(self) -> ScanResult:
+        def scan(self, *, apply_labels: bool) -> ScanResult:
+            assert apply_labels is False
             return ScanResult(0, {"github_error": 1}, degraded=True)
+
+        def apply_agent_labels(self):
+            return {"status": "ok", "updated": 0, "skipped": {}}
 
         def retry_failed(self, _receipt: FeedbackReceipt) -> ScanResult:
             return ScanResult(0, {"dispatch_failed": 1}, degraded=True)

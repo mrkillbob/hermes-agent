@@ -911,13 +911,15 @@ class ScanController:
             raise ValueError("claim_lease must be positive")
         self._clock = clock or (lambda: datetime.now(UTC))
         self._claim_lease = claim_lease
+        self._label_batches: list[tuple[str, RepositoryTarget, tuple[PullRequest, ...]]] = []
 
-    def scan(self) -> ScanResult:
+    def scan(self, *, apply_labels: bool = True) -> ScanResult:
         skipped: Counter[str] = Counter()
         created = 0
         attempted = 0
         required_local_ci_backlog = 0
         local_ci_catalogue_deferred = 0
+        self._label_batches = []
         if not self._policy.enabled or self._policy.not_before is None:
             return _scan_result(
                 created,
@@ -960,33 +962,7 @@ class ScanController:
                     reverse=True,
                 )
             )
-            label_updates = 0
-            label_attempts = 0
-            label_policy = self._policy.agent_labels
-            if label_policy is not None and label_policy.enabled:
-                for pull_request in pull_requests:
-                    desired_label = label_policy.label_for_branch(
-                        pull_request.head_ref_name
-                    )
-                    if desired_label is None or desired_label in pull_request.labels:
-                        continue
-                    if label_attempts >= label_policy.max_updates_per_scan:
-                        skipped["agent_label_update_cap"] += 1
-                        break
-                    label_attempts += 1
-                    error = self._apply_agent_label(
-                        repository,
-                        target,
-                        pull_request,
-                        desired_label,
-                        label_policy,
-                    )
-                    if error is None:
-                        label_updates += 1
-                    else:
-                        skipped[error] += 1
-                        if error == "agent_label_error":
-                            break
+            self._label_batches.append((repository, target, pull_requests))
             required_local_ci_backlog += _required_local_ci_backlog_count(
                 self._policy,
                 self._ledger,
@@ -1233,12 +1209,74 @@ class ScanController:
                             local_ci_dispatched += 1
                         else:
                             skipped[audit_error] += 1
+        if apply_labels:
+            skipped.update(self.apply_agent_labels()["skipped"])
         return _scan_result(
             created,
             skipped,
             required_local_ci_backlog=required_local_ci_backlog,
             local_ci_catalogue_deferred=local_ci_catalogue_deferred,
         )
+
+    def apply_agent_labels(self) -> dict[str, object]:
+        """Run bounded label maintenance after the critical scan lanes.
+
+        Labels are advisory metadata. Keeping them in a post-reconciliation
+        side lane means a shared GitHub cooldown or label permission failure
+        cannot prevent local-CI admission or merge-maintainer evaluation.
+        """
+        label_policy = self._policy.agent_labels
+        if label_policy is None or not label_policy.enabled:
+            return {"status": "ok", "updated": 0, "skipped": {}}
+        skipped: Counter[str] = Counter()
+        updated = 0
+        for repository, target, pull_requests in self._label_batches:
+            candidates: list[tuple[PullRequest, str]] = []
+            for pull_request in pull_requests:
+                desired_label = label_policy.label_for_branch(
+                    pull_request.head_ref_name
+                )
+                if desired_label is None or desired_label in pull_request.labels:
+                    continue
+                candidates.append((pull_request, desired_label))
+            if not candidates:
+                continue
+            limit = label_policy.max_updates_per_scan
+            cursor = self._ledger.agent_label_selection_cursor(repository) % len(candidates)
+            rotated = candidates[cursor:] + candidates[:cursor]
+            selected = rotated[:limit]
+            if len(candidates) > limit:
+                skipped["agent_label_update_cap"] += len(candidates) - len(selected)
+            processed = 0
+            for pull_request, desired_label in selected:
+                processed += 1
+                error = self._apply_agent_label(
+                    repository,
+                    target,
+                    pull_request,
+                    desired_label,
+                    label_policy,
+                )
+                if error is None:
+                    updated += 1
+                else:
+                    skipped[error] += 1
+                    if error in {
+                        "agent_label_error",
+                        "agent_label_github_error",
+                        "agent_label_rate_limited",
+                        "agent_label_permission_denied",
+                        "agent_label_authentication",
+                    }:
+                        break
+            if processed:
+                self._ledger.advance_agent_label_selection_cursor(
+                    repository,
+                    cursor=cursor + processed,
+                    candidate_count=len(candidates),
+                    updated_at=self._clock(),
+                )
+        return {"status": "ok", "updated": updated, "skipped": dict(skipped)}
 
     def _apply_agent_label(
         self,
