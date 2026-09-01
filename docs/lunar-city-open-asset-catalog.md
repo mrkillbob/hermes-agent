@@ -18,6 +18,35 @@ budgets, metadata, and provenance are recorded.
 | [Quaternius Stylized Nature](https://quaternius.com/) | CC0 | Rocks, plants, crystals, ground dressing | Safe candidate for optional pack or benchmark |
 | [Poly Haven](https://polyhaven.com/license) | CC0 | Rocks, HDRIs, surfaces, lighting/material tests | Safe candidate; preserve source attribution link |
 
+## Kenney Starter Kit City Builder review
+
+The [Starter-Kit-City-Builder repository](https://github.com/KenneyNL/Starter-Kit-City-Builder)
+is a strong diagnostic and optional source. Its code is MIT-licensed and its
+included models, sprites, and sounds are CC0. It is a Godot 4.6 template with
+smooth camera movement, middle-mouse rotation, zoom, grid placement/removal,
+dynamic MeshLibrary creation, and save/load behavior.
+
+Useful pieces for Lunar City:
+
+- `models/road-*`, `pavement*`, and `road-straight-lightposts.glb` can improve
+  low-cost route dressing and repeatable modular paths.
+- `models/grass*.glb` can add a second, non-emissive nature layer around the
+  garden and crater rims.
+- `models/building-small-*.glb` and `building-garage.glb` are useful scale and
+  facade-rhythm references, but should not replace Lunar City landmarks.
+- `scripts/view.gd` is a clear diagnostic reference for our existing camera
+  contract: smoothed pan/rotation and a bounded 15–80 m zoom range.
+- `scripts/builder.gd` demonstrates a lightweight grid-build interaction that
+  could inform a future optional construction mode, but it is Godot-specific
+  and should not be copied into the Electron/Babylon runtime.
+
+Recommended disposition: import the CC0 GLBs through the existing quarantine
+receipt and Blender staging bridge as a separately labeled `KENNEY_CITY_BUILDER`
+collection. Use the visual kit for roads, props, and scale studies first; keep
+the current Lunar City identity, worker metadata, open-front building contract,
+and asset-neutral distribution boundary intact. No files from this repository
+are bundled by this review.
+
 ## Diagnostic-only or separately packaged sources
 
 - [0 A.D.](https://play0ad.com/) art is CC-BY-SA 3.0 while code is GPLv2.
