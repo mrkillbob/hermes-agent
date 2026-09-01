@@ -31,11 +31,11 @@ Both reports have a `webgl-preview.png` (real WebGL-lit screenshot) for
 visual comparison. **Read the second report in full before continuing** —
 it documents a real trap (below) that cost a full iteration to find.
 
-The remaining **three** specialist buildings (Engineering Workshop, Release
-Gatehouse, and Archive) still need a targeted enclosure or distinctive-massing
-review. Triage was audited below, Garden now has a lightweight rear pavilion,
-and Arts Studio now has a stepped clerestory that strengthens its studio
-silhouette without blocking the open work area.
+All 11 specialist buildings now satisfy the generated enclosure, open-front,
+budget, and unique-silhouette contracts. Engineering Workshop, Release
+Gatehouse, and Archive use the shared secondary-district shell plus their
+role-specific massing; no additional wall pass is justified without a visual
+regression showing a concrete gap.
 
 ## Approved external benchmark policy
 

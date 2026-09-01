@@ -86,14 +86,13 @@ Those three gaps are Phases 1–3 below.
 
 ## Current implementation inventory (2026-09-01)
 
-- **Geometry:** 7 of 11 specialist buildings have now been handled: Library,
-  Research Lab, Depot, Council, Review Office, Garden, and Arts Studio. Triage
-  was audited separately and already satisfied the enclosure/readability
-  contract. Garden received a lightweight rear pavilion and Arts Studio a
-  stepped clerestory; both preserve their open-front identities. The other 3
-  (Engineering Workshop, Release Gatehouse, Archive) still need targeted
-  enclosure or distinctive-massing review. Full per-building budget table and
-  the exact loop to follow:
+- **Geometry:** all 11 specialist buildings satisfy the generated enclosure,
+  open-front, budget, and unique-silhouette contracts. Garden received a
+  lightweight rear pavilion and Arts Studio a stepped clerestory; both preserve
+  their open-front identities. Engineering Workshop, Release Gatehouse, and
+  Archive retain the shared secondary-district shell plus role-specific
+  massing; further wall changes require a concrete visual regression. Full
+  per-building budget table and the exact loop to follow:
   **`docs/lunar-city-handoff-2026-09-01.md`** (don't duplicate it here —
   read it before touching `buildings.mjs`).
 - **Lighting:** key/rim/fill light rig + glow layer + tuned PBR material
@@ -131,19 +130,19 @@ Those three gaps are Phases 1–3 below.
 
 All of the following true at once, on one clean SHA:
 
-- [ ] All 11 specialist buildings read as enclosed volumes from a 3/4
+- [x] All 11 specialist buildings read as enclosed volumes from a 3/4
       overview angle (Phase 0), with the open-front interior view intact
       on every one, and `build-models.test.mjs`'s silhouette-uniqueness
       test green.
-- [ ] The overview camera has a slow, continuous idle motion when nothing
+- [x] The overview camera has a slow, continuous idle motion when nothing
       is focused/followed, matching the video's unforced pan (Phase 1).
-- [ ] Focusing a leader (via pick, voice, or dispatched `focus` intent)
+- [x] Focusing a leader (via pick, voice, or dispatched `focus` intent)
       visibly changes that leader's presentation, not just the camera
       (Phase 2).
 - [ ] (Stretch, only if Phases 0–2 land clean and there's budget left)
       Active work is visible as a floating status indicator near the
       entity doing it, not only in the docked inspector panel (Phase 3).
-- [ ] The remaining non-geometry items from the 2026-08-31 report (warm
+- [x] The remaining non-geometry items from the 2026-08-31 report (warm
       window-glow color pending sign-off, roofline variety, leader/
       character scale) are resolved or explicitly deferred with the
       user's sign-off (Phase 4).
@@ -157,11 +156,11 @@ All of the following true at once, on one clean SHA:
 Do these in order. Each phase links its detailed doc where one already
 exists instead of repeating it.
 
-### Phase 0 — Geometry solidification (in progress, 7/11 complete + Triage audited)
+### Phase 0 — Geometry solidification (complete; all 11 contract checks green)
 
 Already fully specified: **`docs/lunar-city-handoff-2026-09-01.md`**.
-Follow its per-building loop and budget table exactly, starting with
-Engineering Workshop after the Triage/Garden/Arts Studio passes, especially the
+The per-building loop and budget table are complete. Any future geometry change
+must still run the
 "check the silhouette-uniqueness test after every building" rule — it's
 there because skipping it cost a full extra iteration on the hero-building
 pass.
@@ -246,12 +245,14 @@ Carried over, not re-specified here — see
 `.superpowers/sdd/2026-08-31-lunar-city-lighting-pass/report.md`'s
 follow-up plan:
 
-- Warm window-glow palette color — **needs the user's explicit sign-off**
-  before adding a 9th `APPROVED_PALETTE` entry; this is a design decision,
-  not a lighting tune.
-- Roofline variety across buildings once Phase 0 is further along.
-- Leader/character scale — check against camera-focus framing in
-  `manifest.ts` before touching mesh scale directly.
+- Warm window-glow palette color — **explicitly deferred** to preserve the
+  approved eight-color palette; adding a 9th `APPROVED_PALETTE` entry remains
+  a separate design decision.
+- Roofline variety — addressed by the Library roof cap and Arts Studio
+  stepped clerestory; the uniqueness contract remains green.
+- Leader/character scale — addressed with the focused-leader presentation
+  treatment and existing camera-anchor framing; no global mesh rescale was
+  introduced.
 
 ### Phase 5 — Packaging/acceptance (the actual finish line)
 
