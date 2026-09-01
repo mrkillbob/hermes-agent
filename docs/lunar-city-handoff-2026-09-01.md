@@ -54,6 +54,33 @@ compare it to `render-turntable.mjs`, and remove the benchmark copy before
 shipping. Full rationale is in
 `docs/lunar-city-strategy-game-diagnostic.md`.
 
+## Asset-neutral distribution contract
+
+The renderer is intended to be distributable without Lunar City's generated
+art bundle. `createLunarCityWorld(..., manifestUrl)` resolves every model and
+navigation URI relative to the supplied manifest URL, so a downstream
+integrator can provide a compatible manifest and its own licensed GLBs without
+changing the renderer or copying our `public/lunar-city/v2/models/` files.
+
+The handoff contract for that mode is:
+
+1. Ship the renderer, manifest TypeScript schema, palette/material vocabulary,
+   node/LOD metadata contract, and navigation contract.
+2. Accept a host-provided manifest URL at the integration boundary; do not
+   add a new non-secret `HERMES_*` environment variable for this setting.
+3. Require the host manifest to pass `assertWorldManifestRuntimeAssets` and
+   the generated-asset validator before loading it.
+4. Keep benchmark or customer assets outside this repository and record their
+   URL, license, hashes, budgets, required nodes, and LODs in the host's own
+   asset receipt.
+5. Treat the current generated GLBs as development/reference fixtures. A
+   release aimed at Nous Research can omit them and still provide the same
+   camera, identity, leader-dialogue, navigation, and quality-governance
+   runtime when a host supplies compatible assets.
+
+This preserves our visual IP boundary while making the game engine useful to
+other Hermes deployments with their own art direction.
+
 ### Triage audit (2026-09-01)
 
 The existing Triage source already contains a continuous back wall, two side
