@@ -1,5 +1,6 @@
 .DS_Store
 /venv/
+/venv
 /venv.old/
 /venv.stale.runtime-*/
 /bin/
@@ -140,6 +141,7 @@ models-dev-upstream/
 .codex/
 .cursor/
 .gemini/
+.serena/
 .zed/
 .mcp.json
 opencode.json

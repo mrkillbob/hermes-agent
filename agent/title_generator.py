@@ -19,6 +19,7 @@ same ``custom > ai > fallback`` precedence in its session importer.
 
 import json
 import logging
+import os
 import re
 import threading
 from typing import Any, Callable, Optional
@@ -720,6 +721,14 @@ def maybe_auto_title(
     carries real user intent (machine-authored compaction handoffs are skipped).
     """
     if not session_db or not session_id or not user_message:
+        return
+
+    # Kanban runs are dispatcher-owned, hidden worker transcripts whose
+    # durable name is already the task id.  Spending an auxiliary model call
+    # to rename them adds startup contention to every board worker and can
+    # starve the worker's main inference on local providers.
+    if os.environ.get("HERMES_SESSION_SOURCE", "").strip().lower() == "kanban":
+        logger.debug("Auto-title skipped for hidden Kanban worker session")
         return
 
     # Count the real questions behind us to detect the opening turn.

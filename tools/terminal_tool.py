@@ -1869,6 +1869,9 @@ def _get_env_config() -> Dict[str, Any]:
         "docker_env": docker_env,
         "docker_run_as_host_user": os.getenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false").lower() in {"true", "1", "yes"},
         "docker_network": os.getenv("TERMINAL_DOCKER_NETWORK", "true").lower() in {"true", "1", "yes"},
+        "docker_isolate_host_data": os.getenv(
+            "TERMINAL_DOCKER_ISOLATE_HOST_DATA", "false"
+        ).lower() in {"true", "1", "yes"},
         "docker_extra_args": docker_extra_args,
         "docker_shm_size": docker_shm_size,
         # Cross-process container reuse (issue #20561).  The docs claim
@@ -1939,6 +1942,7 @@ def _container_config_from_config(config: Dict[str, Any]) -> dict:
         "docker_extra_args": config.get("docker_extra_args", []),
         "docker_shm_size": config.get("docker_shm_size", "1g"),
         "docker_network": config.get("docker_network", True),
+        "docker_isolate_host_data": config.get("docker_isolate_host_data", False),
         "docker_persist_across_processes": config.get("docker_persist_across_processes", True),
         "docker_shared_container_key": config.get("docker_shared_container_key", ""),
         "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
@@ -1977,6 +1981,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     docker_env = cc.get("docker_env", {})
     docker_extra_args = cc.get("docker_extra_args", [])
     docker_network = cc.get("docker_network", True)
+    docker_isolate_host_data = cc.get("docker_isolate_host_data", False)
 
     if env_type == "local":
         return _LocalEnvironment(cwd=cwd, timeout=timeout)
@@ -2011,6 +2016,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             env=docker_env,
             run_as_host_user=cc.get("docker_run_as_host_user", False),
             network=docker_network,
+            isolate_host_data=docker_isolate_host_data,
             extra_args=docker_extra_args,
             persist_across_processes=(
                 False if session_scoped
@@ -2800,8 +2806,24 @@ def _resolve_command_cwd(
     sanitizers (#50636, #54447); this is the per-command sibling site.
     """
     if workdir:
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        worker_cwd = resolve_kanban_worker_cwd(workdir)
+        if worker_cwd is not None:
+            # A model commonly sends ``workdir="."``. Passing that relative
+            # value through lets a stale profile-owned LocalEnvironment
+            # interpret it against the stable checkout instead of the
+            # dispatcher-owned task worktree. Resolve it to an absolute path
+            # while the worker process is still anchored in its workspace.
+            return os.path.abspath(os.path.expanduser(worker_cwd))
         return workdir
     recorded = get_session_cwd(session_key)
+    if env_type not in _CONTAINER_BACKENDS:
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        worker_cwd = resolve_kanban_worker_cwd(recorded)
+        if worker_cwd is not None:
+            return worker_cwd
     if (
         recorded
         and _is_container_backend(env_type)
@@ -4125,7 +4147,7 @@ TERMINAL_SCHEMA = {
             },
             "timeout": {
                 "type": "integer",
-                "description": f"Max seconds to wait (default: 180, foreground max: {FOREGROUND_MAX_TIMEOUT}). Returns INSTANTLY when command finishes — set high for long tasks, you won't wait unnecessarily. Foreground timeout above {FOREGROUND_MAX_TIMEOUT}s is rejected; use background=true for longer commands.",
+                "description": "Max seconds to wait (default: 180; bounded by the configured foreground maximum). Returns INSTANTLY when command finishes — set high for long tasks, you won't wait unnecessarily. A value above the configured foreground maximum is rejected; use background=true for longer commands.",
                 "minimum": 1
             },
             "workdir": {
@@ -4164,6 +4186,29 @@ def _handle_terminal(args, **kw):
             "terminal received a 'code' parameter, but it requires a shell "
             "command in 'command'. Use execute_code(code=...) for Python; "
             "for shell, retry as terminal(command=...)."
+        )
+    if "command" not in args:
+        known_parameters = {
+            "background",
+            "timeout",
+            "workdir",
+            "pty",
+            "notify",
+            "notify_on_complete",
+            "watch_patterns",
+        }
+        unexpected = sorted(set(args) - known_parameters)
+        if unexpected:
+            parameter = unexpected[0]
+            return tool_error(
+                f"terminal received an unrecognized '{parameter}' parameter, "
+                "but it requires a shell command string in 'command'. Do not "
+                "pass a command category or token list; retry as "
+                'terminal(command="...").'
+            )
+        return tool_error(
+            "terminal requires a shell command string in 'command'. Retry as "
+            'terminal(command="...").'
         )
     # `notify` is the advertised interface: true → notify_on_complete,
     # ['pat', ...] → watch_patterns. The legacy args remain accepted

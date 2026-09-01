@@ -1028,11 +1028,25 @@ class ResponsesApiTransport(ProviderTransport):
         Normalizes input items, strips unsupported fields, validates structure.
         ``sanitize_harmony_tokens`` is enabled only for the ChatGPT Codex
         backend, which rejects literal reserved Harmony wire tokens in text.
+
+        Hermes' source-provenance sidecar is internal request state. Carry it
+        around public Codex validation so the governed physical-call boundary
+        can consume it; it must never be interpreted as an SDK field.
         """
         from agent.codex_responses_adapter import _preflight_codex_api_kwargs
 
+        provenance_missing = object()
+        provenance_sidecar = provenance_missing
+        public_kwargs = api_kwargs
+        if isinstance(api_kwargs, dict) and "_hermes_source_provenance" in api_kwargs:
+            provenance_sidecar = api_kwargs["_hermes_source_provenance"]
+            public_kwargs = {
+                key: value
+                for key, value in api_kwargs.items()
+                if key != "_hermes_source_provenance"
+            }
         normalized = _preflight_codex_api_kwargs(
-            api_kwargs,
+            public_kwargs,
             allow_stream=allow_stream,
             is_github_responses=is_github_responses,
             sanitize_harmony_tokens=sanitize_harmony_tokens,
@@ -1050,6 +1064,8 @@ class ResponsesApiTransport(ProviderTransport):
                 extra_body["prompt_cache_key"] = bounded
             else:
                 extra_body.pop("prompt_cache_key", None)
+        if provenance_sidecar is not provenance_missing:
+            normalized["_hermes_source_provenance"] = provenance_sidecar
         return normalized
 
     def map_finish_reason(self, raw_reason: str) -> str:

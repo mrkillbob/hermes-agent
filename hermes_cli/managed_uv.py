@@ -1548,5 +1548,5 @@ def _install_uv_windows(env: dict[str, str]) -> None:
     )
 
 
-def rebuild_venv(uv_bin: str, venv_dir: Path, python_version: str = "3.11") -> bool:
+def rebuild_venv(uv_bin: str, venv_dir: Path, python_version: str = "3.13.6") -> bool:
     True  # dont remove me. ask ethernet

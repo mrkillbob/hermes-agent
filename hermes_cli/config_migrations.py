@@ -863,6 +863,34 @@ def _migrate_to_39(results: Dict[str, Any], quiet: bool) -> None:
             )
 
 
+def _migrate_to_40(results: Dict[str, Any], quiet: bool) -> None:
+    # Version 39 → 40: conversation worktree policy is shared by every root
+    # conversation entry point, so its canonical owner is now top-level rather
+    # than Desktop. Preserve an already-explicit canonical block verbatim.
+    _c = _cfg()
+    read_raw_config = _c.read_raw_config
+    _persist_migration = _c._persist_migration
+
+    config = read_raw_config()
+    desktop = config.get("desktop")
+    if not isinstance(desktop, dict) or "conversation_worktree" not in desktop:
+        return
+
+    legacy_policy = desktop.pop("conversation_worktree")
+    if "conversation_worktree" not in config:
+        config["conversation_worktree"] = copy.deepcopy(legacy_policy)
+    config["desktop"] = desktop
+    _persist_migration(config)
+    results["config_added"].append(
+        "conversation_worktree (migrated from desktop.conversation_worktree)"
+    )
+    if not quiet:
+        print(
+            "  ✓ Moved desktop.conversation_worktree to the canonical "
+            "top-level conversation_worktree policy."
+        )
+
+
 #: Registry of (target_version, migration_fn), strictly ascending. The driver
 #: applies every entry whose target version is greater than the on-disk
 #: observe earlier steps' writes via read_raw_config() (filesystem state).
@@ -890,6 +918,7 @@ MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
     (37, _migrate_to_37),
     (38, _migrate_to_38),
     (39, _migrate_to_39),
+    (40, _migrate_to_40),
 )
 
 
