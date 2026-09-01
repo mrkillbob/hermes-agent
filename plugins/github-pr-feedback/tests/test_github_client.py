@@ -128,7 +128,7 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,updatedAt,labels",
+        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     comments_argv = (
         "gh",
@@ -181,6 +181,8 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
 
     assert [pull_request.number for pull_request in pull_requests] == [17, 18]
     assert pull_requests[0].labels == ("codex", "type/perf")
+    assert pull_requests[0].base_branch == "stable"
+    assert pull_requests[0].base_sha == "b" * 40
     assert [(item.kind, item.feedback_id, item.body) for item in feedback] == [
         ("issue_comment", "issue-1", "first"),
         ("issue_comment", "issue-2", "second"),
@@ -391,7 +393,7 @@ def test_github_client_fails_closed_when_filtered_pr_list_lacks_canonical_fields
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,updatedAt,labels",
+        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     runner = RecordingRunner({argv: [{"number": 17}]})
 
@@ -417,7 +419,7 @@ def test_github_client_fails_closed_on_malformed_list_labels(labels: object) -> 
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,updatedAt,labels",
+        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     row = canonical_list_pull()
     row["labels"] = labels
@@ -442,7 +444,7 @@ def test_github_client_fails_closed_if_owned_pr_query_hits_coverage_cap() -> Non
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,updatedAt,labels",
+        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     runner = RecordingRunner(
         {
@@ -469,7 +471,7 @@ def test_github_client_reads_all_open_prs_and_exact_base_head_for_maintenance() 
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,updatedAt,labels",
+        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     branch_argv = ("gh", "api", "repos/acme/widgets/branches/stable")
     runner = RecordingRunner(
@@ -1118,6 +1120,8 @@ def canonical_list_pull(
         "author": {"login": "owner"},
         "headRefName": "codex/fix",
         "headRefOid": head_sha,
+        "baseRefName": "stable",
+        "baseRefOid": "b" * 40,
         "updatedAt": "2026-08-26T08:00:00Z",
         "labels": [{"name": label} for label in labels],
     }
