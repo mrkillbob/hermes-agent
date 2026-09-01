@@ -87,11 +87,12 @@ Those three gaps are Phases 1–3 below.
 ## Current implementation inventory (2026-09-01)
 
 - **Geometry:** 5 of 11 specialist buildings (Library, Research Lab, Depot,
-  Council, Review Office) have
-  solid walls/windows; the other 6 (Triage, Garden,
-  Arts Studio, Engineering Workshop, Release Gatehouse, Archive)
-  still read as thin pillar/rib/wing armatures with no continuous exterior
-  wall. Full per-building budget table and the exact loop to follow:
+  Council, Review Office) have solid walls/windows. Triage has now been
+  audited separately: its existing back/side walls, canopy, and open front
+  satisfy the enclosure/readability contract without spending its zero
+  draw-call headroom. The other 5 (Garden, Arts Studio, Engineering Workshop,
+  Release Gatehouse, Archive) still need targeted enclosure or distinctive-
+  massing review. Full per-building budget table and the exact loop to follow:
   **`docs/lunar-city-handoff-2026-09-01.md`** (don't duplicate it here —
   read it before touching `buildings.mjs`).
 - **Lighting:** key/rim/fill light rig + glow layer + tuned PBR material
@@ -155,10 +156,11 @@ All of the following true at once, on one clean SHA:
 Do these in order. Each phase links its detailed doc where one already
 exists instead of repeating it.
 
-### Phase 0 — Geometry solidification (in progress, 5/11 done)
+### Phase 0 — Geometry solidification (in progress, 5/11 complete + Triage audited)
 
 Already fully specified: **`docs/lunar-city-handoff-2026-09-01.md`**.
-Follow its per-building loop and budget table exactly, especially the
+Follow its per-building loop and budget table exactly, starting with Garden
+after the Triage audit, especially the
 "check the silhouette-uniqueness test after every building" rule — it's
 there because skipping it cost a full extra iteration on the hero-building
 pass.

@@ -31,10 +31,38 @@ Both reports have a `webgl-preview.png` (real WebGL-lit screenshot) for
 visual comparison. **Read the second report in full before continuing** —
 it documents a real trap (below) that cost a full iteration to find.
 
-The remaining **six** specialist buildings (Triage, Garden, Arts Studio,
-Engineering Workshop, Release Gatehouse, and Archive) have not had this
-treatment yet and almost certainly have the same thin-armature silhouette
-problem. Continue one at a time, starting with Triage.
+The remaining **five** specialist buildings (Garden, Arts Studio, Engineering
+Workshop, Release Gatehouse, and Archive) still need a targeted enclosure or
+distinctive-massing review. Triage was audited below and already has a
+continuous open-front enclosure.
+
+## Approved external benchmark policy
+
+The user approved using permissively licensed strategy-game asset kits as
+diagnostic benchmarks. This does **not** authorize copying StarCraft,
+Warcraft, or any other proprietary game assets. Keep benchmark downloads in an
+isolated, untracked scene and never place them under
+`apps/desktop/public/lunar-city/`.
+
+Preferred sources are CC0 libraries such as Kenney's Hexagon/City kits,
+Quaternius, and Poly Haven. Quaternius models may be modified and combined
+but must not be redistributed as standalone asset packs. OpenGameArt is
+mixed-license and requires a per-file license record before use. For each
+benchmark, record its URL/license, measure silhouette/scale/LOD/draw cost,
+compare it to `render-turntable.mjs`, and remove the benchmark copy before
+shipping. Full rationale is in
+`docs/lunar-city-strategy-game-diagnostic.md`.
+
+### Triage audit (2026-09-01)
+
+The existing Triage source already contains a continuous back wall, two side
+walls, canopy, front posts, and an intentionally open front (`buildTriage` in
+`modeling/props.mjs`). Its current near LOD passes the open-front and unique
+silhouette checks, so adding another wall would spend the building's zero
+draw-call headroom without improving the diagnostic target. Treat Triage as
+the first audited specialist and continue the solidification loop with
+Garden, whose circular basin/railing silhouette needs a separate enclosure
+decision rather than a box wall.
 
 ## The one rule that matters: check the silhouette-uniqueness test after every building, not at the end
 
