@@ -923,13 +923,21 @@ _EGRESS_PROTECTED_PROVIDERS = frozenset(
 )
 
 
+def _destination_requires_egress_firewall(agent) -> bool:
+    """Return whether this route is under the protected egress contract."""
+
+    provider = str(getattr(agent, "provider", "") or "").strip().lower()
+    return provider in _EGRESS_PROTECTED_PROVIDERS or (
+        os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1"
+    )
+
+
 def _attach_source_provenance_sidecar(
     agent, kwargs: dict, messages: list | None = None, *, sidecar: list | None = None
 ) -> dict:
     """Carry internal read proofs around strict wire-message conversion."""
 
-    provider = str(getattr(agent, "provider", "") or "").strip().lower()
-    if provider not in _EGRESS_PROTECTED_PROVIDERS:
+    if not _destination_requires_egress_firewall(agent):
         return kwargs
     from agent.source_provenance_tools import build_source_provenance_sidecar
 
@@ -943,8 +951,7 @@ def _attach_source_provenance_sidecar(
 def _dispatch_provider_request(agent, request, callback):
     """Apply the exact provider-bound egress policy at a physical call site."""
 
-    provider = str(getattr(agent, "provider", "") or "").strip().lower()
-    if provider not in _EGRESS_PROTECTED_PROVIDERS:
+    if not _destination_requires_egress_firewall(agent):
         return callback(request)
     from agent.llm_egress_runtime import dispatch_authorized_agent_request
 

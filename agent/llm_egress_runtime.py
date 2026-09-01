@@ -1807,6 +1807,25 @@ def _segment_protected_tool_result(
     return segments[0] if len(segments) == 1 else OutboundText(tuple(segments))
 
 
+def _untrusted_content_digest(value: Any) -> str:
+    """Hash unbound tool content without retaining or rendering its bytes."""
+
+    if isinstance(value, str):
+        payload = value.encode("utf-8")
+    else:
+        try:
+            payload = json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            payload = repr(value).encode("utf-8", errors="replace")
+    return sha256(payload).hexdigest()
+
+
 def _segment_read_file_presentation(
     text: str,
     metadata: Any,
@@ -2170,6 +2189,34 @@ def _typed_payload(
             value.get("role") in {"assistant", "tool"}
             or value.get("type") in {"function", "function_call", "function_call_output"}
         )
+        is_untrusted_tool_result = (
+            protected_kanban_context
+            and is_tool_protocol_mapping
+            and isinstance(output_call_id, str)
+            and source_metadata is None
+            and not is_read_file_result
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+            and not any(
+                (
+                    is_recognized_tool_result,
+                    is_elided_kanban_tool_result,
+                    is_search_projection_tool_result,
+                    is_read_file_projection_tool_result,
+                    is_web_replay_tool_result,
+                    is_file_mutation_replay_result,
+                    is_scratch_read_file_tool_result,
+                    is_git_workspace_diagnostic_result,
+                    is_git_grep_projection_tool_result,
+                    is_rg_projection_tool_result,
+                    is_kanban_assignees_result,
+                    is_plain_github_list_terminal_result,
+                    is_terminal_replay_result,
+                )
+            )
+        )
         is_codex_reasoning_replay = (
             allow_codex_reasoning_replay
             and value.get("type") == "reasoning"
@@ -2195,6 +2242,17 @@ def _typed_payload(
                 key in {"content", "output"}
                 and isinstance(item, (list, Mapping))
             )
+            if is_untrusted_tool_result and key in {"content", "output"}:
+                violation_reasons = {
+                    reason
+                    for _, reasons in content_free_violation_locations(item)
+                    for reason in reasons
+                }
+                if not violation_reasons:
+                    typed[key] = UntrustedProvenanceSegment(
+                        _untrusted_content_digest(item)
+                    )
+                    continue
             structured_text = (
                 _structured_tool_output_text(item) if is_structured_result else None
             )
