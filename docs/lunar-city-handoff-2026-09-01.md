@@ -54,6 +54,24 @@ compare it to `render-turntable.mjs`, and remove the benchmark copy before
 shipping. Full rationale is in
 `docs/lunar-city-strategy-game-diagnostic.md`.
 
+### Blender staging bridge
+
+`apps/desktop/scripts/lunar-city/blender_stage.py` imports the current GLBs into
+editable `LUNAR_CITY::BUILDINGS`, `LUNAR_CITY::WORKERS`, and
+`LUNAR_CITY::TERRAIN` collections, creates the authored palette and staging
+camera/light, and optionally stages reviewed Poly Haven files in a separate
+`POLYHAVEN_BENCHMARK` collection. External files remain outside the shipped
+tree; the script writes a SHA-256 sidecar receipt and marks the scene for human
+review. Recommended CC0 source IDs are in
+`docs/polyhaven-lunar-city-benchmarks.json`.
+
+```bash
+blender --background --python apps/desktop/scripts/lunar-city/blender_stage.py -- \
+  --asset-root apps/desktop/public/lunar-city/v2/models \
+  --polyhaven-dir /path/to/quarantined/polyhaven \
+  --output /tmp/lunar-city-stage.blend
+```
+
 ## Asset-neutral distribution contract
 
 The renderer is intended to be distributable without Lunar City's generated

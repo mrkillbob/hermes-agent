@@ -61,3 +61,22 @@ human license review before any model is mapped into a runtime manifest.
 
 The target is visual-quality parity through richer composition and authored
 detail—not a recognizable clone of another game's art direction.
+
+## Blender staging bridge
+
+The repository now includes an asset-neutral Blender staging script:
+
+```bash
+blender --background --python apps/desktop/scripts/lunar-city/blender_stage.py -- \
+  --asset-root apps/desktop/public/lunar-city/v2/models \
+  --polyhaven-dir /path/to/quarantined/polyhaven \
+  --output /tmp/lunar-city-stage.blend
+```
+
+It imports current Lunar City GLBs into editable `LUNAR_CITY::BUILDINGS`,
+`LUNAR_CITY::WORKERS`, and `LUNAR_CITY::TERRAIN` collections, creates a small
+palette and staging camera/light, and places reviewed Poly Haven models or
+texture preview cards in `POLYHAVEN_BENCHMARK`. It writes a sidecar staging
+receipt with SHA-256 hashes and marks external content for review. Poly Haven
+files are intentionally not bundled; the recommended IDs and source links are
+in [`polyhaven-lunar-city-benchmarks.json`](polyhaven-lunar-city-benchmarks.json).
