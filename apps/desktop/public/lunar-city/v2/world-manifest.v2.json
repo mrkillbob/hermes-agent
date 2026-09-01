@@ -495,20 +495,20 @@
       "collision": { "kind": "box", "navigationArea": "depot" },
       "materialSlots": ["charcoal-structure", "bone-metal", "signal-emissive"],
       "statistics": {
-        "accessorBytes": 64032,
+        "accessorBytes": 67920,
         "animationClips": ["lights-idle", "workbench-cycle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 21,
-        "gpuBytes": 64032,
+        "gpuBytes": 67920,
         "textures": 0,
-        "triangles": 1276,
-        "gpuMiB": 0.0611,
+        "triangles": 1348,
+        "gpuMiB": 0.0648,
         "budget": { "maxDrawCalls": 7, "maxGpuMiB": 9, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 24000 },
-        "bytes": 90652,
+        "bytes": 95696,
         "extent": [17, 11.4233, 13.34],
-        "sha256": "0713faf1ca38b7568149dc1a5657cfbd57c254d4bdaeb068c8b0c9c272bad9da"
+        "sha256": "fd57c77163cd2b15776207d406f2dfbe6e21cdc33f6bf4aebea612892acd4853"
       }
     },
     {

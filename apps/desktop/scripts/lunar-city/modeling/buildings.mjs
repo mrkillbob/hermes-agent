@@ -300,6 +300,25 @@ function addDepotFrame(scene, { accent, depth, height, width }) {
     position: [0, height * 0.31, -depth / 2],
     width: width + 1.5
   })
+  for (const side of [-1, 1]) {
+    box(scene, `depot:side-wall:${side}`, {
+      depth: depth * 0.82,
+      height: height * 0.58,
+      material: 'charcoal-structure',
+      parent: shell,
+      position: [side * (width / 2 + 0.22), height * 0.29, -depth * 0.09],
+      width: 0.62
+    })
+    for (let window = 0; window < 2; window += 1)
+      box(scene, `depot:side-window:${side}:${window}`, {
+        depth: 0.18,
+        height: 0.76,
+        material: accent,
+        parent: shell,
+        position: [side * (width / 2 + 0.55), height * 0.28 + window * 1.5, -depth * 0.25 + window * depth * 0.27],
+        width: 0.18
+      })
+  }
   for (let bay = 0; bay < 4; bay += 1) {
     const x = -width * 0.36 + bay * width * 0.24
     box(scene, `depot:roof:sawtooth:${bay}`, {
