@@ -8,6 +8,12 @@ or `apps/desktop/src/app/lunar-city/world/`.
 
 ## Where things stand
 
+Continuation update: Depot and Council are now solidified as enclosed,
+open-front volumes. Both passed the per-building silhouette-uniqueness guard,
+asset budget validation, and the full generated asset-contract suite. Their
+changes are committed on the draft branch in `617515c4cf` (Depot) and
+`40ea78076d` (Council).
+
 Two passes have landed on `claude/lunar-city-asset-polish-lx8htv` (forked
 from draft PR #8's tip, `f597fe10312a`):
 
@@ -25,10 +31,10 @@ Both reports have a `webgl-preview.png` (real WebGL-lit screenshot) for
 visual comparison. **Read the second report in full before continuing** —
 it documents a real trap (below) that cost a full iteration to find.
 
-The other **eight** specialist buildings (Depot, Review Office, Triage,
-Garden, Council, Arts Studio, Engineering Workshop, Release Gatehouse) and
-Archive have **not** had this treatment yet and almost certainly have the
-same thin-armature silhouette problem. That is the next work.
+The remaining **seven** specialist buildings (Review Office, Triage, Garden,
+Arts Studio, Engineering Workshop, Release Gatehouse, and Archive) have not
+had this treatment yet and almost certainly have the same thin-armature
+silhouette problem. Continue one at a time, starting with Review Office.
 
 ## The one rule that matters: check the silhouette-uniqueness test after every building, not at the end
 
