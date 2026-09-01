@@ -48,7 +48,7 @@ async function main() {
   scene.clearColor = new Color4(0.09, 0.06, 0.07, 1)
   scene.ambientColor = new Color3(0.46, 0.32, 0.28)
 
-  new ArcRotateCamera('cam', -Math.PI / 3.1, 1.05, 55, new Vector3(0, 4, 0), scene).attachControl(canvas, false)
+  new ArcRotateCamera('cam', -Math.PI / 3.1, 1.05, 82, new Vector3(0, 3.5, 4), scene).attachControl(canvas, false)
 
   const keyLight = new DirectionalLight('key', new Vector3(-0.45, -1, 0.35), scene)
   keyLight.intensity = 0.85
@@ -91,7 +91,11 @@ async function main() {
     { uri: 'v2/models/release-gatehouse.glb', pos: [-29, 0.6, 30] },
     { uri: 'v2/models/archive.glb', pos: [0, 0.5, 12] },
     { uri: 'v2/models/leaders.glb', pos: [0, 0, 0] },
-    { uri: 'v2/models/workers.glb', pos: [0, 0, 0] }
+    { uri: 'v2/models/workers.glb', pos: [-18, 0, -12] },
+    { uri: 'v2/models/workers.glb', pos: [17, 0, -16] },
+    { uri: 'v2/models/workers.glb', pos: [-19, 0, 15] },
+    { uri: 'v2/models/workers.glb', pos: [12, 0, 18] },
+    { uri: 'v2/models/workers.glb', pos: [0, 0, 5] }
   ]
 
   for (const { uri, pos } of placements) {
