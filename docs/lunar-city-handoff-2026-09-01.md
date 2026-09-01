@@ -1,5 +1,13 @@
 # Lunar City visual-fidelity handoff — 2026-09-01
 
+> **Independently re-verified 2026-09-01 (second pass).** A large amount of
+> work landed on this branch/PR between the first and second passes of this
+> handoff — see `docs/lunar-city-video-reference-roadmap.md`'s verification
+> addendum for what was checked and how. Short version: Phase 0 (this
+> document's subject) is genuinely complete, not just claimed. The
+> step-by-step section below is now a historical/reference record of the
+> process that got all 11 buildings there, not a to-do list.
+
 Step-by-step continuation guide for closing the gap between the Lunar City
 3D world and the approved reference art (the isometric moon-settlement
 paintings and the user's inspiration video). Read this before making any
@@ -152,19 +160,19 @@ pass its material string to `paletteMaterial()`, which is one of the 8
 building already uses** — introducing a new material for a building pushes
 its material count, and several buildings have zero headroom there:
 
-| Building             | triangles/budget | materials/budget | drawCalls/budget | note                         |
-| -------------------- | ---------------- | ---------------- | ---------------- | ---------------------------- |
-| library              | 4034/28000       | 4/4 (full)       | 6/8              | done this pass               |
-| research-lab         | 2378/32000       | 5/5 (full)       | 7/9              | done this pass (light touch) |
-| depot                | 1276/24000       | 4/4 (full)       | 6/7              |                              |
-| review-office        | 4488/26000       | 4/4 (full)       | 7/8              |                              |
-| triage               | 704/12000        | 3/3 (full)       | 5/5 (full)       | **zero draw-call headroom**  |
-| garden               | 2244/18000       | 4/4 (full)       | 6/6 (full)       | **zero draw-call headroom**  |
-| council              | 5730/22000       | 4/4 (full)       | 6/7              |                              |
-| arts-studio          | 1568/26000       | 6/6 (full)       | 8/8 (full)       | **zero draw-call headroom**  |
-| engineering-workshop | 898/28000        | 4/5              | 6/8              | 1 material free              |
-| release-gatehouse    | 994/24000        | 5/5 (full)       | 7/8              |                              |
-| archive              | 930/26000        | 4/5              | 6/8              | 1 material free              |
+| Building             | triangles/budget | materials/budget | drawCalls/budget | note (re-checked 2026-09-01, second pass)                                            |
+| -------------------- | ---------------- | ---------------- | ---------------- | ------------------------------------------------------------------------------------ |
+| library              | 4034/28000       | 4/4 (full)       | 6/8              | solidified (hero-building pass)                                                      |
+| research-lab         | 2378/32000       | 5/5 (full)       | 7/9              | solidified, light touch (see hero-building report for why)                           |
+| depot                | 1348/24000       | 4/4 (full)       | 6/7              | solidified                                                                           |
+| review-office        | 4524/26000       | 4/4 (full)       | 7/8              | solidified                                                                           |
+| council              | 5790/22000       | 4/4 (full)       | 6/7              | solidified                                                                           |
+| triage               | 704/12000        | 3/3 (full)       | 5/5 (full)       | audited, already enclosed/open-front from original authoring — no wall pass needed   |
+| garden               | 2292/18000       | 4/4 (full)       | 6/6 (full)       | rear pavilion added instead of a wall (zero draw-call headroom)                      |
+| arts-studio          | 1676/26000       | 6/6 (full)       | 8/8 (full)       | stepped clerestory roof added instead of a wall (zero headroom)                      |
+| engineering-workshop | 970/28000        | 4/5              | 6/8              | shared secondary-district shell already sufficient, independently visually confirmed |
+| release-gatehouse    | 1066/24000       | 5/5 (full)       | 7/8              | shared secondary-district shell already sufficient, independently visually confirmed |
+| archive              | 1002/26000       | 4/5              | 6/8              | shared secondary-district shell already sufficient, independently visually confirmed |
 
 Triangle and GPU-MiB budgets have enormous headroom everywhere (every
 building is under 25% of its triangle budget) — that axis is not a
@@ -186,12 +194,13 @@ you forgot to keep the manifest's declared budget and the model's actual
 stats in sync, since `build-models.mjs`'s `updateManifestStatistics`
 rewrites them for you on every build).
 
-## Step-by-step: solidifying one more building
+## Step-by-step: solidifying one more building (historical — Phase 0 is complete)
 
-Follow this loop per building, one at a time, in this order (Depot and
-Council first — they have decent draw-call headroom and are structurally
-simpler to reason about than triage/garden/arts-studio, which are already
-maxed on draw calls):
+All 11 specialist buildings are done; there is no remaining building to
+apply this loop to. Kept as reference in case a future regression or a
+12th building ever needs the same treatment.
+
+Original loop (per building, one at a time):
 
 1. **Read the building's frame function** in `buildings.mjs` (e.g.
    `addDepotFrame`) plus its `specialistFrame`/generic-detail helpers

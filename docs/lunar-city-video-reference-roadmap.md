@@ -1,5 +1,69 @@
 # Lunar City — full handoff: current state to the video-reference endpoint
 
+## Verification addendum (2026-09-01, second pass)
+
+A large amount of work landed between the first and second passes of this
+roadmap — 28 commits, all on the draft PR branch directly: the remaining
+9 buildings' Phase 0 work (Depot/Council/Review Office fully solidified;
+Triage audited and found already sufficient; Garden/Arts Studio given a
+rear pavilion/clerestory instead of a wall; Engineering
+Workshop/Release Gatehouse/Archive judged sufficient on their existing
+shell), Phase 1 (idle camera drift), Phase 2 (focused-leader presentation),
+Phase 4 resolution, and a substantial, disciplined body of **diagnostic-only**
+tooling/research into permissively licensed (CC0) asset kits — see
+`docs/lunar-city-open-asset-catalog.md` and
+`docs/lunar-city-strategy-game-diagnostic.md`.
+
+This pass independently re-verified the claims rather than trusting them:
+
+- Reran `build-models.mjs` → `validate-assets.mjs` → the full
+  `node --test` asset-contract suite (41/41, including the
+  silhouette-uniqueness test) → `npx vitest run --project ui src/app/lunar-city`
+  (542/542) → `npm run typecheck`. All green, matching what the commits
+  claimed.
+- **Independently visually inspected** the three buildings claimed to
+  already be sufficient without a wall pass (Engineering Workshop, Release
+  Gatehouse, Archive) via `render-webgl-preview.mjs`'s single-model mode,
+  from both the open front and the back — confirmed solid enclosed volumes
+  with intact open-front interiors, not just a claim in a commit message.
+- **Read the actual diff** for Phase 1 and Phase 2 rather than trusting
+  their commit messages: idle drift correctly gates on `reducedMotion`,
+  `focusedEntityKey`, and the `efficient` quality tier (disabled there
+  entirely — `setIdleEnabled(settings.tier !== 'efficient')`), resets on
+  any real input, and feeds the frame scheduler's demand check so it
+  doesn't force continuous rendering when inactive. Phase 2 shipped as a
+  cheaper implementation than this roadmap originally suggested — a
+  1.14× scale bump on the focused leader (reset to 1× on every other
+  leader) rather than a rim/emissive material change — which is a
+  legitimate, lower-cost way to satisfy "focus changes presentation, not
+  just camera framing." **Optional future enhancement, not a gap:**
+  combine the scale bump with the rim-light/glow emphasis this roadmap
+  originally described, for a stronger hero-shot read closer to the
+  video's translucent-glow treatment.
+- Verified the CC0 open-asset research stayed diagnostic-only, as its own
+  docs claim: `git show --stat` on every commit that touched Kenney/
+  Quaternius/Poly Haven staging shows only scripts
+  (`curate-open-asset-pack.mjs`, `blender_stage.py`,
+  `import-open-asset-pack.mjs`) and docs changed — zero binary asset files
+  entered `apps/desktop/public/lunar-city/`.
+- Found one **pre-existing, unrelated** test failure while checking the
+  Phase 5 perf harness: `node --test scripts/perf/lunar-city-runner.test.mjs`
+  fails `rejects non-Hermes macOS bundles, arbitrary executables, and
+nonexecutable files` (missing expected exception). That file was last
+  touched by commits from before this PR existed (`f07bf0c57` and
+  earlier) — none of the 28 Lunar City commits touched it. Not this
+  roadmap's bug to fix, but worth knowing about before assuming the perf
+  harness is fully green.
+
+**Net effect: Phases 0, 1, 2, and 4 are genuinely done**, independently
+confirmed, not just self-reported. Phase 3 remains an unstarted, explicitly
+optional stretch goal. Phase 5 is the only phase with real remaining work,
+and it's detailed precisely below — the perf/packaging harness already
+exists in this repo, it's just never been run against a real packaged
+build because that needs an environment this sandbox doesn't have.
+
+## Full-journey roadmap
+
 Full-journey roadmap from where the implementation stands today to a state
 that satisfies the user's video reference. Written 2026-09-01, after two
 follow-up passes (lighting rig, hero-building walls) had already landed.
@@ -165,7 +229,7 @@ must still run the
 there because skipping it cost a full extra iteration on the hero-building
 pass.
 
-### Phase 1 — Cinematic idle camera
+### Phase 1 — Cinematic idle camera (complete)
 
 New work, not previously scoped. Goal: when no entity is focused/followed
 and the user hasn't touched camera input recently, the overview camera
@@ -194,7 +258,7 @@ Landing spots:
   follow whichever one already tests the closest existing behavior, e.g.
   `setReducedMotion`).
 
-### Phase 2 — Focus/hero-shot visual treatment
+### Phase 2 — Focus/hero-shot visual treatment (complete, simpler than originally scoped — see verification addendum)
 
 New work. Goal: the moment a leader is focused (picked, voice-selected,
 or `dispatchCamera({ kind: 'focus', ... })`), that leader's presentation
@@ -239,7 +303,7 @@ project a world position to screen space, and gate visibility by the same
 `decorations` quality flag the glow layer now uses, so it degrades with
 everything else in the efficient tier's ladder.
 
-### Phase 4 — Remaining fidelity items from the 2026-08-31 report
+### Phase 4 — Remaining fidelity items from the 2026-08-31 report (complete)
 
 Carried over, not re-specified here — see
 `.superpowers/sdd/2026-08-31-lunar-city-lighting-pass/report.md`'s
@@ -258,33 +322,81 @@ follow-up plan:
 
 This has been open since the original 3D handoff
 (`docs/lunar-city-design-handoff.md`'s very first addendum) and nothing
-in Phases 0–4 satisfies it on its own:
+in Phases 0–4 satisfies it on its own. **The tooling for this already
+exists in the repo** (`scripts/perf/README.md`'s "Lunar City packaged
+acceptance" section) — it has just never been run against a real
+packaged build, because that needs a real GPU and Electron packaging,
+neither of which this sandbox has. This is a from-scratch environment
+requirement for whoever picks this up, not a coding task.
 
-- A clean `electron-builder` package built from the final SHA (not a dev
-  build — every receipt so far, including this session's, has been
-  build-only or dev-Electron evidence).
-- A GPU-enabled CPU/RSS/FPS allocation receipt against the `efficient`
-  tier's budget.
-- A 30-minute stability run.
-- A supervised-live session against a real Hermes gateway (the "exact
-  packaged 25/100/250 scenarios" noted as blocked in the 2026-08-31
-  addendum, pending an owned authenticated three-gateway lifecycle).
+**Step 1 — build a real package** (not a dev build; every receipt so far,
+including both prior passes' evidence, has been build-only or
+dev-Electron evidence, which the acceptance tooling explicitly refuses to
+accept):
 
-None of this was attempted in this session — Electron's binary isn't
-provisioned in this sandbox (same gap the draft PR's own description
-calls out). It needs an environment where `electron-builder` and a real
-Electron runtime are available.
+```bash
+cd apps/desktop
+npm run dist:linux   # or dist:mac / dist:mac:dmg / dist:win, matching the target platform
+```
+
+**Step 2 — run the acceptance capture** against that package, from the
+exact git SHA it was built from:
+
+```bash
+npm run perf:lunar-city:accept -- \
+  --binary /absolute/path/to/the/built/binary \
+  --sha <the exact git SHA the package was built from> \
+  --output /absolute/path/lunar-city-receipts \
+  --scenario visible-idle          # then repeat with --scenario 30-minute-stability, --scenario balanced-overview
+```
+
+This is fail-closed by design: it rejects a dev build, a build whose
+embedded stamp doesn't match `--sha` exactly, or a skipped/mocked
+Playwright run standing in for real evidence. It captures GPU adapter/
+state, CPU/RSS, FPS, Electron/Chromium versions, window bounds, and
+display scale directly from the launched package and host — not from
+operator-supplied metadata (an optional `--metadata` JSON is
+supplemental annotation only, and cannot itself satisfy the gate).
+`visible-idle` always measures ≥60s; `30-minute-stability` always
+measures ≥1,800,000ms — these are real wall-clock runs, not something a
+unit test's injected clock can substitute for.
+
+**Known blocker that Electron access alone does not fix:** the exact
+25-active / 100-active / 250-LOD-population and 30-minute-stability
+_population_ scenarios additionally require three fixture gateways
+"started and owned by the same run" emitting authenticated observed
+`subagent.start` evidence against the canonical
+`lunar-city-population-v3` fixture. Per `scripts/perf/README.md`: _"The
+repository currently has no supported lifecycle that both owns all three
+fixture gateways and emits authenticated observed `subagent.start`
+evidence. Therefore exact-population package acceptance remains
+deliberately blocked."_ That's separate infrastructure work (a real
+gateway-preseed API), not something Phase 5 can complete just by having
+a GPU and Electron available. The non-population scenarios
+(`visible-idle`, `30-minute-stability`, `balanced-overview`) are not
+blocked by this and can be captured as soon as a real package exists.
+
+**Before trusting a green run:** `node --test scripts/perf/lunar-city.test.mjs
+scripts/perf/lunar-city-runner.test.mjs` currently has one pre-existing
+failure (`rejects non-Hermes macOS bundles...` in
+`lunar-city-runner.test.mjs`) unrelated to any Lunar City visual work —
+see the verification addendum above. Don't let it block Phase 5 progress,
+but don't assume it's caused by anything in this roadmap either.
 
 ## Sequencing guidance
 
-Phase 0 and Phase 1/2 are independent (geometry vs. camera/materials) and
-can be worked in either order or interleaved. Phase 3 should not start
-before 0–2 are stable, given its cost risk. Phase 4's palette question
-should be raised with the user early since it's a standing blocker
-regardless of when the geometry work reaches it. Phase 5 can only happen
-in an environment with Electron packaging available — flag that
-constraint immediately in any session attempting it rather than
-discovering it partway through.
+**Status as of 2026-09-01 (second pass): Phases 0, 1, 2, and 4 are done and
+independently verified.** Only two phases have real remaining work:
+
+- **Phase 3** (floating status badges) is still unstarted and still
+  optional/stretch. If picked up, measure its per-frame cost in the
+  `efficient` tier before writing the feature, not after — the existing
+  docked inspector panel already covers the same information without the
+  cost, so this only earns its place if it's cheap.
+- **Phase 5** (packaging/acceptance) is the only phase blocking "done" and
+  needs an environment with a real GPU and Electron packaging — this
+  sandbox has neither. Follow the precise steps above; the tooling already
+  exists and doesn't need to be built, only run.
 
 ## Environment / verification
 
