@@ -8626,8 +8626,22 @@ def reconcile_orphaned_running(
     for row in rows:
         tid = row["id"]
         pid = row["worker_pid"]
+        # A claim carrying another host's identity is outside this process's
+        # authority.  Local PID liveness cannot prove that a remote worker is
+        # gone: PIDs are scoped to hosts and can be reused independently.  A
+        # remote reconciliation protocol must release these claims; leaving
+        # them running is safer than spawning a duplicate worker.
+        if row["claim_lock"] and not _claim_is_host_local(
+            row["claim_lock"], pid=pid, task_id=tid
+        ):
+            _log.warning(
+                "kanban reconcile: task %s has a non-local claim %r; "
+                "deferring until its owner reconciles it",
+                tid, row["claim_lock"],
+            )
+            continue
         if pid and _pid_alive(pid):
-            # The recorded worker may still be doing real work — never
+            # The recorded local worker may still be doing real work — never
             # requeue beside a live process. Retry next tick.
             _log.debug(
                 "kanban reconcile: task %s has broken claim bookkeeping but "
