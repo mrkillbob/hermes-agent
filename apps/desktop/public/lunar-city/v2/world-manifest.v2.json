@@ -356,20 +356,20 @@
       "collision": { "kind": "mesh", "navigationArea": "walkable" },
       "materialSlots": ["lunar-rust", "charcoal-structure"],
       "statistics": {
-        "accessorBytes": 3341352,
+        "accessorBytes": 2991192,
         "animationClips": [],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 28,
-        "gpuBytes": 3341352,
-        "textures": 0,
+        "nodes": 29,
+        "gpuBytes": 3106129,
+        "textures": 1,
         "triangles": 29612,
-        "gpuMiB": 3.1866,
+        "gpuMiB": 2.9622,
         "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 4, "maxTextures": 4, "maxTriangles": 90000 },
-        "bytes": 3730780,
+        "bytes": 3112724,
         "extent": [102.8977, 12.425, 92.9281],
-        "sha256": "e77000059d9e0765184861796fc6d8e96801b1b5377ff3f9ccd7ff759f9b8310"
+        "sha256": "1ab3b66d085051f01c5ef5c62ebc030f7031739d173f7c754f14ad4feadaacef"
       }
     },
     {
@@ -402,20 +402,20 @@
       "collision": { "kind": "box", "navigationArea": "library" },
       "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 1028508,
+        "accessorBytes": 781224,
         "animationClips": ["lights-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 32,
-        "gpuBytes": 1180212,
+        "gpuBytes": 932928,
         "textures": 1,
         "triangles": 20034,
-        "gpuMiB": 1.1255,
+        "gpuMiB": 0.8897,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 28000 },
-        "bytes": 1188388,
+        "bytes": 940628,
         "extent": [16.7884, 18.182, 14.5275],
-        "sha256": "1c891df3a5e0da8e16a86eb38ee38e7b69d0067e6762b219c05155771a418d09"
+        "sha256": "efd3d32eb6e99a42d6590ea26b248f8594e8014a22da3cec86f94a65f8d25f02"
       }
     },
     {

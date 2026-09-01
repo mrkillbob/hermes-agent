@@ -20,7 +20,7 @@ import {
 import { buildLeaders, buildWorkers } from './modeling/characters.mjs'
 import {
   exportModel,
-  injectBakedAOTexture,
+  injectBakedDetailTexture,
   prepareOutputDirectories,
   updateManifestStatistics,
   writeGeneratedTexture
@@ -52,6 +52,10 @@ const AUTHORED_TEXTURE_HOOKS = Object.freeze({
   library: {
     imagePath: fileURLToPath(new URL('./modeling/authored/library-near-ao.png', import.meta.url)),
     materials: ['bone-metal', 'lunar-rust', 'charcoal-structure', 'archive-emissive']
+  },
+  terrain: {
+    imagePath: fileURLToPath(new URL('./modeling/authored/terrain-mixed-detail.png', import.meta.url)),
+    materials: ['lunar-rust', 'charcoal-structure', 'bone-metal', 'garden-green']
   }
 })
 
@@ -145,11 +149,18 @@ export async function buildAssetPack(outputRoot = DEFAULT_OUTPUT_ROOT) {
       let root = authoredPath ? await importAuthoredModel(scene, model.id, authoredPath) : build(scene)
       if (authoredPath && AUTHORED_ANIMATION_HOOKS[model.id]) root = AUTHORED_ANIMATION_HOOKS[model.id](scene, root)
       if (root.name !== `${model.id}:root`) throw new Error(`${model.id} builder returned ${root.name}`)
-      statistics[model.id] = await exportModel({ budget: model, id: model.id, outputRoot, scene })
       const textureHook = AUTHORED_TEXTURE_HOOKS[model.id]
-      if (authoredPath && textureHook) {
+      const hasAuthoredTexture = Boolean(authoredPath && textureHook)
+      statistics[model.id] = await exportModel({
+        budget: model,
+        id: model.id,
+        outputRoot,
+        scene,
+        skipVertexAOSubdivision: hasAuthoredTexture
+      })
+      if (hasAuthoredTexture) {
         const imageBytes = await readFile(textureHook.imagePath)
-        statistics[model.id] = await injectBakedAOTexture({
+        statistics[model.id] = await injectBakedDetailTexture({
           authoredPath,
           budget: model,
           extent: statistics[model.id].extent,

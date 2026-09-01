@@ -70,7 +70,7 @@ function sceneExtent(scene) {
   return { extent: min.map((value, axis) => Number((max[axis] - value).toFixed(4))), max, min }
 }
 
-export function optimizeModelScene(scene, id, budget) {
+export function optimizeModelScene(scene, id, budget, { skipVertexAOSubdivision = false } = {}) {
   // Near carries the shading detail; mid gets a coarser share; far is seen
   // from far enough away that neither subdivision nor AO buys anything.
   const shares = { far: 0, mid: 0.18, near: 0.62 }
@@ -82,9 +82,15 @@ export function optimizeModelScene(scene, id, budget) {
   // filled box. The guard is measuring something real, so the geometry it
   // watches stays at its authored density; the terrain is not one of its
   // SPECIALIST_IDS and is also where ground-contact shading reads hardest.
-  // Giving districts the same treatment needs an AO *texture* atlas, which
-  // decouples shading resolution from triangle density -- see the handoff.
-  const shadeGeometry = id === 'terrain'
+  // skipVertexAOSubdivision is set once terrain (or any model) has an
+  // authored baked-texture detail pass instead: that texture is baked
+  // against a specific, fixed vertex count/UV layout from the authored
+  // source file, and this subdivision pass would silently change vertex
+  // counts after the fact, breaking injectBakedDetailTexture's by-count
+  // primitive matching. The AO *texture* atlas this comment used to call
+  // future work is exactly what that hook now provides -- decoupling
+  // shading resolution from triangle density without this subdivision.
+  const shadeGeometry = id === 'terrain' && !skipVertexAOSubdivision
 
   for (const suffix of ['near', 'mid', 'far']) {
     const lodRoot = scene.getTransformNodeByName(`${id}:lod:${suffix}`)
@@ -92,7 +98,7 @@ export function optimizeModelScene(scene, id, budget) {
     mergeLodMeshes(scene, lodRoot, `${id}:${suffix}`)
     // Bake after merging so occlusion is computed once against the final
     // triangle soup for this LOD.
-    if (shares[suffix] > 0)
+    if (shares[suffix] > 0 && !skipVertexAOSubdivision)
       bakeAmbientOcclusion(scene, lodRoot, {
         maxTriangles: shadeGeometry ? Math.floor((budget?.maxTriangles ?? Infinity) * shares[suffix]) : 0
       })
@@ -141,8 +147,8 @@ function assertBudget(id, stats, budget) {
   if (stats.gpuMiB > budget.maxGpuMiB) throw new Error(`${id} GPU estimate ${stats.gpuMiB} exceeds ${budget.maxGpuMiB}`)
 }
 
-export async function exportModel({ budget, id, outputRoot, scene }) {
-  optimizeModelScene(scene, id, budget)
+export async function exportModel({ budget, id, outputRoot, scene, skipVertexAOSubdivision = false }) {
+  optimizeModelScene(scene, id, budget, { skipVertexAOSubdivision })
   const bounds = sceneExtent(scene)
   const data = await GLTF2Export.GLBAsync(scene, `${id}.glb`, {
     animationSampleRate: 1 / 30,
@@ -205,7 +211,7 @@ export async function exportModel({ budget, id, outputRoot, scene }) {
  * never touches a material with only one contributing mesh, so this is a
  * true 1:1 correspondence, not a heuristic match.
  */
-export async function injectBakedAOTexture({
+export async function injectBakedDetailTexture({
   authoredPath,
   budget,
   extent,
