@@ -9734,8 +9734,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # clean-exit-but-still-running case, which is accounted against its
     # own bounded violation streak instead of the unified failure
     # counter (see the post-txn loop below).
-    crash_details: list[tuple[str, int, str, bool, str, bool]] = []
-    # (task_id, pid, claimer, protocol_violation, error_text, terminal_blocker)
+    crash_details: list[tuple[str, int, str, bool, str, bool, str | None]] = []
+    # (task_id, pid, claimer, protocol_violation, error_text, terminal_blocker,
+    #  provider_failure_class)
     # Worker-exit observer payloads (RFC #58548), collected inside the main
     # txn and fired only after every reclaim/accounting txn has committed.
     exited_hook_payloads: list[dict] = []
@@ -9912,7 +9913,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     crashed.append(row["id"])
                     crash_details.append(
                         (row["id"], pid, row["claim_lock"],
-                         protocol_violation, error_text, terminal_blocker)
+                         protocol_violation, error_text, terminal_blocker,
+                         provider_failure_class if terminal_blocker else None)
                     )
     # Outside the main txn: account each crashed task and maybe trip the
     # breaker (the retried task transitions to blocked with a ``gave_up`` event
@@ -9937,10 +9939,13 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     if crash_details:
         # Fingerprint errors to detect systemic failures.
         _fp_counts: dict[str, int] = {}
-        for _, _, _, _, err_text, _ in crash_details:
+        for _, _, _, _, err_text, _, _ in crash_details:
             fp = _error_fingerprint(err_text)
             _fp_counts[fp] = _fp_counts.get(fp, 0) + 1
-        for tid, pid, claimer, protocol_violation, error_text, terminal_blocker in crash_details:
+        for (
+            tid, pid, claimer, protocol_violation, error_text,
+            terminal_blocker, provider_failure_class,
+        ) in crash_details:
             if terminal_blocker:
                 tripped = _record_task_failure(
                     conn,
@@ -9962,6 +9967,22 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     },
                 )
                 if tripped:
+                    # ``gave_up`` normally represents a circuit-breaker crash
+                    # that ``recompute_ready`` may recover automatically.
+                    # A typed provider terminal failure is different: retrying
+                    # it without an operator/config change recreates the same
+                    # unsafe or unavailable route. Add a sticky blocked event
+                    # so the next dispatcher pass cannot promote it again.
+                    with write_txn(conn):
+                        _append_event(
+                            conn, tid, "blocked",
+                            {
+                                "reason": error_text,
+                                "failure_class": provider_failure_class,
+                                "source": "provider_terminal",
+                                "requires_operator": True,
+                            },
+                        )
                     auto_blocked.append(tid)
                 continue
             if protocol_violation:
