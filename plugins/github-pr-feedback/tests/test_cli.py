@@ -292,7 +292,7 @@ def test_scan_defers_secondary_fanout_for_required_ci_backlog_below_read_cap(
     assert returncode == 0
     assert order == ["primary"]
     assert payload["required_local_ci_backlog"] == 2
-    assert payload["deferred"] == ["repair", "merge", "release_maintenance"]
+    assert payload["deferred"] == ["repair", "release_maintenance"]
 
 
 def test_scan_does_not_defer_secondary_fanout_for_read_cap_without_ci_backlog(
@@ -311,7 +311,7 @@ def test_scan_does_not_defer_secondary_fanout_for_read_cap_without_ci_backlog(
     )
 
     assert returncode == 0
-    assert order == ["primary", "repair", "merge", "release"]
+    assert order == ["primary", "repair", "release"]
     assert "required_local_ci_backlog" not in payload
     assert "deferred" not in payload
 
@@ -641,6 +641,10 @@ def test_cli_exposes_status_doctor_and_an_exact_immutable_retry_identity() -> No
     )
     assert fresh.fresh is True
     assert parser.parse_args(["merge-scan"]).github_pr_feedback_action == "merge-scan"
+    assert (
+        parser.parse_args(["merge-handoff"]).github_pr_feedback_action
+        == "merge-handoff"
+    )
     assert (
         parser.parse_args(["merge-status"]).github_pr_feedback_action == "merge-status"
     )
