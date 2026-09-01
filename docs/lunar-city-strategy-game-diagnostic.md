@@ -11,6 +11,30 @@ design problems easy to see: a building must read from the overview, a unit's
 role must be legible before selection, routes and ownership must be obvious,
 and detail must collapse gracefully as the camera pulls back.
 
+## Safe external benchmarks
+
+These are candidates for a separate, quarantined reference folder—not assets
+to drop into the shipped Lunar City bundle:
+
+- **Kenney Hexagon Kit / City Kit:** CC0 and useful for studying modular
+  footprints, road widths, camera scale, and overview composition. Kenney
+  confirms its game assets are public-domain CC0, including commercial use.
+- **Quaternius:** CC0 model packs are useful for testing import, LOD, and
+  animation pipelines. Their license permits modification and combination,
+  but prohibits redistributing the models as a standalone asset pack; keep
+  any experiment clearly separated from our generated assets.
+- **Poly Haven:** CC0 materials and environmental models are useful for
+  lighting/material stress tests, not for defining Lunar City's approved
+  character or building language.
+- **OpenGameArt:** a discovery index only. Licenses vary per asset and may
+  include attribution, share-alike, or GPL obligations, so no asset enters
+  the repository without a per-file license record and compatibility review.
+
+The diagnostic workflow is: record source URL and license, import a copy into
+an isolated benchmark scene, measure screen-space silhouette/triangle/draw
+cost, compare against the Lunar City turntable, then delete the benchmark
+copy. Only newly authored or explicitly compatible assets can ship.
+
 ## Our current asset inventory
 
 The v2 manifest currently contains 15 model families:
