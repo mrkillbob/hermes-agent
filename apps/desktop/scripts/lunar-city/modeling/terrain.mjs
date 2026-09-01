@@ -114,6 +114,50 @@ export function buildTerrain(scene) {
       thickness: 0.22
     })
   })
+  const dressing = group(scene, 'terrain:regolith-dressing', near)
+  ;[
+    [-39, 0.6, -9, 1.2],
+    [-35, 0.8, 8, 0.9],
+    [-20, 0.9, 39, 1.1],
+    [12, 0.7, 40, 0.8],
+    [39, 0.9, 25, 1.3],
+    [41, 0.8, -18, 0.95],
+    [2, 0.9, -31, 1],
+    [-12, 0.75, -26, 0.72]
+  ].forEach(([x, y, z, size], index) => {
+    cone(scene, `terrain:regolith-rock:${index}`, {
+      diameterBottom: size * 1.7,
+      diameterTop: size * 0.45,
+      height: size * 1.25,
+      material: index % 2 ? 'charcoal-structure' : 'lunar-rust',
+      parent: dressing,
+      position: [x, y + size * 0.55, z],
+      rotation: [0, index * 0.37, 0],
+      tessellation: 6
+    })
+  })
+  for (const [index, [x, y, z]] of [
+    [0, [-1, 0.5, 12]],
+    [1, [17, 0.7, -3]],
+    [2, [-17, 0.6, 8]]
+  ]) {
+    cylinder(scene, `terrain:activity-beacon:${index}`, {
+      diameter: 0.38,
+      height: 2.2,
+      material: 'bone-metal',
+      parent: dressing,
+      position: [x, y + 1.1, z],
+      tessellation: 8
+    })
+    cylinder(scene, `terrain:activity-beacon:signal:${index}`, {
+      diameter: 0.72,
+      height: 0.16,
+      material: 'garden-green',
+      parent: dressing,
+      position: [x, y + 2.25, z],
+      tessellation: 8
+    })
+  }
   DISTRICTS.forEach((point, index) => districtPad(scene, near, index, point))
 
   const walkways = group(scene, 'terrain:walkways', near)
