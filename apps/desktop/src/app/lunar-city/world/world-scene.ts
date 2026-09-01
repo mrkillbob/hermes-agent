@@ -1447,6 +1447,7 @@ export async function createWorldScene(
   const projectCompoundNodes = new Map<string, BabylonNodeLike>()
   const activeLeaderAnimations = new Map<LeaderId, BabylonAnimationGroupLike>()
   const desiredLeaderStates = new Map<LeaderId, LeaderAnimationState>()
+  const leaderNodes = new Map<LeaderId, BabylonNodeLike>()
 
   const stopLeaderAnimations = (): void => {
     for (const group of activeLeaderAnimations.values()) {
@@ -1576,6 +1577,9 @@ export async function createWorldScene(
 
       if (model.id === 'leaders') {
         const leaderCameraAnchors = retainLeaderIdentityMetadata(result, leaderStateClips, model, focus.cameraAnchor)
+        for (const leader of readStructuredLeaders(result)) {
+          leaderNodes.set(leader.id, leader.node)
+        }
         const importedAnimationGroups = workerAnimationGroups(result)
 
         for (const leaderId of LEADER_IDS) {
@@ -1746,6 +1750,14 @@ export async function createWorldScene(
           previousCameraState.following !== cameraState.following
         ) {
           entityRegistryController.setSelection(cameraState.focusedEntityKey)
+          const focusedLeaderId = cameraState.focusedEntityKey?.match(/^lunar-city:leader:(.+)$/u)?.[1]
+          for (const [leaderId, node] of leaderNodes) {
+            // A small scale lift is the cheapest per-entity hero treatment: it
+            // makes the focused leader read above the shared scene without
+            // changing global lighting or allocating another material.
+            const emphasis = leaderId === focusedLeaderId ? 1.14 : 1
+            node.scaling?.set(emphasis, emphasis, emphasis)
+          }
           emit({ kind: 'camera-state', state: cameraState })
         }
 
