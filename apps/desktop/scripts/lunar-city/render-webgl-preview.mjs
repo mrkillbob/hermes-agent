@@ -67,11 +67,11 @@ async function main() {
   fillLight.shadowEnabled = false
 
   const glow = new GlowLayer('glow', scene, { mainTextureRatio: 0.5 })
-  glow.intensity = 0.6
+  glow.intensity = 0.42
 
   if (scene.imageProcessingConfiguration) {
     scene.imageProcessingConfiguration.contrast = 1.18
-    scene.imageProcessingConfiguration.exposure = 1.08
+    scene.imageProcessingConfiguration.exposure = 1.02
     scene.imageProcessingConfiguration.vignetteEnabled = true
     scene.imageProcessingConfiguration.vignetteWeight = 1.6
     scene.imageProcessingConfiguration.vignetteColor = new Color3(0.04, 0.02, 0.04)
@@ -79,11 +79,19 @@ async function main() {
 
   const placements = [
     { uri: 'v2/models/terrain.glb', pos: [0, 0, 0] },
-    { uri: 'v2/models/library.glb', pos: [-20, 0, -14] },
-    { uri: 'v2/models/research-lab.glb', pos: [18, 0, -16] },
-    { uri: 'v2/models/council.glb', pos: [0, 0, 4] },
-    { uri: 'v2/models/leaders.glb', pos: [-20, 0, -6] },
-    { uri: 'v2/models/workers.glb', pos: [-14, 0, -2] }
+    { uri: 'v2/models/library.glb', pos: [-28, 0.8, -18] },
+    { uri: 'v2/models/research-lab.glb', pos: [25, 1.1, -22] },
+    { uri: 'v2/models/depot.glb', pos: [-31, 0.45, 12] },
+    { uri: 'v2/models/review-office.glb', pos: [33, 0.7, 10] },
+    { uri: 'v2/models/triage.glb', pos: [4, 0.4, 25] },
+    { uri: 'v2/models/garden.glb', pos: [-8, 0.25, 34] },
+    { uri: 'v2/models/council.glb', pos: [27, 0.35, 31] },
+    { uri: 'v2/models/arts-studio.glb', pos: [0, 0.55, -1] },
+    { uri: 'v2/models/engineering-workshop.glb', pos: [-29, 0.7, -1] },
+    { uri: 'v2/models/release-gatehouse.glb', pos: [-29, 0.6, 30] },
+    { uri: 'v2/models/archive.glb', pos: [0, 0.5, 12] },
+    { uri: 'v2/models/leaders.glb', pos: [0, 0, 0] },
+    { uri: 'v2/models/workers.glb', pos: [0, 0, 0] }
   ]
 
   for (const { uri, pos } of placements) {
