@@ -12586,16 +12586,47 @@ def _default_spawn(
         # ``<workspace>/.venv/bin/python`` exists.  Scope the fix to the child
         # environment and preserve the inherited PATH for non-Python tools.
         venv_bin_name = "Scripts" if _IS_WINDOWS else "bin"
+        worker_python: Optional[str] = None
         for venv_root in (".venv", "venv"):
             venv_bin = os.path.join(workspace, venv_root, venv_bin_name)
-            if os.path.isdir(venv_bin):
+            python_name = "python.exe" if _IS_WINDOWS else "python"
+            python_path = os.path.join(venv_bin, python_name)
+            if os.path.isfile(python_path) and os.access(python_path, os.X_OK):
                 inherited_path = env.get("PATH", "")
                 env["PATH"] = (
                     venv_bin
                     if not inherited_path
                     else os.pathsep.join((venv_bin, inherited_path))
                 )
+                # The dispatcher may itself run from Hermes' environment while
+                # the assigned checkout is LunaBot (or the reverse).  Keeping
+                # the inherited VIRTUAL_ENV makes terminal commands, pip, and
+                # child tooling report/use the wrong project environment even
+                # though PATH appears correct. Pin both facts to the resolved
+                # worktree and expose the interpreter for diagnostics/tools.
+                worker_python = os.path.abspath(python_path)
+                env["VIRTUAL_ENV"] = os.path.realpath(
+                    os.path.join(workspace, venv_root)
+                )
+                env["HERMES_KANBAN_WORKTREE_PYTHON"] = worker_python
                 break
+        if worker_python is None:
+            # Hermes and LunaBot are Python projects. A missing worktree link
+            # must not silently run their commands through the gateway's
+            # interpreter, which can pass a few imports and then fail on the
+            # wrong lockfile/runtime. Test fixtures and non-Python task
+            # directories remain compatible because they have no project
+            # marker and are allowed to use their existing PATH.
+            python_markers = (
+                "pyproject.toml",
+                "requirements.txt",
+                "setup.py",
+                "setup.cfg",
+            )
+            if any(os.path.isfile(os.path.join(workspace, marker)) for marker in python_markers):
+                raise RuntimeError(
+                    f"Python task workspace has no executable .venv/bin/python: {workspace}"
+                )
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
     if task.current_run_id is not None:
