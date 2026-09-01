@@ -8610,6 +8610,10 @@ _PROVIDER_UNSUPPORTED_THINKING_RE = re.compile(
     r"(?:does\s+not\s+support\s+thinking|thinking\s+is\s+not\s+supported|unsupported\s+thinking)",
     re.IGNORECASE,
 )
+_PROVIDER_UNRESPONSIVE_RE = re.compile(
+    r"Provider\s+has\s+been\s+unresponsive.*?aborting\s+this\s+call",
+    re.IGNORECASE | re.DOTALL,
+)
 
 # Within this window a completed run counts as "recent proof"; don't re-spawn.
 _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
@@ -9614,6 +9618,11 @@ def _provider_terminal_error_text(task_id: str) -> tuple[str, str] | None:
         return (
             "provider rejected reasoning: selected model does not support thinking",
             "unsupported_thinking",
+        )
+    if _PROVIDER_UNRESPONSIVE_RE.search(tail):
+        return (
+            "provider unresponsive: aborted after repeated stale attempts",
+            "provider_unresponsive",
         )
     return None
 
