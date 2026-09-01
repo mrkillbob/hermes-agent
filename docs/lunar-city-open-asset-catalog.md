@@ -48,5 +48,16 @@ material/draw/texture budgets, required nodes, LOD tier, and the Lunar City
 model or material it replaces. Keep the source package outside the core tree
 until the receipt is complete and `validate-assets.mjs` passes.
 
+The quarantine step is automated by
+`apps/desktop/scripts/lunar-city/import-open-asset-pack.mjs`:
+
+```bash
+node scripts/lunar-city/import-open-asset-pack.mjs <pack-directory> <quarantine-directory>
+```
+
+It refuses the shipped Lunar City asset path and writes `asset-receipt.json`
+with file sizes and SHA-256 hashes. The receipt is intentionally marked for
+human license review before any model is mapped into a runtime manifest.
+
 The target is visual-quality parity through richer composition and authored
 detail—not a recognizable clone of another game's art direction.
