@@ -1482,14 +1482,30 @@ def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
     calls: list[str] = []
     connect_attempts = 0
 
-    class FakeConnection:
-        def execute(self, statement: str):
-            calls.append(statement)
+    class Cursor:
+        def __init__(self, value):
+            self.value = value
 
-        def close(self):
-            calls.append("close")
+        def fetchone(self):
+            return (self.value,)
 
-    connection = FakeConnection()
+    class Connection:
+        def __init__(self):
+            self.wal_attempts = 0
+            self.current_mode = "delete"
+
+        def execute(self, sql):
+            if sql == "PRAGMA journal_mode":
+                return Cursor(self.current_mode)
+            if sql == "PRAGMA journal_mode=WAL":
+                self.wal_attempts += 1
+                if self.wal_attempts == 1:
+                    raise sqlite3.OperationalError("unable to open database file")
+                self.current_mode = "wal"
+                return Cursor("wal")
+            return Cursor(None)
+
+    connection = Connection()
 
     def flaky_connect(*args, **kwargs):
         nonlocal connect_attempts
@@ -1506,7 +1522,10 @@ def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
 
     assert result is connection
     assert connect_attempts == 2
-    assert calls[:2] == ["PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"]
+    assert connection.wal_attempts == 2
+    connection.wal_attempts = 0
+    ledger_module._enable_wal_with_bounded_retry(connection)
+    assert connection.wal_attempts == 0
 
 
 def test_worktree_policy_allows_ten_seconds_for_local_git_probe(

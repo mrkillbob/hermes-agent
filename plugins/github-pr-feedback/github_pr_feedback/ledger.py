@@ -16,6 +16,42 @@ from pathlib import Path
 
 from .policy import FeedbackReceipt
 
+_SQLITE_BUSY_TIMEOUT_MS = 5_000
+_SQLITE_WAL_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
+
+
+def _enable_wal_with_bounded_retry(connection: sqlite3.Connection) -> None:
+    """Enable WAL without losing startup to a concurrent opener.
+
+    SQLite can report ``unable to open database file`` while another process
+    is changing the journal mode.  Install the busy timeout before the mode
+    change, retry only that bounded initialization step, and still fail closed
+    for a persistent or unrelated SQLite error.
+    """
+
+    connection.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+    delays = (0.0, *_SQLITE_WAL_RETRY_DELAYS)
+    last_error: sqlite3.OperationalError | None = None
+    for delay in delays:
+        if delay:
+            time.sleep(delay)
+        try:
+            current_mode = connection.execute("PRAGMA journal_mode").fetchone()
+            if current_mode and str(current_mode[0]).casefold() == "wal":
+                return
+            mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+        except sqlite3.OperationalError as error:
+            if "unable to open database file" not in str(error).casefold():
+                raise
+            last_error = error
+            continue
+        if not mode or str(mode[0]).casefold() != "wal":
+            raise sqlite3.OperationalError(
+                f"SQLite WAL initialization returned {mode!r}"
+            )
+        return
+    assert last_error is not None
+    raise last_error
 try:  # Hermes supplies the profile-aware source of truth at runtime.
     from hermes_constants import get_hermes_home
 except ImportError:  # Standalone unit tests remain dependency-free.
