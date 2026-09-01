@@ -12669,9 +12669,15 @@ def _default_spawn(
             cmd.extend(["--provider", task.provider_override])
     # Per-task thinking depth. Independent of the model override — a task can
     # run the profile's own model at a different depth — so this is its own
-    # branch, not a nested one.
-    if task.reasoning_effort:
-        cmd.extend(["--reasoning", task.reasoning_effort])
+    # branch, not a nested one. Local routes default to ``none`` when a legacy
+    # card predates the persisted override: several local models reject
+    # thinking-mode requests, and allowing the profile default to leak through
+    # can trigger a remote fallback and the egress firewall.
+    reasoning_effort = task.reasoning_effort
+    if reasoning_effort is None and selected_local_route is not None:
+        reasoning_effort = "none"
+    if reasoning_effort:
+        cmd.extend(["--reasoning", reasoning_effort])
     worker_toolsets = _resolve_worker_cli_toolsets(
         env.get("HERMES_HOME"),
         # The local provider path already has repository-scoped terminal/file
