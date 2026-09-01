@@ -782,9 +782,10 @@ class PooledLocalGitRepository:
             self._run(
                 [
                     "git", "-C", str(path), "worktree", "add", "--quiet",
-                    "--detach", str(workspace),
+                    "--no-checkout", "--detach", str(workspace),
                 ]
             )
+        self._configure_case_collision_sparse_checkout(workspace, receipt.head_sha)
         self._run(
             [
                 "git", "-C", str(workspace), "checkout", "--quiet", "--force",
@@ -800,6 +801,46 @@ class PooledLocalGitRepository:
         self._verify_worktree(workspace, receipt.head_sha)
         LocalGitRepository._link_governed_venv(path, workspace)
         return workspace.resolve()
+
+    def _configure_case_collision_sparse_checkout(
+        self, workspace: Path, head_sha: str
+    ) -> None:
+        """Keep case-colliding tracked paths out of case-insensitive slots."""
+
+        ignore_case = self._run(
+            ["git", "-C", str(workspace), "config", "--bool", "core.ignorecase"],
+            missing_ok=True,
+        ).strip().casefold()
+        if ignore_case != "true":
+            return
+        names = self._run(
+            ["git", "-C", str(workspace), "ls-tree", "-r", "--name-only", head_sha]
+        ).splitlines()
+        by_folded_name: dict[str, list[str]] = {}
+        for name in names:
+            by_folded_name.setdefault(name.casefold(), []).append(name)
+        colliding_names = sorted(
+            name
+            for names_for_key in by_folded_name.values()
+            if len(names_for_key) > 1
+            for name in names_for_key
+        )
+        patterns = ["/*", *(f"!/{name}" for name in colliding_names)]
+        self._run(
+            ["git", "-C", str(workspace), "sparse-checkout", "init", "--no-cone"]
+        )
+        self._run(
+            [
+                "git",
+                "-C",
+                str(workspace),
+                "sparse-checkout",
+                "set",
+                "--no-cone",
+                *patterns,
+            ]
+        )
+        self._run(["git", "-C", str(workspace), "sparse-checkout", "reapply"])
 
     def _slot_belongs_to(self, path: Path, workspace: Path) -> bool:
         """Whether ``workspace`` is a live worktree of the repository at ``path``."""
