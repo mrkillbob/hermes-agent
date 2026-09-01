@@ -91,6 +91,20 @@ human license review before any model is mapped into a runtime manifest.
 The target is visual-quality parity through richer composition and authored
 detail—not a recognizable clone of another game's art direction.
 
+For a large multi-kit download, curate before Blender import so the benchmark
+does not become a 10,000-object scene:
+
+```bash
+node apps/desktop/scripts/lunar-city/curate-open-asset-pack.mjs \
+  "/Users/mikedemott/Downloads/Free OpenSource Game Assets" \
+  /tmp/lunar-city-open-asset-curated
+```
+
+The curator selects up to 220 high-value GLB/GLTF/FBX/OBJ files from the space,
+city, factory, nature, fantasy, and Quaternius kits and writes
+`curation-receipt.json`. Every selected file remains marked for license review
+before distribution.
+
 ## Blender staging bridge
 
 The repository now includes an asset-neutral Blender staging script:
