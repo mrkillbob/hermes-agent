@@ -86,9 +86,9 @@ Those three gaps are Phases 1–3 below.
 
 ## Current implementation inventory (2026-09-01)
 
-- **Geometry:** 4 of 11 specialist buildings (Library, Research Lab, Depot,
-  Council) have
-  solid walls/windows; the other 7 (Review Office, Triage, Garden,
+- **Geometry:** 5 of 11 specialist buildings (Library, Research Lab, Depot,
+  Council, Review Office) have
+  solid walls/windows; the other 6 (Triage, Garden,
   Arts Studio, Engineering Workshop, Release Gatehouse, Archive)
   still read as thin pillar/rib/wing armatures with no continuous exterior
   wall. Full per-building budget table and the exact loop to follow:
@@ -155,7 +155,7 @@ All of the following true at once, on one clean SHA:
 Do these in order. Each phase links its detailed doc where one already
 exists instead of repeating it.
 
-### Phase 0 — Geometry solidification (in progress, 4/11 done)
+### Phase 0 — Geometry solidification (in progress, 5/11 done)
 
 Already fully specified: **`docs/lunar-city-handoff-2026-09-01.md`**.
 Follow its per-building loop and budget table exactly, especially the
