@@ -1535,7 +1535,7 @@ export async function createWorldScene(
       : undefined
 
     if (glowLayer) {
-      glowLayer.intensity = 0.6
+      glowLayer.intensity = 0.42
     }
 
     const imageProcessing = scene.imageProcessingConfiguration
@@ -1629,7 +1629,7 @@ export async function createWorldScene(
       keyLight.shadowEnabled = settings.dynamicShadows === 'near'
 
       if (glowLayer) {
-        glowLayer.intensity = settings.decorations ? 0.6 : 0
+        glowLayer.intensity = settings.decorations ? 0.42 : 0
       }
 
       for (const node of decorationNodes) {
