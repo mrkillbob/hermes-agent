@@ -31,10 +31,11 @@ Both reports have a `webgl-preview.png` (real WebGL-lit screenshot) for
 visual comparison. **Read the second report in full before continuing** —
 it documents a real trap (below) that cost a full iteration to find.
 
-The remaining **five** specialist buildings (Garden, Arts Studio, Engineering
+The remaining **four** specialist buildings (Arts Studio, Engineering
 Workshop, Release Gatehouse, and Archive) still need a targeted enclosure or
-distinctive-massing review. Triage was audited below and already has a
-continuous open-front enclosure.
+distinctive-massing review. Triage was audited below and Garden now has a
+lightweight rear pavilion that strengthens its circular enclosure without
+blocking the open recovery space.
 
 ## Approved external benchmark policy
 
@@ -60,9 +61,9 @@ walls, canopy, front posts, and an intentionally open front (`buildTriage` in
 `modeling/props.mjs`). Its current near LOD passes the open-front and unique
 silhouette checks, so adding another wall would spend the building's zero
 draw-call headroom without improving the diagnostic target. Treat Triage as
-the first audited specialist and continue the solidification loop with
-Garden, whose circular basin/railing silhouette needs a separate enclosure
-decision rather than a box wall.
+the first audited specialist. Garden's circular basin/railing silhouette now
+has a rear pavilion rather than a box wall; continue the loop with Arts
+Studio.
 
 ## The one rule that matters: check the silhouette-uniqueness test after every building, not at the end
 

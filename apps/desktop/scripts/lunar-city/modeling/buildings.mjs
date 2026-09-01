@@ -1532,6 +1532,39 @@ export function buildGarden(scene) {
     tessellation: 12
   })
   const plants = addPlants(scene, near)
+  // A low rear pavilion gives the circular recovery district a readable
+  // enclosure/landmark without turning it into a box or blocking the open
+  // garden front. Reuse existing materials so the capped draw-call budget
+  // remains stable after mergeLodMeshes().
+  const pavilion = group(scene, 'garden:rear-pavilion', near)
+  for (const side of [-1, 1]) {
+    box(scene, `garden:rear-pavilion:post:${side}`, {
+      depth: 0.62,
+      height: 3.7,
+      material: 'bone-metal',
+      parent: pavilion,
+      position: [side * 4.1, 2.15, -5.1],
+      rotation: [0, 0, side * 0.08],
+      width: 0.62
+    })
+  }
+  box(scene, 'garden:rear-pavilion:beam', {
+    depth: 0.7,
+    height: 0.52,
+    material: 'bone-metal',
+    parent: pavilion,
+    position: [0, 4.05, -5.1],
+    rotation: [0, 0, -0.04],
+    width: 8.8
+  })
+  box(scene, 'garden:rear-pavilion:glow-panel', {
+    depth: 0.16,
+    height: 1.15,
+    material: 'signal-emissive',
+    parent: pavilion,
+    position: [0, 2.5, -5.46],
+    width: 2.6
+  })
   const bench = group(scene, 'garden:bench', near, { position: [0.4, 1, 1.1], rotation: [0, -0.25, 0] })
   box(scene, 'garden:bench:seat', { depth: 1.5, height: 0.3, material: 'bone-metal', parent: bench, width: 4.2 })
   box(scene, 'garden:bench:back', {

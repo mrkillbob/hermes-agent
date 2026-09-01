@@ -619,20 +619,20 @@
       "collision": { "kind": "mesh", "navigationArea": "garden" },
       "materialSlots": ["lunar-rust", "signal-emissive"],
       "statistics": {
-        "accessorBytes": 59604,
+        "accessorBytes": 62196,
         "animationClips": ["garden-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 14,
-        "gpuBytes": 59604,
+        "nodes": 15,
+        "gpuBytes": 62196,
         "textures": 0,
-        "triangles": 2244,
-        "gpuMiB": 0.0568,
+        "triangles": 2292,
+        "gpuMiB": 0.0593,
         "budget": { "maxDrawCalls": 6, "maxGpuMiB": 7, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 18000 },
-        "bytes": 81776,
-        "extent": [19, 3.055, 19],
-        "sha256": "22af8be2d3e1306ae00d12ba5ffd9e5b734e6327081abf04d243ee09613c3b78"
+        "bytes": 85200,
+        "extent": [19, 4.9107, 19],
+        "sha256": "e7108683fea4e65f5499ef101bcfaa3185ab897d993be0e2982e96808132b3ef"
       }
     },
     {
