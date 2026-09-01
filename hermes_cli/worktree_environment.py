@@ -42,13 +42,23 @@ def _git_value(path: Path, args: list[str]) -> Path | None:
     return Path(value).expanduser().resolve(strict=False)
 
 
-def _same_repository_environment(source_root: Path, resolved_source: Path) -> bool:
+def _same_repository_environment(
+    source_root: Path,
+    resolved_source: Path,
+    *,
+    governed_roots: tuple[Path, ...] = (),
+) -> bool:
     """Return whether an environment resolves inside this repo's checkout."""
     try:
         if resolved_source.is_relative_to(source_root):
             return True
     except ValueError:
         pass
+    if any(
+        resolved_source == root or resolved_source.is_relative_to(root)
+        for root in governed_roots
+    ):
+        return True
 
     # A linked worktree may contain ``.venv -> <main-checkout>/.venv``.  The
     # symlink leaves the source worktree, but remains safe when Git proves that
@@ -88,6 +98,26 @@ def bootstrap_worktree_environments(
         logger.warning("worktree environment bootstrap roots unavailable: %s", exc)
         return ()
 
+    # Existing linked worktrees commonly have no ignored environment of their
+    # own. Resolve the main checkout from Git's common directory so reuse of a
+    # worktree gets the same repository-scoped environment as a newly-created
+    # worktree. The repository check below still rejects environments from a
+    # different Git repository.
+    source_roots = [source_root]
+    governed_roots: list[Path] = []
+    common_dir = _git_value(
+        source_root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]
+    )
+    if common_dir is not None and common_dir.name == ".git":
+        main_root = common_dir.parent
+        if main_root not in source_roots:
+            source_roots.append(main_root)
+        # Managed Hermes installs keep the repository venv outside the
+        # checkout at ``<repo-parent>/venvs``. It is still repository-scoped:
+        # this is the same explicit sibling layout used by the runtime and is
+        # narrower than trusting arbitrary absolute symlink targets.
+        governed_roots.append(main_root.parent / "venvs")
+
     linked: list[str] = []
     for environment_name in environment_names:
         destination = target_root / environment_name
@@ -99,29 +129,35 @@ def bootstrap_worktree_environments(
             if environment_name == ".venv" and allow_venv_fallback
             else (environment_name,)
         )
-        for source_name in source_names:
-            source = source_root / source_name
-            try:
-                if not source.exists():
-                    continue
-                resolved_source = source.resolve(strict=True)
-                python = resolved_source / "bin" / "python"
-                if not resolved_source.is_dir() or not _same_repository_environment(
-                    source_root, resolved_source
-                ):
-                    continue
-                if require_python and (
-                    not python.is_file() or not os.access(python, os.X_OK)
-                ):
-                    continue
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                os.symlink(str(resolved_source), str(destination), target_is_directory=True)
-                linked.append(environment_name)
+        for candidate_root in source_roots:
+            for source_name in source_names:
+                source = candidate_root / source_name
+                try:
+                    if not source.exists():
+                        continue
+                    resolved_source = source.resolve(strict=True)
+                    python = resolved_source / "bin" / "python"
+                    if not resolved_source.is_dir() or not _same_repository_environment(
+                        source_root,
+                        resolved_source,
+                        governed_roots=tuple(governed_roots),
+                    ):
+                        continue
+                    if require_python and (
+                        not python.is_file() or not os.access(python, os.X_OK)
+                    ):
+                        continue
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(
+                        str(resolved_source), str(destination), target_is_directory=True
+                    )
+                    linked.append(environment_name)
+                    break
+                except OSError as exc:
+                    logger.warning(
+                        "worktree environment bootstrap could not link %s",
+                        environment_name,
+                    )
+            if linked and linked[-1] == environment_name:
                 break
-            except OSError as exc:
-                logger.warning(
-                    "worktree environment bootstrap could not link %s: %s",
-                    environment_name,
-                    exc,
-                )
     return tuple(linked)
