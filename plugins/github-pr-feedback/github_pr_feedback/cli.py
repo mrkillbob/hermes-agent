@@ -1660,8 +1660,9 @@ def _merge_maintainer_task(
             "observability card. Model output cannot waive a blocker or create CI or "
             "merge receipts. After the bounded explanation, immediately call kanban_complete with the "
             "repository, PR number, expected head, blockers, and snapshot digest. Call kanban_block only "
-            "if kanban_complete itself is unavailable or rejected. A deterministic controller will act "
-            "automatically after every gate passes."
+            "if kanban_complete itself is unavailable or rejected. An operator will review this exact-head "
+            "handoff and perform the normal repository merge separately; do not merge or claim that it was "
+            "merged."
         ),
         board=policy.board or "",
         assignee=merge_policy.assignee,
