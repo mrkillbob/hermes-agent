@@ -101,6 +101,20 @@ plugins:
           report_only: true
           post_merge:
             enabled: false
+        # For multiple owned repositories, use merge_maintainers instead of
+        # the legacy singular field. Each PR can be explicitly enrolled.
+        merge_maintainers:
+          - enabled: false
+            assignee: pr-merge-maintainer
+            repository: example-owner/hermes-agent
+            author_login: example-owner
+            base_branch: main
+            merge_methods: [squash, rebase, merge]
+            receipt_max_age_seconds: 21600
+            report_only: true
+            require_per_pr_enrollment: true
+            post_merge:
+              enabled: false
         # Optional end-stage repository maintenance. It never runs while any
         # PR remains open and waits for the same base SHA to remain unchanged
         # for the full quiet period. Commands are literal argv, never shell.
@@ -183,6 +197,22 @@ hermes github-pr-feedback scan
 hermes github-pr-feedback merge-status
 ```
 
+Enroll or remove one exact PR from an enabled merge lane:
+
+```sh
+hermes github-pr-feedback merge-enable \
+  --repository example-owner/hermes-agent --pr-number 123
+hermes github-pr-feedback merge-disable \
+  --repository example-owner/hermes-agent --pr-number 123
+```
+
+Enrollment is local, durable state; it does not grant GitHub permissions and
+does not merge anything by itself. A `REVIEW_REQUIRED` GitHub state blocks the
+merge and creates a deduplicated exact-head review task for the configured
+review steward. That worker may review and leave factual feedback or a normal
+approval, but cannot edit, push, change protection, or merge. The controller
+re-reads the PR after the review before considering it again.
+
 `scan` is safe to repeat. It records durable receipt state and creates one
 Kanban card only for feedback that passes all admission checks. By default the
 card starts `blocked`. With the explicit `auto_dispatch: true` opt-in, it starts
@@ -249,7 +279,12 @@ workflow is resolved. The merge maintainer independently reports the same
 than the generic `github_checks_not_green`.
 
 When `merge_maintainer.enabled: true`, each reconciliation also evaluates open
-PRs from the configured author and same repository. It requires a private
+PRs from the configured author and same repository. With
+`merge_maintainers`, the same rules apply independently to every configured
+owned repository. If `require_per_pr_enrollment: true`, a PR is not eligible
+until an operator explicitly enrolls that exact PR in the durable profile
+ledger. This keeps a newly opened PR from becoming an automatic merge target.
+It requires a private
 repository, exact base and head identities, an admitted branch prefix, a fresh
 passing local-CI receipt for the current lane-manifest digest, clean explicit
 mergeability, green GitHub checks when Actions is enabled, no change request,

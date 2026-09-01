@@ -75,6 +75,7 @@ except ImportError:
 
 
 _MISSING = object()
+_REVIEW_REQUIRED_ASSIGNEE = "review-verification-steward"
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(token|secret|password|authorization|api[_-]?key)\s*[:=]\s*\S+"
@@ -222,6 +223,7 @@ class DoctorProbe:
     def checks(self, policy: PluginPolicy, ledger_path: Path) -> dict[str, str]:
         gh = self._runner.which("gh")
         hermes = self._runner.which("hermes")
+        merge_policies = _merge_policies(policy)
         checks = {
             "gh_executable": gh is not None,
             "gh_auth": bool(
@@ -243,11 +245,8 @@ class DoctorProbe:
                         if policy.local_ci_audit is not None
                         else []
                     ),
-                    *(
-                        [policy.merge_maintainer.assignee]
-                        if policy.merge_maintainer is not None
-                        else []
-                    ),
+                    *(merge_policy.assignee for merge_policy in merge_policies),
+                    *([_REVIEW_REQUIRED_ASSIGNEE] if merge_policies else []),
                     *(
                         [policy.repair_steward.assignee]
                         if policy.repair_steward is not None
@@ -491,6 +490,16 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     subcommands.add_parser(
         "merge-status", help="Show bounded merge and deployment counts"
     )
+    merge_enable = subcommands.add_parser(
+        "merge-enable", help="Enroll one configured PR for automatic merging"
+    )
+    merge_enable.add_argument("--repository", required=True)
+    merge_enable.add_argument("--pr-number", required=True, type=int)
+    merge_disable = subcommands.add_parser(
+        "merge-disable", help="Remove one PR from automatic merge enrollment"
+    )
+    merge_disable.add_argument("--repository", required=True)
+    merge_disable.add_argument("--pr-number", required=True, type=int)
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
@@ -535,6 +544,10 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _merge_scan(ctx)
     if action == "merge-status":
         return _merge_status()
+    if action == "merge-enable":
+        return _merge_enable(ctx, args)
+    if action == "merge-disable":
+        return _merge_disable(ctx, args)
     if action == "complete-feedback":
         return _complete_feedback(ctx, args)
     if action == "complete-maintenance":
@@ -636,7 +649,7 @@ def _scan(ctx: Any) -> int:
                     control_home=get_default_hermes_root(),
                 ).scan()
                 repair_payload = _scan_payload(repair)
-            if policy.merge_maintainer is not None and not required_ci_backlog:
+            if _merge_policies(policy) and not required_ci_backlog:
                 merge_payload = _run_merge_scan(policy, ledger)
             if policy.release_maintenance is not None and not required_ci_backlog:
                 maintenance_payload = _run_release_maintenance_scan(policy, ledger)
@@ -1048,6 +1061,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     policy,
                     ledger,
                     receipt.identity.pr_number,
+                    repository=receipt.identity.repository,
                     github=github,
                 )
                 handoff_status = str(merge_handoff.get("status", ""))
@@ -1237,7 +1251,7 @@ def _merge_scan(ctx: Any) -> int:
     except ValueError:
         print(json.dumps({"status": "invalid_configuration"}, sort_keys=True))
         return 1
-    if policy.merge_maintainer is None:
+    if not _merge_policies(policy):
         print(json.dumps({"status": "disabled"}, sort_keys=True))
         return 0
     ledger = FeedbackLedger.for_current_profile()
@@ -1256,9 +1270,54 @@ def _run_merge_scan(
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
 ) -> dict[str, object]:
-    merge_policy = policy.merge_maintainer
-    if merge_policy is None:
+    merge_policies = _merge_policies(policy)
+    if not merge_policies:
         return {"status": "disabled", "processed": 0, "merged": [], "blocked": {}}
+    if len(merge_policies) == 1:
+        return _run_merge_scan_for_policy(
+            policy, merge_policies[0], ledger, github=github, kanban=kanban
+        )
+    results = [
+        _run_merge_scan_for_policy(
+            policy, merge_policy, ledger, github=github, kanban=kanban
+        )
+        for merge_policy in merge_policies
+    ]
+    blocked: dict[str, list[str]] = {}
+    for merge_policy, result in zip(merge_policies, results, strict=True):
+        for number, blockers in result["blocked"].items():
+            blocked[f"{merge_policy.repository}#{number}"] = blockers
+    return {
+        "status": "degraded" if any(result["status"] == "degraded" for result in results) else "ok",
+        "processed": sum(int(result["processed"]) for result in results),
+        "merged": [item for result in results for item in result["merged"]],
+        "blocked": blocked,
+        "maintainer_tasks_created": sum(
+            int(result["maintainer_tasks_created"]) for result in results
+        ),
+        "maintainer_task_dispatch_failed": [
+            f"{merge_policy.repository}#{number}"
+            for merge_policy, result in zip(merge_policies, results, strict=True)
+            for number in result["maintainer_task_dispatch_failed"]
+        ],
+        "deployments": [item for result in results for item in result["deployments"]],
+        "deployment_failures": [
+            f"{merge_policy.repository}#{number}"
+            for merge_policy, result in zip(merge_policies, results, strict=True)
+            for number in result["deployment_failures"]
+        ],
+        "report_only": all(bool(result["report_only"]) for result in results),
+    }
+
+
+def _run_merge_scan_for_policy(
+    policy: PluginPolicy,
+    merge_policy,
+    ledger: FeedbackLedger,
+    *,
+    github: GitHubClient | None = None,
+    kanban: KanbanSubprocessClient | None = None,
+) -> dict[str, object]:
     github = github or GitHubClient()
     kanban = kanban or KanbanSubprocessClient()
     try:
@@ -1272,7 +1331,14 @@ def _run_merge_scan(
             "merged": [],
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
-    source = CanonicalMergeEvidenceSource(policy, github, ledger)
+    if merge_policy.require_per_pr_enrollment:
+        enrolled = set(ledger.enrolled_merge_pr_numbers(merge_policy.repository))
+        pull_requests = tuple(
+            pull_request
+            for pull_request in pull_requests
+            if pull_request.number in enrolled
+        )
+    source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     manifest_path = (
         policy.targets[merge_policy.repository].local_path
         / "tests"
@@ -1292,6 +1358,7 @@ def _run_merge_scan(
     deployments: list[dict[str, object]] = []
     deployment_failures: list[int] = []
     maintainer_task_dispatch_failed: list[int] = []
+    review_tasks_created = 0
     tasks_created = 0
     degraded = False
     open_by_number = {pull_request.number: pull_request for pull_request in pull_requests}
@@ -1394,18 +1461,29 @@ def _run_merge_scan(
                 )
             try:
                 kanban.create_or_get_task(
-                    _merge_maintainer_task(policy, pull_request, result.decision)
+                    _merge_maintainer_task(
+                        policy, merge_policy, pull_request, result.decision
+                    )
                 )
                 tasks_created += 1
             except (RuntimeError, ValueError):
                 degraded = True
                 maintainer_task_dispatch_failed.append(number)
+        if "review_required" in blocker_codes and pull_request is not None:
+            try:
+                kanban.create_or_get_task(
+                    _review_required_task(policy, merge_policy, pull_request)
+                )
+                review_tasks_created += 1
+            except (RuntimeError, ValueError):
+                degraded = True
     return {
         "status": "degraded" if degraded else "ok",
         "processed": len(numbers),
         "merged": merged,
         "blocked": blocked,
         "maintainer_tasks_created": tasks_created,
+        "review_tasks_created": review_tasks_created,
         "maintainer_task_dispatch_failed": maintainer_task_dispatch_failed,
         "deployments": deployments,
         "deployment_failures": deployment_failures,
@@ -1418,17 +1496,26 @@ def _run_single_pr_merge_handoff(
     ledger: FeedbackLedger,
     pr_number: int,
     *,
+    repository: str | None = None,
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
 ) -> dict[str, object]:
     """Attempt one exact PR merge, then admit at most one successor repair."""
 
-    merge_policy = policy.merge_maintainer
+    merge_policy = (
+        policy.merge_policy_for(repository)
+        if repository is not None
+        else policy.merge_maintainer
+    )
     if merge_policy is None:
         return {"status": "disabled", "blockers": ["merge_maintainer_disabled"]}
     github = github or GitHubClient()
     kanban = kanban or KanbanSubprocessClient()
-    source = CanonicalMergeEvidenceSource(policy, github, ledger)
+    if merge_policy.require_per_pr_enrollment and not ledger.is_merge_enrolled(
+        merge_policy.repository, pr_number
+    ):
+        return {"status": "blocked", "blockers": ["merge_pr_not_enrolled"]}
+    source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     try:
         result = MergeController(
             merge_policy,
@@ -1516,10 +1603,18 @@ def _announce_ready_to_merge(github: GitHubClient, repository: str, pull_request
 
 
 def _merge_maintainer_task(
-    policy: PluginPolicy, pull_request, decision: MergeDecision
+    policy: PluginPolicy,
+    merge_policy,
+    pull_request=None,
+    decision: MergeDecision | None = None,
 ) -> KanbanTask:
-    merge_policy = policy.merge_maintainer
-    if merge_policy is None:
+    # Keep the test/plugin helper's historical three-argument form working
+    # while the multi-repository scan passes its selected policy explicitly.
+    if decision is None:
+        decision = pull_request
+        pull_request = merge_policy
+        merge_policy = policy.merge_maintainer
+    if merge_policy is None or decision is None or pull_request is None:
         raise ValueError("merge maintainer is disabled")
     target = policy.targets[merge_policy.repository]
     evidence = {
@@ -1569,6 +1664,118 @@ def _merge_status() -> int:
     finally:
         ledger.close()
     print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _review_required_task(policy: PluginPolicy, merge_policy, pull_request) -> KanbanTask:
+    """Create an exact-head review task when GitHub reports review required."""
+
+    target = policy.targets[merge_policy.repository]
+    key = hashlib.sha256(
+        f"{merge_policy.repository}\0{pull_request.number}\0{pull_request.head_sha}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return KanbanTask(
+        title=f"Review required: {merge_policy.repository}#{pull_request.number}",
+        instructions=(
+            "Perform an independent code review of this exact pull-request head. Re-read the "
+            "canonical PR identity and review the complete diff and relevant tests. Leave factual "
+            "review feedback on GitHub for any issue found; if the change is sound, submit the "
+            "repository's normal approval review. Do not edit, push, force-push, change branch "
+            "protection, or merge the pull request. Stop if the base or head SHA changes. The "
+            "merge controller will re-read the review state automatically and will not waive this "
+            "gate from model output."
+        ),
+        board=policy.board or "",
+        assignee=_REVIEW_REQUIRED_ASSIGNEE,
+        repository_path=target.local_path,
+        head_sha=pull_request.head_sha,
+        branch=pull_request.head_ref_name,
+        idempotency_key=f"github-pr-review-required:{key}",
+        evidence={
+            "repository": merge_policy.repository,
+            "pr_number": pull_request.number,
+            "expected_head_sha": pull_request.head_sha,
+            "base_branch": pull_request.base_branch,
+            "reason": "review_required",
+        },
+        evidence_heading="Canonical review-required evidence (JSON)",
+        initial_status="running" if policy.auto_dispatch else "blocked",
+        max_retries=2 if policy.auto_dispatch else 1,
+        max_runtime_seconds=1200 if policy.auto_dispatch else None,
+    )
+
+
+def _merge_enable(ctx: Any, args: argparse.Namespace) -> int:
+    """Enroll one exact configured PR without granting the worker new authority."""
+
+    try:
+        policy = _load_policy_from_context(ctx)
+        merge_policy = policy.merge_policy_for(args.repository)
+        if merge_policy is None:
+            raise ValueError("repository is not configured for merging")
+        github = GitHubClient()
+        pull = github.get_merge_state(args.repository, args.pr_number)
+        if (
+            pull.repository != merge_policy.repository
+            or pull.head_repository != merge_policy.repository
+            or pull.author_login.casefold() != merge_policy.author_login.casefold()
+            or pull.base_branch != merge_policy.base_branch
+            or pull.state != "OPEN"
+            or pull.merged
+        ):
+            raise ValueError("PR identity is outside the configured merge lane")
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            ledger.enroll_merge_pr(
+                args.repository,
+                args.pr_number,
+                enrolled_at=datetime.now(UTC),
+                enrolled_by=os.environ.get("USER", "hermes-operator"),
+            )
+        finally:
+            ledger.close()
+    except (GitHubClientError, LedgerStateError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "unavailable", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "enrolled",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+                "head_sha": pull.head_sha,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _merge_disable(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        if policy.merge_policy_for(args.repository) is None:
+            raise ValueError("repository is not configured for merging")
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            ledger.unenroll_merge_pr(args.repository, args.pr_number)
+        finally:
+            ledger.close()
+    except (LedgerStateError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "unavailable", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "unenrolled",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -1643,6 +1850,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "local_ci_audit",
         "agent_labels",
         "merge_maintainer",
+        "merge_maintainers",
         "repair_steward",
         "release_maintenance",
         "not_before",
@@ -1653,6 +1861,16 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         if value is not _MISSING:
             settings[key] = value
     return load_policy(settings)
+
+
+def _merge_policies(policy: PluginPolicy) -> tuple[object, ...]:
+    """Read merge policies while keeping injected legacy test policies usable."""
+
+    reader = getattr(policy, "merge_policies", None)
+    if callable(reader):
+        return tuple(reader())
+    legacy = getattr(policy, "merge_maintainer", None)
+    return (legacy,) if legacy is not None else ()
 
 
 def _safe_name(value: str) -> bool:

@@ -1461,7 +1461,7 @@ class ScanController:
             return "head_changed"
         if current.base_sha is None or current.base_sha.casefold() != audit.identity.base_sha:
             return "base_changed"
-        merge_policy = self._policy.merge_maintainer
+        merge_policy = self._policy.merge_policy_for(current.base_repository)
         if (
             merge_policy is not None
             and merge_policy.repository == current.base_repository
@@ -1797,7 +1797,7 @@ class ScanController:
             return "superseded_ci_receipt"
         if current.base_sha is None or current.base_sha.casefold() != audit.identity.base_sha:
             return "base_changed"
-        merge_policy = self._policy.merge_maintainer
+        merge_policy = self._policy.merge_policy_for(current.base_repository)
         if (
             merge_policy is None
             or merge_policy.repository != current.base_repository
@@ -2655,7 +2655,12 @@ def _intent_review_task(
 ) -> KanbanTask:
     """Create one operator-visible, per-PR decision card without a fixer."""
 
-    maintainer = policy.merge_maintainer
+    merge_policy_for = getattr(policy, "merge_policy_for", None)
+    maintainer = (
+        merge_policy_for(receipt.repository)
+        if callable(merge_policy_for)
+        else getattr(policy, "merge_maintainer", None)
+    )
     assignee = maintainer.assignee if maintainer is not None else policy.assignee
     digest = sha256(body.encode("utf-8", errors="replace")).hexdigest()
     return KanbanTask(
