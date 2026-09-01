@@ -1,0 +1,14 @@
+{
+  "source": "Poly Haven",
+  "license": "CC0",
+  "downloadRequired": true,
+  "bundled": false,
+  "assets": [
+    {"id": "rock_07", "kind": "model", "url": "https://polyhaven.com/a/rock_07", "role": "low-poly crater landmark"},
+    {"id": "rock_09", "kind": "model", "url": "https://polyhaven.com/a/rock_09", "role": "hero terrain boulder"},
+    {"id": "rock_face_01", "kind": "model", "url": "https://polyhaven.com/a/rock_face_01", "role": "district perimeter cliff"},
+    {"id": "rock_ground", "kind": "texture", "url": "https://polyhaven.com/a/rock_ground", "role": "regolith ground material"},
+    {"id": "rocky_terrain", "kind": "texture", "url": "https://polyhaven.com/a/rocky_terrain", "role": "background terrain variation"}
+  ],
+  "integration": "Place reviewed downloads in a quarantine directory and pass it to blender_stage.py with --polyhaven-dir. Do not copy them into the shipped public asset tree without a completed receipt."
+}
