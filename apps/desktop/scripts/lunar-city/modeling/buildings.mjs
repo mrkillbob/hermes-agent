@@ -1,5 +1,5 @@
 import { scalarClip } from './animation.mjs'
-import { box, cone, cylinder, group, prismRailing, sphere, torus } from './primitives.mjs'
+import { box, cone, cylinder, facadeFins, group, prismRailing, sphere, torus, trimmedBox } from './primitives.mjs'
 import { addConsoleBank, addPlants, addPortal, addSign, addTelescope, addWorkbenches } from './props.mjs'
 
 function buildingNodes(scene, id) {
@@ -125,6 +125,27 @@ function addLibraryFrame(scene, { accent, depth, height, width }) {
       position: [side * width * 0.33, 0, 0],
       width: 1.25
     })
+  // Thick ivory portal members are the visual shorthand for the reference's
+  // enclosed moon-base architecture.  Keep them on the library only so the
+  // landmark gains a strong hero silhouette without making every district
+  // share one generic frame.
+  for (const side of [-1, 1])
+    box(scene, `library:entrance:hull-pillar:${side}`, {
+      depth: 0.7,
+      height: height * 0.82,
+      material: 'bone-metal',
+      parent: entrance,
+      position: [side * width * 0.47, height * 0.4, 0.08],
+      width: 0.62
+    })
+  box(scene, 'library:entrance:hull-lintel', {
+    depth: 0.76,
+    height: 0.58,
+    material: 'bone-metal',
+    parent: entrance,
+    position: [0, height * 0.81, 0.08],
+    width: width * 0.9
+  })
   const identity = group(scene, 'library:city-identity', near)
   keepIdentity(
     box(scene, 'library:city-identity:great-book', {
@@ -194,6 +215,14 @@ function addLabFrame(scene, { accent, depth, height, width }) {
     position: [width / 2, height * 0.26, -depth * 0.12],
     width: 1.4
   })
+  box(scene, 'research-lab:shell:rear-band', {
+    depth: 0.54,
+    height: 0.5,
+    material: 'bone-metal',
+    parent: shell,
+    position: [0, height * 0.84, -depth / 2 - 0.08],
+    width: width * 0.9
+  })
   // Window glow on the existing east side-return and the west service
   // stack, rather than a dedicated new wall/backing panel, so the lit-window
   // read lands on the lab's own asymmetric massing instead of adding more
@@ -250,6 +279,28 @@ function addLabFrame(scene, { accent, depth, height, width }) {
     parent: entrance,
     width: 2.2
   })
+  // Give the observatory a bespoke silver pressure-shell mouth. The shared
+  // entry kit adds small trim, but the reference landmarks have a thick,
+  // readable enclosure around the occupied room. Keeping this frame local to
+  // the lab preserves specialist silhouette diversity and reuses the existing
+  // bone-metal material, so there is no texture or lighting cost.
+  for (const side of [-1, 1])
+    box(scene, `research-lab:entrance:hull-pillar:${side}`, {
+      depth: 0.72,
+      height: 4.7,
+      material: 'bone-metal',
+      parent: entrance,
+      position: [side * 1.65, 2.2, 0.08],
+      width: 0.62
+    })
+  box(scene, 'research-lab:entrance:hull-lintel', {
+    depth: 0.76,
+    height: 0.62,
+    material: 'bone-metal',
+    parent: entrance,
+    position: [0, 4.48, 0.08],
+    width: 4.55
+  })
   const identity = group(scene, 'research-lab:city-identity', near)
   keepIdentity(
     torus(scene, 'research-lab:city-identity:reactor-cradle', {
@@ -260,6 +311,19 @@ function addLabFrame(scene, { accent, depth, height, width }) {
       rotation: [Math.PI / 2, 0, 0],
       tessellation: 14,
       thickness: 0.42
+    })
+  )
+  // The cradle alone is a thin horizontal ring and disappears at the
+  // overview scale.  Give the lab a compact vertical reactor core so its
+  // warm identity occupies a readable fraction of the landmark silhouette.
+  keepIdentity(
+    cylinder(scene, 'research-lab:city-identity:reactor-core', {
+      diameter: 4.8,
+      height: 7.2,
+      material: 'bone-metal',
+      parent: identity,
+      position: [width * 0.31, 4.2, -depth / 2 + 0.85],
+      tessellation: 12
     })
   )
   box(scene, 'research-lab:far:west-wing', {
@@ -299,6 +363,14 @@ function addDepotFrame(scene, { accent, depth, height, width }) {
     parent: shell,
     position: [0, height * 0.31, -depth / 2],
     width: width + 1.5
+  })
+  box(scene, 'depot:shell:rear-band', {
+    depth: 0.5,
+    height: 0.48,
+    material: 'bone-metal',
+    parent: shell,
+    position: [0, height * 0.62, -depth / 2 - 0.08],
+    width: width * 0.92
   })
   for (const side of [-1, 1]) {
     box(scene, `depot:side-wall:${side}`, {
@@ -408,6 +480,14 @@ function addReviewFrame(scene, { depth, height, width }) {
     position: [0, height * 0.21, -depth * 0.46],
     width: width * 0.52
   })
+  box(scene, 'review-office:shell:rear-band', {
+    depth: 0.46,
+    height: 0.44,
+    material: 'bone-metal',
+    parent: shell,
+    position: [0, height * 0.45, -depth * 0.49],
+    width: width * 0.72
+  })
   for (const side of [-1, 1])
     box(scene, `review-office:chamber-side-wall:${side}`, {
       depth: depth * 0.52,
@@ -498,6 +578,14 @@ function addCouncilFrame(scene, { depth, height, width }) {
     position: [0, height * 0.19, -depth * 0.46],
     width: width * 0.58
   })
+  box(scene, 'council:shell:rear-band', {
+    depth: 0.5,
+    height: 0.44,
+    material: 'bone-metal',
+    parent: shell,
+    position: [0, height * 0.42, -depth * 0.49],
+    width: width * 0.78
+  })
   for (const side of [-1, 1]) {
     box(scene, `council:chamber-side-wall:${side}`, {
       depth: depth * 0.5,
@@ -580,11 +668,28 @@ function addCouncilFrame(scene, { depth, height, width }) {
 }
 
 function specialistFrame(scene, id, options) {
-  if (id === 'library') return addLibraryFrame(scene, options)
-  if (id === 'research-lab') return addLabFrame(scene, options)
-  if (id === 'depot') return addDepotFrame(scene, options)
-  if (id === 'review-office') return addReviewFrame(scene, options)
-  if (id === 'council') return addCouncilFrame(scene, options)
+  const building =
+    id === 'library'
+      ? addLibraryFrame(scene, options)
+      : id === 'research-lab'
+        ? addLabFrame(scene, options)
+        : id === 'depot'
+          ? addDepotFrame(scene, options)
+          : id === 'review-office'
+            ? addReviewFrame(scene, options)
+            : id === 'council'
+              ? addCouncilFrame(scene, options)
+              : undefined
+
+  if (building) {
+    addEntranceWings(scene, id, building.near, options)
+    addEntryArch(scene, id, building.entrance, options)
+    addWindowGrid(scene, id, building.near, options)
+    addRoofDome(scene, id, building.roof, options)
+    addRoofEquipment(scene, id, building.roof, options)
+    return building
+  }
+
   throw new Error(`unsupported specialist frame ${id}`)
 }
 
@@ -625,6 +730,349 @@ function addLayeredRoomDetail(scene, id, parent, { accent, depth, height, width 
       width: width * (0.56 - step * 0.05)
     })
   return detail
+}
+
+/**
+ * Shared facade language: recessed light bays, a structural lintel and a
+ * visible service spine.  This is deliberately built from the existing
+ * palette rather than shipping third-party meshes, so the asset-neutral
+ * package still has a strong authored look when no optional kit is present.
+ */
+function addFacadeKit(scene, id, parent, { accent, depth, height, width }) {
+  const facade = group(scene, `${id}:facade-kit`, parent)
+  // Sit just inside the room mouth so the kit enriches the façade without
+  // changing the landmark's authored city-scale footprint or silhouette.
+  const frontZ = depth / 2 - 0.32
+  for (let bay = 0; bay < 5; bay += 1) {
+    const x = -width * 0.34 + bay * (width * 0.17)
+    trimmedBox(scene, `${id}:facade:bay:${bay}`, {
+      depth: 0.18,
+      height: height * (0.18 + (bay % 2) * 0.04),
+      material: accent,
+      parent: facade,
+      position: [x, height * 0.42 + (bay % 2) * 0.18, frontZ],
+      trimMaterial: 'bone-metal',
+      width: width * 0.12
+    })
+  }
+  // Wrap a second, orthogonal run around each side wall. The default camera
+  // sees the districts from a diagonal, so a front-only façade leaves most
+  // of the visible mass as a blank slab. These shallow service panels add the
+  // layered sci-fi silhouette of the reference without new materials.
+  for (const side of [-1, 1]) {
+    for (let bay = 0; bay < 4; bay += 1) {
+      const z = -depth * 0.28 + bay * (depth * 0.18)
+      trimmedBox(scene, `${id}:facade:side-bay:${side}:${bay}`, {
+        depth: 0.18,
+        height: height * (0.14 + (bay % 2) * 0.04),
+        material: bay % 2 ? 'bone-metal' : accent,
+        parent: facade,
+        position: [side * (width * 0.47 + 0.06), height * 0.38 + (bay % 2) * 0.22, z],
+        rotation: [0, Math.PI / 2, 0],
+        trimMaterial: 'bone-metal',
+        width: depth * 0.12
+      })
+    }
+  }
+  trimmedBox(scene, `${id}:facade:lintel`, {
+    depth: 0.28,
+    height: 0.34,
+    material: 'charcoal-structure',
+    parent: facade,
+    position: [0, height * 0.7, frontZ + 0.04],
+    trimMaterial: 'bone-metal',
+    width: width * 0.82
+  })
+  // Keep the shared kit inside the authored footprint.  Silhouette variety
+  // comes from each specialist's own roof/tower massing; common fins would
+  // flatten those city-scale differences when viewed from above.
+  if (id === 'arts-studio' || id === 'engineering-workshop' || id === 'release-gatehouse' || id === 'archive')
+    facadeFins(scene, `${id}:facade:roof-fins`, facade, {
+      accent,
+      count: 7,
+      depth: 0.16,
+      height: Math.max(1.1, height * 0.22),
+      y: height * 0.9,
+      z: -depth * 0.16,
+      width: width * 0.72
+    })
+  return facade
+}
+
+/**
+ * A vertical entry arch is the cheapest way to give a room a built silhouette
+ * at overview distance.  It uses the same trim/glow vocabulary as the rest of
+ * the city, but reads as a manufactured portal instead of another rectangular
+ * debug block.
+ */
+function addEntryArch(scene, id, parent, { accent, height, width }) {
+  const arch = group(scene, `${id}:entry-arch`, parent, { position: [0, height * 0.46, 0.08] })
+  torus(scene, `${id}:entry-arch:ring`, {
+    diameter: Math.min(width * 0.72, 7.2),
+    material: 'bone-metal',
+    parent: arch,
+    rotation: [Math.PI / 2, 0, 0],
+    scale: [1, 1.12, 1],
+    tessellation: 14,
+    thickness: id === 'research-lab' || id === 'library' ? 0.46 : 0.34
+  })
+  box(scene, `${id}:entry-arch:glow`, {
+    depth: 0.08,
+    height: 0.22,
+    material: accent,
+    parent: arch,
+    position: [0, 0.04, -0.24],
+    width: Math.min(width * 0.42, 4.4)
+  })
+  for (const side of [-1, 1])
+    box(scene, `${id}:entry-arch:light:${side}`, {
+      depth: 0.1,
+      height: 0.5,
+      material: accent,
+      parent: arch,
+      position: [side * Math.min(width * 0.29, 2.2), -0.35, -0.2],
+      width: 0.16
+    })
+  return arch
+}
+
+function addEntranceWings(scene, id, parent, { accent, depth, height, width }) {
+  const wings = group(scene, `${id}:entrance-wings`, parent)
+  for (const side of [-1, 1]) {
+    const x = side * width * 0.34
+    trimmedBox(scene, `${id}:entrance-wing:${side}`, {
+      depth: 0.58,
+      height: height * 0.68,
+      material: 'charcoal-structure',
+      parent: wings,
+      position: [x, height * 0.34, depth / 2 + 0.14],
+      trimMaterial: 'bone-metal',
+      width: width * 0.2
+    })
+    box(scene, `${id}:entrance-wing:light:${side}`, {
+      depth: 0.08,
+      height: height * 0.32,
+      material: accent,
+      parent: wings,
+      position: [x, height * 0.43, depth / 2 + 0.46],
+      width: 0.12
+    })
+  }
+  return wings
+}
+
+/**
+ * A compact window grid gives every district a believable occupied interior.
+ * The panels are deliberately shallow and merge by material, so they add
+ * façade depth without turning each window into a runtime draw call.
+ */
+function addWindowGrid(scene, id, parent, { accent, depth, height, width }) {
+  const windows = group(scene, `${id}:window-grid`, parent)
+  const frontZ = depth / 2 + 0.06
+  const columns = width >= 14 ? 4 : 3
+  const rows = 2
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const x = -width * 0.31 + column * ((width * 0.62) / Math.max(1, columns - 1))
+      const y = height * 0.28 + row * height * 0.2
+      trimmedBox(scene, `${id}:window-grid:${row}:${column}`, {
+        depth: 0.16,
+        height: height * 0.105,
+        // Keep the window grid on the building's existing material palette;
+        // some specialist manifests are capped at four materials.
+        material: accent,
+        parent: windows,
+        position: [x, y, frontZ],
+        trimMaterial: 'bone-metal',
+        width: width * (columns === 4 ? 0.105 : 0.14)
+      })
+    }
+  }
+  box(scene, `${id}:window-grid:header`, {
+    depth: 0.2,
+    height: 0.26,
+    material: 'bone-metal',
+    parent: windows,
+    position: [0, height * 0.56, frontZ + 0.02],
+    width: width * 0.78
+  })
+  return windows
+}
+
+/**
+ * Fine facade greebles make the shared shell read as a built module at the
+ * overview distance.  They are deliberately shallow and all reuse existing
+ * materials, so mergeLodMeshes folds them into the same material surfaces
+ * instead of creating one draw call per panel.
+ */
+function addFacadeGreebles(scene, id, parent, { accent, depth, height, width }) {
+  const detail = group(scene, `${id}:facade-greebles`, parent)
+  const frontZ = depth / 2 + 0.28
+
+  // Armored corner returns and a cap break the large wall plane into the
+  // stepped, pressure-shell language visible in the approved reference.
+  for (const side of [-1, 1])
+    trimmedBox(scene, `${id}:greeble:corner:${side}`, {
+      depth: 0.3,
+      height: height * 0.58,
+      material: 'bone-metal',
+      parent: detail,
+      position: [side * width * 0.43, height * 0.32, frontZ],
+      trimMaterial: accent,
+      width: 0.36
+    })
+  trimmedBox(scene, `${id}:greeble:cap`, {
+    depth: 0.38,
+    height: 0.22,
+    material: 'bone-metal',
+    parent: detail,
+    position: [0, height * 0.68, frontZ + 0.04],
+    trimMaterial: accent,
+    width: width * 0.72
+  })
+
+  // Three broad lit cells are more legible than the tiny overview grid and
+  // suggest occupied rooms without adding a texture atlas or per-cell light.
+  for (let cell = 0; cell < 3; cell += 1)
+    trimmedBox(scene, `${id}:greeble:window:${cell}`, {
+      depth: 0.14,
+      height: Math.max(0.46, height * 0.12),
+      material: accent,
+      parent: detail,
+      position: [-width * 0.23 + cell * width * 0.23, height * 0.35, frontZ + 0.12],
+      trimMaterial: 'bone-metal',
+      width: width * 0.14
+    })
+
+  // A low service rail and two vertical signal bars add the layered facade
+  // rhythm without changing collision or the authored open-front interior.
+  box(scene, `${id}:greeble:service-rail`, {
+    depth: 0.2,
+    height: 0.12,
+    material: 'bone-metal',
+    parent: detail,
+    position: [0, height * 0.18, frontZ + 0.08],
+    width: width * 0.76
+  })
+  for (const side of [-1, 1])
+    box(scene, `${id}:greeble:signal-bar:${side}`, {
+      depth: 0.12,
+      height: height * 0.24,
+      material: accent,
+      parent: detail,
+      position: [side * width * 0.32, height * 0.51, frontZ + 0.12],
+      width: 0.16
+    })
+
+  return detail
+}
+
+function addRearIdentityPlaque(scene, id, parent, { accent, depth, height, label, width }) {
+  addSign(scene, `${id}:rear-identity`, parent, {
+    accent,
+    label,
+    position: [0, height * 0.62, -depth / 2 - 0.52],
+    rotation: [0, Math.PI, 0],
+    width: Math.min(width * 0.58, 5.8)
+  })
+}
+
+/** A low-poly dome and collar break up the flat roofline at overview scale. */
+function addRoofDome(scene, id, parent, { accent, depth, height, width }) {
+  const dome = group(scene, `${id}:roof-dome`, parent)
+  const diameter = Math.min(width * 0.28, 3.8)
+  cylinder(scene, `${id}:roof-dome:collar`, {
+    diameter: diameter * 0.86,
+    height: 0.22,
+    material: 'bone-metal',
+    parent: dome,
+    position: [0, height * 0.95, -depth * 0.12],
+    tessellation: 12
+  })
+  sphere(scene, `${id}:roof-dome:cap`, {
+    diameter,
+    material: 'bone-metal',
+    parent: dome,
+    position: [0, height * 1.08, -depth * 0.12],
+    scale: [1, 0.48, 1],
+    segments: 10
+  })
+  torus(scene, `${id}:roof-dome:ring`, {
+    diameter: diameter * 0.9,
+    material: 'bone-metal',
+    parent: dome,
+    position: [0, height * 1.07, -depth * 0.12],
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 12,
+    thickness: 0.1
+  })
+  cylinder(scene, `${id}:roof-dome:beacon`, {
+    diameter: 0.14,
+    height: 0.9,
+    material: 'bone-metal',
+    parent: dome,
+    position: [0, height * 1.38, -depth * 0.12],
+    tessellation: 6
+  })
+  sphere(scene, `${id}:roof-dome:signal`, {
+    diameter: 0.3,
+    material: accent,
+    parent: dome,
+    position: [0, height * 1.84, -depth * 0.12],
+    segments: 6
+  })
+  return dome
+}
+
+/** Roof equipment gives each district a lived-in skyline without textures. */
+function addRoofEquipment(scene, id, parent, { accent, depth, height, width }) {
+  const equipment = group(scene, `${id}:roof-equipment`, parent)
+  for (let index = 0; index < 3; index += 1) {
+    const x = (index - 1) * width * 0.28
+    const tank = group(scene, `${id}:roof-equipment:tank:${index}`, equipment, {
+      position: [x, height * 0.96 + (index % 2) * 0.32, -depth * 0.18]
+    })
+    cylinder(scene, `${id}:roof-equipment:tank:${index}:body`, {
+      diameter: 0.72 + (index % 2) * 0.16,
+      height: 1.35 + (index % 2) * 0.3,
+      material: 'bone-metal',
+      parent: tank,
+      tessellation: 8
+    })
+    sphere(scene, `${id}:roof-equipment:tank:${index}:cap`, {
+      diameter: 0.78 + (index % 2) * 0.14,
+      material: accent,
+      parent: tank,
+      position: [0, 0.78 + (index % 2) * 0.16, 0],
+      scale: [1, 0.4, 1],
+      segments: 7
+    })
+    torus(scene, `${id}:roof-equipment:tank:${index}:ring`, {
+      diameter: 0.92 + (index % 2) * 0.16,
+      material: 'lunar-rust',
+      parent: tank,
+      position: [0, -0.28, 0],
+      rotation: [Math.PI / 2, 0, 0],
+      tessellation: 8,
+      thickness: 0.08
+    })
+  }
+  cylinder(scene, `${id}:roof-equipment:mast`, {
+    diameter: 0.16,
+    height: 2.5,
+    material: 'bone-metal',
+    parent: equipment,
+    position: [width * 0.4, height * 1.08, -depth * 0.12],
+    tessellation: 6
+  })
+  sphere(scene, `${id}:roof-equipment:beacon`, {
+    diameter: 0.38,
+    material: accent,
+    parent: equipment,
+    position: [width * 0.4, height * 1.08 + 1.32, -depth * 0.12],
+    segments: 6
+  })
+  return equipment
 }
 
 function addLibraryMassing(scene, building) {
@@ -701,7 +1149,7 @@ function addLabMassing(scene, building) {
       height: 1.7 + (index % 3) * 0.35,
       material: index % 3 ? 'bone-metal' : 'signal-emissive',
       parent: roofArray,
-      position: [-5.5 + index * 1.75, 11.45 + (index % 2) * 0.28, -2.7],
+      position: [-5.5 + index * 1.75, 13.45 + (index % 2) * 0.28, -2.7],
       tessellation: 8
     })
   }
@@ -840,6 +1288,18 @@ function secondaryDistrictFrame(scene, id, { accent, depth, height, width }) {
     position: [0, height * 0.36, -depth / 2],
     width: width
   })
+  // A shallow silver pressure-shell plate behind the inset facade gives
+  // secondary rooms the framed, modular silhouette of the reference city.
+  // It sits outside the existing wall so the authored interior windows stay
+  // visible and does not change the navigation footprint.
+  box(scene, `${id}:back-shell-panel`, {
+    depth: 0.32,
+    height: height * 0.8,
+    material: 'bone-metal',
+    parent: shell,
+    position: [0, height * 0.4, -depth / 2 - 0.42],
+    width: width + 0.9
+  })
   // Shared facade construction kit: shallow inset windows and a lintel break
   // up secondary shells at overview distance without changing their footprint
   // or consuming new materials.
@@ -871,12 +1331,12 @@ function secondaryDistrictFrame(scene, id, { accent, depth, height, width }) {
       width: 0.9
     })
     box(scene, `${id}:entrance-post:${side}`, {
-      depth: 0.8,
+      depth: 1.08,
       height: height * 0.82,
       material: 'bone-metal',
       parent: entrance,
       position: [side * width * 0.35, 0, 0],
-      width: 0.76
+      width: 1.12
     })
     box(scene, `${id}:roof-shell:${side}`, {
       depth: depth * 0.52,
@@ -888,6 +1348,18 @@ function secondaryDistrictFrame(scene, id, { accent, depth, height, width }) {
       width: width * 0.48
     })
   }
+  // Complete the open-front pressure shell with a heavy front lintel. The
+  // reference rooms read as enclosed modules rather than freestanding slabs;
+  // this single merged trim member makes that silhouette legible from the
+  // overview while preserving the doorway opening beneath it.
+  box(scene, `${id}:entrance-shell-lintel`, {
+    depth: 1.05,
+    height: 0.78,
+    material: 'bone-metal',
+    parent: entrance,
+    position: [0, height * 0.78, 0.08],
+    width: width * 0.76
+  })
   box(scene, `${id}:roof-beam`, {
     depth: 0.9,
     height: 0.72,
@@ -914,6 +1386,32 @@ function secondaryDistrictFrame(scene, id, { accent, depth, height, width }) {
       parent: entrance,
       position: [0, -1.45 + step * 0.18, 0.45 + step * 0.2],
       width: width * (0.5 - step * 0.05)
+    })
+
+  addFacadeKit(scene, id, near, { accent, depth, height, width })
+  addEntranceWings(scene, id, near, { accent, depth, height, width })
+  addEntryArch(scene, id, entrance, { accent, height, width })
+  addWindowGrid(scene, id, near, { accent, depth, height, width })
+  addFacadeGreebles(scene, id, near, { accent, depth, height, width })
+  addRoofDome(scene, id, roof, { accent, depth, height, width })
+  addRoofEquipment(scene, id, roof, { accent, depth, height, width })
+
+  // The overview camera can see either side of a district as the player
+  // orbits. A compact rear identity plaque keeps the city legible from the
+  // outside-facing shell as well as from the open room front.
+  const rearLabel = {
+    'arts-studio': 'ARTS',
+    'engineering-workshop': 'ENGINEER',
+    'release-gatehouse': 'RELEASE',
+    archive: 'ARCHIVE'
+  }[id]
+  if (rearLabel)
+    addSign(scene, `${id}:rear-sign`, near, {
+      accent,
+      label: rearLabel,
+      position: [0, height * 0.62, -depth / 2 - 0.52],
+      rotation: [0, Math.PI, 0],
+      width: Math.min(width * 0.58, 5.8)
     })
 
   box(scene, `${id}:far:floor`, {
@@ -960,6 +1458,7 @@ export function buildArtsStudio(scene) {
   }
   addSign(scene, 'arts-studio:sign', near, {
     accent: 'archive-emissive',
+    label: 'ARTS',
     position: [0, 7.3, 5.5],
     width: 5.4
   })
@@ -1050,6 +1549,7 @@ export function buildEngineeringWorkshop(scene) {
   const { near } = building
   addSign(scene, 'engineering-workshop:sign', near, {
     accent: 'signal-emissive',
+    label: 'ENGINEER',
     position: [0, 7.65, 6.25],
     width: 6.2
   })
@@ -1140,6 +1640,7 @@ export function buildReleaseGatehouse(scene) {
   const { near, entrance } = building
   addSign(scene, 'release-gatehouse:sign', near, {
     accent: 'triage-amber',
+    label: 'RELEASE',
     position: [0, 6.8, 5.1],
     width: 6.5
   })
@@ -1221,6 +1722,7 @@ export function buildArchive(scene) {
   const { near } = building
   addSign(scene, 'archive:sign', near, {
     accent: 'archive-emissive',
+    label: 'ARCHIVE',
     position: [0, 7.55, 5.75],
     width: 4.8
   })
@@ -1299,8 +1801,16 @@ export function buildLibrary(scene) {
   addSign(scene, 'library:sign', building.near, {
     accent: 'archive-emissive',
     glyph: 'book',
+    label: 'LIBRARY',
     position: [0, 8.5, 6.25],
     width: 5.2
+  })
+  addRearIdentityPlaque(scene, 'library', building.near, {
+    accent: 'archive-emissive',
+    depth: 12,
+    height: 9.8,
+    label: 'LIBRARY',
+    width: 15
   })
   const stacks = group(scene, 'library:archive-stacks', building.near)
   for (const side of [-1, 1]) {
@@ -1372,21 +1882,59 @@ export function buildResearchLab(scene) {
   const building = specialistFrame(scene, 'research-lab', {
     accent: 'signal-emissive',
     depth: 14,
-    height: 10.5,
+    // Give the lab an observatory-like skyline so it cannot collapse into
+    // the library's broad stepped silhouette in the city overview.
+    height: 12.6,
     width: 18
   })
   addLayeredRoomDetail(scene, 'research-lab', building.near, {
     accent: 'signal-emissive',
     depth: 14,
-    height: 10.5,
+    height: 12.6,
     width: 18
   })
   addLabMassing(scene, building)
+  // A tall asymmetric sensor mast is the lab's skyline signature.  It keeps
+  // the research landmark visually distinct from the library at overview
+  // distance while remaining a handful of low-tessellation primitives.
+  const mast = group(scene, 'research-lab:sensor-mast', building.near, { position: [-6.9, 12.8, -2.4] })
+  cylinder(scene, 'research-lab:sensor-mast:shaft', {
+    diameter: 0.38,
+    height: 4.8,
+    material: 'bone-metal',
+    parent: mast,
+    position: [0, 2.3, 0],
+    tessellation: 6
+  })
+  sphere(scene, 'research-lab:sensor-mast:orb', {
+    diameter: 0.95,
+    material: 'signal-emissive',
+    parent: mast,
+    position: [0, 4.85, 0],
+    segments: 6
+  })
+  torus(scene, 'research-lab:sensor-mast:ring', {
+    diameter: 1.45,
+    material: 'signal-emissive',
+    parent: mast,
+    position: [0, 4.85, 0],
+    rotation: [Math.PI / 2, 0, 0],
+    tessellation: 8,
+    thickness: 0.09
+  })
   addSign(scene, 'research-lab:sign', building.near, {
     accent: 'signal-emissive',
     glyph: 'flask',
-    position: [0, 9.25, 7.25],
+    label: 'RESEARCH',
+    position: [0, 11.2, 7.25],
     width: 6.5
+  })
+  addRearIdentityPlaque(scene, 'research-lab', building.near, {
+    accent: 'signal-emissive',
+    depth: 14,
+    height: 12.6,
+    label: 'RESEARCH',
+    width: 18
   })
   addConsoleBank(scene, 'research-lab:consoles', building.near, {
     accent: 'signal-emissive',
@@ -1465,8 +2013,16 @@ export function buildDepot(scene) {
   addSign(scene, 'depot:sign', building.near, {
     accent: 'signal-emissive',
     glyph: 'crate',
+    label: 'DEPOT',
     position: [0, 7.35, 5.75],
     width: 5.4
+  })
+  addRearIdentityPlaque(scene, 'depot', building.near, {
+    accent: 'signal-emissive',
+    depth: 11,
+    height: 8.5,
+    label: 'DEPOT',
+    width: 14.5
   })
   const shelves = group(scene, 'depot:stocked-shelves', building.near)
   for (const side of [-1, 1]) {
@@ -1527,8 +2083,16 @@ export function buildReviewOffice(scene) {
   addSign(scene, 'review-office:sign', building.near, {
     accent: 'archive-emissive',
     glyph: 'review',
+    label: 'REVIEW',
     position: [0, 8.05, 5.95],
     width: 5.8
+  })
+  addRearIdentityPlaque(scene, 'review-office', building.near, {
+    accent: 'archive-emissive',
+    depth: 11.5,
+    height: 9.2,
+    label: 'REVIEW',
+    width: 15.5
   })
   addPortal(scene, building.near)
   addConsoleBank(scene, 'review-office:consoles', building.near, {
@@ -1572,7 +2136,7 @@ export function buildGarden(scene) {
   cylinder(scene, 'garden:soil', {
     diameter: 16.8,
     height: 0.52,
-    material: 'lunar-rust',
+    material: 'garden-green',
     parent: near,
     position: [0, 0.66, 0],
     tessellation: 12
@@ -1676,8 +2240,16 @@ export function buildCouncil(scene) {
   addSign(scene, 'council:sign', building.near, {
     accent: 'archive-emissive',
     glyph: 'council',
+    label: 'COUNCIL',
     position: [0, 7.65, 5.45],
     width: 4.5
+  })
+  addRearIdentityPlaque(scene, 'council', building.near, {
+    accent: 'archive-emissive',
+    depth: 10.5,
+    height: 8.8,
+    label: 'COUNCIL',
+    width: 14
   })
   const dais = group(scene, 'council:dais', building.near, { position: [0, 0.9, -1.2] })
   cylinder(scene, 'council:dais:base', {

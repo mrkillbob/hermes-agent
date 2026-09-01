@@ -278,6 +278,26 @@ Original loop (per building, one at a time):
 
 ## Environment notes for a fresh session
 
+## Exact merged-pass receipt (2026-09-01)
+
+The draft branch now combines the authored facade/worker detail pass with the
+AO, shadow, fog, and tonemapping pass. The exact-head proof artifacts are:
+
+- WebGL preview: `/tmp/lunar-city-final-fidelity.png` (real WebGL2 capture;
+  shadow diagnostics report 498 casters and a ready shadow map).
+- Blender scene: `/tmp/lunar-city-final.blend` and render
+  `/tmp/lunar-city-final-blender.png`.
+- Blender staging receipt: `/tmp/lunar-city-final.staging-receipt.json`;
+  557 staged models, including 18 quarantined host-only open-source benchmark
+  models. No benchmark files are shipped under `public/lunar-city/`.
+
+Focused asset validation (41/41), Lunar City UI tests (542/542 across 36
+files), desktop typecheck, Prettier, Python compilation, and `git diff --check`
+all pass at this receipt. The Blender launcher is
+`apps/desktop/scripts/lunar-city/run-blender-stage.sh`; it records a bounded
+diagnostic receipt when a headless Metal startup fails instead of silently
+turning that OS boundary into a visual claim.
+
 - `npm install --workspace=apps/desktop --include-workspace-root` from the
   repo root if `node_modules` isn't present.
 - `render-webgl-preview.mjs` needs a Chromium build matching

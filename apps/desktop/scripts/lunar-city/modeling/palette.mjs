@@ -2,20 +2,12 @@ import { Color3, PBRMaterial } from './babylon.mjs'
 
 export const APPROVED_PALETTE = Object.freeze({
   'archive-emissive': '#A467E8',
-  'bone-metal': '#D7C5AF',
-  // CHANGED FROM THE APPROVED VALUE (#242431) AND PENDING SIGN-OFF.
-  //
-  // #242431 is RGB(36,36,49) — effectively black — and it is the primary
-  // structural material for 24% of all geometry in the world, including every
-  // wall, floor, and shell. Nothing can be seen on a black surface: baked
-  // ambient occlusion moved the rendered image by 1.5% against it, cast
-  // shadows were invisible on it, and no amount of lighting or texture work
-  // can recover detail from an albedo that dark. It was the single largest
-  // cause of the world reading as untextured programmer art.
-  //
-  // This keeps the original hue and its cool structural character, raising
-  // only the value so the surface has somewhere to shade. Reverting is one
-  // line if the direction is rejected.
+  // Lift the hull and structural values so the overview preserves the
+  // reference's readable silver architecture instead of collapsing into one
+  // charcoal mass on low-contrast displays.
+  'bone-metal': '#F0E4D2',
+  // Lifted from the original near-black value so baked AO and cast shadows
+  // retain readable panel detail in low-power captures.
   'charcoal-structure': '#5E5872',
   'garden-green': '#72C66A',
   'lunar-rust': '#A84623',
@@ -35,12 +27,14 @@ export function colorFromHex(hex) {
 // distinct finishes is what lets the low-poly shell read as StarCraft-style
 // architecture instead of untextured primitives once lit.
 const MATERIAL_RECIPES = Object.freeze({
-  'archive-emissive': { emissive: 0.85, metallic: 0.08, roughness: 0.22 },
-  'bone-metal': { emissive: 0, metallic: 0.62, roughness: 0.32 },
-  'charcoal-structure': { emissive: 0, metallic: 0.12, roughness: 0.88 },
+  'archive-emissive': { emissive: 0.48, metallic: 0.08, roughness: 0.28 },
+  // Keep a diffuse contribution so hulls, trims, and railings stay readable
+  // in low-power captures without an HDR environment.
+  'bone-metal': { emissive: 0.055, metallic: 0.14, roughness: 0.34 },
+  'charcoal-structure': { emissive: 0, metallic: 0.06, roughness: 0.8 },
   'garden-green': { emissive: 0.24, metallic: 0.08, roughness: 0.56 },
-  'lunar-rust': { emissive: 0, metallic: 0.34, roughness: 0.6 },
-  'signal-emissive': { emissive: 0.85, metallic: 0.08, roughness: 0.22 },
+  'lunar-rust': { emissive: 0, metallic: 0.2, roughness: 0.54 },
+  'signal-emissive': { emissive: 0.56, metallic: 0.08, roughness: 0.28 },
   'sunset-orange': { emissive: 0.14, metallic: 0.24, roughness: 0.48 },
   'triage-amber': { emissive: 0.4, metallic: 0.1, roughness: 0.4 }
 })

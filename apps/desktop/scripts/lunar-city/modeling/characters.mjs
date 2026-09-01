@@ -432,6 +432,36 @@ export function buildWorker(scene) {
     position: [0, 0.05, -0.4],
     width: 0.5
   })
+  // Layered shell plates and a compact backpack give workers a readable
+  // silhouette at the approved overview scale. These reuse the shared
+  // palette and are merged with the body surfaces, so the added authored
+  // detail does not become a per-worker draw-call tax.
+  box(scene, 'worker:body:chest:plate', {
+    depth: 0.08,
+    height: 0.18,
+    material: 'bone-metal',
+    parent: body,
+    position: [0, 0.18, -0.5],
+    width: 0.34
+  })
+  box(scene, 'worker:body:pack', {
+    depth: 0.24,
+    height: 0.58,
+    material: 'charcoal-structure',
+    parent: body,
+    position: [0, 0.02, 0.38],
+    width: 0.54
+  })
+  for (const side of [-1, 1])
+    box(scene, `worker:body:shoulder:${side}`, {
+      depth: 0.26,
+      height: 0.16,
+      material: 'bone-metal',
+      parent: body,
+      position: [side * 0.43, 0.34, 0],
+      rotation: [0, 0, side * 0.14],
+      width: 0.22
+    })
   sphere(scene, 'worker:body:signal', {
     diameter: 0.16,
     material: 'signal-emissive',
@@ -456,6 +486,14 @@ export function buildWorker(scene) {
     position: [0, -0.02, -0.46],
     scale: [1, 1, 1],
     width: 0.73
+  })
+  box(scene, 'worker:head:visor', {
+    depth: 0.06,
+    height: 0.1,
+    material: 'signal-emissive',
+    parent: head,
+    position: [0, 0.18, -0.57],
+    width: 0.56
   })
   for (const x of [-0.19, 0.19])
     sphere(scene, `worker:head:eye:${x}`, {
@@ -502,6 +540,11 @@ export function buildWorker(scene) {
 export function buildWorkers(scene) {
   const root = group(scene, 'workers:root')
   const near = group(scene, 'workers:lod:near', root)
+  // Workers need a readable silhouette at the arranged overview distance.
+  // The previous unit scale made the robots disappear against the road grid;
+  // a restrained 1.6 lift keeps them subordinate to leaders while matching
+  // the reference's visible worker traffic.
+  near.scaling.set(1.6, 1.6, 1.6)
   buildWorker(scene).root.parent = near
   const mid = group(scene, 'workers:lod:mid', root)
   capsule(scene, 'workers:mid:silhouette', {
@@ -868,6 +911,21 @@ export function buildLeaders(scene) {
   const otter = buildOtter(scene, near)
   const bird = buildBird(scene, near)
   const stag = buildStag(scene, near)
+  // A restrained emissive focus ring gives each leader a readable footprint at
+  // the overview scale without adding lights, particles, or another material.
+  // The ring lives in the near LOD, so it disappears with the detailed model
+  // and carries no cost while the camera is zoomed out.
+  for (const leader of [owl, fox, badger, otter, bird, stag]) {
+    torus(scene, `${leader.name}:focus-ring`, {
+      diameter: 2.8,
+      material: 'archive-emissive',
+      parent: leader,
+      position: [0, 0.08, 0],
+      rotation: [Math.PI / 2, 0, 0],
+      tessellation: 10,
+      thickness: 0.1
+    })
+  }
   for (const [index, leader] of [owl, fox, badger, otter, bird, stag].entries()) {
     const district = LEADER_DISTRICT_POSITIONS[index]
     leader.position.set(district[0] / near.scaling.x, district[1] / near.scaling.y, district[2] / near.scaling.z)

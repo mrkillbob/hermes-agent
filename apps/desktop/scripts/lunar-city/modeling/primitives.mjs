@@ -36,15 +36,70 @@ export function box(scene, name, options = {}) {
   return finish(mesh, options)
 }
 
+/**
+ * A small authored construction detail used by the landmark facades.  The
+ * runtime intentionally stays asset-neutral, but a plain cuboid everywhere
+ * reads like a debug blockout.  A pair of inset trim rails gives the same
+ * layered, manufactured silhouette as the reference buildings while adding
+ * only two tiny merged meshes per material.
+ */
+export function trimmedBox(scene, name, options = {}) {
+  const mesh = box(scene, name, options)
+  const trim = options.trimMaterial ?? 'bone-metal'
+  const width = options.width ?? options.size ?? 1
+  const height = options.height ?? options.size ?? 1
+  const depth = options.depth ?? options.size ?? 1
+  const parent = options.parent ?? null
+  const inset = Math.min(0.08, Math.max(0.035, Math.min(width, height, depth) * 0.08))
+  const position = options.position ?? [0, 0, 0]
+  const trimOptions = {
+    depth: Math.max(0.04, depth + inset),
+    height: Math.max(0.04, inset),
+    material: trim,
+    parent,
+    position: [position[0], position[1] + height / 2 - inset * 0.5, position[2]],
+    rotation: options.rotation,
+    width: Math.max(0.08, width + inset)
+  }
+  box(scene, `${name}:trim:top`, trimOptions)
+  box(scene, `${name}:trim:bottom`, {
+    ...trimOptions,
+    position: [position[0], position[1] - height / 2 + inset * 0.5, position[2]]
+  })
+  return mesh
+}
+
+/** Repeating shallow fins are cheaper than texture decals and survive LOD. */
+export function facadeFins(
+  scene,
+  name,
+  parent,
+  { accent = 'signal-emissive', count = 5, depth = 0.12, height = 2, y = 2, z = 0, width = 8 } = {}
+) {
+  const root = group(scene, name, parent)
+  const spacing = count > 1 ? width / (count - 1) : 0
+  for (let index = 0; index < count; index += 1) {
+    box(scene, `${name}:fin:${index}`, {
+      depth,
+      height: height * (index % 2 ? 0.78 : 1),
+      material: index % 3 === 0 ? accent : 'bone-metal',
+      parent: root,
+      position: [-width / 2 + spacing * index, y, z],
+      width: 0.12
+    })
+  }
+  return root
+}
+
 export function capsule(scene, name, options = {}) {
   const mesh = MeshBuilder.CreateCapsule(
     name,
     {
-      capSubdivisions: 2,
+      capSubdivisions: 3,
       height: options.height ?? 1,
       radius: options.radius ?? 0.25,
-      subdivisions: 2,
-      tessellation: options.tessellation ?? 8
+      subdivisions: 3,
+      tessellation: options.tessellation ?? 12
     },
     scene
   )
@@ -58,7 +113,7 @@ export function cone(scene, name, options = {}) {
       diameterBottom: options.diameterBottom ?? options.diameter ?? 1,
       diameterTop: options.diameterTop ?? 0,
       height: options.height ?? 1,
-      tessellation: options.tessellation ?? 6
+      tessellation: options.tessellation ?? 8
     },
     scene
   )
@@ -71,7 +126,7 @@ export function cylinder(scene, name, options = {}) {
     {
       diameter: options.diameter ?? 1,
       height: options.height ?? 1,
-      tessellation: options.tessellation ?? 8
+      tessellation: options.tessellation ?? 12
     },
     scene
   )
@@ -83,7 +138,7 @@ export function sphere(scene, name, options = {}) {
     name,
     {
       diameter: options.diameter ?? 1,
-      segments: options.segments ?? 8
+      segments: options.segments ?? 12
     },
     scene
   )
@@ -95,7 +150,7 @@ export function torus(scene, name, options = {}) {
     name,
     {
       diameter: options.diameter ?? 1,
-      tessellation: options.tessellation ?? 12,
+      tessellation: options.tessellation ?? 16,
       thickness: options.thickness ?? 0.18
     },
     scene

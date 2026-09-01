@@ -142,38 +142,42 @@ export function addPlants(scene, parent) {
     [2.3, 0, -3.1],
     [3.8, 0, 2.2],
     [5.1, 0, -0.4],
-    [-0.5, 0, -0.8]
+    [-0.5, 0, -0.8],
+    [-5.5, 0, 0.1],
+    [1.0, 0, 0.2],
+    [-2.9, 0, 1.1],
+    [3.0, 0, -1.0]
   ]
   for (const [index, [x, y, z]] of patches.entries()) {
     cylinder(scene, `garden:plant:stem:${index}`, {
       diameter: 0.18,
-      height: 0.75 + (index % 3) * 0.16,
+      height: 1.05 + (index % 3) * 0.22,
       material: 'garden-green',
       parent: plants,
       position: [x, y + 0.38, z]
     })
     cone(scene, `garden:plant:leaf-a:${index}`, {
-      diameterBottom: 0.62,
-      height: 0.9,
+      diameterBottom: 0.86,
+      height: 1.18,
       material: 'garden-green',
       parent: plants,
-      position: [x - 0.18, y + 0.75, z],
+      position: [x - 0.22, y + 1.0, z],
       rotation: [0, 0, -0.48]
     })
     cone(scene, `garden:plant:leaf-b:${index}`, {
-      diameterBottom: 0.55,
-      height: 0.82,
+      diameterBottom: 0.76,
+      height: 1.06,
       material: 'garden-green',
       parent: plants,
-      position: [x + 0.2, y + 0.68, z],
+      position: [x + 0.24, y + 0.92, z],
       rotation: [0, 0, 0.56]
     })
     if (index % 2 === 0)
       sphere(scene, `garden:plant:flower:${index}`, {
-        diameter: 0.36,
+        diameter: 0.48,
         material: 'signal-emissive',
         parent: plants,
-        position: [x, y + 1.12, z],
+        position: [x, y + 1.55, z],
         segments: 6
       })
   }
@@ -181,7 +185,7 @@ export function addPlants(scene, parent) {
 }
 
 function addSignGlyph(scene, name, parent, accent, glyph) {
-  const glyphRoot = group(scene, `${name}:identity-glyph`, parent, { position: [-1.1, 0, -0.15] })
+  const glyphRoot = group(scene, `${name}:identity-glyph`, parent, { position: [-1.1, 0, 0.15] })
   const stroke = (suffix, position, width, height, rotation = [0, 0, 0]) =>
     box(scene, `${name}:identity-glyph:${suffix}`, {
       depth: 0.06,
@@ -222,25 +226,89 @@ function addSignGlyph(scene, name, parent, accent, glyph) {
   return glyphRoot
 }
 
-export function addSign(scene, name, parent, { accent, glyph = null, position = [0, 0, 0], width = 3.4 } = {}) {
-  const sign = group(scene, name, parent, { position })
+const SIGN_FONT = Object.freeze({
+  A: ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
+  B: ['11110', '10001', '10001', '11110', '10001', '10001', '11110'],
+  C: ['01111', '10000', '10000', '10000', '10000', '10000', '01111'],
+  D: ['11110', '10001', '10001', '10001', '10001', '10001', '11110'],
+  E: ['11111', '10000', '10000', '11110', '10000', '10000', '11111'],
+  G: ['01111', '10000', '10000', '10111', '10001', '10001', '01111'],
+  H: ['10001', '10001', '10001', '11111', '10001', '10001', '10001'],
+  I: ['11111', '00100', '00100', '00100', '00100', '00100', '11111'],
+  L: ['10000', '10000', '10000', '10000', '10000', '10000', '11111'],
+  N: ['10001', '11001', '10101', '10011', '10001', '10001', '10001'],
+  O: ['01110', '10001', '10001', '10001', '10001', '10001', '01110'],
+  R: ['11110', '10001', '10001', '11110', '10100', '10010', '10001'],
+  S: ['01111', '10000', '10000', '01110', '00001', '00001', '11110'],
+  T: ['11111', '00100', '00100', '00100', '00100', '00100', '00100'],
+  U: ['10001', '10001', '10001', '10001', '10001', '10001', '01110'],
+  V: ['10001', '10001', '10001', '10001', '10001', '01010', '00100'],
+  W: ['10001', '10001', '10001', '10101', '10101', '11011', '10001'],
+  Y: ['10001', '10001', '01010', '00100', '00100', '00100', '00100']
+})
+
+function addSignText(scene, name, parent, accent, text, width, centerX) {
+  const normalized = text.toUpperCase().slice(0, 10)
+  const cell = Math.min(0.105, width / Math.max(1, normalized.length * 6.4))
+  const glyphWidth = cell * 5
+  const spacing = cell * 1.35
+  const totalWidth = normalized.length * (glyphWidth + spacing) - spacing
+  const originX = centerX - totalWidth / 2
+  const originY = -0.27
+  for (const [charIndex, character] of [...normalized].entries()) {
+    const rows = SIGN_FONT[character]
+    if (!rows) continue
+    const x = originX + charIndex * (glyphWidth + spacing)
+    for (const [rowIndex, row] of rows.entries()) {
+      let runStart = -1
+      for (let column = 0; column <= row.length; column += 1) {
+        const filled = column < row.length && row[column] === '1'
+        if (filled && runStart < 0) runStart = column
+        if ((!filled || column === row.length) && runStart >= 0) {
+          const runWidth = column - runStart
+          box(scene, `${name}:text:${charIndex}:${rowIndex}:${runStart}`, {
+            depth: 0.045,
+            height: cell,
+            material: accent,
+            parent,
+            position: [x + (runStart + runWidth / 2) * cell, originY + (6 - rowIndex) * cell, 0.145],
+            width: runWidth * cell
+          })
+          runStart = -1
+        }
+      }
+    }
+  }
+}
+
+export function addSign(
+  scene,
+  name,
+  parent,
+  { accent, glyph = null, label = null, position = [0, 0, 0], rotation = [0, 0, 0], width = 3.4 } = {}
+) {
+  const sign = group(scene, name, parent, { position, rotation })
   box(scene, `${name}:panel`, { depth: 0.22, height: 0.86, material: 'charcoal-structure', parent: sign, width })
-  box(scene, `${name}:glow`, {
-    depth: 0.05,
-    height: 0.16,
-    material: accent,
-    parent: sign,
-    position: [glyph ? 0.62 : 0, 0.14, -0.13],
-    width: width * (glyph ? 0.52 : 0.74)
-  })
-  box(scene, `${name}:glyph`, {
-    depth: 0.05,
-    height: 0.14,
-    material: accent,
-    parent: sign,
-    position: [glyph ? 0.62 : 0, -0.18, -0.13],
-    width: width * (glyph ? 0.32 : 0.42)
-  })
+  if (label) {
+    addSignText(scene, name, sign, accent, label, width * (glyph ? 0.56 : 0.82), glyph ? width * 0.16 : 0)
+  } else {
+    box(scene, `${name}:glow`, {
+      depth: 0.05,
+      height: 0.16,
+      material: accent,
+      parent: sign,
+      position: [glyph ? 0.62 : 0, 0.14, 0.13],
+      width: width * (glyph ? 0.52 : 0.74)
+    })
+    box(scene, `${name}:glyph`, {
+      depth: 0.05,
+      height: 0.14,
+      material: accent,
+      parent: sign,
+      position: [glyph ? 0.62 : 0, -0.18, 0.13],
+      width: width * (glyph ? 0.32 : 0.42)
+    })
+  }
   if (glyph) addSignGlyph(scene, name, sign, accent, glyph)
   return sign
 }
