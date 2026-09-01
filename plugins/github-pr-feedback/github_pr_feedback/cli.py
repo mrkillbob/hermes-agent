@@ -1272,7 +1272,13 @@ def _run_merge_scan(
 ) -> dict[str, object]:
     merge_policies = _merge_policies(policy)
     if not merge_policies:
-        return {"status": "disabled", "processed": 0, "merged": [], "blocked": {}}
+        return {
+            "status": "disabled",
+            "processed": 0,
+            "merged": [],
+            "handed_off": [],
+            "blocked": {},
+        }
     if len(merge_policies) == 1:
         return _run_merge_scan_for_policy(
             policy, merge_policies[0], ledger, github=github, kanban=kanban
@@ -1291,6 +1297,9 @@ def _run_merge_scan(
         "status": "degraded" if any(result["status"] == "degraded" for result in results) else "ok",
         "processed": sum(int(result["processed"]) for result in results),
         "merged": [item for result in results for item in result["merged"]],
+        "handed_off": [
+            item for result in results for item in result.get("handed_off", [])
+        ],
         "blocked": blocked,
         "maintainer_tasks_created": sum(
             int(result["maintainer_tasks_created"]) for result in results
@@ -1329,6 +1338,7 @@ def _run_merge_scan_for_policy(
             "status": "degraded",
             "processed": 0,
             "merged": [],
+            "handed_off": [],
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
     if merge_policy.require_per_pr_enrollment:
@@ -1350,10 +1360,12 @@ def _run_merge_scan_for_policy(
             "status": "degraded",
             "processed": 0,
             "merged": [],
+            "handed_off": [],
             "blocked": {"canonical_read": ["ci_manifest_unavailable"]},
         }
     manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     merged: list[dict[str, object]] = []
+    handed_off: list[dict[str, object]] = []
     blocked: dict[str, list[str]] = {}
     deployments: list[dict[str, object]] = []
     deployment_failures: list[int] = []
@@ -1458,6 +1470,13 @@ def _run_merge_scan_for_policy(
             _announce_ready_to_merge(
                 github, merge_policy.repository, pull_request
             )
+            handed_off.append(
+                {
+                    "repository": merge_policy.repository,
+                    "pr_number": number,
+                    "head_sha": pull_request.head_sha,
+                }
+            )
             try:
                 kanban.create_or_get_task(
                     _merge_maintainer_task(
@@ -1480,6 +1499,7 @@ def _run_merge_scan_for_policy(
         "status": "degraded" if degraded else "ok",
         "processed": len(numbers),
         "merged": merged,
+        "handed_off": handed_off,
         "blocked": blocked,
         "maintainer_tasks_created": tasks_created,
         "review_tasks_created": review_tasks_created,
