@@ -472,6 +472,34 @@ function addCouncilFrame(scene, { depth, height, width }) {
     position: [0, 0.42, -0.5],
     tessellation: 16
   })
+  box(scene, 'council:chamber-back-wall', {
+    depth: 0.62,
+    height: height * 0.38,
+    material: 'charcoal-structure',
+    parent: shell,
+    position: [0, height * 0.19, -depth * 0.46],
+    width: width * 0.58
+  })
+  for (const side of [-1, 1]) {
+    box(scene, `council:chamber-side-wall:${side}`, {
+      depth: depth * 0.5,
+      height: height * 0.36,
+      material: 'charcoal-structure',
+      parent: shell,
+      position: [side * (width * 0.47), height * 0.18, -depth * 0.2],
+      rotation: [0, 0, side * 0.1],
+      width: 0.62
+    })
+    box(scene, `council:chamber-window:${side}`, {
+      depth: 0.18,
+      height: 1.1,
+      material: 'archive-emissive',
+      parent: shell,
+      position: [side * (width * 0.47), height * 0.35, -depth * 0.24],
+      rotation: [0, 0, side * 0.1],
+      width: 0.2
+    })
+  }
   for (let column = 0; column < 7; column += 1) {
     const angle = -1.22 + column * 0.407
     cylinder(scene, `council:amphitheater-column:${column}`, {
