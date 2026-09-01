@@ -860,7 +860,7 @@ def classify_api_error(
             message="remote request denied by local egress policy",
             error_context={"reason_codes": error.decision.reason_codes},
             retryable=False,
-            should_fallback=True,
+            should_fallback=False,
         )
 
     status_code = _extract_status_code(error)

@@ -310,7 +310,7 @@ def test_compression_aggregate_capacity_does_not_bypass_scans(tmp_path, unsafe, 
     assert reason in exc_info.value.decision.reason_codes
 
 
-def test_blocked_remote_aux_call_is_fallback_eligible_without_retry(monkeypatch, tmp_path):
+def test_blocked_remote_aux_call_is_terminal_without_fallback(monkeypatch, tmp_path):
     primary = MagicMock()
     primary.base_url = "https://chatgpt.com/backend-api/codex"
     primary.chat.completions.create.return_value = _aux_egress_response()
@@ -339,17 +339,68 @@ def test_blocked_remote_aux_call_is_fallback_eligible_without_retry(monkeypatch,
         lambda: (_ for _ in ()).throw(AssertionError("blocked request must not retry")),
     )
 
-    response = call_llm(
-        task="compression",
-        provider="openai-codex",
-        model="gpt-5.4",
-        main_runtime={"session_id": "session-fallback"},
-        messages=[{"role": "user", "content": "token=super-secret-value"}],
+    with pytest.raises(EgressBlocked):
+        call_llm(
+            task="compression",
+            provider="openai-codex",
+            model="gpt-5.4",
+            main_runtime={"session_id": "session-fallback"},
+            messages=[{"role": "user", "content": "token=super-secret-value"}],
+        )
+
+    primary.chat.completions.create.assert_not_called()
+    fallback.chat.completions.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_blocked_remote_async_aux_call_is_terminal_without_fallback(
+    monkeypatch, tmp_path
+):
+    primary = MagicMock()
+    primary.base_url = "https://chatgpt.com/backend-api/codex"
+    primary.chat.completions.create = AsyncMock(return_value=_aux_egress_response())
+    fallback = MagicMock()
+    fallback.base_url = "http://127.0.0.1:11434/v1"
+    fallback.chat.completions.create = AsyncMock(
+        return_value=_aux_egress_response("fallback")
+    )
+    monkeypatch.setattr("agent.auxiliary_client.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        lambda *args, **kwargs: (
+            "openai-codex", "gpt-5.4", None, None, "codex_responses"
+        ),
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_cached_client",
+        lambda provider, *args, **kwargs: (primary, "gpt-5.4"),
+    )
+    configured = MagicMock(return_value=(None, None, ""))
+    main_fallback = MagicMock(return_value=(fallback, "local-model", "custom"))
+    monkeypatch.setattr(
+        "agent.auxiliary_client._try_configured_fallback_chain", configured
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._try_main_agent_model_fallback", main_fallback
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._transient_retry_count",
+        lambda: (_ for _ in ()).throw(AssertionError("blocked request must not retry")),
     )
 
-    assert response.choices[0].message.content == "fallback"
-    primary.chat.completions.create.assert_not_called()
-    fallback.chat.completions.create.assert_called_once()
+    with pytest.raises(EgressBlocked):
+        await async_call_llm(
+            task="compression",
+            provider="openai-codex",
+            model="gpt-5.4",
+            main_runtime={"session_id": "session-async-fallback"},
+            messages=[{"role": "user", "content": "token=super-secret-value"}],
+        )
+
+    primary.chat.completions.create.assert_not_awaited()
+    fallback.chat.completions.create.assert_not_awaited()
+    configured.assert_not_called()
+    main_fallback.assert_not_called()
 
 
 def _jwt_with_claims(claims: dict) -> str:

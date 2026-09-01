@@ -76,7 +76,7 @@ class TestFailoverReason:
         actual = {r.value for r in FailoverReason}
         assert expected == actual
 
-    def test_egress_policy_denial_falls_back_without_retry(self):
+    def test_egress_policy_denial_is_terminal_without_fallback(self):
         from agent.llm_egress_firewall import (
             DestinationClass,
             EgressBlocked,
@@ -106,7 +106,7 @@ class TestFailoverReason:
 
         assert result.reason is FailoverReason.egress_policy_blocked
         assert result.retryable is False
-        assert result.should_fallback is True
+        assert result.should_fallback is False
 
     def test_unsupported_thinking_is_terminal_and_never_falls_back(self):
         error = MockAPIError(

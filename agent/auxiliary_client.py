@@ -10898,38 +10898,16 @@ def _call_llm_impl(
         # auxiliary task on the floor (silent compression failure /
         # message loss). Auth is NOT a capacity error: it only bypasses
         # the explicit-provider gate when the user is in auto mode.
-        # A blocked remote payload is terminal for every remote destination.
-        # Give only a configured/local fallback one immediate chance, without
-        # entering retry/backoff or the general remote provider chain.
+        # A blocked payload is terminal.  Do not route it to a configured or
+        # local fallback: the firewall denied the serialized request itself,
+        # so changing providers cannot make this request safe and would hide
+        # the durable needs-attention outcome from the caller.
         if isinstance(first_err, EgressBlocked):
-            local_candidates = (
-                _try_configured_fallback_chain(
-                    task, resolved_provider or "auto", reason="egress blocked",
-                    failed_model=final_model,
-                ),
-                _try_main_agent_model_fallback(
-                    resolved_provider, task, reason="egress blocked",
-                    failed_model=final_model,
-                ),
+            logger.warning(
+                "Auxiliary %s: request denied by local egress policy; "
+                "propagating terminal needs-attention failure",
+                task or "call",
             )
-            for fb_client, fb_model, fb_label in local_candidates:
-                if fb_client is None or not _is_safe_egress_fallback_candidate(
-                    fb_client, _fallback_provider_from_label(fb_label), str(fb_model or "")
-                ):
-                    continue
-                _record_route_info(
-                    route_info, _fallback_provider_from_label(fb_label), fb_model
-                )
-                fb_resp = _call_fallback_candidate_sync(
-                    fb_client, fb_model, fb_label,
-                    task=task, messages=messages,
-                    temperature=temperature, max_tokens=max_tokens,
-                    tools=tools, effective_timeout=effective_timeout,
-                    effective_extra_body=effective_extra_body,
-                    reasoning_config=reasoning_config,
-                )
-                if fb_resp is not None:
-                    return fb_resp
             raise
 
         should_fallback = (
