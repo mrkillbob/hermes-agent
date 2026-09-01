@@ -1,11 +1,12 @@
-import { beamBetween, box, cone, cylinder, group, prismRailing, torus } from './primitives.mjs'
+import { Mesh, VertexData } from './babylon.mjs'
+import { beamBetween, box, cone, cylinder, group, prismRailing, sphere, torus } from './primitives.mjs'
 import { addSign } from './props.mjs'
 
 // A real city plan, not a hand-picked coordinate list: every district sits
-// in a zone with a stated identity, walkways are the minimum-spanning-tree
-// over actual distances (plus a couple of deliberate redundant links) so
-// the network reads as roads rather than an arbitrary edge list, and every
-// building faces the plaza it opens onto. This module is the single
+// in a zone with a stated identity, and the walkway plan is a set of
+// deliberately routed civic, pipeline, and care spines so the network reads
+// as roads rather than arbitrary straight lines. Every building faces the
+// plaza it opens onto. This module is the single
 // source of truth for layout -- terrain.mjs consumes it to place pads and
 // walkways, and `node scripts/lunar-city/sync-district-layout.mjs`
 // regenerates world-manifest.v2.json's per-model transforms and
@@ -45,46 +46,65 @@ function districtPoint(id) {
   return DISTRICTS[id].position
 }
 
-function distance(a, b) {
-  return Math.hypot(a[0] - b[0], a[2] - b[2])
-}
-
-// Prim's algorithm over straight-line district distance -- the walkway
-// network is derived from where districts actually are, not hand-picked,
-// so moving a district in DISTRICTS automatically reroutes its roads.
-function minimumSpanningTree(ids) {
-  const remaining = new Set(ids.slice(1))
-  const connected = new Set([ids[0]])
-  const edges = []
-  while (remaining.size > 0) {
-    let best = null
-    for (const from of connected)
-      for (const to of remaining) {
-        const cost = distance(districtPoint(from), districtPoint(to))
-        if (!best || cost < best.cost) best = { cost, from, to }
-      }
-    edges.push([best.from, best.to])
-    connected.add(best.to)
-    remaining.delete(best.to)
-  }
-  return edges
-}
-
-// A pure MST reads a little too much like a tree and not enough like a
-// city -- these redundant links are deliberate, thematic shortcuts (review
-// reports straight to council; the plaza has two ways in) rather than
-// anything the distance metric alone would produce.
-const REDUNDANT_LINKS = Object.freeze([
-  ['review-office', 'council'],
-  ['bus', 'release-gatehouse']
+// Roads are planned as a small number of architectural spines. Each bend is
+// a public planning point in the same coordinate system as DISTRICTS: it is
+// where the road eases around a building cluster instead of cutting across
+// another district or stacking on top of a neighboring link.
+export const WALKWAY_ROUTES = Object.freeze([
+  Object.freeze({ from: 'archive', to: 'arts-studio', bend: [44, -8] }),
+  Object.freeze({ from: 'arts-studio', to: 'council', bend: [26, -12] }),
+  Object.freeze({ from: 'arts-studio', to: 'research-lab', bend: [25, -27] }),
+  Object.freeze({ from: 'bus', to: 'council', bend: [9, -6] }),
+  Object.freeze({ from: 'bus', to: 'release-gatehouse', bend: [-3, 3] }),
+  Object.freeze({ from: 'bus', to: 'review-office', bend: [-10, -3] }),
+  Object.freeze({ from: 'depot', to: 'engineering-workshop', bend: [-38, 16] }),
+  Object.freeze({ from: 'release-gatehouse', to: 'triage', bend: [0, 18] }),
+  Object.freeze({ from: 'review-office', to: 'depot', bend: [-28, -1] }),
+  Object.freeze({ from: 'review-office', to: 'library', bend: [-21, -16] }),
+  Object.freeze({ from: 'triage', to: 'garden', bend: [0, 31] })
 ])
 
-function walkwayEdges() {
-  const mst = minimumSpanningTree(DISTRICT_IDS)
-  const extra = REDUNDANT_LINKS.filter(
-    ([from, to]) => !mst.some(([a, b]) => (a === from && b === to) || (a === to && b === from))
+const ROAD_SURFACE_Y = 0.42
+const ROAD_HEIGHT = 0.32
+const ROAD_SAMPLES = 8
+const ROAD_ENTRY_OFFSET = 7.8
+
+function routeSpec(from, to) {
+  return WALKWAY_ROUTES.find(
+    route => (route.from === from && route.to === to) || (route.from === to && route.to === from)
   )
-  return [...mst, ...extra]
+}
+
+export function roadRoutePoints(from, to, elevation = ROAD_SURFACE_Y) {
+  const route = routeSpec(from, to)
+  if (!route) throw new Error(`missing planned walkway route ${from}-${to}`)
+  const fromPoint = districtPoint(from)
+  const toPoint = districtPoint(to)
+  const distanceBetween = Math.hypot(toPoint[0] - fromPoint[0], toPoint[2] - fromPoint[2])
+  const directionX = (toPoint[0] - fromPoint[0]) / distanceBetween
+  const directionZ = (toPoint[2] - fromPoint[2]) / distanceBetween
+  // Long links can reach the pad perimeter directly, but short civic links
+  // must retain a real road body. Without this clamp, subtracting the entry
+  // offset twice reverses the endpoints and creates tiny overlapping beams.
+  const entryOffset = Math.min(ROAD_ENTRY_OFFSET, distanceBetween * 0.24)
+  const start = [fromPoint[0] + directionX * entryOffset, fromPoint[2] + directionZ * entryOffset]
+  const end = [toPoint[0] - directionX * entryOffset, toPoint[2] - directionZ * entryOffset]
+  const bend = route.bend
+  const points = []
+  for (let index = 0; index <= ROAD_SAMPLES; index += 1) {
+    const t = index / ROAD_SAMPLES
+    const inverse = 1 - t
+    points.push([
+      inverse * inverse * start[0] + 2 * inverse * t * bend[0] + t * t * end[0],
+      elevation,
+      inverse * inverse * start[1] + 2 * inverse * t * bend[1] + t * t * end[1]
+    ])
+  }
+  return points
+}
+
+function walkwayEdges() {
+  return WALKWAY_ROUTES.map(({ from, to }) => [from, to])
 }
 
 // Every building faces the plaza it opens onto -- replaces the old
@@ -99,46 +119,246 @@ export function facingRotationY(id) {
 }
 
 function districtPad(scene, parent, id, index, [x, y, z]) {
-  cylinder(scene, `terrain:district-pad:${id}`, {
+  const pad = cylinder(scene, `terrain:district-pad:${id}`, {
     diameter: 18 - (index % 3),
     height: 2.2 + (index % 2) * 0.5,
     material: 'lunar-rust',
     parent,
     position: [x, y, z],
-    tessellation: 10
+    tessellation: 6
   })
-  cylinder(scene, `terrain:district-deck:${id}`, {
+  const deck = cylinder(scene, `terrain:district-deck:${id}`, {
     diameter: 15.2 - (index % 3),
     height: 0.7,
     material: 'charcoal-structure',
     parent,
     position: [x, y + 1.3, z],
-    tessellation: 10
+    tessellation: 6
+  })
+  return [pad, deck]
+}
+
+function districtUtilityPods(scene, parent, id, index, [x, y, z]) {
+  // Two compact service modules make each hex plate read as an inhabited
+  // colony tile instead of a single isolated landmark. Keep the meshes
+  // direct children of the near LOD so the normal material merge still folds
+  // these low-poly details into the existing terrain draw calls.
+  const meshes = []
+  for (const slot of [0, 1]) {
+    const angle = index * 0.47 + slot * Math.PI
+    const offsetX = Math.cos(angle) * 4.9
+    const offsetZ = Math.sin(angle) * 4.9
+    const body = cylinder(scene, `terrain:utility-pod:${id}:${slot}`, {
+      diameter: 1.8 - slot * 0.2,
+      height: 0.9,
+      material: 'bone-metal',
+      parent,
+      position: [x + offsetX, y + 2.05, z + offsetZ],
+      tessellation: 6
+    })
+    meshes.push(body)
+    meshes.push(
+      sphere(scene, `terrain:utility-cap:${id}:${slot}`, {
+      diameter: 1.45 - slot * 0.15,
+      material: 'lunar-rust',
+      parent,
+      position: [x + offsetX, y + 2.55, z + offsetZ],
+      scale: [1, 0.35, 1],
+      segments: 6
+      })
+    )
+    meshes.push(
+      box(scene, `terrain:utility-signal:${id}:${slot}`, {
+      depth: 0.08,
+      height: 0.12,
+      material: 'signal-emissive',
+      parent,
+      position: [x + offsetX, y + 2.18, z + offsetZ - 0.82],
+      width: 0.72
+      })
+    )
+  }
+  return meshes
+}
+
+/**
+ * Build the low-cost planetary ground outside the authored settlement island.
+ * The center is lower than the rim, so the existing island reads as a colony
+ * sitting in a shallow impact basin instead of a rock floating in space.
+ * Keeping this in its own semantic group lets the runtime and Blender stage
+ * preserve the settlement's current LOD and navigation geometry unchanged.
+ */
+function concaveWorldSurface(scene, name, parent, { radius, centerY, rimRise, rings, segments }) {
+  const positions = [0, centerY, 0]
+  const indices = []
+  for (let ring = 1; ring <= rings; ring += 1) {
+    const t = ring / rings
+    const ringRadius = radius * t
+    const y = centerY + rimRise * t * t
+    for (let segment = 0; segment < segments; segment += 1) {
+      const angle = (segment / segments) * Math.PI * 2
+      positions.push(Math.cos(angle) * ringRadius, y, Math.sin(angle) * ringRadius)
+    }
+  }
+  for (let segment = 0; segment < segments; segment += 1) {
+    const next = (segment + 1) % segments
+    indices.push(0, 1 + next, 1 + segment)
+  }
+  for (let ring = 1; ring < rings; ring += 1) {
+    const current = 1 + (ring - 1) * segments
+    const next = current + segments
+    for (let segment = 0; segment < segments; segment += 1) {
+      const nextSegment = (segment + 1) % segments
+      indices.push(current + segment, next + segment, next + nextSegment)
+      indices.push(current + segment, next + nextSegment, current + nextSegment)
+    }
+  }
+  const mesh = new Mesh(name, scene)
+  const vertexData = new VertexData()
+  vertexData.positions = positions
+  vertexData.indices = indices
+  VertexData.ComputeNormals(positions, indices, vertexData.normals = [])
+  vertexData.applyToMesh(mesh)
+  mesh.material = scene.getMaterialByName('lunar-rust')
+  mesh.parent = parent
+  mesh.isPickable = false
+  mesh.metadata = {
+    keepSeparate: true,
+    gltf: { extras: { semantic: name, role: 'planetary-ground' } }
+  }
+  return mesh
+}
+
+export function addPlanetaryGround(scene, root) {
+  if (!root || root.name !== 'terrain:root') throw new Error('planetary ground requires terrain:root')
+  const near = scene.getTransformNodeByName('terrain:lod:near')
+  const far = scene.getTransformNodeByName('terrain:lod:far')
+  if (!near || !far) throw new Error('planetary ground requires near and far terrain LOD roots')
+  const worldSurface = group(scene, 'terrain:world-surface', near, { position: [0, 0, 3] })
+  concaveWorldSurface(scene, 'terrain:world-surface:mesh', worldSurface, {
+    radius: 180,
+    centerY: -5.8,
+    rimRise: 8,
+    rings: 16,
+    segments: 64
+  })
+  const farWorldSurface = group(scene, 'terrain:far:world-surface', far, { position: [0, 0, 3] })
+  concaveWorldSurface(scene, 'terrain:far:world-surface:mesh', farWorldSurface, {
+    radius: 180,
+    centerY: -5.8,
+    rimRise: 8,
+    rings: 8,
+    segments: 32
   })
 }
 
-function walkway(scene, parent, name, from, to, width = 4.2) {
-  const route = group(scene, name, parent)
-  beamBetween(scene, `${name}:deck`, [from[0], from[1] + 1.65, from[2]], [to[0], to[1] + 1.65, to[2]], {
-    height: 0.65,
-    material: 'charcoal-structure',
-    parent: route,
-    width
+function mergeBaselineMeshes(scene, parent, meshes) {
+  const byMaterial = new Map()
+  for (const mesh of meshes) {
+    const materialId = mesh.material?.uniqueId
+    if (materialId === undefined) continue
+    if (!byMaterial.has(materialId)) byMaterial.set(materialId, [])
+    byMaterial.get(materialId).push(mesh)
+  }
+  let index = 0
+  for (const parts of byMaterial.values()) {
+    const merged = Mesh.MergeMeshes(parts, true, true, undefined, false, true)
+    if (!merged) throw new Error('unable to merge colony-builder baseline geometry')
+    merged.name = `terrain:reference-baseline:${index}`
+    merged.parent = parent
+    merged.isPickable = false
+    merged.metadata = {
+      keepSeparate: true,
+      gltf: { extras: { role: 'reference-baseline', semantic: merged.name } }
+    }
+    index += 1
+  }
+}
+
+export function addColonyBuilderBaseline(scene, root, { mergeMeshes = false } = {}) {
+  if (!root || root.name !== 'terrain:root') throw new Error('colony-builder baseline requires terrain:root')
+  const near = scene.getTransformNodeByName('terrain:lod:near')
+  if (!near) throw new Error('colony-builder baseline requires terrain:lod:near')
+  const marker = scene.getTransformNodeByName('terrain:reference-baseline') ?? group(scene, 'terrain:reference-baseline', near)
+  marker.metadata = {
+    gltf: {
+      extras: {
+        density: 'two-utility-pods-per-district',
+        districtPads: 'hexagonal',
+        semantic: 'terrain:reference-baseline'
+      }
+    }
+  }
+  if (marker.metadata.baselineApplied) return marker
+  const baselineMeshes = []
+  DISTRICT_IDS.forEach((id, index) => {
+    const point = districtPoint(id)
+    baselineMeshes.push(...districtPad(scene, near, id, index, point))
+    baselineMeshes.push(...districtUtilityPods(scene, near, id, index, point))
   })
-  beamBetween(
-    scene,
-    `${name}:signal`,
-    [from[0], from[1] + 2.02, from[2] - width * 0.32],
-    [to[0], to[1] + 2.02, to[2] - width * 0.32],
-    { height: 0.11, material: 'garden-green', parent: route, width: 0.16 }
-  )
+  if (mergeMeshes) mergeBaselineMeshes(scene, marker, baselineMeshes)
+  marker.metadata.baselineApplied = true
+  return marker
+}
+
+function walkway(scene, parent, name, from, to, roadMeshes, width = 4.2) {
+  const route = group(scene, name, parent)
+  const points = roadRoutePoints(from, to)
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const start = points[index]
+    const end = points[index + 1]
+    const deck = beamBetween(scene, `${name}:segment:${index}:deck`, start, end, {
+      height: ROAD_HEIGHT,
+      material: 'lunar-rust',
+      parent: route,
+      width
+    })
+    roadMeshes.deck.push(deck)
+    const dx = end[0] - start[0]
+    const dz = end[2] - start[2]
+    const length = Math.hypot(dx, dz)
+    const sideX = (-dz / length) * width * 0.32
+    const sideZ = (dx / length) * width * 0.32
+    const signal = beamBetween(
+      scene,
+      `${name}:segment:${index}:signal`,
+      [start[0] + sideX, start[1] + ROAD_HEIGHT * 0.7, start[2] + sideZ],
+      [end[0] + sideX, end[1] + ROAD_HEIGHT * 0.7, end[2] + sideZ],
+      { height: 0.1, material: 'signal-emissive', parent: route, width: 0.16 }
+    )
+    roadMeshes.signal.push(signal)
+  }
   return route
+}
+
+function mergeRoadMeshes(meshes, parent, name) {
+  if (meshes.length === 0) return
+  const merged = Mesh.MergeMeshes(meshes, true, true, undefined, false, true)
+  if (!merged) throw new Error(`unable to merge planned road geometry ${name}`)
+  merged.name = name
+  merged.parent = parent
+  merged.isPickable = false
+  merged.metadata = { keepSeparate: true, gltf: { extras: { semantic: name, role: 'planned-road' } } }
+}
+
+export function addPlannedWalkways(scene, root) {
+  if (!root || root.name !== 'terrain:root') throw new Error('planned walkways require terrain:root')
+  const walkways = scene.getTransformNodeByName('terrain:walkways')
+  if (!walkways) throw new Error('planned walkways require terrain:walkways')
+  for (const child of walkways.getChildren().slice()) child.dispose(false)
+  const roadMeshes = { deck: [], signal: [] }
+  for (const { from, to } of WALKWAY_ROUTES)
+    walkway(scene, walkways, `terrain:walkway:${from}-${to}`, from, to, roadMeshes)
+  mergeRoadMeshes(roadMeshes.deck, walkways, 'terrain:walkways:deck')
+  mergeRoadMeshes(roadMeshes.signal, walkways, 'terrain:walkways:signals')
+  return walkways
 }
 
 export function buildTerrain(scene) {
   const root = group(scene, 'terrain:root')
   const near = group(scene, 'terrain:lod:near', root)
   const far = group(scene, 'terrain:lod:far', root)
+  addPlanetaryGround(scene, root)
   const cliffs = group(scene, 'terrain:cliffs', near)
   cylinder(scene, 'terrain:base:island', {
     diameter: 92,
@@ -234,18 +454,16 @@ export function buildTerrain(scene) {
     cylinder(scene, `terrain:activity-beacon:signal:${index}`, {
       diameter: 0.72,
       height: 0.16,
-      material: 'garden-green',
+      material: 'signal-emissive',
       parent: dressing,
       position: [x, y + 2.25, z],
       tessellation: 8
     })
   }
-  DISTRICT_IDS.forEach((id, index) => districtPad(scene, near, id, index, districtPoint(id)))
+  addColonyBuilderBaseline(scene, root)
 
-  const walkways = group(scene, 'terrain:walkways', near)
-  walkwayEdges().forEach(([from, to]) =>
-    walkway(scene, walkways, `terrain:walkway:${from}-${to}`, districtPoint(from), districtPoint(to))
-  )
+  group(scene, 'terrain:walkways', near)
+  addPlannedWalkways(scene, root)
 
   const busStop = group(scene, 'terrain:bus-stop', near, { position: [0, 2.1, -1] })
   box(scene, 'terrain:bus-stop:platform', {
@@ -292,6 +510,14 @@ export function buildTerrain(scene) {
     scale: [1, 1, 0.82],
     tessellation: 12
   })
+  const farWorldSurface = group(scene, 'terrain:far:world-surface', far, { position: [0, 0, 3] })
+  concaveWorldSurface(scene, 'terrain:far:world-surface:mesh', farWorldSurface, {
+    radius: 180,
+    centerY: -5.8,
+    rimRise: 8,
+    rings: 8,
+    segments: 32
+  })
   for (const id of DISTRICT_IDS) {
     const point = districtPoint(id)
     cylinder(scene, `terrain:far:pad:${id}`, {
@@ -322,21 +548,15 @@ export function buildNavigation(scene) {
   })
   walkwayEdges().forEach(([from, to]) => {
     const id = `${from}-${to}`
-    const fromPoint = districtPoint(from)
-    const toPoint = districtPoint(to)
     const link = group(scene, `navigation:link:${id}`, walkable)
-    beamBetween(
-      scene,
-      `navigation:link:${id}:mesh`,
-      [fromPoint[0], fromPoint[1] + 1.75, fromPoint[2]],
-      [toPoint[0], toPoint[1] + 1.75, toPoint[2]],
-      {
+    const points = roadRoutePoints(from, to, 1.75)
+    for (let index = 0; index < points.length - 1; index += 1)
+      beamBetween(scene, `navigation:link:${id}:segment:${index}`, points[index], points[index + 1], {
         height: 0.14,
         material: 'charcoal-structure',
         parent: link,
         width: 3.5
-      }
-    )
+      })
   })
   return root
 }

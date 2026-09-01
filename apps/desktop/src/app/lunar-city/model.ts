@@ -554,6 +554,7 @@ export interface LunarCityWorldModules {
   SceneInstrumentation?: new (scene: BabylonSceneLike) => { dispose(): void; drawCallsCounter?: { current?: number } }
   Vector3: new (x: number, y: number, z: number) => BabylonVector3Like
   Color3: new (red: number, green: number, blue: number) => unknown
+  Color4?: new (red: number, green: number, blue: number, alpha: number) => unknown
   ArcRotateCamera: new (
     name: string,
     alpha: number,

@@ -27,7 +27,13 @@ import {
 } from './modeling/export.mjs'
 import { mergeLodMeshes } from './modeling/primitives.mjs'
 import { buildBus, buildTriage } from './modeling/props.mjs'
-import { buildNavigation, buildTerrain } from './modeling/terrain.mjs'
+import {
+  addColonyBuilderBaseline,
+  addPlanetaryGround,
+  addPlannedWalkways,
+  buildNavigation,
+  buildTerrain
+} from './modeling/terrain.mjs'
 
 // An authored (hand-modeled) GLB only replaces static geometry -- required
 // animation/state channels are still code-owned data, not something the
@@ -147,6 +153,11 @@ export async function buildAssetPack(outputRoot = DEFAULT_OUTPUT_ROOT) {
     try {
       const authoredPath = await authoredModelPath(model.id)
       let root = authoredPath ? await importAuthoredModel(scene, model.id, authoredPath) : build(scene)
+      if (authoredPath && model.id === 'terrain') {
+        addPlanetaryGround(scene, root)
+        addColonyBuilderBaseline(scene, root, { mergeMeshes: true })
+        addPlannedWalkways(scene, root)
+      }
       if (authoredPath && AUTHORED_ANIMATION_HOOKS[model.id]) root = AUTHORED_ANIMATION_HOOKS[model.id](scene, root)
       if (root.name !== `${model.id}:root`) throw new Error(`${model.id} builder returned ${root.name}`)
       const textureHook = AUTHORED_TEXTURE_HOOKS[model.id]

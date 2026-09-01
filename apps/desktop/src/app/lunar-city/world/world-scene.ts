@@ -1499,6 +1499,13 @@ export async function createWorldScene(
     // warmer ambient floor keeps those PBR surfaces legible when the efficient
     // tier disables dynamic shadows, without adding another per-frame light.
     scene.ambientColor = new modules.Color3(0.46, 0.32, 0.28)
+    // Match the Blender staging skybox's deep-space backdrop. The generated
+    // terrain carries the planetary ground; the runtime uses a stable clear
+    // color here so the enlarged bowl has a believable horizon without adding
+    // another loaded model or texture to every scene.
+    if (modules.Color4) {
+      scene.clearColor = new modules.Color4(0.005, 0.008, 0.02, 1)
+    }
     const overview = manifest.camera.overview
     scene.activeCamera = new modules.ArcRotateCamera(
       'lunar-city:approved-overview',

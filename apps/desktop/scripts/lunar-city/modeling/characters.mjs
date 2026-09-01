@@ -591,7 +591,10 @@ function animalBase(
   { bodyMaterial = 'charcoal-structure', height = 2.5, position, robe = 'archive-emissive', width = 1.25 } = {}
 ) {
   const root = group(scene, `leader:${id}`, parent, { position })
-  capsule(scene, `leader:${id}:body`, { height, material: robe, parent: root, radius: width * 0.48, tessellation: 8 })
+  // Leaders are repeated six times in the near LOD. Keep the silhouette
+  // rounded, but use the smallest tessellation that survives the city-view
+  // camera; their expressive state channels live on the rig, not the mesh.
+  capsule(scene, `leader:${id}:body`, { height, material: robe, parent: root, radius: width * 0.48, tessellation: 6 })
   cone(scene, `leader:${id}:layered-robe`, {
     diameterBottom: width * 1.22,
     diameterTop: width * 0.72,
@@ -599,14 +602,14 @@ function animalBase(
     material: robe,
     parent: root,
     position: [0, -height * 0.11, 0.12],
-    tessellation: 8
+    tessellation: 6
   })
   const headRig = group(scene, `leader:${id}:head-rig`, root, { position: [0, height * 0.52, 0] })
   const headMesh = sphere(scene, `leader:${id}:head`, {
     diameter: width,
     material: bodyMaterial,
     parent: headRig,
-    segments: 8
+    segments: 6
   })
   for (const side of [-1, 1]) {
     capsule(scene, `leader:${id}:arm:${side}`, {
@@ -616,7 +619,7 @@ function animalBase(
       position: [side * width * 0.58, 0.02, -0.03],
       radius: width * 0.13,
       rotation: [0, 0, side * -0.16],
-      tessellation: 7
+      tessellation: 6
     })
     sphere(scene, `leader:${id}:hand:${side}`, {
       diameter: width * 0.28,
@@ -632,7 +635,7 @@ function animalBase(
     parent: root,
     position: [0, height * 0.22, 0],
     rotation: [Math.PI / 2, 0, 0],
-    tessellation: 10,
+    tessellation: 8,
     thickness: width * 0.07
   })
   box(scene, `leader:${id}:chest`, {

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -119,6 +120,7 @@ def stage_generated_model(
     imported = import_model_objects(path, target)
     if not imported:
         return 0
+    apply_staging_palette(imported)
     activate_overview_lod(imported)
     apply_staging_edge_finish(imported)
     anchor = bpy.data.objects.new(f"LUNAR_CITY::{path.stem.upper()}_ANCHOR", None)
@@ -235,6 +237,131 @@ def make_material(name: str, color: tuple[float, float, float, float], metallic=
     return mat
 
 
+STAGING_PALETTE = {
+    "archive-emissive": ((0.55, 0.12, 0.95, 1.0), 0.05, 0.28),
+    "bone-metal": ((0.86, 0.9, 0.94, 1.0), 0.22, 0.34),
+    "charcoal-structure": ((0.055, 0.075, 0.15, 1.0), 0.08, 0.72),
+    "garden-green": ((0.14, 0.72, 0.24, 1.0), 0.04, 0.5),
+    "lunar-rust": ((0.86, 0.16, 0.045, 1.0), 0.12, 0.48),
+    "signal-emissive": ((0.02, 0.82, 0.98, 1.0), 0.08, 0.24),
+    "triage-amber": ((0.98, 0.56, 0.08, 1.0), 0.05, 0.4),
+}
+
+
+def apply_staging_palette(imported: list[bpy.types.Object]) -> None:
+    """Give imported runtime materials the saturated colony-builder read."""
+    for obj in imported:
+        if obj.type != "MESH":
+            continue
+        for material in obj.data.materials:
+            if not material:
+                continue
+            palette_id = material.name.rsplit(".", 1)[0]
+            recipe = STAGING_PALETTE.get(palette_id)
+            if not recipe:
+                continue
+            color, metallic, roughness = recipe
+            material.diffuse_color = color
+            material.use_nodes = True
+            material.metallic = metallic
+            material.roughness = roughness
+            bsdf = material.node_tree.nodes.get("Principled BSDF")
+            if bsdf:
+                bsdf.inputs["Base Color"].default_value = color
+                bsdf.inputs["Metallic"].default_value = metallic
+                bsdf.inputs["Roughness"].default_value = roughness
+                if palette_id in {"archive-emissive", "signal-emissive"}:
+                    bsdf.inputs["Emission Color"].default_value = color
+                    bsdf.inputs["Emission Strength"].default_value = 1.8
+
+
+def add_concave_world_surface(target: bpy.types.Collection) -> bpy.types.Object:
+    """Add the Blender-only planetary ground surrounding the colony island."""
+    radius = 180.0
+    center_y = 3.0  # Babylon terrain z=3 becomes Blender y=3.
+    center_z = -5.8
+    rim_rise = 8.0
+    rings = 20
+    segments = 96
+    vertices = [(0.0, center_y, center_z)]
+    faces = []
+    for ring in range(1, rings + 1):
+        t = ring / rings
+        ring_radius = radius * t
+        z = center_z + rim_rise * t * t
+        for segment in range(segments):
+            angle = segment / segments * 2.0 * 3.141592653589793
+            vertices.append((ring_radius * math.cos(angle), center_y + ring_radius * math.sin(angle), z))
+    for segment in range(segments):
+        next_segment = (segment + 1) % segments
+        faces.append((0, 1 + next_segment, 1 + segment))
+    for ring in range(1, rings):
+        current = 1 + (ring - 1) * segments
+        next_ring = current + segments
+        for segment in range(segments):
+            next_segment = (segment + 1) % segments
+            faces.append((current + segment, next_ring + segment, next_ring + next_segment))
+            faces.append((current + segment, next_ring + next_segment, current + next_segment))
+    mesh = bpy.data.meshes.new("LunarWorldSurfaceMesh")
+    mesh.from_pydata(vertices, [], faces)
+    mesh.update()
+    for polygon in mesh.polygons:
+        polygon.use_smooth = True
+    surface = bpy.data.objects.new("LUNAR_CITY::WORLD_SURFACE", mesh)
+    target.objects.link(surface)
+    regolith = make_material("Lunar World Regolith", (0.26, 0.085, 0.035, 1), metallic=0.05, roughness=0.96)
+    bsdf = regolith.node_tree.nodes.get("Principled BSDF")
+    if bsdf and bsdf.inputs.get("Emission Color"):
+        bsdf.inputs["Emission Color"].default_value = (0.08, 0.018, 0.006, 1)
+        bsdf.inputs["Emission Strength"].default_value = 0.12
+    surface.data.materials.append(regolith)
+    surface["lunarCityRole"] = "planetary-ground"
+    surface["lunarCityRadius"] = radius
+    surface["lunarCityConcave"] = True
+    return surface
+
+
+def add_skybox(target: bpy.types.Collection) -> tuple[bpy.types.Object, int]:
+    """Add a dark interior sphere and deterministic stars for staging renders."""
+    sky_material = make_material("Lunar Skybox", (0.008, 0.014, 0.05, 1), metallic=0.0, roughness=1.0)
+    sky_material.use_backface_culling = False
+    sky_bsdf = sky_material.node_tree.nodes.get("Principled BSDF")
+    if sky_bsdf and sky_bsdf.inputs.get("Emission Color"):
+        sky_bsdf.inputs["Emission Color"].default_value = (0.006, 0.01, 0.04, 1)
+        sky_bsdf.inputs["Emission Strength"].default_value = 0.35
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=64, ring_count=32, radius=500.0, location=(0, 0, 0))
+    skybox = bpy.context.object
+    skybox.name = "LUNAR_CITY::SKYBOX"
+    skybox.data.materials.append(sky_material)
+    move_to(skybox, target)
+    skybox["lunarCityRole"] = "skybox"
+    skybox["lunarCityInterior"] = True
+    skybox.hide_select = True
+    for polygon in skybox.data.polygons:
+        polygon.flip()
+
+    star_material = make_material("Lunar Skybox Stars", (0.62, 0.74, 1.0, 1), metallic=0.0, roughness=0.45)
+    star_bsdf = star_material.node_tree.nodes.get("Principled BSDF")
+    if star_bsdf and star_bsdf.inputs.get("Emission Color"):
+        star_bsdf.inputs["Emission Color"].default_value = (0.55, 0.7, 1.0, 1)
+        star_bsdf.inputs["Emission Strength"].default_value = 3.0
+    star_count = 48
+    for index in range(star_count):
+        # A deterministic spherical distribution keeps renders byte-stable
+        # while avoiding a hand-authored texture dependency.
+        y = 1.0 - 2.0 * (index + 0.5) / star_count
+        radial = max(0.0, 1.0 - y * y) ** 0.5
+        angle = index * 2.399963229728653
+        location = (240.0 * radial * math.cos(angle), 240.0 * radial * math.sin(angle), 240.0 * y)
+        bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=1, radius=1.8 if index % 5 else 2.6, location=location)
+        star = bpy.context.object
+        star.name = f"LUNAR_CITY::STAR::{index:02d}"
+        star.data.materials.append(star_material)
+        move_to(star, target)
+        star["lunarCityRole"] = "skybox-star"
+    return skybox, star_count
+
+
 def stage_polyhaven_texture(path: Path, target: bpy.types.Collection) -> int:
     """Create a low-cost preview card for a texture, preserving the source file."""
     try:
@@ -306,7 +433,9 @@ def main() -> None:
     root = collection("LUNAR_CITY")
     collection("LUNAR_CITY::BUILDINGS", root)
     collection("LUNAR_CITY::WORKERS", root)
-    collection("LUNAR_CITY::TERRAIN", root)
+    terrain_collection = collection("LUNAR_CITY::TERRAIN", root)
+    skybox_collection = collection("LUNAR_CITY::SKYBOX", root)
+    _, skybox_star_count = add_skybox(skybox_collection)
     external = collection("POLYHAVEN_BENCHMARK", root)
     kit_collection = collection("LUNAR_CITY::OPEN_SOURCE_BENCHMARK", root)
 
@@ -320,7 +449,7 @@ def main() -> None:
     for name, mat in palette.items():
         mat["lunarCityRole"] = name.rsplit("::", 1)[-1].lower()
 
-    counts = {"models": 0, "openSourceShowcaseModels": 0, "polyhavenModels": 0, "polyhavenTextures": 0}
+    counts = {"models": 0, "openSourceShowcaseModels": 0, "polyhavenModels": 0, "polyhavenTextures": 0, "skyboxStars": skybox_star_count}
     authored_transforms = manifest_transforms(args.asset_root)
     for path in sorted(args.asset_root.rglob("*")):
         if path.suffix.lower() not in {".glb", ".gltf", ".obj", ".fbx"}:
@@ -332,6 +461,13 @@ def main() -> None:
             ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
         )
         counts["models"] += stage_generated_model(path, bpy.data.collections[target_name], location, rotation, scale)
+
+    # New terrain GLBs carry the same planetary surface used by WebGL. Keep a
+    # fallback for older authored files so this staging script remains useful
+    # while a local asset folder is being refreshed, but never overlap two
+    # copies of the ground in the current scene.
+    if not bpy.data.objects.get("terrain:world-surface"):
+        add_concave_world_surface(terrain_collection)
 
     # A curated external kit is intentionally visible in the Blender staging
     # file. This is the missing bridge between the asset-neutral runtime and
@@ -414,6 +550,7 @@ def main() -> None:
         shading.show_shadows = True
         shading.show_cavity = True
         shading.cavity_type = "BOTH"
+        shading.background_type = "WORLD"
     scene.world.use_nodes = True
     background = scene.world.node_tree.nodes.get("Background")
     if background:

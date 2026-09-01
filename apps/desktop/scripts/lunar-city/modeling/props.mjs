@@ -107,7 +107,7 @@ export function addPortal(scene, parent) {
     height: 4.4,
     material: 'archive-emissive',
     parent: portal,
-    tessellation: 14
+    tessellation: 8
   })
   chamber.metadata = { keepSeparate: true }
   for (const y of [-2.15, -0.9, 0.9, 2.15])
@@ -116,7 +116,7 @@ export function addPortal(scene, parent) {
       material: y % 2 ? 'archive-emissive' : 'bone-metal',
       parent: portal,
       position: [0, y, 0],
-      tessellation: 14,
+      tessellation: 8,
       thickness: 0.18
     })
   for (const side of [-1, 1])

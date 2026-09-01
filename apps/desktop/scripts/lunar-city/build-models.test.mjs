@@ -9,6 +9,9 @@ import { after, before, test } from 'node:test'
 import { NodeIO } from '@gltf-transform/core'
 
 import { buildAssetPack } from './build-models.mjs'
+import { NullEngine, Scene } from './modeling/babylon.mjs'
+import { buildCouncil } from './modeling/buildings.mjs'
+import { WALKWAY_ROUTES, buildTerrain, roadRoutePoints } from './modeling/terrain.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -60,7 +63,7 @@ const SEMANTIC_NODES = {
     'release-gatehouse:leader-anchor'
   ],
   'review-office': ['review-office:consoles', 'review-office:portal', 'review-office:verifier-dais'],
-  terrain: ['terrain:bus-stop', 'terrain:cliffs', 'terrain:walkway:review-office-council'],
+  terrain: ['terrain:bus-stop', 'terrain:cliffs', 'terrain:walkways:deck', 'terrain:world-surface'],
   triage: ['triage:cross', 'triage:door', 'triage:station'],
   workers: ['worker:attachment', 'worker:body', 'worker:head', 'worker:role-accessories']
 }
@@ -97,6 +100,11 @@ const SPECIALIST_DETAIL_FLOORS = {
 const SPECIALIST_IDS = ['library', 'research-lab', 'depot', 'review-office', 'council']
 const LEADER_IDS = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag']
 const LEADER_STATES = ['idle', 'listening', 'talking', 'thinking', 'acknowledging', 'unavailable']
+const CLEANUP_TRIANGLE_CAPS = {
+  council: 10500,
+  leaders: 13500,
+  library: 15000
+}
 const HERMES_GROUPS = [
   'Acceptance & Release',
   'Archive and Acquisition',
@@ -300,6 +308,59 @@ test('exports genuine bounded three-dimensional geometry instead of flat replace
     assert.equal(bytes.subarray(0, 4).toString('ascii'), 'glTF')
     assert.equal(bytes.includes(Buffer.from(APPROVED_SOURCE_NAME)), false)
   }
+})
+
+test('keeps the highest-cost procedural landmarks under the cleanup caps', () => {
+  for (const [id, cap] of Object.entries(CLEANUP_TRIANGLE_CAPS)) {
+    assert.ok(
+      firstReceipt.statistics[id].triangles <= cap,
+      `${id} cleanup target is ${cap} triangles (got ${firstReceipt.statistics[id].triangles})`
+    )
+  }
+})
+
+test('uses the supplied colony-builder visual baseline for pads, transit, and dome caps', () => {
+  const engine = new NullEngine({ renderingPipeline: false })
+  const scene = new Scene(engine)
+  try {
+    buildTerrain(scene)
+    const pads = scene.meshes.filter(mesh => mesh.name.startsWith('terrain:district-pad:'))
+    assert.equal(pads.length, 12, 'the baseline must give every district a modular pad')
+    assert.ok(pads.every(mesh => mesh.getTotalVertices() <= 30), 'district pads must be six-sided low-poly tiles')
+
+    const utilityPods = scene.meshes.filter(mesh => mesh.name.startsWith('terrain:utility-pod:'))
+    assert.equal(utilityPods.length, 24, 'the baseline must provide two low-poly support modules per district')
+
+    const transitAccents = scene.meshes.filter(
+      mesh => mesh.name.includes('walkway') && mesh.material?.subMaterials?.some(material => material.name === 'signal-emissive')
+    )
+    assert.ok(transitAccents.length > 0, 'transit accents must read as cyan luminous lines')
+
+    buildCouncil(scene)
+    const domeCap = scene.getMeshByName('council:roof-dome:signal')
+    assert.equal(domeCap?.material?.name, 'lunar-rust', 'dome caps must carry the warm colony-builder accent')
+  } finally {
+    scene.dispose()
+    engine.dispose()
+  }
+})
+
+test('extends terrain into a concave planetary ground beyond the settlement island', async () => {
+  const io = new NodeIO()
+  const root = (await io.read(join(firstRoot, 'models', 'terrain.glb'))).getRoot()
+  const triangles = worldTriangles(root, 'terrain:world-surface')
+  const bounds = boundsOfTriangles(triangles)
+  assert.ok(bounds.max[0] - bounds.min[0] >= 350, 'planetary ground must extend well beyond the current island')
+  assert.ok(bounds.max[2] - bounds.min[2] >= 350, 'planetary ground must extend well beyond the current island')
+  const points = triangles.flat()
+  const centerHeights = points
+    .filter(point => Math.hypot(point[0], point[2] - 3) < 1)
+    .map(point => point[1])
+  const rimHeights = points
+    .filter(point => Math.hypot(point[0], point[2] - 3) > 170)
+    .map(point => point[1])
+  assert.ok(centerHeights.length > 0 && rimHeights.length > 0, 'planetary ground must expose center and rim samples')
+  assert.ok(Math.min(...rimHeights) - Math.min(...centerHeights) >= 6, 'planetary ground must be visibly concave')
 })
 
 test('preserves approved specialist silhouettes and all declared animation/state channels', async () => {
@@ -706,8 +767,43 @@ test('keeps every visible walkway aligned with a semantic navigation link', asyn
     .filter(name => name.startsWith('navigation:link:'))
     .map(name => name.slice('navigation:link:'.length))
     .toSorted()
-  assert.ok(visibleLinks.includes('review-office-council'))
   assert.deepEqual(navigationLinks, visibleLinks)
+})
+
+test('uses the approved district road graph instead of a crossing shortcut', async () => {
+  const root = (await new NodeIO().read(join(firstRoot, 'models', 'terrain.glb'))).getRoot()
+  const normalize = name => name.split('-').toSorted().join('-')
+  const actual = root
+    .listNodes()
+    .map(node => node.getName())
+    .filter(name => name.startsWith('terrain:walkway:'))
+    .map(name => normalize(name.slice('terrain:walkway:'.length)))
+    .toSorted()
+  const expected = [
+    ['archive', 'arts-studio'],
+    ['arts-studio', 'council'],
+    ['arts-studio', 'research-lab'],
+    ['bus', 'council'],
+    ['bus', 'release-gatehouse'],
+    ['bus', 'review-office'],
+    ['depot', 'engineering-workshop'],
+    ['release-gatehouse', 'triage'],
+    ['review-office', 'depot'],
+    ['review-office', 'library'],
+    ['triage', 'garden']
+  ].map(edge => normalize(edge.join('-'))).toSorted()
+  assert.deepEqual(actual, expected)
+})
+
+test('builds roads as low segmented ground routes rather than elevated straight beams', async () => {
+  for (const { from, to } of WALKWAY_ROUTES) {
+    const points = roadRoutePoints(from, to)
+    assert.ok(points.length >= 9, `${from}-${to} must be built from multiple ground-following segments`)
+    assert.ok(points.every(point => point[1] <= 0.55), `${from}-${to} must contact the terrain instead of floating at deck height`)
+    const lengths = points.slice(1).map((point, index) => Math.hypot(point[0] - points[index][0], point[2] - points[index][2]))
+    assert.ok(lengths.every(length => length >= 0.45), `${from}-${to} must not collapse into overlapping micro-segments`)
+    assert.ok(lengths.reduce((total, length) => total + length, 0) >= 5, `${from}-${to} must retain a usable architectural path length`)
+  }
 })
 
 test('ships only generated palette texture data and an auxiliary navigation mesh', async () => {

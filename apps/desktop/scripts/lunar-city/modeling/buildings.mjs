@@ -568,7 +568,7 @@ function addCouncilFrame(scene, { depth, height, width }) {
     material: 'charcoal-structure',
     parent: shell,
     position: [0, 0.42, -0.5],
-    tessellation: 16
+    tessellation: 10
   })
   box(scene, 'council:chamber-back-wall', {
     depth: 0.62,
@@ -614,7 +614,7 @@ function addCouncilFrame(scene, { depth, height, width }) {
       material: column % 2 ? 'archive-emissive' : 'bone-metal',
       parent: shell,
       position: [Math.sin(angle) * width * 0.48, height * 0.34, -depth * 0.1 + Math.cos(angle) * depth * 0.38],
-      tessellation: 8
+      tessellation: 6
     })
   }
   torus(scene, 'council:roof:open-ring', {
@@ -623,7 +623,7 @@ function addCouncilFrame(scene, { depth, height, width }) {
     parent: roof,
     position: [0, height * 0.7, -depth * 0.28],
     rotation: [Math.PI / 2, 0, 0],
-    tessellation: 18,
+    tessellation: 10,
     thickness: 0.32
   })
   entrance.position.set(0, 0.65, depth / 2 + 0.4)
@@ -632,7 +632,7 @@ function addCouncilFrame(scene, { depth, height, width }) {
     material: 'archive-emissive',
     parent: entrance,
     rotation: [Math.PI / 2, 0, 0],
-    tessellation: 14,
+    tessellation: 10,
     thickness: 0.34
   })
   const identity = group(scene, 'council:city-identity', near)
@@ -643,7 +643,7 @@ function addCouncilFrame(scene, { depth, height, width }) {
       parent: identity,
       position: [0, height * 0.66, -depth * 0.35],
       rotation: [Math.PI / 2, 0, 0],
-      tessellation: 18,
+      tessellation: 10,
       thickness: 0.48
     })
   )
@@ -653,7 +653,7 @@ function addCouncilFrame(scene, { depth, height, width }) {
     material: 'bone-metal',
     parent: far,
     position: [0, 0.45, -0.5],
-    tessellation: 14
+    tessellation: 10
   })
   torus(scene, 'council:far:ring', {
     diameter: width * 0.82,
@@ -661,7 +661,7 @@ function addCouncilFrame(scene, { depth, height, width }) {
     parent: far,
     position: [0, height * 0.64, -depth * 0.32],
     rotation: [Math.PI / 2, 0, 0],
-    tessellation: 14,
+    tessellation: 10,
     thickness: 0.5
   })
   return building
@@ -1016,7 +1016,7 @@ function addRoofDome(scene, id, parent, { accent, depth, height, width }) {
   })
   sphere(scene, `${id}:roof-dome:signal`, {
     diameter: 0.3,
-    material: accent,
+    material: 'lunar-rust',
     parent: dome,
     position: [0, height * 1.84, -depth * 0.12],
     segments: 6

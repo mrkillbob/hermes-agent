@@ -52,7 +52,8 @@ export const {
   Skeleton,
   TransformNode,
   Vector3,
-  VertexBuffer
+  VertexBuffer,
+  VertexData
 } = core
 
 export const { GLTF2Export } = serializers

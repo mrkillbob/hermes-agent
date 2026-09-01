@@ -338,7 +338,7 @@
       "uri": "models/terrain.glb",
       "maxTriangles": 90000,
       "maxDrawCalls": 14,
-      "maxMaterials": 4,
+      "maxMaterials": 5,
       "maxTextures": 4,
       "maxGpuMiB": 20,
       "requiredNodes": ["terrain:root", "terrain:lod:near", "terrain:lod:far", "terrain:walkways"],
@@ -349,27 +349,27 @@
       ],
       "transform": { "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
-      "bounds": { "min": [-56, -8, -52], "max": [56, 18, 52] },
+      "bounds": { "min": [-180, -8, -177], "max": [180, 18, 183] },
       "anchors": { "foot": [0, 0, 0], "camera": [0, 8, 0] },
       "cameraAnchor": [0, 8, 0],
       "occlusionGroup": "terrain",
       "collision": { "kind": "mesh", "navigationArea": "walkable" },
-      "materialSlots": ["lunar-rust", "charcoal-structure"],
+      "materialSlots": ["lunar-rust", "charcoal-structure", "bone-metal", "garden-green", "signal-emissive"],
       "statistics": {
-        "accessorBytes": 2991192,
+        "accessorBytes": 3332808,
         "animationClips": [],
-        "drawCalls": 6,
-        "materials": 4,
-        "meshes": 6,
-        "nodes": 29,
-        "gpuBytes": 3106129,
+        "drawCalls": 14,
+        "materials": 5,
+        "meshes": 14,
+        "nodes": 39,
+        "gpuBytes": 3447745,
         "textures": 1,
-        "triangles": 29612,
-        "gpuMiB": 2.9622,
-        "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 4, "maxTextures": 4, "maxTriangles": 90000 },
-        "bytes": 3112724,
-        "extent": [102.8977, 12.425, 92.9281],
-        "sha256": "1ab3b66d085051f01c5ef5c62ebc030f7031739d173f7c754f14ad4feadaacef"
+        "triangles": 41772,
+        "gpuMiB": 3.288,
+        "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 5, "maxTextures": 4, "maxTriangles": 90000 },
+        "bytes": 3460920,
+        "extent": [360, 12.425, 360],
+        "sha256": "f21efc94cef475455100bfccac90477a8066e061c55b3a940096e264cc99bf4e"
       }
     },
     {
@@ -402,20 +402,20 @@
       "collision": { "kind": "box", "navigationArea": "library" },
       "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 781224,
+        "accessorBytes": 548346,
         "animationClips": ["lights-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 32,
-        "gpuBytes": 932928,
+        "gpuBytes": 700050,
         "textures": 1,
-        "triangles": 20034,
-        "gpuMiB": 0.8897,
+        "triangles": 14437,
+        "gpuMiB": 0.6676,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 28000 },
-        "bytes": 940628,
-        "extent": [16.7884, 18.182, 14.5275],
-        "sha256": "efd3d32eb6e99a42d6590ea26b248f8594e8014a22da3cec86f94a65f8d25f02"
+        "bytes": 707736,
+        "extent": [16.7884, 18.1826, 14.5275],
+        "sha256": "e1f4b7bb10d63081eac3a6bd9c843398eacac93a83286c31a80538883516c4d7"
       }
     },
     {
@@ -462,7 +462,7 @@
         "budget": { "maxDrawCalls": 9, "maxGpuMiB": 12, "maxMaterials": 5, "maxTextures": 4, "maxTriangles": 32000 },
         "bytes": 551556,
         "extent": [21.4805, 23.734, 17.39],
-        "sha256": "9bf5903221a976885d0a1fd4bf5ca09177aa3f8353e355c857fccee82ef07a0b"
+        "sha256": "55dd87d483f7f7a7ffb1f7b9b75db59de640a8f9d84fc96ec98f22b71eaa4cae"
       }
     },
     {
@@ -506,9 +506,9 @@
         "triangles": 6250,
         "gpuMiB": 0.2851,
         "budget": { "maxDrawCalls": 7, "maxGpuMiB": 9, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 24000 },
-        "bytes": 395872,
+        "bytes": 395860,
         "extent": [17.6855, 15.8066, 13.5275],
-        "sha256": "538ae8b7199554022347dab67d74304aeff82ddfc04956ddcc9332c3202d303f"
+        "sha256": "09e199a8891b9fb1f349c7c72d1ddf32485a3e127f8cb0bbc4d312dd47ffbb40"
       }
     },
     {
@@ -541,20 +541,20 @@
       "collision": { "kind": "box", "navigationArea": "review" },
       "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 397188,
+        "accessorBytes": 368532,
         "animationClips": ["lights-idle", "portal-idle"],
         "drawCalls": 7,
         "materials": 4,
         "meshes": 7,
         "nodes": 31,
-        "gpuBytes": 397188,
+        "gpuBytes": 368532,
         "textures": 0,
-        "triangles": 9970,
-        "gpuMiB": 0.3788,
+        "triangles": 8794,
+        "gpuMiB": 0.3515,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 26000 },
-        "bytes": 520936,
+        "bytes": 485048,
         "extent": [17.2596, 17.1001, 19.8],
-        "sha256": "4197472aa10fae4acc5b5ed10b35e0886c98ca986b682caa38295ab3eb7a9284"
+        "sha256": "c24824bee92320959036e2176e19de896281f6d909b86d529ad653912182baae"
       }
     },
     {
@@ -658,20 +658,20 @@
       "collision": { "kind": "box", "navigationArea": "council" },
       "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 439404,
+        "accessorBytes": 403788,
         "animationClips": ["lights-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 30,
-        "gpuBytes": 439404,
+        "gpuBytes": 403788,
         "textures": 0,
-        "triangles": 11380,
-        "gpuMiB": 0.419,
+        "triangles": 9908,
+        "gpuMiB": 0.3851,
         "budget": { "maxDrawCalls": 7, "maxGpuMiB": 8, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 22000 },
-        "bytes": 572764,
-        "extent": [16.4, 19.222, 16.4],
-        "sha256": "8518647114ee04a4d6514dd54e4f044bf8ee4b99e6ec775feba9471f0f664e8e"
+        "bytes": 528228,
+        "extent": [16.4, 19.222, 15.5973],
+        "sha256": "f97b76654d45a729002bfd8da180f10d7dddb32836f4972ab86786a384f3865b"
       }
     },
     {
@@ -729,7 +729,7 @@
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 6, "maxTextures": 3, "maxTriangles": 26000 },
         "bytes": 446108,
         "extent": [15.4, 17.25, 13.0475],
-        "sha256": "cae501a5a5ba808e01d436ae22016d56e27812ee2dc5d72e031e6aa6bb6c2e55"
+        "sha256": "6c1ade360a16735aea56207a9ea7ed7c654f56d30b757a03846472029e4d8396"
       }
     },
     {
@@ -778,9 +778,9 @@
         "triangles": 7748,
         "gpuMiB": 0.3821,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 28000 },
-        "bytes": 529352,
+        "bytes": 529356,
         "extent": [16.9, 18.15, 14.5475],
-        "sha256": "112b55e5bb542fadab8a03cfa0e223c3f14065d3c0f568083946d33fca3bda97"
+        "sha256": "c7fb089c6a770f65dfee13ad87dc2d52255764aadfad65bd8b517bf4834a9ade"
       }
     },
     {
@@ -830,7 +830,7 @@
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 9, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 24000 },
         "bytes": 460620,
         "extent": [13.9, 15.9, 12.0475],
-        "sha256": "a23d81e1ea19f874d703451baee3d2d9194ee780f99a6e63bf577de226cf61ec"
+        "sha256": "ac3e28c8e317d53538e890526fb50c420e6eef2b7ae276642729d978d207a073"
       }
     },
     {
@@ -880,7 +880,7 @@
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 26000 },
         "bytes": 509652,
         "extent": [14.9, 17.925, 13.5475],
-        "sha256": "4c64588fee2e81f75f56b00b546f80726d5c1f1277f199f945589a2835eb2f9c"
+        "sha256": "514ec0d6d9214760b87af67aa856b1bfa8a0f897187070ef3a33005adcf2ba7f"
       }
     },
     {
@@ -957,7 +957,7 @@
       "collision": { "kind": "capsule", "navigationArea": "walkable" },
       "materialSlots": ["bone-metal", "archive-emissive", "signal-emissive"],
       "statistics": {
-        "accessorBytes": 430032,
+        "accessorBytes": 386904,
         "animationClips": [
           "acknowledge",
           "acknowledging",
@@ -1010,14 +1010,14 @@
         "materials": 4,
         "meshes": 11,
         "nodes": 33,
-        "gpuBytes": 430032,
+        "gpuBytes": 386904,
         "textures": 0,
-        "triangles": 15098,
-        "gpuMiB": 0.4101,
+        "triangles": 13418,
+        "gpuMiB": 0.369,
         "budget": { "maxDrawCalls": 12, "maxGpuMiB": 14, "maxMaterials": 6, "maxTextures": 4, "maxTriangles": 36000 },
-        "bytes": 594452,
-        "extent": [86.4388, 13.0881, 71.4346],
-        "sha256": "b05d90f88ccf19611814b8d1ffa7415e4d71c341b9e02acedfc3502eaaf35b4e"
+        "bytes": 540292,
+        "extent": [86.4388, 13.0881, 71.2472],
+        "sha256": "8ad0cf6fd1866a5df1e09b196920cff779e543416724f2ca765d923562cd3937"
       }
     },
     {
@@ -1230,20 +1230,20 @@
     "builder": "babylonjs-null-engine",
     "engineVersion": "9.21.2",
     "navigation": {
-      "accessorBytes": 21024,
+      "accessorBytes": 70272,
       "animationClips": [],
       "drawCalls": 1,
       "materials": 1,
       "meshes": 1,
-      "nodes": 15,
-      "gpuBytes": 21024,
+      "nodes": 14,
+      "gpuBytes": 70272,
       "textures": 0,
-      "triangles": 528,
-      "gpuMiB": 0.0201,
+      "triangles": 1440,
+      "gpuMiB": 0.067,
       "budget": { "maxDrawCalls": 4, "maxGpuMiB": 4, "maxMaterials": 1, "maxTextures": 0, "maxTriangles": 12000 },
-      "bytes": 29632,
-      "extent": [95, 1.01, 81],
-      "sha256": "daf3920abf0934ef3b7e7e493364c2004e58cf56ce71d1ede37a4741577edfaf"
+      "bytes": 93348,
+      "extent": [95, 1.2, 81],
+      "sha256": "53c55890d38e6e0e5ce0cbc447f4c7533bad61fee13ecbddbbcded03dde3175b"
     },
     "sourceSha256": "248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590"
   }

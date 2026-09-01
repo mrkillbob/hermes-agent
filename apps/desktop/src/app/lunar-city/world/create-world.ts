@@ -42,6 +42,7 @@ export async function loadBabylonModules(): Promise<LunarCityWorldModules> {
   return {
     ArcRotateCamera: camera.ArcRotateCamera,
     Color3: color.Color3,
+    Color4: color.Color4,
     DirectionalLight: directionalLight.DirectionalLight,
     HemisphericLight: hemisphericLight.HemisphericLight,
     GlowLayer: glowLayer.GlowLayer,
