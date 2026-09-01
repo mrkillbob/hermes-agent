@@ -1,6 +1,9 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { scalarClip } from './modeling/animation.mjs'
+import { importAuthoredModel } from './modeling/authored.mjs'
 import { NullEngine, Scene } from './modeling/babylon.mjs'
 import {
   buildArchive,
@@ -25,6 +28,21 @@ import { mergeLodMeshes } from './modeling/primitives.mjs'
 import { buildBus, buildTriage } from './modeling/props.mjs'
 import { buildNavigation, buildTerrain } from './modeling/terrain.mjs'
 
+// An authored (hand-modeled) GLB only replaces static geometry -- required
+// animation/state channels are still code-owned data, not something the
+// glTF bridge can recover (Babylon AnimationGroups never round-trip through
+// a Blender export). Each entry re-attaches exactly what buildLibrary()/etc.
+// would have created, targeting the same node by name.
+const AUTHORED_ANIMATION_HOOKS = Object.freeze({
+  library: (scene, root) => {
+    const orb = scene.getTransformNodeByName('library:violet-orb')
+    if (!orb) throw new Error('library authored model is missing the library:violet-orb node')
+    scalarClip(scene, 'lights-idle', orb, 'rotation.y', Math.PI * 2, { duration: 100 })
+    return root
+  }
+})
+
+const AUTHORED_MODELS_ROOT = fileURLToPath(new URL('./modeling/authored/', import.meta.url))
 const DEFAULT_OUTPUT_ROOT = fileURLToPath(new URL('../../public/lunar-city/v2/', import.meta.url))
 const MANIFEST_URL = new URL('../../public/lunar-city/v2/world-manifest.v2.json', import.meta.url)
 const SOURCE_REFERENCE_URL = new URL('../../public/lunar-city/v2/source-reference.v2.json', import.meta.url)
@@ -68,6 +86,16 @@ async function readContracts() {
   return { manifest, sourceReference }
 }
 
+async function authoredModelPath(id) {
+  const path = join(AUTHORED_MODELS_ROOT, `${id}.glb`)
+  try {
+    await stat(path)
+    return path
+  } catch {
+    return null
+  }
+}
+
 async function buildNavigationAsset(outputRoot) {
   const { engine, scene } = createScene()
   try {
@@ -100,7 +128,9 @@ export async function buildAssetPack(outputRoot = DEFAULT_OUTPUT_ROOT) {
     }
     const { engine, scene } = createScene()
     try {
-      const root = build(scene)
+      const authoredPath = await authoredModelPath(model.id)
+      let root = authoredPath ? await importAuthoredModel(scene, model.id, authoredPath) : build(scene)
+      if (authoredPath && AUTHORED_ANIMATION_HOOKS[model.id]) root = AUTHORED_ANIMATION_HOOKS[model.id](scene, root)
       if (root.name !== `${model.id}:root`) throw new Error(`${model.id} builder returned ${root.name}`)
       statistics[model.id] = await exportModel({ budget: model, id: model.id, outputRoot, scene })
       sha256ByModel[model.id] = statistics[model.id].sha256
