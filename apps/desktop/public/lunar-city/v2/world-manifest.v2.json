@@ -541,20 +541,20 @@
       "collision": { "kind": "box", "navigationArea": "review" },
       "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 109320,
+        "accessorBytes": 111264,
         "animationClips": ["lights-idle", "portal-idle"],
         "drawCalls": 7,
         "materials": 4,
         "meshes": 7,
         "nodes": 22,
-        "gpuBytes": 109320,
+        "gpuBytes": 111264,
         "textures": 0,
-        "triangles": 4488,
-        "gpuMiB": 0.1043,
+        "triangles": 4524,
+        "gpuMiB": 0.1061,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 26000 },
-        "bytes": 145748,
-        "extent": [17.2596, 10.9, 19.8],
-        "sha256": "f75a222df9bf3f06b796892b001f0f3f9bbc8ac9bbaf288aaf02af85714b00c5"
+        "bytes": 148264,
+        "extent": [17.2596, 10.9221, 19.8],
+        "sha256": "c52dfa1e7deeff13d0028d2cb511ef3bffdb049044a5e608462a712eece8a8e5"
       }
     },
     {

@@ -400,6 +400,24 @@ function addReviewFrame(scene, { depth, height, width }) {
     position: [0, 0.45, -0.4],
     tessellation: 8
   })
+  box(scene, 'review-office:chamber-back-wall', {
+    depth: 0.58,
+    height: height * 0.42,
+    material: 'charcoal-structure',
+    parent: shell,
+    position: [0, height * 0.21, -depth * 0.46],
+    width: width * 0.52
+  })
+  for (const side of [-1, 1])
+    box(scene, `review-office:chamber-side-wall:${side}`, {
+      depth: depth * 0.52,
+      height: height * 0.38,
+      material: 'charcoal-structure',
+      parent: shell,
+      position: [side * (width * 0.45), height * 0.19, -depth * 0.18],
+      rotation: [0, 0, side * 0.12],
+      width: 0.58
+    })
   for (const side of [-1, 1]) {
     cylinder(scene, `review-office:judgement-pylon:${side}`, {
       diameter: 2.35,
