@@ -1,4 +1,4 @@
-import { beamBetween, box, cone, cylinder, group, prismRailing } from './primitives.mjs'
+import { beamBetween, box, cone, cylinder, group, prismRailing, torus } from './primitives.mjs'
 import { addSign } from './props.mjs'
 
 const DISTRICTS = Object.freeze([
@@ -96,6 +96,24 @@ export function buildTerrain(scene) {
       tessellation: 7
     })
   )
+  const craters = group(scene, 'terrain:craters', near)
+  ;[
+    [-34, 0.4, 20, 5.2],
+    [18, 0.45, 39, 4.4],
+    [38, 0.72, -8, 3.6],
+    [-16, 0.65, -31, 3.1],
+    [9, 0.52, 8, 2.5]
+  ].forEach(([x, y, z, diameter], index) => {
+    torus(scene, `terrain:crater:${index}`, {
+      diameter,
+      material: 'charcoal-structure',
+      parent: craters,
+      position: [x, y + 1.18, z],
+      rotation: [Math.PI / 2, 0, index * 0.24],
+      tessellation: 10,
+      thickness: 0.22
+    })
+  })
   DISTRICTS.forEach((point, index) => districtPad(scene, near, index, point))
 
   const walkways = group(scene, 'terrain:walkways', near)

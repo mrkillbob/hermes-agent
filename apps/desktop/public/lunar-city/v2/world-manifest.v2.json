@@ -356,20 +356,20 @@
       "collision": { "kind": "mesh", "navigationArea": "walkable" },
       "materialSlots": ["lunar-rust", "charcoal-structure"],
       "statistics": {
-        "accessorBytes": 82440,
+        "accessorBytes": 104220,
         "animationClips": [],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 29,
-        "gpuBytes": 82440,
+        "nodes": 30,
+        "gpuBytes": 104220,
         "textures": 0,
-        "triangles": 2148,
-        "gpuMiB": 0.0786,
+        "triangles": 3358,
+        "gpuMiB": 0.0994,
         "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 4, "maxTextures": 4, "maxTriangles": 90000 },
-        "bytes": 113428,
+        "bytes": 140124,
         "extent": [101.564, 12.425, 84.6786],
-        "sha256": "2e7718aed74723f7f89fcfa4965247acc84359295152a6a39313876587c0cf04"
+        "sha256": "d0dfa182e629e1086f453059a305a79ba0f1890ea911b35c7b61c1800e7df7ca"
       }
     },
     {
