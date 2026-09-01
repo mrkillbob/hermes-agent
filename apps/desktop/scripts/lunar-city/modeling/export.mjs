@@ -7,6 +7,7 @@ import { NodeIO } from '@gltf-transform/core'
 import { format } from 'prettier'
 
 import { bakeAmbientOcclusion } from './ambient-occlusion.mjs'
+import { normalizePaletteId } from './authored.mjs'
 import { GLTF2Export } from './babylon.mjs'
 import { approvedPaletteBytes } from './palette.mjs'
 import { mergeLodMeshes } from './primitives.mjs'
@@ -167,6 +168,112 @@ export async function exportModel({ budget, id, outputRoot, scene }) {
     bytes: bytes.length,
     extent: bounds.extent,
     sha256: sha256(bytes)
+  }
+  assertBudget(id, stats, budget)
+  return stats
+}
+
+/**
+ * Multiplies a baked (not hand-painted, not third-party) grayscale AO map
+ * into specific materials' baseColorTexture on an already-written model
+ * GLB. glTF's baseColorTexture is spec-required to multiply against
+ * baseColorFactor per channel, so with an unchanged approved-palette
+ * baseColorFactor this reads as (approved color x AO) at pixel resolution
+ * -- the same math the existing per-vertex AO baker already does, just
+ * finer-grained, and it darkens under every light in the rig, not only
+ * indirect/IBL contribution (glTF's occlusionTexture channel is spec'd to
+ * affect indirect lighting only, so it was tried first here and measured
+ * as visually inert under this scene's all-direct lighting rig -- kept as
+ * a cautionary note, not a design to repeat).
+ *
+ * Runs as a post-process on the Babylon-exported file rather than through
+ * Babylon/NullEngine itself, for two independent reasons discovered while
+ * building this: (1) Babylon's Node-side texture loading expects browser
+ * image-decoding APIs that do not exist here, while @gltf-transform/core
+ * writes raw image bytes into a glTF texture directly, no decode required;
+ * (2) Babylon's own glTF exporter silently drops a mesh's UV0 buffer for
+ * any material that has no texture attached *at export time* -- measured
+ * directly (a minimal repro mesh with setVerticesData(UVKind, ...) lost
+ * its TEXCOORD_0 through GLTF2Export.GLBAsync every time), so setting the
+ * texture only after Babylon has already written the file means the UV
+ * data required to sample it correctly is already gone. This function
+ * therefore also copies TEXCOORD_0 from the authored source file's
+ * matching primitive (by approved-palette material name, tolerating
+ * Blender's ".NNN" dedup suffix) directly onto the output primitive,
+ * verifying vertex counts line up first -- authored.mjs's importer keeps
+ * source vertex order/count 1:1 into the Babylon mesh, and mergeLodMeshes
+ * never touches a material with only one contributing mesh, so this is a
+ * true 1:1 correspondence, not a heuristic match.
+ */
+export async function injectBakedAOTexture({
+  authoredPath,
+  budget,
+  extent,
+  id,
+  imageBytes,
+  materialNames,
+  outputRoot
+}) {
+  const uri = join(outputRoot, 'models', `${id}.glb`)
+  const [document, authoredDocument] = await Promise.all([new NodeIO().read(uri), new NodeIO().read(authoredPath)])
+  const root = document.getRoot()
+  const authoredPrimitives = authoredDocument
+    .getRoot()
+    .listMeshes()
+    .flatMap(mesh => mesh.listPrimitives())
+
+  const texture = document.createTexture(`${id}:ao`).setImage(imageBytes).setMimeType('image/png')
+  for (const materialName of materialNames) {
+    const material = root.listMaterials().find(candidate => candidate.getName() === materialName)
+    if (!material) throw new Error(`${id}: no material named "${materialName}" to attach a baked AO texture to`)
+    // Several authored primitives can share one approved-palette material
+    // name (e.g. far-LOD geometry alongside the UV-unwrapped near-LOD
+    // atlas), and the same is true on the output side after LOD-tiered
+    // merging -- only the one actually carrying TEXCOORD_0 is the bake
+    // target, so pick the source primitive that has UV0 for this material,
+    // then match it to the output primitive by exact vertex count -- the
+    // one property guaranteed 1:1 between source and output for a
+    // single-mesh-per-material group untouched by mergeLodMeshes.
+    const sourcePrimitive = authoredPrimitives.find(
+      primitive =>
+        normalizePaletteId(primitive.getMaterial()?.getName()) === materialName && primitive.getAttribute('TEXCOORD_0')
+    )
+    if (!sourcePrimitive)
+      throw new Error(`${id}: authored source has no UV-mapped primitive for material "${materialName}"`)
+    const sourceUV = sourcePrimitive.getAttribute('TEXCOORD_0')
+    const sourceCount = sourceUV.getCount()
+    const candidates = root
+      .listMeshes()
+      .flatMap(mesh => mesh.listPrimitives())
+      .filter(primitive => primitive.getMaterial() === material)
+    const outputPrimitive = candidates.find(primitive => primitive.getAttribute('POSITION').getCount() === sourceCount)
+    if (!outputPrimitive)
+      throw new Error(
+        `${id}: no output "${materialName}" primitive matches authored UV0 vertex count (${sourceCount}); candidates had [${candidates.map(c => c.getAttribute('POSITION').getCount()).join(', ')}]`
+      )
+    const uvAccessor = document
+      .createAccessor(`${materialName}:uv`)
+      .setType('VEC2')
+      .setArray(Float32Array.from(sourceUV.getArray()))
+    outputPrimitive.setAttribute('TEXCOORD_0', uvAccessor)
+    material.setBaseColorTexture(texture)
+    material.getBaseColorTextureInfo().setTexCoord(0)
+  }
+  const outBytes = Buffer.from(await new NodeIO().writeBinary(document))
+  await writeFile(uri, outBytes)
+  const inspection = await inspectWrittenGlb(uri)
+  const stats = {
+    ...inspection,
+    budget: {
+      maxDrawCalls: budget.maxDrawCalls,
+      maxGpuMiB: budget.maxGpuMiB,
+      maxMaterials: budget.maxMaterials,
+      maxTextures: budget.maxTextures,
+      maxTriangles: budget.maxTriangles
+    },
+    bytes: outBytes.length,
+    extent,
+    sha256: sha256(outBytes)
   }
   assertBudget(id, stats, budget)
   return stats

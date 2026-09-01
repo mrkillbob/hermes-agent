@@ -14,7 +14,7 @@ import { APPROVED_PALETTE, paletteMaterial } from './palette.mjs'
 // into the shared staging .blend (e.g. "bone-metal" -> "bone-metal.008")
 // whenever another building's import already claimed the bare name. Strip
 // that suffix before matching against the approved palette.
-function normalizePaletteId(name) {
+export function normalizePaletteId(name) {
   return name?.replace(/\.\d{3}$/, '') ?? name
 }
 
@@ -60,10 +60,12 @@ function buildMeshFromPrimitive(scene, name, primitive, parent, id, keepSeparate
   const indices = indicesAccessor
     ? Array.from(indicesAccessor.getArray())
     : Array.from({ length: positions.length / 3 }, (_, index) => index)
+  const uv = primitive.getAttribute('TEXCOORD_0')?.getArray()
 
   const mesh = new Mesh(name, scene)
   mesh.setVerticesData('position', Array.from(positions))
   mesh.setVerticesData('normal', Array.from(normals))
+  if (uv) mesh.setVerticesData('uv', Array.from(uv))
   mesh.setIndices(indices)
   mesh.material = materialForPrimitive(scene, primitive, id)
   mesh.parent = parent

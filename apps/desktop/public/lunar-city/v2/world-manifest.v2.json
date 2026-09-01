@@ -402,20 +402,20 @@
       "collision": { "kind": "box", "navigationArea": "library" },
       "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 704940,
+        "accessorBytes": 1028508,
         "animationClips": ["lights-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 31,
-        "gpuBytes": 704940,
-        "textures": 0,
+        "nodes": 32,
+        "gpuBytes": 1180212,
+        "textures": 1,
         "triangles": 20034,
-        "gpuMiB": 0.6723,
+        "gpuMiB": 1.1255,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 28000 },
-        "bytes": 778260,
+        "bytes": 1188388,
         "extent": [16.7884, 18.182, 14.5275],
-        "sha256": "efcea4caa3add7d4e5df0c651df4dc228d741edbee36da6629394dd30569d271"
+        "sha256": "1c891df3a5e0da8e16a86eb38ee38e7b69d0067e6762b219c05155771a418d09"
       }
     },
     {
