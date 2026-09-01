@@ -806,6 +806,36 @@ test('builds roads as low segmented ground routes rather than elevated straight 
   }
 })
 
+test('makes overview transit rails wide enough to read as deliberate cyan routes', () => {
+  const engine = new NullEngine({ renderingPipeline: false })
+  const scene = new Scene(engine)
+  try {
+    const root = buildTerrain(scene)
+    const signal = root.getChildMeshes().find(mesh => mesh.name === 'terrain:walkways:signals')
+    assert.ok(signal, 'the planned road network needs one merged signal rail mesh')
+
+    const positions = signal.getVerticesData('position')
+    const points = []
+    for (let index = 0; index < 24; index += 3) {
+      const point = [positions[index], positions[index + 1], positions[index + 2]]
+      if (!points.some(existing => point.every((value, axis) => Math.abs(value - existing[axis]) < 1e-8))) {
+        points.push(point)
+      }
+    }
+    const pairDistances = []
+    for (let left = 0; left < points.length; left += 1) {
+      for (let right = left + 1; right < points.length; right += 1) {
+        pairDistances.push(Math.hypot(...points[left].map((value, axis) => value - points[right][axis])))
+      }
+    }
+    const shortestNonHeightEdge = pairDistances.filter(distance => distance > 0.15).toSorted((a, b) => a - b)[0]
+    assert.ok(shortestNonHeightEdge >= 0.34, 'signal rails must have enough width to remain visible at overview scale')
+  } finally {
+    scene.dispose()
+    engine.dispose()
+  }
+})
+
 test('ships only generated palette texture data and an auxiliary navigation mesh', async () => {
   assert.deepEqual(
     firstReceipt.textures.map(texture => texture.uri),

@@ -324,7 +324,7 @@ function walkway(scene, parent, name, from, to, roadMeshes, width = 4.2) {
       `${name}:segment:${index}:signal`,
       [start[0] + sideX, start[1] + ROAD_HEIGHT * 0.7, start[2] + sideZ],
       [end[0] + sideX, end[1] + ROAD_HEIGHT * 0.7, end[2] + sideZ],
-      { height: 0.1, material: 'signal-emissive', parent: route, width: 0.16 }
+      { height: 0.14, material: 'signal-emissive', parent: route, width: 0.44 }
     )
     roadMeshes.signal.push(signal)
   }

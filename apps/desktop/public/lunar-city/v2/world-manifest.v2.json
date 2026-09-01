@@ -369,7 +369,7 @@
         "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 5, "maxTextures": 4, "maxTriangles": 90000 },
         "bytes": 3460920,
         "extent": [360, 12.425, 360],
-        "sha256": "f21efc94cef475455100bfccac90477a8066e061c55b3a940096e264cc99bf4e"
+        "sha256": "3b4c0e114fefdc29839897394ca8af3103228234be01c09998a2a280cd7cc13c"
       }
     },
     {
