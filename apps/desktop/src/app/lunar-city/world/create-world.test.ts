@@ -660,8 +660,8 @@ describe('createLunarCityWorld', () => {
     expect(runtime.loadedUrls).toHaveLength(manifest.models.length)
     expect(runtime.loadedUrls.every(url => url.startsWith('https://desktop.test/lunar-city/v2/models/'))).toBe(true)
     expect(runtime.loadedUrls.join('\n')).not.toMatch(/moon-settlement-approved\.jpg/i)
-    expect(runtime.placements.get('library')?.position.set).toHaveBeenCalledWith(-28, 4, -18)
-    expect(runtime.placements.get('library')?.rotation.set).toHaveBeenCalledWith(0, 0.28, 0)
+    expect(runtime.placements.get('library')?.position.set).toHaveBeenCalledWith(-20, 4, -24)
+    expect(runtime.placements.get('library')?.rotation.set).toHaveBeenCalledWith(0, 0.6202, 0)
     expect(runtime.placements.get('library')?.scaling.set).toHaveBeenCalledWith(1, 1, 1)
     expect(runtime.placements.get('library')?.setPivotPoint).toHaveBeenCalledWith(
       expect.objectContaining({ x: 0, y: 0, z: 0 })

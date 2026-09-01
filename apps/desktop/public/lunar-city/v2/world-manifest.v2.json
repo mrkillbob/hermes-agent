@@ -356,20 +356,20 @@
       "collision": { "kind": "mesh", "navigationArea": "walkable" },
       "materialSlots": ["lunar-rust", "charcoal-structure"],
       "statistics": {
-        "accessorBytes": 3548148,
+        "accessorBytes": 3341352,
         "animationClips": [],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 31,
-        "gpuBytes": 3548148,
+        "nodes": 28,
+        "gpuBytes": 3341352,
         "textures": 0,
-        "triangles": 31426,
-        "gpuMiB": 3.3838,
+        "triangles": 29612,
+        "gpuMiB": 3.1866,
         "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 4, "maxTextures": 4, "maxTriangles": 90000 },
-        "bytes": 3960664,
-        "extent": [101.564, 12.425, 84.6786],
-        "sha256": "19c791b73b04caaff19ff6fd84319c302676eb69520841e508950f6c447dc3ba"
+        "bytes": 3730780,
+        "extent": [102.8977, 12.425, 92.9281],
+        "sha256": "e77000059d9e0765184861796fc6d8e96801b1b5377ff3f9ccd7ff759f9b8310"
       }
     },
     {
@@ -393,7 +393,7 @@
         { "distance": 0, "node": "library:lod:near" },
         { "distance": 112, "node": "library:lod:far" }
       ],
-      "transform": { "position": [-28, 4, -18], "rotation": [0, 0.28, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-20, 4, -24], "rotation": [0, 0.6202, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 16, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 5, 0], "camera": [0, 8, 14], "dialogue": [-2, 1, 2] },
@@ -440,7 +440,7 @@
         { "distance": 0, "node": "research-lab:lod:near" },
         { "distance": 112, "node": "research-lab:lod:far" }
       ],
-      "transform": { "position": [25, 5, -22], "rotation": [0, -0.2, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [18, 5, -34], "rotation": [0, -0.4424, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-14, 0, -12], "max": [14, 17, 12] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 5, 0], "camera": [0, 9, 15], "dialogue": [2, 1, 0] },
@@ -486,7 +486,7 @@
         { "distance": 0, "node": "depot:lod:near" },
         { "distance": 112, "node": "depot:lod:far" }
       ],
-      "transform": { "position": [-31, 2, 12], "rotation": [0, 0.18, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-32, 2, 6], "rotation": [0, 1.6332, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 14, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [-1, 1, 2] },
@@ -532,7 +532,7 @@
         { "distance": 0, "node": "review-office:lod:near" },
         { "distance": 112, "node": "review-office:lod:far" }
       ],
-      "transform": { "position": [33, 3, 10], "rotation": [0, -0.26, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-22, 3, -8], "rotation": [0, 1.0714, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-13, 0, -10], "max": [13, 15, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 8, 14], "dialogue": [0, 1, 1] },
@@ -571,7 +571,7 @@
         { "distance": 0, "node": "triage:lod:near" },
         { "distance": 112, "node": "triage:lod:far" }
       ],
-      "transform": { "position": [4, 1, 25], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [8, 1, 24], "rotation": [0, -2.7611, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-7, 0, -6], "max": [7, 9, 6] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 3, 0], "camera": [0, 6, 10] },
@@ -610,7 +610,7 @@
         { "distance": 0, "node": "garden:lod:near" },
         { "distance": 112, "node": "garden:lod:far" }
       ],
-      "transform": { "position": [-8, 0, 34], "rotation": [0, 0.14, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-8, 0, 34], "rotation": [0, 2.881, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-14, 0, -12], "max": [14, 5, 12] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 1, 0], "camera": [0, 6, 15] },
@@ -649,7 +649,7 @@
         { "distance": 0, "node": "council:lod:near" },
         { "distance": 112, "node": "council:lod:far" }
       ],
-      "transform": { "position": [27, 1, 31], "rotation": [0, -0.18, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [18, 1, -10], "rotation": [0, -0.9098, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-11, 0, -9], "max": [11, 14, 9] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [0, 1, 1] },
@@ -700,7 +700,7 @@
         { "distance": 0, "node": "arts-studio:lod:near" },
         { "distance": 112, "node": "arts-studio:lod:far" }
       ],
-      "transform": { "position": [-29, 2, -1], "rotation": [0, 0.2, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [34, 2, -18], "rotation": [0, -0.9965, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 15, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 14], "dialogue": [-2, 1, 1] },
@@ -758,7 +758,7 @@
         { "distance": 0, "node": "engineering-workshop:lod:near" },
         { "distance": 112, "node": "engineering-workshop:lod:far" }
       ],
-      "transform": { "position": [-29, 2, 30], "rotation": [0, -0.16, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-40, 2, 26], "rotation": [0, 2.0736, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-13, 0, -11], "max": [13, 16, 11] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 8, 15], "dialogue": [2, 1, 1] },
@@ -808,7 +808,7 @@
         { "distance": 0, "node": "release-gatehouse:lod:near" },
         { "distance": 112, "node": "release-gatehouse:lod:far" }
       ],
-      "transform": { "position": [0, 2, 12], "rotation": [0, 0.08, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-6, 2, 10], "rotation": [0, 2.3562, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-11, 0, -9], "max": [11, 15, 9] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [0, 1, 1] },
@@ -858,7 +858,7 @@
         { "distance": 0, "node": "archive:lod:near" },
         { "distance": 112, "node": "archive:lod:far" }
       ],
-      "transform": { "position": [38, 2, 18], "rotation": [0, -0.22, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [42, 2, 4], "rotation": [0, -1.5708, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 15, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 14], "dialogue": [-2, 1, 1] },
@@ -897,7 +897,7 @@
         { "distance": 0, "node": "bus:lod:near" },
         { "distance": 112, "node": "bus:lod:far" }
       ],
-      "transform": { "position": [0, 2, -1], "rotation": [0, 0.2, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [0, 2, -2], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-5, 0, -3], "max": [5, 4, 3] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 2, 0], "camera": [0, 5, 9] },
@@ -1181,17 +1181,17 @@
     ]
   },
   "destinations": {
-    "bus": [0, 0, -1],
+    "bus": [0, 0, -2],
     "project": [18, 0, 38],
-    "depot": [-31, 0, 12],
-    "review": [33, 0, 10],
-    "triage": [4, 0, 25],
+    "depot": [-32, 0, 6],
+    "review": [-22, 0, -8],
+    "triage": [8, 0, 24],
     "garden": [-8, 0, 34],
-    "council": [27, 0, 31],
-    "arts-studio": [-29, 0, -1],
-    "engineering-workshop": [-29, 0, 30],
-    "release-gatehouse": [0, 0, 12],
-    "archive": [38, 0, 18],
+    "council": [18, 0, -10],
+    "arts-studio": [34, 0, -18],
+    "engineering-workshop": [-40, 0, 26],
+    "release-gatehouse": [-6, 0, 10],
+    "archive": [42, 0, 4],
     "unavailable": [0, 0, 0]
   },
   "projectSlots": [
@@ -1230,20 +1230,20 @@
     "builder": "babylonjs-null-engine",
     "engineVersion": "9.21.2",
     "navigation": {
-      "accessorBytes": 22968,
+      "accessorBytes": 21024,
       "animationClips": [],
       "drawCalls": 1,
       "materials": 1,
       "meshes": 1,
-      "nodes": 18,
-      "gpuBytes": 22968,
+      "nodes": 15,
+      "gpuBytes": 21024,
       "textures": 0,
-      "triangles": 564,
-      "gpuMiB": 0.0219,
+      "triangles": 528,
+      "gpuMiB": 0.0201,
       "budget": { "maxDrawCalls": 4, "maxGpuMiB": 4, "maxMaterials": 1, "maxTextures": 0, "maxTriangles": 12000 },
-      "bytes": 32304,
-      "extent": [82, 1.01, 69],
-      "sha256": "5aa3e72aee3ef6242ddc5e192aa4dd11e29fb3cbe8c0ba575289cc13419fa209"
+      "bytes": 29632,
+      "extent": [95, 1.01, 81],
+      "sha256": "daf3920abf0934ef3b7e7e493364c2004e58cf56ce71d1ede37a4741577edfaf"
     },
     "sourceSha256": "248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590"
   }

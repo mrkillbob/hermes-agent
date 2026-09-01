@@ -1,23 +1,105 @@
 import { beamBetween, box, cone, cylinder, group, prismRailing, torus } from './primitives.mjs'
 import { addSign } from './props.mjs'
 
-const DISTRICTS = Object.freeze([
-  [-28, 0.8, -18],
-  [25, 1.1, -22],
-  [-31, 0.45, 12],
-  [33, 0.7, 10],
-  [4, 0.4, 25],
-  [-8, 0.25, 34],
-  [27, 0.35, 31],
-  [0, 0.55, -1],
-  [-29, 0.7, -1],
-  [-29, 0.6, 30],
-  [0, 0.5, 12],
-  [38, 0.5, 18]
+// A real city plan, not a hand-picked coordinate list: every district sits
+// in a zone with a stated identity, walkways are the minimum-spanning-tree
+// over actual distances (plus a couple of deliberate redundant links) so
+// the network reads as roads rather than an arbitrary edge list, and every
+// building faces the plaza it opens onto. This module is the single
+// source of truth for layout -- terrain.mjs consumes it to place pads and
+// walkways, and `node scripts/lunar-city/sync-district-layout.mjs`
+// regenerates world-manifest.v2.json's per-model transforms and
+// destinations from it, so the three previously-independent hand-kept
+// copies of these coordinates can't drift out of sync again.
+//
+// Zones, by identity:
+// - plaza: the front door. bus stays where it always was.
+// - pipeline: the literal build -> review -> ship chain (engineering
+//   workshop -> depot -> review office -> release gatehouse), arranged as
+//   a path that gets closer to the plaza as work moves toward release.
+// - civic: leadership, knowledge, culture, and record-keeping. Council
+//   sits nearest the plaza (leadership overlooks the front door); library,
+//   research lab, arts studio, and archive spread out from there.
+// - care: triage and garden, a small quiet cluster apart from the
+//   industrial and civic halves.
+export const DISTRICTS = Object.freeze({
+  archive: Object.freeze({ position: [42, 0.5, 4], zone: 'civic' }),
+  'arts-studio': Object.freeze({ position: [34, 0.7, -18], zone: 'civic' }),
+  bus: Object.freeze({ position: [0, 0.55, -2], zone: 'plaza' }),
+  council: Object.freeze({ position: [18, 0.35, -10], zone: 'civic' }),
+  depot: Object.freeze({ position: [-32, 0.45, 6], zone: 'pipeline' }),
+  'engineering-workshop': Object.freeze({ position: [-40, 0.6, 26], zone: 'pipeline' }),
+  garden: Object.freeze({ position: [-8, 0.25, 34], zone: 'care' }),
+  library: Object.freeze({ position: [-20, 0.8, -24], zone: 'civic' }),
+  'release-gatehouse': Object.freeze({ position: [-6, 0.5, 10], zone: 'pipeline' }),
+  'research-lab': Object.freeze({ position: [18, 1.1, -34], zone: 'civic' }),
+  'review-office': Object.freeze({ position: [-22, 0.7, -8], zone: 'pipeline' }),
+  triage: Object.freeze({ position: [8, 0.4, 24], zone: 'care' })
+})
+
+// Stable render order -- only affects districtPad's cosmetic size variation
+// (index % 3 / index % 2) and far-LOD pad iteration, not identity.
+export const DISTRICT_IDS = Object.freeze(Object.keys(DISTRICTS).sort())
+
+function districtPoint(id) {
+  return DISTRICTS[id].position
+}
+
+function distance(a, b) {
+  return Math.hypot(a[0] - b[0], a[2] - b[2])
+}
+
+// Prim's algorithm over straight-line district distance -- the walkway
+// network is derived from where districts actually are, not hand-picked,
+// so moving a district in DISTRICTS automatically reroutes its roads.
+function minimumSpanningTree(ids) {
+  const remaining = new Set(ids.slice(1))
+  const connected = new Set([ids[0]])
+  const edges = []
+  while (remaining.size > 0) {
+    let best = null
+    for (const from of connected)
+      for (const to of remaining) {
+        const cost = distance(districtPoint(from), districtPoint(to))
+        if (!best || cost < best.cost) best = { cost, from, to }
+      }
+    edges.push([best.from, best.to])
+    connected.add(best.to)
+    remaining.delete(best.to)
+  }
+  return edges
+}
+
+// A pure MST reads a little too much like a tree and not enough like a
+// city -- these redundant links are deliberate, thematic shortcuts (review
+// reports straight to council; the plaza has two ways in) rather than
+// anything the distance metric alone would produce.
+const REDUNDANT_LINKS = Object.freeze([
+  ['review-office', 'council'],
+  ['bus', 'release-gatehouse']
 ])
 
-function districtPad(scene, parent, index, [x, y, z]) {
-  cylinder(scene, `terrain:district-pad:${index}`, {
+function walkwayEdges() {
+  const mst = minimumSpanningTree(DISTRICT_IDS)
+  const extra = REDUNDANT_LINKS.filter(
+    ([from, to]) => !mst.some(([a, b]) => (a === from && b === to) || (a === to && b === from))
+  )
+  return [...mst, ...extra]
+}
+
+// Every building faces the plaza it opens onto -- replaces the old
+// per-model hand-jittered rotation with a real yaw-to-target computed from
+// actual position, matching the same [0, 4] plaza anchor the camera
+// overview target and bus/release-gatehouse already use.
+const PLAZA_TARGET = Object.freeze([0, 4])
+
+export function facingRotationY(id) {
+  const [x, , z] = districtPoint(id)
+  return Math.atan2(PLAZA_TARGET[0] - x, PLAZA_TARGET[1] - z)
+}
+
+function districtPad(scene, parent, id, index, [x, y, z]) {
+  cylinder(scene, `terrain:district-pad:${id}`, {
     diameter: 18 - (index % 3),
     height: 2.2 + (index % 2) * 0.5,
     material: 'lunar-rust',
@@ -25,7 +107,7 @@ function districtPad(scene, parent, index, [x, y, z]) {
     position: [x, y, z],
     tessellation: 10
   })
-  cylinder(scene, `terrain:district-deck:${index}`, {
+  cylinder(scene, `terrain:district-deck:${id}`, {
     diameter: 15.2 - (index % 3),
     height: 0.7,
     material: 'charcoal-structure',
@@ -158,24 +240,12 @@ export function buildTerrain(scene) {
       tessellation: 8
     })
   }
-  DISTRICTS.forEach((point, index) => districtPad(scene, near, index, point))
+  DISTRICT_IDS.forEach((id, index) => districtPad(scene, near, id, index, districtPoint(id)))
 
   const walkways = group(scene, 'terrain:walkways', near)
-  walkway(scene, walkways, 'terrain:walkway:library-research', DISTRICTS[0], DISTRICTS[1], 4.8)
-  walkway(scene, walkways, 'terrain:walkway:library-bus', DISTRICTS[0], DISTRICTS[7])
-  walkway(scene, walkways, 'terrain:walkway:research-bus', DISTRICTS[1], DISTRICTS[7])
-  walkway(scene, walkways, 'terrain:walkway:depot-garden', DISTRICTS[2], DISTRICTS[5])
-  walkway(scene, walkways, 'terrain:walkway:review-triage', DISTRICTS[3], DISTRICTS[4])
-  walkway(scene, walkways, 'terrain:walkway:triage-garden', DISTRICTS[4], DISTRICTS[5])
-  walkway(scene, walkways, 'terrain:walkway:triage-council', DISTRICTS[4], DISTRICTS[6])
-  walkway(scene, walkways, 'terrain:walkway:bus-triage', DISTRICTS[7], DISTRICTS[4])
-  walkway(scene, walkways, 'terrain:walkway:arts-library', DISTRICTS[8], DISTRICTS[0])
-  walkway(scene, walkways, 'terrain:walkway:arts-depot', DISTRICTS[8], DISTRICTS[2])
-  walkway(scene, walkways, 'terrain:walkway:engineering-garden', DISTRICTS[9], DISTRICTS[5])
-  walkway(scene, walkways, 'terrain:walkway:engineering-release', DISTRICTS[9], DISTRICTS[10])
-  walkway(scene, walkways, 'terrain:walkway:release-triage', DISTRICTS[10], DISTRICTS[4])
-  walkway(scene, walkways, 'terrain:walkway:archive-council', DISTRICTS[11], DISTRICTS[6])
-  walkway(scene, walkways, 'terrain:walkway:archive-review', DISTRICTS[11], DISTRICTS[3])
+  walkwayEdges().forEach(([from, to]) =>
+    walkway(scene, walkways, `terrain:walkway:${from}-${to}`, districtPoint(from), districtPoint(to))
+  )
 
   const busStop = group(scene, 'terrain:bus-stop', near, { position: [0, 2.1, -1] })
   box(scene, 'terrain:bus-stop:platform', {
@@ -222,8 +292,9 @@ export function buildTerrain(scene) {
     scale: [1, 1, 0.82],
     tessellation: 12
   })
-  for (const [index, point] of DISTRICTS.entries())
-    cylinder(scene, `terrain:far:pad:${index}`, {
+  for (const id of DISTRICT_IDS) {
+    const point = districtPoint(id)
+    cylinder(scene, `terrain:far:pad:${id}`, {
       diameter: 14,
       height: 1.2,
       material: 'charcoal-structure',
@@ -231,14 +302,16 @@ export function buildTerrain(scene) {
       position: [point[0], point[1] + 0.4, point[2]],
       tessellation: 8
     })
+  }
   return root
 }
 
 export function buildNavigation(scene) {
   const root = group(scene, 'navigation:root')
   const walkable = group(scene, 'navigation:walkable', root)
-  DISTRICTS.forEach((point, index) =>
-    cylinder(scene, `navigation:area:${index}`, {
+  DISTRICT_IDS.forEach(id => {
+    const point = districtPoint(id)
+    cylinder(scene, `navigation:area:${id}`, {
       diameter: 13,
       height: 0.16,
       material: 'charcoal-structure',
@@ -246,32 +319,24 @@ export function buildNavigation(scene) {
       position: [point[0], point[1] + 1.7, point[2]],
       tessellation: 8
     })
-  )
-  const links = [
-    ['library-research', DISTRICTS[0], DISTRICTS[1]],
-    ['library-bus', DISTRICTS[0], DISTRICTS[7]],
-    ['research-bus', DISTRICTS[1], DISTRICTS[7]],
-    ['depot-garden', DISTRICTS[2], DISTRICTS[5]],
-    ['review-triage', DISTRICTS[3], DISTRICTS[4]],
-    ['triage-garden', DISTRICTS[4], DISTRICTS[5]],
-    ['triage-council', DISTRICTS[4], DISTRICTS[6]],
-    ['bus-triage', DISTRICTS[7], DISTRICTS[4]],
-    ['arts-library', DISTRICTS[8], DISTRICTS[0]],
-    ['arts-depot', DISTRICTS[8], DISTRICTS[2]],
-    ['engineering-garden', DISTRICTS[9], DISTRICTS[5]],
-    ['engineering-release', DISTRICTS[9], DISTRICTS[10]],
-    ['release-triage', DISTRICTS[10], DISTRICTS[4]],
-    ['archive-council', DISTRICTS[11], DISTRICTS[6]],
-    ['archive-review', DISTRICTS[11], DISTRICTS[3]]
-  ]
-  links.forEach(([id, from, to]) => {
+  })
+  walkwayEdges().forEach(([from, to]) => {
+    const id = `${from}-${to}`
+    const fromPoint = districtPoint(from)
+    const toPoint = districtPoint(to)
     const link = group(scene, `navigation:link:${id}`, walkable)
-    beamBetween(scene, `navigation:link:${id}:mesh`, [from[0], from[1] + 1.75, from[2]], [to[0], to[1] + 1.75, to[2]], {
-      height: 0.14,
-      material: 'charcoal-structure',
-      parent: link,
-      width: 3.5
-    })
+    beamBetween(
+      scene,
+      `navigation:link:${id}:mesh`,
+      [fromPoint[0], fromPoint[1] + 1.75, fromPoint[2]],
+      [toPoint[0], toPoint[1] + 1.75, toPoint[2]],
+      {
+        height: 0.14,
+        material: 'charcoal-structure',
+        parent: link,
+        width: 3.5
+      }
+    )
   })
   return root
 }

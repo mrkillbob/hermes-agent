@@ -60,7 +60,7 @@ const SEMANTIC_NODES = {
     'release-gatehouse:leader-anchor'
   ],
   'review-office': ['review-office:consoles', 'review-office:portal', 'review-office:verifier-dais'],
-  terrain: ['terrain:bus-stop', 'terrain:cliffs', 'terrain:walkway:library-research'],
+  terrain: ['terrain:bus-stop', 'terrain:cliffs', 'terrain:walkway:review-office-council'],
   triage: ['triage:cross', 'triage:door', 'triage:station'],
   workers: ['worker:attachment', 'worker:body', 'worker:head', 'worker:role-accessories']
 }
@@ -706,7 +706,7 @@ test('keeps every visible walkway aligned with a semantic navigation link', asyn
     .filter(name => name.startsWith('navigation:link:'))
     .map(name => name.slice('navigation:link:'.length))
     .toSorted()
-  assert.ok(visibleLinks.includes('library-research'))
+  assert.ok(visibleLinks.includes('review-office-council'))
   assert.deepEqual(navigationLinks, visibleLinks)
 })
 
