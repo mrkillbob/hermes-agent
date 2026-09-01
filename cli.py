@@ -17182,6 +17182,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         # Refresh provider credentials if needed (handles key rotation transparently)
         if not self._ensure_runtime_credentials():
+            # Kanban workers are supervised through this result rather than
+            # the human-facing return value.  Preserve the distinction
+            # between a preflight/provider failure and a process that exited
+            # cleanly without making a terminal Kanban call; otherwise the
+            # dispatcher sees rc=0 + no result and misclassifies a missing
+            # credential as a protocol violation, causing futile retries.
+            self._last_turn_result = {
+                "failed": True,
+                "failure_reason": "credentials",
+                "error": "runtime credentials unavailable",
+            }
             return None
 
         turn_route = self._resolve_turn_agent_config(message)
