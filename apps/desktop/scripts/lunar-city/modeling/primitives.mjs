@@ -138,6 +138,9 @@ export function sphere(scene, name, options = {}) {
     name,
     {
       diameter: options.diameter ?? 1,
+      diameterX: options.diameterX,
+      diameterY: options.diameterY,
+      diameterZ: options.diameterZ,
       segments: options.segments ?? 12
     },
     scene
@@ -183,16 +186,21 @@ function directChildOf(node, ancestor) {
 
 export function mergeLodMeshes(scene, lodRoot, prefix) {
   const candidates = scene.meshes.filter(mesh => directChildOf(mesh, lodRoot) && !mesh.metadata?.keepSeparate)
-  const byMaterial = new Map()
+  const bySurfaceContract = new Map()
   for (const mesh of candidates) {
     if (!mesh.material) continue
-    const key = mesh.material.uniqueId
-    if (!byMaterial.has(key)) byMaterial.set(key, [])
-    byMaterial.get(key).push(mesh)
+    // Babylon cannot merge skinned and unskinned vertex layouts.  Keep the
+    // shared-material optimization, but partition by deformation contract so
+    // character skins retain their JOINTS_0/WEIGHTS_0 attributes.
+    const skinKey = mesh.skeleton ? `skinned:${mesh.skeleton.uniqueId}` : 'static'
+    const mergeGroup = mesh.metadata?.mergeGroup ?? 'shared'
+    const key = `${mesh.material.uniqueId}:${skinKey}:${mergeGroup}`
+    if (!bySurfaceContract.has(key)) bySurfaceContract.set(key, [])
+    bySurfaceContract.get(key).push(mesh)
   }
 
   let index = 0
-  for (const meshes of byMaterial.values()) {
+  for (const meshes of bySurfaceContract.values()) {
     if (meshes.length === 1) {
       meshes[0].name = `${prefix}:surface:${index}`
       index += 1

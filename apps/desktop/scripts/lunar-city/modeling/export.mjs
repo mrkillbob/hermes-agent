@@ -92,9 +92,17 @@ export function optimizeModelScene(scene, id, budget, { skipVertexAOSubdivision 
   // shading resolution from triangle density without this subdivision.
   const shadeGeometry = id === 'terrain' && !skipVertexAOSubdivision
 
+  // Leaders are exported as authored skinned character nodes. Merging any
+  // of their LODs bakes child transforms into vertex space while the glTF
+  // inverse-bind matrices still expect the original node spaces, which
+  // displaces the characters in Blender. Keep this family topology-preserved
+  // until the Blender-authored optimization pass can rebuild weights safely.
+  if (id === 'leaders') return
+
   for (const suffix of ['near', 'mid', 'far']) {
     const lodRoot = scene.getTransformNodeByName(`${id}:lod:${suffix}`)
     if (!lodRoot) continue
+    if (id === 'leaders') continue
     mergeLodMeshes(scene, lodRoot, `${id}:${suffix}`)
     // Bake after merging so occlusion is computed once against the final
     // triangle soup for this LOD.

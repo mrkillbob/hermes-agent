@@ -653,7 +653,8 @@ function validateCharacterModelResources(model, characterAssets, stats, errors) 
   if (model.id !== 'workers' && model.id !== 'leaders') return
   if (model.id === 'workers' && stats.skins !== 1)
     errors.push(`workers must contain exactly one shared skin, found ${stats.skins}`)
-  if (model.id === 'leaders' && stats.skins !== 0) errors.push(`leaders must not contain skins, found ${stats.skins}`)
+  if (model.id === 'leaders' && stats.skins !== 1)
+    errors.push(`leaders must contain exactly one shared skin, found ${stats.skins}`)
 
   const costs = inspectTierCosts(stats.root, model)
   const near = costs[`${model.id}:lod:near`]

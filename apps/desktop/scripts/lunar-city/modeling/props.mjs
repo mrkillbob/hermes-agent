@@ -609,14 +609,58 @@ export function addRobotTool(scene, name, parent, kind, position) {
 
 export function addRobotLimb(scene, name, parent, position, rotation = [0, 0, 0]) {
   const limb = group(scene, name, parent, { position, rotation })
-  capsule(scene, `${name}:shell`, { height: 0.7, material: 'bone-metal', parent: limb, radius: 0.11, tessellation: 6 })
+  capsule(scene, `${name}:shell`, {
+    height: 0.5,
+    material: 'bone-metal',
+    parent: limb,
+    radius: 0.13,
+    tessellation: 10
+  })
   sphere(scene, `${name}:joint`, {
     diameter: 0.24,
     material: 'charcoal-structure',
     parent: limb,
-    position: [0, -0.34, 0],
-    segments: 6
+    position: [0, -0.25, 0],
+    segments: 8
   })
+
+  if (name.includes('-leg')) {
+    const boot = group(scene, `${name}:boot`, limb, { position: [0, -0.31, -0.1] })
+    sphere(scene, `${name}:boot:shell`, {
+      diameterX: 0.4,
+      diameterY: 0.23,
+      diameterZ: 0.44,
+      material: 'bone-metal',
+      parent: boot,
+      segments: 8
+    })
+    sphere(scene, `${name}:boot:sole`, {
+      diameterX: 0.48,
+      diameterY: 0.12,
+      diameterZ: 0.34,
+      material: 'lunar-rust',
+      parent: boot,
+      position: [0, -0.18, -0.05],
+      segments: 8
+    })
+  } else {
+    const forearm = group(scene, `${name}:forearm`, limb, { position: [0, -0.24, -0.02] })
+    sphere(scene, `${name}:forearm:shell`, {
+      diameterX: 0.28,
+      diameterY: 0.3,
+      diameterZ: 0.28,
+      material: 'bone-metal',
+      parent: forearm,
+      segments: 8
+    })
+    sphere(scene, `${name}:forearm:hand`, {
+      diameter: 0.26,
+      material: 'signal-emissive',
+      parent: forearm,
+      position: [0, -0.2, -0.02],
+      segments: 8
+    })
+  }
   return limb
 }
 

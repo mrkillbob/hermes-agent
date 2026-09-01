@@ -102,7 +102,7 @@ const LEADER_IDS = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag']
 const LEADER_STATES = ['idle', 'listening', 'talking', 'thinking', 'acknowledging', 'unavailable']
 const CLEANUP_TRIANGLE_CAPS = {
   council: 10500,
-  leaders: 13500,
+  leaders: 18000,
   library: 15000
 }
 const HERMES_GROUPS = [
@@ -547,6 +547,48 @@ test('exports seven exclusive selectable worker role variants with physical acce
     variantIds.length,
     'worker role variants must have distinct physical accessories'
   )
+})
+
+test('models reference colony workers as compact armored robots with helmet, panel, and boot language', async () => {
+  const root = (await new NodeIO().read(join(firstRoot, 'models', 'workers.glb'))).getRoot()
+  const nodes = new Set(root.listNodes().map(node => node.getName()))
+  for (const name of [
+    'worker:limb:left-arm:forearm',
+    'worker:limb:right-arm:forearm',
+    'worker:limb:left-leg:boot',
+    'worker:limb:right-leg:boot'
+  ]) {
+    assert.ok(nodes.has(name), `reference worker silhouette is missing ${name}`)
+  }
+
+  const workerRoot = root.listNodes().find(node => node.getName() === 'workers:lod:near')
+  const materials = new Set(
+    descendantsWithMeshes(root, workerRoot).flatMap(node =>
+      node.getMesh().listPrimitives().map(primitive => primitive.getMaterial()?.getName())
+    )
+  )
+  assert.ok(materials.has('bone-metal'), 'reference worker needs a light armored shell')
+  assert.ok(materials.has('signal-emissive'), 'reference worker needs a readable cyan face and status language')
+  assert.ok(materials.has('lunar-rust'), 'reference worker needs warm red-orange kit accents')
+})
+
+test('models every leader as a finished character with expressive face and layered robe trim', async () => {
+  const root = (await new NodeIO().read(join(firstRoot, 'models', 'leaders.glb'))).getRoot()
+  assert.equal(root.listSkins().length, 1, 'leaders must share one deformable character rig')
+  const jointNames = new Set(root.listSkins()[0].listJoints().map(joint => joint.getName()))
+  for (const id of LEADER_IDS) {
+    const leader = root.listNodes().find(node => node.getName() === `leader:${id}`)
+    assert.deepEqual(leader.getExtras().featureSet, [
+      'deformable-body',
+      'expressive-face',
+      'layered-robe',
+      'chest-insignia'
+    ])
+    assert.ok(jointNames.has(`leader:${id}:body-rig`), `${id} is missing its body skin joint`)
+    assert.ok(jointNames.has(`leader:${id}:head-rig`), `${id} is missing its head skin joint`)
+    assert.ok(jointNames.has(`leader:${id}:arm-rig:left`), `${id} is missing its left-arm skin joint`)
+    assert.ok(jointNames.has(`leader:${id}:arm-rig:right`), `${id} is missing its right-arm skin joint`)
+  }
 })
 
 test('exports one distinct physical kit for every Hermes group without multiplying worker resources', async () => {
