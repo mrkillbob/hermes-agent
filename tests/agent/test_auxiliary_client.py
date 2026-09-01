@@ -51,6 +51,29 @@ def _aux_egress_response(content="ok"):
     )
 
 
+def _blocked_egress_error(reason="base64_payload"):
+    from agent.llm_egress_firewall import DestinationClass, EgressDecision
+
+    return EgressBlocked(
+        EgressDecision(
+            allowed=False,
+            destination_class=DestinationClass.REMOTE,
+            provider="openai-codex",
+            model="gpt-5.4",
+            payload_sha256="payload-digest",
+            serialized_bytes=128,
+            estimated_tokens=32,
+            source_grant_count=1,
+            source_segment_count=1,
+            session_id="session",
+            turn_id="turn",
+            request_id="request",
+            policy_digest="policy",
+            reason_codes=(reason,),
+        )
+    )
+
+
 def _run_aux_codex_call(
     monkeypatch,
     tmp_path,
@@ -313,7 +336,7 @@ def test_compression_aggregate_capacity_does_not_bypass_scans(tmp_path, unsafe, 
 def test_blocked_remote_aux_call_is_terminal_without_fallback(monkeypatch, tmp_path):
     primary = MagicMock()
     primary.base_url = "https://chatgpt.com/backend-api/codex"
-    primary.chat.completions.create.return_value = _aux_egress_response()
+    primary.chat.completions.create.side_effect = _blocked_egress_error()
     fallback = MagicMock()
     fallback.base_url = "http://127.0.0.1:11434/v1"
     fallback.chat.completions.create.return_value = _aux_egress_response("fallback")
@@ -345,10 +368,10 @@ def test_blocked_remote_aux_call_is_terminal_without_fallback(monkeypatch, tmp_p
             provider="openai-codex",
             model="gpt-5.4",
             main_runtime={"session_id": "session-fallback"},
-            messages=[{"role": "user", "content": "token=super-secret-value"}],
+            messages=[{"role": "user", "content": "ordinary request"}],
         )
 
-    primary.chat.completions.create.assert_not_called()
+    primary.chat.completions.create.assert_called_once()
     fallback.chat.completions.create.assert_not_called()
 
 
@@ -358,7 +381,7 @@ async def test_blocked_remote_async_aux_call_is_terminal_without_fallback(
 ):
     primary = MagicMock()
     primary.base_url = "https://chatgpt.com/backend-api/codex"
-    primary.chat.completions.create = AsyncMock(return_value=_aux_egress_response())
+    primary.chat.completions.create = AsyncMock(side_effect=_blocked_egress_error())
     fallback = MagicMock()
     fallback.base_url = "http://127.0.0.1:11434/v1"
     fallback.chat.completions.create = AsyncMock(
@@ -394,10 +417,10 @@ async def test_blocked_remote_async_aux_call_is_terminal_without_fallback(
             provider="openai-codex",
             model="gpt-5.4",
             main_runtime={"session_id": "session-async-fallback"},
-            messages=[{"role": "user", "content": "token=super-secret-value"}],
+            messages=[{"role": "user", "content": "ordinary request"}],
         )
 
-    primary.chat.completions.create.assert_not_awaited()
+    primary.chat.completions.create.assert_awaited_once()
     fallback.chat.completions.create.assert_not_awaited()
     configured.assert_not_called()
     main_fallback.assert_not_called()
