@@ -485,7 +485,11 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
         help="Run new local CI even when an exact-head receipt is reusable",
     )
     subcommands.add_parser(
-        "merge-scan", help="Evaluate and merge strictly eligible PR heads"
+        "merge-scan",
+        help="Evaluate and hand off strictly eligible PR heads (never merges in handoff mode)",
+    )
+    subcommands.add_parser(
+        "merge-handoff", help="Hand off strictly eligible PR heads without merging"
     )
     subcommands.add_parser(
         "merge-status", help="Show bounded merge and deployment counts"
@@ -541,6 +545,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     if action == "audit-pr":
         return _audit_pr(ctx, args)
     if action == "merge-scan":
+        return _merge_scan(ctx)
+    if action == "merge-handoff":
         return _merge_scan(ctx)
     if action == "merge-status":
         return _merge_status()
@@ -622,7 +628,6 @@ def _scan(ctx: Any) -> int:
             print(json.dumps({"status": "scan_in_progress"}, sort_keys=True))
             return 0
         ledger = FeedbackLedger.for_current_profile()
-        merge_payload: dict[str, object] | None = None
         repair_payload: dict[str, object] | None = None
         maintenance_payload: dict[str, object] | None = None
         try:
@@ -649,17 +654,13 @@ def _scan(ctx: Any) -> int:
                     control_home=get_default_hermes_root(),
                 ).scan()
                 repair_payload = _scan_payload(repair)
-            if _merge_policies(policy) and not required_ci_backlog:
-                merge_payload = _run_merge_scan(policy, ledger)
             if policy.release_maintenance is not None and not required_ci_backlog:
                 maintenance_payload = _run_release_maintenance_scan(policy, ledger)
         finally:
             ledger.close()
     payload = _scan_payload(result)
     if result.required_local_ci_backlog > 0:
-        payload["deferred"] = ["repair", "merge", "release_maintenance"]
-    if merge_payload is not None:
-        payload["merge"] = merge_payload
+        payload["deferred"] = ["repair", "release_maintenance"]
     if repair_payload is not None:
         payload["repair"] = repair_payload
     if maintenance_payload is not None:
@@ -670,7 +671,6 @@ def _scan(ctx: Any) -> int:
         if (
             result.degraded
             or (repair_payload or {}).get("status") == "degraded"
-            or (merge_payload or {}).get("status") == "degraded"
             or (maintenance_payload or {}).get("status") == "degraded"
         )
         else 0
@@ -1454,11 +1454,10 @@ def _run_merge_scan_for_policy(
         # can only restate them, adding queue latency without changing authority.
         # Report-only mode has no repair owner, so retain its explicit human-facing
         # readiness report without enabling any write authority.
-        if merge_policy.report_only and pull_request is not None:
-            if not blocker_codes:
-                _announce_ready_to_merge(
-                    github, merge_policy.repository, pull_request
-                )
+        if merge_policy.report_only and pull_request is not None and not blocker_codes:
+            _announce_ready_to_merge(
+                github, merge_policy.repository, pull_request
+            )
             try:
                 kanban.create_or_get_task(
                     _merge_maintainer_task(

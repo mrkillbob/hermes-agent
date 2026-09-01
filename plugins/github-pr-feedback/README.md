@@ -88,8 +88,8 @@ plugins:
           repositories:
             - example-owner/example-repository
           report_only: true
-        # Optional deterministic merge owner. Keep report-only enabled until
-        # exact-head CI receipts and blocker decisions have been observed.
+        # Optional deterministic merge-readiness handoff. It only hands fully
+        # eligible PRs to an operator and never merges them.
         merge_maintainer:
           enabled: false
           assignee: pr-merge-maintainer
@@ -195,6 +195,7 @@ hermes github-pr-feedback doctor
 hermes github-pr-feedback status
 hermes github-pr-feedback scan
 hermes github-pr-feedback merge-status
+hermes github-pr-feedback merge-handoff
 ```
 
 Enroll or remove one exact PR from an enabled merge lane:
@@ -207,8 +208,9 @@ hermes github-pr-feedback merge-disable \
 ```
 
 Enrollment is local, durable state; it does not grant GitHub permissions and
-does not merge anything by itself. A `REVIEW_REQUIRED` GitHub state blocks the
-merge and creates a deduplicated exact-head review task for the configured
+does not merge anything by itself. `merge-handoff` only creates a task after
+all gates pass. A `REVIEW_REQUIRED` GitHub state blocks the merge and creates a
+deduplicated exact-head review task for the configured
 review steward. That worker may review and leave factual feedback or a normal
 approval, but cannot edit, push, change protection, or merge. The controller
 re-reads the PR after the review before considering it again.
@@ -278,8 +280,10 @@ workflow is resolved. The merge maintainer independently reports the same
 `action_required` PR blocked with the precise `action_required` code rather
 than the generic `github_checks_not_green`.
 
-When `merge_maintainer.enabled: true`, each reconciliation also evaluates open
-PRs from the configured author and same repository. With
+When `merge_maintainer.enabled: true`, an explicit `merge-handoff` evaluates
+open PRs from the configured author and same repository. The ordinary
+reconciliation `scan` does not invoke this evaluator, so a frequent feedback
+cron cannot repeatedly consume merge-scan API calls. With
 `merge_maintainers`, the same rules apply independently to every configured
 owned repository. If `require_per_pr_enrollment: true`, a PR is not eligible
 until an operator explicitly enrolls that exact PR in the durable profile
@@ -303,9 +307,11 @@ and the deterministic base-refresh merge-forward -- mentions `@codex review`
 itself right after a verified push, once, only if Codex's last review does not
 already cover the new head. Without this, `codex_review_pending` would wait
 forever for a re-review nothing ever asked for. Missing or
-unknown evidence blocks. The controller selects the first configured method
-that the repository currently enables, binds the command with
-`--match-head-commit`, and accepts success only from canonical merged readback.
+unknown evidence blocks. In handoff mode, the controller creates one
+exact-head readiness task and does not acquire a merge lease, call the GitHub
+merge endpoint, or run post-merge deployment. An operator performs the normal
+repository merge after reviewing that task. The legacy `merge-scan` name
+remains as a compatibility alias, but it is read-only when `report_only: true`.
 PRs carrying a `sweeper:risk-*`, `sweeper:blast-broad`,
 `sweeper:blast-massive`, or `telemetry` label also require the explicit
 `ci-reviewed` label. This gate is evaluated again on both exact-head snapshots;
@@ -319,11 +325,11 @@ within a precedence level. An equal top rank never guesses between specialists:
 it routes to the fallback orchestrator and requires an independent exact-head
 safety review.
 
-The `pr-merge-maintainer` Kanban profile is an observability worker. It may
-explain deterministic blocker codes, but it cannot edit, push, reply, approve,
-merge, change policy, waive a gate, or create receipts. Roll out in stages:
-collect CI receipts, use `report_only: true`, enable automatic merging, and only
-then separately configure and enable a post-merge hook.
+The `pr-merge-maintainer` Kanban profile is a handoff worker. It may explain
+deterministic readiness evidence, but it cannot edit, push, reply, approve,
+merge, change policy, waive a gate, or create receipts. Keep
+`report_only: true` for this profile and let an operator perform the final
+merge.
 
 When `release_maintenance.enabled: true`, the ordinary reconciliation scan
 first requires a canonical repository-wide open-PR count of zero
@@ -414,5 +420,5 @@ HERMES_EXECUTABLE=/absolute/path/to/hermes
 The wrapper refuses an unset, relative, missing, or non-executable
 `HERMES_EXECUTABLE`, then runs exactly that absolute executable with
 `github-pr-feedback scan`. It does not accept arguments, start a model, or
-create webhooks. GitHub remains read-only unless the strict merge maintainer is
-explicitly enabled and not in report-only mode.
+create webhooks. The normal scan does not run merge handoff. The configured
+handoff profile is read-only and leaves the final GitHub merge to the operator.
