@@ -434,6 +434,15 @@ def _load_raw_config() -> Dict[str, Any]:
     return parsed
 
 
+# Skills that must stay available regardless of configuration. The
+# `hermes-agent` skill is the agent's own operating manual — it drives
+# configuring, extending, and troubleshooting Hermes itself, and the system
+# prompt unconditionally points at it. Disabling it leaves the agent unable
+# to help with Hermes, so disable requests for these names are ignored
+# everywhere the disabled list is consulted.
+ESSENTIAL_SKILLS: frozenset = frozenset({"hermes-agent"})
+
+
 def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     """Read disabled skill names from config.yaml.
 
@@ -468,8 +477,10 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
             resolved_platform
         )
         if platform_disabled is not None:
-            return global_disabled | _normalize_string_set(platform_disabled)
-    return global_disabled
+            return (
+                global_disabled | _normalize_string_set(platform_disabled)
+            ) - ESSENTIAL_SKILLS
+    return global_disabled - ESSENTIAL_SKILLS
 
 
 def parse_config_string_list(value) -> List[str]:
@@ -721,10 +732,65 @@ def _project_trusted_dirs_from_config() -> Set[Path]:
     return result
 
 
-def is_project_root_trusted(root: Path) -> bool:
-    """True when *root* is listed in ``skills.trusted_project_dirs``."""
+def _git_common_dir(root: Path) -> Optional[Path]:
+    """Resolve the common Git directory shared by a checkout and its worktrees."""
+    marker = Path(root) / ".git"
     try:
-        return Path(root).resolve() in _project_trusted_dirs_from_config()
+        if marker.is_dir():
+            return marker.resolve()
+        if not marker.is_file():
+            return None
+        prefix = "gitdir:"
+        line = marker.read_text(encoding="utf-8").strip()
+        if not line.casefold().startswith(prefix):
+            return None
+        git_dir = Path(line[len(prefix) :].strip())
+        if not git_dir.is_absolute():
+            git_dir = marker.parent / git_dir
+        git_dir = git_dir.resolve()
+        common_marker = git_dir / "commondir"
+        if not common_marker.is_file():
+            return git_dir
+        common = Path(common_marker.read_text(encoding="utf-8").strip())
+        return (common if common.is_absolute() else git_dir / common).resolve()
+    except (OSError, UnicodeError):
+        return None
+
+
+def is_project_root_trusted(root: Path) -> bool:
+    """True for an explicit root, its linked worktree, or an owned worker root."""
+    try:
+        resolved_root = Path(root).resolve()
+        trusted_roots = _project_trusted_dirs_from_config()
+        if resolved_root in trusted_roots:
+            return True
+
+        common_dir = _git_common_dir(resolved_root)
+        if common_dir is not None and any(
+            _git_common_dir(candidate) == common_dir for candidate in trusted_roots
+        ):
+            return True
+
+        task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+        workspace = os.environ.get("HERMES_KANBAN_WORKSPACE", "").strip()
+        workspaces_root = os.environ.get(
+            "HERMES_KANBAN_WORKSPACES_ROOT", ""
+        ).strip()
+        if not task_id or task_id != resolved_root.name or not workspace or not workspaces_root:
+            return False
+        resolved_workspace = Path(workspace).resolve()
+        resolved_workspaces_root = Path(workspaces_root).resolve()
+        board_owned_workspace = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent == resolved_workspaces_root
+            and resolved_workspaces_root.parent in trusted_roots
+        )
+        migrated_trusted_worktree = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent.name == ".worktrees"
+            and resolved_root.parent.parent in trusted_roots
+        )
+        return board_owned_workspace or migrated_trusted_worktree
     except OSError:
         return False
 
@@ -1007,6 +1073,13 @@ def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
         "requires_toolsets": hermes.get("requires_toolsets", []),
         "fallback_for_tools": hermes.get("fallback_for_tools", []),
         "requires_tools": hermes.get("requires_tools", []),
+        # Gateway-channel gate (maintainer-directed, skills-index slim):
+        # list of session platforms (e.g. ["msteams"]) the skill is FOR.
+        # Unlike top-level ``platforms:`` (host OS), this hides the skill
+        # from the index on every other channel — the teams-meeting
+        # pipeline has no business in a desktop or telegram session's
+        # index. Empty/absent = visible everywhere (backward compat).
+        "session_platforms": hermes.get("session_platforms", []),
     }
 
 
