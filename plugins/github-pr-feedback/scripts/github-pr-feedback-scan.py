@@ -70,7 +70,25 @@ def main() -> int:
         capture_output=True,
         text=True,
     )
+    if not completed.stdout.strip():
+        # A clean child exit without the scan's JSON is not a successful scan.
+        # Preserve the child diagnostic on stderr, but always render a typed
+        # stdout result so cron/UI callers cannot silently lose the outcome.
+        print(
+            json.dumps(
+                {
+                    "status": "worker_output_missing",
+                    "child_returncode": completed.returncode,
+                    "stderr_present": bool(completed.stderr.strip()),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        sys.stderr.write(completed.stderr)
+        return completed.returncode if completed.returncode != 0 else 1
     sys.stdout.write(completed.stdout)
+    sys.stdout.flush()
     sys.stderr.write(completed.stderr)
     return _cron_exit_code(completed.stdout, completed.returncode)
 
