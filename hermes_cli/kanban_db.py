@@ -12622,6 +12622,9 @@ def _default_spawn(
         for sk in task.skills:
             if sk:
                 cmd.extend(["--skills", sk])
+    # Never inherit a local-only marker from the dispatcher's environment:
+    # only the route selected for this child may enable the confinement.
+    env.pop("HERMES_KANBAN_LOCAL_ONLY", None)
     explicit_local_route = _resolve_explicit_local_task_route(task)
     # ``local_first`` is a default-route policy, not a directive to erase a
     # card's deliberate provider/model selection.  Remote task pins still go
@@ -12659,6 +12662,13 @@ def _default_spawn(
         if local_endpoint:
             env["CUSTOM_BASE_URL"] = local_endpoint
             cmd[cmd.index("--provider") + 1] = "ollama"
+        # Local CI workers are deliberately confined to the verified local
+        # route.  Without this child-only marker, the worker profile's remote
+        # fallback chain can take over after a local failure and immediately
+        # hit the egress firewall with the same payload.  Keep the operator's
+        # normal fallback behavior unchanged; this is only inherited by the
+        # spawned Kanban child.
+        env["HERMES_KANBAN_LOCAL_ONLY"] = "1"
     elif task.model_override:
         cmd.extend(["-m", task.model_override])
         # Pin the provider too when the override names one, so the worker
