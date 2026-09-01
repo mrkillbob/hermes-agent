@@ -23,6 +23,13 @@ user's inspiration video/PNGs, though less so after two follow-up passes:
   silhouette converge on another building's, and explains why Research Lab
   only got window glow rather than the Library's full wall treatment.
 
+**Continuing this work? Start at `docs/lunar-city-handoff-2026-09-01.md`.**
+It is the step-by-step guide: per-building material/draw-call budget
+headroom for all 11 specialist buildings, the exact loop to follow per
+building (edit → rebuild → check the silhouette test → validate → visual
+check → commit), and the remaining non-geometry follow-ups in priority
+order.
+
 ## Current implementation addendum
 
 - `/lunar-city` is a dedicated left-sidebar destination immediately after Kanban. Arranged Sim-City/StarCraft-like 3D camera controls support orbit, pan, tilt, zoom, focus, follow, occlusion, interiors, visibility pausing, context recovery, and real world teardown.
