@@ -44,6 +44,18 @@ logger = logging.getLogger(__name__)
 # every time. Cleared automatically when the file changes (different mtime).
 _CONFIG_PARSE_WARNED: set = set()
 
+# Parallel record of active parse failures keyed by path -> (mtime_ns, size,
+# error message). Written by _warn_config_parse_failure() (the single funnel
+# every load-path parse failure goes through) and probed by
+# get_active_config_parse_failure() so provider auto-resolution can refuse to
+# adopt a paid provider from environment keys while the user's REAL config —
+# which may name a completely different provider — is unreadable (#81952).
+_CONFIG_PARSE_FAILURES: dict = {}
+
+
+class InvalidUserConfigError(RuntimeError):
+    """Raised when a run that cannot repair config finds invalid user YAML."""
+
 
 def _backup_corrupt_config(config_path: Path) -> Optional[Path]:
     """Preserve a corrupted ``config.yaml`` by copying it to a timestamped ``.bak``.
@@ -127,6 +139,11 @@ def _warn_config_parse_failure(
     try:
         st = config_path.stat()
         key = (str(config_path), st.st_mtime_ns, st.st_size)
+        _CONFIG_PARSE_FAILURES[str(config_path)] = (
+            st.st_mtime_ns,
+            st.st_size,
+            str(exc),
+        )
     except OSError:
         key = (str(config_path), 0, 0)
     if key in _CONFIG_PARSE_WARNED:
@@ -162,6 +179,37 @@ def _warn_config_parse_failure(
         sys.stderr.flush()
     except Exception:
         pass
+
+
+def get_active_config_parse_failure() -> Optional[str]:
+    """Return the parse-error message if the ACTIVE config.yaml is corrupt.
+
+    Probes the failure record written by :func:`_warn_config_parse_failure`
+    for the current :func:`get_config_path` and re-stats the file NOW: the
+    recorded error is returned only while the file is byte-identical
+    (mtime_ns + size) to the one that failed to parse. The moment the user
+    fixes (or deletes) the file, this returns ``None`` without any cache
+    invalidation dance.
+
+    Consumers: ``hermes_cli.auth.resolve_provider`` uses this to refuse
+    env-key/pool auto-adoption of a paid provider while the user's real
+    config — which may name a different provider entirely — is unreadable
+    (#81952). Returns ``None`` when no failure was ever recorded, when the
+    file changed since the failure, or on any stat error.
+    """
+    try:
+        path = get_config_path()
+        recorded = _CONFIG_PARSE_FAILURES.get(str(path))
+        if not recorded:
+            return None
+        mtime_ns, size, err = recorded
+        st = path.stat()
+        if st.st_mtime_ns == mtime_ns and st.st_size == size:
+            return err
+    except Exception:
+        return None
+    return None
+
 
 _IS_WINDOWS = platform.system() == "Windows"
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -770,6 +818,48 @@ from utils import atomic_replace, fast_safe_load
 def get_config_path() -> Path:
     """Get the main config file path."""
     return get_hermes_home() / "config.yaml"
+
+
+def require_parseable_user_config(*, ignore_user_config: bool = False) -> None:
+    """Reject an existing invalid config before a non-interactive agent run.
+
+    Interactive surfaces retain ``load_config()``'s recovery behavior so the
+    operator can repair their configuration. A one-shot or single-query run
+    has no such repair opportunity: allowing defaults there can silently pick
+    a hosted provider/model and spend against credentials loaded from ``.env``.
+
+    Missing and empty files remain valid first-run states. The explicit
+    ``--ignore-user-config``/safe-mode escape hatch also remains authoritative.
+    """
+    if ignore_user_config or os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1":
+        return
+
+    config_path = get_config_path()
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            data = fast_safe_load(f)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        parse_error = exc
+    else:
+        if data is None or isinstance(data, dict):
+            return
+        parse_error = TypeError(
+            f"top-level YAML value must be a mapping, got {type(data).__name__}"
+        )
+
+    backup_path = _backup_corrupt_config(config_path)
+    message = (
+        f"Refusing non-interactive startup because {config_path} is invalid: "
+        f"{parse_error}. Repair the file or pass --ignore-user-config to "
+        "intentionally run with built-in defaults."
+    )
+    if backup_path is not None:
+        message += f" A copy was saved to {backup_path}."
+    logger.error(message)
+    raise InvalidUserConfigError(message) from parse_error
+
 
 def get_env_path() -> Path:
     """Get the .env file path (for API keys)."""
