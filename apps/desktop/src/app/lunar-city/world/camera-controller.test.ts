@@ -180,6 +180,57 @@ describe('createCameraController', () => {
 
     expect(controller.getState()).toEqual({ focusedEntityKey: undefined, following: false })
   })
+
+  it('starts a slow overview drift only after an idle grace period', () => {
+    const camera = fakeCamera()
+    const controller = createCameraController(camera, overview, bounds)
+
+    controller.setIdleEnabled(true)
+    controller.update(4_999)
+    expect(camera.alpha).toBe(overview.alpha)
+    expect(controller.isIdleActive()).toBe(false)
+
+    controller.update(16)
+    expect(camera.alpha).not.toBe(overview.alpha)
+    expect(controller.isIdleActive()).toBe(true)
+  })
+
+  it('yields idle drift immediately to input, focus, and reduced motion', () => {
+    const workerKey = key('session:local:worker:session-1')
+    const camera = fakeCamera()
+    const controller = createCameraController(camera, overview, bounds, {
+      focusAnchors: new Map([[workerKey, () => ({ x: 8, y: 0, z: 4 })]])
+    })
+
+    controller.setIdleEnabled(true)
+    controller.update(5_100)
+    expect(controller.isIdleActive()).toBe(true)
+
+    controller.dispatch({ kind: 'orbit', deltaAlpha: 0.1, deltaBeta: 0 })
+    expect(controller.isIdleActive()).toBe(false)
+    controller.update(5_100)
+    controller.dispatch({ kind: 'focus', entityKey: workerKey, follow: false })
+    expect(controller.isIdleActive()).toBe(false)
+    controller.dispatch({ kind: 'clear-focus' })
+    controller.update(5_100)
+    expect(controller.isIdleActive()).toBe(true)
+    controller.setReducedMotion(true)
+    expect(controller.isIdleActive()).toBe(false)
+  })
+
+  it('parks the idle mode when the efficient quality tier disables it', () => {
+    const camera = fakeCamera()
+    const controller = createCameraController(camera, overview, bounds)
+
+    controller.setIdleEnabled(true)
+    controller.update(5_100)
+    const alpha = camera.alpha
+    controller.setIdleEnabled(false)
+    controller.update(5_100)
+
+    expect(controller.isIdleActive()).toBe(false)
+    expect(camera.alpha).toBe(alpha)
+  })
 })
 
 describe('bindCameraInput', () => {

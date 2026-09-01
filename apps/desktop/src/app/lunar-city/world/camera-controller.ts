@@ -30,6 +30,9 @@ export interface CameraController {
   getState(): CameraControlState
   isTransitioning(): boolean
   setReducedMotion(reduced: boolean): void
+  setIdleEnabled(enabled: boolean): void
+  isIdleActive(): boolean
+  isIdlePending(): boolean
   update(elapsedMs: number): void
 }
 
@@ -57,6 +60,8 @@ interface FocusTransition {
 const FULL_TURN = Math.PI * 2
 const DEFAULT_TRANSITION_MS = 260
 const DRAG_THRESHOLD_PX = 3
+const IDLE_START_MS = 5_000
+const IDLE_ORBIT_RADIANS_PER_MS = 0.000018
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
@@ -153,6 +158,14 @@ export function createCameraController(
   let transition: FocusTransition | undefined
   let lastFollowAnchor: Vec3 | undefined
   let reducedMotion = false
+  let idleEnabled = false
+  let idleElapsedMs = 0
+  let idleActive = false
+
+  const resetIdle = (): void => {
+    idleElapsedMs = 0
+    idleActive = false
+  }
 
   const applyBounds = (): void => {
     camera.alpha = normalizeAngle(camera.alpha)
@@ -195,6 +208,8 @@ export function createCameraController(
 
   return {
     dispatch(intent) {
+      resetIdle()
+
       if (intent.kind === 'orbit') {
         transition = undefined
         camera.alpha += intent.deltaAlpha
@@ -258,12 +273,27 @@ export function createCameraController(
     },
     setReducedMotion(reduced) {
       reducedMotion = reduced
+      if (reduced) {
+        resetIdle()
+      }
 
       if (reduced && transition) {
         writePose(camera, transition.to)
         applyBounds()
         transition = undefined
       }
+    },
+    setIdleEnabled(enabled) {
+      idleEnabled = enabled
+      if (!enabled) {
+        resetIdle()
+      }
+    },
+    isIdleActive() {
+      return idleActive
+    },
+    isIdlePending() {
+      return idleEnabled && !reducedMotion && !focusedEntityKey && !idleActive
     },
     update(elapsedMs) {
       if (following && focusedEntityKey) {
@@ -282,6 +312,18 @@ export function createCameraController(
       }
 
       if (!transition) {
+        const delta = Math.max(0, elapsedMs)
+
+        if (idleEnabled && !reducedMotion && !focusedEntityKey) {
+          idleElapsedMs += delta
+
+          if (idleElapsedMs >= IDLE_START_MS) {
+            idleActive = true
+            camera.alpha = normalizeAngle(camera.alpha + delta * IDLE_ORBIT_RADIANS_PER_MS)
+            applyBounds()
+          }
+        }
+
         return
       }
 

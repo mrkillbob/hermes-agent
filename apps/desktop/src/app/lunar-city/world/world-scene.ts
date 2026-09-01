@@ -1618,6 +1618,10 @@ export async function createWorldScene(
       const settings = quality.settings()
 
       applyQualitySettings(engine, settings)
+      // Continuous idle camera motion is reserved for balanced/detailed
+      // presentation. Efficient mode must be able to park the scheduler when
+      // the world has no real activity, which keeps the low-power path honest.
+      cameraController.setIdleEnabled(settings.tier !== 'efficient')
       keyLight.shadowEnabled = settings.dynamicShadows === 'near'
 
       if (glowLayer) {
@@ -1810,6 +1814,8 @@ export async function createWorldScene(
           activeNavigation.size > 0 ||
           cameraController.isTransitioning() ||
           cameraState.following ||
+          cameraController.isIdleActive() ||
+          cameraController.isIdlePending() ||
           entityRegistryController.hasActiveAnimations() ||
           leaderAnimationActive
         )
