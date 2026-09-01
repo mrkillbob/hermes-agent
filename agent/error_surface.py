@@ -41,8 +41,31 @@ _TRANSPORT_REASONS = {"timeout", "ssl_cert_verification"}
 # only: current backends stamp the classifier's verdict in ``failure_retryable``.
 # Kept in sync with ``classify_api_error``'s retryable=False verdicts.
 _NON_RETRYABLE_REASONS = {
+<<<<<<< HEAD
     "auth", "auth_permanent", "billing", "billing_unverified", "content_policy_blocked",
     "provider_policy_blocked", "model_not_found", "format_error", "ssl_cert_verification",
+||||||| parent of 89e37e7be6 (fix: fail closed on unsupported local reasoning)
+    "auth",
+    "auth_permanent",
+    "billing",
+    "billing_unverified",
+    "content_policy_blocked",
+    "provider_policy_blocked",
+    "model_not_found",
+    "format_error",
+    "ssl_cert_verification",
+=======
+    "auth",
+    "auth_permanent",
+    "billing",
+    "billing_unverified",
+    "content_policy_blocked",
+    "provider_policy_blocked",
+    "model_not_found",
+    "format_error",
+    "unsupported_thinking",
+    "ssl_cert_verification",
+>>>>>>> 89e37e7be6 (fix: fail closed on unsupported local reasoning)
 }
 
 # Providers whose base_url is user-supplied rather than a known vendor.

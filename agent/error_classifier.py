@@ -47,6 +47,7 @@ class FailoverReason(enum.Enum):
 
     # Provider-specific
     thinking_signature = "thinking_signature"  # Anthropic thinking block sig invalid
+    unsupported_thinking = "unsupported_thinking"  # Selected model has no thinking capability
     long_context_tier = "long_context_tier"    # Anthropic "extra usage" tier gate
     oauth_long_context_beta_forbidden = "oauth_long_context_beta_forbidden"  # Anthropic OAuth rejects 1M beta — disable beta and retry
     llama_cpp_grammar_pattern = "llama_cpp_grammar_pattern"  # llama.cpp grammar rejects regex `pattern`/`format` — strip from tools and retry
@@ -818,7 +819,512 @@ def _is_server_injected_param_rejection(error_msg: str, provider: str) -> bool:
     return False
 
 
+<<<<<<< HEAD
 _CODEX_MASKED_REPLAY_MESSAGE = "request blocked."
+||||||| parent of 89e37e7be6 (fix: fail closed on unsupported local reasoning)
+# OpenRouter aggregator policy-block patterns.
+#
+# When a user's OpenRouter account privacy setting (or a per-request
+# `provider.data_collection: deny` preference) excludes the only endpoint
+# serving a model, OpenRouter returns 404 with a *specific* message that is
+# distinct from "model not found":
+#
+#   "No endpoints available matching your guardrail restrictions and
+#    data policy. Configure: https://openrouter.ai/settings/privacy"
+#
+# We classify this as `provider_policy_blocked` rather than
+# `model_not_found` because:
+#   - The model *exists* — model_not_found is misleading in logs
+#   - Provider fallback won't help: the account-level setting applies to
+#     every call on the same OpenRouter account
+#   - The error body already contains the fix URL, so the user gets
+#     actionable guidance without us rewriting the message
+_PROVIDER_POLICY_BLOCKED_PATTERNS = [
+    "no endpoints available matching your guardrail",
+    "no endpoints available matching your data policy",
+    "no endpoints found matching your data policy",
+]
+
+# Provider content-policy / safety-filter blocks. Distinct from
+# ``provider_policy_blocked`` above (which is an OpenRouter *account*-level
+# data/privacy guardrail) — these are *per-prompt* safety decisions made by
+# the upstream model provider. They are deterministic for the unchanged
+# request, so retrying the same prompt three times just reproduces the same
+# block and burns paid attempts on a refusal. The recovery is to switch to a
+# configured fallback model/provider immediately, or surface the block to
+# the user with actionable guidance if no fallback exists.
+#
+# Patterns are intentionally narrow — each phrase is a verbatim string from
+# a specific provider's safety pipeline, not a generic word like "policy" or
+# "violation" that could collide with billing/auth/format errors:
+#   • OpenAI Codex cybersecurity refusal (gpt-5.5, the case from #18028)
+#   • OpenAI moderation refusal ("violates our usage policies", with
+#     "usage policies" disambiguating from billing's "exceeded ... policy")
+#   • Anthropic safety refusal ("prompt was flagged by ... safety system")
+#   • OpenAI Responses content filter
+_CONTENT_POLICY_BLOCKED_PATTERNS = [
+    # OpenAI Codex (#18028) — message may arrive without an HTTP status
+    "flagged for possible cybersecurity risk",
+    "trusted access for cyber",
+    # OpenAI moderation — chat completions / responses
+    "violates our usage policies",
+    "violates openai's usage policies",
+    "your request was flagged by",
+    # Anthropic safety system
+    "prompt was flagged by our safety",
+    "responses cannot be generated due to safety",
+    # Generic content-filter wording seen on Azure / OpenAI Responses.
+    # ``content_filter`` (underscore) is the OpenAI-standard error/finish
+    # token surfaced verbatim by their SDKs when a request is blocked.
+    # ``responsibleaipolicyviolation`` is Azure OpenAI's error code.
+    # Deliberately NOT matching the space variant ("content filter") — it
+    # appears in benign config descriptions and tooltip text that providers
+    # echo back; the underscore form is provider-specific enough.
+    "content_filter",
+    "responsibleaipolicyviolation",
+    # MiniMax output-layer safety filter. The error string is surfaced
+    # verbatim by MiniMax SDK / OpenAI-compatible endpoints, usually in the
+    # form "output new_sensitive (1027)" when the model's *output* (often a
+    # large tool-call argument block) trips the upstream safety filter and
+    # the SSE stream is truncated mid-flight. ``new_sensitive`` is the
+    # filter name and is narrow enough that billing / format / auth error
+    # strings will not collide. See #32421.
+    "new_sensitive",
+]
+
+# Auth patterns (non-status-code signals)
+_AUTH_PATTERNS = [
+    "invalid api key",
+    "invalid_api_key",
+    "gateway_auth_failed",
+    "authentication",
+    "unauthorized",
+    "forbidden",
+    "invalid token",
+    "token expired",
+    "token revoked",
+    "access denied",
+]
+
+# Anthropic thinking block signature patterns
+_THINKING_SIG_PATTERNS = [
+    "signature",  # Combined with "thinking" check
+]
+
+# Message-string patterns that indicate a provider-side timeout even when
+# the exception type is generic (e.g. RuntimeError from a local shim that
+# wraps a subprocess timeout).  Checked before the type-based transport
+# heuristics so custom-provider "timed out" errors don't fall through to
+# Provider empty-response advisories (OpenRouter / nano-gpt / similar).
+# Checked before context-overflow matching because the advisory text often
+# mentions "max_tokens" as a possible cause, which historically sat in
+# _CONTEXT_OVERFLOW_PATTERNS and sent healthy sessions into a compression
+# death spiral ending in "Cannot compress further".
+_EMPTY_PROVIDER_RESPONSE_PATTERNS = [
+    "returned an empty response",
+    "empty response despite retries",
+    "provider returned an empty response",
+    "model returning empty responses",
+    "empty response stream",
+]
+
+# the unknown bucket and get misreported as empty responses.
+_TIMEOUT_MESSAGE_PATTERNS = [
+    "timed out",
+    "turn timed out",
+    "request timed out",
+    "deadline exceeded",
+    "operation timed out",
+    "upstream timed out",
+]
+
+# Connection-establishment / DNS failure message patterns.  These surface
+# when the exception TYPE is generic (RuntimeError/Exception from a local
+# shim, MCP bridge, subprocess wrapper, or an SDK that re-raises without
+# chaining) so the _TRANSPORT_ERROR_TYPES check never fires, and the error
+# carries no HTTP status.  Without message-level matching they fall through
+# to FailoverReason.unknown, which misses the transport eager-fallback path
+# in the retry loop (unknown retries the same dead endpoint for the full
+# budget before fallback).  Ported from anomalyco/opencode#40707, which hit
+# the same bug shape: serialized midstream errors matched by type only.
+#
+# Deliberately EXCLUDES mid-stream disconnect strings ("connection reset by
+# peer", "peer closed connection", "unexpected eof", "socket hang up") —
+# those belong to _SERVER_DISCONNECT_PATTERNS, whose classification step
+# runs later and routes large sessions to context-overflow compression.
+# A connection that was never established cannot be a server-side overflow
+# rejection, so these are safe to classify as plain retryable transport.
+_CONNECTION_MESSAGE_PATTERNS = [
+    # TCP connect failures
+    "connection refused",
+    "econnrefused",
+    "no route to host",
+    "network is unreachable",
+    "network unreachable",
+    # DNS resolution failures (Python, glibc, macOS, Node bridge phrasings)
+    "name or service not known",
+    "temporary failure in name resolution",
+    "nodename nor servname provided",
+    "getaddrinfo failed",
+    "getaddrinfo enotfound",
+    "eai_again",
+    # Node/undici bridge generic network failure (MCP servers, local shims)
+    "fetch failed",
+    "failed to fetch",
+    # Envoy/proxy upstream connect failure (cloud gateways)
+    "upstream connect error",
+]
+
+# Transport error type names
+_TRANSPORT_ERROR_TYPES = frozenset({
+    "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+    "ConnectError", "RemoteProtocolError",
+    "ConnectionError", "ConnectionResetError",
+    "ConnectionAbortedError", "BrokenPipeError",
+    "TimeoutError", "ReadError",
+    "ServerDisconnectedError",
+    # SSL/TLS transport errors — transient mid-stream handshake/record
+    # failures that should retry rather than surface as a stalled session.
+    # ssl.SSLError subclasses OSError (caught by isinstance) but we list
+    # the type names here so provider-wrapped SSL errors (e.g. when the
+    # SDK re-raises without preserving the exception chain) still classify
+    # as transport rather than falling through to the unknown bucket.
+    "SSLError", "SSLZeroReturnError", "SSLWantReadError",
+    "SSLWantWriteError", "SSLEOFError", "SSLSyscallError",
+    # OpenAI SDK errors (not subclasses of Python builtins)
+    "APIConnectionError",
+    "APITimeoutError",
+})
+
+# Server disconnect patterns (no status code, but transport-level).
+# These are the "ambiguous" patterns — a plain connection close could be
+# transient transport hiccup OR server-side context overflow rejection
+# (common when the API gateway disconnects instead of returning an HTTP
+# error for oversized requests).  A large session + one of these patterns
+# triggers the context-overflow-with-compression recovery path.
+_SERVER_DISCONNECT_PATTERNS = [
+    "server disconnected",
+    "peer closed connection",
+    "connection reset by peer",
+    "connection was closed",
+    "network connection lost",
+    "unexpected eof",
+    "incomplete chunked read",
+]
+
+# SSL certificate verification failures — deterministic, NOT transient.
+#
+# A failed certificate chain (TLS-inspecting corporate proxy, missing
+# custom CA in the trust store, expired certificate, self-signed cert)
+# fails identically on every retry. Burning the retry budget before
+# surfacing the error hides the actionable fix from the user for minutes.
+# Inspired by Claude Code v2.1.199 (July 2026), which made SSL certificate
+# errors fail immediately with a fix hint instead of retrying.
+#
+# Must be checked BEFORE _SSL_TRANSIENT_PATTERNS — "certificate verify
+# failed" messages usually also contain "[SSL:" which would otherwise
+# match the transient list and retry forever.
+_SSL_CERT_VERIFY_PATTERNS = [
+    "certificate verify failed",       # Python ssl module canonical text
+    "certificate_verify_failed",       # OpenSSL error token
+    "unable to get local issuer certificate",
+    "self-signed certificate",
+    "self signed certificate",
+    "certificate has expired",
+    "hostname mismatch, certificate is not valid",
+    "unable to verify the first certificate",  # Node/undici phrasing (MCP bridges)
+]
+
+# SSL/TLS transient failure patterns — intentionally distinct from
+# _SERVER_DISCONNECT_PATTERNS above.
+#
+# An SSL alert mid-stream is almost always a transport-layer hiccup
+# (flaky network, mid-session TLS renegotiation failure, load balancer
+# dropping the connection) — NOT a server-side context overflow signal.
+# So we want the retry path but NOT the compression path; lumping these
+# into _SERVER_DISCONNECT_PATTERNS would trigger unnecessary (and
+# expensive) context compression on any large-session SSL hiccup.
+#
+# The OpenSSL library constructs error codes by prepending a format string
+# to the uppercased alert reason; OpenSSL 3.x changed the separator
+# (e.g. `SSLV3_ALERT_BAD_RECORD_MAC` → `SSL/TLS_ALERT_BAD_RECORD_MAC`),
+# which silently stopped matching anything explicit.  Matching on the
+# stable substrings (`bad record mac`, `ssl alert`, `tls alert`, etc.)
+# survives future OpenSSL format churn without code changes.
+_SSL_TRANSIENT_PATTERNS = [
+    # Space-separated (human-readable form, Python ssl module, most SDKs)
+    "bad record mac",
+    "ssl alert",
+    "tls alert",
+    "ssl handshake failure",
+    "tlsv1 alert",
+    "sslv3 alert",
+    # Underscore-separated (OpenSSL error code tokens, e.g.
+    # `ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC`, `SSLV3_ALERT_BAD_RECORD_MAC`)
+    "bad_record_mac",
+    "ssl_alert",
+    "tls_alert",
+    "tls_alert_internal_error",
+    # Python ssl module prefix, e.g. "[SSL: BAD_RECORD_MAC]"
+    "[ssl:",
+]
+=======
+# OpenRouter aggregator policy-block patterns.
+#
+# When a user's OpenRouter account privacy setting (or a per-request
+# `provider.data_collection: deny` preference) excludes the only endpoint
+# serving a model, OpenRouter returns 404 with a *specific* message that is
+# distinct from "model not found":
+#
+#   "No endpoints available matching your guardrail restrictions and
+#    data policy. Configure: https://openrouter.ai/settings/privacy"
+#
+# We classify this as `provider_policy_blocked` rather than
+# `model_not_found` because:
+#   - The model *exists* — model_not_found is misleading in logs
+#   - Provider fallback won't help: the account-level setting applies to
+#     every call on the same OpenRouter account
+#   - The error body already contains the fix URL, so the user gets
+#     actionable guidance without us rewriting the message
+_PROVIDER_POLICY_BLOCKED_PATTERNS = [
+    "no endpoints available matching your guardrail",
+    "no endpoints available matching your data policy",
+    "no endpoints found matching your data policy",
+]
+
+# Provider content-policy / safety-filter blocks. Distinct from
+# ``provider_policy_blocked`` above (which is an OpenRouter *account*-level
+# data/privacy guardrail) — these are *per-prompt* safety decisions made by
+# the upstream model provider. They are deterministic for the unchanged
+# request, so retrying the same prompt three times just reproduces the same
+# block and burns paid attempts on a refusal. The recovery is to switch to a
+# configured fallback model/provider immediately, or surface the block to
+# the user with actionable guidance if no fallback exists.
+#
+# Patterns are intentionally narrow — each phrase is a verbatim string from
+# a specific provider's safety pipeline, not a generic word like "policy" or
+# "violation" that could collide with billing/auth/format errors:
+#   • OpenAI Codex cybersecurity refusal (gpt-5.5, the case from #18028)
+#   • OpenAI moderation refusal ("violates our usage policies", with
+#     "usage policies" disambiguating from billing's "exceeded ... policy")
+#   • Anthropic safety refusal ("prompt was flagged by ... safety system")
+#   • OpenAI Responses content filter
+_CONTENT_POLICY_BLOCKED_PATTERNS = [
+    # OpenAI Codex (#18028) — message may arrive without an HTTP status
+    "flagged for possible cybersecurity risk",
+    "trusted access for cyber",
+    # OpenAI moderation — chat completions / responses
+    "violates our usage policies",
+    "violates openai's usage policies",
+    "your request was flagged by",
+    # Anthropic safety system
+    "prompt was flagged by our safety",
+    "responses cannot be generated due to safety",
+    # Generic content-filter wording seen on Azure / OpenAI Responses.
+    # ``content_filter`` (underscore) is the OpenAI-standard error/finish
+    # token surfaced verbatim by their SDKs when a request is blocked.
+    # ``responsibleaipolicyviolation`` is Azure OpenAI's error code.
+    # Deliberately NOT matching the space variant ("content filter") — it
+    # appears in benign config descriptions and tooltip text that providers
+    # echo back; the underscore form is provider-specific enough.
+    "content_filter",
+    "responsibleaipolicyviolation",
+    # MiniMax output-layer safety filter. The error string is surfaced
+    # verbatim by MiniMax SDK / OpenAI-compatible endpoints, usually in the
+    # form "output new_sensitive (1027)" when the model's *output* (often a
+    # large tool-call argument block) trips the upstream safety filter and
+    # the SSE stream is truncated mid-flight. ``new_sensitive`` is the
+    # filter name and is narrow enough that billing / format / auth error
+    # strings will not collide. See #32421.
+    "new_sensitive",
+]
+
+# Auth patterns (non-status-code signals)
+_AUTH_PATTERNS = [
+    "invalid api key",
+    "invalid_api_key",
+    "gateway_auth_failed",
+    "authentication",
+    "unauthorized",
+    "forbidden",
+    "invalid token",
+    "token expired",
+    "token revoked",
+    "access denied",
+]
+
+# Anthropic thinking block signature patterns
+_THINKING_SIG_PATTERNS = [
+    "signature",  # Combined with "thinking" check
+]
+
+# Local inference servers can reject a request that still carries reasoning
+# controls when the model has no thinking capability. This is deterministic
+# model/configuration drift and must not trigger a remote fallback.
+_UNSUPPORTED_THINKING_PATTERNS = [
+    "does not support thinking",
+    "thinking is not supported",
+    "unsupported thinking",
+]
+
+# Message-string patterns that indicate a provider-side timeout even when
+# the exception type is generic (e.g. RuntimeError from a local shim that
+# wraps a subprocess timeout).  Checked before the type-based transport
+# heuristics so custom-provider "timed out" errors don't fall through to
+# Provider empty-response advisories (OpenRouter / nano-gpt / similar).
+# Checked before context-overflow matching because the advisory text often
+# mentions "max_tokens" as a possible cause, which historically sat in
+# _CONTEXT_OVERFLOW_PATTERNS and sent healthy sessions into a compression
+# death spiral ending in "Cannot compress further".
+_EMPTY_PROVIDER_RESPONSE_PATTERNS = [
+    "returned an empty response",
+    "empty response despite retries",
+    "provider returned an empty response",
+    "model returning empty responses",
+    "empty response stream",
+]
+
+# the unknown bucket and get misreported as empty responses.
+_TIMEOUT_MESSAGE_PATTERNS = [
+    "timed out",
+    "turn timed out",
+    "request timed out",
+    "deadline exceeded",
+    "operation timed out",
+    "upstream timed out",
+]
+
+# Connection-establishment / DNS failure message patterns.  These surface
+# when the exception TYPE is generic (RuntimeError/Exception from a local
+# shim, MCP bridge, subprocess wrapper, or an SDK that re-raises without
+# chaining) so the _TRANSPORT_ERROR_TYPES check never fires, and the error
+# carries no HTTP status.  Without message-level matching they fall through
+# to FailoverReason.unknown, which misses the transport eager-fallback path
+# in the retry loop (unknown retries the same dead endpoint for the full
+# budget before fallback).  Ported from anomalyco/opencode#40707, which hit
+# the same bug shape: serialized midstream errors matched by type only.
+#
+# Deliberately EXCLUDES mid-stream disconnect strings ("connection reset by
+# peer", "peer closed connection", "unexpected eof", "socket hang up") —
+# those belong to _SERVER_DISCONNECT_PATTERNS, whose classification step
+# runs later and routes large sessions to context-overflow compression.
+# A connection that was never established cannot be a server-side overflow
+# rejection, so these are safe to classify as plain retryable transport.
+_CONNECTION_MESSAGE_PATTERNS = [
+    # TCP connect failures
+    "connection refused",
+    "econnrefused",
+    "no route to host",
+    "network is unreachable",
+    "network unreachable",
+    # DNS resolution failures (Python, glibc, macOS, Node bridge phrasings)
+    "name or service not known",
+    "temporary failure in name resolution",
+    "nodename nor servname provided",
+    "getaddrinfo failed",
+    "getaddrinfo enotfound",
+    "eai_again",
+    # Node/undici bridge generic network failure (MCP servers, local shims)
+    "fetch failed",
+    "failed to fetch",
+    # Envoy/proxy upstream connect failure (cloud gateways)
+    "upstream connect error",
+]
+
+# Transport error type names
+_TRANSPORT_ERROR_TYPES = frozenset({
+    "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+    "ConnectError", "RemoteProtocolError",
+    "ConnectionError", "ConnectionResetError",
+    "ConnectionAbortedError", "BrokenPipeError",
+    "TimeoutError", "ReadError",
+    "ServerDisconnectedError",
+    # SSL/TLS transport errors — transient mid-stream handshake/record
+    # failures that should retry rather than surface as a stalled session.
+    # ssl.SSLError subclasses OSError (caught by isinstance) but we list
+    # the type names here so provider-wrapped SSL errors (e.g. when the
+    # SDK re-raises without preserving the exception chain) still classify
+    # as transport rather than falling through to the unknown bucket.
+    "SSLError", "SSLZeroReturnError", "SSLWantReadError",
+    "SSLWantWriteError", "SSLEOFError", "SSLSyscallError",
+    # OpenAI SDK errors (not subclasses of Python builtins)
+    "APIConnectionError",
+    "APITimeoutError",
+})
+
+# Server disconnect patterns (no status code, but transport-level).
+# These are the "ambiguous" patterns — a plain connection close could be
+# transient transport hiccup OR server-side context overflow rejection
+# (common when the API gateway disconnects instead of returning an HTTP
+# error for oversized requests).  A large session + one of these patterns
+# triggers the context-overflow-with-compression recovery path.
+_SERVER_DISCONNECT_PATTERNS = [
+    "server disconnected",
+    "peer closed connection",
+    "connection reset by peer",
+    "connection was closed",
+    "network connection lost",
+    "unexpected eof",
+    "incomplete chunked read",
+]
+
+# SSL certificate verification failures — deterministic, NOT transient.
+#
+# A failed certificate chain (TLS-inspecting corporate proxy, missing
+# custom CA in the trust store, expired certificate, self-signed cert)
+# fails identically on every retry. Burning the retry budget before
+# surfacing the error hides the actionable fix from the user for minutes.
+# Inspired by Claude Code v2.1.199 (July 2026), which made SSL certificate
+# errors fail immediately with a fix hint instead of retrying.
+#
+# Must be checked BEFORE _SSL_TRANSIENT_PATTERNS — "certificate verify
+# failed" messages usually also contain "[SSL:" which would otherwise
+# match the transient list and retry forever.
+_SSL_CERT_VERIFY_PATTERNS = [
+    "certificate verify failed",       # Python ssl module canonical text
+    "certificate_verify_failed",       # OpenSSL error token
+    "unable to get local issuer certificate",
+    "self-signed certificate",
+    "self signed certificate",
+    "certificate has expired",
+    "hostname mismatch, certificate is not valid",
+    "unable to verify the first certificate",  # Node/undici phrasing (MCP bridges)
+]
+
+# SSL/TLS transient failure patterns — intentionally distinct from
+# _SERVER_DISCONNECT_PATTERNS above.
+#
+# An SSL alert mid-stream is almost always a transport-layer hiccup
+# (flaky network, mid-session TLS renegotiation failure, load balancer
+# dropping the connection) — NOT a server-side context overflow signal.
+# So we want the retry path but NOT the compression path; lumping these
+# into _SERVER_DISCONNECT_PATTERNS would trigger unnecessary (and
+# expensive) context compression on any large-session SSL hiccup.
+#
+# The OpenSSL library constructs error codes by prepending a format string
+# to the uppercased alert reason; OpenSSL 3.x changed the separator
+# (e.g. `SSLV3_ALERT_BAD_RECORD_MAC` → `SSL/TLS_ALERT_BAD_RECORD_MAC`),
+# which silently stopped matching anything explicit.  Matching on the
+# stable substrings (`bad record mac`, `ssl alert`, `tls alert`, etc.)
+# survives future OpenSSL format churn without code changes.
+_SSL_TRANSIENT_PATTERNS = [
+    # Space-separated (human-readable form, Python ssl module, most SDKs)
+    "bad record mac",
+    "ssl alert",
+    "tls alert",
+    "ssl handshake failure",
+    "tlsv1 alert",
+    "sslv3 alert",
+    # Underscore-separated (OpenSSL error code tokens, e.g.
+    # `ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC`, `SSLV3_ALERT_BAD_RECORD_MAC`)
+    "bad_record_mac",
+    "ssl_alert",
+    "tls_alert",
+    "tls_alert_internal_error",
+    # Python ssl module prefix, e.g. "[SSL: BAD_RECORD_MAC]"
+    "[ssl:",
+]
+>>>>>>> 89e37e7be6 (fix: fail closed on unsupported local reasoning)
 
 
 def _is_codex_masked_replay_rejection(c: "_Ctx") -> bool:
@@ -845,10 +1351,669 @@ def _json_dict(text: Any) -> Optional[dict]:
     if not (isinstance(text, str) and text.strip()):
         return None
     try:
+<<<<<<< HEAD
         inner = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return None
     return inner if isinstance(inner, dict) else None
+||||||| parent of 89e37e7be6 (fix: fail closed on unsupported local reasoning)
+        from hermes_cli.plugins import get_plugin_error_classification
+        plugin_classification = get_plugin_error_classification(
+            provider=provider,
+            model=model,
+            status_code=status_code,
+            error_type=error_type,
+            error_code=error_code,
+            error_message=error_msg,
+            error_body=body,
+            error=error,
+            approx_tokens=approx_tokens,
+            context_length=context_length,
+            num_messages=num_messages,
+        )
+    except Exception as exc:
+        logger.debug("Plugin error classification unavailable: %s", exc)
+        plugin_classification = None
+    if plugin_classification is not None:
+        reason = plugin_classification.pop("reason")
+        logger.info(
+            "API error classified by plugin hook: %s (provider=%s, status=%s)",
+            reason.value, provider, status_code,
+        )
+        return _result(reason, **plugin_classification)
+
+    # ── 1. Provider-specific patterns (highest priority) ────────────
+
+    # Provider content-policy / safety-filter block. The provider has made a
+    # deterministic refusal decision about THIS prompt — retrying unchanged
+    # just reproduces the same refusal and burns paid attempts. Must run
+    # before status-based classification so a 400 safety block isn't
+    # downgraded to a generic ``format_error`` and a status-less block
+    # (OpenAI Codex SDK can raise without one) isn't left in the retryable
+    # ``unknown`` bucket. See issue #18028.
+    if any(p in error_msg for p in _CONTENT_POLICY_BLOCKED_PATTERNS):
+        return _result(
+            FailoverReason.content_policy_blocked,
+            retryable=False,
+            should_fallback=True,
+        )
+
+    # Anthropic thinking block recovery (400).  Two distinct failure modes,
+    # same recovery (strip all reasoning_details and retry without thinking
+    # blocks — see the thinking_signature handler in conversation_loop.py):
+    #   1. Signature mismatch: a thinking block is signed against the full
+    #      turn content; any upstream mutation (context compression, session
+    #      truncation, message merging) invalidates the signature.
+    #      Pattern: "signature" + "thinking".
+    #   2. Frozen-block mutation: Anthropic rejects any change to the
+    #      thinking/redacted_thinking blocks in the *latest* assistant
+    #      message — "`thinking` or `redacted_thinking` blocks in the latest
+    #      assistant message cannot be modified. These blocks must remain as
+    #      they were in the original response."  This carries no "signature"
+    #      token, so the original pattern missed it and the turn hard-aborted
+    #      as a non-retryable client error instead of self-healing.
+    #      Pattern: "thinking" + ("cannot be modified" | "must remain as they were").
+    # Don't gate on provider — OpenRouter proxies Anthropic errors, so the
+    # provider may be "openrouter" even though the error is Anthropic-specific.
+    # The combined patterns are unique enough.
+    if (
+        status_code == 400
+        and "thinking" in error_msg
+        and (
+            "signature" in error_msg
+            or "cannot be modified" in error_msg
+            or "must remain as they were" in error_msg
+        )
+    ):
+        return _result(
+            FailoverReason.thinking_signature,
+            retryable=True,
+            should_compress=False,
+        )
+
+    # Anthropic long-context tier gate (429 "extra usage" + "long context")
+    if (
+        status_code == 429
+        and "extra usage" in error_msg
+        and "long context" in error_msg
+    ):
+        return _result(
+            FailoverReason.long_context_tier,
+            retryable=True,
+            should_compress=True,
+        )
+
+    # Anthropic OAuth subscription rejects the 1M-context beta header.
+    # Observed error body: "The long context beta is not yet available for
+    # this subscription." Returned as HTTP 400 from native Anthropic when
+    # the subscription doesn't include 1M context, even though the request
+    # carries ``anthropic-beta: context-1m-2025-08-07``. The recovery path
+    # in run_agent.py rebuilds the Anthropic client with the beta stripped
+    # and retries once. Pattern is narrow enough that it won't collide with
+    # the 429 tier-gate pattern above (different status, different phrase).
+    if (
+        status_code == 400
+        and "long context beta" in error_msg
+        and "not yet available" in error_msg
+    ):
+        return _result(
+            FailoverReason.oauth_long_context_beta_forbidden,
+            retryable=True,
+            should_compress=False,
+        )
+
+    # llama.cpp's ``json-schema-to-grammar`` converter (used by its OAI
+    # server to build GBNF tool-call parsers) rejects regex escape classes
+    # like ``\d``/``\w``/``\s`` and most ``format`` values. MCP servers
+    # routinely emit ``"pattern": "\\d{4}-\\d{2}-\\d{2}"`` for date/phone/
+    # email params. llama.cpp surfaces this as HTTP 400 with one of a few
+    # recognizable phrases; on match we strip ``pattern``/``format`` from
+    # ``self.tools`` in the retry loop and retry once. Cloud providers are
+    # unaffected — they accept these keywords and we never hit this branch.
+    #
+    # Exclude Qwen/vLLM template raise_exception("No user query found…")
+    # wrapped by some local engines as applyPromptTemplate / "Unable to
+    # generate parser for this template". That is a poisoned transcript
+    # shape (handled via _INVALID_MESSAGE_BODY_PATTERNS → format_error),
+    # not a tool-schema grammar rejection — matching it here strips
+    # pattern/format keywords and retries uselessly while the real fix
+    # is /new (or a successful compression that preserves a user turn).
+    if status_code == 400:
+        _llama_cpp_grammar_hit = (
+            "error parsing grammar" in error_msg
+            or "json-schema-to-grammar" in error_msg
+            or (
+                "unable to generate parser" in error_msg
+                and "template" in error_msg
+            )
+        )
+    else:
+        _llama_cpp_grammar_hit = False
+    if (
+        _llama_cpp_grammar_hit
+        and _NO_USER_QUERY_SIGNAL not in error_msg
+    ):
+        return _result(
+            FailoverReason.llama_cpp_grammar_pattern,
+            retryable=True,
+            should_compress=False,
+        )
+
+    # xAI Grok subscription entitlement errors.
+    #
+    # xAI returns "You have either run out of available resources or do not
+    # have an active Grok subscription" through two distinct code paths:
+    #
+    #   • HTTP 403 — status_code is set; _classify_by_status (step 2) routes
+    #     it to FailoverReason.auth correctly, and _is_entitlement_failure
+    #     then prevents the credential-refresh loop.
+    #
+    #   • SSE ``type=error`` frame — surfaced as _StreamErrorEvent with
+    #     status_code=None.  _classify_by_status is skipped entirely, and
+    #     "grok subscription" / "out of available resources" appear in none
+    #     of the message-pattern lists below.  Without this guard the error
+    #     falls through to FailoverReason.unknown (retryable=True), burning
+    #     max_retries before the agent stops — and _is_entitlement_failure
+    #     is never called because it only runs under FailoverReason.auth.
+    #
+    # Both X Premium+ and SuperGrok subscribers hit this path when their
+    # subscription tier does not cover the requested model or feature.
+    if (
+        "do not have an active grok subscription" in error_msg
+        or ("out of available resources" in error_msg and "grok" in error_msg)
+    ):
+        return _result(
+            FailoverReason.auth,
+            retryable=False,
+            should_fallback=True,
+        )
+
+    # ── 2. HTTP status code classification ──────────────────────────
+
+    if status_code is not None:
+        classified = _classify_by_status(
+            status_code, error_msg, error_code, body,
+            provider=provider_lower, model=model_lower,
+            approx_tokens=approx_tokens, context_length=context_length,
+            num_messages=num_messages,
+            response_headers=response_headers,
+            result_fn=_result,
+        )
+        if classified is not None:
+            return classified
+
+    # Local MoA streaming compatibility errors are adapter-shape bugs, not a
+    # provider outage. Falling back to another model would silently switch the
+    # user's selected MoA route to a single-model answer (#55933 follow-up).
+    if provider_lower == "moa" and (
+        "'types.SimpleNamespace' object is not iterable" in str(error)
+        or "'types.SimpleNamespace' object has no attribute 'index'" in str(error)
+    ):
+        return _result(
+            FailoverReason.format_error,
+            retryable=False,
+            should_fallback=False,
+        )
+
+    # Local MoA config drift is deterministic: a persisted session can retain
+    # a preset name that was later renamed/deleted. Retrying the same lookup
+    # cannot recover and makes a clear config error look like an API outage.
+    from agent.errors import MoAPresetNotFoundError
+
+    if isinstance(error, MoAPresetNotFoundError):
+        return _result(FailoverReason.model_not_found, retryable=False)
+
+    # ── 3. Error code classification ────────────────────────────────
+
+    if error_code:
+        classified = _classify_by_error_code(error_code, error_msg, _result)
+        if classified is not None:
+            return classified
+
+    # ── 4. Message pattern matching (no status code) ────────────────
+
+    classified = _classify_by_message(
+        error_msg, error_type,
+        approx_tokens=approx_tokens,
+        context_length=context_length,
+        result_fn=_result,
+    )
+    if classified is not None:
+        return classified
+
+    # ── 5. SSL certificate verification failures → fail fast ────────
+    # A broken certificate chain (TLS-inspecting proxy, missing custom CA,
+    # expired/self-signed cert) is deterministic for the host — every retry
+    # reproduces the identical handshake failure. Fail immediately with
+    # actionable guidance instead of burning the retry budget first.
+    # Checked BEFORE the transient-SSL patterns: cert-verify messages also
+    # contain "[ssl:" which would otherwise match the transient list.
+    # Inspired by Claude Code v2.1.199 (July 2026).
+    if any(p in error_msg for p in _SSL_CERT_VERIFY_PATTERNS):
+        return _result(
+            FailoverReason.ssl_cert_verification,
+            retryable=False,
+            should_fallback=False,
+        )
+
+    # ── 5b. SSL/TLS transient errors → retry as timeout (not compression) ──
+    # SSL alerts mid-stream are transport hiccups, not server-side context
+    # overflow signals.  Classify before the disconnect check so a large
+    # session doesn't incorrectly trigger context compression when the real
+    # cause is a flaky TLS handshake.  Also matches when the error is
+    # wrapped in a generic exception whose message string carries the SSL
+    # alert text but the type isn't ssl.SSLError (happens with some SDKs
+    # that re-raise without chaining).
+    if any(p in error_msg for p in _SSL_TRANSIENT_PATTERNS):
+        return _result(FailoverReason.timeout, retryable=True)
+
+    # ── 6. Server disconnect + large session → context overflow ─────
+    # Must come BEFORE generic transport error catch — a disconnect on
+    # a large session is more likely context overflow than a transient
+    # transport hiccup.  Without this ordering, RemoteProtocolError
+    # always maps to timeout regardless of session size.
+
+    is_disconnect = any(p in error_msg for p in _SERVER_DISCONNECT_PATTERNS)
+    if is_disconnect and not status_code:
+        # Reasoning-model override: a transport disconnect on a reasoning
+        # model is much more likely the upstream proxy idle-killing a
+        # long thinking stream than a true context overflow — even on
+        # large sessions.  The default disconnect+large-session routing
+        # below would otherwise send the user into the compression
+        # branch (should_compress=True) and silently delete
+        # conversation history on a phantom context-length error.
+        # Reasoning models have multi-minute thinking phases that
+        # routinely exceed the cloud gateway's idle window (NVIDIA
+        # NIM ~120s — first-party repro at NVIDIA/NemoClaw#4846;
+        # OpenAI worker / Anthropic stream-idle similar).  The
+        # per-reasoning-model stale-timeout floor in
+        # agent/reasoning_timeouts.py raises the stale-detector
+        # threshold to tolerate long thinking, so a true
+        # transport-layer failure here is recoverable via the retry
+        # path — not via context compression.  Reclassify as timeout.
+        # (Part 1 of Fixes #52310.)
+        from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
+        if get_reasoning_stale_timeout_floor(model) is not None:
+            return _result(FailoverReason.timeout, retryable=True)
+        # Absolute token/message-count thresholds are only a proxy for smaller
+        # context windows.  Large-context sessions can have hundreds of
+        # messages while still being far below their actual token budget.
+        is_large = approx_tokens > context_length * 0.6 or (
+            context_length <= 256000 and (approx_tokens > 120000 or num_messages > 200)
+        )
+        if is_large:
+            return _result(
+                FailoverReason.context_overflow,
+                retryable=True,
+                should_compress=True,
+            )
+        return _result(FailoverReason.timeout, retryable=True)
+
+    # ── 7b. Stale-call circuit breaker → failover immediately ──────
+    # _check_stale_giveup() in agent/chat_completion_helpers.py raises a
+    # RuntimeError when the provider has been unresponsive for N
+    # consecutive stale attempts (default 5).  The error is NOT a transport
+    # timeout — the circuit breaker fires *before* any network call to avoid
+    # an indefinite stall.  Without this classification the RuntimeError
+    # falls through to FailoverReason.unknown (retryable=True), which burns
+    # all max_retries against the same dead provider (each retry hitting the
+    # circuit breaker instantly with zero network overhead) before fallback
+    # is attempted.  Classify as non-retryable + should_fallback so the
+    # retry loop activates the next fallback provider on the first hit.
+    if (
+        error_type == "RuntimeError"
+        and "consecutive stale attempts" in error_msg
+        and "aborting this call" in error_msg
+    ):
+        return _result(
+            FailoverReason.timeout,
+            retryable=False,
+            should_fallback=True,
+        )
+
+    # ── 8. Transport / timeout heuristics ───────────────────────────
+
+    if error_type in _TRANSPORT_ERROR_TYPES or isinstance(error, (TimeoutError, ConnectionError, OSError)):
+        return _result(FailoverReason.timeout, retryable=True)
+
+    # ── 9. Fallback: unknown ────────────────────────────────────────
+
+    return _result(FailoverReason.unknown, retryable=True)
+=======
+        from hermes_cli.plugins import get_plugin_error_classification
+        plugin_classification = get_plugin_error_classification(
+            provider=provider,
+            model=model,
+            status_code=status_code,
+            error_type=error_type,
+            error_code=error_code,
+            error_message=error_msg,
+            error_body=body,
+            error=error,
+            approx_tokens=approx_tokens,
+            context_length=context_length,
+            num_messages=num_messages,
+        )
+    except Exception as exc:
+        logger.debug("Plugin error classification unavailable: %s", exc)
+        plugin_classification = None
+    if plugin_classification is not None:
+        reason = plugin_classification.pop("reason")
+        logger.info(
+            "API error classified by plugin hook: %s (provider=%s, status=%s)",
+            reason.value, provider, status_code,
+        )
+        return _result(reason, **plugin_classification)
+
+    # ── 1. Provider-specific patterns (highest priority) ────────────
+
+    # A model that explicitly rejects thinking cannot be repaired by a retry,
+    # and this signal must never activate a remote fallback. The local
+    # capability probe normally prevents the request, so reaching this branch
+    # is actionable deployment/configuration drift.
+    if any(p in error_msg for p in _UNSUPPORTED_THINKING_PATTERNS):
+        return _result(
+            FailoverReason.unsupported_thinking,
+            retryable=False,
+            should_fallback=False,
+        )
+
+    # Provider content-policy / safety-filter block. The provider has made a
+    # deterministic refusal decision about THIS prompt — retrying unchanged
+    # just reproduces the same refusal and burns paid attempts. Must run
+    # before status-based classification so a 400 safety block isn't
+    # downgraded to a generic ``format_error`` and a status-less block
+    # (OpenAI Codex SDK can raise without one) isn't left in the retryable
+    # ``unknown`` bucket. See issue #18028.
+    if any(p in error_msg for p in _CONTENT_POLICY_BLOCKED_PATTERNS):
+        return _result(
+            FailoverReason.content_policy_blocked,
+            retryable=False,
+            should_fallback=True,
+        )
+
+    # Anthropic thinking block recovery (400).  Two distinct failure modes,
+    # same recovery (strip all reasoning_details and retry without thinking
+    # blocks — see the thinking_signature handler in conversation_loop.py):
+    #   1. Signature mismatch: a thinking block is signed against the full
+    #      turn content; any upstream mutation (context compression, session
+    #      truncation, message merging) invalidates the signature.
+    #      Pattern: "signature" + "thinking".
+    #   2. Frozen-block mutation: Anthropic rejects any change to the
+    #      thinking/redacted_thinking blocks in the *latest* assistant
+    #      message — "`thinking` or `redacted_thinking` blocks in the latest
+    #      assistant message cannot be modified. These blocks must remain as
+    #      they were in the original response."  This carries no "signature"
+    #      token, so the original pattern missed it and the turn hard-aborted
+    #      as a non-retryable client error instead of self-healing.
+    #      Pattern: "thinking" + ("cannot be modified" | "must remain as they were").
+    # Don't gate on provider — OpenRouter proxies Anthropic errors, so the
+    # provider may be "openrouter" even though the error is Anthropic-specific.
+    # The combined patterns are unique enough.
+    if (
+        status_code == 400
+        and "thinking" in error_msg
+        and (
+            "signature" in error_msg
+            or "cannot be modified" in error_msg
+            or "must remain as they were" in error_msg
+        )
+    ):
+        return _result(
+            FailoverReason.thinking_signature,
+            retryable=True,
+            should_compress=False,
+        )
+
+    # Anthropic long-context tier gate (429 "extra usage" + "long context")
+    if (
+        status_code == 429
+        and "extra usage" in error_msg
+        and "long context" in error_msg
+    ):
+        return _result(
+            FailoverReason.long_context_tier,
+            retryable=True,
+            should_compress=True,
+        )
+
+    # Anthropic OAuth subscription rejects the 1M-context beta header.
+    # Observed error body: "The long context beta is not yet available for
+    # this subscription." Returned as HTTP 400 from native Anthropic when
+    # the subscription doesn't include 1M context, even though the request
+    # carries ``anthropic-beta: context-1m-2025-08-07``. The recovery path
+    # in run_agent.py rebuilds the Anthropic client with the beta stripped
+    # and retries once. Pattern is narrow enough that it won't collide with
+    # the 429 tier-gate pattern above (different status, different phrase).
+    if (
+        status_code == 400
+        and "long context beta" in error_msg
+        and "not yet available" in error_msg
+    ):
+        return _result(
+            FailoverReason.oauth_long_context_beta_forbidden,
+            retryable=True,
+            should_compress=False,
+        )
+
+    # llama.cpp's ``json-schema-to-grammar`` converter (used by its OAI
+    # server to build GBNF tool-call parsers) rejects regex escape classes
+    # like ``\d``/``\w``/``\s`` and most ``format`` values. MCP servers
+    # routinely emit ``"pattern": "\\d{4}-\\d{2}-\\d{2}"`` for date/phone/
+    # email params. llama.cpp surfaces this as HTTP 400 with one of a few
+    # recognizable phrases; on match we strip ``pattern``/``format`` from
+    # ``self.tools`` in the retry loop and retry once. Cloud providers are
+    # unaffected — they accept these keywords and we never hit this branch.
+    #
+    # Exclude Qwen/vLLM template raise_exception("No user query found…")
+    # wrapped by some local engines as applyPromptTemplate / "Unable to
+    # generate parser for this template". That is a poisoned transcript
+    # shape (handled via _INVALID_MESSAGE_BODY_PATTERNS → format_error),
+    # not a tool-schema grammar rejection — matching it here strips
+    # pattern/format keywords and retries uselessly while the real fix
+    # is /new (or a successful compression that preserves a user turn).
+    if status_code == 400:
+        _llama_cpp_grammar_hit = (
+            "error parsing grammar" in error_msg
+            or "json-schema-to-grammar" in error_msg
+            or (
+                "unable to generate parser" in error_msg
+                and "template" in error_msg
+            )
+        )
+    else:
+        _llama_cpp_grammar_hit = False
+    if (
+        _llama_cpp_grammar_hit
+        and _NO_USER_QUERY_SIGNAL not in error_msg
+    ):
+        return _result(
+            FailoverReason.llama_cpp_grammar_pattern,
+            retryable=True,
+            should_compress=False,
+        )
+
+    # xAI Grok subscription entitlement errors.
+    #
+    # xAI returns "You have either run out of available resources or do not
+    # have an active Grok subscription" through two distinct code paths:
+    #
+    #   • HTTP 403 — status_code is set; _classify_by_status (step 2) routes
+    #     it to FailoverReason.auth correctly, and _is_entitlement_failure
+    #     then prevents the credential-refresh loop.
+    #
+    #   • SSE ``type=error`` frame — surfaced as _StreamErrorEvent with
+    #     status_code=None.  _classify_by_status is skipped entirely, and
+    #     "grok subscription" / "out of available resources" appear in none
+    #     of the message-pattern lists below.  Without this guard the error
+    #     falls through to FailoverReason.unknown (retryable=True), burning
+    #     max_retries before the agent stops — and _is_entitlement_failure
+    #     is never called because it only runs under FailoverReason.auth.
+    #
+    # Both X Premium+ and SuperGrok subscribers hit this path when their
+    # subscription tier does not cover the requested model or feature.
+    if (
+        "do not have an active grok subscription" in error_msg
+        or ("out of available resources" in error_msg and "grok" in error_msg)
+    ):
+        return _result(
+            FailoverReason.auth,
+            retryable=False,
+            should_fallback=True,
+        )
+
+    # ── 2. HTTP status code classification ──────────────────────────
+
+    if status_code is not None:
+        classified = _classify_by_status(
+            status_code, error_msg, error_code, body,
+            provider=provider_lower, model=model_lower,
+            approx_tokens=approx_tokens, context_length=context_length,
+            num_messages=num_messages,
+            response_headers=response_headers,
+            result_fn=_result,
+        )
+        if classified is not None:
+            return classified
+
+    # Local MoA streaming compatibility errors are adapter-shape bugs, not a
+    # provider outage. Falling back to another model would silently switch the
+    # user's selected MoA route to a single-model answer (#55933 follow-up).
+    if provider_lower == "moa" and (
+        "'types.SimpleNamespace' object is not iterable" in str(error)
+        or "'types.SimpleNamespace' object has no attribute 'index'" in str(error)
+    ):
+        return _result(
+            FailoverReason.format_error,
+            retryable=False,
+            should_fallback=False,
+        )
+
+    # Local MoA config drift is deterministic: a persisted session can retain
+    # a preset name that was later renamed/deleted. Retrying the same lookup
+    # cannot recover and makes a clear config error look like an API outage.
+    from agent.errors import MoAPresetNotFoundError
+
+    if isinstance(error, MoAPresetNotFoundError):
+        return _result(FailoverReason.model_not_found, retryable=False)
+
+    # ── 3. Error code classification ────────────────────────────────
+
+    if error_code:
+        classified = _classify_by_error_code(error_code, error_msg, _result)
+        if classified is not None:
+            return classified
+
+    # ── 4. Message pattern matching (no status code) ────────────────
+
+    classified = _classify_by_message(
+        error_msg, error_type,
+        approx_tokens=approx_tokens,
+        context_length=context_length,
+        result_fn=_result,
+    )
+    if classified is not None:
+        return classified
+
+    # ── 5. SSL certificate verification failures → fail fast ────────
+    # A broken certificate chain (TLS-inspecting proxy, missing custom CA,
+    # expired/self-signed cert) is deterministic for the host — every retry
+    # reproduces the identical handshake failure. Fail immediately with
+    # actionable guidance instead of burning the retry budget first.
+    # Checked BEFORE the transient-SSL patterns: cert-verify messages also
+    # contain "[ssl:" which would otherwise match the transient list.
+    # Inspired by Claude Code v2.1.199 (July 2026).
+    if any(p in error_msg for p in _SSL_CERT_VERIFY_PATTERNS):
+        return _result(
+            FailoverReason.ssl_cert_verification,
+            retryable=False,
+            should_fallback=False,
+        )
+
+    # ── 5b. SSL/TLS transient errors → retry as timeout (not compression) ──
+    # SSL alerts mid-stream are transport hiccups, not server-side context
+    # overflow signals.  Classify before the disconnect check so a large
+    # session doesn't incorrectly trigger context compression when the real
+    # cause is a flaky TLS handshake.  Also matches when the error is
+    # wrapped in a generic exception whose message string carries the SSL
+    # alert text but the type isn't ssl.SSLError (happens with some SDKs
+    # that re-raise without chaining).
+    if any(p in error_msg for p in _SSL_TRANSIENT_PATTERNS):
+        return _result(FailoverReason.timeout, retryable=True)
+
+    # ── 6. Server disconnect + large session → context overflow ─────
+    # Must come BEFORE generic transport error catch — a disconnect on
+    # a large session is more likely context overflow than a transient
+    # transport hiccup.  Without this ordering, RemoteProtocolError
+    # always maps to timeout regardless of session size.
+
+    is_disconnect = any(p in error_msg for p in _SERVER_DISCONNECT_PATTERNS)
+    if is_disconnect and not status_code:
+        # Reasoning-model override: a transport disconnect on a reasoning
+        # model is much more likely the upstream proxy idle-killing a
+        # long thinking stream than a true context overflow — even on
+        # large sessions.  The default disconnect+large-session routing
+        # below would otherwise send the user into the compression
+        # branch (should_compress=True) and silently delete
+        # conversation history on a phantom context-length error.
+        # Reasoning models have multi-minute thinking phases that
+        # routinely exceed the cloud gateway's idle window (NVIDIA
+        # NIM ~120s — first-party repro at NVIDIA/NemoClaw#4846;
+        # OpenAI worker / Anthropic stream-idle similar).  The
+        # per-reasoning-model stale-timeout floor in
+        # agent/reasoning_timeouts.py raises the stale-detector
+        # threshold to tolerate long thinking, so a true
+        # transport-layer failure here is recoverable via the retry
+        # path — not via context compression.  Reclassify as timeout.
+        # (Part 1 of Fixes #52310.)
+        from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
+        if get_reasoning_stale_timeout_floor(model) is not None:
+            return _result(FailoverReason.timeout, retryable=True)
+        # Absolute token/message-count thresholds are only a proxy for smaller
+        # context windows.  Large-context sessions can have hundreds of
+        # messages while still being far below their actual token budget.
+        is_large = approx_tokens > context_length * 0.6 or (
+            context_length <= 256000 and (approx_tokens > 120000 or num_messages > 200)
+        )
+        if is_large:
+            return _result(
+                FailoverReason.context_overflow,
+                retryable=True,
+                should_compress=True,
+            )
+        return _result(FailoverReason.timeout, retryable=True)
+
+    # ── 7b. Stale-call circuit breaker → failover immediately ──────
+    # _check_stale_giveup() in agent/chat_completion_helpers.py raises a
+    # RuntimeError when the provider has been unresponsive for N
+    # consecutive stale attempts (default 5).  The error is NOT a transport
+    # timeout — the circuit breaker fires *before* any network call to avoid
+    # an indefinite stall.  Without this classification the RuntimeError
+    # falls through to FailoverReason.unknown (retryable=True), which burns
+    # all max_retries against the same dead provider (each retry hitting the
+    # circuit breaker instantly with zero network overhead) before fallback
+    # is attempted.  Classify as non-retryable + should_fallback so the
+    # retry loop activates the next fallback provider on the first hit.
+    if (
+        error_type == "RuntimeError"
+        and "consecutive stale attempts" in error_msg
+        and "aborting this call" in error_msg
+    ):
+        return _result(
+            FailoverReason.timeout,
+            retryable=False,
+            should_fallback=True,
+        )
+
+    # ── 8. Transport / timeout heuristics ───────────────────────────
+
+    if error_type in _TRANSPORT_ERROR_TYPES or isinstance(error, (TimeoutError, ConnectionError, OSError)):
+        return _result(FailoverReason.timeout, retryable=True)
+
+    # ── 9. Fallback: unknown ────────────────────────────────────────
+
+    return _result(FailoverReason.unknown, retryable=True)
+>>>>>>> 89e37e7be6 (fix: fail closed on unsupported local reasoning)
 
 
 def _openrouter_wrapped_message(err_obj: dict) -> str:
