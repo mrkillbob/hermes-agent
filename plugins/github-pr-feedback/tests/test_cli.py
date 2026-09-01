@@ -1616,6 +1616,7 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "local_ci_audit",
         "agent_labels",
         "merge_maintainer",
+        "merge_maintainers",
         "repair_steward",
         "release_maintenance",
         "not_before",

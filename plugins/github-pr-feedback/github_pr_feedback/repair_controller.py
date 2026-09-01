@@ -160,7 +160,7 @@ class RepairController:
         for repository in sorted(configured.repositories):
             base_refresh_slots_used = 0
             target = self._policy.targets[repository]
-            merge_policy = self._policy.merge_maintainer
+            merge_policy = self._policy.merge_policy_for(repository)
             base_head: str | None = None
             if merge_policy is not None and merge_policy.repository == repository:
                 try:

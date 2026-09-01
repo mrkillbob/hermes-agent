@@ -321,6 +321,15 @@ class FeedbackLedger:
             )
             """)
         self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS merge_enrollments (
+                repository TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                enrolled_at TEXT NOT NULL,
+                enrolled_by TEXT NOT NULL,
+                PRIMARY KEY (repository, pr_number)
+            )
+            """)
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS deployment_receipts (
                 receipt_id TEXT PRIMARY KEY,
                 repository TEXT NOT NULL,
@@ -1653,6 +1662,50 @@ class FeedbackLedger:
             return MergeReceipt.from_payload(json.loads(row[0]))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise LedgerStateError("stored merge receipt is invalid") from error
+
+    def enroll_merge_pr(
+        self,
+        repository: str,
+        pr_number: int,
+        *,
+        enrolled_at: datetime,
+        enrolled_by: str,
+    ) -> None:
+        """Persist per-PR merge intent; it survives worker and app restarts."""
+
+        if not repository or pr_number < 1 or not enrolled_by.strip():
+            raise ValueError("merge enrollment identity is invalid")
+        enrolled_at = _aware_utc(enrolled_at, "enrolled_at")
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO merge_enrollments (repository, pr_number, enrolled_at, enrolled_by) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(repository, pr_number) DO UPDATE SET "
+                "enrolled_at = excluded.enrolled_at, enrolled_by = excluded.enrolled_by",
+                (repository, pr_number, enrolled_at.isoformat(), enrolled_by.strip()),
+            )
+
+    def unenroll_merge_pr(self, repository: str, pr_number: int) -> None:
+        if not repository or pr_number < 1:
+            raise ValueError("merge enrollment identity is invalid")
+        with self._transaction():
+            self._connection.execute(
+                "DELETE FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
+                (repository, pr_number),
+            )
+
+    def is_merge_enrolled(self, repository: str, pr_number: int) -> bool:
+        row = self._connection.execute(
+            "SELECT 1 FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
+            (repository, pr_number),
+        ).fetchone()
+        return row is not None
+
+    def enrolled_merge_pr_numbers(self, repository: str) -> tuple[int, ...]:
+        rows = self._connection.execute(
+            "SELECT pr_number FROM merge_enrollments WHERE repository = ? ORDER BY pr_number",
+            (repository,),
+        ).fetchall()
+        return tuple(int(row[0]) for row in rows)
 
     def verification_required_merge_lease(
         self, repository: str, pr_number: int

@@ -378,6 +378,7 @@ class MergeMaintainerPolicy:
     receipt_max_age_seconds: int
     report_only: bool
     post_merge: PostMergePolicy | None
+    require_per_pr_enrollment: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,6 +438,22 @@ class PluginPolicy:
     merge_maintainer: MergeMaintainerPolicy | None = None
     repair_steward: RepairStewardPolicy | None = None
     release_maintenance: ReleaseMaintenancePolicy | None = None
+    merge_maintainers: tuple[MergeMaintainerPolicy, ...] = ()
+
+    def merge_policies(self) -> tuple[MergeMaintainerPolicy, ...]:
+        """Return configured merge lanes, preserving the legacy singular field."""
+
+        if self.merge_maintainers:
+            return self.merge_maintainers
+        if self.merge_maintainer is not None:
+            return (self.merge_maintainer,)
+        return ()
+
+    def merge_policy_for(self, repository: str) -> MergeMaintainerPolicy | None:
+        return next(
+            (candidate for candidate in self.merge_policies() if candidate.repository == repository),
+            None,
+        )
 
     def assignee_for(self, body: str) -> str:
         """Choose the unique highest-scoring specialist, otherwise the fallback."""
@@ -931,7 +948,8 @@ def _parse_merge_maintainer(
         "report_only",
         "post_merge",
     }
-    if set(raw) != expected:
+    optional = {"require_per_pr_enrollment"}
+    if not expected.issubset(raw) or set(raw) - expected - optional:
         raise ValueError("merge_maintainer has missing or unknown fields")
     repository = _repository(raw["repository"], "merge_maintainer repository")
     target = targets.get(repository)
@@ -966,6 +984,9 @@ def _parse_merge_maintainer(
     report_only = raw["report_only"]
     if not isinstance(report_only, bool):
         raise ValueError("report_only must be a boolean")
+    require_per_pr_enrollment = raw.get("require_per_pr_enrollment", False)
+    if not isinstance(require_per_pr_enrollment, bool):
+        raise ValueError("require_per_pr_enrollment must be a boolean")
     return MergeMaintainerPolicy(
         assignee=_nonempty_string(raw["assignee"], "merge_maintainer assignee"),
         repository=repository,
@@ -975,6 +996,7 @@ def _parse_merge_maintainer(
         receipt_max_age_seconds=receipt_max_age_seconds,
         report_only=report_only,
         post_merge=_parse_post_merge(raw["post_merge"], target=target),
+        require_per_pr_enrollment=require_per_pr_enrollment,
     )
 
 
@@ -1110,6 +1132,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "local_ci_audit",
         "agent_labels",
         "merge_maintainer",
+        "merge_maintainers",
         "repair_steward",
         "release_maintenance",
     }
@@ -1157,6 +1180,31 @@ def load_policy(raw: object) -> PluginPolicy:
     )
     if not reviewer_logins and not reviewer_associations:
         raise ValueError("at least one reviewer login or association is required")
+    singular_merge_policy = (
+        _parse_merge_maintainer(raw["merge_maintainer"], targets=targets)
+        if "merge_maintainer" in raw
+        else None
+    )
+    raw_merge_policies = raw.get("merge_maintainers")
+    if singular_merge_policy is not None and raw_merge_policies is not None:
+        raise ValueError("use merge_maintainer or merge_maintainers, not both")
+    if raw_merge_policies is None:
+        merge_policies = (
+            (singular_merge_policy,) if singular_merge_policy is not None else ()
+        )
+    else:
+        if (
+            isinstance(raw_merge_policies, (str, bytes))
+            or not isinstance(raw_merge_policies, Sequence)
+            or not raw_merge_policies
+        ):
+            raise ValueError("merge_maintainers must be a non-empty list")
+        merge_policies = tuple(
+            _parse_merge_maintainer(item, targets=targets)
+            for item in raw_merge_policies
+        )
+        if len({item.repository for item in merge_policies}) != len(merge_policies):
+            raise ValueError("merge_maintainers repositories must be unique")
     return PluginPolicy(
         enabled=True,
         targets=targets,
@@ -1182,11 +1230,7 @@ def load_policy(raw: object) -> PluginPolicy:
             if "agent_labels" in raw
             else None
         ),
-        merge_maintainer=(
-            _parse_merge_maintainer(raw["merge_maintainer"], targets=targets)
-            if "merge_maintainer" in raw
-            else None
-        ),
+        merge_maintainer=merge_policies[0] if len(merge_policies) == 1 else None,
         repair_steward=(
             _parse_repair_steward(raw["repair_steward"], targets=targets)
             if "repair_steward" in raw
@@ -1197,6 +1241,7 @@ def load_policy(raw: object) -> PluginPolicy:
             if "release_maintenance" in raw
             else None
         ),
+        merge_maintainers=merge_policies,
     )
 
 

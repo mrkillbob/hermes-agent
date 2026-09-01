@@ -314,6 +314,81 @@ def test_enabled_policy_parses_strict_merge_and_post_merge_settings(
     )
 
 
+def test_merge_enrollment_is_durable_and_scoped_per_pr(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    try:
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == ()
+        ledger.enroll_merge_pr(
+            "acme/widgets",
+            17,
+            enrolled_at=datetime(2026, 8, 25, tzinfo=UTC),
+            enrolled_by="operator",
+        )
+        assert ledger.is_merge_enrolled("acme/widgets", 17)
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == (17,)
+        ledger.unenroll_merge_pr("acme/widgets", 17)
+        assert not ledger.is_merge_enrolled("acme/widgets", 17)
+    finally:
+        ledger.close()
+
+
+def test_policy_supports_multiple_same_repository_merge_lanes(tmp_path: Path) -> None:
+    hermes = tmp_path / "hermes"
+    luna = tmp_path / "luna"
+    initialize_git_worktree(hermes)
+    initialize_git_worktree(luna)
+    raw = enabled_raw_config(hermes)
+    raw["repositories"] = [
+        {
+            "base_repository": "mrkillbob/hermes-agent",
+            "head_repository": "mrkillbob/hermes-agent",
+            "local_path": str(hermes),
+            "owner_login": "mrkillbob",
+            "branch_prefixes": ["codex/", "claude/", "hermes/"],
+        },
+        {
+            "base_repository": "mrkillbob/luna-bot",
+            "head_repository": "mrkillbob/luna-bot",
+            "local_path": str(luna),
+            "owner_login": "mrkillbob",
+            "branch_prefixes": ["codex/", "claude/", "hermes/"],
+        },
+    ]
+    raw.pop("merge_maintainer", None)
+    raw["merge_maintainers"] = [
+        {
+            "enabled": True,
+            "assignee": "pr-merge-maintainer",
+            "repository": "mrkillbob/hermes-agent",
+            "author_login": "mrkillbob",
+            "base_branch": "main",
+            "merge_methods": ["squash"],
+            "receipt_max_age_seconds": 3600,
+            "report_only": False,
+            "require_per_pr_enrollment": True,
+            "post_merge": {"enabled": False},
+        },
+        {
+            "enabled": True,
+            "assignee": "pr-merge-maintainer",
+            "repository": "mrkillbob/luna-bot",
+            "author_login": "mrkillbob",
+            "base_branch": "stable",
+            "merge_methods": ["squash"],
+            "receipt_max_age_seconds": 3600,
+            "report_only": False,
+            "require_per_pr_enrollment": True,
+            "post_merge": {"enabled": False},
+        },
+    ]
+    policy = load_policy(raw)
+    assert [item.repository for item in policy.merge_policies()] == [
+        "mrkillbob/hermes-agent",
+        "mrkillbob/luna-bot",
+    ]
+    assert policy.merge_policy_for("mrkillbob/hermes-agent").require_per_pr_enrollment
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

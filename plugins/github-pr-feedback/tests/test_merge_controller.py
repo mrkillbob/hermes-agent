@@ -143,6 +143,10 @@ def eligible_snapshot(**overrides: object) -> MergeSnapshot:
             "changes_requested",
         ),
         (
+            eligible_snapshot(review_state=ReviewState("REVIEW_REQUIRED", 0)),
+            "review_required",
+        ),
+        (
             eligible_snapshot(review_state=ReviewState("APPROVED", 1)),
             "unresolved_review_threads",
         ),
