@@ -912,6 +912,21 @@ export function buildArtsStudio(scene) {
     width: 14
   })
   const { near } = building
+  // A stepped clerestory gives the studio a distinct roofline and enclosed
+  // workshop read while keeping the front visually open. Existing materials
+  // are reused so the building remains within its capped draw/material budget.
+  const clerestory = group(scene, 'arts-studio:clerestory', near)
+  for (let bay = 0; bay < 3; bay += 1) {
+    box(scene, `arts-studio:clerestory:panel:${bay}`, {
+      depth: 1.4,
+      height: 1.35 + bay * 0.45,
+      material: bay % 2 ? 'archive-emissive' : 'bone-metal',
+      parent: clerestory,
+      position: [-3.2 + bay * 3.2, 7.35 + bay * 0.35, -3.9],
+      rotation: [0, 0, bay === 1 ? 0.08 : -0.06],
+      width: 2.5
+    })
+  }
   addSign(scene, 'arts-studio:sign', near, {
     accent: 'archive-emissive',
     position: [0, 7.3, 5.5],

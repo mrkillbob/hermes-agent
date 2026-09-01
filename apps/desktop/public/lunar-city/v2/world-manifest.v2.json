@@ -716,20 +716,20 @@
         "garden-green"
       ],
       "statistics": {
-        "accessorBytes": 44340,
+        "accessorBytes": 46284,
         "animationClips": ["lights-idle"],
         "drawCalls": 8,
         "materials": 6,
         "meshes": 8,
-        "nodes": 21,
-        "gpuBytes": 44340,
+        "nodes": 22,
+        "gpuBytes": 46284,
         "textures": 0,
-        "triangles": 1568,
-        "gpuMiB": 0.0423,
+        "triangles": 1604,
+        "gpuMiB": 0.0441,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 6, "maxTextures": 3, "maxTriangles": 26000 },
-        "bytes": 65416,
+        "bytes": 68020,
         "extent": [15.4, 12.434, 12.96],
-        "sha256": "31240482dd959c31e6f1cdaf1af76cf91a5bfcc1298ff69a6dbccc08ef21dddc"
+        "sha256": "442c1dea71fdaf2036b229b25a89b2861c92f776c9be2eecb5b7afe5085293df"
       }
     },
     {
