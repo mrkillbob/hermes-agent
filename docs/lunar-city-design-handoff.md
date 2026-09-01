@@ -34,6 +34,16 @@ items, packaging/acceptance). `docs/lunar-city-handoff-2026-09-01.md` is
 its Phase 0 detail doc: the step-by-step per-building geometry loop and
 budget table for the 9 remaining specialist buildings.
 
+**Switching to a session with local Blender/desktop access?** Start at
+`docs/lunar-city-handoff-2026-09-01-local-session.md` instead — it covers
+everything above plus what changed after (baked AO, real shadows,
+tonemapping, fog, the approved `charcoal-structure` palette fix) and the
+two open problems a local session is positioned to actually fix: the
+geometry is primitive-box modeling with no bevels/booleans/subdivision,
+and the district layout is 12 hand-picked coordinates with no city-planning
+logic behind them (confirmed by reading `terrain.mjs`'s `DISTRICTS`
+constant directly — there is no generative plan there at all).
+
 ## Current implementation addendum
 
 - `/lunar-city` is a dedicated left-sidebar destination immediately after Kanban. Arranged Sim-City/StarCraft-like 3D camera controls support orbit, pan, tilt, zoom, focus, follow, occlusion, interiors, visibility pausing, context recovery, and real world teardown.
