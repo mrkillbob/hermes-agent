@@ -9549,9 +9549,16 @@ def _error_fingerprint(error_text: str) -> str:
     return fp.lower().strip()
 
 
-def _provider_egress_error_text(task_id: str) -> str | None:
-    """Classify a typed firewall denial before ordinary retry logic."""
+def _current_worker_log_tail(task_id: str) -> str | None:
+    """Read only the current worker session from the shared task log.
 
+    Task logs are append-only across retries.  Looking for a terminal provider
+    error in the whole tail can therefore attribute an old egress denial to a
+    newer, unrelated run (for example a local-model timeout).  Workers emit
+    ``Initializing agent...`` at the start of each process; use the last such
+    marker as the run boundary.  Keep the unmarked fallback for older logs and
+    small callers/tests that predate the marker.
+    """
     try:
         log_path = worker_log_path(task_id)
         with log_path.open("rb") as handle:
@@ -9559,6 +9566,20 @@ def _provider_egress_error_text(task_id: str) -> str | None:
             handle.seek(max(0, handle.tell() - 16_384))
             tail = handle.read().decode("utf-8", "replace")
     except (OSError, ValueError):
+        return None
+
+    marker = "Initializing agent..."
+    marker_index = tail.rfind(marker)
+    if marker_index >= 0:
+        return tail[marker_index:]
+    return tail
+
+
+def _provider_egress_error_text(task_id: str) -> str | None:
+    """Classify a typed firewall denial before ordinary retry logic."""
+
+    tail = _current_worker_log_tail(task_id)
+    if tail is None:
         return None
     match = _PROVIDER_EGRESS_BLOCK_RE.search(tail)
     if match is None:
@@ -9574,13 +9595,8 @@ def _provider_egress_error_text(task_id: str) -> str | None:
 def _provider_terminal_error_text(task_id: str) -> tuple[str, str] | None:
     """Return a deterministic provider failure requiring a handoff."""
 
-    try:
-        log_path = worker_log_path(task_id)
-        with log_path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, handle.tell() - 16_384))
-            tail = handle.read().decode("utf-8", "replace")
-    except (OSError, ValueError):
+    tail = _current_worker_log_tail(task_id)
+    if tail is None:
         return None
     match = _PROVIDER_EGRESS_BLOCK_RE.search(tail)
     if match is not None:
