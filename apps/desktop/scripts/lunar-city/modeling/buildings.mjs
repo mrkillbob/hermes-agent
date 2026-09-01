@@ -896,6 +896,16 @@ function secondaryDistrictFrame(scene, id, { accent, depth, height, width }) {
     position: [0, height * 0.82, -depth * 0.2],
     width: width * 0.7
   })
+  for (let skylight = 0; skylight < 2; skylight += 1)
+    box(scene, `${id}:roof-skylight:${skylight}`, {
+      depth: depth * 0.18,
+      height: 0.22,
+      material: accent,
+      parent: roof,
+      position: [-width * 0.18 + skylight * width * 0.36, height * 0.88, -depth * 0.18],
+      rotation: [0, 0, skylight ? 0.06 : -0.06],
+      width: width * 0.2
+    })
   for (let step = 0; step < 3; step += 1)
     box(scene, `${id}:entrance:step:${step}`, {
       depth: 0.62 + step * 0.35,

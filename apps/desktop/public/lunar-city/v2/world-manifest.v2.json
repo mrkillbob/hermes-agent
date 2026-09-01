@@ -716,20 +716,20 @@
         "garden-green"
       ],
       "statistics": {
-        "accessorBytes": 48876,
+        "accessorBytes": 50172,
         "animationClips": ["lights-idle"],
         "drawCalls": 8,
         "materials": 6,
         "meshes": 8,
         "nodes": 22,
-        "gpuBytes": 48876,
+        "gpuBytes": 50172,
         "textures": 0,
-        "triangles": 1652,
-        "gpuMiB": 0.0466,
+        "triangles": 1676,
+        "gpuMiB": 0.0478,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 6, "maxTextures": 3, "maxTriangles": 26000 },
-        "bytes": 71404,
+        "bytes": 73084,
         "extent": [15.4, 12.434, 12.96],
-        "sha256": "124823512229dae435225b599c1581ccbb697d273a68487bb5c06ac3ae99a83e"
+        "sha256": "9e159b4e6b14a80b593234441b226c5ec42e5a2b74b879c74c0a919195d07408"
       }
     },
     {
@@ -767,20 +767,20 @@
       "collision": { "kind": "box", "navigationArea": "engineering" },
       "materialSlots": ["charcoal-structure", "bone-metal", "lunar-rust", "signal-emissive"],
       "statistics": {
-        "accessorBytes": 36540,
+        "accessorBytes": 37836,
         "animationClips": ["gantry-idle", "workbench-cycle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 19,
-        "gpuBytes": 36540,
+        "gpuBytes": 37836,
         "textures": 0,
-        "triangles": 946,
-        "gpuMiB": 0.0348,
+        "triangles": 970,
+        "gpuMiB": 0.0361,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 28000 },
-        "bytes": 54840,
+        "bytes": 56520,
         "extent": [16.9, 10.4931, 14.46],
-        "sha256": "ef99e72f7bc10d92d84951d06fdac331c69f60cd4ce27363f3cffd5855c0da9d"
+        "sha256": "13c1e51fba7de94968fa901f444986b592b5f1bff5af71bb8547cc29db975d71"
       }
     },
     {
@@ -817,20 +817,20 @@
       "collision": { "kind": "box", "navigationArea": "release" },
       "materialSlots": ["charcoal-structure", "bone-metal", "lunar-rust", "triage-amber", "garden-green"],
       "statistics": {
-        "accessorBytes": 32604,
+        "accessorBytes": 33900,
         "animationClips": ["gatehouse-beacon", "gatehouse-gate"],
         "drawCalls": 7,
         "materials": 5,
         "meshes": 7,
         "nodes": 19,
-        "gpuBytes": 32604,
+        "gpuBytes": 33900,
         "textures": 0,
-        "triangles": 1042,
-        "gpuMiB": 0.0311,
+        "triangles": 1066,
+        "gpuMiB": 0.0323,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 9, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 24000 },
-        "bytes": 50304,
+        "bytes": 51984,
         "extent": [13.9, 10.973, 11.96],
-        "sha256": "e38f6afe3d50fac38e4c4cf730a512fbd856317c596e671e7c45068eb34523c1"
+        "sha256": "3ff7f1484d2e1d5793967d6f4e13115c25b36d5662b6353a62945f4e4093fa14"
       }
     },
     {
@@ -867,20 +867,20 @@
       "collision": { "kind": "box", "navigationArea": "archive" },
       "materialSlots": ["charcoal-structure", "bone-metal", "lunar-rust", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 43344,
+        "accessorBytes": 44640,
         "animationClips": ["archive-seal-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 18,
-        "gpuBytes": 43344,
+        "gpuBytes": 44640,
         "textures": 0,
-        "triangles": 978,
-        "gpuMiB": 0.0413,
+        "triangles": 1002,
+        "gpuMiB": 0.0426,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 26000 },
-        "bytes": 62940,
+        "bytes": 64620,
         "extent": [14.9, 10.1198, 13.46],
-        "sha256": "8402cce3d0b6fcd6134e3cdec1167a81d995c7c297bf8c6f9caa1c982dcb0ed5"
+        "sha256": "b4fb3be9f43c56e6a3cbec6e31d85872d9d1c7219ea045b19ace1014632a3369"
       }
     },
     {
