@@ -23,12 +23,16 @@ user's inspiration video/PNGs, though less so after two follow-up passes:
   silhouette converge on another building's, and explains why Research Lab
   only got window glow rather than the Library's full wall treatment.
 
-**Continuing this work? Start at `docs/lunar-city-handoff-2026-09-01.md`.**
-It is the step-by-step guide: per-building material/draw-call budget
-headroom for all 11 specialist buildings, the exact loop to follow per
-building (edit → rebuild → check the silhouette test → validate → visual
-check → commit), and the remaining non-geometry follow-ups in priority
-order.
+**Continuing this work? Start at `docs/lunar-city-video-reference-roadmap.md`.**
+It is the top-level, full-journey handoff from the current state to the
+user's video-reference endpoint — it resolves what that video actually
+means for this project (concept, not palette; read it before assuming
+otherwise), inventories what's already built, defines what "done" looks
+like, and sequences every remaining phase (geometry, cinematic camera,
+focus/hero-shot treatment, floating status badges, remaining fidelity
+items, packaging/acceptance). `docs/lunar-city-handoff-2026-09-01.md` is
+its Phase 0 detail doc: the step-by-step per-building geometry loop and
+budget table for the 9 remaining specialist buildings.
 
 ## Current implementation addendum
 
