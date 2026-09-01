@@ -42,7 +42,43 @@ function addLibraryFrame(scene, { accent, depth, height, width }) {
       position: [x, panelHeight / 2, -depth / 2],
       width: panelWidth
     })
+  // A full-width backing wall behind the tiered archive-back panels above.
+  // Those panels alone leave gaps a viewer can see straight through from
+  // outside; this closes the envelope without losing their stepped massing.
+  box(scene, 'library:back-wall', {
+    depth: 0.4,
+    height: height * 0.86,
+    material: 'charcoal-structure',
+    parent: shell,
+    position: [0, height * 0.43, -depth / 2 - 0.22],
+    width: width * 0.98
+  })
   for (const side of [-1, 1]) {
+    // A solid side wall so the library reads as an enclosed volume from a
+    // 3/4 overview angle instead of the freestanding wing/tower armature
+    // alone. It stops short of the entrance-facing front edge so the
+    // approved open-front interior view is untouched.
+    box(scene, `library:side-wall:${side}`, {
+      depth: depth * 0.92,
+      height: height * 0.82,
+      material: 'charcoal-structure',
+      parent: shell,
+      position: [side * (width / 2 + 0.32), height * 0.41, -depth * 0.06],
+      width: 0.62
+    })
+    for (let window = 0; window < 3; window += 1)
+      box(scene, `library:window:${side}:${window}`, {
+        depth: 1.35,
+        height: 1.5,
+        material: accent,
+        parent: shell,
+        position: [
+          side * (width / 2 + 0.32),
+          height * 0.3 + (window % 2) * 1.9,
+          -depth * 0.32 + window * (depth * 0.34)
+        ],
+        width: 0.2
+      })
     box(scene, `library:archive-wing:${side}`, {
       depth: depth * 0.76,
       height: height * 0.7,
@@ -62,6 +98,14 @@ function addLibraryFrame(scene, { accent, depth, height, width }) {
       width: width * 0.26
     })
   }
+  box(scene, 'library:roof:cap', {
+    depth: depth * 0.94,
+    height: 0.5,
+    material: 'lunar-rust',
+    parent: roof,
+    position: [0, height * 0.84, -depth * 0.04],
+    width: width * 0.96
+  })
   for (let tier = 0; tier < 3; tier += 1)
     box(scene, `library:roof:stepped-gable:${tier}`, {
       depth: 1.25 + tier * 0.25,
@@ -149,6 +193,27 @@ function addLabFrame(scene, { accent, depth, height, width }) {
     parent: shell,
     position: [width / 2, height * 0.26, -depth * 0.12],
     width: 1.4
+  })
+  // Window glow on the existing east side-return and the west service
+  // stack, rather than a dedicated new wall/backing panel, so the lit-window
+  // read lands on the lab's own asymmetric massing instead of adding more
+  // dominant flat wall area that converges its silhouette on the library's.
+  for (let window = 0; window < 2; window += 1)
+    box(scene, `research-lab:window:east:${window}`, {
+      depth: depth * 0.18,
+      height: 1.3,
+      material: accent,
+      parent: shell,
+      position: [width / 2, height * 0.22 + window * 1.7, -depth * 0.28 + window * depth * 0.32],
+      width: 0.22
+    })
+  box(scene, 'research-lab:window:west', {
+    depth: 1.3,
+    height: 1.2,
+    material: accent,
+    parent: shell,
+    position: [-width * 0.46, height * 0.4, -depth * 0.24],
+    width: 0.22
   })
   box(scene, 'research-lab:service-stack', {
     depth: 2.2,

@@ -16,7 +16,7 @@
 import { mkdtemp, writeFile, cp } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join, extname } from 'node:path'
+import { extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { chromium } from '@playwright/test'
@@ -178,9 +178,14 @@ async function renderWebglPreview(outputUrl = DEFAULT_OUTPUT_URL) {
     try {
       const page = await browser.newPage({ viewport: { width: 1400, height: 900 } })
       await page.goto(`http://127.0.0.1:${server.port}/index.html`)
-      const ready = await page.waitForFunction(() => window.__ready !== undefined, { timeout: 60000 }).then(() =>
-        page.evaluate(() => window.__ready)
-      )
+      // These callbacks run inside the page (browser context), not here in
+      // Node — `window` is real there, just not a global ESLint knows about
+      // for a .mjs script.
+      /* eslint-disable no-undef */
+      const ready = await page
+        .waitForFunction(() => window.__ready !== undefined, { timeout: 60000 })
+        .then(() => page.evaluate(() => window.__ready))
+      /* eslint-enable no-undef */
       if (ready !== true) throw new Error(`preview scene failed to render: ${ready}`)
       await writeFile(outputUrl, await page.screenshot())
     } finally {
@@ -192,7 +197,7 @@ async function renderWebglPreview(outputUrl = DEFAULT_OUTPUT_URL) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const target = process.argv[2] ? new URL(`file://${join(process.cwd(), process.argv[2])}`) : DEFAULT_OUTPUT_URL
+  const target = process.argv[2] ? new URL(`file://${resolve(process.cwd(), process.argv[2])}`) : DEFAULT_OUTPUT_URL
   await renderWebglPreview(target)
   console.log(`wrote ${fileURLToPath(target)}`)
 }

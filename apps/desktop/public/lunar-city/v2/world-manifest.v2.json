@@ -402,20 +402,20 @@
       "collision": { "kind": "box", "navigationArea": "library" },
       "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 128232,
+        "accessorBytes": 134712,
         "animationClips": ["lights-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
         "nodes": 22,
-        "gpuBytes": 128232,
+        "gpuBytes": 134712,
         "textures": 0,
-        "triangles": 3914,
-        "gpuMiB": 0.1223,
+        "triangles": 4034,
+        "gpuMiB": 0.1285,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 28000 },
-        "bytes": 170820,
+        "bytes": 179256,
         "extent": [16.7884, 11.505, 14.44],
-        "sha256": "61c7bb313b7c322c51eb19e7a3dfdf4a8f2d189b32e6583384f209a30e26037c"
+        "sha256": "791e3e49f474674969a5a30b02f946eaf9749dc9f7387f9c8f134d014e78449c"
       }
     },
     {
@@ -449,20 +449,20 @@
       "collision": { "kind": "box", "navigationArea": "research" },
       "materialSlots": ["charcoal-structure", "bone-metal", "signal-emissive"],
       "statistics": {
-        "accessorBytes": 84720,
+        "accessorBytes": 86664,
         "animationClips": ["lights-idle", "telescope-scan", "workbench-cycle"],
         "drawCalls": 7,
         "materials": 5,
         "meshes": 7,
         "nodes": 25,
-        "gpuBytes": 84720,
+        "gpuBytes": 86664,
         "textures": 0,
-        "triangles": 2342,
-        "gpuMiB": 0.0808,
+        "triangles": 2378,
+        "gpuMiB": 0.0826,
         "budget": { "maxDrawCalls": 9, "maxGpuMiB": 12, "maxMaterials": 5, "maxTextures": 4, "maxTriangles": 32000 },
-        "bytes": 118340,
+        "bytes": 120864,
         "extent": [21.4805, 13.33, 16.29],
-        "sha256": "fc3c3dfc197f5a97030f88dbe63566d9aca33b529a0c511b4471325eabaed8c1"
+        "sha256": "3db62864ca96df2fe269706c7840e165dd0b4b91bcbb480c583055533fca3b97"
       }
     },
     {
