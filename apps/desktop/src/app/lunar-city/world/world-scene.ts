@@ -4,6 +4,7 @@ import type {
   BabylonImportResultLike,
   BabylonMeshLike,
   BabylonNodeLike,
+  BabylonShadowGeneratorLike,
   CameraControlState,
   CameraIntent,
   CharacterAssetManifest,
@@ -66,6 +67,17 @@ const LEADER_STATES: readonly LeaderAnimationState[] = [
 ]
 
 const CONTINUOUS_LEADER_STATES = new Set<LeaderAnimationState>(['listening', 'talking', 'thinking'])
+
+/** `Scene.FOGMODE_LINEAR`, inlined so the fog needs no extra Babylon import. */
+const FOG_MODE_LINEAR = 3
+/** `ImageProcessingConfiguration.TONEMAPPING_ACES`, inlined for the same reason. */
+const TONE_MAPPING_ACES = 1
+/**
+ * One 1024² cascade is enough for a settlement that fits inside the camera's
+ * bounded 18–120 unit zoom, and keeps the shadow pass to a single low-cost
+ * render of the near-LOD casters.
+ */
+const SHADOW_MAP_SIZE = 1024
 
 const LEADER_IDS = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag'] as const satisfies readonly LeaderId[]
 
@@ -1444,6 +1456,7 @@ export async function createWorldScene(
   let entityRegistry: ReturnType<typeof createEntityRegistry> | undefined
   let occlusion: ReturnType<typeof createOcclusionController> | undefined
   let glowLayer: BabylonGlowLayerLike | undefined
+  let shadowGenerator: BabylonShadowGeneratorLike | undefined
   const projectCompoundNodes = new Map<string, BabylonNodeLike>()
   const activeLeaderAnimations = new Map<LeaderId, BabylonAnimationGroupLike>()
   const desiredLeaderStates = new Map<LeaderId, LeaderAnimationState>()
@@ -1476,6 +1489,7 @@ export async function createWorldScene(
 
     projectCompoundNodes.clear()
     glowLayer?.dispose?.()
+    shadowGenerator?.dispose?.()
     perfAdapter.dispose()
     scene.dispose()
   }
@@ -1538,14 +1552,47 @@ export async function createWorldScene(
       glowLayer.intensity = 0.42
     }
 
+    // Distance haze. Without it the settlement reads as a diorama floating in
+    // a void: every district is equally crisp, so the eye gets no depth cue
+    // and the far rim of the crater sits visually on top of the near one.
+    // Linear fog over the camera's own bounded zoom range costs nothing —
+    // it is a per-pixel lerp the fixed-function path already runs.
+    scene.fogMode = FOG_MODE_LINEAR
+    scene.fogColor = new modules.Color3(0.09, 0.06, 0.08)
+    scene.fogStart = overview.maxRadius * 0.7
+    scene.fogEnd = overview.maxRadius * 2.4
+
     const imageProcessing = scene.imageProcessingConfiguration
 
     if (imageProcessing) {
-      imageProcessing.contrast = 1.18
-      imageProcessing.exposure = 1.08
+      // ACES filmic tonemapping. The authored palette drives emissive values
+      // above 1.0 for the signage; without a tonemapper those clip to flat
+      // white and the whole image reads as untonemapped sRGB — the single
+      // clearest "engine default" tell. ACES rolls the highlights off and is
+      // the same curve the reference games grade through.
+      imageProcessing.toneMappingEnabled = true
+      imageProcessing.toneMappingType = TONE_MAPPING_ACES
+      imageProcessing.contrast = 1.34
+      imageProcessing.exposure = 1.25
       imageProcessing.vignetteEnabled = true
       imageProcessing.vignetteWeight = 1.6
       imageProcessing.vignetteColor = new modules.Color3(0.04, 0.02, 0.04)
+    }
+
+    // The quality tiers have always declared `dynamicShadows: 'near'`, but no
+    // shadow generator existed, so the flag toggled nothing and every district
+    // floated with no contact against the terrain. One soft-filtered map on
+    // the key light grounds the whole settlement; it renders only while
+    // `keyLight.shadowEnabled` is true, which the efficient tier keeps off.
+    shadowGenerator = modules.ShadowGenerator ? new modules.ShadowGenerator(SHADOW_MAP_SIZE, keyLight) : undefined
+
+    if (shadowGenerator) {
+      shadowGenerator.usePercentageCloserFiltering = true
+      shadowGenerator.filteringQuality = 0
+      shadowGenerator.darkness = 0.42
+      shadowGenerator.bias = 0.0018
+      shadowGenerator.normalBias = 0.012
+      shadowGenerator.transparencyShadow = false
     }
 
     const leaderStateClips = new Map<string, LeaderStateClipMap>()
@@ -1575,11 +1622,28 @@ export async function createWorldScene(
       occlusionCandidates.push(...buildOcclusionCandidates(result, model))
       decorationNodes.push(...allImportedNodes(result).filter(isDecorationNode))
 
+      if (shadowGenerator) {
+        const renderList = shadowGenerator.getShadowMap?.()?.renderList
+
+        for (const mesh of result.meshes) {
+          // Every surface receives; only real geometry casts. The terrain is
+          // the ground plane the settlement sits on, so it receives without
+          // casting a redundant shadow onto itself.
+          mesh.receiveShadows = true
+
+          if (model.id !== 'terrain' && (mesh.getTotalVertices?.() ?? 0) > 0) {
+            renderList?.push(mesh)
+          }
+        }
+      }
+
       if (model.id === 'leaders') {
         const leaderCameraAnchors = retainLeaderIdentityMetadata(result, leaderStateClips, model, focus.cameraAnchor)
+
         for (const leader of readStructuredLeaders(result)) {
           leaderNodes.set(leader.id, leader.node)
         }
+
         const importedAnimationGroups = workerAnimationGroups(result)
 
         for (const leaderId of LEADER_IDS) {
@@ -1751,6 +1815,7 @@ export async function createWorldScene(
         ) {
           entityRegistryController.setSelection(cameraState.focusedEntityKey)
           const focusedLeaderId = cameraState.focusedEntityKey?.match(/^lunar-city:leader:(.+)$/u)?.[1]
+
           for (const [leaderId, node] of leaderNodes) {
             // A small scale lift is the cheapest per-entity hero treatment: it
             // makes the focused leader read above the shared scene without
@@ -1758,6 +1823,7 @@ export async function createWorldScene(
             const emphasis = leaderId === focusedLeaderId ? 1.14 : 1
             node.scaling?.set(emphasis, emphasis, emphasis)
           }
+
           emit({ kind: 'camera-state', state: cameraState })
         }
 

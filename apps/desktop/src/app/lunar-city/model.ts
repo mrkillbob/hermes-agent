@@ -421,9 +421,11 @@ export interface BabylonNodeLike {
 export interface BabylonMeshLike extends BabylonNodeLike {
   freezeWorldMatrix?(): void
   getIndices?(): readonly number[] | null
+  getTotalVertices?(): number
   getVerticesData?(kind: string): readonly number[] | null
   getWorldMatrix?(): { m: readonly number[] }
   isPickable?: boolean
+  receiveShadows?: boolean
   material?: {
     alpha?: number
     clone?(name: string): unknown
@@ -445,9 +447,17 @@ export interface BabylonSceneLike {
   _activeIndices?: { current?: number }
   activeCamera?: unknown
   ambientColor?: unknown
+  clearColor?: unknown
+  fogColor?: unknown
+  fogDensity?: number
+  fogEnd?: number
+  fogMode?: number
+  fogStart?: number
   imageProcessingConfiguration?: {
     contrast?: number
     exposure?: number
+    toneMappingEnabled?: boolean
+    toneMappingType?: number
     vignetteColor?: unknown
     vignetteEnabled?: boolean
     vignetteWeight?: number
@@ -459,6 +469,20 @@ export interface BabylonSceneLike {
   render(): void
   whenReadyAsync(): Promise<void>
   pick?(x: number, y: number): { pickedMesh?: BabylonNodeLike } | undefined
+}
+
+/** Babylon's `ShadowGenerator`, narrowed to what the world scene drives. */
+export interface BabylonShadowGeneratorLike {
+  bias?: number
+  darkness?: number
+  normalBias?: number
+  transparencyShadow?: boolean
+  useExponentialShadowMap?: boolean
+  usePercentageCloserFiltering?: boolean
+  filteringQuality?: number
+  getShadowMap?(): { renderList?: BabylonMeshLike[] | null } | null
+  addShadowCaster?(mesh: BabylonMeshLike, includeDescendants?: boolean): unknown
+  dispose?(): void
 }
 
 export interface BabylonImportResultLike {
@@ -549,6 +573,7 @@ export interface LunarCityWorldModules {
     scene: BabylonSceneLike,
     options?: { mainTextureRatio?: number }
   ) => BabylonGlowLayerLike
+  ShadowGenerator?: new (mapSize: number, light: BabylonLightLike) => BabylonShadowGeneratorLike
   TransformNode: new (name: string, scene: BabylonSceneLike) => BabylonNodeLike
   ImportMeshAsync(source: string, scene: BabylonSceneLike): Promise<BabylonImportResultLike>
   createRecastNavigation?(): Promise<RecastRuntimeLike>

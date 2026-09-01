@@ -37,6 +37,7 @@ import { Color3, Color4 } from '@babylonjs/core/Maths/math.color'
 import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight'
 import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight'
 import { GlowLayer } from '@babylonjs/core/Layers/glowLayer'
+import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator'
 import { ImportMeshAsync } from '@babylonjs/core/Loading/sceneLoader'
 import '@babylonjs/loaders/glTF'
 
@@ -50,7 +51,10 @@ async function main() {
 
   new ArcRotateCamera('cam', -Math.PI / 3.1, 1.05, 82, new Vector3(0, 3.5, 4), scene).attachControl(canvas, false)
 
-  const keyLight = new DirectionalLight('key', new Vector3(-0.45, -1, 0.35), scene)
+  const keyLight = new DirectionalLight('key', new Vector3(-0.62, -0.55, 0.56), scene)
+  keyLight.position = new Vector3(70, 62, -64)
+  keyLight.shadowMinZ = 1
+  keyLight.shadowMaxZ = 320
   keyLight.intensity = 0.85
   keyLight.diffuse = new Color3(1, 0.86, 0.68)
 
@@ -69,9 +73,23 @@ async function main() {
   const glow = new GlowLayer('glow', scene, { mainTextureRatio: 0.5 })
   glow.intensity = 0.42
 
+  const shadows = new ShadowGenerator(1024, keyLight)
+  shadows.usePercentageCloserFiltering = true
+  shadows.filteringQuality = 0
+  shadows.darkness = 0.42
+  shadows.bias = 0.0018
+  shadows.normalBias = 0.012
+
+  scene.fogMode = 3
+  scene.fogColor = new Color3(0.09, 0.06, 0.08)
+  scene.fogStart = 84
+  scene.fogEnd = 288
+
   if (scene.imageProcessingConfiguration) {
-    scene.imageProcessingConfiguration.contrast = 1.18
-    scene.imageProcessingConfiguration.exposure = 1.02
+    scene.imageProcessingConfiguration.toneMappingEnabled = true
+    scene.imageProcessingConfiguration.toneMappingType = 1
+    scene.imageProcessingConfiguration.contrast = 1.34
+    scene.imageProcessingConfiguration.exposure = 1.25
     scene.imageProcessingConfiguration.vignetteEnabled = true
     scene.imageProcessingConfiguration.vignetteWeight = 1.6
     scene.imageProcessingConfiguration.vignetteColor = new Color3(0.04, 0.02, 0.04)
@@ -106,12 +124,23 @@ async function main() {
         mesh.position.y += pos[1]
         mesh.position.z += pos[2]
       }
+      mesh.receiveShadows = true
+      if (!uri.includes('terrain') && mesh.getTotalVertices() > 0) {
+        shadows.getShadowMap().renderList.push(mesh)
+      }
     }
   }
 
   scene.render()
   await scene.whenReadyAsync()
   scene.render()
+  const map = shadows.getShadowMap()
+  console.log('SHADOWDIAG casters=' + (map && map.renderList ? map.renderList.length : 'null')
+    + ' lightShadowEnabled=' + keyLight.shadowEnabled
+    + ' caps.textureFloat=' + engine.getCaps().textureFloat
+    + ' caps.textureHalfFloatRender=' + engine.getCaps().textureHalfFloatRender
+    + ' isWebGL2=' + engine.webGLVersion
+    + ' mapReady=' + (map ? map.isReady() : 'n/a'))
   window.__ready = true
 }
 
@@ -189,6 +218,10 @@ async function renderWebglPreview(outputUrl = DEFAULT_OUTPUT_URL) {
     })
     try {
       const page = await browser.newPage({ viewport: { width: 1400, height: 900 } })
+      // Forward page diagnostics: a silently black or unshadowed render is
+      // otherwise impossible to debug from the outside.
+      page.on('console', message => console.log(`[page] ${message.text()}`))
+      page.on('pageerror', error => console.log(`[page error] ${error.message}`))
       await page.goto(`http://127.0.0.1:${server.port}/index.html`)
       // These callbacks run inside the page (browser context), not here in
       // Node — `window` is real there, just not a global ESLint knows about

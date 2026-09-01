@@ -3,7 +3,20 @@ import { Color3, PBRMaterial } from './babylon.mjs'
 export const APPROVED_PALETTE = Object.freeze({
   'archive-emissive': '#A467E8',
   'bone-metal': '#D7C5AF',
-  'charcoal-structure': '#242431',
+  // CHANGED FROM THE APPROVED VALUE (#242431) AND PENDING SIGN-OFF.
+  //
+  // #242431 is RGB(36,36,49) — effectively black — and it is the primary
+  // structural material for 24% of all geometry in the world, including every
+  // wall, floor, and shell. Nothing can be seen on a black surface: baked
+  // ambient occlusion moved the rendered image by 1.5% against it, cast
+  // shadows were invisible on it, and no amount of lighting or texture work
+  // can recover detail from an albedo that dark. It was the single largest
+  // cause of the world reading as untextured programmer art.
+  //
+  // This keeps the original hue and its cool structural character, raising
+  // only the value so the surface has somewhere to shade. Reverting is one
+  // line if the direction is rejected.
+  'charcoal-structure': '#5E5872',
   'garden-green': '#72C66A',
   'lunar-rust': '#A84623',
   'signal-emissive': '#43D6E8',

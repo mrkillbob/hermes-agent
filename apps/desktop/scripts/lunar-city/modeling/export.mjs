@@ -6,13 +6,14 @@ import { deflateSync } from 'node:zlib'
 import { NodeIO } from '@gltf-transform/core'
 import { format } from 'prettier'
 
+import { bakeAmbientOcclusion } from './ambient-occlusion.mjs'
 import { GLTF2Export } from './babylon.mjs'
 import { approvedPaletteBytes } from './palette.mjs'
 import { mergeLodMeshes } from './primitives.mjs'
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, value) => {
   let crc = value
-  for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1
+  for (let bit = 0; bit < 8; bit += 1) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1
   return crc >>> 0
 })
 
@@ -68,10 +69,32 @@ function sceneExtent(scene) {
   return { extent: min.map((value, axis) => Number((max[axis] - value).toFixed(4))), max, min }
 }
 
-export function optimizeModelScene(scene, id) {
+export function optimizeModelScene(scene, id, budget) {
+  // Near carries the shading detail; mid gets a coarser share; far is seen
+  // from far enough away that neither subdivision nor AO buys anything.
+  const shares = { far: 0, mid: 0.18, near: 0.62 }
+  // Subdivision is scoped to the terrain deliberately. Vertex AO needs
+  // tessellation to have anything to interpolate across, but tessellating a
+  // district breaks `build-models.test.mjs`'s silhouette-uniqueness guard:
+  // that metric rasterizes triangles into a coarse occupancy grid, so denser
+  // meshes fill it more completely and every specialist converges toward a
+  // filled box. The guard is measuring something real, so the geometry it
+  // watches stays at its authored density; the terrain is not one of its
+  // SPECIALIST_IDS and is also where ground-contact shading reads hardest.
+  // Giving districts the same treatment needs an AO *texture* atlas, which
+  // decouples shading resolution from triangle density -- see the handoff.
+  const shadeGeometry = id === 'terrain'
+
   for (const suffix of ['near', 'mid', 'far']) {
     const lodRoot = scene.getTransformNodeByName(`${id}:lod:${suffix}`)
-    if (lodRoot) mergeLodMeshes(scene, lodRoot, `${id}:${suffix}`)
+    if (!lodRoot) continue
+    mergeLodMeshes(scene, lodRoot, `${id}:${suffix}`)
+    // Bake after merging so occlusion is computed once against the final
+    // triangle soup for this LOD.
+    if (shares[suffix] > 0)
+      bakeAmbientOcclusion(scene, lodRoot, {
+        maxTriangles: shadeGeometry ? Math.floor((budget?.maxTriangles ?? Infinity) * shares[suffix]) : 0
+      })
   }
 }
 
@@ -82,11 +105,17 @@ async function inspectWrittenGlb(uri) {
     const indices = primitive.getIndices()
     return total + (indices ? indices.getCount() / 3 : (primitive.getAttribute('POSITION')?.getCount() ?? 0) / 3)
   }, 0)
-  const accessorBytes = root.listAccessors().reduce((total, accessor) => total + (accessor.getArray()?.byteLength ?? 0), 0)
+  const accessorBytes = root
+    .listAccessors()
+    .reduce((total, accessor) => total + (accessor.getArray()?.byteLength ?? 0), 0)
   const textureBytes = root.listTextures().reduce((total, texture) => total + (texture.getImage()?.byteLength ?? 0), 0)
   return {
     accessorBytes,
-    animationClips: root.listAnimations().map(animation => animation.getName()).filter(Boolean).toSorted(),
+    animationClips: root
+      .listAnimations()
+      .map(animation => animation.getName())
+      .filter(Boolean)
+      .toSorted(),
     drawCalls: primitives.length,
     materials: root.listMaterials().length,
     meshes: root.listMeshes().length,
@@ -112,7 +141,7 @@ function assertBudget(id, stats, budget) {
 }
 
 export async function exportModel({ budget, id, outputRoot, scene }) {
-  optimizeModelScene(scene, id)
+  optimizeModelScene(scene, id, budget)
   const bounds = sceneExtent(scene)
   const data = await GLTF2Export.GLBAsync(scene, `${id}.glb`, {
     animationSampleRate: 1 / 30,
