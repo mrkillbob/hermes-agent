@@ -10,6 +10,7 @@ import os
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -271,7 +272,10 @@ class DoctorProbe:
                 ledger_path.parent / "worktrees",
             ),
         }
-        return {name: "ok" if ok else "failed" for name, ok in checks.items()}
+        return {
+            name: value if isinstance(value, str) else "ok" if value else "failed"
+            for name, value in checks.items()
+        }
 
     def _command_ok(self, argv: list[str]) -> bool:
         try:
@@ -310,11 +314,11 @@ class DoctorProbe:
 
     def _repositories_ready(
         self, repositories: tuple[Path, ...], worktree_root: Path
-    ) -> bool:
+    ) -> str:
         git = self._runner.which("git")
-        all_ready = git is not None and _nearest_existing_parent_access(worktree_root)
         if git is None:
-            return False
+            return "failed"
+        worktree_access = _path_access_status(worktree_root)
         for repository in repositories:
             try:
                 top = self._runner.run(
@@ -335,8 +339,9 @@ class DoctorProbe:
                 )
             except (OSError, RuntimeError, ValueError):
                 repository_ready = False
-            all_ready = all_ready and repository_ready
-        return all_ready
+            if not repository_ready:
+                return "failed"
+        return worktree_access
 
 
 class KanbanCommandRunner(Protocol):
@@ -1844,9 +1849,24 @@ def _doctor(
     path = ledger_path or FeedbackLedger.current_profile_path()
     checks = (probe or DoctorProbe(get_default_hermes_root())).checks(policy, path)
     ready = all(value == "ok" for value in checks.values())
+    environment_blocked = any(value == "environment_blocked" for value in checks.values())
+    status = "ready" if ready else "environment_blocked" if environment_blocked else "degraded"
     print(
         json.dumps(
-            {"status": "ready" if ready else "degraded", "checks": checks},
+            {
+                "status": status,
+                "checks": checks,
+                **(
+                    {
+                        "message": (
+                            "The host denied Hermes worktree-pool access; this is an "
+                            "environment blocker, not proof of repository damage."
+                        )
+                    }
+                    if environment_blocked
+                    else {}
+                ),
+            },
             sort_keys=True,
         )
     )
@@ -1909,3 +1929,34 @@ def _nearest_existing_parent_access(path: Path) -> bool:
     while not candidate.exists() and candidate != candidate.parent:
         candidate = candidate.parent
     return candidate.is_dir() and os.access(candidate, os.R_OK | os.W_OK | os.X_OK)
+
+
+def _path_access_status(path: Path) -> str:
+    """Classify worktree-pool access without mistaking host policy for repo damage.
+
+    Sandboxed hosts can deny ``os.access`` for a directory whose Unix metadata still
+    grants the current user read/write/execute access. That is an environment
+    limitation, not evidence that the configured repository or worktree pool is
+    corrupt. Keep the check blocking, but report that distinction to the operator.
+    """
+
+    candidate = Path(path)
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    if not candidate.is_dir():
+        return "failed"
+    if _nearest_existing_parent_access(path):
+        return "ok"
+    try:
+        metadata = candidate.stat()
+    except OSError:
+        return "failed"
+    if os.name == "nt":
+        return "failed"
+    user_id = getattr(os, "getuid", lambda: -1)()
+    user_access_declared = metadata.st_uid == user_id and bool(
+        metadata.st_mode & stat.S_IRUSR
+        and metadata.st_mode & stat.S_IWUSR
+        and metadata.st_mode & stat.S_IXUSR
+    )
+    return "environment_blocked" if user_access_declared else "failed"

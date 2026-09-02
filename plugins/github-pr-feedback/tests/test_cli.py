@@ -1447,6 +1447,62 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
     assert len(runner.calls) == 5
 
 
+def test_doctor_classifies_host_worktree_access_blocker_without_calling_repo_broken(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import DoctorProbe, _doctor
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    profile_root = tmp_path / "profile"
+    (profile_root / "kanban" / "boards" / "repairs").mkdir(parents=True)
+    (profile_root / "kanban" / "boards" / "repairs" / "board.json").write_text(
+        '{"slug":"repairs"}\n', encoding="utf-8"
+    )
+    (profile_root / "profiles" / "repair-agent").mkdir(parents=True)
+    (profile_root / "profiles" / "repair-agent" / "config.yaml").write_text(
+        "profile: repair-agent\n", encoding="utf-8"
+    )
+    ledger_path = profile_root / "github-pr-feedback" / "ledger.sqlite3"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_bytes(b"SQLite format 3\x00")
+    repository_settings = enabled_settings(repository)
+    responses = {
+        ("/opt/tools/gh", "auth", "status", "--hostname", "github.com"): (0, ""),
+        ("/opt/tools/hermes", "--version"): (0, "Hermes Agent test"),
+        ("/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"): (
+            0,
+            f"{repository}\n",
+        ),
+        ("/opt/tools/git", "-C", str(repository), "rev-parse", "--git-common-dir"): (
+            0,
+            ".git\n",
+        ),
+        ("/opt/tools/git", "-C", str(repository), "worktree", "list", "--porcelain"): (
+            0,
+            f"worktree {repository}\n",
+        ),
+    }
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._path_access_status",
+        lambda _path: "environment_blocked",
+    )
+
+    exit_code = _doctor(
+        RecordingContext(repository_settings),
+        probe=DoctorProbe(profile_root, RecordingDoctorRunner(responses)),
+        ledger_path=ledger_path,
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "environment_blocked"
+    assert payload["checks"]["repository_worktree"] == "environment_blocked"
+    assert "not proof of repository damage" in payload["message"]
+
+
 def test_doctor_requires_the_configured_local_ci_auditor_profile(
     tmp_path: Path,
 ) -> None:
