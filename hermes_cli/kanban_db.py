@@ -8752,6 +8752,81 @@ _RECENT_WORKER_EXIT_TTL_SECONDS = 600
 _RECENT_WORKER_EXITS_MAX = 4096
 _recent_worker_exits: "dict[int, tuple[int, float]]" = {}
 
+# ``Popen`` handles are retained briefly so the dispatcher can observe a
+# worker's exit immediately instead of waiting for the next 60-second tick.
+# The periodic liveness/reconciliation pass remains the recovery path for
+# workers whose parent process disappears, but normal children should close
+# their Kanban run at process exit.  Values are removed by the watcher before
+# it returns; this is deliberately bounded by the number of live workers.
+_worker_processes: "dict[int, subprocess.Popen]" = {}
+_worker_processes_lock = threading.Lock()
+
+
+def _register_worker_process(proc: subprocess.Popen) -> int:
+    """Retain a spawned worker handle and return its PID."""
+    pid = int(proc.pid)
+    with _worker_processes_lock:
+        _worker_processes[pid] = proc
+    return pid
+
+
+def _watch_worker_process(pid: int, task_id: str, *, board: Optional[str]) -> None:
+    """Close a worker's open Kanban run as soon as its process exits.
+
+    The worker normally calls ``kanban_complete``/``kanban_block`` first, in
+    which case ``detect_crashed_workers`` is a no-op.  If it exits before that
+    terminal call, this invokes the same existing crash/protocol classifier
+    used by the dispatcher, but immediately and against the exact board.
+    There is no duplicate state transition because the classifier uses the
+    task's live status, PID, and claim lock in its CAS update.
+    """
+    try:
+        with _worker_processes_lock:
+            proc = _worker_processes.get(int(pid))
+        if proc is None:
+            return
+        returncode = proc.wait()
+        if returncode is None:
+            return
+        # ``detect_crashed_workers`` consumes this registry entry to preserve
+        # the distinction between clean exit, signal termination, and a real
+        # non-zero failure after the watcher has reaped the child.
+        if returncode < 0:
+            raw_status = int(-returncode)
+        else:
+            raw_status = int(returncode) << 8
+        _record_worker_exit(int(pid), raw_status)
+        try:
+            with contextlib.closing(connect(board=board)) as conn:
+                detect_crashed_workers(conn)
+        except Exception:
+            _log.exception(
+                "kanban worker exit reconciliation failed for %s (pid %s)",
+                task_id,
+                pid,
+            )
+    finally:
+        with _worker_processes_lock:
+            _worker_processes.pop(int(pid), None)
+
+
+def _start_worker_exit_watcher(
+    pid: Optional[int], task_id: str, *, board: Optional[str]
+) -> None:
+    """Start a daemon watcher after the worker PID is durably recorded."""
+    if not pid:
+        return
+    with _worker_processes_lock:
+        if int(pid) not in _worker_processes:
+            return
+    threading.Thread(
+        target=_watch_worker_process,
+        args=(int(pid), task_id),
+        kwargs={"board": board},
+        name=f"kanban-worker-exit-{int(pid)}",
+        daemon=True,
+    ).start()
+
 
 def _record_worker_exit(pid: int, raw_status: int) -> None:
     """Record a reaped child's exit status for later classification.
@@ -11817,6 +11892,7 @@ def _dispatch_once_locked(
                 pid = _spawn(claimed, str(workspace))
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
+                _start_worker_exit_watcher(int(pid), claimed.id, board=board)
             # Worker-lifecycle observer (RFC #58548): fires AFTER spawn_fn
             # returned and the PID (when reported) is durably persisted,
             # per the RFC timing contract. Best-effort — can never break
@@ -11966,6 +12042,7 @@ def _dispatch_once_locked(
                 pid = _spawn(claimed, str(workspace))
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
+                _start_worker_exit_watcher(int(pid), claimed.id, board=board)
             # Worker-lifecycle observer (RFC #58548): same contract as the
             # ready-lane fire above — after spawn + PID persistence.
             _fire_worker_spawned_hook(
@@ -12826,12 +12903,11 @@ def _default_spawn(
             "`hermes` executable not found on PATH. "
             "Install Hermes Agent or activate its venv before running the kanban dispatcher."
         )
-    # NOTE: we intentionally do NOT close log_f here — we want Popen's
-    # child process to keep writing after this function returns.  The
-    # handle is kept alive by the child's inheritance.  The parent's
-    # reference goes out of scope and is GC'd, but the OS-level FD stays
-    # open in the child until the child exits.
-    return proc.pid
+    # The child has its own inherited stdout descriptor; retaining the
+    # dispatcher's descriptor leaks one FD per attempt and can eventually
+    # delay EOF-based log readers. Close only the parent copy.
+    log_f.close()
+    return _register_worker_process(proc)
 
 
 # ---------------------------------------------------------------------------

@@ -2154,6 +2154,39 @@ def test_write_txn_check_reads_correct_header_fields(tmp_path):
 
 # ---------------------------------------------------------------------------
 # reap_worker_zombies() tests
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected_kind"),
+    [(0, "clean_exit"), (7, "nonzero_exit"), (-9, "signaled")],
+)
+def test_worker_exit_watcher_reconciles_all_fast_exit_kinds(
+    monkeypatch, returncode, expected_kind
+):
+    """A child exit is finalized immediately, independent of exit flavor."""
+    class FakeProc:
+        pid = 7132
+
+        def wait(self):
+            return returncode
+
+    class FakeConn:
+        def close(self):
+            pass
+
+    observed = []
+    monkeypatch.setitem(kb._worker_processes, 7132, FakeProc())
+    monkeypatch.setattr(kb, "connect", lambda *, board=None: FakeConn())
+
+    def fake_detect(conn):
+        observed.append(kb._classify_worker_exit(7132)[0])
+        return []
+
+    monkeypatch.setattr(kb, "detect_crashed_workers", fake_detect)
+    kb._watch_worker_process(7132, "t_fast_exit", board="test-board")
+
+    assert observed == [expected_kind]
+    assert 7132 not in kb._worker_processes
 # ---------------------------------------------------------------------------
 
 
