@@ -261,7 +261,15 @@ def _hermes_review_task(
             "repository's normal approval review. Do not edit files, push, force-push, change "
             "branch protection, or merge. Re-read the canonical PR immediately before any GitHub "
             "write and stop if the base or head SHA changed. The deterministic merge controller "
-            "will re-read this review state and will not waive the review gate from model output."
+            "will re-read this review state and will not waive the review gate from model output. "
+            "Call kanban_show before inspection and finish every run with exactly one "
+            "kanban_complete, kanban_request_changes, or kanban_block action. Use safe fixed-argv "
+            "terminal commands only: no shell pipelines, command substitution, destructive cleanup, "
+            "dependency installation, or repeated retries after a guardrail error. Never exit after "
+            "a tool error or with narrative text only. If GitHub rejects the normal approval or "
+            "request-changes mutation because the authenticated reviewer is the PR author, leave a "
+            "factual exact-head issue comment when needed and complete the review with that identity "
+            "limitation recorded; never claim approval or waive the merge gate."
         ),
         board=policy.board or "",
         assignee=review_policy.assignee,

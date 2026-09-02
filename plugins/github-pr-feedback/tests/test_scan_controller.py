@@ -76,6 +76,7 @@ def test_hermes_review_task_is_exact_head_and_idempotent() -> None:
     assert task.initial_status == "running"
     assert task.max_retries == 2
     assert task.evidence["review_kind"] == "hermes_independent_code_review"
+    assert "identity limitation" in task.instructions
     assert task.idempotency_key == _hermes_review_task(
         policy, review_policy, target, pull_request
     ).idempotency_key
