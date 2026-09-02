@@ -133,6 +133,7 @@ _DEGRADED_REASONS = frozenset(
         "dispatch_failed",
         "exact_head_unavailable",
         "hermes_review_dispatch_failed",
+        "hermes_review_read_failed",
         "codex_review_trigger_failed",
         "codex_review_head_changed",
     }
@@ -1118,6 +1119,19 @@ class ScanController:
                         actions_enabled = False
                 except Exception:  # noqa: BLE001 - uncertain sample keeps prior gate value.
                     pass
+            hermes_review = self._policy.hermes_review
+            if hermes_review is not None and hermes_review.applies_to(repository):
+                review_candidates = tuple(
+                    pull_request
+                    for pull_request in pull_requests
+                    if self._policy.admit_pull_request(pull_request).admitted
+                )
+                created += self._dispatch_hermes_review_coverage(
+                    repository,
+                    target,
+                    review_candidates,
+                    skipped,
+                )
             admitted_pull_requests: list[PullRequest] = []
             for pull_request in pull_requests:
                 pull_request_admission = self._policy.admit_pull_request(pull_request)
@@ -1130,10 +1144,6 @@ class ScanController:
                 and self._policy.local_ci_audit.applies_to(repository)
                 and actions_enabled is False
             )
-            need_current_for_hermes_review = bool(
-                self._policy.hermes_review is not None
-                and self._policy.hermes_review.applies_to(repository)
-            )
             feedback_current = tuple(
                 pull_request.updated_at is not None
                 and self._ledger.feedback_scan_is_current(
@@ -1141,10 +1151,6 @@ class ScanController:
                     pull_request.number,
                     pull_request.head_sha,
                     pull_request.updated_at,
-                )
-                and not (
-                    self._policy.hermes_review is not None
-                    and self._policy.hermes_review.applies_to(repository)
                 )
                 for pull_request in admitted_pull_requests
             )
@@ -1163,7 +1169,6 @@ class ScanController:
                                 repository,
                                 item[0],
                                 need_current_for_ci=need_current_for_ci,
-                                need_current_for_hermes_review=need_current_for_hermes_review,
                             )
                         ),
                         zip(admitted_pull_requests, feedback_current, strict=True),
@@ -1184,27 +1189,6 @@ class ScanController:
                         scanned_at=self._clock(),
                     )
                 current, feedback_items = snapshot
-                hermes_review = self._policy.hermes_review
-                if (
-                    hermes_review is not None
-                    and hermes_review.applies_to(repository)
-                    and current is not None
-                ):
-                    try:
-                        self._kanban.create_or_get_task(
-                            _hermes_review_task(
-                                self._policy,
-                                hermes_review,
-                                self._policy.targets[repository],
-                                current,
-                            )
-                        )
-                        created += 1
-                    except (RuntimeError, ValueError):
-                        skipped["hermes_review_dispatch_failed"] += 1
-                    codex_error = self._ensure_codex_review(current, feedback_items)
-                    if codex_error is not None:
-                        skipped[codex_error] += 1
                 local_ci_receipt_status = None
                 if (
                     self._policy.local_ci_audit is not None
@@ -1440,6 +1424,58 @@ class ScanController:
         except Exception:  # noqa: BLE001 - canonical read failures fail closed.
             return None
         return current, feedback_items
+
+    def _dispatch_hermes_review_coverage(
+        self,
+        repository: str,
+        target: RepositoryTarget,
+        pull_requests: tuple[PullRequest, ...],
+        skipped: Counter[str],
+    ) -> int:
+        """Cover every admitted PR before local-CI catalogue limits are applied."""
+
+        if not pull_requests:
+            return 0
+        hermes_review = self._policy.hermes_review
+        if hermes_review is None:
+            return 0
+        with ThreadPoolExecutor(
+            max_workers=min(MAX_PARALLEL_PR_READS, len(pull_requests))
+        ) as executor:
+            snapshots = tuple(
+                executor.map(
+                    lambda pull_request: self._read_scan_snapshot(
+                        repository,
+                        pull_request,
+                        need_current_for_ci=False,
+                        need_current_for_hermes_review=True,
+                    ),
+                    pull_requests,
+                )
+            )
+        created = 0
+        for pull_request, snapshot in zip(pull_requests, snapshots, strict=True):
+            if snapshot is None:
+                skipped["hermes_review_read_failed"] += 1
+                continue
+            current, feedback_items = snapshot
+            if current is None:
+                skipped["hermes_review_read_failed"] += 1
+                continue
+            codex_error = self._ensure_codex_review(current, feedback_items)
+            if codex_error == "codex_review_head_changed":
+                skipped[codex_error] += 1
+                continue
+            if codex_error is not None:
+                skipped[codex_error] += 1
+            try:
+                self._kanban.create_or_get_task(
+                    _hermes_review_task(self._policy, hermes_review, target, current)
+                )
+                created += 1
+            except (RuntimeError, ValueError):
+                skipped["hermes_review_dispatch_failed"] += 1
+        return created
 
     def _ensure_codex_review(
         self, current: PullRequest, feedback_items: tuple[Feedback, ...]
