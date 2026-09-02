@@ -692,6 +692,47 @@ def _tool_result_call_ids(value: Any) -> frozenset[str]:
     return frozenset(found)
 
 
+def _tool_call_names_by_id(value: Any) -> dict[str, str]:
+    """Map exact provider call-id variants to their declared tool names."""
+    names: dict[str, str] = {}
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            direct_function = item.get("function")
+            direct_name = (
+                direct_function.get("name")
+                if isinstance(direct_function, Mapping)
+                else item.get("name")
+            )
+            if (
+                item.get("type") in {"function", "function_call"}
+                and isinstance(direct_name, str)
+            ):
+                call_id = item.get("call_id") or item.get("id")
+                if isinstance(call_id, str):
+                    for variant in tool_result_id_variants(call_id):
+                        names[variant] = direct_name
+            tool_calls = item.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, Mapping):
+                        continue
+                    function = call.get("function")
+                    name = function.get("name") if isinstance(function, Mapping) else None
+                    call_id = call.get("call_id") or call.get("id")
+                    if isinstance(name, str) and isinstance(call_id, str):
+                        for variant in tool_result_id_variants(call_id):
+                            names[variant] = name
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return names
+
+
 def _scratch_read_file_tool_call_ids(value: Any) -> frozenset[str]:
     """Recognize worker scratch-file reads that have no source authority."""
 
@@ -1923,6 +1964,7 @@ def _typed_payload(
     combined_github_view_terminal_call_limits: Mapping[str, int] | None = None,
     rejected_terminal_call_ids: frozenset[str] = frozenset(),
     unbound_tool_result_call_ids: frozenset[str] = frozenset(),
+    unbound_tool_result_names: Mapping[str, str] | None = None,
     terminal_replay_tool_call_ids: frozenset[str] = frozenset(),
     redact_terminal_arguments: bool = False,
     redact_readonly_tool_arguments: bool = False,
@@ -2387,7 +2429,13 @@ def _typed_payload(
                 # binding.  Keep the strict rejection for replay-shaped
                 # output, and retain raw unsafe text for the firewall to
                 # diagnose instead of silently redacting it away.
-                direct_result_name = value.get("tool_name") or value.get("name")
+                direct_result_name = (
+                    value.get("tool_name")
+                    or value.get("name")
+                    or (
+                        unbound_tool_result_names or {}
+                    ).get(output_call_id)
+                )
                 if re.search(r"https?://\S+.*\brun_id=", item, re.IGNORECASE):
                     typed[key] = UntrustedProvenanceSegment(
                         sha256(item.encode("utf-8")).hexdigest(), item
@@ -2540,6 +2588,7 @@ def _typed_payload(
                 combined_github_view_terminal_call_limits=combined_github_view_terminal_call_limits,
                 rejected_terminal_call_ids=rejected_terminal_call_ids,
                 unbound_tool_result_call_ids=unbound_tool_result_call_ids,
+                unbound_tool_result_names=unbound_tool_result_names,
                 terminal_replay_tool_call_ids=terminal_replay_tool_call_ids,
                 redact_terminal_arguments=redact_terminal_arguments,
                 redact_readonly_tool_arguments=redact_readonly_tool_arguments,
@@ -2591,6 +2640,7 @@ def _typed_payload(
                 combined_github_view_terminal_call_limits=combined_github_view_terminal_call_limits,
                 rejected_terminal_call_ids=rejected_terminal_call_ids,
                 unbound_tool_result_call_ids=unbound_tool_result_call_ids,
+                unbound_tool_result_names=unbound_tool_result_names,
                 terminal_replay_tool_call_ids=terminal_replay_tool_call_ids,
                 redact_terminal_arguments=redact_terminal_arguments,
                 redact_readonly_tool_arguments=redact_readonly_tool_arguments,
@@ -3083,6 +3133,11 @@ def authorize_agent_sdk_kwargs(
             )
             if protected_kanban_remote
             else frozenset()
+        ),
+        unbound_tool_result_names=(
+            _tool_call_names_by_id(body)
+            if protected_kanban_remote and protected_provider_route
+            else {}
         ),
         terminal_replay_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES)

@@ -603,6 +603,42 @@ def test_protected_nous_keeps_unbound_kanban_output_blocked(tmp_path, monkeypatc
     assert "base64_payload" in exc_info.value.decision.reason_codes
 
 
+def test_protected_nous_allows_bound_tool_search_context(tmp_path, monkeypatch):
+    """Tool discovery output is safe only when bound to its exact call."""
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_safe_projection")
+    agent = _agent(tmp_path)
+    agent.provider = "nous"
+    agent.base_url = "https://inference-api.nousresearch.com/v1"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_tool_search_123",
+                            "type": "function",
+                            "function": {"name": "tool_search", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_tool_search_123",
+                    "content": "Available tools: terminal, read_file, kanban_at",
+                },
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    assert authorized["messages"][1]["content"].startswith("Available tools:")
+
+
 def test_protected_nous_redacts_generated_cloud_system_context(tmp_path):
     """Generated cloud framing may be redacted, unlike user/source content."""
 
