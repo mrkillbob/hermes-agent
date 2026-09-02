@@ -2447,6 +2447,43 @@ def test_protected_kanban_elides_scratch_read_without_source_metadata(
     )
 
 
+def test_protected_kanban_elides_bound_read_alias_output(tmp_path, monkeypatch):
+    """The Responses read alias uses the same exact-call replay boundary."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_read_alias"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "read",
+                    "call_id": call_id,
+                    "arguments": '{"path":"run_static_lane.py"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": "1|c2VjcmV0LXBheWxvYWQ=",
+                },
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    assert authorized["input"][1]["output"] == (
+        "read_file completed locally, but its raw content cannot be replayed on "
+        "this protected route. Request only the needed narrow range again."
+    )
+
+
 def test_protected_kanban_redacts_readonly_search_argument_replay(
     tmp_path, monkeypatch
 ):
