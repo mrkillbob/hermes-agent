@@ -580,7 +580,7 @@ DEFAULT_CONFIG = {
         "extract_backend": "",   # per-capability override for web_extract (e.g. "native")
         "extract_char_limit": 15000,  # per-page char budget for web_extract; larger pages truncate + store full text in cache/web
         # Keyless free-tier ring: with NO web backend configured or keyed,
-        # web_search/web_extract rotate round-robin across five vendors'
+        # web_search/web_extract rotate round-robin across four vendors'
         # public free tiers (exa, parallel, firecrawl, keenable),
         # failing over to the next ring vendor on rate limits. Never
         # pre-empts a configured or keyed backend. Set false to disable.
@@ -590,10 +590,11 @@ DEFAULT_CONFIG = {
         # free-tier ring — the next call attempts the chosen backend again
         # (no sticky failover). Off when keyless_fallback is false.
         "keyless_rescue": True,
-        # Per-provider tier selection for ring vendors with both a keyless
+        # Per-provider tier selection for vendors with both a keyless
         # free endpoint and a keyed paid path (exa, parallel,
-        # firecrawl, keenable). Set by the `hermes tools` picker's
-        # "Free (keyless)" / "Paid (API key)" rows.
+        # firecrawl, keenable on the ring; tavily is opt-in keyless via
+        # `hermes tools`, not a ring member). Set by the `hermes tools`
+        # picker's "Free (keyless)" / "Paid (API key)" rows.
         #   free  — always use the anonymous free endpoint (even with a key)
         #   paid  — always use the keyed path (missing key = error; vendor
         #           is also excluded from the keyless ring)
@@ -1769,6 +1770,15 @@ DEFAULT_CONFIG = {
         # override for backward compatibility. 0 disables the reap
         # (park forever).
         "ws_orphan_reap_grace_s": 20.0,
+        # Activity-staleness threshold (seconds) gating the WS-orphan
+        # interrupt of a detached RUNNING turn (#98028/#100325). A
+        # client-absent turn is only interrupted once its agent activity
+        # clock (the same one the agent.turn_liveness watchdog samples —
+        # stamped by API waits, stream tokens, tool heartbeats) has been
+        # idle at least this long; an actively-working detached turn runs
+        # to completion. Default matches agent.turn_liveness.timeout_s.
+        # 0 restores the old interrupt-at-grace-regardless behavior.
+        "ws_orphan_activity_stale_s": 600.0,
         # Startup sweep of session rows orphaned by a dead gateway process
         # (#65194).  The ws-orphan grace timer above is in-process, so a
         # gateway restart (update, crash, systemd) leaves disconnected
@@ -2310,9 +2320,17 @@ DEFAULT_CONFIG = {
 
     # Skills — external skill directories for sharing skills across tools/agents.
     # Each path is expanded (~, ${VAR}) and resolved.  Read-only — skill creation
-    # always goes to ~/.hermes/skills/.
+    # goes to ~/.hermes/skills/ unless create_dir (below) redirects it.
     "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
+        # Where agent-created skills (skill_manage action=create) are written.
+        # Empty = the profile-local skills dir (~/.hermes/skills/). When set,
+        # new skills land here AND every agent-facing instruction that names
+        # the creation path (tool schema text, prompts) renders this directory
+        # instead of the default. Expanded (~, ${VAR}); relative paths resolve
+        # against HERMES_HOME. The directory is scanned for skills alongside
+        # the local dir. e.g. "/opt/brain/skills"
+        "create_dir": "",
         # Project-local skill discovery: when a session starts inside a git
         # checkout, ``<root>/.hermes/skills/`` and ``<root>/.agents/skills/``
         # are sourced as the highest-precedence skill tier — but ONLY when the
@@ -3635,11 +3653,28 @@ DEFAULT_CONFIG = {
         "profile_build": "ask",
     },
 
-    # Privacy-safe aggregate metrics written only to this profile's local
-    # telemetry directory. Collection is opt-in and no remote sink exists.
+    # Privacy-safe aggregate metrics written to this profile's local telemetry
+    # directory. Collection is opt-in (``enabled``). Transmission to the Nous
+    # telemetry service is a SEPARATE opt-in (``send``) and is off by default;
+    # see docs/observability/relay-shared-metrics.md, Appendix A, for the
+    # consent, identity, rotation, retention, and deletion decisions.
     "telemetry": {
         "shared_metrics": {
             "enabled": False,
+            # Transmit exported packages to the Nous telemetry service.
+            # Requires ``enabled``: it never switches collection on by itself,
+            # and ``send`` without ``enabled`` is logged as an error rather
+            # than silently doing nothing. A package is only sent when its
+            # whole period falls inside a recorded consent window, so data
+            # collected before consent — or while it was withdrawn — stays
+            # local.
+            "send": False,
+            # Ingest endpoint. Production by default; override for staging or
+            # a local test server. Deliberately NOT overridable by an
+            # environment variable: that would let an inherited value silently
+            # redirect telemetry a user consented to send to Nous. Non-HTTPS
+            # is refused unless the host is localhost.
+            "endpoint": "https://telemetry.nousresearch.com/v1/telemetry",
         },
     },
 
@@ -4103,6 +4138,29 @@ DEFAULT_CONFIG = {
         # (regional endpoints silently 404 them). Override to a regional value
         # (e.g. "us-central1") only if your models are pinned to a region.
         "region": "global",
+    },
+
+    # Managed llama.cpp local runtime (see docs: user-guide/local-models).
+    # Hermes downloads official llama.cpp release binaries, then spawns and
+    # supervises one llama-server in router mode. Context sizing is policy,
+    # not preference: there are deliberately no context/VRAM knobs here.
+    "local_runtime": {
+        # Master switch for the managed runtime. Off = detection-only
+        # (Hermes still finds an external llama-server you run yourself).
+        "enabled": False,
+        # Pinned llama.cpp release tag (rolling bNNNN). Bumped by Hermes
+        # releases after the validation suite re-runs, not tracked live.
+        "tag": "b10679",
+        # Inference backend: auto = CUDA on NVIDIA, Metal on macOS, Vulkan on
+        # other GPUs, else CPU. Explicit values: cuda|metal|vulkan|hip|cpu.
+        "backend": "auto",
+        # Router process: how many models may be resident at once.
+        "models_max": 4,
+        # Port for the managed server. 0 = pick a free port at spawn.
+        "port": 0,
+        # Extra ports detection probes for an external llama-server, in
+        # addition to the default 8080.
+        "detect_ports": [],
     },
 
     # Config schema version - bump this when adding new required fields
@@ -4606,6 +4664,14 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "tool",
         "advanced": True,
+    },
+    "TAVILY_API_KEY": {
+        "description": "Tavily API key for AI-native web search and extract (optional — keyless works when Tavily is selected)",
+        "prompt": "Tavily API key",
+        "url": "https://app.tavily.com/home",
+        "tools": ["web_search", "web_extract"],
+        "password": True,
+        "category": "tool",
     },
     "KEENABLE_API_KEY": {
         "description": "Keenable API key for fast independent-index web search and page fetch (optional — keyless free tier works without it)",

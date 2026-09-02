@@ -5491,6 +5491,30 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # clobber an explicit override with the session's stored model.
         self._explicit_model_override = bool(model)
         self.model = model or _config_model or _DEFAULT_CONFIG_MODEL
+        _startup_provider_override = ""
+        _startup_base_url_override = ""
+        _startup_api_key_override = ""
+        if self.model:
+            from hermes_cli.model_switch import resolve_startup_model_route
+
+            _startup_route = resolve_startup_model_route(
+                self.model,
+                explicit_provider=provider or "",
+                current_provider=(
+                    provider
+                    or _nested_provider
+                    or CLI_CONFIG["model"].get("provider")
+                    or os.getenv("HERMES_INFERENCE_PROVIDER")
+                    or ""
+                ),
+                user_providers=CLI_CONFIG.get("providers"),
+                custom_providers=CLI_CONFIG.get("custom_providers"),
+            )
+            if _startup_route is not None:
+                self.model = _startup_route.model
+                _startup_provider_override = _startup_route.provider
+                _startup_base_url_override = _startup_route.base_url
+                _startup_api_key_override = _startup_route.api_key
         # A ``moa:<preset>`` model string selects the MoA virtual provider in
         # one shot (parity with interactive ``/moa`` and the model picker). Do
         # this before provider resolution so ``-Q -m moa:<preset>`` routes
@@ -5527,13 +5551,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             not _config_model or _config_model == _DEFAULT_CONFIG_MODEL
         )
 
-        self._explicit_api_key = api_key
+        # An explicit --api-key wins; otherwise a URL-bearing startup alias
+        # carries its own credential for the alias host (#28660).
+        self._explicit_api_key = api_key or _startup_api_key_override or None
         self._explicit_base_url = base_url
 
         # Provider selection is resolved lazily at use-time via _ensure_runtime_credentials().
         self.requested_provider = (
             _moa_provider_override
             or provider
+            or _startup_provider_override
             or _nested_provider
             or CLI_CONFIG["model"].get("provider")
             or os.getenv("HERMES_INFERENCE_PROVIDER")
@@ -5567,6 +5594,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         self.acp_args: list[str] = []
         self.base_url = (
             base_url
+            or _startup_base_url_override
             or CLI_CONFIG["model"].get("base_url", "")
             or os.getenv("OPENROUTER_BASE_URL", "")
         ) or None
@@ -6827,6 +6855,29 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             context_tokens = getattr(compressor, "last_prompt_tokens", 0) or 0
             if context_tokens < 0:
                 context_tokens = 0
+            # Durable-transcript view: on reasoning models a long tool loop
+            # replays the current turn's thinking + scaffolding on every
+            # request, so the LAST request's prompt_tokens can exceed the
+            # durable transcript by hundreds of K — all of which evaporates
+            # at the turn boundary. Rendering that raw figure makes the bar
+            # sawtooth (e.g. 850K mid-turn -> 600K next turn) and reads as a
+            # broken compaction. Anchor the display on the turn's FIRST
+            # response (minimal replay) plus a delta estimate of messages
+            # appended since, excluding stale thinking. Display-only: the
+            # compression trigger keeps using real last-request usage.
+            try:
+                from agent.model_metadata import anchored_context_tokens
+
+                _msgs = getattr(agent, "_session_messages", None)
+                _anchored = anchored_context_tokens(
+                    _msgs if isinstance(_msgs, list) else [],
+                    getattr(agent, "_turn_base_usage_anchor", None),
+                    charge_stale_thinking=False,
+                )
+                if _anchored is not None and _anchored > 0:
+                    context_tokens = _anchored
+            except Exception:
+                pass
             context_length = getattr(compressor, "context_length", 0) or 0
             if context_length < 0:
                 context_length = 0
