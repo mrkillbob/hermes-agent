@@ -274,6 +274,9 @@ _BOUNDED_SOURCE_CLI_VALUE = re.compile(
     r"(?P<prefix>--[a-z][a-z0-9]*(?:-[a-z0-9]+)*=)"
     r"(?P<value>[A-Z]{3,8})(?P<suffix>[^A-Za-z0-9_+/=-])"
 )
+_BOUNDED_SOURCE_CODE_ASSIGNMENT = re.compile(
+    r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,7}="
+)
 # Bounded operational tokens are emitted by ordinary CLI/test tooling. They
 # can decode as Base64 by coincidence, but are not opaque encoded payloads.
 _BOUNDED_SHORT_CLI_OPTION = re.compile(r"^-[A-Za-z]{1,8}$")
@@ -892,6 +895,7 @@ def _source_text_for_base64_scan(text: str) -> str:
     # CLI filter values such as ``--diff-filter=ACMR`` are source syntax, not
     # opaque payloads.  Keep this grammar tied to a long-option assignment so
     # short quoted Base64 values elsewhere are still rejected.
+    masked = _BOUNDED_SOURCE_CODE_ASSIGNMENT.sub("<code>", masked)
     return _BOUNDED_SOURCE_CLI_VALUE.sub(
         lambda match: f"{match.group('prefix')}<code>{match.group('suffix')}",
         masked,
