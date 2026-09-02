@@ -349,6 +349,12 @@ _PRIVATE_ABSOLUTE_PATH = re.compile(
     r")",
     re.IGNORECASE,
 )
+_EGRESS_SECRET_ASSIGNMENT = re.compile(
+    r"(?<![A-Za-z0-9_])(?:api[_ -]?key|token|secret|password|passwd|credential|"
+    r"authorization|client[_ -]?secret|auth)\s*=\s*['\"]?"
+    r"(?!<redacted>|«redacted|\*\*\*)[^\s'\"]+",
+    re.IGNORECASE,
+)
 # These are fixed provider-protocol grammar atoms, not a caller-configurable
 # egress allowlist. Several happen to round-trip as unpadded Base64 even though
 # they are required JSON schema words. They still go through the final secret
@@ -888,6 +894,12 @@ def _contains_secret(value: Any, *, seen: set[int] | None = None) -> bool:
     """Apply forced redaction semantics independently to every request string."""
 
     if isinstance(value, str):
+        # The display redactor intentionally avoids treating every bare
+        # ``token=...`` phrase as a credential because it also appears in
+        # ordinary prose and source examples. At provider egress, an explicit
+        # credential assignment must fail closed.
+        if _EGRESS_SECRET_ASSIGNMENT.search(value):
+            return True
         return redact_sensitive_text(
             value,
             force=True,

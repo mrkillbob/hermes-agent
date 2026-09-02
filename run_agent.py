@@ -2570,7 +2570,12 @@ class AIAgent:
                 tool_calls_data = None
                 if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
                     tool_calls_data = [
-                        {"name": tc.function.name, "arguments": tc.function.arguments}
+                        {
+                            "id": getattr(tc, "id", None),
+                            "type": getattr(tc, "type", "function"),
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        }
                         for tc in msg.tool_calls
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
