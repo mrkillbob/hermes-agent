@@ -235,6 +235,23 @@ def test_source_grant_allows_ordinary_cli_source_atoms_but_rejects_base64(tmp_pa
     assert "base64_payload" in exc_info.value.decision.reason_codes
 
 
+def test_source_grant_allows_issue_keys_and_added_diff_metadata(tmp_path):
+    path = tmp_path / "pr.diff"
+    path.write_text(
+        "Q383-LIVE-RUNNER-STAGE1-CONTRACT-GAP-FREEZE\n"
+        "++++\n"
+        "+status\n",
+        encoding="utf-8",
+    )
+    grant = _source_grant(path, end=3)
+    decision = firewall(tmp_path).preflight(
+        _typed_request(_request(path.read_text(encoding="utf-8")), source_grant=grant),
+        _route(),
+        grants=(grant,),
+    )
+    assert decision.allowed is True
+
+
 def test_unrelated_grant_and_incomplete_typed_source_request_are_denied(tmp_path):
     first = tmp_path / "first.py"
     second = tmp_path / "second.py"

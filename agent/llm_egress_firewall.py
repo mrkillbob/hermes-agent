@@ -277,6 +277,12 @@ _BOUNDED_SOURCE_CLI_VALUE = re.compile(
 _BOUNDED_SOURCE_CODE_ASSIGNMENT = re.compile(
     r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,7}="
 )
+_BOUNDED_SOURCE_ISSUE_KEY = re.compile(
+    r"\b[A-Z]{1,8}\d{2,}-[A-Z0-9]+(?:-[A-Z0-9]+){1,8}\b"
+)
+_BOUNDED_SOURCE_DIFF_METADATA = re.compile(
+    r"(?m)^\+[A-Za-z0-9+/=_-]{1,128}\s*$"
+)
 _BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT = re.compile(
     r"\b(?P<name>[a-z][a-z0-9_]*_(?:pass|token|secret|password|auth|key))"
     r"\s*=\s*(?P<value>_[a-z][a-z0-9_]*(?:\([^\n]*\))?|[a-z][a-z0-9_]*)"
@@ -900,6 +906,14 @@ def _source_text_for_base64_scan(text: str) -> str:
     # opaque payloads.  Keep this grammar tied to a long-option assignment so
     # short quoted Base64 values elsewhere are still rejected.
     masked = _BOUNDED_SOURCE_CODE_ASSIGNMENT.sub("<code>", masked)
+    # Repository-owned PR diffs contain issue keys and unified-diff marker
+    # lines.  Their URL-safe alphabet can resemble encoded payloads, but the
+    # surrounding source grammar proves they are presentation metadata. This
+    # affects only the Base64 scan; secret/path scans still see the original.
+    # Keep replacement labels separated: the labels themselves must not form
+    # another URL-safe Base64 candidate during the same scan.
+    masked = _BOUNDED_SOURCE_ISSUE_KEY.sub("<source issue key>", masked)
+    masked = _BOUNDED_SOURCE_DIFF_METADATA.sub("<diff metadata>", masked)
     return _BOUNDED_SOURCE_CLI_VALUE.sub(
         lambda match: f"{match.group('prefix')}<code>{match.group('suffix')}",
         masked,
