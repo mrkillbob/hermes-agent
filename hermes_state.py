@@ -375,6 +375,20 @@ DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 # query; short enough that transient fd pressure doesn't strand the read pool.
 _READ_OPEN_RETRY_SECONDS = 60.0
 
+# Transient SQLITE_IOERR retry budget for READ-ONLY opens (#100436). A WAL
+# database being actively written (checkpoint, WAL reset/truncate, frame
+# flush) can surface "disk I/O error" to a concurrent ``mode=ro`` reader in
+# a millisecond-wide transition window: the read-only connection cannot
+# perform the WAL recovery a read through a stale or mid-update -shm file
+# needs, because recovery requires writing the -shm index, which mode=ro
+# refuses. The window closes on its own (the writer finishes the transition),
+# so a bounded number of short retries makes the open succeed instead of
+# 500-ing the whole /api/sessions poll (or any other read-only opener).
+# Deliberately NOT attempted on writable opens: a writer owns the
+# transition, so an IOERR there means a real storage/fd problem.
+_READ_ONLY_IOERR_RETRY_ATTEMPTS = 3
+_READ_ONLY_IOERR_RETRY_BACKOFF_S = 0.05
+
 # Hard ceiling on read-only connections ALIVE at once against one database
 # FILE — pooled idle ones and checked-out ones together, summed over every
 # SessionDB in this process that points at that file. See _PathReadBudget.
@@ -2083,6 +2097,52 @@ def is_malformed_db_error(exc: BaseException) -> bool:
     return any(marker in str(exc).lower() for marker in _MALFORMED_DB_MARKERS)
 
 
+# SQLITE_IOERR, matched as a plain substring so wrapped error strings still
+# classify. Shared by the read-only open retry and the write-path BEGIN retry.
+_DISK_IO_ERROR_MARKER = "disk i/o error"
+
+# Broader set for HTTP classification: a read that failed for one of these
+# reasons found the store BUSY, not gone. Callers map it to 503 (retry, the
+# list was not cleared) instead of 500. Corruption is deliberately absent —
+# a malformed store must surface, not be retried into a timeout.
+_TRANSIENT_SQLITE_MARKERS = (
+    _DISK_IO_ERROR_MARKER,
+    "database is locked",
+    "database table is locked",
+    "busy",
+)
+
+
+def is_transient_sqlite_error(exc: BaseException) -> bool:
+    """True when a SQLite failure means "busy right now", not "damaged".
+
+    One predicate so the read paths cannot drift apart on what counts as
+    recoverable: the read-only open retry, and the HTTP 503-vs-500 split on
+    the session-list endpoints, classify the same way.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in _TRANSIENT_SQLITE_MARKERS)
+
+
+def _is_transient_read_only_ioerr(exc: sqlite3.OperationalError, *, attempt: int) -> bool:
+    """True when a read-only open should be retried rather than raised.
+
+    A ``mode=ro`` connection cannot perform WAL recovery (recovery needs to
+    write the -shm index, which read-only mode refuses), so a concurrent WAL
+    checkpoint / reset / frame-flush can surface ``SQLITE_IOERR`` ("disk I/O
+    error") to a reader on an otherwise healthy database (#100436). The
+    transition is millisecond-scale, so a bounded number of short retries
+    clears it without changing classification for genuine storage failures —
+    a persistent IOERR still exhausts the budget and propagates.
+    """
+    return (
+        attempt < _READ_ONLY_IOERR_RETRY_ATTEMPTS
+        and _DISK_IO_ERROR_MARKER in str(exc).lower()
+    )
+
+
 def is_malformed_schema_error(exc: BaseException) -> bool:
     """True only when SQLite explicitly reports malformed schema text.
 
@@ -2277,10 +2337,11 @@ def _cross_process_repair_lock(db_path: Path):
     """Serialize state.db schema surgery across processes.
 
     Yields True when this process holds the repair lock for *db_path*, False
-    when the bounded acquire timed out.  Unlike the kanban init lock — whose
-    critical section is idempotent, so proceeding without the lock is merely
-    redundant work — proceeding here would be exactly the unsafe interleaving
-    we are trying to prevent, so a caller that gets False must NOT do surgery.
+    when the bounded acquire timed out or the lock file could not be opened at
+    all.  Unlike the kanban init lock — whose critical section is idempotent,
+    so proceeding without the lock is merely redundant work — proceeding here
+    would be exactly the unsafe interleaving we are trying to prevent, so a
+    caller that gets False must NOT do surgery.
 
     ``flock`` is the right primitive for this: the kernel drops the lock when
     the holding process dies, so a crashed repairer cannot leave a stale lock
@@ -2298,14 +2359,22 @@ def _cross_process_repair_lock(db_path: Path):
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = lock_path.open("a+b")
     except OSError as exc:
-        # Read-only dir, exhausted fds, exotic filesystem: fall back to the
-        # in-process behaviour that shipped before this lock existed rather
-        # than refusing to repair a DB we could otherwise heal.
+        # Fail closed, exactly as a timed-out acquire does.  A lock file we
+        # cannot even open means the filesystem is out of space, inodes or
+        # descriptors — and a sibling that opened ITS handle before the disk
+        # filled is still inside writable_schema surgery or VACUUM.  Yielding
+        # True here let two processes run schema surgery on the same live
+        # state.db concurrently, which is itself the corruption source this
+        # lock exists to remove (#100368: the disk-full trigger, then a fresh
+        # corruption on every boot with other writers alive).  Callers already
+        # handle False by re-probing and reporting, and on a read-only
+        # directory no repair strategy could have written anyway.
         logger.warning(
-            "Could not open state.db repair lock %s (%s) — proceeding with "
-            "in-process serialisation only.", lock_path, exc,
+            "Could not open state.db repair lock %s (%s) — skipping schema "
+            "surgery rather than running it without cross-process authority.",
+            lock_path, exc,
         )
-        yield True
+        yield False
         return
 
     acquired = False
@@ -3555,16 +3624,19 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
     result = report
     with _cross_process_repair_lock(db_path) as holding_lock:
         if not holding_lock:
-            # Another process is still inside its critical section. It may
-            # nonetheless have healed the file already (long VACUUM after a
-            # successful strategy), so re-probe before reporting failure.
+            # Another process is still inside its critical section, or the
+            # lock file itself could not be opened (full disk / no fds). It
+            # may nonetheless have healed the file already (long VACUUM after
+            # a successful strategy), so re-probe before reporting failure.
             if _db_opens_cleanly(db_path) is None:
                 report["repaired"] = True
                 report["strategy"] = "repaired_by_other_process"
             else:
                 report["error"] = (
-                    "another process holds the state.db repair lock; skipped "
-                    "schema surgery to avoid racing it"
+                    "could not obtain the state.db repair lock (held by "
+                    "another process, or the lock file was unopenable); "
+                    "skipped schema surgery to avoid racing a concurrent "
+                    "repairer"
                 )
         else:
             # The fast check above avoids taking the lock for a known-exhausted
@@ -5143,46 +5215,67 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 # must already exist + be initialised (callers guard on
                 # db_path.exists()); a SELECT against an empty file raises and
                 # the caller degrades per-profile.
-                self._conn = _connect_tracked_db(
-                    f"file:{self.db_path}?mode=ro",
-                    tracking_path=self.db_path,
-                    uri=True,
-                    check_same_thread=False,
-                    timeout=1.0,
-                    isolation_level=None,
-                )
-                self._conn.row_factory = sqlite3.Row
-                # FTS capability flags normally come from writable schema
-                # initialisation. Probe existing virtual tables with SELECTs
-                # only so read-only search keeps its FTS and trigram paths.
-                # Close the connection on ANY probe failure (e.g. malformed
-                # schema raises DatabaseError, not the OperationalError the
-                # probe handles). The constructor's outer finally also covers
-                # failures before this probe and BaseException paths, so a
-                # leaked tracked connection cannot block _backup_db_file's
-                # raw-copy for the rest of the process — the writable heal
-                # that follows would then repair WITHOUT its forensic backup.
-                try:
-                    apply_database_pragmas(self._conn, db_label="state.db")
-                    cursor = self._conn.cursor()
-                    self._fts_enabled = (
-                        self._fts_table_probe(cursor, "messages_fts") is True
-                    )
-                    if self._fts_enabled:
-                        self._trigram_available = (
-                            self._fts_table_probe(
-                                cursor,
-                                "messages_fts_trigram",
-                            )
-                            is True
-                        )
-                except BaseException:
-                    conn, self._conn = self._conn, None
+                open_attempt = 0
+                while True:
                     try:
-                        conn.close()
-                    except Exception:
-                        pass
-                    raise
+                        self._conn = _connect_tracked_db(
+                            f"file:{self.db_path}?mode=ro",
+                            tracking_path=self.db_path,
+                            uri=True,
+                            check_same_thread=False,
+                            timeout=1.0,
+                            isolation_level=None,
+                        )
+                        self._conn.row_factory = sqlite3.Row
+                        # FTS capability flags normally come from writable schema
+                        # initialisation. Probe existing virtual tables with
+                        # SELECTs only so read-only search keeps its FTS and
+                        # trigram paths. Close the connection on ANY probe
+                        # failure (e.g. malformed schema raises DatabaseError,
+                        # not the OperationalError the probe handles). The
+                        # constructor's outer finally also covers failures
+                        # before this probe and BaseException paths, so a
+                        # leaked tracked connection cannot block
+                        # _backup_db_file's raw-copy for the rest of the
+                        # process — the writable heal that follows would then
+                        # repair WITHOUT its forensic backup.
+                        try:
+                            apply_database_pragmas(self._conn, db_label="state.db")
+                            cursor = self._conn.cursor()
+                            self._fts_enabled = (
+                                self._fts_table_probe(cursor, "messages_fts")
+                                is True
+                            )
+                            if self._fts_enabled:
+                                self._trigram_available = (
+                                    self._fts_table_probe(
+                                        cursor,
+                                        "messages_fts_trigram",
+                                    )
+                                    is True
+                                )
+                        except BaseException:
+                            conn, self._conn = self._conn, None
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+                            raise
+                        break
+                    except sqlite3.OperationalError as ioerr:
+                        # A WAL checkpoint / reset / frame-flush in flight on
+                        # the writer side can surface SQLITE_IOERR to a
+                        # concurrent mode=ro reader (it cannot perform the
+                        # recovery the read needs — recovery writes the -shm
+                        # index, which mode=ro refuses). The transition closes
+                        # in milliseconds, so retry a bounded number of times
+                        # before classifying the store as failed (#100436).
+                        if not _is_transient_read_only_ioerr(
+                            ioerr, attempt=open_attempt
+                        ):
+                            raise
+                        open_attempt += 1
+                        time.sleep(_READ_ONLY_IOERR_RETRY_BACKOFF_S)
                 self._record_db_file_identity()
                 initialization_complete = True
                 return
@@ -5950,6 +6043,13 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # Set on the first compression-busy collision so the short wait is
         # measured from then, not from the start of the write.
         compression_deadline: Optional[float] = None
+        # One retry for SQLITE_IOERR raised by BEGIN IMMEDIATE itself. The
+        # callback has not run at that point, so there is no durable effect
+        # to replay and the retry is exactly-once safe (#99502's contract).
+        # Once the callback starts, an IOERR leaves the write's settlement
+        # unknown and must propagate — this helper owns non-idempotent
+        # transcript/counter mutations, not just idempotent UPSERTs.
+        ioerr_begin_retried = False
 
         # Transient engine-level error observed on contended WAL appends
         # (dual gateway/agent writers; FTS5 trigram sync holds the write
@@ -5963,6 +6063,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         while True:
             self._raise_if_db_replaced()
+            fn_started = False
             try:
                 with self._lock:
                     if self._conn is None:
@@ -5971,6 +6072,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                         self._reopen_after_close_locked(context="write")
                     self._conn.execute("BEGIN IMMEDIATE")
                     try:
+                        fn_started = True
                         result = fn(self._conn)
                         self._conn.commit()
                     except BaseException:
@@ -6023,7 +6125,21 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     ) from exc
                 if _is_no_more_rows(exc) and self._sleep_before_write_retry(deadline, patience_s):
                     continue
-                # Non-lock error or patience exhausted — propagate.
+                if (
+                    _DISK_IO_ERROR_MARKER in err_msg
+                    and not fn_started
+                    and not ioerr_begin_retried
+                    and self._sleep_before_write_retry(deadline, patience_s)
+                ):
+                    # BEGIN IMMEDIATE itself hit a transient WAL-transition
+                    # IOERR. Nothing has been mutated, so retrying on the SAME
+                    # connection replays nothing. Never close()+reopen to
+                    # "heal" it: close() cancels this process's POSIX locks on
+                    # the file for every sibling connection (howtocorrupt §2.2).
+                    ioerr_begin_retried = True
+                    continue
+                # Non-lock error, the callback already ran (settlement is
+                # unknown — do not replay), or patience exhausted.
                 raise
             except sqlite3.DatabaseError as exc:
                 if _is_no_more_rows(exc) and self._sleep_before_write_retry(deadline, patience_s):
@@ -13673,11 +13789,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         halves the resume's DB work versus two separate calls, with byte-identical
         output (see test_get_resume_conversations_matches_separate_reads).
         """
-        session_ids = (
-            [session_id]
-            if self._is_explicit_branch_session(session_id)
-            else self._session_lineage_root_to_tip(session_id)
-        )
+        session_ids = self._resume_lineage_ids(session_id)
         with self._read_ctx() as conn:
             placeholders = ",".join("?" for _ in session_ids)
             rows = conn.execute(
@@ -13713,9 +13825,32 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         )
         return model_history, display_history
 
-    def get_resume_message_count(self, session_id: str) -> int:
-        """Count active rows that a full resume would materialize."""
-        session_ids = self._session_lineage_root_to_tip(session_id)
+    def _resume_lineage_ids(self, session_id: str) -> List[str]:
+        """Session ids a full (display) resume materializes for *session_id*.
+
+        Compression continuations need their ended ancestors' rows for the
+        display transcript; an explicit ``/branch`` copy already owns its
+        transcript, so its lineage is itself alone. This is the ONE definition
+        shared by the resume readers (``get_resume_conversations``,
+        ``get_ancestor_display_prefix``) and the resume guard
+        (``assert_resume_safe`` / ``get_resume_message_count``) — the guard must
+        count exactly the rows a resume would load, never a superset.
+        """
+        if self._is_explicit_branch_session(session_id):
+            return [session_id]
+        return self._session_lineage_root_to_tip(session_id)
+
+    def get_resume_message_count(
+        self, session_id: str, *, tip_only: bool = False
+    ) -> int:
+        """Count active rows that a resume would materialize.
+
+        ``tip_only=True`` counts only the tip segment — the set a model-history
+        restore loads (``get_messages_as_conversation`` without ancestors, or
+        the deferred Desktop resume that pages the display transcript over
+        REST and never materializes the ancestor prefix in memory).
+        """
+        session_ids = [session_id] if tip_only else self._resume_lineage_ids(session_id)
         placeholders = ",".join("?" for _ in session_ids)
         with self._read_ctx() as conn:
             row = conn.execute(
@@ -13729,12 +13864,24 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         self,
         session_id: str,
         max_messages: Optional[int] = None,
+        *,
+        tip_only: bool = False,
     ) -> int:
         """Return resume row count or reject a transcript too large to load.
 
         ``max_messages=None`` resolves the limit from config
         (``sessions.max_resume_messages``); 0 disables the guard and returns
         the (bounded) count without raising.
+
+        ``tip_only=True`` bounds only the tip segment, for callers that never
+        materialize the ancestor lineage in memory (tip-only model restore,
+        deferred Desktop resume whose display history is REST-paginated). A
+        heavily-compressed conversation — 85 compaction segments and ~29k
+        lineage rows behind a ~700-row tip — is exactly the shape compression
+        is supposed to produce; counting its whole lineage against a limit
+        sized for in-memory materialization rejected the healthiest sessions
+        (Desktop Bot Chat stuck on "Waking up…" with code 4130) while the
+        process would only ever have held the tip.
         """
         if max_messages is None:
             max_messages = resolved_max_resume_messages()
@@ -13746,7 +13893,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             # return value, and an unbounded lineage COUNT here would do the
             # exact pathological work the disable exists to avoid.
             return 0
-        session_ids = self._session_lineage_root_to_tip(session_id)
+        session_ids = [session_id] if tip_only else self._resume_lineage_ids(session_id)
         placeholders = ",".join("?" for _ in session_ids)
         with self._read_ctx() as conn:
             row = conn.execute(
@@ -13758,7 +13905,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             ).fetchone()
         message_count = int(row[0] if row else 0)
         if message_count > max_messages:
-            raise SessionResumeTooLargeError(message_count, max_messages)
+            raise SessionResumeTooLargeError(
+                message_count,
+                max_messages,
+                scope="in its tip segment" if tip_only else "across its lineage",
+            )
         return message_count
 
     def assert_export_safe(
@@ -13817,10 +13968,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         returns ONLY the genuine ancestor messages, identified by
         ``session_id != tip_session_id``. (#65919)
         """
-        if self._is_explicit_branch_session(session_id):
-            return []
-
-        session_ids = self._session_lineage_root_to_tip(session_id)
+        session_ids = self._resume_lineage_ids(session_id)
         if len(session_ids) <= 1:
             return []
         with self._read_ctx() as conn:

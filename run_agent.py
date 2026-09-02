@@ -1885,12 +1885,26 @@ class AIAgent:
         (LiteLLM/sglang/vLLM/LM Studio proxies, Tailscale boxes), which
         report finish_reason correctly and were the source of #13971's
         false-positive truncation continuations.
+
+        Also excludes Ollama Cloud — the hosted service correctly reports
+        finish_reason and is not affected by the local Ollama stop-reason
+        bug (GH-72316).  Two signatures identify it: the ``ollama.com`` host
+        (provider ``ollama-cloud``) and the ``:cloud`` model suffix (cloud
+        generation proxied through a local 11434 endpoint, #98406).  Applying
+        the stop→length rewrite to them manufactures false truncations and
+        causes the continuation nudge to consume the model's output budget
+        on the next retry, making further false-positives more likely.
         """
         model_lower = (self.model or "").lower()
         provider_lower = (self.provider or "").lower()
         if "glm" not in model_lower and provider_lower != "zai":
             return False
-        if "ollama" in self._base_url_lower or ":11434" in self._base_url_lower:
+        base = self._base_url_lower
+        # Ollama Cloud (hosted service or :cloud proxy) forwards finish_reason
+        # faithfully — do not rewrite.
+        if "ollama.com" in base or ":cloud" in model_lower:
+            return False
+        if "ollama" in base or ":11434" in base:
             return True
         return provider_lower == "ollama"
 
@@ -2006,6 +2020,13 @@ class AIAgent:
             enabled, task_cfg = load_background_review_settings()
             if not enabled:
                 return
+
+        # Structural clone at the single chokepoint every review path
+        # (automatic, /refine, idle-queue deferral) goes through. The fork
+        # sanitizes its transcript in place; a shallow copy would alias the
+        # nested tool_calls/content containers of the live history (#100795).
+        from agent.turn_finalizer import _clone_background_review_messages
+        messages_snapshot = _clone_background_review_messages(messages_snapshot)
 
         kwargs = dict(
             messages_snapshot=messages_snapshot,
@@ -9013,6 +9034,13 @@ class AIAgent:
             function_result = append_toolguard_guidance(function_result, decision)
         if decision.should_halt:
             self._set_tool_guardrail_halt(decision)
+        else:
+            # observe_call may have raised the identical-call streak halt
+            # (hard_stop_enabled, tool-agnostic) — surface it the same way.
+            streak_halt = self._tool_guardrails.halt_decision
+            if streak_halt is not None and streak_halt.code == "identical_call_streak_halt":
+                function_result = append_toolguard_guidance(function_result, streak_halt)
+                self._set_tool_guardrail_halt(streak_halt)
         if stall_notice:
             function_result = (function_result or "") + "\n\n" + stall_notice
         return function_result

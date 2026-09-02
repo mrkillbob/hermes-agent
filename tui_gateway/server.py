@@ -8117,7 +8117,7 @@ def _todo_state_from_history(history) -> dict | None:
             if not isinstance(msg, dict):
                 continue
             for call in msg.get("tool_calls") or []:
-                if (call.get("function") or {}).get("name") == "todo":
+                if (call.get("function") or {}).get("name") in ("todo_list", "todo"):
                     cid = call.get("id")
                     if cid:
                         todo_call_ids.add(cid)
@@ -8202,7 +8202,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         if result_text:
             payload["result_text"] = result_text
     todo_state = None
-    if name == "todo":
+    if name in ("todo_list", "todo"):  # legacy alias: pre-rename replays
         todo_state = _normalize_todo_state(payload.get("result"))
         if todo_state is not None:
             payload.update(todo_state)
@@ -8228,7 +8228,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         _tool_progress_enabled(sid)
         or payload.get("inline_diff")
         or _tool_lifecycle_required_for_ui(name)
-        or name == "todo"
+        or name in ("todo_list", "todo")
     ):
         _emit("tool.complete", sid, payload)
     # Task state is application data, not optional tool-progress chrome. A
@@ -8341,6 +8341,8 @@ def _on_tool_progress(
             payload["parent_id"] = str(_kwargs["parent_id"])
         if _kwargs.get("child_session_id"):
             payload["child_session_id"] = str(_kwargs["child_session_id"])
+        if _kwargs.get("delegation_id"):
+            payload["delegation_id"] = str(_kwargs["delegation_id"])
         if _kwargs.get("depth") is not None:
             payload["depth"] = int(_kwargs["depth"])
         if _kwargs.get("model"):
@@ -10159,6 +10161,128 @@ def _fail_inflight_turn(
     session["inflight_turn"] = turn
 
 
+_TURN_FAILURE_DETAIL_LIMIT = 240
+# Shortest run of the submitted prompt that counts as the provider quoting it
+# back. Long enough that shared boilerplate ("Invalid request for model ") does
+# not trip it, short enough to catch a quoted sentence.
+_TURN_PROMPT_ECHO_WINDOW = 24
+# Ceiling on the prompt we shingle. An @-expanded prompt can carry a whole
+# file; the failure path must stay cheap.
+_TURN_PROMPT_ECHO_MAX_PROMPT = 65536
+
+
+def _strip_prompt_echo(message: str, prompt: Any) -> str:
+    """Blank runs of the submitted prompt that ``message`` quotes back.
+
+    Secret redaction and prompt omission are different contracts, and only the
+    first one is pattern-based. A provider 4xx that echoes the request carries
+    ordinary private prose -- a paragraph about a person, a pasted file from an
+    ``@`` reference -- that matches no credential pattern and would otherwise
+    reach the log intact. This closes that path directly: anything the message
+    shares with the prompt for ``_TURN_PROMPT_ECHO_WINDOW`` characters or more
+    becomes ``<prompt>``.
+
+    Shingle-set matching, not a diff: cost is linear in both strings, which
+    matters because this runs on every failed turn and an ``@`` reference can
+    make the prompt arbitrarily long. The JSON-escaped form of the prompt is
+    shingled too, since a provider that hands back its own request body often
+    hands it back escaped.
+
+    Verbatim echo is what this stops. A paraphrase, a re-encoding (base64, a
+    different unicode normalization) or a summary of the prompt would survive,
+    so this is a floor and not a proof; the guarantee it does give is that the
+    prompt cannot reach the record by being quoted.
+    """
+    if not message or not prompt:
+        return message
+    needle = " ".join(str(prompt).split())[:_TURN_PROMPT_ECHO_MAX_PROMPT]
+    window = _TURN_PROMPT_ECHO_WINDOW
+    if len(needle) < window or len(message) < window:
+        return message
+    shingles = {needle[i:i + window] for i in range(len(needle) - window + 1)}
+    try:
+        escaped = json.dumps(needle)[1:-1]
+    except Exception:
+        escaped = ""
+    if escaped and escaped != needle:
+        shingles.update(
+            escaped[i:i + window] for i in range(len(escaped) - window + 1)
+        )
+    out: list[str] = []
+    i = 0
+    n = len(message)
+    while i <= n - window:
+        if message[i:i + window] in shingles:
+            j = i + window
+            while j < n and message[j - window + 1:j + 1] in shingles:
+                j += 1
+            out.append("<prompt>")
+            i = j
+        else:
+            out.append(message[i])
+            i += 1
+    out.append(message[i:])
+    return "".join(out)
+
+
+def _turn_failure_detail(error: Any, reason: Any = None, prompt: Any = None) -> str:
+    """Render why a turn failed, for the ``tui turn finished`` bookend.
+
+    Returns ``""`` when there is nothing to say, otherwise a fragment that
+    already carries its own leading space, so the caller can append it to the
+    record unconditionally.
+
+    #86865 added the bookend to trace compression rotations, so it logs
+    identities and a coarse ``status`` and deliberately logs no content.
+    #89117 is what the missing cause costs: a report consisting of two lines
+    reading ``status=error error_retained=True duration=0.9s`` with no way to
+    tell a provider 4xx from a budget wall from a crashed finalizer. The
+    returned-error path -- the one a 0.9 s failure almost always takes --
+    emits no other log line at all; only the exception path prints to stderr,
+    which is why the quiet failures are the ones that get filed.
+
+    Content discipline follows #86865's, and it takes two separate steps
+    because it is two separate contracts. ``redact_sensitive_text`` removes
+    credentials, which are pattern-shaped. It does nothing about a 4xx body
+    that quotes the request back, because ordinary private prose is not
+    pattern-shaped -- so ``_strip_prompt_echo`` removes that separately, using
+    the submitted ``prompt`` itself as the thing to look for. The invariant the
+    two of them keep is: this record may gain failure classification and
+    provider detail, and may not newly persist the user's own content.
+
+    ``prompt`` is optional so the helper stays callable from a path that has no
+    prompt in scope, but the turn paths always pass it; without it, only the
+    secret contract is enforced.
+    """
+    reason_text = str(reason or "").strip()
+    message = str(error or "").strip()
+    if isinstance(error, BaseException):
+        message = message or type(error).__name__
+    if not message and not reason_text:
+        return ""
+    try:
+        from agent.redact import redact_sensitive_text
+
+        message = redact_sensitive_text(message, force=True)
+    except Exception:
+        # A redactor that cannot run must not be able to leak the raw
+        # message into the log by failing open.
+        message = "<unredactable>"
+    message = " ".join(message.split())
+    # After the collapse, so both sides are compared in the same shape, and
+    # before the truncation, so a quote that starts inside the kept prefix
+    # cannot survive by being cut mid-run.
+    message = _strip_prompt_echo(message, prompt)
+    if len(message) > _TURN_FAILURE_DETAIL_LIMIT:
+        message = message[:_TURN_FAILURE_DETAIL_LIMIT] + "\u2026"
+    out = ""
+    if reason_text:
+        out += " failure_reason=%s" % " ".join(reason_text.split())
+    if message:
+        out += " cause=%r" % message
+    return out
+
+
 # ── Auto-continue: resume a turn killed by a process/machine death ────
 #
 # A turn that concludes — success, handled error, interrupt — clears its
@@ -11043,8 +11167,39 @@ def _schedule_resume_hydration(
                 {"phase": "history", "status": "loading"},
             )
             db.reopen_session(stored_id)
-            raw_history, display_history = db.get_resume_conversations(stored_id)
-            prefix = db.get_ancestor_display_prefix(stored_id)
+            from hermes_state import SessionResumeTooLargeError
+
+            # The deferred resume is guarded tip-only (session.resume): the
+            # display transcript is REST-paginated, so the ancestor prefix is
+            # an in-memory convenience (rewind ordinal translation, branch
+            # snapshots), not a requirement. Materialize the full lineage only
+            # while it fits sessions.max_resume_messages; past that, hydrate
+            # the tip alone instead of loading the runaway lineage the guard
+            # exists to keep out of memory (the omit_messages resume already
+            # runs with an empty prefix, so this is an existing shape).
+            prefix_fits = True
+            guard = getattr(db, "assert_resume_safe", None)
+            if callable(guard):
+                try:
+                    guard(stored_id)
+                except SessionResumeTooLargeError as exc:
+                    prefix_fits = False
+                    logger.info(
+                        "resume %s: compression lineage exceeds the resume "
+                        "limit (%s); hydrating the tip segment only",
+                        stored_id, exc,
+                    )
+                except Exception:
+                    logger.debug("resume lineage guard failed; loading full lineage", exc_info=True)
+            if prefix_fits:
+                raw_history, display_history = db.get_resume_conversations(stored_id)
+                prefix = db.get_ancestor_display_prefix(stored_id)
+            else:
+                raw_history = db.get_messages_as_conversation(
+                    stored_id, repair_alternation=True, include_row_ids=True
+                )
+                display_history = raw_history
+                prefix = []
             history = sanitize_replay_history(raw_history)
 
             if _sessions.get(sid) is not session:
@@ -13163,6 +13318,16 @@ def _run_prompt_submit(
         # True once a failed turn's snapshot was retained for resume replay —
         # tells the finally below to skip the normal inflight clear.
         turn_error_retained = False
+        # One-line cause for the "tui turn finished" bookend below. The record
+        # fires from a `finally`, where neither `result` nor the caught
+        # exception is reliably in scope, so both failure paths stash their
+        # cause here on the way past.
+        turn_error_detail = ""
+        # What this turn actually submitted, kept only so the cause can be
+        # checked for quoting it back (see _strip_prompt_echo). Bound here
+        # rather than read from the turn body because the exception path can
+        # fire before the prompt is resolved.
+        turn_prompt_text = ""
         # Durable crash marker: written before the turn runs, retired the
         # moment its outcome reaches the client (see _retire_turn_marker).
         # Any concluded turn — success, handled error, interrupt — retires
@@ -13275,6 +13440,11 @@ def _run_prompt_submit(
                     )
                     return
                 prompt = ctx.message
+
+            # After @-expansion on purpose: an injected file's contents are
+            # exactly the kind of private material a provider echo would carry
+            # back, and they are not in `text`.
+            turn_prompt_text = prompt if isinstance(prompt, str) else ""
 
             # Decide image routing per-turn based on active provider/model.
             # "native" → pass pixels to the main model as OpenAI-style content
@@ -13689,6 +13859,11 @@ def _run_prompt_submit(
                         error_surface=_error_surface,
                     )
                     turn_error_retained = True
+                    turn_error_detail = _turn_failure_detail(
+                        (result.get("error") if isinstance(result, dict) else raw),
+                        (result.get("failure_reason") if isinstance(result, dict) else None),
+                        turn_prompt_text,
+                    )
                 else:
                     _clear_inflight_turn(session)
             if status == "error":
@@ -13917,6 +14092,9 @@ def _run_prompt_submit(
                     retire_marker=terminal_receipt_committed,
                 )
                 turn_error_retained = True
+                turn_error_detail = _turn_failure_detail(
+                    e, type(e).__name__, turn_prompt_text
+                )
             except Exception as emit_exc:
                 print(
                     f"[gateway-turn] terminal error emit failed: "
@@ -13992,7 +14170,8 @@ def _run_prompt_submit(
             # without reaching this finally.
             logger.info(
                 "tui turn finished: ui_session=%s session_key=%s "
-                "agent_session_id=%s status=%s error_retained=%s duration=%.1fs",
+                "agent_session_id=%s status=%s error_retained=%s duration=%.1fs"
+                "%s",
                 sid,
                 session.get("session_key") or "",
                 getattr(agent, "session_id", "") or "",
@@ -14007,6 +14186,7 @@ def _run_prompt_submit(
                 else ("error" if turn_error_retained else "complete"),
                 turn_error_retained,
                 time.monotonic() - _turn_started_monotonic,
+                turn_error_detail,
             )
             # Backstop for turns that never reached a terminal frame (the
             # frame paths retire the marker as they emit).
@@ -16915,6 +17095,30 @@ def _voice_tts_enabled() -> bool:
     return os.environ.get("HERMES_VOICE_TTS", "").strip() == "1"
 
 
+def _tts_lease_async(lease: str, active: bool) -> None:
+    """Acquire/release a TTS engine lease off the RPC thread.
+
+    Speech-output toggles are the signal that TTS is about to be needed (or
+    no longer is). Acquiring warms the configured provider — for local
+    engines that is a model load, possibly a voice download — so it must not
+    block the toggle's RPC reply. Release is cheap but rides the same thread
+    for symmetry. Best-effort: a failure here never affects the toggle.
+    """
+
+    def _run():
+        try:
+            from tools.tts_tool import acquire_tts_lease, release_tts_lease
+
+            if active:
+                acquire_tts_lease(lease)
+            else:
+                release_tts_lease(lease)
+        except Exception as e:
+            logger.debug("voice: tts lease %s active=%s failed: %s", lease, active, e)
+
+    threading.Thread(target=_run, name=f"tts-lease-{lease}", daemon=True).start()
+
+
 def _any_session_running() -> bool:
     """True while any session's agent turn is in flight.
 
@@ -17764,6 +17968,12 @@ def _(rid, params: dict) -> dict:
             except Exception:
                 stop_hint = ""
 
+            # Voice mode with speech output already on (voice.auto_tts /
+            # prior /voice tts) means replies will be spoken — warm the
+            # engine now rather than on the first reply.
+            if _voice_tts_enabled():
+                _tts_lease_async("tui:voice-tts", True)
+
         if not enabled:
             # Disabling the mode must tear the continuous loop down; the
             # loop holds the microphone and would otherwise keep running.
@@ -17780,6 +17990,7 @@ def _(rid, params: dict) -> dict:
             # and silence any in-flight streaming speech.
             os.environ["HERMES_VOICE_TTS"] = "0"
             _tts_stream_stop(user_barge=False)
+            _tts_lease_async("tui:voice-tts", False)
 
         return _ok(
             rid,
@@ -17799,6 +18010,10 @@ def _(rid, params: dict) -> dict:
         os.environ["HERMES_VOICE_TTS"] = "1" if new_value else "0"
         if not new_value:
             _tts_stream_stop(user_barge=False)
+        # The TTS toggle is the "speech is about to be needed" signal: on →
+        # pre-load the configured engine so the first reply starts hot; off →
+        # release the lease (last holder gone = resident local model freed).
+        _tts_lease_async("tui:voice-tts", new_value)
         # Include ``record_key`` on every branch so a /voice tts toggle
         # doesn't reset the TUI's cached shortcut to the default when a
         # user has a custom binding configured (Copilot review, round 2
