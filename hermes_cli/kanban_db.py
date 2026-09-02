@@ -12469,20 +12469,22 @@ def _default_spawn(
     for key in _VAR_MAP:
         env.pop(key, None)
 
-    # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
-    # (fallback_providers, toolsets, agent settings, etc.) instead of the root
-    # config.  Without this, `env = dict(os.environ)` copies only the parent's
-    # env, and when the child process starts `hermes -p <name>` the
-    # _apply_profile_override() runs *before* hermes_constants is imported.
-    # If HERMES_HOME is absent from the child's env, get_hermes_home() falls
-    # back to Path.home() / ".hermes" (the DEFAULT profile root), ignoring the
-    # profile-specific config entirely.  Fixes profile-scoped fallback_providers
-    # being invisible to kanban workers.
+    # Keep HERMES_HOME at the process-level Hermes root and let the explicit
+    # `-p <name>` argv select the profile exactly once. Setting HERMES_HOME to
+    # the already-selected profile directory and also passing `-p` makes the
+    # child look for `<profile>/profiles/<name>`, producing the misleading
+    # "Profile ... does not exist" startup crash seen in detached workers.
+    # With the root here, `_apply_profile_override()` resolves the profile's
+    # config (fallback_providers, toolsets, agent settings, etc.) before the
+    # worker starts while preserving the shared-board path overrides below.
     from hermes_cli.profiles import resolve_profile_env
     parsed_profile: Optional[Mapping[str, Any]] = None
+    profile_home: Optional[str] = None
     try:
         profile_home = resolve_profile_env(profile_arg)
-        env["HERMES_HOME"] = profile_home
+        from hermes_constants import get_default_hermes_root
+
+        env["HERMES_HOME"] = str(get_default_hermes_root())
         # Profile config loading is deliberately fail-open for interactive
         # sessions, where retaining defaults can still let an operator repair
         # the file. A detached Kanban worker has no such recovery path: falling
@@ -12693,10 +12695,9 @@ def _default_spawn(
         *_resolve_hermes_argv(),
         "-p", profile_arg,
         "--cli",
-        # Worker subprocesses switch to a profile-scoped HERMES_HOME above,
-        # so they see that profile's shell-hook allowlist instead of the
-        # dispatcher's root allowlist. Pass --accept-hooks explicitly so
-        # profile-local worker sessions still register configured hooks.
+        # The explicit `-p` selects the profile from the shared Hermes root.
+        # Pass --accept-hooks explicitly so profile-local worker sessions
+        # still register configured hooks.
         "--accept-hooks",
     ]
     # Per-task force-loaded skills. Each name goes in its own
@@ -12775,7 +12776,7 @@ def _default_spawn(
     if reasoning_effort:
         cmd.extend(["--reasoning", reasoning_effort])
     worker_toolsets = _resolve_worker_cli_toolsets(
-        env.get("HERMES_HOME"),
+        profile_home or env.get("HERMES_HOME"),
         # The local provider path already has repository-scoped terminal/file
         # execution. Do not advertise the separate Python kernel to local
         # workers: when that optional kernel is unavailable, models can repeat

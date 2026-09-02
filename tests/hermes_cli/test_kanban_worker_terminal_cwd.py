@@ -139,7 +139,10 @@ def test_worker_path_prefers_workspace_venv_for_terminal_commands(monkeypatch, t
     from hermes_cli import kanban_db as kb
 
     workspace = tmp_path / "ws"
-    (workspace / ".venv" / "bin").mkdir(parents=True)
+    python = workspace / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
     captured = _capture_spawn_env(kb, monkeypatch, str(workspace))
 
     assert captured["env"]["PATH"].split(":")[:3] == [
