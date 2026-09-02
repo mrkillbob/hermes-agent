@@ -208,10 +208,12 @@ def test_source_grant_allows_ordinary_cli_source_atoms_but_rejects_base64(tmp_pa
     path = tmp_path / "lane.py"
     path.write_text(
         'args = ["git", "diff", "--diff-filter=ACMR"]\n'
-        "current, line_ranges = result\n",
+        "current, line_ranges = result\n"
+        "current_pass = _format_pass(tool)\n"
+        "baseline_pass = bool(baseline_path)\n",
         encoding="utf-8",
     )
-    grant = _source_grant(path, end=2)
+    grant = _source_grant(path, end=4)
     request = _request(path.read_text(encoding="utf-8"))
     decision = firewall(tmp_path).preflight(
         _typed_request(request, source_grant=grant),

@@ -277,6 +277,10 @@ _BOUNDED_SOURCE_CLI_VALUE = re.compile(
 _BOUNDED_SOURCE_CODE_ASSIGNMENT = re.compile(
     r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,7}="
 )
+_BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT = re.compile(
+    r"\b(?P<name>[a-z][a-z0-9_]*_(?:pass|token|secret|password|auth|key))"
+    r"\s*=\s*(?P<value>_[a-z][a-z0-9_]*(?:\([^\n]*\))?|[a-z][a-z0-9_]*)"
+)
 # Bounded operational tokens are emitted by ordinary CLI/test tooling. They
 # can decode as Base64 by coincidence, but are not opaque encoded payloads.
 _BOUNDED_SHORT_CLI_OPTION = re.compile(r"^-[A-Za-z]{1,8}$")
@@ -900,6 +904,12 @@ def _source_text_for_base64_scan(text: str) -> str:
         lambda match: f"{match.group('prefix')}<code>{match.group('suffix')}",
         masked,
     )
+
+
+def _source_text_for_secret_scan(text: str) -> str:
+    """Mask code identifiers that resemble secret names, not secret values."""
+
+    return _BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT.sub("<code>", text)
 
 
 def _generated_context_text_for_base64_scan(text: str) -> str:
@@ -1740,7 +1750,7 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(text)
+                scan_values.append(_source_text_for_secret_scan(text))
                 base64_scan_values.append(_source_text_for_base64_scan(text))
                 return text
             if isinstance(segment, SourcePresentationSegment):
@@ -1769,7 +1779,7 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(segment.text)
+                scan_values.append(_source_text_for_secret_scan(segment.text))
                 base64_scan_values.append(
                     _source_text_for_base64_scan(raw_text)
                 )
