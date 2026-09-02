@@ -370,18 +370,63 @@ test('uses rounded manufactured panels for shared facade detail instead of raw b
   }
 })
 
+// Half the plan-view footprint diagonal (or the plain radius for garden,
+// which is circular) per district -- matches
+// scripts/lunar-city/layout-solver.mjs's FOOTPRINTS/footprintRadius, which
+// is the source of truth DISTRICTS was last solved against. A flat
+// distance check here (the previous version of this test) missed two real
+// problems: it only covered the 10 ids in BUILDING_BUILDERS (bus and
+// garden were never checked against anything), and a fixed 24-unit
+// threshold doesn't know that wireframeShell's per-building shellScale
+// width multiplier (e.g. council x1.42) can make one building meaningfully
+// bigger than the next -- both gaps let a real interpenetration regression
+// through silently.
+const DISTRICT_FOOTPRINT_RADIUS = Object.freeze({
+  archive: Math.hypot(13.5, 11) / 2,
+  'arts-studio': Math.hypot(14, 10.5) / 2,
+  bus: Math.hypot(12, 8.2) / 2,
+  council: Math.hypot(14 * 1.42, 10.5) / 2,
+  depot: Math.hypot(14.5 * 1.14, 11) / 2,
+  'engineering-workshop': Math.hypot(15.5, 12) / 2,
+  garden: 9.5,
+  library: Math.hypot(15 * 1.06, 12) / 2,
+  'release-gatehouse': Math.hypot(12.5, 9.5) / 2,
+  'research-lab': Math.hypot(18 * 0.96, 14) / 2,
+  'review-office': Math.hypot(15.5 * 0.62, 11.5) / 2,
+  triage: Math.hypot(9.5, 7.4) / 2
+})
+const DISTRICT_CLEARANCE_MARGIN = 7
+
 test('keeps building district anchors clear so authored footprints cannot interpenetrate', () => {
-  const ids = Object.keys(BUILDING_BUILDERS)
+  const ids = Object.keys(DISTRICTS)
+  assert.deepEqual(ids.toSorted(), Object.keys(DISTRICT_FOOTPRINT_RADIUS).toSorted())
   for (let leftIndex = 0; leftIndex < ids.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < ids.length; rightIndex += 1) {
-      const left = DISTRICTS[ids[leftIndex]].position
-      const right = DISTRICTS[ids[rightIndex]].position
+      const leftId = ids[leftIndex]
+      const rightId = ids[rightIndex]
+      const left = DISTRICTS[leftId].position
+      const right = DISTRICTS[rightId].position
       const distance = Math.hypot(left[0] - right[0], left[2] - right[2])
+      const required =
+        DISTRICT_FOOTPRINT_RADIUS[leftId] + DISTRICT_FOOTPRINT_RADIUS[rightId] + DISTRICT_CLEARANCE_MARGIN
       assert.ok(
-        distance >= 24,
-        `${ids[leftIndex]} and ${ids[rightIndex]} anchors are only ${distance.toFixed(2)} units apart`
+        distance >= required,
+        `${leftId} and ${rightId} anchors are ${distance.toFixed(2)} units apart, need >= ${required.toFixed(2)} for their footprints`
       )
     }
+  }
+})
+
+test('keeps every district footprint inside the camera bounds', async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL('../../public/lunar-city/v2/world-manifest.v2.json', import.meta.url), 'utf8')
+  )
+  const { max, min } = manifest.camera.bounds
+  for (const [id, { position }] of Object.entries(DISTRICTS)) {
+    const radius = DISTRICT_FOOTPRINT_RADIUS[id]
+    const [x, , z] = position
+    assert.ok(x - radius >= min[0] && x + radius <= max[0], `${id} footprint exceeds camera X bounds`)
+    assert.ok(z - radius >= min[2] && z + radius <= max[2], `${id} footprint exceeds camera Z bounds`)
   }
 })
 
@@ -426,13 +471,18 @@ test('uses the supplied colony-builder visual baseline for pads, transit, and do
     buildTerrain(scene)
     const pads = scene.meshes.filter(mesh => mesh.name.startsWith('terrain:district-pad:'))
     assert.equal(pads.length, 12, 'the baseline must give every district a modular pad')
-    assert.ok(pads.every(mesh => mesh.getTotalVertices() <= 30), 'district pads must be six-sided low-poly tiles')
+    assert.ok(
+      pads.every(mesh => mesh.getTotalVertices() <= 30),
+      'district pads must be six-sided low-poly tiles'
+    )
 
     const utilityPods = scene.meshes.filter(mesh => mesh.name.startsWith('terrain:utility-pod:'))
     assert.equal(utilityPods.length, 24, 'the baseline must provide two low-poly support modules per district')
 
     const transitAccents = scene.meshes.filter(
-      mesh => mesh.name.includes('walkway') && mesh.material?.subMaterials?.some(material => material.name === 'signal-emissive')
+      mesh =>
+        mesh.name.includes('walkway') &&
+        mesh.material?.subMaterials?.some(material => material.name === 'signal-emissive')
     )
     assert.ok(transitAccents.length > 0, 'transit accents must read as cyan luminous lines')
 
@@ -453,12 +503,8 @@ test('extends terrain into a concave planetary ground beyond the settlement isla
   assert.ok(bounds.max[0] - bounds.min[0] >= 350, 'planetary ground must extend well beyond the current island')
   assert.ok(bounds.max[2] - bounds.min[2] >= 350, 'planetary ground must extend well beyond the current island')
   const points = triangles.flat()
-  const centerHeights = points
-    .filter(point => Math.hypot(point[0], point[2] - 3) < 1)
-    .map(point => point[1])
-  const rimHeights = points
-    .filter(point => Math.hypot(point[0], point[2] - 3) > 170)
-    .map(point => point[1])
+  const centerHeights = points.filter(point => Math.hypot(point[0], point[2] - 3) < 1).map(point => point[1])
+  const rimHeights = points.filter(point => Math.hypot(point[0], point[2] - 3) > 170).map(point => point[1])
   assert.ok(centerHeights.length > 0 && rimHeights.length > 0, 'planetary ground must expose center and rim samples')
   assert.ok(Math.min(...rimHeights) - Math.min(...centerHeights) >= 6, 'planetary ground must be visibly concave')
 })
@@ -664,7 +710,10 @@ test('models reference colony workers as compact armored robots with helmet, pan
   const workerRoot = root.listNodes().find(node => node.getName() === 'workers:lod:near')
   const materials = new Set(
     descendantsWithMeshes(root, workerRoot).flatMap(node =>
-      node.getMesh().listPrimitives().map(primitive => primitive.getMaterial()?.getName())
+      node
+        .getMesh()
+        .listPrimitives()
+        .map(primitive => primitive.getMaterial()?.getName())
     )
   )
   assert.ok(materials.has('bone-metal'), 'reference worker needs a light armored shell')
@@ -675,7 +724,12 @@ test('models reference colony workers as compact armored robots with helmet, pan
 test('models every leader as a finished character with expressive face and layered robe trim', async () => {
   const root = (await new NodeIO().read(join(firstRoot, 'models', 'leaders.glb'))).getRoot()
   assert.equal(root.listSkins().length, 1, 'leaders must share one deformable character rig')
-  const jointNames = new Set(root.listSkins()[0].listJoints().map(joint => joint.getName()))
+  const jointNames = new Set(
+    root
+      .listSkins()[0]
+      .listJoints()
+      .map(joint => joint.getName())
+  )
   for (const id of LEADER_IDS) {
     const leader = root.listNodes().find(node => node.getName() === `leader:${id}`)
     assert.deepEqual(leader.getExtras().featureSet, [
@@ -933,7 +987,9 @@ test('uses the approved district road graph instead of a crossing shortcut', asy
     ['review-office', 'depot'],
     ['review-office', 'library'],
     ['triage', 'garden']
-  ].map(edge => normalize(edge.join('-'))).toSorted()
+  ]
+    .map(edge => normalize(edge.join('-')))
+    .toSorted()
   assert.deepEqual(actual, expected)
 })
 
@@ -941,10 +997,21 @@ test('builds roads as low segmented ground routes rather than elevated straight 
   for (const { from, to } of WALKWAY_ROUTES) {
     const points = roadRoutePoints(from, to)
     assert.ok(points.length >= 9, `${from}-${to} must be built from multiple ground-following segments`)
-    assert.ok(points.every(point => point[1] <= 0.55), `${from}-${to} must contact the terrain instead of floating at deck height`)
-    const lengths = points.slice(1).map((point, index) => Math.hypot(point[0] - points[index][0], point[2] - points[index][2]))
-    assert.ok(lengths.every(length => length >= 0.45), `${from}-${to} must not collapse into overlapping micro-segments`)
-    assert.ok(lengths.reduce((total, length) => total + length, 0) >= 5, `${from}-${to} must retain a usable architectural path length`)
+    assert.ok(
+      points.every(point => point[1] <= 0.55),
+      `${from}-${to} must contact the terrain instead of floating at deck height`
+    )
+    const lengths = points
+      .slice(1)
+      .map((point, index) => Math.hypot(point[0] - points[index][0], point[2] - points[index][2]))
+    assert.ok(
+      lengths.every(length => length >= 0.45),
+      `${from}-${to} must not collapse into overlapping micro-segments`
+    )
+    assert.ok(
+      lengths.reduce((total, length) => total + length, 0) >= 5,
+      `${from}-${to} must retain a usable architectural path length`
+    )
   }
 })
 

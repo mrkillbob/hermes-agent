@@ -657,11 +657,30 @@ describe('createLunarCityWorld', () => {
       'https://desktop.test/lunar-city/v2/world-manifest.v2.json'
     )
 
+    // Expected position/rotation come from the parsed manifest itself, not
+    // a hardcoded snapshot -- the city layout is expected to keep changing
+    // as districts get re-planned, and this test exists to catch
+    // createLunarCityWorld applying the wrong transform, not to pin
+    // coordinates that go stale every time DISTRICTS changes.
+    const libraryTransform = manifest.models.find(model => model.id === 'library')?.transform
+
+    if (!libraryTransform) {
+      throw new Error('library model missing from parsed manifest fixture')
+    }
+
     expect(runtime.loadedUrls).toHaveLength(manifest.models.length)
     expect(runtime.loadedUrls.every(url => url.startsWith('https://desktop.test/lunar-city/v2/models/'))).toBe(true)
     expect(runtime.loadedUrls.join('\n')).not.toMatch(/moon-settlement-approved\.jpg/i)
-    expect(runtime.placements.get('library')?.position.set).toHaveBeenCalledWith(-24, 4, -30)
-    expect(runtime.placements.get('library')?.rotation.set).toHaveBeenCalledWith(0, 0.6147, 0)
+    expect(runtime.placements.get('library')?.position.set).toHaveBeenCalledWith(
+      libraryTransform.position.x,
+      libraryTransform.position.y,
+      libraryTransform.position.z
+    )
+    expect(runtime.placements.get('library')?.rotation.set).toHaveBeenCalledWith(
+      libraryTransform.rotation.x,
+      libraryTransform.rotation.y,
+      libraryTransform.rotation.z
+    )
     expect(runtime.placements.get('library')?.scaling.set).toHaveBeenCalledWith(1, 1, 1)
     expect(runtime.placements.get('library')?.setPivotPoint).toHaveBeenCalledWith(
       expect.objectContaining({ x: 0, y: 0, z: 0 })

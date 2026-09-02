@@ -15,6 +15,13 @@ describe('parseWorldManifest', () => {
     const manifest = parseWorldManifest(cloneActualManifest())
     const library = manifest.models.find(model => model.id === 'library')
     const leaders = manifest.models.find(model => model.id === 'leaders')
+    // Position/rotation/destinations come from the raw fixture itself, not
+    // a frozen snapshot -- the city layout (DISTRICTS in terrain.mjs) is
+    // expected to keep changing as districts get re-planned, and this test
+    // exists to catch parseWorldManifest silently discarding/mangling
+    // fields, not to pin specific coordinates that go stale every time.
+    const rawLibrary = actualManifest.models.find(model => model.id === 'library')
+    const rawReview = actualManifest.destinations.review
 
     expect(manifest.version).toBe(2)
     expect(manifest.assetVersion).toBe('2.0.0')
@@ -22,8 +29,16 @@ describe('parseWorldManifest', () => {
     expect(library).toMatchObject({
       uri: 'models/library.glb',
       transform: {
-        position: { x: -24, y: 4, z: -30 },
-        rotation: { x: 0, y: 0.6147, z: 0 },
+        position: {
+          x: rawLibrary?.transform.position[0],
+          y: rawLibrary?.transform.position[1],
+          z: rawLibrary?.transform.position[2]
+        },
+        rotation: {
+          x: rawLibrary?.transform.rotation[0],
+          y: rawLibrary?.transform.rotation[1],
+          z: rawLibrary?.transform.rotation[2]
+        },
         scale: { x: 1, y: 1, z: 1 }
       },
       lods: [
@@ -36,7 +51,7 @@ describe('parseWorldManifest', () => {
     })
     expect(leaders?.statistics.animationClips).toContain('leader:fox:talking')
     expect(manifest.navigation.meshUri).toBe('models/navigation.glb')
-    expect(manifest.destinations.review).toEqual({ x: -26, y: 0, z: -4 })
+    expect(manifest.destinations.review).toEqual({ x: rawReview[0], y: rawReview[1], z: rawReview[2] })
     expect(manifest.projectSlots[0]).toMatchObject({
       id: 'compound-inner-1',
       position: { x: 16, y: 0, z: 38 }

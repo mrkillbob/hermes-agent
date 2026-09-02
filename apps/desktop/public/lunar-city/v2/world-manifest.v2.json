@@ -367,9 +367,9 @@
         "triangles": 41772,
         "gpuMiB": 3.288,
         "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 5, "maxTextures": 4, "maxTriangles": 90000 },
-        "bytes": 3460920,
+        "bytes": 3460936,
         "extent": [360, 12.425, 360],
-        "sha256": "73c38e8d77c5951959ebf15d224cf85b401c87ad8bef2b7d8cde982f67d6ec1a"
+        "sha256": "f5c3a927cbee9c2a68424ab072000b28fad8a4d606efbfb8828af3a977a25437"
       }
     },
     {
@@ -393,7 +393,7 @@
         { "distance": 0, "node": "library:lod:near" },
         { "distance": 112, "node": "library:lod:far" }
       ],
-      "transform": { "position": [-24, 4, -30], "rotation": [0, 0.6147, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-14.97, 4, -22.54], "rotation": [0, 0.5136, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 16, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 5, 0], "camera": [0, 8, 14], "dialogue": [-2, 1, 2] },
@@ -440,7 +440,7 @@
         { "distance": 0, "node": "research-lab:lod:near" },
         { "distance": 112, "node": "research-lab:lod:far" }
       ],
-      "transform": { "position": [22, 5, -34], "rotation": [0, -0.5248, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-29.24, 5, -47.3], "rotation": [0, 0.5181, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-14, 0, -12], "max": [14, 17, 12] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 5, 0], "camera": [0, 9, 15], "dialogue": [2, 1, 0] },
@@ -486,7 +486,7 @@
         { "distance": 0, "node": "depot:lod:near" },
         { "distance": 112, "node": "depot:lod:far" }
       ],
-      "transform": { "position": [-48, 2, 8], "rotation": [0, 1.6539, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-8.44, 2, 23.2], "rotation": [0, 2.7274, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 14, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [-1, 1, 2] },
@@ -532,7 +532,7 @@
         { "distance": 0, "node": "review-office:lod:near" },
         { "distance": 112, "node": "review-office:lod:far" }
       ],
-      "transform": { "position": [-26, 3, -4], "rotation": [0, 1.2723, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-32.79, 3, 28.51], "rotation": [0, 2.2127, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-13, 0, -10], "max": [13, 15, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 8, 14], "dialogue": [0, 1, 1] },
@@ -571,7 +571,7 @@
         { "distance": 0, "node": "triage:lod:near" },
         { "distance": 112, "node": "triage:lod:far" }
       ],
-      "transform": { "position": [12, 1, 38], "rotation": [0, -2.8023, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [20.49, 1, 3.48], "rotation": [0, -1.5454, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-7, 0, -6], "max": [7, 9, 6] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 3, 0], "camera": [0, 6, 10] },
@@ -610,7 +610,7 @@
         { "distance": 0, "node": "garden:lod:near" },
         { "distance": 112, "node": "garden:lod:far" }
       ],
-      "transform": { "position": [-10, 0, 54], "rotation": [0, 2.9442, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [20.11, 0, 26.5], "rotation": [0, -2.4122, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-14, 0, -12], "max": [14, 5, 12] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 1, 0], "camera": [0, 6, 15] },
@@ -649,7 +649,7 @@
         { "distance": 0, "node": "council:lod:near" },
         { "distance": 112, "node": "council:lod:far" }
       ],
-      "transform": { "position": [18, 1, -2], "rotation": [0, -1.249, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [14.13, 1, -21.84], "rotation": [0, -0.5004, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-11, 0, -9], "max": [11, 14, 9] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [0, 1, 1] },
@@ -700,7 +700,7 @@
         { "distance": 0, "node": "arts-studio:lod:near" },
         { "distance": 112, "node": "arts-studio:lod:far" }
       ],
-      "transform": { "position": [40, 2, -12], "rotation": [0, -1.1903, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [1.65, 2, -47.3], "rotation": [0, -0.0322, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 15, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 14], "dialogue": [-2, 1, 1] },
@@ -758,7 +758,7 @@
         { "distance": 0, "node": "engineering-workshop:lod:near" },
         { "distance": 112, "node": "engineering-workshop:lod:far" }
       ],
-      "transform": { "position": [-50, 2, 34], "rotation": [0, 2.1112, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-49.5, 2, 10.86], "rotation": [0, 1.7085, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-13, 0, -11], "max": [13, 16, 11] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 8, 15], "dialogue": [2, 1, 1] },
@@ -808,7 +808,7 @@
         { "distance": 0, "node": "release-gatehouse:lod:near" },
         { "distance": 112, "node": "release-gatehouse:lod:far" }
       ],
-      "transform": { "position": [-6, 2, 14], "rotation": [0, 2.6012, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-23.88, 2, 2.26], "rotation": [0, 1.4981, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-11, 0, -9], "max": [11, 15, 9] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [0, 1, 1] },
@@ -858,7 +858,7 @@
         { "distance": 0, "node": "archive:lod:near" },
         { "distance": 112, "node": "archive:lod:far" }
       ],
-      "transform": { "position": [52, 2, 14], "rotation": [0, -1.7608, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [28.93, 2, -44.95], "rotation": [0, -0.5338, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 15, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 14], "dialogue": [-2, 1, 1] },
@@ -897,7 +897,7 @@
         { "distance": 0, "node": "bus:lod:near" },
         { "distance": 112, "node": "bus:lod:far" }
       ],
-      "transform": { "position": [0, 2, -2], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [0, 2, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-5, 0, -3], "max": [5, 4, 3] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 2, 0], "camera": [0, 5, 9] },
@@ -1188,17 +1188,17 @@
     ]
   },
   "destinations": {
-    "bus": [0, 0, -2],
+    "bus": [0, 0, 0],
     "project": [18, 0, 38],
-    "depot": [-48, 0, 8],
-    "review": [-26, 0, -4],
-    "triage": [12, 0, 38],
-    "garden": [-10, 0, 54],
-    "council": [18, 0, -2],
-    "arts-studio": [40, 0, -12],
-    "engineering-workshop": [-50, 0, 34],
-    "release-gatehouse": [-6, 0, 14],
-    "archive": [52, 0, 14],
+    "depot": [-8.44, 0, 23.2],
+    "review": [-32.79, 0, 28.51],
+    "triage": [20.49, 0, 3.48],
+    "garden": [20.11, 0, 26.5],
+    "council": [14.13, 0, -21.84],
+    "arts-studio": [1.65, 0, -47.3],
+    "engineering-workshop": [-49.5, 0, 10.86],
+    "release-gatehouse": [-23.88, 0, 2.26],
+    "archive": [28.93, 0, -44.95],
     "unavailable": [0, 0, 0]
   },
   "projectSlots": [
@@ -1248,9 +1248,9 @@
       "triangles": 1440,
       "gpuMiB": 0.067,
       "budget": { "maxDrawCalls": 4, "maxGpuMiB": 4, "maxMaterials": 1, "maxTextures": 0, "maxTriangles": 12000 },
-      "bytes": 93348,
-      "extent": [115, 1.2, 101],
-      "sha256": "6476377453eae5dddfe8efbeae61d12028538930edc527ca5148c9691ec8b3c1"
+      "bytes": 93388,
+      "extent": [91.43, 1.2, 88.81],
+      "sha256": "d37342f87841601f0b95d074651c01bd79d1bdc3d541e0c3a8ce7695d412c18c"
     },
     "sourceSha256": "248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590"
   }

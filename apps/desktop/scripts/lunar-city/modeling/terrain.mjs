@@ -23,19 +23,31 @@ import { addSign } from './props.mjs'
 //   research lab, arts studio, and archive spread out from there.
 // - care: triage and garden, a small quiet cluster apart from the
 //   industrial and civic halves.
+// Positions below are the output of scripts/lunar-city/layout-solver.mjs,
+// not hand-picked: every pair is checked against the sum of both
+// buildings' actual footprint radii (post-shellScale width/depth from
+// buildings.mjs and primitives.mjs's wireframeShell profile tables) plus a
+// walkway/breathing-room margin, and against camera.bounds in
+// world-manifest.v2.json (note the bounds are asymmetric -- Z only goes to
+// +36 vs +60 on every other side -- which is why civic, the largest zone,
+// sits toward -Z). The previous hand-adjusted values here still had real
+// overlaps once wireframeShell's per-building width multipliers (e.g.
+// council x1.42) were accounted for, and placed garden at Z=54, outside
+// the camera bounds entirely. Re-run the solver and paste its output here
+// if any building's footprint size or a shellScale entry changes.
 export const DISTRICTS = Object.freeze({
-  archive: Object.freeze({ position: [52, 0.5, 14], zone: 'civic' }),
-  'arts-studio': Object.freeze({ position: [40, 0.7, -12], zone: 'civic' }),
-  bus: Object.freeze({ position: [0, 0.55, -2], zone: 'plaza' }),
-  council: Object.freeze({ position: [18, 0.35, -2], zone: 'civic' }),
-  depot: Object.freeze({ position: [-48, 0.45, 8], zone: 'pipeline' }),
-  'engineering-workshop': Object.freeze({ position: [-50, 0.6, 34], zone: 'pipeline' }),
-  garden: Object.freeze({ position: [-10, 0.25, 54], zone: 'care' }),
-  library: Object.freeze({ position: [-24, 0.8, -30], zone: 'civic' }),
-  'release-gatehouse': Object.freeze({ position: [-6, 0.5, 14], zone: 'pipeline' }),
-  'research-lab': Object.freeze({ position: [22, 1.1, -34], zone: 'civic' }),
-  'review-office': Object.freeze({ position: [-26, 0.7, -4], zone: 'pipeline' }),
-  triage: Object.freeze({ position: [12, 0.4, 38], zone: 'care' })
+  archive: Object.freeze({ position: [28.93, 0.5, -44.95], zone: 'civic' }),
+  'arts-studio': Object.freeze({ position: [1.65, 0.7, -47.3], zone: 'civic' }),
+  bus: Object.freeze({ position: [0, 0.55, 0], zone: 'plaza' }),
+  council: Object.freeze({ position: [14.13, 0.35, -21.84], zone: 'civic' }),
+  depot: Object.freeze({ position: [-8.44, 0.45, 23.2], zone: 'pipeline' }),
+  'engineering-workshop': Object.freeze({ position: [-49.5, 0.6, 10.86], zone: 'pipeline' }),
+  garden: Object.freeze({ position: [20.11, 0.25, 26.5], zone: 'care' }),
+  library: Object.freeze({ position: [-14.97, 0.8, -22.54], zone: 'civic' }),
+  'release-gatehouse': Object.freeze({ position: [-23.88, 0.5, 2.26], zone: 'pipeline' }),
+  'research-lab': Object.freeze({ position: [-29.24, 1.1, -47.3], zone: 'civic' }),
+  'review-office': Object.freeze({ position: [-32.79, 0.7, 28.51], zone: 'pipeline' }),
+  triage: Object.freeze({ position: [20.49, 0.4, 3.48], zone: 'care' })
 })
 
 // Stable render order -- only affects districtPad's cosmetic size variation
@@ -50,18 +62,24 @@ function districtPoint(id) {
 // a public planning point in the same coordinate system as DISTRICTS: it is
 // where the road eases around a building cluster instead of cutting across
 // another district or stacking on top of a neighboring link.
+// Bend points are each route's midpoint nudged perpendicular by ~12% of
+// the segment length (capped at 6 units) -- a gentle curve, not a hand-
+// placed detour, recomputed directly from the current DISTRICTS positions
+// above. Re-run this same computation (or layout-solver.mjs's positions)
+// if DISTRICTS changes; a stale bend from a previous layout can route a
+// road through an unrelated building.
 export const WALKWAY_ROUTES = Object.freeze([
-  Object.freeze({ from: 'archive', to: 'arts-studio', bend: [46, 1] }),
-  Object.freeze({ from: 'arts-studio', to: 'council', bend: [26, -12] }),
-  Object.freeze({ from: 'arts-studio', to: 'research-lab', bend: [31, -23] }),
-  Object.freeze({ from: 'bus', to: 'council', bend: [9, -6] }),
-  Object.freeze({ from: 'bus', to: 'release-gatehouse', bend: [-3, 3] }),
-  Object.freeze({ from: 'bus', to: 'review-office', bend: [-10, -3] }),
-  Object.freeze({ from: 'depot', to: 'engineering-workshop', bend: [-38, 16] }),
-  Object.freeze({ from: 'release-gatehouse', to: 'triage', bend: [0, 18] }),
-  Object.freeze({ from: 'review-office', to: 'depot', bend: [-38, 2] }),
-  Object.freeze({ from: 'review-office', to: 'library', bend: [-21, -16] }),
-  Object.freeze({ from: 'triage', to: 'garden', bend: [0, 31] })
+  Object.freeze({ from: 'archive', to: 'arts-studio', bend: [15.57, -49.4] }),
+  Object.freeze({ from: 'arts-studio', to: 'council', bend: [4.83, -33.07] }),
+  Object.freeze({ from: 'arts-studio', to: 'research-lab', bend: [-13.79, -51.01] }),
+  Object.freeze({ from: 'bus', to: 'council', bend: [9.69, -9.22] }),
+  Object.freeze({ from: 'bus', to: 'release-gatehouse', bend: [-12.21, -1.74] }),
+  Object.freeze({ from: 'bus', to: 'review-office', bend: [-19.82, 10.32] }),
+  Object.freeze({ from: 'depot', to: 'engineering-workshop', bend: [-27.49, 12.1] }),
+  Object.freeze({ from: 'release-gatehouse', to: 'triage', bend: [-1.84, 8.19] }),
+  Object.freeze({ from: 'review-office', to: 'depot', bend: [-19.98, 28.78] }),
+  Object.freeze({ from: 'review-office', to: 'library', bend: [-18.22, 4.96] }),
+  Object.freeze({ from: 'triage', to: 'garden', bend: [17.54, 14.94] })
 ])
 
 const ROAD_SURFACE_Y = 0.42
@@ -159,22 +177,22 @@ function districtUtilityPods(scene, parent, id, index, [x, y, z]) {
     meshes.push(body)
     meshes.push(
       sphere(scene, `terrain:utility-cap:${id}:${slot}`, {
-      diameter: 1.45 - slot * 0.15,
-      material: 'lunar-rust',
-      parent,
-      position: [x + offsetX, y + 2.55, z + offsetZ],
-      scale: [1, 0.35, 1],
-      segments: 6
+        diameter: 1.45 - slot * 0.15,
+        material: 'lunar-rust',
+        parent,
+        position: [x + offsetX, y + 2.55, z + offsetZ],
+        scale: [1, 0.35, 1],
+        segments: 6
       })
     )
     meshes.push(
       box(scene, `terrain:utility-signal:${id}:${slot}`, {
-      depth: 0.08,
-      height: 0.12,
-      material: 'signal-emissive',
-      parent,
-      position: [x + offsetX, y + 2.18, z + offsetZ - 0.82],
-      width: 0.72
+        depth: 0.08,
+        height: 0.12,
+        material: 'signal-emissive',
+        parent,
+        position: [x + offsetX, y + 2.18, z + offsetZ - 0.82],
+        width: 0.72
       })
     )
   }
@@ -217,7 +235,7 @@ function concaveWorldSurface(scene, name, parent, { radius, centerY, rimRise, ri
   const vertexData = new VertexData()
   vertexData.positions = positions
   vertexData.indices = indices
-  VertexData.ComputeNormals(positions, indices, vertexData.normals = [])
+  VertexData.ComputeNormals(positions, indices, (vertexData.normals = []))
   vertexData.applyToMesh(mesh)
   mesh.material = scene.getMaterialByName('lunar-rust')
   mesh.parent = parent
@@ -279,7 +297,8 @@ export function addColonyBuilderBaseline(scene, root, { mergeMeshes = false } = 
   if (!root || root.name !== 'terrain:root') throw new Error('colony-builder baseline requires terrain:root')
   const near = scene.getTransformNodeByName('terrain:lod:near')
   if (!near) throw new Error('colony-builder baseline requires terrain:lod:near')
-  const marker = scene.getTransformNodeByName('terrain:reference-baseline') ?? group(scene, 'terrain:reference-baseline', near)
+  const marker =
+    scene.getTransformNodeByName('terrain:reference-baseline') ?? group(scene, 'terrain:reference-baseline', near)
   marker.metadata = {
     gltf: {
       extras: {
