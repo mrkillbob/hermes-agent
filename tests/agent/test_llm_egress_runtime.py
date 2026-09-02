@@ -2162,6 +2162,48 @@ def test_protected_kanban_admits_bounded_generic_terminal_stdout(
     assert receipt.decision.source_segment_count == 0
 
 
+def test_protected_kanban_preserves_background_process_session_handle(
+    tmp_path, monkeypatch
+):
+    """Remote workers can wait on a local background process after replay."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_terminal_background"
+    result = json.dumps({
+        "session_id": "proc_background_123",
+        "status": "running",
+        "output": "c2VjcmV0LXBheWxvYWQ=",
+        "exit_code": None,
+    })
+
+    authorized, receipt = authorize_agent_sdk_kwargs(agent, {
+        "model": agent.model,
+        "input": [
+            {
+                "type": "function_call",
+                "name": "terminal",
+                "call_id": call_id,
+                "arguments": json.dumps({"command": "pytest", "background": True}),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": [{"type": "input_text", "text": result}],
+            },
+        ],
+    })
+
+    assert receipt.allowed
+    replay = json.loads(authorized["input"][1]["output"])
+    assert replay["session_id"] == "proc_background_123"
+    assert replay["raw_output"] == "omitted_from_remote_replay"
+    assert "c2VjcmV0" not in json.dumps(authorized)
+
+
 def test_protected_kanban_search_result_projects_source_content_to_locations(
     tmp_path, monkeypatch
 ):

@@ -2223,7 +2223,9 @@ def _typed_payload(
                 # terminal call gets the same outcome-only replay boundary as
                 # its scalar counterpart; recursively typing the array would
                 # expose raw stdout to the remote firewall.
-                typed[key] = GeneratedContextSegment(_terminal_replay_result(""))
+                typed[key] = GeneratedContextSegment(
+                    _terminal_replay_result(structured_text or "")
+                )
                 continue
             if (
                 is_read_file_projection_tool_result
@@ -2572,19 +2574,32 @@ def _terminal_replay_command(arguments: str) -> str:
 
 
 def _terminal_replay_result(output: str) -> str:
-    """Preserve a local terminal exit status without replaying raw output."""
+    """Preserve local terminal control metadata without replaying raw output.
 
+    A background terminal result carries the process-registry session handle
+    that the model must pass to ``process(action=wait|poll)``.  That handle is
+    local control-plane data, not command output; dropping it while eliding
+    stdout strands protected remote workers after every required background
+    command.
+    """
+
+    exit_code = None
+    session_id = None
     try:
         parsed = json.loads(output)
         exit_code = parsed.get("exit_code") if isinstance(parsed, Mapping) else None
+        session_id = parsed.get("session_id") if isinstance(parsed, Mapping) else None
     except (TypeError, ValueError, json.JSONDecodeError):
         exit_code = None
+    replay = {
+        "terminal_result": "completed",
+        "exit_code": exit_code if isinstance(exit_code, int) else None,
+        "raw_output": "omitted_from_remote_replay",
+    }
+    if isinstance(session_id, str) and session_id.strip():
+        replay["session_id"] = session_id.strip()
     return json.dumps(
-        {
-            "terminal_result": "completed",
-            "exit_code": exit_code if isinstance(exit_code, int) else None,
-            "raw_output": "omitted_from_remote_replay",
-        },
+        replay,
         separators=(",", ":"),
     )
 
