@@ -80,6 +80,7 @@ logger = logging.getLogger(__name__)
 _VALIDATED_SYNTAX_TOOL_NAMES = frozenset({"terminal"})
 _REMOTE_KANBAN_PROJECTION_TOOL_NAMES = frozenset({"kanban_show"})
 _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES = frozenset({"terminal"})
+_PROTECTED_CONTROL_CONTEXT_TOOL_NAMES = frozenset({"tool_search", "tool_desc"})
 _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"search_files"})
 _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file", "read"})
 _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES = frozenset({"web_extract", "web_search"})
@@ -2373,10 +2374,24 @@ def _typed_payload(
                     )
                     continue
             if is_unbound_tool_result and key in {"content", "output"} and isinstance(item, str):
-                typed[key] = UntrustedProvenanceSegment(
-                    sha256(item.encode("utf-8")).hexdigest(),
-                    item,
-                )
+                # Unknown control-plane results (for example tool discovery)
+                # may be valid generated context even without a model-call
+                # binding.  Keep the strict rejection for replay-shaped
+                # output, and retain raw unsafe text for the firewall to
+                # diagnose instead of silently redacting it away.
+                direct_result_name = value.get("tool_name") or value.get("name")
+                if re.search(r"https?://\S+.*\brun_id=", item, re.IGNORECASE):
+                    typed[key] = UntrustedProvenanceSegment(
+                        sha256(item.encode("utf-8")).hexdigest(), item
+                    )
+                elif redact_remote_unsafe_text(item) != item:
+                    typed[key] = SanitizedSegment(item)
+                elif direct_result_name in _PROTECTED_CONTROL_CONTEXT_TOOL_NAMES:
+                    typed[key] = GeneratedContextSegment(item)
+                else:
+                    typed[key] = UntrustedProvenanceSegment(
+                        sha256(item.encode("utf-8")).hexdigest(), item
+                    )
                 continue
             if (
                 isinstance(github_api_extract_limit, int)
