@@ -1,5 +1,5 @@
 import { scalarClip } from './animation.mjs'
-import { box, cone, cylinder, facadeFins, group, prismRailing, sphere, torus, trimmedBox } from './primitives.mjs'
+import { box, cone, cylinder, facadeFins, group, prismRailing, sphere, torus, trimmedBox, wireframeShell } from './primitives.mjs'
 import { addConsoleBank, addPlants, addPortal, addSign, addTelescope, addWorkbenches } from './props.mjs'
 
 function buildingNodes(scene, id) {
@@ -16,6 +16,19 @@ function buildingNodes(scene, id) {
 function keepIdentity(mesh) {
   mesh.metadata = { ...(mesh.metadata ?? {}), keepSeparate: true }
   return mesh
+}
+
+function installWireframeEnvelope(scene, building, id, options) {
+  for (const legacy of [building.shell, building.roof, building.entrance]) {
+    for (const mesh of legacy.getChildMeshes()) mesh.dispose()
+  }
+  const envelope = wireframeShell(scene, `${id}:wireframe-envelope`, building.near, options)
+  building.near.metadata = { ...(building.near.metadata ?? {}), construction: 'wireframe-with-skin' }
+  building.entrance = envelope.entrance
+  building.roof = envelope.roof
+  building.shell = envelope.root
+  building.wireframe = envelope
+  return building
 }
 
 function addLibraryFrame(scene, { accent, depth, height, width }) {
@@ -682,6 +695,7 @@ function specialistFrame(scene, id, options) {
               : undefined
 
   if (building) {
+    installWireframeEnvelope(scene, building, id, options)
     addEntranceWings(scene, id, building.near, options)
     addEntryArch(scene, id, building.entrance, options)
     addWindowGrid(scene, id, building.near, options)
@@ -1388,13 +1402,19 @@ function secondaryDistrictFrame(scene, id, { accent, depth, height, width }) {
       width: width * (0.5 - step * 0.05)
     })
 
+  const building = installWireframeEnvelope(scene, { entrance, far, near, roof, root, shell }, id, {
+    accent,
+    depth,
+    height,
+    width
+  })
   addFacadeKit(scene, id, near, { accent, depth, height, width })
   addEntranceWings(scene, id, near, { accent, depth, height, width })
-  addEntryArch(scene, id, entrance, { accent, height, width })
+  addEntryArch(scene, id, building.entrance, { accent, height, width })
   addWindowGrid(scene, id, near, { accent, depth, height, width })
   addFacadeGreebles(scene, id, near, { accent, depth, height, width })
-  addRoofDome(scene, id, roof, { accent, depth, height, width })
-  addRoofEquipment(scene, id, roof, { accent, depth, height, width })
+  addRoofDome(scene, id, building.roof, { accent, depth, height, width })
+  addRoofEquipment(scene, id, building.roof, { accent, depth, height, width })
 
   // The overview camera can see either side of a district as the player
   // orbits. A compact rear identity plaque keeps the city legible from the
@@ -1430,7 +1450,7 @@ function secondaryDistrictFrame(scene, id, { accent, depth, height, width }) {
     position: [0, height * 0.34, -depth * 0.42],
     width: width * 0.9
   })
-  return { entrance, far, near, roof, root, shell }
+  return building
 }
 
 export function buildArtsStudio(scene) {

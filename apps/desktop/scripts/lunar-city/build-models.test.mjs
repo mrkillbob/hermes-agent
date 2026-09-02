@@ -10,8 +10,19 @@ import { NodeIO } from '@gltf-transform/core'
 
 import { buildAssetPack } from './build-models.mjs'
 import { NullEngine, Scene } from './modeling/babylon.mjs'
-import { buildCouncil } from './modeling/buildings.mjs'
-import { WALKWAY_ROUTES, buildTerrain, roadRoutePoints } from './modeling/terrain.mjs'
+import {
+  buildArchive,
+  buildArtsStudio,
+  buildCouncil,
+  buildDepot,
+  buildEngineeringWorkshop,
+  buildLibrary,
+  buildReleaseGatehouse,
+  buildResearchLab,
+  buildReviewOffice
+} from './modeling/buildings.mjs'
+import { buildTriage } from './modeling/props.mjs'
+import { DISTRICTS, WALKWAY_ROUTES, buildTerrain, roadRoutePoints } from './modeling/terrain.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -98,6 +109,18 @@ const SPECIALIST_DETAIL_FLOORS = {
   triage: 420
 }
 const SPECIALIST_IDS = ['library', 'research-lab', 'depot', 'review-office', 'council']
+const BUILDING_BUILDERS = Object.freeze({
+  archive: buildArchive,
+  'arts-studio': buildArtsStudio,
+  council: buildCouncil,
+  depot: buildDepot,
+  'engineering-workshop': buildEngineeringWorkshop,
+  library: buildLibrary,
+  'release-gatehouse': buildReleaseGatehouse,
+  'research-lab': buildResearchLab,
+  'review-office': buildReviewOffice,
+  triage: buildTriage
+})
 const LEADER_IDS = ['owl', 'fox', 'badger', 'otter', 'bird', 'stag']
 const LEADER_STATES = ['idle', 'listening', 'talking', 'thinking', 'acknowledging', 'unavailable']
 const CLEANUP_TRIANGLE_CAPS = {
@@ -283,6 +306,83 @@ after(async () => {
 test('builds every approved landmark and character family', () => {
   assert.deepEqual(firstReceipt.missing, [])
   assert.deepEqual(firstReceipt.models.toSorted(), MODEL_IDS)
+})
+
+test('every building has a continuous wireframe shell with a separate skinned surface', () => {
+  for (const [id, build] of Object.entries(BUILDING_BUILDERS)) {
+    const engine = new NullEngine({ renderingPipeline: false })
+    const scene = new Scene(engine)
+    try {
+      const root = build(scene)
+      const near = scene.getTransformNodeByName(`${id}:lod:near`)
+      assert.ok(root, `${id} builder must return a root`)
+      assert.ok(near, `${id} must expose a near LOD`)
+      assert.equal(near.metadata?.construction, 'wireframe-with-skin', `${id} must declare its construction contract`)
+      assert.ok(
+        scene.meshes.filter(mesh => mesh.metadata?.lunarCityRole === 'wireframe-member').length >= 6,
+        `${id} needs a continuous structural wireframe`
+      )
+      assert.ok(
+        scene.meshes.some(mesh => mesh.metadata?.lunarCityRole === 'skinned-surface'),
+        `${id} needs a visible skinned surface`
+      )
+    } finally {
+      scene.dispose()
+      engine.dispose()
+    }
+  }
+})
+
+test('wraps every building in multiple curved skin panels without sealing the room front', () => {
+  for (const [id, build] of Object.entries(BUILDING_BUILDERS)) {
+    const engine = new NullEngine({ renderingPipeline: false })
+    const scene = new Scene(engine)
+    try {
+      build(scene)
+      const shell = scene.getTransformNodeByName(`${id}:wireframe-envelope`)
+      const skins = scene.meshes.filter(mesh => mesh.metadata?.lunarCityRole === 'skinned-surface')
+      assert.ok(shell?.metadata?.skinSurfaces?.length >= 4, `${id} needs a wraparound skin surface contract`)
+      assert.ok(skins.length >= 4, `${id} needs rear, side, roof, and front skin panels`)
+      assert.equal(
+        skins.some(mesh => mesh.name.endsWith(':skin:front')),
+        true,
+        `${id} must retain an open-front interior read with a front pressure panel`
+      )
+    } finally {
+      scene.dispose()
+      engine.dispose()
+    }
+  }
+})
+
+test('uses rounded manufactured panels for shared facade detail instead of raw block plates', () => {
+  for (const [id, build] of Object.entries(BUILDING_BUILDERS)) {
+    const engine = new NullEngine({ renderingPipeline: false })
+    const scene = new Scene(engine)
+    try {
+      build(scene)
+      const roundedPanels = scene.meshes.filter(mesh => mesh.metadata?.construction === 'rounded-panel')
+      assert.ok(roundedPanels.length >= 8, `${id} needs rounded facade panels instead of block plates`)
+    } finally {
+      scene.dispose()
+      engine.dispose()
+    }
+  }
+})
+
+test('keeps building district anchors clear so authored footprints cannot interpenetrate', () => {
+  const ids = Object.keys(BUILDING_BUILDERS)
+  for (let leftIndex = 0; leftIndex < ids.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < ids.length; rightIndex += 1) {
+      const left = DISTRICTS[ids[leftIndex]].position
+      const right = DISTRICTS[ids[rightIndex]].position
+      const distance = Math.hypot(left[0] - right[0], left[2] - right[2])
+      assert.ok(
+        distance >= 24,
+        `${ids[leftIndex]} and ${ids[rightIndex]} anchors are only ${distance.toFixed(2)} units apart`
+      )
+    }
+  }
 })
 
 test('is byte-stable for identical source input', () => {

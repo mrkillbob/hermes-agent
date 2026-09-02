@@ -369,7 +369,7 @@
         "budget": { "maxDrawCalls": 14, "maxGpuMiB": 20, "maxMaterials": 5, "maxTextures": 4, "maxTriangles": 90000 },
         "bytes": 3460920,
         "extent": [360, 12.425, 360],
-        "sha256": "3b4c0e114fefdc29839897394ca8af3103228234be01c09998a2a280cd7cc13c"
+        "sha256": "73c38e8d77c5951959ebf15d224cf85b401c87ad8bef2b7d8cde982f67d6ec1a"
       }
     },
     {
@@ -393,7 +393,7 @@
         { "distance": 0, "node": "library:lod:near" },
         { "distance": 112, "node": "library:lod:far" }
       ],
-      "transform": { "position": [-20, 4, -24], "rotation": [0, 0.6202, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-24, 4, -30], "rotation": [0, 0.6147, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 16, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 5, 0], "camera": [0, 8, 14], "dialogue": [-2, 1, 2] },
@@ -440,7 +440,7 @@
         { "distance": 0, "node": "research-lab:lod:near" },
         { "distance": 112, "node": "research-lab:lod:far" }
       ],
-      "transform": { "position": [18, 5, -34], "rotation": [0, -0.4424, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [22, 5, -34], "rotation": [0, -0.5248, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-14, 0, -12], "max": [14, 17, 12] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 5, 0], "camera": [0, 9, 15], "dialogue": [2, 1, 0] },
@@ -449,20 +449,20 @@
       "collision": { "kind": "box", "navigationArea": "research" },
       "materialSlots": ["charcoal-structure", "bone-metal", "signal-emissive"],
       "statistics": {
-        "accessorBytes": 416796,
+        "accessorBytes": 440412,
         "animationClips": ["lights-idle", "telescope-scan", "workbench-cycle"],
         "drawCalls": 8,
         "materials": 5,
         "meshes": 8,
-        "nodes": 36,
-        "gpuBytes": 416796,
+        "nodes": 41,
+        "gpuBytes": 440412,
         "textures": 0,
-        "triangles": 8806,
-        "gpuMiB": 0.3975,
+        "triangles": 9934,
+        "gpuMiB": 0.42,
         "budget": { "maxDrawCalls": 9, "maxGpuMiB": 12, "maxMaterials": 5, "maxTextures": 4, "maxTriangles": 32000 },
-        "bytes": 551556,
+        "bytes": 581388,
         "extent": [21.4805, 23.734, 17.39],
-        "sha256": "55dd87d483f7f7a7ffb1f7b9b75db59de640a8f9d84fc96ec98f22b71eaa4cae"
+        "sha256": "3f957a372b1323ac4bcd1458a8a50ad20de98548cd5fc115406359e4724717d3"
       }
     },
     {
@@ -486,7 +486,7 @@
         { "distance": 0, "node": "depot:lod:near" },
         { "distance": 112, "node": "depot:lod:far" }
       ],
-      "transform": { "position": [-32, 2, 6], "rotation": [0, 1.6332, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-48, 2, 8], "rotation": [0, 1.6539, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 14, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [-1, 1, 2] },
@@ -495,20 +495,20 @@
       "collision": { "kind": "box", "navigationArea": "depot" },
       "materialSlots": ["charcoal-structure", "bone-metal", "signal-emissive"],
       "statistics": {
-        "accessorBytes": 298908,
+        "accessorBytes": 323460,
         "animationClips": ["lights-idle", "workbench-cycle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 30,
-        "gpuBytes": 298908,
+        "nodes": 35,
+        "gpuBytes": 323460,
         "textures": 0,
-        "triangles": 6250,
-        "gpuMiB": 0.2851,
+        "triangles": 7390,
+        "gpuMiB": 0.3085,
         "budget": { "maxDrawCalls": 7, "maxGpuMiB": 9, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 24000 },
-        "bytes": 395860,
-        "extent": [17.6855, 15.8066, 13.5275],
-        "sha256": "09e199a8891b9fb1f349c7c72d1ddf32485a3e127f8cb0bbc4d312dd47ffbb40"
+        "bytes": 426860,
+        "extent": [17.074, 18.6756, 13.5275],
+        "sha256": "cf5e1ee2dbf4f5f956fd7b961e23886251f6206018d9bf00e2b0a59e74c5cfe8"
       }
     },
     {
@@ -532,7 +532,7 @@
         { "distance": 0, "node": "review-office:lod:near" },
         { "distance": 112, "node": "review-office:lod:far" }
       ],
-      "transform": { "position": [-22, 3, -8], "rotation": [0, 1.0714, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-26, 3, -4], "rotation": [0, 1.2723, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-13, 0, -10], "max": [13, 15, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 8, 14], "dialogue": [0, 1, 1] },
@@ -541,20 +541,20 @@
       "collision": { "kind": "box", "navigationArea": "review" },
       "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 368532,
+        "accessorBytes": 388404,
         "animationClips": ["lights-idle", "portal-idle"],
         "drawCalls": 7,
         "materials": 4,
         "meshes": 7,
-        "nodes": 31,
-        "gpuBytes": 368532,
+        "nodes": 36,
+        "gpuBytes": 388404,
         "textures": 0,
-        "triangles": 8794,
-        "gpuMiB": 0.3515,
+        "triangles": 9766,
+        "gpuMiB": 0.3704,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 26000 },
-        "bytes": 485048,
-        "extent": [17.2596, 17.1001, 19.8],
-        "sha256": "c24824bee92320959036e2176e19de896281f6d909b86d529ad653912182baae"
+        "bytes": 510220,
+        "extent": [17.2596, 17.078, 16.5],
+        "sha256": "600af5ac382c37e656fed3dd0f253bdba9f36353744d8a050f135e11b43829da"
       }
     },
     {
@@ -571,7 +571,7 @@
         { "distance": 0, "node": "triage:lod:near" },
         { "distance": 112, "node": "triage:lod:far" }
       ],
-      "transform": { "position": [8, 1, 24], "rotation": [0, -2.7611, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [12, 1, 38], "rotation": [0, -2.8023, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-7, 0, -6], "max": [7, 9, 6] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 3, 0], "camera": [0, 6, 10] },
@@ -580,20 +580,20 @@
       "collision": { "kind": "box", "navigationArea": "triage" },
       "materialSlots": ["lunar-rust", "bone-metal"],
       "statistics": {
-        "accessorBytes": 45156,
+        "accessorBytes": 67236,
         "animationClips": ["door-open", "lights-idle", "triage-station-idle"],
         "drawCalls": 5,
         "materials": 3,
         "meshes": 5,
-        "nodes": 16,
-        "gpuBytes": 45156,
+        "nodes": 21,
+        "gpuBytes": 67236,
         "textures": 0,
-        "triangles": 704,
-        "gpuMiB": 0.0431,
+        "triangles": 1732,
+        "gpuMiB": 0.0641,
         "budget": { "maxDrawCalls": 5, "maxGpuMiB": 5, "maxMaterials": 3, "maxTextures": 2, "maxTriangles": 12000 },
-        "bytes": 66216,
-        "extent": [9.5, 5.28, 8.07],
-        "sha256": "aa51dd87abf9510f1a1091acb5cec246ae4b6826e65da9e4b64f5c46b2c69ce6"
+        "bytes": 94204,
+        "extent": [9.86, 9.8575, 8.2259],
+        "sha256": "b084f91dcbeb9ea1963ce6761829159b0a6495d1ae6f695f6ce1b3fe31c34d4d"
       }
     },
     {
@@ -610,7 +610,7 @@
         { "distance": 0, "node": "garden:lod:near" },
         { "distance": 112, "node": "garden:lod:far" }
       ],
-      "transform": { "position": [-8, 0, 34], "rotation": [0, 2.881, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-10, 0, 54], "rotation": [0, 2.9442, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-14, 0, -12], "max": [14, 5, 12] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 1, 0], "camera": [0, 6, 15] },
@@ -649,7 +649,7 @@
         { "distance": 0, "node": "council:lod:near" },
         { "distance": 112, "node": "council:lod:far" }
       ],
-      "transform": { "position": [18, 1, -10], "rotation": [0, -0.9098, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [18, 1, -2], "rotation": [0, -1.249, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-11, 0, -9], "max": [11, 14, 9] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [0, 1, 1] },
@@ -658,20 +658,20 @@
       "collision": { "kind": "box", "navigationArea": "council" },
       "materialSlots": ["charcoal-structure", "bone-metal", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 403788,
+        "accessorBytes": 413748,
         "animationClips": ["lights-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 30,
-        "gpuBytes": 403788,
+        "nodes": 35,
+        "gpuBytes": 413748,
         "textures": 0,
-        "triangles": 9908,
-        "gpuMiB": 0.3851,
+        "triangles": 10452,
+        "gpuMiB": 0.3946,
         "budget": { "maxDrawCalls": 7, "maxGpuMiB": 8, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 22000 },
-        "bytes": 528228,
-        "extent": [16.4, 19.222, 15.5973],
-        "sha256": "f97b76654d45a729002bfd8da180f10d7dddb32836f4972ab86786a384f3865b"
+        "bytes": 540976,
+        "extent": [20.4432, 18.2729, 15.1033],
+        "sha256": "d2e695fdddf09d78d0787c68e8fb11d23a8738936f8874470832ea5606c0a442"
       }
     },
     {
@@ -700,7 +700,7 @@
         { "distance": 0, "node": "arts-studio:lod:near" },
         { "distance": 112, "node": "arts-studio:lod:far" }
       ],
-      "transform": { "position": [34, 2, -18], "rotation": [0, -0.9965, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [40, 2, -12], "rotation": [0, -1.1903, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 15, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 14], "dialogue": [-2, 1, 1] },
@@ -716,20 +716,20 @@
         "garden-green"
       ],
       "statistics": {
-        "accessorBytes": 336444,
+        "accessorBytes": 367620,
         "animationClips": ["lights-idle"],
         "drawCalls": 8,
         "materials": 6,
         "meshes": 8,
-        "nodes": 34,
-        "gpuBytes": 336444,
+        "nodes": 39,
+        "gpuBytes": 367620,
         "textures": 0,
-        "triangles": 7398,
-        "gpuMiB": 0.3209,
+        "triangles": 9186,
+        "gpuMiB": 0.3506,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 6, "maxTextures": 3, "maxTriangles": 26000 },
-        "bytes": 446108,
-        "extent": [15.4, 17.25, 13.0475],
-        "sha256": "6c1ade360a16735aea56207a9ea7ed7c654f56d30b757a03846472029e4d8396"
+        "bytes": 484736,
+        "extent": [15, 17.8025, 11.8031],
+        "sha256": "85013397fc7a015780141c6a358a1cedf1ec653d9fcac78a0dfd97f056dd06b7"
       }
     },
     {
@@ -758,7 +758,7 @@
         { "distance": 0, "node": "engineering-workshop:lod:near" },
         { "distance": 112, "node": "engineering-workshop:lod:far" }
       ],
-      "transform": { "position": [-40, 2, 26], "rotation": [0, 2.0736, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-50, 2, 34], "rotation": [0, 2.1112, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-13, 0, -11], "max": [13, 16, 11] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 8, 15], "dialogue": [2, 1, 1] },
@@ -767,20 +767,20 @@
       "collision": { "kind": "box", "navigationArea": "engineering" },
       "materialSlots": ["charcoal-structure", "bone-metal", "lunar-rust", "signal-emissive"],
       "statistics": {
-        "accessorBytes": 400668,
+        "accessorBytes": 431844,
         "animationClips": ["gantry-idle", "workbench-cycle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 31,
-        "gpuBytes": 400668,
+        "nodes": 36,
+        "gpuBytes": 431844,
         "textures": 0,
-        "triangles": 7748,
-        "gpuMiB": 0.3821,
+        "triangles": 9536,
+        "gpuMiB": 0.4118,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 28000 },
-        "bytes": 529356,
-        "extent": [16.9, 18.15, 14.5475],
-        "sha256": "c7fb089c6a770f65dfee13ad87dc2d52255764aadfad65bd8b517bf4834a9ade"
+        "bytes": 568072,
+        "extent": [16.5, 18.3574, 13.3031],
+        "sha256": "e3dc51006cb74183546b55c68c2381e876446f7d7d040cdd9150130a845ff73a"
       }
     },
     {
@@ -808,7 +808,7 @@
         { "distance": 0, "node": "release-gatehouse:lod:near" },
         { "distance": 112, "node": "release-gatehouse:lod:far" }
       ],
-      "transform": { "position": [-6, 2, 10], "rotation": [0, 2.3562, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [-6, 2, 14], "rotation": [0, 2.6012, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-11, 0, -9], "max": [11, 15, 9] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 13], "dialogue": [0, 1, 1] },
@@ -817,20 +817,20 @@
       "collision": { "kind": "box", "navigationArea": "release" },
       "materialSlots": ["charcoal-structure", "bone-metal", "lunar-rust", "triage-amber", "garden-green"],
       "statistics": {
-        "accessorBytes": 347532,
+        "accessorBytes": 377484,
         "animationClips": ["gatehouse-beacon", "gatehouse-gate"],
         "drawCalls": 7,
         "materials": 5,
         "meshes": 7,
-        "nodes": 31,
-        "gpuBytes": 347532,
+        "nodes": 36,
+        "gpuBytes": 377484,
         "textures": 0,
-        "triangles": 7220,
-        "gpuMiB": 0.3314,
+        "triangles": 8936,
+        "gpuMiB": 0.36,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 9, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 24000 },
-        "bytes": 460620,
-        "extent": [13.9, 15.9, 12.0475],
-        "sha256": "ac3e28c8e317d53538e890526fb50c420e6eef2b7ae276642729d978d207a073"
+        "bytes": 497812,
+        "extent": [13.5, 16.5952, 10.8031],
+        "sha256": "ef6d082cc989dd3de0726c7b3ed699bd4b73df45aca918087f814596b00af4fc"
       }
     },
     {
@@ -858,7 +858,7 @@
         { "distance": 0, "node": "archive:lod:near" },
         { "distance": 112, "node": "archive:lod:far" }
       ],
-      "transform": { "position": [42, 2, 4], "rotation": [0, -1.5708, 0], "scale": [1, 1, 1] },
+      "transform": { "position": [52, 2, 14], "rotation": [0, -1.7608, 0], "scale": [1, 1, 1] },
       "pivot": [0, 0, 0],
       "bounds": { "min": [-12, 0, -10], "max": [12, 15, 10] },
       "anchors": { "foot": [0, 0, 0], "interaction": [0, 4, 0], "camera": [0, 7, 14], "dialogue": [-2, 1, 1] },
@@ -867,20 +867,20 @@
       "collision": { "kind": "box", "navigationArea": "archive" },
       "materialSlots": ["charcoal-structure", "bone-metal", "lunar-rust", "archive-emissive"],
       "statistics": {
-        "accessorBytes": 386328,
+        "accessorBytes": 416280,
         "animationClips": ["archive-seal-idle"],
         "drawCalls": 6,
         "materials": 4,
         "meshes": 6,
-        "nodes": 30,
-        "gpuBytes": 386328,
+        "nodes": 35,
+        "gpuBytes": 416280,
         "textures": 0,
-        "triangles": 7444,
-        "gpuMiB": 0.3684,
+        "triangles": 9160,
+        "gpuMiB": 0.397,
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 26000 },
-        "bytes": 509652,
-        "extent": [14.9, 17.925, 13.5475],
-        "sha256": "514ec0d6d9214760b87af67aa856b1bfa8a0f897187070ef3a33005adcf2ba7f"
+        "bytes": 546760,
+        "extent": [14.5, 18.2186, 12.3031],
+        "sha256": "880fcb9932cc43fe8c45fd5eb6e408f962fba2deee52508a4377bcd8e7303659"
       }
     },
     {
@@ -1190,15 +1190,15 @@
   "destinations": {
     "bus": [0, 0, -2],
     "project": [18, 0, 38],
-    "depot": [-32, 0, 6],
-    "review": [-22, 0, -8],
-    "triage": [8, 0, 24],
-    "garden": [-8, 0, 34],
-    "council": [18, 0, -10],
-    "arts-studio": [34, 0, -18],
-    "engineering-workshop": [-40, 0, 26],
-    "release-gatehouse": [-6, 0, 10],
-    "archive": [42, 0, 4],
+    "depot": [-48, 0, 8],
+    "review": [-26, 0, -4],
+    "triage": [12, 0, 38],
+    "garden": [-10, 0, 54],
+    "council": [18, 0, -2],
+    "arts-studio": [40, 0, -12],
+    "engineering-workshop": [-50, 0, 34],
+    "release-gatehouse": [-6, 0, 14],
+    "archive": [52, 0, 14],
     "unavailable": [0, 0, 0]
   },
   "projectSlots": [
@@ -1249,8 +1249,8 @@
       "gpuMiB": 0.067,
       "budget": { "maxDrawCalls": 4, "maxGpuMiB": 4, "maxMaterials": 1, "maxTextures": 0, "maxTriangles": 12000 },
       "bytes": 93348,
-      "extent": [95, 1.2, 81],
-      "sha256": "53c55890d38e6e0e5ce0cbc447f4c7533bad61fee13ecbddbbcded03dde3175b"
+      "extent": [115, 1.2, 101],
+      "sha256": "6476377453eae5dddfe8efbeae61d12028538930edc527ca5148c9691ec8b3c1"
     },
     "sourceSha256": "248e8d40946b08b9f74f4b2ddd0ba17e4f17fd054260189972164c5d6ca70590"
   }

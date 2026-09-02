@@ -1,5 +1,5 @@
 import { scalarClip, stateClips } from './animation.mjs'
-import { beamBetween, box, capsule, cone, cylinder, group, sphere, torus } from './primitives.mjs'
+import { beamBetween, box, capsule, cone, cylinder, group, roundedPanel, sphere, torus, wireframeShell } from './primitives.mjs'
 
 export function addConsoleBank(
   scene,
@@ -461,8 +461,6 @@ export function buildTriage(scene) {
     width: 1.35
   })
   const cross = group(scene, 'triage:cross', near, { position: [-2.25, 4.28, 3.16] })
-  box(scene, 'triage:cross:h', { depth: 0.12, height: 0.34, material: 'bone-metal', parent: cross, width: 1.45 })
-  box(scene, 'triage:cross:v', { depth: 0.12, height: 1.45, material: 'bone-metal', parent: cross, width: 0.34 })
   const station = group(scene, 'triage:station', interior)
   addConsoleBank(scene, 'triage:station:consoles', station, {
     accent: 'triage-amber',
@@ -500,7 +498,7 @@ export function buildTriage(scene) {
     })
   }
   for (let panel = 0; panel < 6; panel += 1)
-    box(scene, `triage:status-panel:${panel}`, {
+    roundedPanel(scene, `triage:status-panel:${panel}`, {
       depth: 0.12,
       height: 0.5 + (panel % 2) * 0.25,
       material: panel % 2 ? 'triage-amber' : 'bone-metal',
@@ -508,6 +506,28 @@ export function buildTriage(scene) {
       position: [-2.5 + panel, 3.15 + (panel % 2) * 0.38, -2.72],
       width: 0.68
     })
+  roundedPanel(scene, 'triage:cross:h', { depth: 0.12, height: 0.34, material: 'bone-metal', parent: cross, width: 1.45 })
+  roundedPanel(scene, 'triage:cross:v', { depth: 0.12, height: 1.45, material: 'bone-metal', parent: cross, width: 0.34 })
+  for (const mesh of scene.meshes.filter(
+    mesh =>
+      mesh.name === 'triage:floor' ||
+      mesh.name === 'triage:canopy' ||
+      mesh.name === 'triage:front-header' ||
+      mesh.name.startsWith('triage:back-wall') ||
+      mesh.name.startsWith('triage:side-wall:') ||
+      mesh.name.startsWith('triage:side-rib:') ||
+      mesh.name.startsWith('triage:front-post:')
+  ))
+    mesh.dispose()
+  wireframeShell(scene, 'triage:wireframe-envelope', near, {
+    accent: 'triage-amber',
+    depth: 7.4,
+    height: 4.9,
+    structure: 'bone-metal',
+    width: 9.5,
+    skin: 'charcoal-structure'
+  })
+  near.metadata = { ...(near.metadata ?? {}), construction: 'wireframe-with-skin' }
   for (let step = 0; step < 3; step += 1)
     box(scene, `triage:front-step:${step}`, {
       depth: 0.7 + step * 0.42,

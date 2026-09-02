@@ -24,18 +24,18 @@ import { addSign } from './props.mjs'
 // - care: triage and garden, a small quiet cluster apart from the
 //   industrial and civic halves.
 export const DISTRICTS = Object.freeze({
-  archive: Object.freeze({ position: [42, 0.5, 4], zone: 'civic' }),
-  'arts-studio': Object.freeze({ position: [34, 0.7, -18], zone: 'civic' }),
+  archive: Object.freeze({ position: [52, 0.5, 14], zone: 'civic' }),
+  'arts-studio': Object.freeze({ position: [40, 0.7, -12], zone: 'civic' }),
   bus: Object.freeze({ position: [0, 0.55, -2], zone: 'plaza' }),
-  council: Object.freeze({ position: [18, 0.35, -10], zone: 'civic' }),
-  depot: Object.freeze({ position: [-32, 0.45, 6], zone: 'pipeline' }),
-  'engineering-workshop': Object.freeze({ position: [-40, 0.6, 26], zone: 'pipeline' }),
-  garden: Object.freeze({ position: [-8, 0.25, 34], zone: 'care' }),
-  library: Object.freeze({ position: [-20, 0.8, -24], zone: 'civic' }),
-  'release-gatehouse': Object.freeze({ position: [-6, 0.5, 10], zone: 'pipeline' }),
-  'research-lab': Object.freeze({ position: [18, 1.1, -34], zone: 'civic' }),
-  'review-office': Object.freeze({ position: [-22, 0.7, -8], zone: 'pipeline' }),
-  triage: Object.freeze({ position: [8, 0.4, 24], zone: 'care' })
+  council: Object.freeze({ position: [18, 0.35, -2], zone: 'civic' }),
+  depot: Object.freeze({ position: [-48, 0.45, 8], zone: 'pipeline' }),
+  'engineering-workshop': Object.freeze({ position: [-50, 0.6, 34], zone: 'pipeline' }),
+  garden: Object.freeze({ position: [-10, 0.25, 54], zone: 'care' }),
+  library: Object.freeze({ position: [-24, 0.8, -30], zone: 'civic' }),
+  'release-gatehouse': Object.freeze({ position: [-6, 0.5, 14], zone: 'pipeline' }),
+  'research-lab': Object.freeze({ position: [22, 1.1, -34], zone: 'civic' }),
+  'review-office': Object.freeze({ position: [-26, 0.7, -4], zone: 'pipeline' }),
+  triage: Object.freeze({ position: [12, 0.4, 38], zone: 'care' })
 })
 
 // Stable render order -- only affects districtPad's cosmetic size variation
@@ -51,15 +51,15 @@ function districtPoint(id) {
 // where the road eases around a building cluster instead of cutting across
 // another district or stacking on top of a neighboring link.
 export const WALKWAY_ROUTES = Object.freeze([
-  Object.freeze({ from: 'archive', to: 'arts-studio', bend: [44, -8] }),
+  Object.freeze({ from: 'archive', to: 'arts-studio', bend: [46, 1] }),
   Object.freeze({ from: 'arts-studio', to: 'council', bend: [26, -12] }),
-  Object.freeze({ from: 'arts-studio', to: 'research-lab', bend: [25, -27] }),
+  Object.freeze({ from: 'arts-studio', to: 'research-lab', bend: [31, -23] }),
   Object.freeze({ from: 'bus', to: 'council', bend: [9, -6] }),
   Object.freeze({ from: 'bus', to: 'release-gatehouse', bend: [-3, 3] }),
   Object.freeze({ from: 'bus', to: 'review-office', bend: [-10, -3] }),
   Object.freeze({ from: 'depot', to: 'engineering-workshop', bend: [-38, 16] }),
   Object.freeze({ from: 'release-gatehouse', to: 'triage', bend: [0, 18] }),
-  Object.freeze({ from: 'review-office', to: 'depot', bend: [-28, -1] }),
+  Object.freeze({ from: 'review-office', to: 'depot', bend: [-38, 2] }),
   Object.freeze({ from: 'review-office', to: 'library', bend: [-21, -16] }),
   Object.freeze({ from: 'triage', to: 'garden', bend: [0, 31] })
 ])
