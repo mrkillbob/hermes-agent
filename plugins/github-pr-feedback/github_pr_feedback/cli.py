@@ -50,6 +50,8 @@ from .policy import (
     load_policy,
 )
 from .post_merge import PostMergeExecutor
+from .stack import StackEntry
+from .stack_controller import StackController, _ordered
 from .repair_controller import (
     PR_REPAIR_ATTRIBUTION_PREFIX,
     RepairController,
@@ -518,6 +520,27 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     )
     merge_disable.add_argument("--repository", required=True)
     merge_disable.add_argument("--pr-number", required=True, type=int)
+    stack_create = subcommands.add_parser(
+        "stack-create", help="Create an explicit dependent PR stack"
+    )
+    stack_create.add_argument("--repository", required=True)
+    stack_create.add_argument("--stack-id", required=True)
+    stack_create.add_argument("--base-branch", required=True)
+    stack_create.add_argument(
+        "--entry", action="append", required=True, metavar="BRANCH=BASE:TITLE"
+    )
+    stack_refresh = subcommands.add_parser(
+        "stack-refresh", help="Rebase and safely push merged-stack descendants"
+    )
+    stack_refresh.add_argument("--repository", required=True)
+    stack_refresh.add_argument("--stack-id", required=True)
+    stack_refresh.add_argument("--repository-path", required=True, type=Path)
+    stack_merge = subcommands.add_parser(
+        "stack-merge", help="Merge a verified stack in dependency order"
+    )
+    stack_merge.add_argument("--repository", required=True)
+    stack_merge.add_argument("--stack-id", required=True)
+    stack_merge.add_argument("--repository-path", required=True, type=Path)
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
@@ -568,6 +591,12 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _merge_enable(ctx, args)
     if action == "merge-disable":
         return _merge_disable(ctx, args)
+    if action == "stack-create":
+        return _stack_create(ctx, args)
+    if action == "stack-refresh":
+        return _stack_refresh(ctx, args)
+    if action == "stack-merge":
+        return _stack_merge(ctx, args)
     if action == "complete-feedback":
         return _complete_feedback(ctx, args)
     if action == "complete-maintenance":
@@ -1785,6 +1814,87 @@ def _merge_enable(ctx: Any, args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def _parse_stack_entries(raw_entries: list[str]) -> tuple[StackEntry, ...]:
+    entries: list[StackEntry] = []
+    for raw in raw_entries:
+        if "=" not in raw or ":" not in raw:
+            raise ValueError("--entry must be BRANCH=BASE:TITLE")
+        branch, remainder = raw.split("=", 1)
+        base, title = remainder.split(":", 1)
+        entries.append(StackEntry(branch, base, title, f"Hermes stack entry: {title}"))
+    return tuple(entries)
+
+
+def _stack_create(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        manifest = StackController(policy).create(
+            args.repository,
+            args.stack_id,
+            args.base_branch,
+            _parse_stack_entries(args.entry),
+        )
+    except (GitHubClientError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "unavailable", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(json.dumps({"status": "created", "repository": manifest.repository,
+                      "stack_id": manifest.stack_id,
+                      "entries": [
+                          {"branch": item.branch, "base_branch": item.base_branch,
+                           "pr_number": item.pr_number, "head_sha": item.head_sha}
+                          for item in manifest.entries
+                      ]}, sort_keys=True))
+    return 0
+
+
+def _stack_refresh(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        manifest = StackController(policy).refresh(
+            args.repository, args.stack_id, repository_path=args.repository_path
+        )
+    except (GitHubClientError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "blocked", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(json.dumps({"status": "refreshed", "repository": manifest.repository,
+                      "stack_id": manifest.stack_id,
+                      "entries": [
+                          {"branch": item.branch, "base_branch": item.base_branch,
+                           "pr_number": item.pr_number, "head_sha": item.head_sha}
+                          for item in manifest.entries
+                      ]}, sort_keys=True))
+    return 0
+
+
+def _stack_merge(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        controller = StackController(policy)
+        manifest = controller.store.load(args.repository, args.stack_id)
+        results: list[dict[str, object]] = []
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            for entry in _ordered(manifest.entries, manifest.base_branch):
+                manifest = controller.refresh(
+                    args.repository, args.stack_id, repository_path=args.repository_path
+                )
+                current = next(item for item in manifest.entries if item.branch == entry.branch)
+                result = _run_single_pr_merge_handoff(
+                    policy, ledger, current.pr_number or 0, repository=args.repository
+                )
+                results.append(result)
+                if result.get("status") != "merged":
+                    print(json.dumps({"status": "blocked", "results": results}, sort_keys=True))
+                    return 1
+        finally:
+            ledger.close()
+        print(json.dumps({"status": "merged", "results": results}, sort_keys=True))
+        return 0
+    except (GitHubClientError, LedgerStateError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "blocked", "reason": str(error)}, sort_keys=True))
+        return 1
 
 
 def _merge_disable(ctx: Any, args: argparse.Namespace) -> int:
