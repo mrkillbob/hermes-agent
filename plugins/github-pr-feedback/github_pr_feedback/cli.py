@@ -49,6 +49,8 @@ from .policy import (
     load_policy,
 )
 from .post_merge import PostMergeExecutor
+from .stack import StackEntry
+from .stack_controller import StackController, _ordered
 from .repair_controller import (
     PR_REPAIR_ATTRIBUTION_PREFIX,
     RepairController,
@@ -491,6 +493,37 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     subcommands.add_parser(
         "merge-status", help="Show bounded merge and deployment counts"
     )
+    merge_enable = subcommands.add_parser(
+        "merge-enable", help="Enroll one configured PR for automatic merging"
+    )
+    merge_enable.add_argument("--repository", required=True)
+    merge_enable.add_argument("--pr-number", required=True, type=int)
+    merge_disable = subcommands.add_parser(
+        "merge-disable", help="Remove one PR from automatic merge enrollment"
+    )
+    merge_disable.add_argument("--repository", required=True)
+    merge_disable.add_argument("--pr-number", required=True, type=int)
+    stack_create = subcommands.add_parser(
+        "stack-create", help="Create an explicit dependent PR stack"
+    )
+    stack_create.add_argument("--repository", required=True)
+    stack_create.add_argument("--stack-id", required=True)
+    stack_create.add_argument("--base-branch", required=True)
+    stack_create.add_argument(
+        "--entry", action="append", required=True, metavar="BRANCH=BASE:TITLE"
+    )
+    stack_refresh = subcommands.add_parser(
+        "stack-refresh", help="Rebase and safely push merged-stack descendants"
+    )
+    stack_refresh.add_argument("--repository", required=True)
+    stack_refresh.add_argument("--stack-id", required=True)
+    stack_refresh.add_argument("--repository-path", required=True, type=Path)
+    stack_merge = subcommands.add_parser(
+        "stack-merge", help="Merge a verified stack in dependency order"
+    )
+    stack_merge.add_argument("--repository", required=True)
+    stack_merge.add_argument("--stack-id", required=True)
+    stack_merge.add_argument("--repository-path", required=True, type=Path)
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
@@ -535,6 +568,16 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _merge_scan(ctx)
     if action == "merge-status":
         return _merge_status()
+    if action == "merge-enable":
+        return _merge_enable(ctx, args)
+    if action == "merge-disable":
+        return _merge_disable(ctx, args)
+    if action == "stack-create":
+        return _stack_create(ctx, args)
+    if action == "stack-refresh":
+        return _stack_refresh(ctx, args)
+    if action == "stack-merge":
+        return _stack_merge(ctx, args)
     if action == "complete-feedback":
         return _complete_feedback(ctx, args)
     if action == "complete-maintenance":
@@ -1569,6 +1612,199 @@ def _merge_status() -> int:
     finally:
         ledger.close()
     print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _review_required_task(policy: PluginPolicy, merge_policy, pull_request) -> KanbanTask:
+    """Create an exact-head review task when GitHub reports review required."""
+
+    target = policy.targets[merge_policy.repository]
+    key = hashlib.sha256(
+        f"{merge_policy.repository}\0{pull_request.number}\0{pull_request.head_sha}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return KanbanTask(
+        title=f"Review required: {merge_policy.repository}#{pull_request.number}",
+        instructions=(
+            "Perform an independent code review of this exact pull-request head. Re-read the "
+            "canonical PR identity and review the complete diff and relevant tests. Leave factual "
+            "review feedback on GitHub for any issue found; if the change is sound, submit the "
+            "repository's normal approval review. Do not edit, push, force-push, change branch "
+            "protection, or merge the pull request. Stop if the base or head SHA changes. The "
+            "merge controller will re-read the review state automatically and will not waive this "
+            "gate from model output."
+        ),
+        board=policy.board or "",
+        assignee=_REVIEW_REQUIRED_ASSIGNEE,
+        repository_path=target.local_path,
+        head_sha=pull_request.head_sha,
+        branch=pull_request.head_ref_name,
+        idempotency_key=f"github-pr-review-required:{key}",
+        evidence={
+            "repository": merge_policy.repository,
+            "pr_number": pull_request.number,
+            "expected_head_sha": pull_request.head_sha,
+            "base_branch": pull_request.base_branch,
+            "reason": "review_required",
+        },
+        evidence_heading="Canonical review-required evidence (JSON)",
+        initial_status="running" if policy.auto_dispatch else "blocked",
+        max_retries=2 if policy.auto_dispatch else 1,
+        max_runtime_seconds=1200 if policy.auto_dispatch else None,
+    )
+
+
+def _merge_enable(ctx: Any, args: argparse.Namespace) -> int:
+    """Enroll one exact configured PR without granting the worker new authority."""
+
+    try:
+        policy = _load_policy_from_context(ctx)
+        merge_policy = policy.merge_policy_for(args.repository)
+        if merge_policy is None:
+            raise ValueError("repository is not configured for merging")
+        github = GitHubClient()
+        pull = github.get_merge_state(args.repository, args.pr_number)
+        if (
+            pull.repository != merge_policy.repository
+            or pull.head_repository != merge_policy.repository
+            or pull.author_login.casefold() != merge_policy.author_login.casefold()
+            or pull.base_branch != merge_policy.base_branch
+            or pull.state != "OPEN"
+            or pull.merged
+        ):
+            raise ValueError("PR identity is outside the configured merge lane")
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            ledger.enroll_merge_pr(
+                args.repository,
+                args.pr_number,
+                enrolled_at=datetime.now(UTC),
+                enrolled_by=os.environ.get("USER", "hermes-operator"),
+            )
+        finally:
+            ledger.close()
+    except (GitHubClientError, LedgerStateError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "unavailable", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "enrolled",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+                "head_sha": pull.head_sha,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _parse_stack_entries(raw_entries: list[str]) -> tuple[StackEntry, ...]:
+    entries: list[StackEntry] = []
+    for raw in raw_entries:
+        if "=" not in raw or ":" not in raw:
+            raise ValueError("--entry must be BRANCH=BASE:TITLE")
+        branch, remainder = raw.split("=", 1)
+        base, title = remainder.split(":", 1)
+        entries.append(StackEntry(branch, base, title, f"Hermes stack entry: {title}"))
+    return tuple(entries)
+
+
+def _stack_create(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        manifest = StackController(policy).create(
+            args.repository,
+            args.stack_id,
+            args.base_branch,
+            _parse_stack_entries(args.entry),
+        )
+    except (GitHubClientError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "unavailable", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(json.dumps({"status": "created", "repository": manifest.repository,
+                      "stack_id": manifest.stack_id,
+                      "entries": [
+                          {"branch": item.branch, "base_branch": item.base_branch,
+                           "pr_number": item.pr_number, "head_sha": item.head_sha}
+                          for item in manifest.entries
+                      ]}, sort_keys=True))
+    return 0
+
+
+def _stack_refresh(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        manifest = StackController(policy).refresh(
+            args.repository, args.stack_id, repository_path=args.repository_path
+        )
+    except (GitHubClientError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "blocked", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(json.dumps({"status": "refreshed", "repository": manifest.repository,
+                      "stack_id": manifest.stack_id,
+                      "entries": [
+                          {"branch": item.branch, "base_branch": item.base_branch,
+                           "pr_number": item.pr_number, "head_sha": item.head_sha}
+                          for item in manifest.entries
+                      ]}, sort_keys=True))
+    return 0
+
+
+def _stack_merge(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        controller = StackController(policy)
+        manifest = controller.store.load(args.repository, args.stack_id)
+        results: list[dict[str, object]] = []
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            for entry in _ordered(manifest.entries, manifest.base_branch):
+                manifest = controller.refresh(
+                    args.repository, args.stack_id, repository_path=args.repository_path
+                )
+                current = next(item for item in manifest.entries if item.branch == entry.branch)
+                result = _run_single_pr_merge_handoff(
+                    policy, ledger, current.pr_number or 0, repository=args.repository
+                )
+                results.append(result)
+                if result.get("status") != "merged":
+                    print(json.dumps({"status": "blocked", "results": results}, sort_keys=True))
+                    return 1
+        finally:
+            ledger.close()
+        print(json.dumps({"status": "merged", "results": results}, sort_keys=True))
+        return 0
+    except (GitHubClientError, LedgerStateError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "blocked", "reason": str(error)}, sort_keys=True))
+        return 1
+
+
+def _merge_disable(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        if policy.merge_policy_for(args.repository) is None:
+            raise ValueError("repository is not configured for merging")
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            ledger.unenroll_merge_pr(args.repository, args.pr_number)
+        finally:
+            ledger.close()
+    except (LedgerStateError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "unavailable", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "unenrolled",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 

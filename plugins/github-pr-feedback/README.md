@@ -290,6 +290,33 @@ merge, change policy, waive a gate, or create receipts. Roll out in stages:
 collect CI receipts, use `report_only: true`, enable automatic merging, and only
 then separately configure and enable a post-merge hook.
 
+### Explicit pull-request stacks
+
+For repositories configured with a merge maintainer, Hermes can manage a
+linear stack of existing branch heads:
+
+```sh
+hermes github-pr-feedback stack-create \
+  --repository mrkillbob/luna-bot --stack-id feature-42 \
+  --base-branch stable \
+  --entry codex/feature-1=stable:First change \
+  --entry codex/feature-2=codex/feature-1:Second change
+hermes github-pr-feedback stack-refresh \
+  --repository mrkillbob/luna-bot --stack-id feature-42 \
+  --repository-path /path/to/checkout
+hermes github-pr-feedback stack-merge \
+  --repository mrkillbob/luna-bot --stack-id feature-42 \
+  --repository-path /path/to/checkout
+```
+
+`stack-create` only creates missing PRs for the declared branch/base pairs and
+records exact heads. `stack-refresh` rebases descendants after a merged parent
+and pushes them with `--force-with-lease`; any unexpected remote head stops the
+operation. `stack-merge` processes entries parent-first and reuses every
+existing exact-head merge gate, stopping when fresh CI or review evidence is
+required. These commands are explicit mutations; scheduled feedback scans do
+not create or merge stacks.
+
 When `release_maintenance.enabled: true`, the ordinary reconciliation scan
 first requires a canonical repository-wide open-PR count of zero
 (`require_zero_open_prs: false` opts out of that specific precondition for a

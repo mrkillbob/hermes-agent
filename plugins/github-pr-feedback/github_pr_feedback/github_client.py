@@ -489,6 +489,66 @@ class GitHubClient:
         row = self._read_object(f"repos/{repository}/pulls/{number}")
         return _pull_request(row, expected_repository=repository, expected_number=number)
 
+    def create_pull_request(
+        self, repository: str, *, head: str, base: str, title: str, body: str
+    ) -> PullRequest:
+        """Create one explicitly requested PR and return canonical identity."""
+
+        repository = _validated_repository(repository)
+        head = _required_branch(head)
+        base = _required_branch(base)
+        title = _bounded_text(title, "title", 256)
+        body = _bounded_text(body, "body", 65_536, allow_empty=True, allow_newlines=True)
+        payload = self._json(
+            [
+                "gh",
+                "api",
+                f"repos/{repository}/pulls",
+                "--method",
+                "POST",
+                "--field",
+                f"head={head}",
+                "--field",
+                f"base={base}",
+                "--field",
+                f"title={title}",
+                "--field",
+                f"body={body}",
+            ]
+        )
+        if not isinstance(payload, dict):
+            raise GitHubClientError("GitHub pull request create response was invalid")
+        return _pull_request(payload, expected_repository=repository)
+
+    def update_pull_request_base(
+        self, repository: str, number: int, *, base: str, expected_head_sha: str
+    ) -> PullRequest:
+        """Change a PR base only when its current head still matches exactly."""
+
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        base = _required_branch(base)
+        expected_head_sha = _validated_sha(expected_head_sha)
+        current = self.get_pull_request(repository, number)
+        if current.head_sha != expected_head_sha:
+            raise GitHubClientError("pull request head changed before base update")
+        payload = self._json(
+            [
+                "gh",
+                "api",
+                f"repos/{repository}/pulls/{number}",
+                "--method",
+                "PATCH",
+                "--field",
+                f"base={base}",
+            ]
+        )
+        if not isinstance(payload, dict):
+            raise GitHubClientError("GitHub pull request update response was invalid")
+        return _pull_request(
+            payload, expected_repository=repository, expected_number=number
+        )
+
     def actions_enabled(self, repository: str) -> bool:
         repository = _validated_repository(repository)
         now = time.monotonic()
@@ -1175,6 +1235,37 @@ def _required_string(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("required string was absent")
     return value.strip()
+
+
+def _required_branch(value: object) -> str:
+    branch = _required_string(value)
+    if (
+        len(branch) > 200
+        or branch.startswith(("/", "-"))
+        or branch.endswith("/")
+        or ".." in branch
+        or "//" in branch
+        or any(character in branch for character in "\x00\r\n ~^:?*[\\")
+    ):
+        raise ValueError("branch is not a safe Git ref")
+    return branch
+
+
+def _bounded_text(
+    value: object,
+    field: str,
+    maximum: int,
+    *,
+    allow_empty: bool = False,
+    allow_newlines: bool = False,
+) -> str:
+    if not isinstance(value, str) or len(value) > maximum or "\x00" in value:
+        raise ValueError(f"{field} is invalid or too long")
+    if not allow_newlines and any(character in value for character in "\r\n"):
+        raise ValueError(f"{field} must be single-line")
+    if not allow_empty and not value.strip():
+        raise ValueError(f"{field} must be non-empty")
+    return value
 
 
 def _validated_label(value: object) -> str:

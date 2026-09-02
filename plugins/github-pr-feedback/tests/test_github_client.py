@@ -886,6 +886,58 @@ def test_github_client_preserves_canonical_pr_labels_for_worker_routing() -> Non
     assert pull.labels == ("type/perf", "sweeper:risk-session-state")
 
 
+def test_github_client_creates_pr_with_fixed_argv() -> None:
+    argv = (
+        "gh",
+        "api",
+        "repos/acme/widgets/pulls",
+        "--method",
+        "POST",
+        "--field",
+        "head=codex/child",
+        "--field",
+        "base=codex/parent",
+        "--field",
+        "title=Child",
+        "--field",
+        "body=Body\nDetails",
+    )
+    row = canonical_pull()
+    row["number"] = 18
+    row["head"]["ref"] = "codex/child"
+    row["base"]["ref"] = "codex/parent"
+    row["title"] = "Child"
+    pull = GitHubClient(RecordingRunner({argv: row})).create_pull_request(
+        "acme/widgets", head="codex/child", base="codex/parent", title="Child", body="Body\nDetails"
+    )
+    assert pull.number == 18
+    assert pull.base_branch == "codex/parent"
+
+
+def test_github_client_updates_base_only_for_expected_head() -> None:
+    get_argv = ("gh", "api", "repos/acme/widgets/pulls/18")
+    patch_argv = (
+        "gh",
+        "api",
+        "repos/acme/widgets/pulls/18",
+        "--method",
+        "PATCH",
+        "--field",
+        "base=stable",
+    )
+    row = canonical_pull()
+    row["number"] = 18
+    updated = canonical_pull()
+    updated["number"] = 18
+    updated["base"]["ref"] = "stable"
+    runner = RecordingRunner({get_argv: row, patch_argv: updated})
+    pull = GitHubClient(runner).update_pull_request_base(
+        "acme/widgets", 18, base="stable", expected_head_sha="a" * 40
+    )
+    assert pull.base_branch == "stable"
+    assert runner.calls == [get_argv, patch_argv]
+
+
 def test_github_client_reads_review_decision_and_unresolved_threads_with_fixed_graphql_argv() -> None:
     query_argv = (
         "gh",
