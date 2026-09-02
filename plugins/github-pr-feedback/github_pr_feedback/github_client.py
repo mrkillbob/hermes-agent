@@ -802,7 +802,7 @@ class GitHubClient:
                 f"repos/{repository}/issues/{number}/comments",
                 "--method",
                 "POST",
-                "--field",
+                "--raw-field",
                 f"body={body}",
             ]
         )

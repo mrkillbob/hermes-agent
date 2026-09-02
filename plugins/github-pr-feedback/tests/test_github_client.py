@@ -331,7 +331,7 @@ def test_github_client_posts_bounded_issue_comment_with_fixed_argv() -> None:
         "repos/acme/widgets/issues/17/comments",
         "--method",
         "POST",
-        "--field",
+        "--raw-field",
         "body=exact-head receipt passed",
     )
     runner = RecordingRunner({argv: {"id": 1}})
