@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .git_stack import GitStackRunner
 from .github_client import GitHubClient, GitHubClientError
-from .policy import PluginPolicy
+from .policy import PluginPolicy, codex_review_trigger_comment
 from .stack import StackEntry, StackManifest, StackStore
 
 try:
@@ -53,7 +53,11 @@ class StackController:
             raise ValueError("stack base must equal the configured merge base")
         manifest = StackManifest(repository, stack_id, base_branch, entries, datetime.now(UTC))
         existing = self.github.list_all_open_pull_requests(repository)
-        by_branch = {(pull.head_ref_name, pull.base_branch): pull for pull in existing}
+        by_branch = {
+            (pull.head_ref_name, pull.base_branch): pull
+            for pull in existing
+            if pull.head_repository == repository
+        }
         created: list[StackEntry] = []
         for entry in _ordered(entries, base_branch):
             pull = by_branch.get((entry.branch, entry.base_branch))
@@ -84,6 +88,11 @@ class StackController:
                 if parent_state.merged:
                     runner.rebase_branch(entry.branch, manifest.base_branch)
                     runner.push_branch(entry.branch, head)
+                    self.github.post_issue_comment(
+                        repository,
+                        entry.pr_number or 0,
+                        codex_review_trigger_comment(head),
+                    )
                     self.github.update_pull_request_base(
                         repository,
                         entry.pr_number or 0,
