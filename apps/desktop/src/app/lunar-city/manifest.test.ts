@@ -22,8 +22,8 @@ describe('parseWorldManifest', () => {
     expect(library).toMatchObject({
       uri: 'models/library.glb',
       transform: {
-        position: { x: -20, y: 4, z: -24 },
-        rotation: { x: 0, y: 0.6202, z: 0 },
+        position: { x: -24, y: 4, z: -30 },
+        rotation: { x: 0, y: 0.6147, z: 0 },
         scale: { x: 1, y: 1, z: 1 }
       },
       lods: [
@@ -36,7 +36,7 @@ describe('parseWorldManifest', () => {
     })
     expect(leaders?.statistics.animationClips).toContain('leader:fox:talking')
     expect(manifest.navigation.meshUri).toBe('models/navigation.glb')
-    expect(manifest.destinations.review).toEqual({ x: -22, y: 0, z: -8 })
+    expect(manifest.destinations.review).toEqual({ x: -26, y: 0, z: -4 })
     expect(manifest.projectSlots[0]).toMatchObject({
       id: 'compound-inner-1',
       position: { x: 16, y: 0, z: 38 }

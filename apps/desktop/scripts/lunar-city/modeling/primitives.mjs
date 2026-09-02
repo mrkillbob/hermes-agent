@@ -52,7 +52,14 @@ export function wireframeShell(
   scene,
   name,
   parent,
-  { accent = 'signal-emissive', depth = 10, height = 8, structure = 'bone-metal', width = 14, skin = 'charcoal-structure' } = {}
+  {
+    accent = 'signal-emissive',
+    depth = 10,
+    height = 8,
+    structure = 'bone-metal',
+    width = 14,
+    skin = 'charcoal-structure'
+  } = {}
 ) {
   const root = group(scene, name, parent)
   const frame = group(scene, `${name}:frame`, root)
@@ -145,8 +152,8 @@ export function wireframeShell(
       parent: entrance,
       position: [0, height * 0.48, 0],
       rotation: [Math.PI / 2, 0, 0],
-      scale: [1, Math.max(0.78, height / Math.max(width, 1) * 0.9), 1],
-          tessellation: 12,
+      scale: [1, Math.max(0.78, (height / Math.max(width, 1)) * 0.9), 1],
+      tessellation: 12,
       thickness: radius * 1.7
     }),
     'wireframe-member'
@@ -200,15 +207,33 @@ export function wireframeShell(
     return panel
   }
 
-  const skinRows = 4
+  // Rear/side panels used to be a thin 2-row band at ~55% height (a strip,
+  // not a wall), leaving most of the wireframe frame exposed on three of
+  // four faces -- the building read as an unfinished cage rather than the
+  // "open front, enclosed everywhere else" habitable module the approved
+  // reference art establishes. A first attempt made rear/sides span the
+  // full frame height/depth like the front skin, which fixed that but
+  // collapsed every specialist's silhouette into the same filled-box shape
+  // (build-models.test.mjs's uniqueness guard measured 0.77-0.91 similarity
+  // against a ~0.73-0.82 threshold) and pushed council over its triangle
+  // cap. This is deliberately a middle ground: a wide band, not a sliver
+  // and not a full wall, so the frame still reads structurally (its own
+  // per-building roofProfile/shellScale keep silhouettes apart) while
+  // closing most of the previously-empty gap.
   const wrapRows = 2
-  const rowAt = row => {
-    const rowT = row / (skinRows - 1)
-    return yBottom + (yTop - yBottom) * rowT
-  }
+  // review-office and council still converged at this coverage level
+  // (0.74 average similarity against the ~0.73 threshold) despite their
+  // very different roofProfile/shellScale entries -- the wrap band itself
+  // was identical in every building, in normalized-height terms, so it
+  // dominated the comparison. A small per-profile offset on the same
+  // lookup keys used above breaks that without touching the (now-tested)
+  // generic coverage every other specialist relies on.
+  const [wrapBandStart, wrapBandSpan] = { council: [0.08, 0.3], 'review-office': [0.2, 0.34] }[profileId] ?? [
+    0.14, 0.42
+  ]
   const wrapRowAt = row => {
     const rowT = row / (wrapRows - 1)
-    return yBottom + (yTop - yBottom) * (0.54 + rowT * 0.035)
+    return yBottom + (yTop - yBottom) * (wrapBandStart + rowT * wrapBandSpan)
   }
   const rearPaths = Array.from({ length: columns }, (_, column) => {
     const t = column / (columns - 1)
@@ -220,9 +245,13 @@ export function wireframeShell(
 
   for (const side of [-1, 1]) {
     const x = side * (width / 2 - 0.12)
+    // Runs from just behind the open front edge to about 55% of the way
+    // back -- enough that the side reads as a real wall near the entrance
+    // instead of a sliver, without fully closing the whole depth (which is
+    // what drove the silhouette convergence above).
     const sidePaths = [
       Array.from({ length: wrapRows }, (_, row) => new Vector3(x, wrapRowAt(row), frontZ - 0.2)),
-      Array.from({ length: wrapRows }, (_, row) => new Vector3(x, wrapRowAt(row), frontZ - 0.7))
+      Array.from({ length: wrapRows }, (_, row) => new Vector3(x, wrapRowAt(row), frontZ - depth * 0.27))
     ]
     createSkinPanel(`side:${side < 0 ? 'left' : 'right'}`, sidePaths)
   }
@@ -446,11 +475,12 @@ export function tubeBetween(scene, name, from, to, options = {}) {
   const target = direction.scale(1 / length)
   const axis = Vector3.Cross(up, target)
   const dot = Math.max(-1, Math.min(1, Vector3.Dot(up, target)))
-  tube.rotationQuaternion = axis.lengthSquared() < 1e-8
-    ? dot < 0
-      ? Quaternion.RotationAxis(new Vector3(1, 0, 0), Math.PI)
-      : Quaternion.Identity()
-    : Quaternion.RotationAxis(axis.normalize(), Math.acos(dot))
+  tube.rotationQuaternion =
+    axis.lengthSquared() < 1e-8
+      ? dot < 0
+        ? Quaternion.RotationAxis(new Vector3(1, 0, 0), Math.PI)
+        : Quaternion.Identity()
+      : Quaternion.RotationAxis(axis.normalize(), Math.acos(dot))
   return tube
 }
 

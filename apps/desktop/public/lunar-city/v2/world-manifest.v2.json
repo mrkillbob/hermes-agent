@@ -462,7 +462,7 @@
         "budget": { "maxDrawCalls": 9, "maxGpuMiB": 12, "maxMaterials": 5, "maxTextures": 4, "maxTriangles": 32000 },
         "bytes": 581388,
         "extent": [21.4805, 23.734, 17.39],
-        "sha256": "3f957a372b1323ac4bcd1458a8a50ad20de98548cd5fc115406359e4724717d3"
+        "sha256": "e3146a030068d14c9d1105c814c33c5f69b427d018d8ff38d67b3a6ea59cb105"
       }
     },
     {
@@ -508,7 +508,7 @@
         "budget": { "maxDrawCalls": 7, "maxGpuMiB": 9, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 24000 },
         "bytes": 426860,
         "extent": [17.074, 18.6756, 13.5275],
-        "sha256": "cf5e1ee2dbf4f5f956fd7b961e23886251f6206018d9bf00e2b0a59e74c5cfe8"
+        "sha256": "3898f65339f19f7b078eed5c4864fa18919f797b43e56c90292e8146199ef744"
       }
     },
     {
@@ -554,7 +554,7 @@
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 26000 },
         "bytes": 510220,
         "extent": [17.2596, 17.078, 16.5],
-        "sha256": "600af5ac382c37e656fed3dd0f253bdba9f36353744d8a050f135e11b43829da"
+        "sha256": "d8a887e1120c17b6fe9731f61c5356f5d3c202e29b9a475fdb1c265d4474e1a8"
       }
     },
     {
@@ -593,7 +593,7 @@
         "budget": { "maxDrawCalls": 5, "maxGpuMiB": 5, "maxMaterials": 3, "maxTextures": 2, "maxTriangles": 12000 },
         "bytes": 94204,
         "extent": [9.86, 9.8575, 8.2259],
-        "sha256": "b084f91dcbeb9ea1963ce6761829159b0a6495d1ae6f695f6ce1b3fe31c34d4d"
+        "sha256": "0c4d0efeff01ebfac7bb0f90b53eaad75eb87bf47812c00317a43cf56ae7abd2"
       }
     },
     {
@@ -671,7 +671,7 @@
         "budget": { "maxDrawCalls": 7, "maxGpuMiB": 8, "maxMaterials": 4, "maxTextures": 3, "maxTriangles": 22000 },
         "bytes": 540976,
         "extent": [20.4432, 18.2729, 15.1033],
-        "sha256": "d2e695fdddf09d78d0787c68e8fb11d23a8738936f8874470832ea5606c0a442"
+        "sha256": "47f2496b8863733fc52619213f8f7c4170d4cace88420fca5c0bc1a450d6f408"
       }
     },
     {
@@ -729,7 +729,7 @@
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 6, "maxTextures": 3, "maxTriangles": 26000 },
         "bytes": 484736,
         "extent": [15, 17.8025, 11.8031],
-        "sha256": "85013397fc7a015780141c6a358a1cedf1ec653d9fcac78a0dfd97f056dd06b7"
+        "sha256": "f1ee9102aa5c680b0c4c95823d5fa158e0e77d6a73ba4c3901e87576adc7f6b8"
       }
     },
     {
@@ -780,7 +780,7 @@
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 28000 },
         "bytes": 568072,
         "extent": [16.5, 18.3574, 13.3031],
-        "sha256": "e3dc51006cb74183546b55c68c2381e876446f7d7d040cdd9150130a845ff73a"
+        "sha256": "4f47eaf2068b74b388528afae63853804d7acd9ee92ae144a1fe4950146523aa"
       }
     },
     {
@@ -830,7 +830,7 @@
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 9, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 24000 },
         "bytes": 497812,
         "extent": [13.5, 16.5952, 10.8031],
-        "sha256": "ef6d082cc989dd3de0726c7b3ed699bd4b73df45aca918087f814596b00af4fc"
+        "sha256": "5e9e028ec9786bb15735f72200d44969e84deb3a953d73cd5e77b552b860286e"
       }
     },
     {
@@ -880,7 +880,7 @@
         "budget": { "maxDrawCalls": 8, "maxGpuMiB": 10, "maxMaterials": 5, "maxTextures": 3, "maxTriangles": 26000 },
         "bytes": 546760,
         "extent": [14.5, 18.2186, 12.3031],
-        "sha256": "880fcb9932cc43fe8c45fd5eb6e408f962fba2deee52508a4377bcd8e7303659"
+        "sha256": "b1b0d9da2dbfe81309bec9c58284946bdfd03c6f3ea9f78108f02a18ebe5e9bb"
       }
     },
     {
