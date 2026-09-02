@@ -107,6 +107,10 @@ _PR_WRITE_ACTION_RE = re.compile(
     r"refresh(?:ing)?\s+(?:the\s+)?base|resolve(?:d|s|ing)?\s+(?:a\s+)?merge\s+conflict)\b",
     re.IGNORECASE,
 )
+_NEGATED_PR_WRITE_SENTENCE_RE = re.compile(
+    r"\b(?:do\s+not|don't|never)\b[^.!?\n]*[.!?]?",
+    re.IGNORECASE,
+)
 
 
 def is_atomic_pr_automation_task(
@@ -138,7 +142,12 @@ def _task_requires_pr_write_authority(
         body=body, idempotency_key=idempotency_key
     ):
         return False
-    return _PR_WRITE_ACTION_RE.search(f"{title}\n{body or ''}") is not None
+    # Review-only tasks must be able to state their negative authority boundary
+    # ("Do not edit, push, or merge") without that prohibition being mistaken
+    # for a write instruction. Positive repair/push language remains subject to
+    # the read-only profile guard below.
+    text = _NEGATED_PR_WRITE_SENTENCE_RE.sub(" ", f"{title}\n{body or ''}")
+    return _PR_WRITE_ACTION_RE.search(text) is not None
 
 
 def _profile_is_explicitly_read_only(profile: Optional[str]) -> bool:

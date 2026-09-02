@@ -98,6 +98,33 @@ def test_read_only_profile_may_own_exact_head_verification(kanban_home):
         assert kb.get_task(conn, tid).assignee == "review-verification-steward"
 
 
+def test_read_only_profile_may_own_review_with_explicit_negative_boundary(
+    kanban_home,
+):
+    _write_profile(
+        kanban_home,
+        "review-verification-steward",
+        "Read-only verifier; never edits, pushes, replies, refreshes, or merges.",
+    )
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Hermes code review: mrkillbob/luna-bot#132",
+            body=(
+                "Perform an independent code review of this exact pull-request head. "
+                "Do not edit files, push, or merge. Return a factual review verdict.\n"
+                "Canonical evidence: {\"repository\":\"mrkillbob/luna-bot\","
+                "\"pr_number\":132,\"expected_head_sha\":\""
+                + "a" * 40
+                + "\"}"
+            ),
+            assignee="review-verification-steward",
+            idempotency_key="github-pr-hermes-review:132:abc",
+        )
+        assert kb.get_task(conn, tid).assignee == "review-verification-steward"
+
+
 def test_blocked_intent_review_negative_contract_may_use_read_only_owner(
     kanban_home,
 ):
