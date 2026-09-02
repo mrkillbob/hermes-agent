@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -714,6 +715,199 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[a-f0-9]{64}", value, re.IGNORECASE))
+
+
+def _safe_candidate_artifact(root: Path, raw_path: object) -> Path | None:
+    """Resolve a candidate artifact without allowing path traversal or symlinks out."""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    normalized = raw_path.replace("\\", "/")
+    if normalized.startswith("/") or normalized in {".", ".."} or normalized.startswith("../") or "/../" in normalized:
+        return None
+    root = root.resolve(strict=True)
+    artifact = (root / Path(normalized)).resolve(strict=True)
+    try:
+        artifact.relative_to(root)
+    except ValueError:
+        return None
+    return artifact if artifact.is_file() else None
+
+
+def load_generated_candidate_manifest(path: Path, candidate_root: Path, known_targets: set[str]) -> dict:
+    """Validate and hash-lock quarantined image-to-3D outputs before import."""
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        return {"valid": False, "errors": [f"unable to read generated candidate manifest: {error}"]}
+
+    errors: list[str] = []
+    if not isinstance(manifest, dict):
+        return {"valid": False, "errors": ["manifest must be an object"]}
+    if manifest.get("version") != 1:
+        errors.append("version must be 1")
+    reference = manifest.get("reference")
+    if not isinstance(reference, dict):
+        errors.append("reference is required")
+    else:
+        if not isinstance(reference.get("design"), str) or not reference["design"].strip():
+            errors.append("reference.design is required")
+        if not isinstance(reference.get("images"), list) or not reference["images"]:
+            errors.append("reference.images must contain at least one image")
+    if not isinstance(manifest.get("candidates"), list):
+        errors.append("candidates must be an array")
+        return {"valid": False, "errors": errors}
+
+    seen_ids: set[str] = set()
+    for index, candidate in enumerate(manifest["candidates"]):
+        prefix = f"candidates[{index}]"
+        if not isinstance(candidate, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        for key in ("id", "targetModelId"):
+            if not isinstance(candidate.get(key), str) or not candidate[key].strip():
+                errors.append(f"{prefix}.{key} is required")
+        candidate_id = candidate.get("id")
+        if isinstance(candidate_id, str):
+            if candidate_id in seen_ids:
+                errors.append(f"{prefix}.id must be unique")
+            seen_ids.add(candidate_id)
+        target = candidate.get("targetModelId")
+        if isinstance(target, str) and target not in known_targets:
+            errors.append(f"{prefix}.targetModelId does not exist in world-manifest.v2.json")
+        artifact = candidate.get("artifact")
+        if not isinstance(artifact, dict):
+            errors.append(f"{prefix}.artifact is required")
+        else:
+            suffix = str(artifact.get("format", "")).lower()
+            if suffix not in {"glb", "gltf", "obj", "fbx"}:
+                errors.append(f"{prefix}.artifact.format is invalid")
+            if not _is_sha256(artifact.get("sha256")):
+                errors.append(f"{prefix}.artifact.sha256 must be a 64-character SHA-256 digest")
+            artifact_path = _safe_candidate_artifact(candidate_root, artifact.get("path"))
+            if artifact_path is None:
+                errors.append(f"{prefix}.artifact.path must resolve to a file inside the candidate directory")
+            elif sha256(artifact_path).lower() != str(artifact["sha256"]).lower():
+                errors.append(f"{prefix} artifact SHA-256 does not match the manifest")
+        source = candidate.get("source")
+        if not isinstance(source, dict) or not isinstance(source.get("images"), list) or not source["images"]:
+            errors.append(f"{prefix}.source.images must contain at least one image reference")
+        else:
+            for image_index, image in enumerate(source["images"]):
+                image_prefix = f"{prefix}.source.images[{image_index}]"
+                if not isinstance(image, dict) or not isinstance(image.get("path"), str) or not image["path"].strip():
+                    errors.append(f"{image_prefix}.path is required")
+                if not isinstance(image, dict) or not _is_sha256(image.get("sha256")):
+                    errors.append(f"{image_prefix}.sha256 must be a 64-character SHA-256 digest")
+        if not isinstance(source, dict) or not isinstance(source.get("designReference"), str) or not source["designReference"].strip():
+            errors.append(f"{prefix}.source.designReference is required")
+        generator = candidate.get("generator")
+        if not isinstance(generator, dict):
+            errors.append(f"{prefix}.generator is required")
+        else:
+            for key in ("id", "repository", "model"):
+                if not isinstance(generator.get(key), str) or not generator[key].strip():
+                    errors.append(f"{prefix}.generator.{key} is required")
+        review = candidate.get("review")
+        if not isinstance(review, dict):
+            errors.append(f"{prefix}.review is required")
+        else:
+            if review.get("artifactStatus") not in {"candidate", "review", "approved", "rejected"}:
+                errors.append(f"{prefix}.review.artifactStatus is invalid")
+            if review.get("licenseStatus") not in {"pending", "cleared", "restricted"}:
+                errors.append(f"{prefix}.review.licenseStatus is invalid")
+        normalization = candidate.get("normalization")
+        if not isinstance(normalization, dict) or normalization.get("anchor") != "manifest-transform":
+            errors.append(f"{prefix}.normalization.anchor must be manifest-transform")
+        elif not isinstance(normalization.get("maxExtent"), (int, float)) or normalization["maxExtent"] <= 0:
+            errors.append(f"{prefix}.normalization.maxExtent must be positive")
+        constraints = candidate.get("constraints")
+        if not isinstance(constraints, dict) or not isinstance(constraints.get("hull"), list) or not constraints["hull"]:
+            errors.append(f"{prefix}.constraints.hull must contain at least one boundary")
+        for key in ("avoidance", "touch"):
+            if not isinstance(constraints, dict) or not isinstance(constraints.get(key), list):
+                errors.append(f"{prefix}.constraints.{key} must be an array")
+
+    if errors:
+        return {"valid": False, "errors": errors}
+    candidates = []
+    root = candidate_root.resolve(strict=True)
+    for candidate in manifest["candidates"]:
+        artifact_path = _safe_candidate_artifact(root, candidate["artifact"]["path"])
+        assert artifact_path is not None
+        candidates.append({
+            **candidate,
+            "artifact": {
+                **candidate["artifact"],
+                "absolutePath": str(artifact_path),
+                "sha256Verified": True,
+            },
+        })
+    return {"valid": True, "errors": [], "version": 1, "reference": reference, "candidates": candidates}
+
+
+def stage_generated_candidate(
+    candidate: dict,
+    target: bpy.types.Collection,
+    guides: bpy.types.Collection,
+    transform: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+) -> dict:
+    """Stage a hash-locked generated asset as a review-only, non-runtime assembly."""
+    path = Path(candidate["artifact"]["absolutePath"])
+    imported = import_model_objects(path, target)
+    if not imported:
+        raise RuntimeError(f"generated candidate {candidate['id']} imported no objects")
+    apply_staging_palette(imported)
+    activate_overview_lod(imported)
+    apply_staging_edge_finish(imported)
+    source_extent = max((max(float(value) for value in obj.dimensions) for obj in imported if obj.dimensions.length > 0), default=0.0)
+    max_extent = float(candidate["normalization"]["maxExtent"])
+    normalization_scale = min(1.0, max_extent / source_extent) if source_extent else 1.0
+    location, rotation, scale = transform
+    anchor = bpy.data.objects.new(f"LUNAR_CITY::CANDIDATE::{candidate['id']}::ANCHOR", None)
+    target.objects.link(anchor)
+    anchor.location = babylon_to_blender_position(location)
+    anchor.rotation_euler = babylon_to_blender_rotation(rotation)
+    anchor.scale = tuple(float(value) * normalization_scale for value in scale)
+    top_level = [obj for obj in imported if obj.parent not in imported]
+    for obj in top_level:
+        obj.parent = anchor
+    cage = bpy.data.objects.new(f"LUNAR_CITY::CANDIDATE::{candidate['id']}::WIRE_CAGE", None)
+    guides.objects.link(cage)
+    bpy.ops.mesh.primitive_cube_add(size=max_extent, location=(0.0, 0.0, 0.0))
+    cage_mesh = bpy.context.object
+    cage_mesh.name = f"LUNAR_CITY::CANDIDATE::{candidate['id']}::WIRE_CAGE_MESH"
+    move_to(cage_mesh, guides)
+    cage_mesh.parent = anchor
+    cage_mesh.location = (0.0, 0.0, 0.0)
+    cage_mesh.display_type = "WIRE"
+    cage_mesh.hide_render = True
+    for key, values in candidate["constraints"].items():
+        cage[key] = json.dumps(values, sort_keys=True)
+    cage["lunarCityRole"] = "generated-candidate-constraint-guide"
+    anchor["lunarCityRole"] = "generated-candidate-review"
+    anchor["lunarCityCandidateId"] = candidate["id"]
+    anchor["lunarCityTargetModelId"] = candidate["targetModelId"]
+    anchor["lunarCityGenerator"] = candidate["generator"]["id"]
+    anchor["lunarCityLicenseStatus"] = candidate["review"]["licenseStatus"]
+    anchor["lunarCityArtifactStatus"] = candidate["review"]["artifactStatus"]
+    anchor["lunarCityRuntimePromotion"] = "forbidden-until-independent-approval"
+    return {
+        "id": candidate["id"],
+        "targetModelId": candidate["targetModelId"],
+        "generator": candidate["generator"],
+        "source": candidate["source"],
+        "review": candidate["review"],
+        "artifact": candidate["artifact"],
+        "normalizationScale": normalization_scale,
+        "anchor": anchor.name,
+        "constraintGuide": cage.name,
+        "importedObjects": len(imported),
+        "runtimePromotion": "forbidden-until-independent-approval",
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--asset-root", type=Path, default=DEFAULT_ASSET_ROOT)
@@ -724,6 +918,18 @@ def parse_args() -> argparse.Namespace:
         help="Curated external kit directory for visible Blender-only showcase geometry",
     )
     parser.add_argument("--asset-kit-limit", type=int, default=30)
+    parser.add_argument(
+        "--generated-candidate-dir",
+        type=Path,
+        default=None,
+        help="Quarantined image-to-3D output directory; never copied into shipped assets",
+    )
+    parser.add_argument(
+        "--candidate-manifest",
+        type=Path,
+        default=None,
+        help="Versioned generated-candidates.v1.json; requires --generated-candidate-dir",
+    )
     parser.add_argument("--polyhaven-dir", type=Path, default=None)
     parser.add_argument(
         "--scene-contract",
@@ -766,6 +972,10 @@ def main() -> None:
     _, skybox_star_count = add_skybox(skybox_collection)
     external = collection("POLYHAVEN_BENCHMARK", root)
     kit_collection = collection("LUNAR_CITY::OPEN_SOURCE_BENCHMARK", root)
+    candidate_collection = collection("LUNAR_CITY::GENERATED_CANDIDATES", root)
+    candidate_guides = collection("LUNAR_CITY::GENERATED_CANDIDATE_GUIDES", root)
+    candidate_collection["lunarCityDistribution"] = "quarantine-only"
+    candidate_guides["lunarCityDistribution"] = "quarantine-only"
 
     palette = {
         "LUNAR_CITY::PALETTE::MOON": make_material("Lunar Moon", (0.09, 0.12, 0.18, 1), metallic=0.15),
@@ -777,7 +987,7 @@ def main() -> None:
     for name, mat in palette.items():
         mat["lunarCityRole"] = name.rsplit("::", 1)[-1].lower()
 
-    counts = {"models": 0, "openSourceShowcaseModels": 0, "polyhavenModels": 0, "polyhavenTextures": 0, "skyboxStars": skybox_star_count}
+    counts = {"models": 0, "generatedCandidates": 0, "openSourceShowcaseModels": 0, "polyhavenModels": 0, "polyhavenTextures": 0, "skyboxStars": skybox_star_count}
     authored_transforms = manifest_transforms(args.asset_root)
     for path in sorted(args.asset_root.rglob("*")):
         if path.suffix.lower() not in {".glb", ".gltf", ".obj", ".fbx"}:
@@ -789,6 +999,27 @@ def main() -> None:
             ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
         )
         counts["models"] += stage_generated_model(path, bpy.data.collections[target_name], location, rotation, scale)
+
+    generated_candidate_receipt = []
+    if args.candidate_manifest:
+        if not args.generated_candidate_dir:
+            raise RuntimeError("--candidate-manifest requires --generated-candidate-dir")
+        candidate_contract = load_generated_candidate_manifest(args.candidate_manifest, args.generated_candidate_dir, set(authored_transforms))
+        if not candidate_contract["valid"]:
+            raise RuntimeError("invalid generated candidate manifest:\n- " + "\n- ".join(candidate_contract["errors"]))
+        for candidate in candidate_contract["candidates"]:
+            if candidate["review"]["artifactStatus"] == "rejected":
+                generated_candidate_receipt.append({
+                    "id": candidate["id"],
+                    "targetModelId": candidate["targetModelId"],
+                    "review": candidate["review"],
+                    "runtimePromotion": "forbidden-until-independent-approval",
+                    "staged": False,
+                })
+                continue
+            transform = authored_transforms[candidate["targetModelId"]]
+            generated_candidate_receipt.append(stage_generated_candidate(candidate, candidate_collection, candidate_guides, transform))
+            counts["generatedCandidates"] += 1
 
     # New terrain GLBs carry the same planetary surface used by WebGL. Keep a
     # fallback for older authored files so this staging script remains useful
@@ -934,7 +1165,7 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     receipt_path = args.output.with_suffix(".staging-receipt.json")
-    receipt_path.write_text(json.dumps({"assetRoot": str(args.asset_root), "sceneContract": str(scene_contract_path), "scene": scene_contract_receipt, "assetKitDir": str(args.asset_kit_dir) if args.asset_kit_dir else None, "counts": counts, "openSourceShowcase": showcase_receipt, "polyhaven": receipt, "reviewRequired": bool(receipt) or bool(showcase_receipt)}, indent=2) + "\n")
+    receipt_path.write_text(json.dumps({"assetRoot": str(args.asset_root), "sceneContract": str(scene_contract_path), "scene": scene_contract_receipt, "assetKitDir": str(args.asset_kit_dir) if args.asset_kit_dir else None, "generatedCandidateDir": str(args.generated_candidate_dir) if args.generated_candidate_dir else None, "candidateManifest": str(args.candidate_manifest) if args.candidate_manifest else None, "counts": counts, "generatedCandidates": generated_candidate_receipt, "openSourceShowcase": showcase_receipt, "polyhaven": receipt, "reviewRequired": bool(receipt) or bool(showcase_receipt) or bool(generated_candidate_receipt)}, indent=2) + "\n")
     bpy.ops.wm.save_as_mainfile(filepath=str(args.output))
     if args.render_output:
         # Render after saving so a driver crash cannot leave an apparently
