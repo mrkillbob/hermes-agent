@@ -4773,6 +4773,32 @@ def recompute_ready(
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
     with write_txn(conn):
+        # Capability/transient loop escalations are machine-recoverable.  They
+        # must not strand work in the human-only triage column; reserve that
+        # column for explicit needs_input tasks.
+        auto_triage = conn.execute(
+            "SELECT id, block_kind FROM tasks "
+            "WHERE status = 'triage' AND COALESCE(block_kind, '') != 'needs_input'"
+        ).fetchall()
+        for row in auto_triage:
+            task_id = row["id"]
+            parents = conn.execute(
+                "SELECT t.status FROM tasks t JOIN task_links l "
+                "ON l.parent_id = t.id WHERE l.child_id = ?", (task_id,)
+            ).fetchall()
+            resume_status = "ready" if all(
+                p["status"] in ("done", "archived") for p in parents
+            ) else "todo"
+            conn.execute(
+                "UPDATE tasks SET status = ? WHERE id = ? AND status = 'triage'",
+                (resume_status, task_id),
+            )
+            _append_event(conn, task_id, "triage_auto_resolved", {
+                "reason": "machine-recoverable triage kind",
+                "kind": row["block_kind"],
+                "status": resume_status,
+            })
+            promoted += 1
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
