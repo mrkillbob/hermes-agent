@@ -102,7 +102,12 @@ def _is_bounded_tool_catalog_context(text: str) -> bool:
     if not isinstance(text, str) or len(text.encode("utf-8")) > 16_384:
         return False
     stripped = text.strip()
-    if stripped.startswith("Available tools:"):
+    if stripped.startswith((
+        "Available tools:",
+        "Tool description:",
+        "No matching tools",
+        "No tools found",
+    )):
         return True
     if not stripped.startswith(("{", "[")):
         return False
@@ -112,8 +117,11 @@ def _is_bounded_tool_catalog_context(text: str) -> bool:
         return False
     if isinstance(payload, Mapping):
         keys = set(payload)
-        return bool(keys & {"tools", "tool", "name", "description"}) and not bool(
-            keys & {"content", "output", "path", "diff", "matches"}
+        return bool(keys & {
+            "tools", "tool", "name", "description", "tool_name",
+            "tool_description", "parameters", "schema",
+        }) and not bool(
+            keys & {"path", "diff", "matches"}
         )
     return isinstance(payload, list) and all(
         isinstance(item, Mapping)
