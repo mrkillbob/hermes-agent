@@ -73,6 +73,7 @@ def test_hermes_review_task_is_exact_head_and_idempotent() -> None:
 
     assert task.assignee == "review-verification-steward"
     assert task.head_sha == "a" * 40
+    assert task.workspace_kind == "scratch"
     assert task.initial_status == "running"
     assert task.max_retries == 2
     assert task.evidence["review_kind"] == "hermes_independent_code_review"

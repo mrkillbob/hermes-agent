@@ -438,7 +438,11 @@ def _kanban_create_argv(task: KanbanTask) -> list[str]:
         "--assignee",
         task.assignee,
         "--workspace",
-        f"dir:{task.repository_path}",
+        (
+            task.workspace_kind
+            if task.workspace_kind == "scratch"
+            else f"dir:{task.repository_path}"
+        ),
         "--idempotency-key",
         task.idempotency_key,
         "--max-retries",

@@ -228,6 +228,7 @@ class KanbanTask:
     branch: str
     idempotency_key: str
     evidence: Mapping[str, object]
+    workspace_kind: str = "dir"
     evidence_heading: str = "Untrusted evidence (JSON)"
     initial_status: str = "blocked"
     max_retries: int = 1
@@ -274,6 +275,7 @@ def _hermes_review_task(
         board=policy.board or "",
         assignee=review_policy.assignee,
         repository_path=target.local_path,
+        workspace_kind="scratch",
         head_sha=pull_request.head_sha,
         branch=pull_request.head_ref_name,
         idempotency_key=f"github-pr-hermes-review:{key}",
