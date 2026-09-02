@@ -246,6 +246,11 @@ class DoctorProbe:
                         if policy.local_ci_audit is not None
                         else []
                     ),
+                    *(
+                        [policy.hermes_review.assignee]
+                        if policy.hermes_review is not None
+                        else []
+                    ),
                     *(merge_policy.assignee for merge_policy in merge_policies),
                     *([_REVIEW_REQUIRED_ASSIGNEE] if merge_policies else []),
                     *(
@@ -1888,6 +1893,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "assignee_rules",
         "routing_rules",
         "local_ci_audit",
+        "hermes_review",
         "agent_labels",
         "merge_maintainer",
         "merge_maintainers",

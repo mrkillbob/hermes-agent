@@ -325,6 +325,17 @@ class LocalCIAuditPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class HermesReviewPolicy:
+    """Independent exact-head Hermes review coverage for configured PRs."""
+
+    assignee: str
+    repositories: frozenset[str] = frozenset()
+
+    def applies_to(self, repository: str) -> bool:
+        return not self.repositories or repository in self.repositories
+
+
+@dataclass(frozen=True, slots=True)
 class AgentLabelMapping:
     """One explicit branch-prefix to canonical GitHub label mapping."""
 
@@ -434,6 +445,7 @@ class PluginPolicy:
     assignee_rules: tuple[AssigneeRule, ...] = ()
     routing_rules: tuple[RoutingRule, ...] = ()
     local_ci_audit: LocalCIAuditPolicy | None = None
+    hermes_review: HermesReviewPolicy | None = None
     agent_labels: AgentLabelPolicy | None = None
     merge_maintainer: MergeMaintainerPolicy | None = None
     repair_steward: RepairStewardPolicy | None = None
@@ -747,6 +759,29 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
         required_for_open_prs=required_for_open_prs,
         max_dispatches_per_scan=max_dispatches_per_scan,
         max_open_prs_per_scan=max_open_prs_per_scan,
+    )
+
+
+def _parse_hermes_review(raw: object) -> HermesReviewPolicy | None:
+    if not isinstance(raw, Mapping):
+        raise ValueError("hermes_review must be a mapping")
+    required = {"enabled", "assignee"}
+    optional = {"repositories"}
+    if not required.issubset(raw) or set(raw).difference(required | optional):
+        raise ValueError("hermes_review has missing or unknown fields")
+    enabled = raw["enabled"]
+    if not isinstance(enabled, bool):
+        raise ValueError("hermes_review enabled must be a boolean")
+    if not enabled:
+        return None
+    repositories = (
+        frozenset(_string_list(raw["repositories"], "hermes_review repositories"))
+        if "repositories" in raw
+        else frozenset()
+    )
+    return HermesReviewPolicy(
+        assignee=_nonempty_string(raw["assignee"], "hermes_review assignee"),
+        repositories=repositories,
     )
 
 
@@ -1130,6 +1165,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "assignee_rules",
         "routing_rules",
         "local_ci_audit",
+        "hermes_review",
         "agent_labels",
         "merge_maintainer",
         "merge_maintainers",
@@ -1225,6 +1261,11 @@ def load_policy(raw: object) -> PluginPolicy:
             _parse_routing_rules(raw["routing_rules"]) if "routing_rules" in raw else ()
         ),
         local_ci_audit=_validated_local_ci_audit(raw, targets),
+        hermes_review=(
+            _parse_hermes_review(raw["hermes_review"])
+            if "hermes_review" in raw
+            else None
+        ),
         agent_labels=(
             _parse_agent_labels(raw["agent_labels"])
             if "agent_labels" in raw

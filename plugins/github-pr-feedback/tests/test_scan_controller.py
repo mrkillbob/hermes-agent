@@ -24,6 +24,7 @@ from github_pr_feedback.controller import (
     ScanController,
     _ci_failure_assignee,
     _ci_receipt_feedback_reason,
+    _hermes_review_task,
     _is_self_resolution_receipt,
     _intent_review_task,
     _local_ci_feedback_id,
@@ -40,6 +41,7 @@ from github_pr_feedback.github_client import MAX_FEEDBACK_BODY_CHARS, CheckState
 from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.policy import (
     FeedbackReceipt,
+    HermesReviewPolicy,
     PullRequest,
     Reviewer,
     load_policy,
@@ -48,6 +50,35 @@ from github_pr_feedback.policy import (
 
 def test_scan_admission_budget_covers_a_large_pr_repair_queue() -> None:
     assert MAX_ADMISSIONS_PER_SCAN >= 128
+
+
+def test_hermes_review_task_is_exact_head_and_idempotent() -> None:
+    policy = SimpleNamespace(board="repairs", auto_dispatch=True)
+    review_policy = HermesReviewPolicy(
+        assignee="review-verification-steward",
+        repositories=frozenset({"acme/widgets"}),
+    )
+    pull_request = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        "a" * 40,
+    )
+    target = SimpleNamespace(local_path=Path("/tmp/widgets"))
+
+    task = _hermes_review_task(policy, review_policy, target, pull_request)
+
+    assert task.assignee == "review-verification-steward"
+    assert task.head_sha == "a" * 40
+    assert task.initial_status == "running"
+    assert task.max_retries == 2
+    assert task.evidence["review_kind"] == "hermes_independent_code_review"
+    assert task.idempotency_key == _hermes_review_task(
+        policy, review_policy, target, pull_request
+    ).idempotency_key
 
 
 def test_intent_review_card_uses_valid_zero_retry_encoding(tmp_path: Path) -> None:
@@ -92,6 +123,7 @@ class FakeGitHub:
         self.branch_calls: list[tuple[str, str]] = []
         self.label_calls: list[tuple[str, int, tuple[str, ...]]] = []
         self.ensure_label_calls: list[tuple[str, str, str, str]] = []
+        self.posted_comments: list[tuple[str, int, str]] = []
         self.actions_are_enabled = True
         self.billing_blocked = False
         self.branch_head = self.current.base_sha
@@ -164,6 +196,46 @@ class FakeGitHub:
         self, repository: str, label: str, *, color: str, description: str
     ) -> None:
         self.ensure_label_calls.append((repository, label, color, description))
+
+    def post_issue_comment(self, repository: str, number: int, body: str) -> None:
+        self.posted_comments.append((repository, number, body))
+
+
+def test_scan_requests_codex_and_hermes_review_for_a_pr_without_feedback(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        auto_dispatch=True,
+        hermes_review=True,
+    )
+    current = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="main",
+        base_sha="b" * 40,
+    )
+    github = FakeGitHub(current, ())
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.created == 1
+    assert len(kanban.tasks) == 1
+    assert kanban.tasks[0].assignee == "review-verification-steward"
+    assert kanban.tasks[0].head_sha == head_sha
+    assert len(github.posted_comments) == 1
+    assert github.posted_comments[0][0:2] == ("acme/widgets", 17)
+    assert f"head={head_sha}" in github.posted_comments[0][2]
+    ledger.close()
 
 
 @pytest.mark.parametrize(
@@ -4026,6 +4098,7 @@ def configured_policy(
     not_before: str,
     auto_dispatch: bool = False,
     local_ci_audit: bool = False,
+    hermes_review: bool = False,
     merge_maintainer: bool = False,
     agent_labels: bool = False,
 ):
@@ -4068,6 +4141,12 @@ def configured_policy(
                 "requires_review": False,
             }
         ]
+    if hermes_review:
+        raw["hermes_review"] = {
+            "enabled": True,
+            "assignee": "review-verification-steward",
+            "repositories": ["acme/widgets"],
+        }
     if agent_labels:
         raw["agent_labels"] = {
             "enabled": True,

@@ -27,10 +27,13 @@ from .ledger import ClaimLease, FeedbackLedger, LedgerStateError, WorktreeSlotLe
 from .intent_review import classify_feedback, pending_intent_comment_ids
 from .policy import (
     FeedbackReceipt,
+    HermesReviewPolicy,
     PluginPolicy,
     PullRequest,
     RepositoryTarget,
     RoutingDecision,
+    codex_review_trigger_comment,
+    codex_review_trigger_requested,
     pr_repair_attribution_line,
     pr_repair_attribution_required,
 )
@@ -129,6 +132,9 @@ _DEGRADED_REASONS = frozenset(
         "admission_cap",
         "dispatch_failed",
         "exact_head_unavailable",
+        "hermes_review_dispatch_failed",
+        "codex_review_trigger_failed",
+        "codex_review_head_changed",
     }
 )
 
@@ -228,6 +234,52 @@ class KanbanTask:
     model_override: str | None = None
     provider_override: str | None = None
     reasoning_effort: str | None = None
+
+
+def _hermes_review_task(
+    policy: PluginPolicy,
+    review_policy: HermesReviewPolicy,
+    target: RepositoryTarget,
+    pull_request: PullRequest,
+) -> KanbanTask:
+    """Build one idempotent, exact-head independent Hermes review task."""
+
+    key = sha256(
+        f"{pull_request.base_repository}\0{pull_request.number}\0"
+        f"{pull_request.head_sha}".encode("utf-8")
+    ).hexdigest()
+    return KanbanTask(
+        title=(
+            f"Hermes code review: {pull_request.base_repository}#"
+            f"{pull_request.number}"
+        ),
+        instructions=(
+            "Perform an independent code review of this exact pull-request head. Re-read the "
+            "canonical PR identity and inspect the complete diff and relevant tests. Leave one "
+            "factual review on GitHub for any issue found; if the change is sound, submit the "
+            "repository's normal approval review. Do not edit files, push, force-push, change "
+            "branch protection, or merge. Re-read the canonical PR immediately before any GitHub "
+            "write and stop if the base or head SHA changed. The deterministic merge controller "
+            "will re-read this review state and will not waive the review gate from model output."
+        ),
+        board=policy.board or "",
+        assignee=review_policy.assignee,
+        repository_path=target.local_path,
+        head_sha=pull_request.head_sha,
+        branch=pull_request.head_ref_name,
+        idempotency_key=f"github-pr-hermes-review:{key}",
+        evidence={
+            "repository": pull_request.base_repository,
+            "pr_number": pull_request.number,
+            "expected_head_sha": pull_request.head_sha,
+            "base_branch": pull_request.base_branch,
+            "review_kind": "hermes_independent_code_review",
+        },
+        evidence_heading="Canonical Hermes review evidence (JSON)",
+        initial_status="running" if policy.auto_dispatch else "blocked",
+        max_retries=2 if policy.auto_dispatch else 1,
+        max_runtime_seconds=1200 if policy.auto_dispatch else None,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1078,6 +1130,10 @@ class ScanController:
                 and self._policy.local_ci_audit.applies_to(repository)
                 and actions_enabled is False
             )
+            need_current_for_hermes_review = bool(
+                self._policy.hermes_review is not None
+                and self._policy.hermes_review.applies_to(repository)
+            )
             feedback_current = tuple(
                 pull_request.updated_at is not None
                 and self._ledger.feedback_scan_is_current(
@@ -1085,6 +1141,10 @@ class ScanController:
                     pull_request.number,
                     pull_request.head_sha,
                     pull_request.updated_at,
+                )
+                and not (
+                    self._policy.hermes_review is not None
+                    and self._policy.hermes_review.applies_to(repository)
                 )
                 for pull_request in admitted_pull_requests
             )
@@ -1103,6 +1163,7 @@ class ScanController:
                                 repository,
                                 item[0],
                                 need_current_for_ci=need_current_for_ci,
+                                need_current_for_hermes_review=need_current_for_hermes_review,
                             )
                         ),
                         zip(admitted_pull_requests, feedback_current, strict=True),
@@ -1123,6 +1184,27 @@ class ScanController:
                         scanned_at=self._clock(),
                     )
                 current, feedback_items = snapshot
+                hermes_review = self._policy.hermes_review
+                if (
+                    hermes_review is not None
+                    and hermes_review.applies_to(repository)
+                    and current is not None
+                ):
+                    try:
+                        self._kanban.create_or_get_task(
+                            _hermes_review_task(
+                                self._policy,
+                                hermes_review,
+                                self._policy.targets[repository],
+                                current,
+                            )
+                        )
+                        created += 1
+                    except (RuntimeError, ValueError):
+                        skipped["hermes_review_dispatch_failed"] += 1
+                    codex_error = self._ensure_codex_review(current, feedback_items)
+                    if codex_error is not None:
+                        skipped[codex_error] += 1
                 local_ci_receipt_status = None
                 if (
                     self._policy.local_ci_audit is not None
@@ -1342,6 +1424,7 @@ class ScanController:
         pull_request: PullRequest,
         *,
         need_current_for_ci: bool,
+        need_current_for_hermes_review: bool = False,
     ) -> tuple[PullRequest | None, tuple[Feedback, ...]] | None:
         """Read one PR's independent feedback and canonical identity off-ledger."""
 
@@ -1351,12 +1434,50 @@ class ScanController:
             )
             current = (
                 self._github.get_pull_request(repository, pull_request.number)
-                if feedback_items or need_current_for_ci
+                if feedback_items or need_current_for_ci or need_current_for_hermes_review
                 else None
             )
         except Exception:  # noqa: BLE001 - canonical read failures fail closed.
             return None
         return current, feedback_items
+
+    def _ensure_codex_review(
+        self, current: PullRequest, feedback_items: tuple[Feedback, ...]
+    ) -> str | None:
+        """Request Codex review once for the exact current head before merge gating."""
+
+        post_issue_comment = getattr(self._github, "post_issue_comment", None)
+        if not callable(post_issue_comment):
+            return "codex_review_trigger_failed"
+        from .merge_controller import _codex_reviewed_head
+
+        if _codex_reviewed_head(feedback_items, current.head_sha) or any(
+            codex_review_trigger_requested(item.body, current.head_sha)
+            for item in feedback_items
+        ):
+            return None
+        try:
+            canonical = self._github.get_pull_request(
+                current.base_repository, current.number
+            )
+            if canonical.head_sha.casefold() != current.head_sha.casefold():
+                return "codex_review_head_changed"
+            fresh_feedback = self._github.list_feedback(
+                current.base_repository, current.number
+            )
+            if _codex_reviewed_head(fresh_feedback, canonical.head_sha) or any(
+                codex_review_trigger_requested(item.body, canonical.head_sha)
+                for item in fresh_feedback
+            ):
+                return None
+            post_issue_comment(
+                canonical.base_repository,
+                canonical.number,
+                codex_review_trigger_comment(canonical.head_sha),
+            )
+        except (GitHubClientError, RuntimeError):
+            return "codex_review_trigger_failed"
+        return None
 
     def dispatch_local_ci_after_feedback(self, current: PullRequest) -> str:
         """Immediately hand an actioned feedback head to the local-CI lane."""
