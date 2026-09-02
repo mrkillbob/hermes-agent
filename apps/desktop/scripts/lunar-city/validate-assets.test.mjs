@@ -11,7 +11,8 @@ import {
   APPROVED_SHA,
   validateAssetContract,
   validateAssetContractFiles,
-  validateAssetPack
+  validateAssetPack,
+  validateSceneContract
 } from './validate-assets.mjs'
 
 const APPROVED_SOURCE_URI = '../moon-settlement-approved.jpg'
@@ -833,6 +834,79 @@ test('ships source and manifest records that preserve provenance without a runti
   assert.ok(manifest.projectSlots.length > 0)
   assert.ok(manifest.qualityBudgets.balancedOverview.visibleTriangles <= 1_500_000)
   assert.ok(manifest.qualityBudgets.balancedWorkerFocus.visibleTriangles <= 2_000_000)
+  const sceneContract = JSON.parse(
+    await readFile(new URL('../../public/lunar-city/v2/scene-contract.v1.json', import.meta.url), 'utf8')
+  )
+  assert.deepEqual(validateSceneContract(sceneContract), { ok: true, errors: [] })
+})
+
+test('accepts a complete Blender building and environment scene contract', () => {
+  const result = validateSceneContract({
+    version: 1,
+    activeClip: 'sky-scene',
+    frameRange: [1, 240],
+    world: {
+      name: 'LunarCityWorld',
+      background: { color: [0.005, 0.008, 0.02], strength: 0.22 },
+      raySettings: { engine: 'BLENDER_EEVEE_NEXT', samples: 32, maxBounces: 4 },
+      surface: { type: 'SKY', horizonColor: [0.005, 0.008, 0.02], zenithColor: [0.001, 0.002, 0.012] }
+    },
+    collections: [
+      'LUNAR_CITY::BUILDINGS',
+      'LUNAR_CITY::TERRAIN',
+      'LUNAR_CITY::WORKERS',
+      'LUNAR_CITY::SKYBOX',
+      'LUNAR_CITY::COLLISION'
+    ],
+    instancing: [{ collection: 'LUNAR_CITY::BUILDING_INSTANCES', source: 'LUNAR_CITY::BUILDINGS', count: 12 }],
+    motionPaths: [{ object: 'LUNAR_CITY::SKYBOX', mode: 'OBJECT', frames: [1, 240] }],
+    shading: { colorType: 'MATERIAL', showShadows: true, showCavity: true, cavityType: 'BOTH' },
+    motionBlur: { enabled: true, shutter: 0.35 },
+    visibility: { skybox: true, buildings: true, terrain: true, collisionViewport: false },
+    lineArt: { mode: 'FREESTYLE', enabled: true },
+    physics: {
+      rigidBodyWorld: { enabled: true, frameRate: 60, substeps: 4 },
+      constraints: [{ name: 'LUNAR_CITY::CONSTRAINT::TRANSIT_GUIDE', type: 'FIXED' }]
+    },
+    geometry: {
+      vertexGroups: ['LUNAR_GROUND_CONTACT', 'LUNAR_FACADE_ACCENT'],
+      shapeKeys: ['LunarSurfaceRest', 'LunarFacadeFlex'],
+      textureSpace: true,
+      remesh: { mode: 'VOXEL', voxelSize: 0.18, showViewport: false, showRender: false }
+    },
+    data: {
+      animation: { skyClip: 'sky-scene', modifier: 'CYCLES' },
+      texture: { name: 'LunarCity::SkyGradient', type: 'IMAGE' },
+      brushes: ['LunarCity::SurfaceBrush']
+    }
+  })
+
+  assert.deepEqual(result, { ok: true, errors: [] })
+})
+
+test('rejects a scene contract that silently drops the active sky clip or physics world', () => {
+  const result = validateSceneContract({
+    version: 1,
+    activeClip: '',
+    frameRange: [1, 1],
+    world: {},
+    collections: [],
+    instancing: [],
+    motionPaths: [],
+    shading: {},
+    motionBlur: {},
+    visibility: {},
+    lineArt: {},
+    physics: { rigidBodyWorld: {}, constraints: [] },
+    geometry: {},
+    data: {}
+  })
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /activeClip is required/)
+  assert.match(result.errors.join('\n'), /world ray settings are invalid/)
+  assert.match(result.errors.join('\n'), /rigid body world is invalid/)
+  assert.match(result.errors.join('\n'), /at least one physics constraint is required/)
 })
 
 test('returns an immutable validation result', async () => {

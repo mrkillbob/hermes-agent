@@ -88,6 +88,143 @@ function isVec3(value) {
   return Array.isArray(value) && value.length === 3 && value.every(Number.isFinite)
 }
 
+function isFrameRange(value) {
+  return Array.isArray(value) && value.length === 2 && value.every(Number.isInteger) && value[0] < value[1]
+}
+
+function isColor3(value) {
+  return isVec3(value) && value.every(channel => channel >= 0 && channel <= 1)
+}
+
+/**
+ * Validate the Blender-only authored scene contract.
+ *
+ * Runtime GLBs deliberately stay renderer-neutral. This contract is the
+ * boundary for the artist-facing .blend staging scene: it names the actual
+ * world, collection, animation, physics, geometry, and shading data that the
+ * Blender stage must realize and receipt.
+ */
+export function validateSceneContract(sceneContract) {
+  const errors = []
+  if (!isRecord(sceneContract) || sceneContract.version !== 1) errors.push('scene contract version must equal 1')
+  if (!isNonEmptyString(sceneContract?.activeClip)) errors.push('activeClip is required')
+  if (!isFrameRange(sceneContract?.frameRange)) errors.push('scene frameRange is invalid')
+
+  const world = sceneContract?.world
+  const background = world?.background
+  const raySettings = world?.raySettings
+  const surface = world?.surface
+  if (
+    !isRecord(world) ||
+    !isNonEmptyString(world.name) ||
+    !isRecord(background) ||
+    !isColor3(background.color) ||
+    !Number.isFinite(background.strength) ||
+    background.strength < 0 ||
+    !isRecord(surface) ||
+    surface.type !== 'SKY' ||
+    !isColor3(surface.horizonColor) ||
+    !isColor3(surface.zenithColor)
+  )
+    errors.push('world background or surface is invalid')
+  if (
+    !isRecord(raySettings) ||
+    !isNonEmptyString(raySettings.engine) ||
+    !Number.isInteger(raySettings.samples) ||
+    raySettings.samples < 1 ||
+    !Number.isInteger(raySettings.maxBounces) ||
+    raySettings.maxBounces < 0
+  )
+    errors.push('world ray settings are invalid')
+
+  if (
+    !Array.isArray(sceneContract?.collections) ||
+    sceneContract.collections.length < 5 ||
+    !sceneContract.collections.every(isNonEmptyString)
+  )
+    errors.push('scene collections are invalid')
+  if (
+    !Array.isArray(sceneContract?.instancing) ||
+    sceneContract.instancing.length === 0 ||
+    !sceneContract.instancing.every(
+      entry => isRecord(entry) && isNonEmptyString(entry.collection) && isNonEmptyString(entry.source) && Number.isInteger(entry.count) && entry.count > 0
+    )
+  )
+    errors.push('scene instancing is invalid')
+  if (
+    !Array.isArray(sceneContract?.motionPaths) ||
+    sceneContract.motionPaths.length === 0 ||
+    !sceneContract.motionPaths.every(
+      entry => isRecord(entry) && isNonEmptyString(entry.object) && entry.mode === 'OBJECT' && isFrameRange(entry.frames)
+    )
+  )
+    errors.push('scene motion paths are invalid')
+
+  const shading = sceneContract?.shading
+  if (!isRecord(shading) || shading.colorType !== 'MATERIAL' || shading.showShadows !== true || shading.showCavity !== true || shading.cavityType !== 'BOTH')
+    errors.push('scene shading settings are invalid')
+  const motionBlur = sceneContract?.motionBlur
+  if (!isRecord(motionBlur) || motionBlur.enabled !== true || !Number.isFinite(motionBlur.shutter) || motionBlur.shutter <= 0)
+    errors.push('scene motion blur settings are invalid')
+  const visibility = sceneContract?.visibility
+  if (!isRecord(visibility) || visibility.skybox !== true || visibility.buildings !== true || visibility.terrain !== true || visibility.collisionViewport !== false)
+    errors.push('scene visibility settings are invalid')
+  if (!isRecord(sceneContract?.lineArt) || sceneContract.lineArt.mode !== 'FREESTYLE' || sceneContract.lineArt.enabled !== true)
+    errors.push('scene line art settings are invalid')
+
+  const rigidBodyWorld = sceneContract?.physics?.rigidBodyWorld
+  if (
+    !isRecord(rigidBodyWorld) ||
+    rigidBodyWorld.enabled !== true ||
+    !Number.isInteger(rigidBodyWorld.frameRate) ||
+    rigidBodyWorld.frameRate < 1 ||
+    !Number.isInteger(rigidBodyWorld.substeps) ||
+    rigidBodyWorld.substeps < 1
+  )
+    errors.push('rigid body world is invalid')
+  if (
+    !Array.isArray(sceneContract?.physics?.constraints) ||
+    sceneContract.physics.constraints.length === 0 ||
+    !sceneContract.physics.constraints.every(entry => isRecord(entry) && isNonEmptyString(entry.name) && isNonEmptyString(entry.type))
+  )
+    errors.push('at least one physics constraint is required')
+
+  const geometry = sceneContract?.geometry
+  if (
+    !isRecord(geometry) ||
+    !Array.isArray(geometry.vertexGroups) ||
+    geometry.vertexGroups.length < 2 ||
+    !geometry.vertexGroups.every(isNonEmptyString) ||
+    !Array.isArray(geometry.shapeKeys) ||
+    geometry.shapeKeys.length < 2 ||
+    !geometry.shapeKeys.every(isNonEmptyString) ||
+    geometry.textureSpace !== true ||
+    !isRecord(geometry.remesh) ||
+    geometry.remesh.mode !== 'VOXEL' ||
+    !Number.isFinite(geometry.remesh.voxelSize) ||
+    geometry.remesh.voxelSize <= 0 ||
+    geometry.remesh.showViewport !== false ||
+    geometry.remesh.showRender !== false
+  )
+    errors.push('scene geometry data is invalid')
+
+  const data = sceneContract?.data
+  if (
+    !isRecord(data) ||
+    !isRecord(data.animation) ||
+    data.animation.skyClip !== sceneContract?.activeClip ||
+    data.animation.modifier !== 'CYCLES' ||
+    !isRecord(data.texture) ||
+    !isNonEmptyString(data.texture.name) ||
+    data.texture.type !== 'IMAGE' ||
+    !Array.isArray(data.brushes) ||
+    data.brushes.length === 0 ||
+    !data.brushes.every(isNonEmptyString)
+  )
+    errors.push('scene animation, texture, or brush data is invalid')
+  return validationResult(errors)
+}
+
 function isBounds(value) {
   return (
     value &&
@@ -795,6 +932,7 @@ export async function validateAssetContractFiles(manifestPath, io = new NodeIO()
   const sourceReferencePath = resolve(dirname(absoluteManifestPath), 'source-reference.v2.json')
   const sourceReference = JSON.parse(await readFile(sourceReferencePath, 'utf8'))
   const baseDirectory = dirname(absoluteManifestPath)
+  const sceneContractPath = resolve(baseDirectory, 'scene-contract.v1.json')
   const resolvedModels = Array.isArray(root?.models)
     ? root.models.map(model =>
         isRecord(model) && isNonEmptyString(model.uri) ? { ...model, uri: resolve(baseDirectory, model.uri) } : model
@@ -807,7 +945,15 @@ export async function validateAssetContractFiles(manifestPath, io = new NodeIO()
   const resolvedRoot = isRecord(root) ? { ...root, models: resolvedModels, navigation: resolvedNavigation } : root
   const sourceUri = sourceReference?.source?.uri
   const sourcePath = isNonEmptyString(sourceUri) ? resolve(dirname(sourceReferencePath), sourceUri) : undefined
-  return validateAssetContract({ root: resolvedRoot, io, sourcePath, sourceReference })
+  const result = await validateAssetContract({ root: resolvedRoot, io, sourcePath, sourceReference })
+  const errors = [...result.errors]
+  try {
+    const sceneContract = JSON.parse(await readFile(sceneContractPath, 'utf8'))
+    errors.push(...validateSceneContract(sceneContract).errors.map(error => `scene contract: ${error}`))
+  } catch {
+    errors.push('scene contract file cannot be read')
+  }
+  return validationResult(errors)
 }
 
 async function main() {

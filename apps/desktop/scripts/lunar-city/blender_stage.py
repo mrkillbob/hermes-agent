@@ -362,6 +362,326 @@ def add_skybox(target: bpy.types.Collection) -> tuple[bpy.types.Object, int]:
     return skybox, star_count
 
 
+def load_scene_contract(path: Path) -> dict:
+    """Load the versioned Blender authoring contract beside the world manifest."""
+    try:
+        contract = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"unable to read Lunar City scene contract {path}: {error}") from error
+    if contract.get("version") != 1 or contract.get("activeClip") != "sky-scene":
+        raise RuntimeError(f"unsupported Lunar City scene contract at {path}")
+    return contract
+
+
+def set_keyframe_cycle(id_block, data_path: str, index: int, frame_values: tuple[tuple[int, float], ...]) -> str:
+    """Animate one scalar and give its F-curve a reusable cyclic modifier."""
+    for frame, value in frame_values:
+        id_block.keyframe_insert(data_path=data_path, index=index, frame=frame)
+        try:
+            getattr(id_block, data_path.split(".")[0])[index] = value
+        except (AttributeError, IndexError, TypeError):
+            pass
+    animation = id_block.animation_data
+    action = animation.action if animation else None
+    if not action:
+        return ""
+    action.name = "sky-scene"
+    for fcurve in action_fcurves(action):
+        if fcurve.data_path == data_path and fcurve.array_index == index and not fcurve.modifiers:
+            fcurve.modifiers.new(type="CYCLES")
+    return action.name
+
+
+def action_fcurves(action):
+    """Yield F-curves from both legacy and Blender 5.2 layered actions."""
+    if not action:
+        return
+    if hasattr(action, "fcurves"):
+        yield from action.fcurves
+        return
+    for layer in action.layers:
+        for strip in layer.strips:
+            for slot in action.slots:
+                channelbag = strip.channelbag(slot)
+                if channelbag:
+                    yield from channelbag.fcurves
+
+
+def add_scene_texture_and_brush(contract: dict) -> dict:
+    """Create editable Blender image/texture/brush datablocks for surface work."""
+    texture_spec = contract["data"]["texture"]
+    image = bpy.data.images.get(texture_spec["name"]) or bpy.data.images.new(texture_spec["name"], width=8, height=2)
+    image.generated_color = (*contract["world"]["surface"]["zenithColor"], 1.0)
+    texture = bpy.data.textures.get(texture_spec["name"]) or bpy.data.textures.new(texture_spec["name"], type="IMAGE")
+    texture.image = image
+    brush_name = contract["data"]["brushes"][0]
+    brush = bpy.data.brushes.get(brush_name) or bpy.data.brushes.new(brush_name, mode="SCULPT")
+    if hasattr(brush, "texture"):
+        brush.texture = texture
+    image["lunarCityRole"] = "sky-gradient-and-surface-reference"
+    texture["lunarCityRole"] = "surface-texture-space"
+    brush["lunarCityRole"] = "surface-authoring-brush"
+    return {"image": image.name, "texture": texture.name, "brush": brush.name}
+
+
+def ensure_mesh_data_contract(obj: bpy.types.Object, vertex_group_name: str, shape_key_name: str, remesh_spec: dict | None = None) -> dict:
+    """Attach editable geometry data to one terrain/building mesh."""
+    if obj.type != "MESH" or not obj.data:
+        return {"object": obj.name, "vertices": 0, "edges": 0, "vertexGroup": False, "shapeKey": False, "remesh": False}
+    mesh = obj.data
+    group = obj.vertex_groups.get(vertex_group_name) or obj.vertex_groups.new(name=vertex_group_name)
+    if mesh.vertices:
+        group.add([vertex.index for vertex in mesh.vertices], 1.0, "REPLACE")
+    basis = obj.shape_key_add(name="Basis") if not obj.data.shape_keys else obj.data.shape_keys.key_blocks.get("Basis")
+    shape_key = obj.data.shape_keys.key_blocks.get(shape_key_name) if obj.data.shape_keys else None
+    if not shape_key:
+        shape_key = obj.shape_key_add(name=shape_key_name)
+    shape_key.value = 0.0
+    mesh.use_auto_texspace = True
+    remesh_name = "LunarCityVoxelRemeshPreview"
+    modifier = obj.modifiers.get(remesh_name)
+    if not modifier and remesh_spec:
+        modifier = obj.modifiers.new(remesh_name, "REMESH")
+    remesh_enabled = False
+    if modifier and remesh_spec:
+        if hasattr(modifier, "mode"):
+            modifier.mode = remesh_spec.get("mode", "VOXEL")
+        if hasattr(modifier, "voxel_size"):
+            modifier.voxel_size = float(remesh_spec.get("voxelSize", 0.18))
+        modifier.show_viewport = bool(remesh_spec.get("showViewport", False))
+        modifier.show_render = bool(remesh_spec.get("showRender", False))
+        remesh_enabled = True
+    return {
+        "object": obj.name,
+        "vertices": len(mesh.vertices),
+        "edges": len(mesh.edges),
+        "vertexGroup": group.name,
+        "shapeKey": shape_key.name,
+        "textureSpace": bool(mesh.use_auto_texspace),
+        "remesh": remesh_enabled,
+    }
+
+
+def first_mesh(objects: list[bpy.types.Object], *, exclude_roles: set[str] | None = None) -> bpy.types.Object | None:
+    exclude_roles = exclude_roles or set()
+    return next(
+        (
+            obj
+            for obj in objects
+            if obj.type == "MESH" and obj.data and obj.get("lunarCityRole") not in exclude_roles and len(obj.data.vertices) > 0
+        ),
+        None,
+    )
+
+
+def configure_scene_contract(
+    scene: bpy.types.Scene,
+    contract: dict,
+    root: bpy.types.Collection,
+    buildings_collection: bpy.types.Collection,
+    terrain_collection: bpy.types.Collection,
+    skybox_collection: bpy.types.Collection,
+    building_objects: list[bpy.types.Object],
+    terrain_objects: list[bpy.types.Object],
+) -> dict:
+    """Realize the scene contract as Blender datablocks and return a receipt."""
+    start, end = contract["frameRange"]
+    scene.frame_start = start
+    scene.frame_end = end
+    scene.frame_set(start)
+    scene["lunarCityActiveClip"] = contract["activeClip"]
+    scene["lunarCitySceneContractVersion"] = contract["version"]
+
+    world = scene.world or bpy.data.worlds.new(contract["world"]["name"])
+    scene.world = world
+    world.name = contract["world"]["name"]
+    world.color = (*contract["world"]["background"]["color"],)
+    world.use_nodes = True
+    background = world.node_tree.nodes.get("Background")
+    if background:
+        background.inputs["Color"].default_value = (*contract["world"]["background"]["color"], 1.0)
+        background.inputs["Strength"].default_value = contract["world"]["background"]["strength"]
+        for frame, color in (
+            (start, (*contract["world"]["surface"]["zenithColor"], 1.0)),
+            (end, (*contract["world"]["surface"]["horizonColor"], 1.0)),
+        ):
+            background.inputs["Color"].default_value = color
+            background.inputs["Color"].keyframe_insert("default_value", frame=frame)
+        world_animation = world.node_tree.animation_data
+        if world_animation.action:
+            world_animation.action.name = contract["activeClip"]
+        if world_animation.action:
+            for fcurve in action_fcurves(world_animation.action):
+                if not fcurve.modifiers:
+                    fcurve.modifiers.new(type="CYCLES")
+    world["lunarCityRole"] = "animated-sky-world"
+    world["lunarCitySurfaceType"] = contract["world"]["surface"]["type"]
+
+    scene["lunarCityRaySettings"] = json.dumps(contract["world"]["raySettings"], sort_keys=True)
+    if hasattr(scene, "cycles"):
+        scene.cycles.samples = contract["world"]["raySettings"]["samples"]
+        if hasattr(scene.cycles, "max_bounces"):
+            scene.cycles.max_bounces = contract["world"]["raySettings"]["maxBounces"]
+    if hasattr(scene.render, "use_motion_blur"):
+        scene.render.use_motion_blur = contract["motionBlur"]["enabled"]
+    if hasattr(scene.render, "motion_blur_shutter"):
+        scene.render.motion_blur_shutter = contract["motionBlur"]["shutter"]
+    if hasattr(scene.render, "use_freestyle"):
+        scene.render.use_freestyle = contract["lineArt"]["enabled"]
+        if scene.render.use_freestyle and scene.view_layers:
+            freestyle = scene.view_layers[0].freestyle_settings
+            line_set = freestyle.linesets[0] if freestyle.linesets else freestyle.linesets.new("LunarCity::LineSet")
+            line_style = bpy.data.linestyles.get("LunarCity::LineStyle") or bpy.data.linestyles.new("LunarCity::LineStyle")
+            line_style.color = (0.015, 0.02, 0.04)
+            line_style.thickness = 1.2
+            line_set.linestyle = line_style
+    scene["lunarCityMotionBlur"] = contract["motionBlur"]["shutter"]
+    scene["lunarCityLineArt"] = contract["lineArt"]["mode"]
+
+    collision_collection = collection("LUNAR_CITY::COLLISION", root)
+    fx_collection = collection("LUNAR_CITY::FX", root)
+    instance_collection = collection("LUNAR_CITY::BUILDING_INSTANCES", root)
+    collision_collection.hide_viewport = contract["visibility"]["collisionViewport"] is False
+    collision_collection.hide_render = True
+    instance_collection.hide_render = True
+    instance_collection["lunarCityRole"] = "collection-instance-source"
+    instance = bpy.data.objects.get("LUNAR_CITY::BUILDING_INSTANCE")
+    if not instance:
+        instance = bpy.data.objects.new("LUNAR_CITY::BUILDING_INSTANCE", None)
+        fx_collection.objects.link(instance)
+    instance.instance_type = "COLLECTION"
+    instance.instance_collection = buildings_collection
+    instance.hide_viewport = True
+    instance.hide_render = True
+    instance["lunarCityInstanceCount"] = contract["instancing"][0]["count"]
+    instance["lunarCitySourceCollection"] = contract["instancing"][0]["source"]
+
+    skybox = bpy.data.objects.get("LUNAR_CITY::SKYBOX")
+    if skybox:
+        skybox.rotation_euler = (0.0, 0.0, 0.0)
+        skybox.keyframe_insert("rotation_euler", frame=start)
+        skybox.rotation_euler.z = math.tau
+        skybox.keyframe_insert("rotation_euler", frame=end)
+        skybox_animation = skybox.animation_data_create()
+        if skybox_animation.action:
+            skybox_animation.action.name = contract["activeClip"]
+        if skybox_animation.action:
+            for fcurve in action_fcurves(skybox_animation.action):
+                if not fcurve.modifiers:
+                    fcurve.modifiers.new(type="CYCLES")
+        skybox["lunarCityMotionPath"] = True
+        try:
+            bpy.ops.object.select_all(action="DESELECT")
+            skybox.hide_select = False
+            skybox.select_set(True)
+            bpy.context.view_layer.objects.active = skybox
+            bpy.ops.object.paths_calculate()
+            skybox.hide_select = True
+        except (RuntimeError, TypeError):
+            skybox["lunarCityMotionPath"] = "animation-path"
+
+    collider = bpy.data.objects.get("LUNAR_CITY::GROUND_COLLIDER")
+    if not collider:
+        bpy.ops.mesh.primitive_cylinder_add(vertices=32, radius=180.0, depth=0.2, location=(0.0, 3.0, -5.8))
+        collider = bpy.context.object
+        collider.name = "LUNAR_CITY::GROUND_COLLIDER"
+        move_to(collider, collision_collection)
+    collider.display_type = "WIRE"
+    collider["lunarCityRole"] = "passive-ground-collider"
+    bpy.context.view_layer.objects.active = collider
+    collider.select_set(True)
+    try:
+        if not collider.rigid_body:
+            bpy.ops.rigidbody.object_add()
+        collider.rigid_body.type = "PASSIVE"
+        collider.rigid_body.collision_shape = "MESH"
+    except RuntimeError:
+        collider["lunarCityRigidBody"] = "PASSIVE"
+    collider.select_set(False)
+    collider.hide_viewport = True
+    collider.hide_render = True
+    guide = bpy.data.objects.get("LUNAR_CITY::TRANSIT_GUIDE")
+    if not guide:
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.0, 3.0, 0.0))
+        guide = bpy.context.object
+        guide.name = "LUNAR_CITY::TRANSIT_GUIDE"
+        move_to(guide, collision_collection)
+    guide.hide_viewport = False
+    guide.hide_render = True
+    guide.display_type = "WIRE"
+    guide["lunarCityRole"] = "passive-transit-guide"
+    bpy.context.view_layer.objects.active = guide
+    guide.select_set(True)
+    try:
+        if not guide.rigid_body:
+            bpy.ops.rigidbody.object_add()
+        guide.rigid_body.type = "PASSIVE"
+        guide.rigid_body.collision_shape = "BOX"
+    except RuntimeError:
+        guide["lunarCityRigidBody"] = "PASSIVE"
+    guide.select_set(False)
+    guide.hide_viewport = True
+    constraint = bpy.data.objects.get(contract["physics"]["constraints"][0]["name"])
+    if not constraint:
+        constraint = bpy.data.objects.new(contract["physics"]["constraints"][0]["name"], None)
+        collision_collection.objects.link(constraint)
+    constraint.hide_viewport = False
+    constraint.hide_render = True
+    constraint["lunarCityConstraintType"] = contract["physics"]["constraints"][0]["type"]
+    try:
+        bpy.context.view_layer.objects.active = constraint
+        constraint.select_set(True)
+        bpy.ops.rigidbody.constraint_add()
+        constraint.rigid_body_constraint.type = contract["physics"]["constraints"][0]["type"]
+        constraint.rigid_body_constraint.object1 = collider
+        constraint.rigid_body_constraint.object2 = guide
+        constraint.select_set(False)
+    except RuntimeError:
+        constraint["lunarCityConstraint"] = "FIXED"
+    constraint.hide_viewport = True
+    rigid_body_world = scene.rigidbody_world
+    if rigid_body_world:
+        rigid_body_world.substeps_per_frame = contract["physics"]["rigidBodyWorld"]["substeps"]
+        rigid_body_world.point_cache.frame_start = start
+        rigid_body_world.point_cache.frame_end = end
+        scene["lunarCityRigidBodyFrameRate"] = contract["physics"]["rigidBodyWorld"]["frameRate"]
+
+    terrain_mesh = next(
+        (obj for obj in terrain_objects if obj.name == "terrain:world-surface:mesh" and obj.type == "MESH"),
+        None,
+    ) or first_mesh(terrain_objects, exclude_roles={"skybox", "skybox-star"}) or bpy.data.objects.get("LUNAR_CITY::WORLD_SURFACE")
+    building_mesh = first_mesh(building_objects)
+    geometry_receipt = {}
+    if terrain_mesh:
+        geometry_receipt["terrain"] = ensure_mesh_data_contract(
+            terrain_mesh,
+            contract["geometry"]["vertexGroups"][0],
+            contract["geometry"]["shapeKeys"][0],
+            contract["geometry"]["remesh"],
+        )
+    if building_mesh:
+        geometry_receipt["building"] = ensure_mesh_data_contract(
+            building_mesh,
+            contract["geometry"]["vertexGroups"][1],
+            contract["geometry"]["shapeKeys"][1],
+        )
+    data_receipt = add_scene_texture_and_brush(contract)
+    return {
+        "activeClip": contract["activeClip"],
+        "frameRange": [start, end],
+        "world": world.name,
+        "raySettings": contract["world"]["raySettings"],
+        "collections": [child.name for child in root.children],
+        "instancing": {"object": instance.name, "source": instance.instance_collection.name if instance.instance_collection else None, "count": instance.get("lunarCityInstanceCount", 0)},
+        "motionPaths": [skybox.name] if skybox and skybox.get("lunarCityMotionPath") else [],
+        "motionBlur": {"enabled": bool(getattr(scene.render, "use_motion_blur", contract["motionBlur"]["enabled"])), "shutter": contract["motionBlur"]["shutter"]},
+        "lineArt": {"enabled": bool(getattr(scene.render, "use_freestyle", contract["lineArt"]["enabled"])), "mode": contract["lineArt"]["mode"]},
+        "physics": {"rigidBodyWorld": bool(scene.rigidbody_world), "constraints": [constraint.name], "bodies": [collider.name, guide.name]},
+        "geometry": geometry_receipt,
+        "data": data_receipt,
+    }
+
+
 def stage_polyhaven_texture(path: Path, target: bpy.types.Collection) -> int:
     """Create a low-cost preview card for a texture, preserving the source file."""
     try:
@@ -406,6 +726,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asset-kit-limit", type=int, default=30)
     parser.add_argument("--polyhaven-dir", type=Path, default=None)
     parser.add_argument(
+        "--scene-contract",
+        type=Path,
+        default=None,
+        help="Versioned Blender world/authoring contract; defaults beside world-manifest.v2.json",
+    )
+    parser.add_argument(
         "--render-engine",
         choices=("auto", "workbench", "eevee"),
         default="auto",
@@ -428,6 +754,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    scene_contract_path = args.scene_contract or args.asset_root.parent / "scene-contract.v1.json"
+    scene_contract = load_scene_contract(scene_contract_path)
     if not args.no_reset:
         bpy.ops.wm.read_factory_settings(use_empty=True)
     root = collection("LUNAR_CITY")
@@ -591,9 +919,22 @@ def main() -> None:
     add_area("LunarCity_KeyLight", (12, -18, 46), 1800, 40)
     add_area("LunarCity_FillLight", (-38, 20, 26), 950, 48)
 
+    building_objects = list(bpy.data.collections["LUNAR_CITY::BUILDINGS"].objects)
+    terrain_objects = list(bpy.data.collections["LUNAR_CITY::TERRAIN"].objects)
+    scene_contract_receipt = configure_scene_contract(
+        scene,
+        scene_contract,
+        root,
+        bpy.data.collections["LUNAR_CITY::BUILDINGS"],
+        terrain_collection,
+        skybox_collection,
+        building_objects,
+        terrain_objects,
+    )
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     receipt_path = args.output.with_suffix(".staging-receipt.json")
-    receipt_path.write_text(json.dumps({"assetRoot": str(args.asset_root), "assetKitDir": str(args.asset_kit_dir) if args.asset_kit_dir else None, "counts": counts, "openSourceShowcase": showcase_receipt, "polyhaven": receipt, "reviewRequired": bool(receipt) or bool(showcase_receipt)}, indent=2) + "\n")
+    receipt_path.write_text(json.dumps({"assetRoot": str(args.asset_root), "sceneContract": str(scene_contract_path), "scene": scene_contract_receipt, "assetKitDir": str(args.asset_kit_dir) if args.asset_kit_dir else None, "counts": counts, "openSourceShowcase": showcase_receipt, "polyhaven": receipt, "reviewRequired": bool(receipt) or bool(showcase_receipt)}, indent=2) + "\n")
     bpy.ops.wm.save_as_mainfile(filepath=str(args.output))
     if args.render_output:
         # Render after saving so a driver crash cannot leave an apparently
