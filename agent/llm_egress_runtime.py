@@ -89,6 +89,38 @@ _PROTECTED_CONTROL_CONTEXT_TOOL_NAMES = frozenset(
         "kanban_attachments",
     }
 )
+
+
+def _is_bounded_tool_catalog_context(text: str) -> bool:
+    """Recognize only the non-source tool catalog replay shape.
+
+    Compacted conversations can lose the assistant call that originally
+    bound ``tool_search``/``tool_desc``.  Keep that control-plane context
+    usable, but do not turn arbitrary unbound tool output into trusted text.
+    """
+
+    if not isinstance(text, str) or len(text.encode("utf-8")) > 16_384:
+        return False
+    stripped = text.strip()
+    if stripped.startswith("Available tools:"):
+        return True
+    if not stripped.startswith(("{", "[")):
+        return False
+    try:
+        payload = json.loads(stripped)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if isinstance(payload, Mapping):
+        keys = set(payload)
+        return bool(keys & {"tools", "tool", "name", "description"}) and not bool(
+            keys & {"content", "output", "path", "diff", "matches"}
+        )
+    return isinstance(payload, list) and all(
+        isinstance(item, Mapping)
+        and isinstance(item.get("name"), str)
+        and isinstance(item.get("description", ""), str)
+        for item in payload[:64]
+    )
 _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"search_files"})
 _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file", "read"})
 _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES = frozenset({"web_extract", "web_search"})
@@ -2443,6 +2475,10 @@ def _typed_payload(
                 elif redact_remote_unsafe_text(item) != item:
                     typed[key] = SanitizedSegment(item)
                 elif direct_result_name in _PROTECTED_CONTROL_CONTEXT_TOOL_NAMES:
+                    typed[key] = GeneratedContextSegment(item)
+                elif _is_bounded_tool_catalog_context(item):
+                    # The call binding may be absent after context compaction,
+                    # but only this strict catalog grammar is safe to replay.
                     typed[key] = GeneratedContextSegment(item)
                 else:
                     typed[key] = UntrustedProvenanceSegment(
