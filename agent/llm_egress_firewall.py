@@ -97,6 +97,10 @@ class UntrustedProvenanceSegment:
     """Content-free marker for tool bytes with no trusted origin proof."""
 
     content_sha256: str
+    # Retained only inside the typed request so the final firewall pass can
+    # report independent content violations (for example Base64) without ever
+    # returning unbound tool bytes to the provider.
+    text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +269,10 @@ _BOUNDED_SOURCE_CODE_ATOM = re.compile(
     r"|[A-Z][A-Z0-9]{0,63}(?:_[A-Z0-9]{1,64}){1,7}"
     r"|[a-z][a-z0-9]{0,63}(?:-[a-z][a-z0-9]{0,63}){1,7}"
     r"|[A-Z][0-9]{3,4})"
+)
+_BOUNDED_SOURCE_CLI_VALUE = re.compile(
+    r"(?P<prefix>--[a-z][a-z0-9]*(?:-[a-z0-9]+)*=)"
+    r"(?P<value>[A-Z]{3,8})(?P<suffix>[^A-Za-z0-9_+/=-])"
 )
 # Bounded operational tokens are emitted by ordinary CLI/test tooling. They
 # can decode as Base64 by coincidence, but are not opaque encoded payloads.
@@ -861,20 +869,32 @@ def _source_text_for_base64_scan(text: str) -> str:
     """
 
     def is_source_code_atom(candidate: str) -> bool:
+        # ``_BASE64_CANDIDATE`` includes padding characters in the match, so
+        # a source keyword such as ``line_ranges=`` arrives here with its
+        # trailing assignment marker attached.  Strip only that marker; a
+        # padded encoded value remains unchanged and fail-closed.
+        source_atom = candidate[:-1] if candidate.endswith("=") else candidate
         return (
-            _BOUNDED_SOURCE_CODE_ATOM.fullmatch(candidate) is not None
-            or _PYTHON_DUNDER_IDENTIFIER.fullmatch(candidate) is not None
-            or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(candidate) is not None
-            or _PYTHON_MIXED_CASE_IDENTIFIER.fullmatch(candidate) is not None
+            _BOUNDED_SOURCE_CODE_ATOM.fullmatch(source_atom) is not None
+            or _PYTHON_DUNDER_IDENTIFIER.fullmatch(source_atom) is not None
+            or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(source_atom) is not None
+            or _PYTHON_MIXED_CASE_IDENTIFIER.fullmatch(source_atom) is not None
         )
 
-    return _BASE64_CANDIDATE.sub(
+    masked = _BASE64_CANDIDATE.sub(
         lambda match: (
             "<code>"
             if is_source_code_atom(match.group(1))
             else match.group(0)
         ),
         text,
+    )
+    # CLI filter values such as ``--diff-filter=ACMR`` are source syntax, not
+    # opaque payloads.  Keep this grammar tied to a long-option assignment so
+    # short quoted Base64 values elsewhere are still rejected.
+    return _BOUNDED_SOURCE_CLI_VALUE.sub(
+        lambda match: f"{match.group('prefix')}<code>{match.group('suffix')}",
+        masked,
     )
 
 
@@ -1751,6 +1771,9 @@ class LLMEgressFirewall:
                 )
                 return segment.text
             if isinstance(segment, UntrustedProvenanceSegment):
+                if isinstance(segment.text, str):
+                    scan_values.append(segment.text)
+                    base64_scan_values.append(segment.text)
                 reasons.append("untrusted_provenance")
                 return ""
             reasons.append("invalid_source_segment")

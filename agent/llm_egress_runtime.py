@@ -662,6 +662,27 @@ def _recognized_syntax_tool_call_ids(value: Any) -> frozenset[str]:
     return _recognized_tool_call_ids(value, _VALIDATED_SYNTAX_TOOL_NAMES)
 
 
+def _tool_result_call_ids(value: Any) -> frozenset[str]:
+    """Collect tool-result IDs so an unbound replay cannot masquerade as output."""
+
+    found: set[str] = set()
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            if item.get("role") == "tool" or item.get("type") == "function_call_output":
+                call_id = item.get("tool_call_id") or item.get("call_id")
+                if isinstance(call_id, str):
+                    found.update(tool_result_id_variants(call_id))
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return frozenset(found)
+
+
 def _scratch_read_file_tool_call_ids(value: Any) -> frozenset[str]:
     """Recognize worker scratch-file reads that have no source authority."""
 
@@ -1892,6 +1913,7 @@ def _typed_payload(
     combined_github_list_terminal_call_limits: Mapping[str, int] | None = None,
     combined_github_view_terminal_call_limits: Mapping[str, int] | None = None,
     rejected_terminal_call_ids: frozenset[str] = frozenset(),
+    unbound_tool_result_call_ids: frozenset[str] = frozenset(),
     terminal_replay_tool_call_ids: frozenset[str] = frozenset(),
     redact_terminal_arguments: bool = False,
     redact_readonly_tool_arguments: bool = False,
@@ -1945,6 +1967,11 @@ def _typed_payload(
             )
         )
         output_call_id = value.get("tool_call_id") or value.get("call_id")
+        is_unbound_tool_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in unbound_tool_result_call_ids
+            and (value.get("role") == "tool" or value.get("type") == "function_call_output")
+        )
         is_recognized_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in syntax_tool_call_ids
@@ -2345,6 +2372,12 @@ def _typed_payload(
                         redact_remote_unsafe_text(projected)
                     )
                     continue
+            if is_unbound_tool_result and key in {"content", "output"} and isinstance(item, str):
+                typed[key] = UntrustedProvenanceSegment(
+                    sha256(item.encode("utf-8")).hexdigest(),
+                    item,
+                )
+                continue
             if (
                 isinstance(github_api_extract_limit, int)
                 and key in {"content", "output"}
@@ -2483,6 +2516,7 @@ def _typed_payload(
                 combined_github_list_terminal_call_limits=combined_github_list_terminal_call_limits,
                 combined_github_view_terminal_call_limits=combined_github_view_terminal_call_limits,
                 rejected_terminal_call_ids=rejected_terminal_call_ids,
+                unbound_tool_result_call_ids=unbound_tool_result_call_ids,
                 terminal_replay_tool_call_ids=terminal_replay_tool_call_ids,
                 redact_terminal_arguments=redact_terminal_arguments,
                 redact_readonly_tool_arguments=redact_readonly_tool_arguments,
@@ -2533,6 +2567,7 @@ def _typed_payload(
                 combined_github_list_terminal_call_limits=combined_github_list_terminal_call_limits,
                 combined_github_view_terminal_call_limits=combined_github_view_terminal_call_limits,
                 rejected_terminal_call_ids=rejected_terminal_call_ids,
+                unbound_tool_result_call_ids=unbound_tool_result_call_ids,
                 terminal_replay_tool_call_ids=terminal_replay_tool_call_ids,
                 redact_terminal_arguments=redact_terminal_arguments,
                 redact_readonly_tool_arguments=redact_readonly_tool_arguments,
@@ -3007,6 +3042,23 @@ def authorize_agent_sdk_kwargs(
         rejected_terminal_call_ids=(
             _rejected_terminal_call_ids(body)
             if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
+        unbound_tool_result_call_ids=(
+            _tool_result_call_ids(body)
+            - _recognized_tool_call_ids(
+                body,
+                (
+                    _VALIDATED_SYNTAX_TOOL_NAMES
+                    | _REMOTE_KANBAN_PROJECTION_TOOL_NAMES
+                    | _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES
+                    | _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES
+                    | _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES
+                    | _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES
+                    | _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES
+                ),
+            )
+            if protected_kanban_remote
             else frozenset()
         ),
         terminal_replay_tool_call_ids=(

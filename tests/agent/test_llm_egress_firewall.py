@@ -204,6 +204,35 @@ def test_remote_request_requires_an_exact_source_grant(tmp_path):
     assert decision.payload_sha256
 
 
+def test_source_grant_allows_ordinary_cli_source_atoms_but_rejects_base64(tmp_path):
+    path = tmp_path / "lane.py"
+    path.write_text(
+        'args = ["git", "diff", "--diff-filter=ACMR"]\n'
+        "current, line_ranges = result\n",
+        encoding="utf-8",
+    )
+    grant = _source_grant(path, end=2)
+    request = _request(path.read_text(encoding="utf-8"))
+    decision = firewall(tmp_path).preflight(
+        _typed_request(request, source_grant=grant),
+        _route(),
+        grants=(grant,),
+    )
+    assert decision.allowed is True
+
+    encoded = base64.b64encode(b"source-secret-payload").decode("ascii")
+    secret_path = tmp_path / "secret.py"
+    secret_path.write_text(f'value = "{encoded}"\n', encoding="utf-8")
+    secret_grant = _source_grant(secret_path)
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _typed_request(_request(secret_path.read_text(encoding="utf-8")), source_grant=secret_grant),
+            _route(),
+            grants=(secret_grant,),
+        )
+    assert "base64_payload" in exc_info.value.decision.reason_codes
+
+
 def test_unrelated_grant_and_incomplete_typed_source_request_are_denied(tmp_path):
     first = tmp_path / "first.py"
     second = tmp_path / "second.py"
