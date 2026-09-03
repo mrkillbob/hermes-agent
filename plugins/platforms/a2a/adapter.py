@@ -370,21 +370,27 @@ class A2AAdapter(BasePlatformAdapter):
         # Scope-aware: a secondary multiplex profile must not borrow the
         # default profile's bridged A2A_PORT (mirrors the Buzz/SimpleX fix
         # for #98738) — an unconfigured profile falls closed to the module
-        # default port instead. (advertised_toolsets has the same env-leak
-        # shape but is left unscoped here — see the "Scope note" in this
-        # fix's PR description: open PR #98937 is actively rewriting this
-        # field's None-vs-empty-list semantics.)
+        # default port instead.
         self._security_context = security.A2ASecurityContext.capture()
         _port_env = None if _profile_scoped() else os.getenv("A2A_PORT")
         self.port = int(_port_env or extra.get("port", _DEFAULT_PORT))
         self.host = self._security_context.resolve_bind_host()
         self.agent_name = _default_agent_name()
-        self._advertised_toolsets = [
-            t.strip() for t in (
-                list(extra.get("advertised_toolsets") or [])
-                or os.getenv("A2A_ADVERTISED_TOOLSETS", "").split(",")
-            ) if str(t).strip()
-        ]
+        if "advertised_toolsets" in extra:
+            configured_toolsets = extra["advertised_toolsets"]
+        elif _profile_scoped():
+            configured_toolsets = None
+        else:
+            configured_toolsets = os.getenv("A2A_ADVERTISED_TOOLSETS")
+        if configured_toolsets is None:
+            self._advertised_toolsets = None
+        else:
+            values = (
+                configured_toolsets.split(",")
+                if isinstance(configured_toolsets, str)
+                else configured_toolsets
+            )
+            self._advertised_toolsets = [str(value).strip() for value in values if str(value).strip()]
         self._active_profile = _active_profile_name()
         self._agents = self._load_served_agents(extra)
 
@@ -575,7 +581,11 @@ class A2AAdapter(BasePlatformAdapter):
                 continue
             profile = str(val.get("profile") or slug).strip()
             path = "/" + path_segment
-            toolsets = val.get("advertised_toolsets") or val.get("toolsets") or val.get("capabilities") or []
+            toolsets = []
+            for key_name in ("advertised_toolsets", "toolsets", "capabilities"):
+                if key_name in val:
+                    toolsets = val[key_name]
+                    break
             if isinstance(toolsets, str):
                 toolsets = [t.strip() for t in toolsets.split(",") if t.strip()]
             local = bool(val.get("local")) or profile in ("", "default", self._active_profile)
@@ -668,21 +678,26 @@ class A2AAdapter(BasePlatformAdapter):
         restricts what we advertise; without a registry we fall back to that
         static list.
         """
+        configured = (agent or {}).get("advertised_toolsets") if agent else self._advertised_toolsets
+        if configured == []:
+            return []
         try:
             from tools.registry import registry as tool_registry
             names = tool_registry.get_registered_toolset_names()
-            configured = (agent or {}).get("advertised_toolsets") if agent else self._advertised_toolsets
-            allowed = set(configured or []) or None
+            allowed = None if configured is None else set(configured)
             mapping = {
                 n: tool_registry.get_tool_names_for_toolset(n)
                 for n in names
                 if allowed is None or n in allowed
             }
+            # Profiles may advertise orchestration capabilities that are not
+            # standalone names in the local tool registry.
+            for capability in configured or []:
+                mapping.setdefault(capability, [])
             if mapping:
                 return protocol.skills_from_toolsets(mapping)
         except Exception:
             logger.debug("A2A: tool registry unavailable for Agent Card", exc_info=True)
-        configured = (agent or {}).get("advertised_toolsets") if agent else self._advertised_toolsets
         return protocol.skills_from_toolsets(configured or [])
 
     # ── Pending reply plumbing ────────────────────────────────────────────

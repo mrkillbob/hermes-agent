@@ -1731,23 +1731,51 @@ def default_profile_env(monkeypatch):
 class TestMultiplexConstructionScope:
 
     def test_secondary_profile_never_borrows_default_profile_env(
-        self, multiplex_scope, default_profile_env
+        self, monkeypatch, multiplex_scope, default_profile_env
     ):
         """The secondary profile's own config is authoritative; keys absent
         from it fall to the module defaults, never to the default profile's
         bridged A2A_* env values."""
         from plugins.platforms.a2a.adapter import A2AAdapter, _DEFAULT_PORT
+        from tools.registry import registry
         from gateway.config import PlatformConfig
 
         multiplex_scope()
         assert A2AAdapter(PlatformConfig(enabled=True, extra={"port": 9222})).port == 9222
 
+        monkeypatch.setattr(registry, "get_registered_toolset_names", lambda: ["local-tools"])
+        monkeypatch.setattr(registry, "get_tool_names_for_toolset", lambda _name: ["local_tool"])
         adapter = A2AAdapter(PlatformConfig(enabled=True, extra={}))
         assert adapter.port == _DEFAULT_PORT
         assert adapter.agent_name != "default-profile-agent"
+        assert adapter._advertised_toolsets is None
+        assert [skill["name"] for skill in adapter._advertised_skills()] == ["local-tools"]
         assert adapter._agents[""]["description"] == (
             "Hermes Agent — a general-purpose agent reachable over A2A."
         )
+
+    def test_secondary_profile_preserves_explicit_empty_and_served_agent_capabilities(
+        self, multiplex_scope, default_profile_env
+    ):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.a2a.adapter import A2AAdapter
+
+        multiplex_scope()
+        adapter = A2AAdapter(
+            PlatformConfig(
+                enabled=True,
+                extra={
+                    "advertised_toolsets": [],
+                    "agents": {"research": {"advertised_toolsets": ["research"]}},
+                },
+            )
+        )
+
+        assert adapter._advertised_toolsets == []
+        assert adapter._advertised_skills(adapter._agents[""]) == []
+        assert [skill["name"] for skill in adapter._advertised_skills(adapter._agents["research"])] == [
+            "research"
+        ]
 
     def test_default_profile_unscoped_keeps_env_precedence(
         self, monkeypatch, default_profile_env
