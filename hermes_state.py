@@ -4531,6 +4531,29 @@ def _stat_db_file_identity(path: Path) -> "Optional[tuple]":
     return (st.st_dev, st.st_ino)
 
 
+def _stat_sqlite_sidecar_identity(db_path: Path) -> Dict[str, tuple]:
+    """Compatibility delegate to the state-holder authority."""
+    return _state_holders.sqlite_sidecar_identity(db_path)
+
+
+def iter_deleted_sqlite_sidecar_holders(
+    db_path, include_self: bool = True
+) -> List[Tuple[int, str]]:
+    """Compatibility delegate for deleted WAL/SHM generation checks."""
+    return _state_holders.deleted_sqlite_sidecar_holders(
+        Path(db_path), include_self=include_self
+    )
+
+
+def refuse_deleted_wal_generation(db_path) -> None:
+    """Refuse an open while a process holds a deleted WAL/SHM generation."""
+    holders = iter_deleted_sqlite_sidecar_holders(db_path, include_self=True)
+    if not holders:
+        return
+    logger.error(_DELETED_WAL_GENERATION_MSG)
+    raise DeletedWalGenerationError(_DELETED_WAL_GENERATION_MSG)
+
+
 class ConversationWorktreeConflict(RuntimeError):
     """A root session attempted to change its claimed Git identity."""
 
