@@ -10,7 +10,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .ci_runner import CIAuditReceipt
+from .ci_runner import (
+    CIAuditReceipt,
+    CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
+)
 from .github_client import (
     CheckState,
     Feedback,
@@ -207,6 +210,15 @@ def evaluate_merge(
         # receipt or repair commit can clear this, only a human approving the
         # gated workflow run (or otherwise resolving it) on GitHub itself.
         blockers.append("action_required")
+    elif snapshot.check_state.actions_enabled and snapshot.check_state.billing_blocked:
+        if (
+            not policy.allow_budget_exhausted_local_ci
+            or receipt is None
+            or receipt.status != "passed"
+            or receipt.ci_mode != CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT
+            or not receipt.actions_state.billing_blocked
+        ):
+            blockers.append("github_actions_budget_exhausted")
     elif (
         snapshot.check_state.actions_enabled
         and not snapshot.check_state.all_green
@@ -550,8 +562,10 @@ def _snapshot_digest(snapshot: MergeSnapshot, receipt: CIAuditReceipt | None) ->
             "enabled": snapshot.check_state.actions_enabled,
             "green": snapshot.check_state.all_green,
             "count": snapshot.check_state.check_count,
+            "billing_blocked": snapshot.check_state.billing_blocked,
         },
         "ci_receipt": receipt.receipt_id if receipt else None,
+        "ci_mode": receipt.ci_mode if receipt else None,
         "manifest": snapshot.manifest_digest,
         "feedback_clear": snapshot.feedback_clear,
     }

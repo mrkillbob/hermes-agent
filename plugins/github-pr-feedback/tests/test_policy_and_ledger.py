@@ -334,6 +334,9 @@ def test_enabled_policy_parses_strict_merge_and_post_merge_settings(
             {"package_argv": "python3 tools/tb.py"}
         ),
         lambda merge: merge["post_merge"].update({"relaunch_argv": []}),
+        lambda merge: merge["post_merge"].update(
+            {"relaunch_argv": ["/usr/bin/open"]}
+        ),
     ],
 )
 def test_enabled_policy_rejects_unsafe_merge_maintainer_settings(
@@ -364,6 +367,62 @@ def test_disabled_post_merge_hook_requires_only_explicit_enabled_flag(
 
     assert policy.merge_maintainer is not None
     assert policy.merge_maintainer.post_merge is None
+
+
+def test_budget_exhausted_substitution_requires_audit_only_required_no_post_ci(
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "widgets"
+    deployment_path = tmp_path / "deployment"
+    initialize_git_worktree(repository_path)
+    initialize_git_worktree(deployment_path)
+    raw = enabled_merge_config(repository_path, deployment_path)
+    raw["merge_maintainer"]["allow_budget_exhausted_local_ci"] = True
+    raw["local_ci_audit"] = {
+        "enabled": True,
+        "assignee": "pr-local-ci-auditor",
+        "post_results": False,
+        "audit_only": True,
+        "required_for_open_prs": True,
+        "repositories": ["acme/widgets"],
+    }
+
+    policy = load_policy(raw)
+
+    assert policy.merge_maintainer is not None
+    assert policy.merge_maintainer.allow_budget_exhausted_local_ci is True
+    assert policy.local_ci_audit is not None
+    assert policy.local_ci_audit.audit_only is True
+
+
+@pytest.mark.parametrize(
+    "local_ci",
+    [
+        None,
+        {"enabled": True, "assignee": "auditor", "post_results": True},
+        {
+            "enabled": True,
+            "assignee": "auditor",
+            "post_results": False,
+            "audit_only": True,
+            "required_for_open_prs": False,
+        },
+    ],
+)
+def test_budget_exhausted_substitution_rejects_unsafe_local_ci_policy(
+    tmp_path: Path, local_ci: dict[str, object] | None
+) -> None:
+    repository_path = tmp_path / "widgets"
+    deployment_path = tmp_path / "deployment"
+    initialize_git_worktree(repository_path)
+    initialize_git_worktree(deployment_path)
+    raw = enabled_merge_config(repository_path, deployment_path)
+    raw["merge_maintainer"]["allow_budget_exhausted_local_ci"] = True
+    if local_ci is not None:
+        raw["local_ci_audit"] = local_ci
+
+    with pytest.raises(ValueError, match="budget-exhausted CI substitution"):
+        load_policy(raw)
 
 
 def test_policy_can_explicitly_admit_owner_and_bot_feedback_without_widening_human_reviewers(

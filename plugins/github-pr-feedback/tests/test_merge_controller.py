@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt
+from github_pr_feedback.ci_runner import (
+    CIAuditIdentity,
+    CIAuditReceipt,
+    CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
+)
 from github_pr_feedback.github_client import (
     CheckState,
     Feedback,
@@ -31,7 +35,11 @@ MERGE_SHA = "c" * 40
 NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 
 
-def policy(*, report_only: bool = False) -> MergeMaintainerPolicy:
+def policy(
+    *,
+    report_only: bool = False,
+    allow_budget_exhausted_local_ci: bool = False,
+) -> MergeMaintainerPolicy:
     return MergeMaintainerPolicy(
         assignee="pr-merge-maintainer",
         repository="acme/widgets",
@@ -41,6 +49,7 @@ def policy(*, report_only: bool = False) -> MergeMaintainerPolicy:
         receipt_max_age_seconds=3600,
         report_only=report_only,
         post_merge=None,
+        allow_budget_exhausted_local_ci=allow_budget_exhausted_local_ci,
     )
 
 
@@ -164,19 +173,43 @@ def test_evaluate_merge_fails_closed_with_stable_blocker_codes(
     assert decision.method is None
 
 
-def test_evaluate_merge_does_not_block_on_a_billing_locked_out_check_state() -> None:
-    """Actions failing every job from a billing lockout is not evidence against the PR.
-
-    Local CI (the ci_receipt gates above) remains the authoritative signal;
-    GitHub's own red X is noise while the account is locked out.
-    """
+def test_evaluate_merge_blocks_a_billing_locked_out_check_state_by_default() -> None:
 
     snapshot = eligible_snapshot(check_state=CheckState(True, False, 2, True))
 
     decision = evaluate_merge(policy(), snapshot, now=NOW)
 
+    assert decision.eligible is False
+    assert "github_actions_budget_exhausted" in decision.blockers
+
+
+def test_evaluate_merge_accepts_explicit_exact_head_budget_substitution() -> None:
+    billing_state = CheckState(True, False, 2, True)
+    snapshot = eligible_snapshot(
+        check_state=billing_state,
+        ci_receipt=ci_receipt(
+            actions_state=billing_state,
+            ci_mode=CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
+        ),
+    )
+
+    decision = evaluate_merge(
+        policy(allow_budget_exhausted_local_ci=True), snapshot, now=NOW
+    )
+
     assert decision.eligible is True
-    assert "github_checks_not_green" not in decision.blockers
+    assert decision.blockers == ()
+
+
+def test_evaluate_merge_rejects_standard_receipt_as_budget_substitution() -> None:
+    snapshot = eligible_snapshot(check_state=CheckState(True, False, 2, True))
+
+    decision = evaluate_merge(
+        policy(allow_budget_exhausted_local_ci=True), snapshot, now=NOW
+    )
+
+    assert decision.eligible is False
+    assert "github_actions_budget_exhausted" in decision.blockers
 
 
 def test_evaluate_merge_reports_action_required_instead_of_the_generic_not_green_code() -> None:

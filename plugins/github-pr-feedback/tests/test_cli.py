@@ -144,6 +144,22 @@ def test_register_exposes_the_github_feedback_cli_command() -> None:
     parser = argparse.ArgumentParser()
     command["setup_fn"](parser)
     assert parser.parse_args(["scan"]).github_pr_feedback_action == "scan"
+    review = parser.parse_args(
+        [
+            "submit-review",
+            "--repository",
+            "acme/widgets",
+            "--pr-number",
+            "17",
+            "--head-sha",
+            "a" * 40,
+            "--event",
+            "APPROVE",
+            "--body",
+            "Reviewed.",
+        ]
+    )
+    assert review.github_pr_feedback_action == "submit-review"
 
 
 def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
@@ -171,6 +187,7 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
             pass
 
     class Policy:
+        enabled = True
         repair_steward = object()
         merge_maintainer = None
         release_maintenance = None
@@ -193,6 +210,7 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
     monkeypatch.setattr("github_pr_feedback.cli.FeedbackLedger", Ledger)
     monkeypatch.setattr("github_pr_feedback.cli.RepairController", Repair)
     monkeypatch.setattr("github_pr_feedback.cli._controller", lambda *_args: Feedback())
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: object())
 
     assert _scan(object()) == 1
     assert order == ["feedback", "repair"]
@@ -225,6 +243,7 @@ def _run_scan_with_primary_result(
             pass
 
     class Policy:
+        enabled = True
         repair_steward = object()
         merge_maintainer = object()
         release_maintenance = object()
@@ -268,6 +287,7 @@ def _run_scan_with_primary_result(
     monkeypatch.setattr(
         "github_pr_feedback.cli._run_release_maintenance_scan", release
     )
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: object())
 
     returncode = _scan(object())
     payload = json.loads(capsys.readouterr().out)
@@ -314,6 +334,22 @@ def test_scan_does_not_defer_secondary_fanout_for_read_cap_without_ci_backlog(
     assert order == ["primary", "repair", "merge", "release"]
     assert "required_local_ci_backlog" not in payload
     assert "deferred" not in payload
+
+
+def test_scan_payload_reports_catalogue_deferred_separately_from_skips() -> None:
+    from github_pr_feedback.controller import ScanResult
+    from github_pr_feedback.cli import _scan_payload
+
+    payload = _scan_payload(
+        ScanResult(
+            created=1,
+            skipped={},
+            local_ci_catalogue_deferred=199,
+        )
+    )
+
+    assert payload["local_ci_catalogue_deferred"] == 199
+    assert "local_ci_open_pr_scan_cap" not in payload["skipped"]
 
 
 class RecordingKanbanRunner:
@@ -501,6 +537,27 @@ def test_auto_dispatch_argv_is_accepted_by_the_real_kanban_parser() -> None:
     assert parsed.kanban_action == "create"
     assert parsed.initial_status == "running"
     assert parsed.max_retries == 3
+
+
+def test_kanban_client_persists_explicit_worker_route() -> None:
+    from github_pr_feedback.cli import _kanban_create_argv
+    from hermes_cli.kanban import build_parser
+
+    root = argparse.ArgumentParser()
+    subcommands = root.add_subparsers(dest="command", required=True)
+    build_parser(subcommands)
+    task = replace(
+        kanban_task(),
+        model_override="qwen3.5:4b",
+        provider_override="ollama-launch",
+        reasoning_effort="none",
+    )
+
+    parsed = root.parse_args(_kanban_create_argv(task)[1:])
+
+    assert parsed.model_override == "qwen3.5:4b"
+    assert parsed.provider_override == "ollama-launch"
+    assert parsed.reasoning_effort == "none"
 
 
 @pytest.mark.parametrize("stdout", ["{}", "[]", '{"id": ""}', '{"id": 17}', "not json"])
@@ -701,6 +758,53 @@ def test_namespaced_context_loads_assignee_rules_for_runtime_routing(
     policy = _load_policy_from_context(RecordingContext(settings))
 
     assert policy.assignee_for("Reduce latency") == "performance-patch-steward"
+
+
+def test_inspect_pr_emits_canonical_identity_from_the_shared_github_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _inspect_pr
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    expected = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        "a" * 40,
+        base_branch="main",
+        base_sha="b" * 40,
+    )
+
+    class FakeGitHub:
+        def get_pull_request(self, repository: str, number: int) -> PullRequest:
+            assert repository == "acme/widgets"
+            assert number == 17
+            return expected
+
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", FakeGitHub)
+
+    exit_code = _inspect_pr(
+        RecordingContext(settings),
+        argparse.Namespace(repository="acme/widgets", pr_number=17),
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "base_branch": "main",
+        "base_sha": "b" * 40,
+        "head_ref_name": "codex/fix",
+        "head_repository": "acme/widgets",
+        "head_sha": "a" * 40,
+        "number": 17,
+        "repository": "acme/widgets",
+    }
 
 
 def test_namespaced_context_preserves_auto_dispatch_and_local_ci_audit_settings(
@@ -1234,6 +1338,7 @@ def test_merge_scan_reconciles_verification_required_pr_that_is_no_longer_open(
 
 def test_doctor_read_only_verifies_every_runtime_dependency(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from github_pr_feedback.cli import DoctorProbe, _doctor
@@ -1279,6 +1384,7 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     }
     runner = RecordingDoctorRunner(responses)
     before = profile_snapshot(profile_root)
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: object())
 
     exit_code = _doctor(
         context,
@@ -1292,14 +1398,13 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     assert payload["checks"] == {
         "assignee": "ok",
         "board": "ok",
-        "gh_auth": "ok",
         "gh_executable": "ok",
+        "github_identity": "ok",
         "hermes_executable": "ok",
         "ledger_access": "ok",
         "repository_worktree": "ok",
     }
     assert runner.calls == [
-        ["/opt/tools/gh", "auth", "status", "--hostname", "github.com"],
         ["/opt/tools/hermes", "--version"],
         ["/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"],
         ["/opt/tools/git", "-C", str(repository), "rev-parse", "--git-common-dir"],
@@ -1346,17 +1451,17 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
     assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "degraded"
-    assert payload["checks"]["gh_auth"] == "failed"
+    assert payload["checks"]["github_identity"] == "failed"
     assert set(payload["checks"]) == {
         "assignee",
         "board",
-        "gh_auth",
         "gh_executable",
+        "github_identity",
         "hermes_executable",
         "ledger_access",
         "repository_worktree",
     }
-    assert len(runner.calls) == 5
+    assert len(runner.calls) == 4
 
 
 def test_doctor_requires_the_configured_local_ci_auditor_profile(
@@ -1421,7 +1526,9 @@ def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
             return ScanResult(1, {})
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    monkeypatch.setattr(cli, "ScanController", RevalidatingController)
+    monkeypatch.setattr(
+        cli, "_controller", lambda _policy, _ledger: RevalidatingController()
+    )
     context = RecordingContext({"enabled": False})
     parser = argparse.ArgumentParser()
     cli.setup_cli(context, parser)
@@ -1477,6 +1584,29 @@ def test_scan_and_retry_exit_nonzero_and_report_degraded_on_incomplete_work(
     monkeypatch.setattr(
         cli, "_controller", lambda _policy, _ledger: DegradedController()
     )
+    if action == "scan":
+        class EnabledPolicy:
+            enabled = True
+            repair_steward = None
+            merge_maintainer = None
+            release_maintenance = None
+
+        class Lock:
+            def __enter__(self) -> bool:
+                return True
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        class Ledger:
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(cli, "_load_policy_from_context", lambda _ctx: EnabledPolicy())
+        monkeypatch.setattr(cli, "_exclusive_scan_lock", lambda: Lock())
+        monkeypatch.setattr(
+            cli.FeedbackLedger, "for_current_profile", lambda: Ledger()
+        )
     parser = argparse.ArgumentParser()
     cli.setup_cli(RecordingContext({"enabled": False}), parser)
     argv = [action]
@@ -1532,9 +1662,11 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "local_ci_audit",
         "agent_labels",
         "merge_maintainer",
-        "repair_steward",
-        "release_maintenance",
-        "not_before",
+        "merge_maintainers",
+            "repair_steward",
+            "release_maintenance",
+            "github_identity",
+            "not_before",
         "assignee",
         "board",
     ]
@@ -1557,9 +1689,6 @@ def test_scan_fails_closed_for_an_incomplete_enabled_configuration(
 def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh(
     tmp_path: Path,
 ) -> None:
-    hermes = shutil.which("hermes")
-    if hermes is None:
-        pytest.skip("Hermes executable is not installed on this host")
     plugin_root = Path(__file__).resolve().parents[1]
     profile = tmp_path / "profile"
     installed = profile / "plugins" / "github-pr-feedback"
@@ -1607,7 +1736,7 @@ def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh
         environment.pop(name, None)
 
     completed = subprocess.run(
-        [hermes, "github-pr-feedback", "scan"],
+        [sys.executable, "-m", "hermes_cli.main", "github-pr-feedback", "scan"],
         check=False,
         cwd=tmp_path,
         env=environment,
@@ -1808,6 +1937,26 @@ def test_cron_wrapper_classifies_successful_merges_as_partial_success(
     assert module._cron_exit_code(json.dumps(payload), process_returncode) == expected
 
 
+def test_cron_wrapper_keeps_completed_scan_green_for_ci_metadata_gap() -> None:
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "github-pr-feedback-scan.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "github_pr_feedback_cron_status_soft_gap", script_path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    payload = {
+        "status": "degraded",
+        "skipped": {"duplicate": 189, "github_ci_state_unavailable": 28},
+        "repair": {"status": "ok"},
+        "merge": {"status": "ok"},
+    }
+    assert module._cron_exit_code(json.dumps(payload), 1) == 0
+
+
 @pytest.mark.parametrize("configured", [None, "hermes", "/missing/hermes"])
 def test_cron_wrapper_fails_cleanly_without_an_executable_absolute_hermes_path(
     configured: str | None,
@@ -1871,6 +2020,148 @@ def enabled_settings(repository: Path) -> dict[str, object]:
         "not_before": "2026-08-24T00:00:00Z",
         "assignee": "repair-agent",
         "board": "repairs",
+    }
+
+
+def test_submit_review_fails_closed_when_independent_identity_is_not_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _submit_review
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._github_client",
+        lambda *_args: pytest.fail("GitHub must not be called without reviewer config"),
+    )
+
+    exit_code = _submit_review(
+        RecordingContext(enabled_settings(tmp_path)),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha="a" * 40,
+            event="APPROVE",
+            body="Independent review passed.",
+        ),
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "independent_reviewer_not_configured",
+        "status": "review_identity_unavailable",
+    }
+
+
+def test_submit_review_refuses_pr_author_without_comment_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _submit_review
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    settings = enabled_settings(tmp_path)
+    settings["github_identity"] = {
+        "expected_login": "reviewer",
+        "token_env": "HERMES_GITHUB_BOT_TOKEN",
+    }
+    monkeypatch.setenv("HERMES_GITHUB_BOT_TOKEN", "secret-reviewer-token")
+    writes: list[str] = []
+
+    class FakeGitHub:
+        def viewer_login(self) -> str:
+            return "owner"
+
+        def get_pull_request(self, *_args: object) -> PullRequest:
+            return PullRequest(
+                17, "OPEN", "acme/widgets", "acme/widgets", "owner", "codex/fix", "a" * 40
+            )
+
+        def submit_pull_request_review(self, *_args: object, **_kwargs: object) -> None:
+            writes.append("review")
+
+        def post_issue_comment(self, *_args: object, **_kwargs: object) -> None:
+            writes.append("comment")
+
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._github_client", lambda *_args: FakeGitHub()
+    )
+
+    exit_code = _submit_review(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha="a" * 40,
+            event="APPROVE",
+            body="Independent review passed.",
+        ),
+    )
+
+    assert exit_code == 1
+    assert writes == []
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "viewer_is_pr_author",
+        "status": "review_identity_unavailable",
+    }
+
+
+def test_submit_review_uses_exact_configured_independent_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _submit_review
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    settings = enabled_settings(tmp_path)
+    settings["github_identity"] = {
+        "expected_login": "reviewer",
+        "token_env": "HERMES_GITHUB_BOT_TOKEN",
+    }
+    monkeypatch.setenv("HERMES_GITHUB_BOT_TOKEN", "secret-reviewer-token")
+    writes: list[tuple[str, int, str, str]] = []
+
+    class FakeGitHub:
+        def viewer_login(self) -> str:
+            return "reviewer"
+
+        def get_pull_request(self, *_args: object) -> PullRequest:
+            return PullRequest(
+                17, "OPEN", "acme/widgets", "acme/widgets", "owner", "codex/fix", "a" * 40
+            )
+
+        def submit_pull_request_review(
+            self, repository: str, number: int, *, event: str, body: str
+        ) -> None:
+            writes.append((repository, number, event, body))
+
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._github_client", lambda *_args: FakeGitHub()
+    )
+
+    exit_code = _submit_review(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha="a" * 40,
+            event="APPROVE",
+            body="Independent review passed.",
+        ),
+    )
+
+    assert exit_code == 0
+    assert writes == [("acme/widgets", 17, "APPROVE", "Independent review passed.")]
+    assert json.loads(capsys.readouterr().out) == {
+        "event": "APPROVE",
+        "head_sha": "a" * 40,
+        "pr_number": 17,
+        "repository": "acme/widgets",
+        "reviewer": "reviewer",
+        "status": "submitted",
     }
 
 
@@ -2094,6 +2385,7 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
     assert rendered == [
         {
             "command_count": 1,
+            "ci_mode": "standard",
             "head_sha": head_sha,
             "manifest_digest": receipt.manifest_digest,
             "pr_number": 17,
@@ -2110,6 +2402,319 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
             "status": "audit_handoff_retryable",
         }
     ]
+
+
+def test_audit_handoff_exception_renders_retryable_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt
+    from github_pr_feedback.cli import _audit_pr
+    from github_pr_feedback.github_client import CheckState, PullRequestMergeState
+
+    head_sha = "a" * 40
+    base_sha = "b" * 40
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    settings = enabled_settings(Path(__file__).resolve().parents[3])
+    settings["local_ci_audit"] = {
+        "enabled": True,
+        "assignee": "pr-local-ci-auditor",
+        "post_results": True,
+    }
+    receipt = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, base_sha, head_sha),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+
+    class GitHub:
+        def get_merge_state(self, repository: str, pr_number: int):
+            return PullRequestMergeState(
+                repository=repository,
+                number=pr_number,
+                state="OPEN",
+                is_draft=False,
+                mergeable=True,
+                merge_state_status="CLEAN",
+                base_branch="main",
+                base_sha=base_sha,
+                head_repository=repository,
+                author_login="owner",
+                head_ref_name="codex/fix",
+                head_sha=head_sha,
+                merged=False,
+                merge_commit_oid=None,
+            )
+
+        def list_feedback(self, _repository: str, _pr_number: int):
+            return ()
+
+        def post_issue_comment(self, _repository: str, _pr_number: int, _body: str):
+            return None
+
+    class Ledger:
+        def close(self) -> None:
+            pass
+
+    class Controller:
+        def dispatch_ci_failure(self, _audit: CIAuditReceipt) -> str:
+            raise RuntimeError("repair dispatch crashed")
+
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", GitHub)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli.FeedbackLedger.for_current_profile", lambda: Ledger()
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._controller", lambda _policy, _ledger: Controller()
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_grouped_exact_head_audit",
+        lambda *_args, **_kwargs: receipt,
+    )
+    monkeypatch.setattr("github_pr_feedback.cli._block_current_ci_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("github_pr_feedback.cli._terminate_current_ci_worker", lambda: None)
+
+    result = _audit_pr(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha=head_sha,
+            worktree=str(repository),
+        ),
+    )
+
+    assert result == 1
+    rendered = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert rendered[-1] == {
+        "handoff_reason": "repair dispatch crashed",
+        "receipt_id": receipt.receipt_id,
+        "retryable": True,
+        "status": "audit_handoff_retryable",
+    }
+
+
+def test_blocked_merge_handoff_blocks_task_with_exact_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt
+    from github_pr_feedback.cli import _audit_pr
+    from github_pr_feedback.github_client import CheckState, PullRequestMergeState
+
+    head_sha = "a" * 40
+    base_sha = "b" * 40
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    manifest = repository / "tests" / "manifests" / "test_lanes.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("[lanes.fast]\nargv = ['pytest']\n", encoding="utf-8")
+    settings = enabled_settings(repository)
+    settings["local_ci_audit"] = {
+        "enabled": True,
+        "assignee": "pr-local-ci-auditor",
+        "post_results": False,
+    }
+    receipt = CIAuditReceipt(
+        receipt_id="p" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, base_sha, head_sha),
+        manifest_digest=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        status="passed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+
+    class GitHub:
+        def get_merge_state(self, _repository: str, _pr_number: int):
+            return PullRequestMergeState(
+                repository="acme/widgets",
+                number=17,
+                state="OPEN",
+                is_draft=False,
+                merged=False,
+                mergeable=True,
+                merge_state_status="CLEAN",
+                base_branch="main",
+                base_sha=base_sha,
+                head_repository="acme/widgets",
+                author_login="owner",
+                head_ref_name="codex/fix",
+                head_sha=head_sha,
+                merge_commit_oid=None,
+            )
+
+    class Ledger:
+        def close(self) -> None:
+            pass
+
+    blocked: list[tuple[CIAuditReceipt, list[str]]] = []
+    completed: list[CIAuditReceipt] = []
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", GitHub)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli.FeedbackLedger.for_current_profile", lambda: Ledger()
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_grouped_exact_head_audit",
+        lambda *_args, **_kwargs: receipt,
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_single_pr_merge_handoff",
+        lambda *_args, **_kwargs: {
+            "status": "blocked",
+            "blockers": ["ci_receipt_not_passing", "review_required"],
+        },
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._block_current_ci_task",
+        lambda audit, blockers: blocked.append((audit, blockers)),
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._complete_current_ci_task",
+        lambda audit: completed.append(audit),
+    )
+
+    result = _audit_pr(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha=head_sha,
+            worktree=str(repository),
+        ),
+    )
+
+    assert result == 1
+    assert blocked == [(receipt, ["ci_receipt_not_passing", "review_required"])]
+    assert completed == []
+    rendered = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert rendered[-1] == {
+        "blockers": ["ci_receipt_not_passing", "review_required"],
+        "receipt_id": receipt.receipt_id,
+        "retryable": False,
+        "status": "audit_handoff_blocked",
+    }
+
+
+def test_audit_only_records_receipt_without_post_repair_or_merge_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt
+    from github_pr_feedback.cli import _audit_pr
+    from github_pr_feedback.github_client import CheckState, PullRequestMergeState
+
+    head_sha = "a" * 40
+    base_sha = "b" * 40
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["local_ci_audit"] = {
+        "enabled": True,
+        "assignee": "pr-local-ci-auditor",
+        "post_results": False,
+        "audit_only": True,
+        "required_for_open_prs": True,
+    }
+    receipt = CIAuditReceipt(
+        receipt_id="d" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, base_sha, head_sha),
+        manifest_digest="e" * 64,
+        status="passed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+
+    class GitHub:
+        def get_merge_state(self, _repository: str, _pr_number: int):
+            return PullRequestMergeState(
+                repository="acme/widgets",
+                number=17,
+                state="OPEN",
+                is_draft=False,
+                merged=False,
+                mergeable=True,
+                merge_state_status="CLEAN",
+                base_branch="main",
+                base_sha=base_sha,
+                head_repository="acme/widgets",
+                author_login="owner",
+                head_ref_name="codex/fix",
+                head_sha=head_sha,
+                merge_commit_oid=None,
+            )
+
+        def list_feedback(self, *_args: object):
+            raise AssertionError("audit-only must not read feedback for posting")
+
+        def post_issue_comment(self, *_args: object):
+            raise AssertionError("audit-only must not post")
+
+    class Ledger:
+        def close(self) -> None:
+            pass
+
+    completed: list[CIAuditReceipt] = []
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", GitHub)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli.FeedbackLedger.for_current_profile", lambda: Ledger()
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_grouped_exact_head_audit",
+        lambda *_args, **_kwargs: receipt,
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._controller",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("audit-only must not dispatch repairs")
+        ),
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_single_pr_merge_handoff",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("audit-only must not hand off a merge")
+        ),
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._complete_current_ci_task",
+        lambda audit: completed.append(audit),
+    )
+    monkeypatch.setattr("github_pr_feedback.cli._terminate_current_ci_worker", lambda: None)
+
+    result = _audit_pr(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha=head_sha,
+            worktree=str(repository),
+            fresh=True,
+        ),
+    )
+
+    assert result == 0
+    assert completed == [receipt]
+    rendered = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert rendered[-1] == {
+        "ci_mode": "standard",
+        "merge_handoff": False,
+        "posted": False,
+        "receipt_id": receipt.receipt_id,
+        "status": "audit_only_complete",
+    }
 
 
 def test_audit_reuses_exact_head_manifest_receipt_without_rerunning_lane(
@@ -2392,6 +2997,10 @@ def test_ci_audit_comment_self_identifies_as_hermes_on_our_own_repository() -> N
     body = _ci_audit_comment(_passed_ci_receipt("mrkillbob/luna-bot"))
 
     assert body.startswith("Hermes automated CI audit (pr-local-ci-auditor)")
+    assert (
+        f"<!-- pr-ci-receipt:v1 status=passed id={'d' * 64} head={'a' * 40} -->"
+        in body
+    )
 
 
 def test_ci_audit_comment_stays_brand_neutral_on_the_upstream_repository() -> None:

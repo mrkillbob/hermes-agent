@@ -51,6 +51,7 @@ from .policy import (
 from .post_merge import PostMergeExecutor
 from .stack import StackEntry
 from .stack_controller import StackController, _ordered
+from .superseded import SupersededPullRequestController
 from .repair_controller import (
     PR_REPAIR_ATTRIBUTION_PREFIX,
     RepairController,
@@ -98,6 +99,7 @@ _PR_REPAIR_RECEIPT_COMMENT = re.compile(
 _MARKER_REQUIRED_FEEDBACK_KINDS = frozenset(
     {"pr_repair", "issue_comment", "review_comment", "review"}
 )
+_REVIEW_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES", "COMMENT"})
 
 
 def _factual_reply_is_missing(
@@ -226,10 +228,6 @@ class DoctorProbe:
         hermes = self._runner.which("hermes")
         checks = {
             "gh_executable": gh is not None,
-            "gh_auth": bool(
-                gh
-                and self._command_ok([gh, "auth", "status", "--hostname", "github.com"])
-            ),
             "hermes_executable": bool(
                 hermes and self._command_ok([hermes, "--version"])
             ),
@@ -467,6 +465,14 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     )
     inspect.add_argument("--repository", required=True)
     inspect.add_argument("--pr-number", required=True, type=int)
+    submit_review = subcommands.add_parser(
+        "submit-review", help="Submit an exact-head review with an independent identity"
+    )
+    submit_review.add_argument("--repository", required=True)
+    submit_review.add_argument("--pr-number", required=True, type=int)
+    submit_review.add_argument("--head-sha", required=True)
+    submit_review.add_argument("--event", required=True)
+    submit_review.add_argument("--body", required=True)
     retry = subcommands.add_parser(
         "retry", help="Retry one failed, immutable feedback receipt"
     )
@@ -513,7 +519,7 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
         "--entry", action="append", required=True, metavar="BRANCH=BASE:TITLE"
     )
     stack_refresh = subcommands.add_parser(
-        "stack-refresh", help="Rebase and safely push merged-stack descendants"
+        "stack-refresh", help="Merge the configured base and normally push stack descendants"
     )
     stack_refresh.add_argument("--repository", required=True)
     stack_refresh.add_argument("--stack-id", required=True)
@@ -524,6 +530,14 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     stack_merge.add_argument("--repository", required=True)
     stack_merge.add_argument("--stack-id", required=True)
     stack_merge.add_argument("--repository-path", required=True, type=Path)
+    close_superseded = subcommands.add_parser(
+        "close-superseded",
+        help="Close an exact PR head already contained by its configured base",
+    )
+    close_superseded.add_argument("--repository", required=True)
+    close_superseded.add_argument("--pr-number", required=True, type=int)
+    close_superseded.add_argument("--head-sha", required=True)
+    close_superseded.add_argument("--repository-path", required=True, type=Path)
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
@@ -560,6 +574,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _doctor(ctx)
     if action == "inspect-pr":
         return _inspect_pr(ctx, args)
+    if action == "submit-review":
+        return _submit_review(ctx, args)
     if action == "retry":
         return _retry(ctx, args)
     if action == "audit-pr":
@@ -578,6 +594,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _stack_refresh(ctx, args)
     if action == "stack-merge":
         return _stack_merge(ctx, args)
+    if action == "close-superseded":
+        return _close_superseded(ctx, args)
     if action == "complete-feedback":
         return _complete_feedback(ctx, args)
     if action == "complete-maintenance":
@@ -641,12 +659,145 @@ def cli_bindings(ctx: Any) -> tuple[Any, Any]:
     return partial(setup_cli, ctx), partial(handle_cli_with_context, ctx)
 
 
+def _github_client(policy: PluginPolicy) -> GitHubClient:
+    """Return the sole authenticated client for governed Hermes GitHub activity."""
+
+    # Lightweight injected test doubles intentionally do not implement the
+    # production factory. Production always uses the real class below.
+    factory = getattr(GitHubClient, "for_automation_identity", None)
+    if not callable(factory):
+        return GitHubClient()
+    if not isinstance(policy, PluginPolicy):
+        raise GitHubClientError("invalid GitHub automation policy", code="invalid_policy")
+    settings = policy.github_identity
+    if settings is None:
+        raise GitHubClientError(
+            "Hermes GitHub automation identity is not configured",
+            code="automation_identity_not_configured",
+        )
+    return factory(
+        expected_login=settings.expected_login,
+        token_env=settings.token_env,
+    )
+
+
+def _submit_review(ctx: Any, args: argparse.Namespace) -> int:
+    """Submit a review only after proving an independent configured identity."""
+
+    try:
+        policy = _load_policy_from_context(ctx)
+        if not policy.enabled or args.repository not in policy.targets:
+            raise ValueError("repository is not a configured target")
+        if not isinstance(args.head_sha, str) or not _FULL_SHA.fullmatch(args.head_sha):
+            raise ValueError("head_sha must be a full hexadecimal SHA")
+        event = str(args.event or "").strip().upper().replace("-", "_")
+        if event not in _REVIEW_EVENTS:
+            raise ValueError("review event must be APPROVE, REQUEST_CHANGES, or COMMENT")
+        settings = policy.github_identity
+        if settings is None:
+            print(
+                json.dumps(
+                    {
+                        "status": "review_identity_unavailable",
+                        "reason": "independent_reviewer_not_configured",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        github = _github_client(policy)
+        viewer_login = github.viewer_login()
+        pull_request = github.get_pull_request(args.repository, args.pr_number)
+        if viewer_login.casefold() == pull_request.author_login.casefold():
+            print(
+                json.dumps(
+                    {
+                        "status": "review_identity_unavailable",
+                        "reason": "viewer_is_pr_author",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        if viewer_login.casefold() != settings.expected_login:
+            print(
+                json.dumps(
+                    {
+                        "status": "review_identity_unavailable",
+                        "reason": "reviewer_identity_mismatch",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        expected_head_sha = args.head_sha.casefold()
+        if pull_request.head_sha != expected_head_sha:
+            print(
+                json.dumps(
+                    {
+                        "status": "stale_head",
+                        "repository": args.repository,
+                        "pr_number": args.pr_number,
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": pull_request.head_sha,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        if str(pull_request.state or "").strip().upper() != "OPEN":
+            print(
+                json.dumps(
+                    {
+                        "status": "not_reviewable",
+                        "reason": "pull_request_not_open",
+                        "repository": args.repository,
+                        "pr_number": args.pr_number,
+                        "head_sha": pull_request.head_sha,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        github.submit_pull_request_review(
+            args.repository,
+            args.pr_number,
+            event=event,
+            body=args.body,
+        )
+    except (GitHubClientError, TypeError, ValueError) as error:
+        print(
+            json.dumps(
+                {"status": "review_unavailable", "reason": str(error)},
+                sort_keys=True,
+            )
+        )
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "submitted",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+                "head_sha": pull_request.head_sha,
+                "event": event,
+                "reviewer": viewer_login,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _scan(ctx: Any) -> int:
     try:
         policy = _load_policy_from_context(ctx)
     except ValueError:
         print(json.dumps({"status": "invalid_configuration"}, sort_keys=True))
         return 1
+    if not policy.enabled:
+        print(json.dumps({"created": 0, "skipped": {}, "status": "ok"}, sort_keys=True))
+        return 0
     with _exclusive_scan_lock() as acquired:
         if not acquired:
             print(json.dumps({"status": "scan_in_progress"}, sort_keys=True))
@@ -674,7 +825,7 @@ def _scan(ctx: Any) -> int:
                 repair = RepairController(
                     policy,
                     ledger,
-                    GitHubClient(),
+                    _github_client(policy),
                     KanbanSubprocessClient(),
                     control_home=get_default_hermes_root(),
                 ).scan()
@@ -730,7 +881,7 @@ def _run_release_maintenance_scan(
         maintenance,
         target,
         ledger,
-        github or GitHubClient(),
+        github or _github_client(policy),
         kanban or KanbanSubprocessClient(),
         workspaces or LocalGitRepository(ledger.path.parent / "maintenance-worktrees"),
         now=now,
@@ -798,7 +949,7 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
             args.feedback_id,
             args.receipt_head_sha,
         )
-        github = GitHubClient()
+        github = _github_client(policy)
         current = github.get_pull_request(args.repository, args.pr_number)
         admission = policy.admit_pull_request(current)
         if (
@@ -881,7 +1032,7 @@ def _controller(policy: PluginPolicy, ledger: FeedbackLedger) -> ScanController:
     return ScanController(
         policy,
         ledger,
-        GitHubClient(),
+        _github_client(policy),
         KanbanSubprocessClient(),
         control_home=get_default_hermes_root(),
     )
@@ -895,6 +1046,9 @@ def _scan_payload(result) -> dict[str, object]:
     }
     if result.required_local_ci_backlog > 0:
         payload["required_local_ci_backlog"] = result.required_local_ci_backlog
+    catalogue_deferred = getattr(result, "local_ci_catalogue_deferred", 0)
+    if catalogue_deferred > 0:
+        payload["local_ci_catalogue_deferred"] = catalogue_deferred
     return payload
 
 
@@ -1015,6 +1169,7 @@ def _ci_receipt_payload(receipt: CIAuditReceipt) -> dict[str, object]:
         "head_sha": receipt.identity.head_sha,
         "manifest_digest": receipt.manifest_digest,
         "command_count": len(receipt.commands),
+        "ci_mode": receipt.ci_mode,
         "handoff_status": "pending",
     }
 
@@ -1033,7 +1188,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
         worktree = Path(args.worktree).resolve()
         if target is None or not worktree.is_dir():
             raise ValueError("audit target is not configured")
-        github = GitHubClient()
+        github = _github_client(policy)
         state = github.get_merge_state(args.repository, args.pr_number)
         if state.head_sha != str(args.head_sha).casefold():
             raise CIValidationError("canonical PR head changed")
@@ -1069,7 +1224,22 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
             final_state = github.get_merge_state(args.repository, args.pr_number)
             if final_state.head_sha != receipt.identity.head_sha:
                 raise CIValidationError("canonical PR head changed after audit")
-            if policy.local_ci_audit.post_results:
+            if policy.local_ci_audit.audit_only:
+                print(
+                    json.dumps(
+                        {
+                            "status": "audit_only_complete",
+                            "receipt_id": receipt.receipt_id,
+                            "ci_mode": receipt.ci_mode,
+                            "posted": False,
+                            "merge_handoff": False,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                return_code = 0 if receipt.status == "passed" else 1
+            elif policy.local_ci_audit.post_results:
                 feedback = github.list_feedback(
                     receipt.identity.repository, receipt.identity.pr_number
                 )
@@ -1079,7 +1249,9 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                         receipt.identity.pr_number,
                         _ci_audit_comment(receipt),
                     )
-            if receipt.status == "failed":
+            if policy.local_ci_audit.audit_only:
+                pass
+            elif receipt.status == "failed":
                 repair_status = _controller(policy, ledger).dispatch_ci_failure(receipt)
                 if repair_status not in {"scheduled", "duplicate"}:
                     raise RuntimeError(f"typed CI repair handoff failed: {repair_status}")
@@ -1088,6 +1260,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     policy,
                     ledger,
                     receipt.identity.pr_number,
+                    repository=receipt.identity.repository,
                     github=github,
                 )
                 handoff_status = str(merge_handoff.get("status", ""))
@@ -1296,10 +1469,64 @@ def _run_merge_scan(
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
 ) -> dict[str, object]:
-    merge_policy = policy.merge_maintainer
-    if merge_policy is None:
-        return {"status": "disabled", "processed": 0, "merged": [], "blocked": {}}
-    github = github or GitHubClient()
+    merge_policies = policy.merge_policies()
+    if not merge_policies:
+        return {
+            "status": "disabled",
+            "processed": 0,
+            "merged": [],
+            "handed_off": [],
+            "blocked": {},
+        }
+    if len(merge_policies) == 1:
+        return _run_merge_scan_for_policy(
+            policy, merge_policies[0], ledger, github=github, kanban=kanban
+        )
+    results = [
+        _run_merge_scan_for_policy(
+            policy, merge_policy, ledger, github=github, kanban=kanban
+        )
+        for merge_policy in merge_policies
+    ]
+    blocked: dict[str, list[str]] = {}
+    for merge_policy, result in zip(merge_policies, results, strict=True):
+        for number, blockers in result["blocked"].items():
+            blocked[f"{merge_policy.repository}#{number}"] = blockers
+    return {
+        "status": "degraded" if any(result["status"] == "degraded" for result in results) else "ok",
+        "processed": sum(int(result["processed"]) for result in results),
+        "merged": [item for result in results for item in result["merged"]],
+        "handed_off": [
+            item for result in results for item in result.get("handed_off", [])
+        ],
+        "blocked": blocked,
+        "maintainer_tasks_created": sum(
+            int(result["maintainer_tasks_created"]) for result in results
+        ),
+        "maintainer_task_dispatch_failed": [
+            f"{merge_policy.repository}#{number}"
+            for merge_policy, result in zip(merge_policies, results, strict=True)
+            for number in result["maintainer_task_dispatch_failed"]
+        ],
+        "deployments": [item for result in results for item in result["deployments"]],
+        "deployment_failures": [
+            f"{merge_policy.repository}#{number}"
+            for merge_policy, result in zip(merge_policies, results, strict=True)
+            for number in result["deployment_failures"]
+        ],
+        "report_only": all(bool(result["report_only"]) for result in results),
+    }
+
+
+def _run_merge_scan_for_policy(
+    policy: PluginPolicy,
+    merge_policy,
+    ledger: FeedbackLedger,
+    *,
+    github: GitHubClient | None = None,
+    kanban: KanbanSubprocessClient | None = None,
+) -> dict[str, object]:
+    github = github or _github_client(policy)
     kanban = kanban or KanbanSubprocessClient()
     try:
         pull_requests = github.list_open_pull_requests(
@@ -1458,15 +1685,20 @@ def _run_single_pr_merge_handoff(
     ledger: FeedbackLedger,
     pr_number: int,
     *,
+    repository: str | None = None,
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
 ) -> dict[str, object]:
     """Attempt one exact PR merge, then admit at most one successor repair."""
 
-    merge_policy = policy.merge_maintainer
+    merge_policy = (
+        policy.merge_policy_for(repository)
+        if repository is not None
+        else (policy.merge_policies()[0] if len(policy.merge_policies()) == 1 else None)
+    )
     if merge_policy is None:
         return {"status": "disabled", "blockers": ["merge_maintainer_disabled"]}
-    github = github or GitHubClient()
+    github = github or _github_client(policy)
     kanban = kanban or KanbanSubprocessClient()
     source = CanonicalMergeEvidenceSource(policy, github, ledger)
     try:
@@ -1660,7 +1892,7 @@ def _merge_enable(ctx: Any, args: argparse.Namespace) -> int:
         merge_policy = policy.merge_policy_for(args.repository)
         if merge_policy is None:
             raise ValueError("repository is not configured for merging")
-        github = GitHubClient()
+        github = _github_client(policy)
         pull = github.get_merge_state(args.repository, args.pr_number)
         if (
             pull.repository != merge_policy.repository
@@ -1712,7 +1944,7 @@ def _parse_stack_entries(raw_entries: list[str]) -> tuple[StackEntry, ...]:
 def _stack_create(ctx: Any, args: argparse.Namespace) -> int:
     try:
         policy = _load_policy_from_context(ctx)
-        manifest = StackController(policy).create(
+        manifest = StackController(policy, github=_github_client(policy)).create(
             args.repository,
             args.stack_id,
             args.base_branch,
@@ -1734,7 +1966,7 @@ def _stack_create(ctx: Any, args: argparse.Namespace) -> int:
 def _stack_refresh(ctx: Any, args: argparse.Namespace) -> int:
     try:
         policy = _load_policy_from_context(ctx)
-        manifest = StackController(policy).refresh(
+        manifest = StackController(policy, github=_github_client(policy)).refresh(
             args.repository, args.stack_id, repository_path=args.repository_path
         )
     except (GitHubClientError, RuntimeError, ValueError) as error:
@@ -1753,7 +1985,7 @@ def _stack_refresh(ctx: Any, args: argparse.Namespace) -> int:
 def _stack_merge(ctx: Any, args: argparse.Namespace) -> int:
     try:
         policy = _load_policy_from_context(ctx)
-        controller = StackController(policy)
+        controller = StackController(policy, github=_github_client(policy))
         manifest = controller.store.load(args.repository, args.stack_id)
         results: list[dict[str, object]] = []
         ledger = FeedbackLedger.for_current_profile()
@@ -1777,6 +2009,35 @@ def _stack_merge(ctx: Any, args: argparse.Namespace) -> int:
     except (GitHubClientError, LedgerStateError, RuntimeError, ValueError) as error:
         print(json.dumps({"status": "blocked", "reason": str(error)}, sort_keys=True))
         return 1
+
+
+def _close_superseded(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        result = SupersededPullRequestController(
+            policy, github=_github_client(policy)
+        ).close(
+            args.repository,
+            args.pr_number,
+            args.head_sha,
+            repository_path=args.repository_path,
+        )
+    except (GitHubClientError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "blocked", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "closed_superseded",
+                "repository": result.repository,
+                "pr_number": result.pr_number,
+                "head_sha": result.head_sha,
+                "base_branch": result.base_branch,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _merge_disable(ctx: Any, args: argparse.Namespace) -> int:
@@ -1810,7 +2071,7 @@ def _inspect_pr(ctx: Any, args: argparse.Namespace) -> int:
         policy = _load_policy_from_context(ctx)
         if not policy.enabled or args.repository not in policy.targets:
             raise ValueError("repository is not a configured target")
-        pull_request = GitHubClient().get_pull_request(
+        pull_request = _github_client(policy).get_pull_request(
             args.repository, args.pr_number
         )
     except (GitHubClientError, ValueError):
@@ -1849,6 +2110,12 @@ def _doctor(
         return 0
     path = ledger_path or FeedbackLedger.current_profile_path()
     checks = (probe or DoctorProbe(get_default_hermes_root())).checks(policy, path)
+    try:
+        _github_client(policy)
+    except GitHubClientError:
+        checks["github_identity"] = "failed"
+    else:
+        checks["github_identity"] = "ok"
     ready = all(value == "ok" for value in checks.values())
     print(
         json.dumps(
@@ -1876,8 +2143,10 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "local_ci_audit",
         "agent_labels",
         "merge_maintainer",
+        "merge_maintainers",
         "repair_steward",
         "release_maintenance",
+        "github_identity",
         "not_before",
         "assignee",
         "board",
