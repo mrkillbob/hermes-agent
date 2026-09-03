@@ -214,6 +214,12 @@ def prepare_receipt(repository: Path, ledger: FeedbackLedger) -> None:
             commands=commands,
         )
     )
+    ledger.enroll_merge_pr(
+        "acme/widgets",
+        17,
+        enrolled_at=completed_at,
+        enrolled_by="operator",
+    )
 
 
 def test_end_to_end_exact_head_receipt_selects_enabled_method_and_merges_once(

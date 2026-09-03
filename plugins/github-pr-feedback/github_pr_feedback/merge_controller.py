@@ -432,12 +432,17 @@ class CanonicalMergeEvidenceSource:
     """Build merge evidence only from canonical GitHub reads and typed ledger state."""
 
     def __init__(
-        self, plugin_policy: PluginPolicy, github: GitHubClient, ledger: FeedbackLedger
+        self,
+        plugin_policy: PluginPolicy,
+        github: GitHubClient,
+        ledger: FeedbackLedger,
+        merge_policy: MergeMaintainerPolicy | None = None,
     ) -> None:
-        if plugin_policy.merge_maintainer is None:
+        selected_policy = merge_policy or plugin_policy.merge_maintainer
+        if selected_policy is None:
             raise ValueError("merge maintainer is disabled")
         self._plugin_policy = plugin_policy
-        self._merge_policy = plugin_policy.merge_maintainer
+        self._merge_policy = selected_policy
         self._github = github
         self._ledger = ledger
 
