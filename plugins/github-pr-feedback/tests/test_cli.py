@@ -2022,10 +2022,11 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "agent_labels",
         "merge_maintainer",
         "merge_maintainers",
-            "repair_steward",
-            "release_maintenance",
-            "github_identity",
-            "not_before",
+        "repair_steward",
+        "release_maintenance",
+        "github_identity",
+        "github_actions_permissions_identity",
+        "not_before",
         "assignee",
         "board",
     ]
@@ -2385,8 +2386,7 @@ def enabled_settings(repository: Path) -> dict[str, object]:
 def test_github_client_binds_repository_scoped_actions_permissions_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from github_pr_feedback.cli import _github_client
-    from github_pr_feedback.policy import load_policy
+    from github_pr_feedback.cli import _github_client, _load_policy_from_context
 
     repository = tmp_path / "repository"
     subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
@@ -2402,7 +2402,7 @@ def test_github_client_binds_repository_scoped_actions_permissions_identity(
         "gh_config_dir": str(gh_config_dir),
         "repositories": ["acme/widgets"],
     }
-    policy = load_policy(settings)
+    policy = _load_policy_from_context(RecordingContext(settings))
     captured: dict[str, object] = {}
     sentinel = object()
 

@@ -2306,6 +2306,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "repair_steward",
         "release_maintenance",
         "github_identity",
+        "github_actions_permissions_identity",
         "not_before",
         "assignee",
         "board",
