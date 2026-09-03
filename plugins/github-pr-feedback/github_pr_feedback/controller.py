@@ -1026,6 +1026,11 @@ class ScanController:
                 label_policy is not None
                 and label_policy.enabled
                 and label_policy.applies_to(repository)
+                and not (
+                    local_ci_policy is not None
+                    and local_ci_policy.applies_to(repository)
+                    and local_ci_policy.audit_only
+                )
             ):
                 for pull_request in pull_requests:
                     desired_label = label_policy.label_for_branch(
