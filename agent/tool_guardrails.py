@@ -421,6 +421,10 @@ class ToolCallGuardrailController:
         self._exact_failure_counts: dict[ToolCallSignature, int] = {}
         self._same_tool_failure_counts: dict[str, int] = {}
         self._same_tool_failure_result_hashes: dict[str, str] = {}
+        # Tracks whether a successful mutation landed since a signature last
+        # failed, so edit -> re-run is treated as fresh work rather than a
+        # replay of the same failed call.
+        self._progress_since_failure: dict[ToolCallSignature, bool] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
         # Identical-call loop-breaker state (agent.stall_guards): tracks the

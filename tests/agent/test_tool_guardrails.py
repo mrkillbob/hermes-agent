@@ -47,6 +47,15 @@ def test_default_config_is_soft_warning_only_with_hard_stop_disabled():
     assert cfg.no_progress_block_after == 5
 
 
+def test_guardrail_progress_state_is_initialized_for_each_turn():
+    controller = ToolCallGuardrailController()
+
+    assert controller._progress_since_failure == {}
+    controller._progress_since_failure[ToolCallSignature.from_call("terminal", {})] = True
+    controller.reset_for_turn()
+    assert controller._progress_since_failure == {}
+
+
 def test_config_parses_nested_warn_and_hard_stop_thresholds():
     cfg = ToolCallGuardrailConfig.from_mapping(
         {
@@ -315,7 +324,6 @@ def test_web_search_cap_blocks_after_limit_regardless_of_hard_stop():
     assert decision.action == "block"
     assert decision.code == "loop_web_search_cap"
     assert decision.should_halt is True
-
 
 
 
