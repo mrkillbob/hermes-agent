@@ -306,6 +306,49 @@ def test_scan_applies_one_exact_branch_label_and_confirms_readback(
     assert github.current.labels == ("codex",)
 
 
+def test_audit_only_scan_registers_local_ci_without_github_label_mutations(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+        merge_maintainer=True,
+        agent_labels=True,
+        budget_local_ci=True,
+    )
+    pull_request = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        base_branch="stable",
+        base_sha=head_sha,
+        updated_at=datetime(2026, 8, 26, 8, 0, tzinfo=UTC),
+    )
+    github = FakeGitHub(pull_request, ())
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+    ).scan()
+
+    assert result.created == 1
+    assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
+    assert github.ensure_label_calls == []
+    assert github.label_calls == []
+    assert github.current.labels == ()
+
+
 def test_scan_does_not_label_repository_outside_agent_label_scope(
     tmp_path: Path,
 ) -> None:
