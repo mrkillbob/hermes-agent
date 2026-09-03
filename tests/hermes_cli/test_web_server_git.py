@@ -196,6 +196,78 @@ def test_worktree_add_from_origin_base_does_not_track(client, repo_with_remote):
     assert probe.returncode != 0
 
 
+def test_worktree_add_trims_explicit_remote_base(client, repo_with_remote):
+    main_sha = subprocess.run(
+        ["git", "rev-parse", "origin/main"],
+        cwd=repo_with_remote,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    added = client.post(
+        "/api/git/worktree/add",
+        json={
+            "path": str(repo_with_remote),
+            "branch": "trimmed-base",
+            "base": "  origin/main\t",
+        },
+    ).json()
+
+    tree = Path(added["path"])
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == main_sha
+
+
+def test_review_push_uses_configured_push_default(client, tmp_path):
+    upstream = tmp_path / "upstream.git"
+    fork = tmp_path / "fork.git"
+    _git(tmp_path, "init", "-q", "--bare", str(upstream))
+    _git(tmp_path, "init", "-q", "--bare", str(fork))
+
+    root = tmp_path / "fork-clone"
+    _git(tmp_path, "clone", "-q", str(upstream), str(root))
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "remote", "add", "fork", str(fork))
+    _git(root, "config", "remote.pushDefault", "fork")
+    (root / "change.txt").write_text("fork only\n", encoding="utf-8")
+    _git(root, "add", "change.txt")
+    _git(root, "commit", "-qm", "fork change")
+    _git(root, "branch", "-M", "codex/fork-target")
+
+    assert client.post(
+        "/api/git/review/push", json={"path": str(root)}
+    ).json() == {"ok": True}
+
+    fork_head = subprocess.run(
+        ["git", "--git-dir", str(fork), "rev-parse", "refs/heads/codex/fork-target"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    local_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert fork_head == local_head
+    upstream_probe = subprocess.run(
+        ["git", "--git-dir", str(upstream), "rev-parse", "--verify", "refs/heads/codex/fork-target"],
+        capture_output=True,
+        text=True,
+    )
+    assert upstream_probe.returncode != 0
+
+
 def test_worktree_add_without_base_uses_remote_default(client, repo_with_remote):
     main_sha = subprocess.run(
         ["git", "rev-parse", "origin/main"],
