@@ -339,6 +339,28 @@ existing exact-head merge gate, stopping when fresh CI or review evidence is
 required. These commands are explicit mutations; scheduled feedback scans do
 not create or merge stacks.
 
+When a review comment on an older open PR has been fixed by a later commit
+already on the configured stable branch, resolve only that exact thread with a
+literal identity-bound command:
+
+```sh
+hermes github-pr-feedback resolve-superseded-feedback \
+  --repository mrkillbob/luna-bot --pr-number 123 \
+  --head-sha 0123456789abcdef0123456789abcdef01234567 \
+  --comment-id 456789 \
+  --fix-sha 89abcdef0123456789abcdef0123456789abcdef \
+  --repository-path /path/to/checkout \
+  --test-evidence 'scripts/run_tests.sh tests/test_regression.py -q: passed'
+```
+
+The command uses only the configured automation identity. It fetches the
+configured stable target and proves the exact PR head is an ancestor of the
+fix, and the fix is an ancestor of stable. It rereads the PR immediately before
+posting one bounded, marker-bearing factual reply, resolves only the thread
+containing the literal review-comment ID, and rereads both PR and thread state.
+Any identity, head, base, state, ancestry, comment, or post-state mismatch exits
+nonzero without a success receipt.
+
 When `release_maintenance.enabled: true`, the ordinary reconciliation scan
 first requires a canonical repository-wide open-PR count of zero
 (`require_zero_open_prs: false` opts out of that specific precondition for a

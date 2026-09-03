@@ -1009,6 +1009,68 @@ class FeedbackLedger:
             if result.rowcount != 1:
                 raise LedgerStateError("feedback dispatch is not complete")
 
+    def reconcile_superseded_feedback_action(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        stable_fix_sha: str,
+        actioned_at: datetime,
+    ) -> None:
+        """Record one externally verified, exact review-comment resolution.
+
+        This transition is intentionally narrower than ordinary task completion:
+        the caller must already have verified the marker, exact PR identity, and
+        resolved review thread through the governed superseded-feedback flow.
+        """
+
+        if receipt.feedback_kind != "review_comment":
+            raise ValueError("superseded feedback must be an exact review comment")
+        if (
+            not isinstance(stable_fix_sha, str)
+            or len(stable_fix_sha) != 40
+            or any(
+                character not in "0123456789abcdefABCDEF"
+                for character in stable_fix_sha
+            )
+        ):
+            raise ValueError("stable_fix_sha must be a full hexadecimal SHA")
+        actioned_at = _aware_utc(actioned_at, "actioned_at")
+        normalized_fix = stable_fix_sha.casefold()
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT status, action_status, actioned_head_sha FROM feedback_receipts "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ?",
+                receipt.key,
+            ).fetchone()
+            if row is None:
+                self._connection.execute(
+                    "INSERT INTO feedback_receipts "
+                    "(repository, pr_number, feedback_kind, feedback_id, head_sha, status, "
+                    "attempts, action_status, actioned_head_sha, actioned_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'completed', 0, 'completed', ?, ?)",
+                    (*receipt.key, normalized_fix, actioned_at.isoformat()),
+                )
+                return
+            status, action_status, stored_fix = row
+            if status == "completed" and action_status == "completed":
+                if stored_fix != normalized_fix:
+                    raise LedgerStateError("superseded feedback fix commit changed")
+                return
+            if action_status not in {"pending", "resolving"}:
+                raise LedgerStateError("feedback action status is invalid")
+            if stored_fix is not None and stored_fix != normalized_fix:
+                raise LedgerStateError("superseded feedback fix commit changed")
+            result = self._connection.execute(
+                "UPDATE feedback_receipts SET status = 'completed', action_status = 'completed', "
+                "actioned_head_sha = ?, actioned_at = ?, last_error = NULL "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ?",
+                (normalized_fix, actioned_at.isoformat(), *receipt.key),
+            )
+            if result.rowcount != 1:
+                raise LedgerStateError("superseded feedback receipt changed")
+
     def begin_feedback_action(
         self,
         receipt: FeedbackReceipt,

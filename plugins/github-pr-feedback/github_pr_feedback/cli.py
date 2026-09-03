@@ -52,6 +52,7 @@ from .post_merge import PostMergeExecutor
 from .stack import StackEntry
 from .stack_controller import StackController, _ordered
 from .superseded import SupersededPullRequestController
+from .superseded_feedback import SupersededFeedbackController
 from .repair_controller import (
     PR_REPAIR_ATTRIBUTION_PREFIX,
     RepairController,
@@ -538,6 +539,19 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     close_superseded.add_argument("--pr-number", required=True, type=int)
     close_superseded.add_argument("--head-sha", required=True)
     close_superseded.add_argument("--repository-path", required=True, type=Path)
+    resolve_superseded_feedback = subcommands.add_parser(
+        "resolve-superseded-feedback",
+        help="Resolve one exact review thread whose exact fix is already on stable",
+    )
+    resolve_superseded_feedback.add_argument("--repository", required=True)
+    resolve_superseded_feedback.add_argument("--pr-number", required=True, type=int)
+    resolve_superseded_feedback.add_argument("--head-sha", required=True)
+    resolve_superseded_feedback.add_argument("--comment-id", required=True)
+    resolve_superseded_feedback.add_argument("--fix-sha", required=True)
+    resolve_superseded_feedback.add_argument(
+        "--repository-path", required=True, type=Path
+    )
+    resolve_superseded_feedback.add_argument("--test-evidence", required=True)
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
@@ -596,6 +610,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _stack_merge(ctx, args)
     if action == "close-superseded":
         return _close_superseded(ctx, args)
+    if action == "resolve-superseded-feedback":
+        return _resolve_superseded_feedback(ctx, args)
     if action == "complete-feedback":
         return _complete_feedback(ctx, args)
     if action == "complete-maintenance":
@@ -2033,6 +2049,57 @@ def _close_superseded(ctx: Any, args: argparse.Namespace) -> int:
                 "pr_number": result.pr_number,
                 "head_sha": result.head_sha,
                 "base_branch": result.base_branch,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _resolve_superseded_feedback(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        result = SupersededFeedbackController(
+            policy, github=_github_client(policy)
+        ).resolve(
+            args.repository,
+            args.pr_number,
+            args.head_sha,
+            comment_id=args.comment_id,
+            fix_sha=args.fix_sha,
+            repository_path=args.repository_path,
+            test_evidence=args.test_evidence,
+        )
+        receipt = FeedbackReceipt(
+            result.repository,
+            result.pr_number,
+            "review_comment",
+            result.comment_id,
+            result.head_sha,
+        )
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            ledger.reconcile_superseded_feedback_action(
+                receipt,
+                stable_fix_sha=result.fix_sha,
+                actioned_at=datetime.now(UTC),
+            )
+        finally:
+            ledger.close()
+    except (GitHubClientError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "blocked", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "resolved_superseded_feedback",
+                "repository": result.repository,
+                "pr_number": result.pr_number,
+                "head_sha": result.head_sha,
+                "comment_id": result.comment_id,
+                "fix_sha": result.fix_sha,
+                "base_branch": result.base_branch,
+                "thread_resolved": result.thread_resolved,
             },
             sort_keys=True,
         )

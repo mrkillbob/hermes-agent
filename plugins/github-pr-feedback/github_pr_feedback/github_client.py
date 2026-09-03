@@ -380,6 +380,16 @@ class ReviewState:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewThread:
+    """Exact review-thread identity resolved from one REST review comment ID."""
+
+    thread_id: str
+    comment_id: str
+    head_sha: str
+    is_resolved: bool
+
+
+@dataclass(frozen=True, slots=True)
 class CheckState:
     actions_enabled: bool
     all_green: bool
@@ -1088,6 +1098,46 @@ class GitHubClient:
     ) -> bool:
         """Resolve only the complete review thread containing one exact REST comment ID."""
 
+        thread = self.get_review_thread_for_comment(
+            repository,
+            number,
+            comment_id,
+            expected_head_sha=expected_head_sha,
+        )
+        if thread.is_resolved:
+            return False
+        thread_id = thread.thread_id
+        mutation = self._json(
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                "query=" + self.RESOLVE_REVIEW_THREAD_MUTATION,
+                "-F",
+                f"threadId={thread_id}",
+            ]
+        )
+        try:
+            if "errors" in mutation:
+                raise TypeError("GraphQL mutation returned errors")
+            result = mutation["data"]["resolveReviewThread"]["thread"]
+            if result["id"] != thread_id or result["isResolved"] is not True:
+                raise TypeError("review thread resolution was not confirmed")
+        except (KeyError, TypeError) as error:
+            raise GitHubClientError("GitHub review thread resolution failed") from error
+        return True
+
+    def get_review_thread_for_comment(
+        self,
+        repository: str,
+        number: int,
+        comment_id: str,
+        *,
+        expected_head_sha: str,
+    ) -> ReviewThread:
+        """Read the one complete review thread containing an exact REST comment ID."""
+
         repository = _validated_repository(repository)
         number = _positive_number(number)
         expected_head_sha = _validated_sha(expected_head_sha)
@@ -1152,28 +1202,7 @@ class GitHubClient:
                 raise TypeError("review thread resolution state is invalid")
         except (KeyError, TypeError, ValueError) as error:
             raise GitHubClientError("GitHub review thread was unavailable") from error
-        if resolved:
-            return False
-        mutation = self._json(
-            [
-                "gh",
-                "api",
-                "graphql",
-                "-f",
-                "query=" + self.RESOLVE_REVIEW_THREAD_MUTATION,
-                "-F",
-                f"threadId={thread_id}",
-            ]
-        )
-        try:
-            if "errors" in mutation:
-                raise TypeError("GraphQL mutation returned errors")
-            result = mutation["data"]["resolveReviewThread"]["thread"]
-            if result["id"] != thread_id or result["isResolved"] is not True:
-                raise TypeError("review thread resolution was not confirmed")
-        except (KeyError, TypeError) as error:
-            raise GitHubClientError("GitHub review thread resolution failed") from error
-        return True
+        return ReviewThread(thread_id, str(database_id), observed_head_sha, resolved)
 
     def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
         endpoints = (
