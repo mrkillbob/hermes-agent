@@ -12422,6 +12422,32 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
         _log.debug("kanban worker: legacy session retag skipped (%s)", exc)
 
 
+def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
+    """Wrap a managed-gateway worker in the shared restart-safe scope."""
+    if task.current_run_id is None:
+        # Outside managed systemd this is harmless, but a managed dispatch must
+        # never mint an untraceable scope.  Check topology through the shared
+        # helper first, using a placeholder suffix that cannot be launched.
+        from tools.process_registry import restart_safe_gateway_child_argv
+
+        scoped = restart_safe_gateway_child_argv(
+            command, unit_suffix=f"kanban-{task.id}-run-missing"
+        )
+        if scoped is not command:
+            raise RuntimeError(
+                "cannot create restart-safe systemd scope for Kanban worker: "
+                "the claimed task has no current run id"
+            )
+        return command
+
+    from tools.process_registry import restart_safe_gateway_child_argv
+
+    return restart_safe_gateway_child_argv(
+        command,
+        unit_suffix=f"kanban-{task.id}-run-{task.current_run_id}",
+    )
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -12449,7 +12475,13 @@ def _default_spawn(
     profile_arg = normalize_profile_name(task.assignee)
 
     prompt = f"work kanban task {task.id}"
-    env = dict(os.environ)
+    from agent.secret_scope import is_multiplex_active
+    from tools.environments.local import build_subprocess_env
+
+    env = build_subprocess_env(
+        scrub_secrets=is_multiplex_active(),
+        inherit_profile_home=True,
+    )
     # The target checkout is intentionally the worker's cwd so terminal and
     # file operations act on the assigned PR worktree.  Python otherwise puts
     # that cwd ahead of Hermes' installed source, allowing a target-repo
@@ -12760,6 +12792,12 @@ def _default_spawn(
         # turn, prints text, exits rc=0, and the dispatcher records a
         # protocol violation (incident 2026-06-09 t_d9cbe312).
         cmd.append("-Q")
+
+    # A worker spawned by a managed systemd gateway must leave the gateway's
+    # cgroup before startup; otherwise restarting the service kills the worker
+    # that is performing the handoff.
+    cmd = _restart_safe_worker_argv(task, cmd)
+
     # Redirect output to a per-task log under <board-root>/logs/.
     # Anchored at the board root (not the shared kanban root), so
     # `hermes kanban log` on a specific board reads its own file and

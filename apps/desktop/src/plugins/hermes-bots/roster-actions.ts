@@ -253,6 +253,14 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
       openedSessionId: fronted.storedSessionId
     })
 
+    // Fronting is presentation-only: the pane keeps whatever transcript it
+    // last painted, which can predate rows the bot wrote while the user was
+    // elsewhere (another bot's turn, a cron delivery, a teammate's
+    // message_agent). Force a registry open so forceResume re-pulls the
+    // latest transcript instead of leaving a stale snapshot until the next
+    // user turn (#99393 class; #95600 only covered the not-yet-open path).
+    refreshOpenBotChat(bot)
+
     return true
   }
 

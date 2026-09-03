@@ -2907,7 +2907,12 @@ def _persistent_repair_exhausted_error(db_path: Path) -> str:
         f"{_MAX_PERSISTENT_REPAIR_ATTEMPTS} times on this exact file — "
         "the corruption is beyond the schema/FTS repair strategies "
         "(likely b-tree page damage). Manual recovery required: restore "
-        f"a backup, or salvage with `sqlite3 {db_path} \".recover\"`. "
+        "a backup, or salvage with `hermes sessions recover --source "
+        f"{db_path} --inspect-only`, then (if it reports recoverable) "
+        f"`hermes sessions recover --source {db_path} --output "
+        "recovered-state.db` (recovery snapshots the damaged file first, "
+        "then runs the page-level `.recover` lane on the copy; do NOT "
+        "point a raw `sqlite3` shell at the live database). "
         f"Delete {_repair_ledger_path(db_path).name} to force another "
         "automatic attempt."
     )
@@ -3106,8 +3111,9 @@ def _backup_db_file(db_path: Path) -> "Tuple[Optional[Path], Optional[str]]":
                     f"only {usage.free / 1e9:.2f}GB free on {db_path.parent}; "
                     f"copying the damaged DB needs {need / 1e9:.2f}GB and must "
                     f"leave {headroom / 1e9:.2f}GB headroom. Free disk space, "
-                    f"then retry (or recover manually with `sqlite3 {db_path} "
-                    '".recover"`).'
+                    "then retry (or recover manually with "
+                    f"`hermes sessions recover --source {db_path} "
+                    "--inspect-only` first)."
                 )
                 logger.error("Refusing forensic backup of %s: %s", db_path, reason)
                 return None, reason
@@ -3121,7 +3127,8 @@ def _backup_db_file(db_path: Path) -> "Tuple[Optional[Path], Optional[str]]":
                 f"could not determine free space on {db_path.parent} ({exc}); "
                 "refusing the forensic copy rather than risk filling the "
                 f"volume. Free disk space, then retry (or recover manually "
-                f'with `sqlite3 {db_path} ".recover"`).'
+                f"with `hermes sessions recover --source {db_path} "
+                "--inspect-only` first)."
             )
             logger.error("Refusing forensic backup of %s: %s", db_path, reason)
             return None, reason
@@ -3727,11 +3734,13 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
                 # database.journal_mode setting is the restore target.
                 before_mode = _probe_journal_mode_for_repair(db_path)
                 result = _repair_state_db_schema_locked(
-                    db_path, backup=backup, report=report
+                    db_path,
+                    backup=backup,
+                    report=report,
+                    journal_mode_before=before_mode,
                 )
                 if result.get("repaired"):
                     result["journal_mode_before"] = before_mode
-                    _restore_journal_mode_after_repair(db_path, before_mode)
             # Environmental aborts happen before a strategy gets to mutate the
             # isolated snapshot. They are retriable operating conditions, not
             # proof that the damaged database exhausted a repair strategy.
@@ -3767,7 +3776,9 @@ def _probe_journal_mode_for_repair(db_path: Path) -> Optional[str]:
         return None
 
 
-def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]) -> None:
+def _restore_journal_mode_after_repair(
+    db_path: Path, before_mode: Optional[str], *, conn=None
+) -> None:
     """Re-apply the journal mode after schema surgery (#89674).
 
     A repaired/rebuilt SQLite file comes back in the default journal mode
@@ -3776,6 +3787,14 @@ def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]
     WAL-reset gate at open time never sees the flip because it happened
     inside the repair path, not at open (the open-time flip #89393 warns
     about is a different door).
+
+    ``conn`` must be the exclusive repair guard connection when called from
+    the repair path (#101064): opening a fresh connection AFTER the guard
+    released let a writer still holding the unlinked old ``-wal`` inode
+    coexist with a brand-new ``state.db-wal`` this connection created — two
+    generations of one store. The transactional promotion already leaves the
+    destination in its pre-repair mode, so on that path this is mostly the
+    WAL-companion re-assertion; the reopen is the hazard, not the mode.
 
     The restore runs through :func:`apply_wal_with_fallback` — the canonical
     journal-mode path — rather than issuing a switch pragma directly, so it
@@ -3792,12 +3811,15 @@ def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]
     Best-effort by design: the repair itself already succeeded, so failures
     to re-apply are logged at WARNING, never raised.
     """
+    owned_conn = conn is None
     try:
-        conn = _connect_repair_durable(db_path)
+        if owned_conn:
+            conn = _connect_repair_durable(db_path)
         try:
             after = apply_wal_with_fallback(conn, db_label=db_path.name)
         finally:
-            conn.close()
+            if owned_conn:
+                conn.close()
         if before_mode and after != before_mode:
             logger.warning(
                 "state.db repair changed journal_mode %r -> %r "
@@ -3815,7 +3837,11 @@ def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]
 
 
 def _repair_state_db_schema_locked(
-    db_path: Path, *, backup: bool, report: Dict[str, Any]
+    db_path: Path,
+    *,
+    backup: bool,
+    report: Dict[str, Any],
+    journal_mode_before: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Repair strategies for :func:`repair_state_db_schema`.
 
@@ -3956,6 +3982,11 @@ def _repair_state_db_schema_locked(
                         "state.db repaired via '%s' and promoted transactionally: %s",
                         report.get("strategy"),
                         db_path,
+                    )
+                    _restore_journal_mode_after_repair(
+                        db_path,
+                        journal_mode_before,
+                        conn=live_guard,
                     )
             if not report.get("repaired"):
                 # Logged HERE, not inside the strategies: they run against the
@@ -5972,6 +6003,28 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # The v23 table declares tool_name/tool_calls columns. Their absence
         # means a legacy shape that doesn't index tool metadata → optimize.
         return "tool_name" not in sql
+
+    @staticmethod
+    def _db_has_trigram_tool_calls_projection(cursor: sqlite3.Cursor) -> bool:
+        """True when the trigram vtable still includes tool_calls payload."""
+        row = cursor.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'messages_fts_trigram'"
+        ).fetchone()
+        if row is None:
+            return False
+        sql = (row[0] if not isinstance(row, sqlite3.Row) else row["sql"]) or ""
+        return "tool_calls" in sql.lower()
+
+    @classmethod
+    def _db_needs_fts_storage_upgrade(
+        cls, cursor: sqlite3.Cursor
+    ) -> bool:
+        """True when the current FTS storage layout should be treated as stale."""
+        return (
+            cls._db_has_legacy_inline_fts(cursor)
+            or cls._db_has_trigram_tool_calls_projection(cursor)
+        )
 
     def _warn_trigram_unavailable(self, exc: sqlite3.OperationalError) -> None:
         """Log once that the trigram tokenizer is missing; base FTS5 stays enabled."""

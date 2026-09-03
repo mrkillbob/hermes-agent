@@ -415,7 +415,10 @@ class SessionSchemaMixin:
             )
 
     def _migrate_trigram_cron_exclusion(self, cursor: sqlite3.Cursor) -> bool:
-        """Install the cron-filtered trigram view and purge historical rows.
+        """Install the source-filtered trigram view and purge historical rows.
+
+        Covers the v29 cron exclusion and the v30 subagent exclusion — both
+        only change the view/trigger predicate and rebuild from it.
 
         Legacy inline indexes remain opt-in: their content is private to the
         virtual table and cannot adopt this external-content view. For an
@@ -425,6 +428,15 @@ class SessionSchemaMixin:
         admission gate used by every startup FTS repair.
         """
         if self._db_has_legacy_inline_fts(cursor):
+            return True
+        if self._db_has_trigram_tool_calls_projection(cursor):
+            # The existing vtable still declares the FTS_STORAGE_VERSION 1
+            # ``tool_calls`` column. Replacing the view underneath it would
+            # make the 'rebuild' read ``T.tool_calls`` from a view that no
+            # longer has it. Changing vtable columns is the opt-in
+            # ``hermes sessions optimize-storage`` path (it recreates the
+            # vtable from FTS_TRIGRAM_SQL, cron-filtered view included), so
+            # leave this install to that path instead of half-migrating it.
             return True
         trigram_exists = self._fts_table_probe(cursor, "messages_fts_trigram")
         if trigram_exists is not True:
@@ -680,6 +692,16 @@ class SessionSchemaMixin:
         restored. Never raises.
         """
         if not getattr(self, "_fts_stale", False):
+            return False
+        if getattr(self, "_db_corrupt", False):
+            # Quarantined: never run FTS DDL/DML against a damaged image
+            # (mirrors _try_wal_checkpoint / close). This runs every
+            # housekeeping tick for the life of a gateway process, so a stale
+            # flag on a corrupt handle would otherwise retry the rebuild
+            # forever. Reset the backoff so any future un-quarantine path
+            # starts from the default interval, not a doubled stale one.
+            self._fts_stale_retry_after = 0.0
+            self._fts_stale_retry_interval = 0.0
             return False
         if getattr(self, "read_only", False) or getattr(self, "_conn", None) is None:
             return False
@@ -1518,7 +1540,10 @@ class SessionSchemaMixin:
                 # advances to SCHEMA_VERSION here like every other migration —
                 # future v24+ migrations land automatically for legacy-FTS
                 # users too. Only the FTS *layout* waits for opt-in.
-                if fts5_available and self._db_has_legacy_inline_fts(cursor):
+                if (
+                    fts5_available
+                    and self._db_needs_fts_storage_upgrade(cursor)
+                ):
                     self.set_meta("fts_optimize_available", "1", cursor=cursor)
 
             if current_version < 25:
@@ -1528,11 +1553,11 @@ class SessionSchemaMixin:
                 # rows, but clear migrated rows so future writes do not keep
                 # one large prompt copy per session.
                 self._dedupe_legacy_system_prompts(cursor)
-            if current_version < 29 and fts5_available:
-                # v29 (was v27 in the original PR; main had already reached
-                # v28 with column-reconciliation bumps, so a `< 27` gate would
-                # never fire on existing installs): cron sessions remain canonical and stay in the standard
+            if current_version < 30 and fts5_available:
+                # v29: cron sessions remain canonical and stay in the standard
                 # word index, but no longer inflate the trigram substring index.
+                # v30: delegate-child (subagent) transcripts get the same
+                # treatment (FTS_TRIGRAM_EXCLUDED_SOURCES + _delegate_from).
                 # Rebuild once so rows indexed by older trigger/view definitions
                 # do not survive indefinitely as stale matches and disk usage.
                 if not self._migrate_trigram_cron_exclusion(cursor):
@@ -1551,7 +1576,7 @@ class SessionSchemaMixin:
             # transition actually completes.
             if (
                 fts5_available
-                and not self._db_has_legacy_inline_fts(cursor)
+                and not self._db_needs_fts_storage_upgrade(cursor)
                 and cursor.execute(
                     "SELECT 1 FROM state_meta "
                     "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
