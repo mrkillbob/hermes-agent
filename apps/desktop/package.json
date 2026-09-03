@@ -46,6 +46,7 @@
     "perf:lunar-city:accept": "node scripts/perf/lunar-city-orchestrator.mjs",
     "perf:lunar-city:test": "node --test scripts/perf/lunar-city-orchestrator.test.mjs scripts/perf/lunar-city-runner.test.mjs scripts/perf/lunar-city.test.mjs",
     "perf:lunar-city:validate": "node scripts/perf/lunar-city.mjs",
+    "audit:lunar-city-model": "node scripts/audit-lunar-city-model.mjs",
     "update:shim": "bash ../../scripts/desktop-update/repro.sh shim",
     "update:shim:fail": "bash ../../scripts/desktop-update/repro.sh shim-fail",
     "update:repro:fresh": "bash ../../scripts/desktop-update/repro.sh fresh",

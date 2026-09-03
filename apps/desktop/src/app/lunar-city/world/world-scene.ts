@@ -26,8 +26,10 @@ import type {
   Vec3,
   WorkerCharacterPresentation,
   WorldBounds,
-  WorldManifestV2
+  WorldManifestV2,
+  WorldPresetId
 } from '../model'
+import { lightingFor } from '../world-presets'
 
 import {
   type CameraController,
@@ -93,6 +95,8 @@ export interface LunarCitySceneHandle {
   setVisible(visible: boolean): void
   setQuality(tier: QualityTier): void
   setReducedMotion(reduced: boolean): void
+  setTimeOfDay(value: number): void
+  setWorldPreset(preset: WorldPresetId): void
   render(): void
   dispose(): void
 }
@@ -1546,6 +1550,21 @@ export async function createWorldScene(
       fillLight.shadowEnabled = false
     }
 
+    let worldPreset: WorldPresetId = 'luna'
+    let timeOfDay = 0.5
+    const applyWorldPalette = (): void => {
+      const lighting = lightingFor(worldPreset, timeOfDay)
+      scene.ambientColor = new modules.Color3(...lighting.ambient)
+      keyLight.intensity = lighting.keyIntensity
+      keyLight.diffuse = new modules.Color3(...lighting.preset.key)
+      rimLight.intensity = lighting.rimIntensity
+      rimLight.diffuse = new modules.Color3(...lighting.preset.rim)
+      scene.fogColor = new modules.Color3(...lighting.fog)
+      if (modules.Color4) {
+        scene.clearColor = new modules.Color4(...lighting.clear, 1)
+      }
+    }
+
     // A low-resolution glow pass blooms the authored emissive materials
     // (signal-emissive, archive-emissive, the amber/green accent glows) so
     // they read as lit signage instead of flat colored panels. It rides the
@@ -2094,6 +2113,22 @@ export async function createWorldScene(
       setQuality(tier) {
         quality.setTier(tier)
         applyRuntimeQuality()
+        schedulerController.requestRender()
+      },
+      setTimeOfDay(value) {
+        if (disposed) {
+          return
+        }
+        timeOfDay = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.5))
+        applyWorldPalette()
+        schedulerController.requestRender()
+      },
+      setWorldPreset(preset) {
+        if (disposed || (preset !== 'luna' && preset !== 'mars' && preset !== 'terra')) {
+          return
+        }
+        worldPreset = preset
+        applyWorldPalette()
         schedulerController.requestRender()
       },
       setReducedMotion(reduced) {

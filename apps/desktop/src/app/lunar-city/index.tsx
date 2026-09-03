@@ -10,16 +10,18 @@ import { $fleetRoster } from '@/store/fleet-roster'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { $connection } from '@/store/session'
 
-import { createRegisteredKanbanCitySource } from './adapters/kanban'
+import { createRegisteredKanbanCitySource, type ProjectCompoundPlacement } from './adapters/kanban'
 import { startLunarCityReconciler } from './adapters/reconciler'
 import { LunarCityCommandRuntime } from './command-runtime'
 import { CameraControls } from './components/camera-controls'
 import type { InspectorSessionTarget } from './components/entity-inspector'
 import { entityFriendlyLabel, EntityList } from './components/entity-list'
 import { LeaderDialogueRuntime } from './components/leader-dialogue-runtime'
+import { ProjectZonePanel } from './components/project-zone-panel'
 import { QualityControl, type RendererStatus } from './components/quality-control'
 import { reducedMotionPresentation } from './components/reduced-motion'
 import { SourceHealthPanel } from './components/source-health'
+import { WorldControls } from './components/world-controls'
 import {
   leaderModelFocusKeyForOwner,
   leaderModelIdForOwner,
@@ -36,11 +38,19 @@ import type {
   LunarCityWorldHandle,
   LunarEntity,
   QualityTier,
-  WorldManifestV2
+  WorldManifestV2,
+  WorldPresetId
 } from './model'
 import { lunarCityPerfRuntime } from './perf-runtime'
 import { $lunarCitySnapshot } from './store'
 import { createLunarCityWorld } from './world/create-world'
+import {
+  loadZoneLayout,
+  mergeZoneLayout,
+  retainedCompoundsFromZoneLayout,
+  saveZoneLayout,
+  zoneLayoutsEqual
+} from './zone-layout'
 
 const LUNAR_CITY_MANIFEST_URL = './lunar-city/v2/world-manifest.v2.json'
 // A renderer must never leave the route in an unbounded STARTING state. This
@@ -108,8 +118,12 @@ function LunarCityHudStatus({ rendererStatus }: { rendererStatus: RendererStatus
 interface LunarCityOperationsProps {
   getCameraOrder(): readonly EntityKey[]
   onQualityChange(tier: QualityTier): void
+  onPresetChange(preset: WorldPresetId): void
+  onTimeOfDayChange(value: number): void
   onSelect(entity: LunarEntity): void
   qualityTier: QualityTier
+  preset: WorldPresetId
+  timeOfDay: number
   reducedMotion: boolean
   rendererStatus: RendererStatus
   selectedEntityKey?: EntityKey
@@ -121,10 +135,14 @@ interface LunarCityOperationsProps {
  */
 function LunarCityOperations({
   getCameraOrder,
+  onPresetChange,
   onQualityChange,
   onSelect,
+  onTimeOfDayChange,
+  preset,
   qualityTier,
   reducedMotion,
+  timeOfDay,
   rendererStatus,
   selectedEntityKey
 }: LunarCityOperationsProps) {
@@ -144,7 +162,14 @@ function LunarCityOperations({
           : 'Motion: camera easing and worker travel are enabled.'}
       </p>
       <QualityControl onTierChange={onQualityChange} rendererStatus={rendererStatus} tier={qualityTier} />
+      <WorldControls
+        onPresetChange={onPresetChange}
+        onTimeOfDayChange={onTimeOfDayChange}
+        preset={preset}
+        timeOfDay={timeOfDay}
+      />
       <SourceHealthPanel sources={snapshot.sources} />
+      <ProjectZonePanel onSelect={onSelect} snapshot={snapshot} />
       <EntityList
         cameraOrder={getCameraOrder()}
         onSelect={onSelect}
@@ -164,6 +189,8 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   const [selectedEntityKey, setSelectedEntityKey] = useState<EntityKey | undefined>(undefined)
   const [focusedEntityLabel, setFocusedEntityLabel] = useState<string | undefined>(undefined)
   const [qualityTier, setQualityTier] = useState<QualityTier>('efficient')
+  const [worldPreset, setWorldPreset] = useState<WorldPresetId>('luna')
+  const [timeOfDay, setTimeOfDay] = useState(0.5)
   const [rendererStatus, setRendererStatus] = useState<RendererStatus | 'loading'>('loading')
   const [operationsReady, setOperationsReady] = useState(false)
 
@@ -187,6 +214,7 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
   const profileLeaderEntitiesRef = useRef(profileLeaderEntities)
   const selectedLeaderOwnerRef = useRef(selectedLeaderOwner)
   const leaderSessionRef = useRef(leaderSession)
+  const zoneLayoutRef = useRef(loadZoneLayout())
 
   const leaderPerfScenarioRef = useRef<
     ((text: string) => Promise<{ opened: number; received: number; sent: number }>) | undefined
@@ -230,6 +258,16 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
     setSelectedEntityKey(entity.key)
     dispatchCamera({ kind: 'focus', entityKey: entity.key, follow: false })
     setFocusedEntityLabel(entityFriendlyLabel(entity))
+  }
+
+  const changeWorldPreset = (preset: WorldPresetId): void => {
+    setWorldPreset(preset)
+    worldHandleRef.current?.setWorldPreset(preset)
+  }
+
+  const changeTimeOfDay = (value: number): void => {
+    setTimeOfDay(value)
+    worldHandleRef.current?.setTimeOfDay(value)
   }
 
   const changeQuality = (tier: QualityTier): void => {
@@ -415,7 +453,29 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
       return
     }
 
-    const kanbanSource = createRegisteredKanbanCitySource({ manifest: worldManifest, roster: $fleetRoster })
+    const persistenceAvailable = (() => {
+      try {
+        return typeof globalThis.localStorage !== 'undefined'
+      } catch {
+        return false
+      }
+    })()
+    const kanbanSource = createRegisteredKanbanCitySource({
+      manifest: worldManifest,
+      roster: $fleetRoster,
+      ...(persistenceAvailable
+        ? {
+            retainedCompounds: retainedCompoundsFromZoneLayout(zoneLayoutRef.current),
+            onCompoundsChanged: (compounds: readonly ProjectCompoundPlacement[]) => {
+              const next = mergeZoneLayout(zoneLayoutRef.current, compounds, Date.now())
+              if (!zoneLayoutsEqual(zoneLayoutRef.current, next)) {
+                zoneLayoutRef.current = next
+                saveZoneLayout(undefined, next)
+              }
+            }
+          }
+        : {})
+    })
 
     const stop = startLunarCityReconciler({ optionalSources: [kanbanSource] })
     let stopped = false
@@ -777,12 +837,16 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
 
                 return typeof world?.getEntityCameraOrder === 'function' ? world.getEntityCameraOrder() : []
               }}
+              onPresetChange={changeWorldPreset}
               onQualityChange={changeQuality}
               onSelect={selectEntity}
+              onTimeOfDayChange={changeTimeOfDay}
+              preset={worldPreset}
               qualityTier={qualityTier}
               reducedMotion={reducedMotion}
               rendererStatus={rendererStatus === 'loading' ? 'degraded' : rendererStatus}
               selectedEntityKey={selectedEntityKey}
+              timeOfDay={timeOfDay}
             />
           ) : null}
 

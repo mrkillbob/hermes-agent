@@ -82,6 +82,8 @@ export interface RegisteredKanbanCitySourceOptions {
   manifest?: Pick<WorldManifestV2, 'camera' | 'navigation' | 'projectSlots'>
   now?: () => number
   roster: ReadableRoster
+  retainedCompounds?: readonly ProjectCompoundPlacement[]
+  onCompoundsChanged?: (compounds: readonly ProjectCompoundPlacement[]) => void
   selectedTaskId?: () => string | undefined
   timeoutMs?: number
 }
@@ -96,6 +98,8 @@ export interface KanbanCitySourceOptions {
   manifest?: Pick<WorldManifestV2, 'camera' | 'navigation' | 'projectSlots'>
   now?: () => number
   rest?: KanbanRest
+  retainedCompounds?: readonly ProjectCompoundPlacement[]
+  onCompoundsChanged?: (compounds: readonly ProjectCompoundPlacement[]) => void
   scope: PluginSourceScope
   selectedTaskId?: () => string | undefined
   socket?: KanbanSocket
@@ -723,7 +727,7 @@ export function createKanbanCitySource(options: KanbanCitySourceOptions): Kanban
   let socketDispose: (() => void) | undefined
   let invalidate: ((result: KanbanFrameResult) => void) | undefined
   let inFlight: Promise<KanbanReadResult> | undefined
-  let retainedCompounds: readonly ProjectCompoundPlacement[] = []
+  let retainedCompounds: readonly ProjectCompoundPlacement[] = options.retainedCompounds ?? []
   let selectedDetail: { board: string; dirty: boolean; error?: string; taskId: string; value?: unknown } | undefined
 
   const closeSocket = (): void => {
@@ -829,6 +833,18 @@ export function createKanbanCitySource(options: KanbanCitySourceOptions): Kanban
       const workers = workerRows(workersPayload)
       const compounds = allocateProjectCompounds(projectInputs(scope, tasks), slots, retainedCompounds)
       const entities = normalizeEntities(scope, board, tasks, workers, compounds, observedAt)
+      const compoundsChanged =
+        compounds.length !== retainedCompounds.length ||
+        compounds.some((compound, index) => {
+          const prior = retainedCompounds[index]
+          return (
+            prior?.key !== compound.key || prior?.slotId !== compound.slotId || prior?.unplaced !== compound.unplaced
+          )
+        })
+
+      if (compoundsChanged) {
+        options.onCompoundsChanged?.(compounds)
+      }
       const latestEventId = natural(record(boardPayload).latest_event_id) ?? 0
       const details = new Map<string, unknown>()
       const selectedTask = options.selectedTaskId?.()?.trim()
@@ -1109,6 +1125,8 @@ export function createRegisteredKanbanCitySource(options: RegisteredKanbanCitySo
       const source = makeSource({
         manifest: options.manifest,
         scope,
+        ...(options.retainedCompounds ? { retainedCompounds: options.retainedCompounds } : {}),
+        ...(options.onCompoundsChanged ? { onCompoundsChanged: options.onCompoundsChanged } : {}),
         selectedTaskId: options.selectedTaskId,
         timeoutMs: options.timeoutMs
       })

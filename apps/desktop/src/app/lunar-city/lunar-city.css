@@ -129,6 +129,33 @@
   color: var(--ui-text-secondary);
 }
 
+.lunar-city-world-controls,
+.lunar-city-project-zone-panel {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.lunar-city-world-controls label,
+.lunar-city-project-zone-panel li {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.lunar-city-world-controls select,
+.lunar-city-world-controls input,
+.lunar-city-project-zone-panel button {
+  border: 1px solid var(--ui-stroke-tertiary);
+  border-radius: 0.3rem;
+  background: var(--ui-bg-quaternary);
+  color: var(--ui-text-primary);
+  padding: 0.25rem 0.35rem;
+}
+
+.lunar-city-project-zone-panel li span {
+  color: var(--ui-text-secondary);
+  font-size: 0.6rem;
+}
+
 .lunar-city-quality-control,
 .lunar-city-source-health li,
 .lunar-city-entity-list li {

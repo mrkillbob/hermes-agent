@@ -1,3 +1,4 @@
+import { cityStatusBadge, cityStatusLabel, resolveCityStatus } from '../city-status'
 import type { DestinationId, EntityKey, LunarCitySnapshot, LunarEntity } from '../model'
 
 export interface EntityListProps {
@@ -32,20 +33,6 @@ const DESTINATION_LABELS: Readonly<Record<string, string>> = {
   triage: 'Triage District',
   unavailable: 'Unavailable',
   unknown: 'Unknown destination'
-}
-
-const ANIMATION_LABELS: Readonly<Record<string, string>> = {
-  blocked: 'Blocked',
-  done: 'Completed',
-  failed: 'Failed',
-  handoff: 'Handing off',
-  heartbeat: 'Heartbeat',
-  queue: 'Queued',
-  rest: 'Idle',
-  triage: 'In triage',
-  unavailable: 'Unavailable',
-  wait: 'Waiting',
-  work: 'Working'
 }
 
 const AUTHORITY_LABELS: Readonly<Record<LunarEntity['authority'], string>> = {
@@ -138,10 +125,6 @@ function destinationLabel(destination: string): string {
   return DESTINATION_LABELS[destination] ?? titleCase(destination)
 }
 
-function stateLabel(animation: string): string {
-  return ANIMATION_LABELS[animation] ?? titleCase(animation)
-}
-
 function districtRank(destination: string, districtOrder: readonly string[]): number {
   const index = districtOrder.indexOf(destination)
 
@@ -182,11 +165,13 @@ export function EntityList({ cameraOrder, districtOrder, onSelect, selectedEntit
         <ul>
           {entities.map(entity => {
             const name = entityFriendlyLabel(entity)
-            const state = stateLabel(entity.animation)
+            const cityStatus = resolveCityStatus(entity, snapshot.observedAt || Date.now())
+            const state = cityStatusLabel(cityStatus.status)
             const destination = destinationLabel(entity.destination)
             const authority = AUTHORITY_LABELS[entity.authority]
             const descriptionId = `lunar-city-entity-${entity.key.replace(/[^a-z0-9_-]/giu, '-')}`
-            const description = `${state}; ${destination}; ${authority}`
+            const badge = cityStatusBadge(cityStatus.status)
+            const description = `${badge ? `${badge} ` : ''}${state}; ${destination}; ${authority}`
             const identity = identityDetails(entity)
             const presentation = presentationDetails(entity)
             const accessibleDescription = `${description}; ${presentation.length > 0 ? `${presentation.join('; ')}; ` : ''}Identity: ${identity}; Entity key ${entity.key}`

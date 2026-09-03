@@ -179,6 +179,12 @@ export async function createLunarCityWorld(
       setQuality(tier) {
         world?.setQuality(tier)
       },
+      setTimeOfDay(value) {
+        world?.setTimeOfDay(value)
+      },
+      setWorldPreset(preset) {
+        world?.setWorldPreset(preset)
+      },
       setReducedMotion(reduced) {
         world?.setReducedMotion(reduced)
       },

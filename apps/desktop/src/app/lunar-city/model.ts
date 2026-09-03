@@ -13,6 +13,7 @@ export type DestinationId =
   | 'unavailable'
   | 'unknown'
 export type QualityTier = 'efficient' | 'balanced' | 'detailed'
+export type WorldPresetId = 'luna' | 'mars' | 'terra'
 
 export interface Vec3 {
   x: number
@@ -219,6 +220,14 @@ export interface WorldManifestV2 {
   generatedAssetPack: Readonly<Record<string, unknown>>
 }
 
+export interface LunarEntitySignals {
+  blocked?: boolean
+  celebrating?: boolean
+  lastActivityAt?: number
+  waiting?: boolean
+  working?: boolean
+}
+
 export interface LunarEntity {
   key: EntityKey
   identity: EntityIdentity
@@ -228,6 +237,8 @@ export interface LunarEntity {
   animation: string
   /** Exact upstream state used for command compatibility; never inferred from animation. */
   sourceState?: string
+  /** Explicit source-provided signals used only for presentation status precedence. */
+  signals?: LunarEntitySignals
   /** Presentation position only; it never represents work progress. */
   position?: Vec3
   projectId?: string
@@ -387,6 +398,8 @@ export interface LunarCityWorldHandle {
   /** Plays only a state clip declared by the selected leader's GLB metadata. */
   setLeaderAnimation(leaderId: LeaderId, state: LeaderAnimationState): void
   setQuality(tier: QualityTier): void
+  setTimeOfDay(value: number): void
+  setWorldPreset(preset: WorldPresetId): void
   setReducedMotion(reduced: boolean): void
   destroy(): void
 }
