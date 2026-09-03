@@ -440,6 +440,15 @@ class GitHubIdentityPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class GitHubActionsPermissionsIdentityPolicy:
+    """Human-owned gh profile admitted only for repository Actions settings reads."""
+
+    expected_login: str
+    gh_config_dir: Path
+    repositories: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class PluginPolicy:
     enabled: bool
     targets: Mapping[str, RepositoryTarget]
@@ -460,6 +469,7 @@ class PluginPolicy:
     release_maintenance: ReleaseMaintenancePolicy | None = None
     merge_maintainers: tuple[MergeMaintainerPolicy, ...] = ()
     github_identity: GitHubIdentityPolicy | None = None
+    github_actions_permissions_identity: GitHubActionsPermissionsIdentityPolicy | None = None
 
     def merge_policies(self) -> tuple[MergeMaintainerPolicy, ...]:
         """Return configured merge lanes, preserving the legacy singular field."""
@@ -1179,6 +1189,63 @@ def _parse_github_identity(
     return GitHubIdentityPolicy(expected_login=expected_login, token_env=token_env)
 
 
+def _parse_github_actions_permissions_identity(
+    raw: object,
+    *,
+    targets: Mapping[str, RepositoryTarget],
+    github_identity: GitHubIdentityPolicy | None,
+) -> GitHubActionsPermissionsIdentityPolicy:
+    required = {"expected_login", "gh_config_dir", "repositories"}
+    if not isinstance(raw, Mapping) or set(raw) != required:
+        raise ValueError(
+            "github_actions_permissions_identity must contain exactly "
+            "expected_login, gh_config_dir, and repositories"
+        )
+    expected_login = _nonempty_string(
+        raw["expected_login"], "github_actions_permissions_identity expected_login"
+    ).casefold()
+    config_value = _nonempty_string(
+        raw["gh_config_dir"], "github_actions_permissions_identity gh_config_dir"
+    )
+    config_path = Path(config_value)
+    if not config_path.is_absolute():
+        raise ValueError("github_actions_permissions_identity gh_config_dir must be absolute")
+    try:
+        gh_config_dir = config_path.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(
+            "github_actions_permissions_identity gh_config_dir must exist"
+        ) from error
+    if not gh_config_dir.is_dir():
+        raise ValueError("github_actions_permissions_identity gh_config_dir must be a directory")
+    repositories = frozenset(
+        _string_list(
+            raw["repositories"],
+            "github_actions_permissions_identity repositories",
+        )
+    )
+    if not repositories or not repositories.issubset(targets):
+        raise ValueError(
+            "github_actions_permissions_identity repositories must be a non-empty target subset"
+        )
+    if any(
+        targets[repository].owner_login.casefold() != expected_login
+        for repository in repositories
+    ):
+        raise ValueError(
+            "github_actions_permissions_identity expected_login must own every scoped target"
+        )
+    if github_identity is not None and github_identity.expected_login == expected_login:
+        raise ValueError(
+            "github_actions_permissions_identity must differ from github_identity"
+        )
+    return GitHubActionsPermissionsIdentityPolicy(
+        expected_login=expected_login,
+        gh_config_dir=gh_config_dir,
+        repositories=repositories,
+    )
+
+
 def load_policy(raw: object) -> PluginPolicy:
     """Parse plugin configuration, retaining no enabled behavior on any omission."""
 
@@ -1213,6 +1280,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "repair_steward",
         "release_maintenance",
         "github_identity",
+        "github_actions_permissions_identity",
     }
     if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("enabled configuration has missing or unknown fields")
@@ -1299,6 +1367,15 @@ def load_policy(raw: object) -> PluginPolicy:
             raise ValueError(
                 "budget-exhausted CI substitution requires required, audit-only, no-post local CI"
             )
+    github_identity = (
+        _parse_github_identity(
+            raw["github_identity"],
+            targets=targets,
+            reviewer_logins=reviewer_logins,
+        )
+        if "github_identity" in raw
+        else None
+    )
     return PluginPolicy(
         enabled=True,
         targets=targets,
@@ -1336,13 +1413,14 @@ def load_policy(raw: object) -> PluginPolicy:
             else None
         ),
         merge_maintainers=merge_policies,
-        github_identity=(
-            _parse_github_identity(
-                raw["github_identity"],
+        github_identity=github_identity,
+        github_actions_permissions_identity=(
+            _parse_github_actions_permissions_identity(
+                raw["github_actions_permissions_identity"],
                 targets=targets,
-                reviewer_logins=reviewer_logins,
+                github_identity=github_identity,
             )
-            if "github_identity" in raw
+            if "github_actions_permissions_identity" in raw
             else None
         ),
     )

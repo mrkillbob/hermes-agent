@@ -699,6 +699,66 @@ def test_github_identity_requires_an_admitted_independent_login(tmp_path: Path) 
     assert policy.github_identity.token_env == "HERMES_GITHUB_BOT_TOKEN"
 
 
+def test_actions_permissions_identity_is_explicit_and_repository_scoped(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    gh_config_dir = tmp_path / "human-gh"
+    gh_config_dir.mkdir()
+    raw = enabled_raw_config(repository)
+    raw["github_actions_permissions_identity"] = {
+        "expected_login": "owner",
+        "gh_config_dir": str(gh_config_dir),
+        "repositories": ["acme/widgets"],
+    }
+
+    policy = load_policy(raw)
+
+    identity = policy.github_actions_permissions_identity
+    assert identity is not None
+    assert identity.expected_login == "owner"
+    assert identity.gh_config_dir == gh_config_dir.resolve()
+    assert identity.repositories == frozenset({"acme/widgets"})
+
+
+@pytest.mark.parametrize(
+    "identity",
+    (
+        {
+            "expected_login": "owner",
+            "gh_config_dir": "relative/gh",
+            "repositories": ["acme/widgets"],
+        },
+        {
+            "expected_login": "stranger",
+            "gh_config_dir": "/tmp/gh",
+            "repositories": ["acme/widgets"],
+        },
+        {
+            "expected_login": "owner",
+            "gh_config_dir": "/tmp/gh",
+            "repositories": ["other/widgets"],
+        },
+        {
+            "expected_login": "owner",
+            "gh_config_dir": "/tmp/gh",
+            "repositories": [],
+        },
+    ),
+)
+def test_actions_permissions_identity_fails_closed_on_unsafe_scope(
+    tmp_path: Path, identity: dict[str, object]
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    raw = enabled_raw_config(repository)
+    raw["github_actions_permissions_identity"] = identity
+
+    with pytest.raises(ValueError):
+        load_policy(raw)
+
+
 @pytest.mark.parametrize(
     "github_identity",
     (

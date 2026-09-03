@@ -106,6 +106,98 @@ def test_automation_identity_uses_only_dedicated_token_and_verifies_login(
     assert runner.calls == [("gh", "api", "user")]
 
 
+def test_actions_permissions_read_uses_separate_human_gh_profile_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    bot_runner = RecordingRunner(
+        {
+            ("gh", "api", "user"): {"login": "mrkillbobbot"},
+            ("gh", "api", "repos/acme/widgets"): {"private": True},
+        }
+    )
+    human_runner = RecordingRunner(
+        {
+            ("gh", "api", "user"): {"login": "mrkillbob"},
+            ("gh", "api", "repos/acme/widgets/actions/permissions"): {
+                "enabled": False
+            },
+        }
+    )
+    captured: list[dict[str, str | None]] = []
+
+    def runner_factory(*, env_overrides, **_kwargs):
+        overrides = dict(env_overrides)
+        captured.append(overrides)
+        return human_runner if "GH_CONFIG_DIR" in overrides else bot_runner
+
+    monkeypatch.setattr(
+        "github_pr_feedback.github_client.SubprocessCommandRunner", runner_factory
+    )
+
+    client = GitHubClient.for_automation_identity(
+        expected_login="mrkillbobbot",
+        token_env="HERMES_GITHUB_BOT_TOKEN",
+        actions_permissions_expected_login="mrkillbob",
+        actions_permissions_gh_config_dir=tmp_path,
+        actions_permissions_repositories=frozenset({"acme/widgets"}),
+        environ={
+            "HERMES_GITHUB_BOT_TOKEN": "bot-secret",
+            "GH_TOKEN": "human-secret-must-not-be-copied",
+            "GITHUB_TOKEN": "ci-secret-must-not-be-copied",
+        },
+    )
+
+    assert client.repository_is_private("acme/widgets") is True
+    assert client.actions_enabled("acme/widgets", refresh=True) is False
+    assert captured == [
+        {"GH_TOKEN": "bot-secret", "GITHUB_TOKEN": None},
+        {
+            "GH_CONFIG_DIR": str(tmp_path.resolve()),
+            "GH_HOST": "github.com",
+            "GH_TOKEN": None,
+            "GITHUB_TOKEN": None,
+            "GH_ENTERPRISE_TOKEN": None,
+            "GITHUB_ENTERPRISE_TOKEN": None,
+        },
+    ]
+    assert bot_runner.calls == [
+        ("gh", "api", "user"),
+        ("gh", "api", "repos/acme/widgets"),
+    ]
+    assert human_runner.calls == [
+        ("gh", "api", "user"),
+        ("gh", "api", "repos/acme/widgets/actions/permissions"),
+    ]
+
+
+def test_actions_permissions_identity_mismatch_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    bot_runner = RecordingRunner({("gh", "api", "user"): {"login": "mrkillbobbot"}})
+    wrong_human_runner = RecordingRunner(
+        {("gh", "api", "user"): {"login": "unexpected-user"}}
+    )
+
+    def runner_factory(*, env_overrides, **_kwargs):
+        return wrong_human_runner if "GH_CONFIG_DIR" in env_overrides else bot_runner
+
+    monkeypatch.setattr(
+        "github_pr_feedback.github_client.SubprocessCommandRunner", runner_factory
+    )
+
+    with pytest.raises(GitHubClientError) as caught:
+        GitHubClient.for_automation_identity(
+            expected_login="mrkillbobbot",
+            token_env="HERMES_GITHUB_BOT_TOKEN",
+            actions_permissions_expected_login="mrkillbob",
+            actions_permissions_gh_config_dir=tmp_path,
+            actions_permissions_repositories=frozenset({"acme/widgets"}),
+            environ={"HERMES_GITHUB_BOT_TOKEN": "bot-secret"},
+        )
+
+    assert caught.value.code == "actions_permissions_identity_mismatch"
+
+
 @pytest.mark.parametrize(
     ("environ", "code"),
     (

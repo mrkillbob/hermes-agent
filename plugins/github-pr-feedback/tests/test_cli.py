@@ -2382,6 +2382,48 @@ def enabled_settings(repository: Path) -> dict[str, object]:
     }
 
 
+def test_github_client_binds_repository_scoped_actions_permissions_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from github_pr_feedback.cli import _github_client
+    from github_pr_feedback.policy import load_policy
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    gh_config_dir = tmp_path / "human-gh"
+    gh_config_dir.mkdir()
+    settings = enabled_settings(repository)
+    settings["github_identity"] = {
+        "expected_login": "reviewer",
+        "token_env": "HERMES_GITHUB_BOT_TOKEN",
+    }
+    settings["github_actions_permissions_identity"] = {
+        "expected_login": "owner",
+        "gh_config_dir": str(gh_config_dir),
+        "repositories": ["acme/widgets"],
+    }
+    policy = load_policy(settings)
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    class FakeGitHubClient:
+        @staticmethod
+        def for_automation_identity(**kwargs: object) -> object:
+            captured.update(kwargs)
+            return sentinel
+
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", FakeGitHubClient)
+
+    assert _github_client(policy) is sentinel
+    assert captured == {
+        "expected_login": "reviewer",
+        "token_env": "HERMES_GITHUB_BOT_TOKEN",
+        "actions_permissions_expected_login": "owner",
+        "actions_permissions_gh_config_dir": gh_config_dir.resolve(),
+        "actions_permissions_repositories": frozenset({"acme/widgets"}),
+    }
+
+
 def test_merge_enable_and_disable_persist_operator_enrollment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

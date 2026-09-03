@@ -431,8 +431,16 @@ class GitHubClient:
         "thread{id isResolved}}}"
     )
 
-    def __init__(self, runner: CommandRunner | None = None) -> None:
+    def __init__(
+        self,
+        runner: CommandRunner | None = None,
+        *,
+        actions_permissions_runner: CommandRunner | None = None,
+        actions_permissions_repositories: frozenset[str] = frozenset(),
+    ) -> None:
         self._runner = runner or SubprocessCommandRunner()
+        self._actions_permissions_runner = actions_permissions_runner
+        self._actions_permissions_repositories = actions_permissions_repositories
         self._actions_enabled_cache: dict[str, tuple[bool, float]] = {}
 
     @classmethod
@@ -441,6 +449,9 @@ class GitHubClient:
         *,
         expected_login: str,
         token_env: str,
+        actions_permissions_expected_login: str | None = None,
+        actions_permissions_gh_config_dir: Path | None = None,
+        actions_permissions_repositories: frozenset[str] = frozenset(),
         environ: Mapping[str, str] | None = None,
     ) -> "GitHubClient":
         """Build a client bound only to the configured Hermes bot credential."""
@@ -455,14 +466,43 @@ class GitHubClient:
                 "Hermes GitHub automation credential is missing",
                 code="automation_credential_missing",
             ) from error
-        client = cls(
-            SubprocessCommandRunner(
+        runner = SubprocessCommandRunner(
+            env_overrides={
+                "GH_TOKEN": child_env["GH_TOKEN"],
+                # Never allow a generic CI or user token to act as fallback.
+                "GITHUB_TOKEN": None,
+            }
+        )
+        actions_runner = None
+        actions_settings = (
+            actions_permissions_expected_login,
+            actions_permissions_gh_config_dir,
+            actions_permissions_repositories,
+        )
+        if any(value for value in actions_settings):
+            if (
+                not actions_permissions_expected_login
+                or actions_permissions_gh_config_dir is None
+                or not actions_permissions_repositories
+            ):
+                raise GitHubClientError(
+                    "GitHub Actions permissions identity is incomplete",
+                    code="actions_permissions_identity_not_configured",
+                )
+            actions_runner = SubprocessCommandRunner(
                 env_overrides={
-                    "GH_TOKEN": child_env["GH_TOKEN"],
-                    # Never allow a generic CI or user token to act as fallback.
+                    "GH_CONFIG_DIR": str(actions_permissions_gh_config_dir.resolve()),
+                    "GH_HOST": "github.com",
+                    "GH_TOKEN": None,
                     "GITHUB_TOKEN": None,
+                    "GH_ENTERPRISE_TOKEN": None,
+                    "GITHUB_ENTERPRISE_TOKEN": None,
                 }
             )
+        client = cls(
+            runner,
+            actions_permissions_runner=actions_runner,
+            actions_permissions_repositories=actions_permissions_repositories,
         )
         actual_login = client.viewer_login()
         if actual_login.casefold() != expected_login.casefold():
@@ -470,6 +510,13 @@ class GitHubClient:
                 "Hermes GitHub automation identity does not match policy",
                 code="automation_identity_mismatch",
             )
+        if actions_runner is not None:
+            actual_actions_login = client._viewer_login(actions_runner)
+            if actual_actions_login.casefold() != actions_permissions_expected_login.casefold():
+                raise GitHubClientError(
+                    "GitHub Actions permissions identity does not match policy",
+                    code="actions_permissions_identity_mismatch",
+                )
         return client
 
     def list_open_pull_requests(
@@ -508,7 +555,10 @@ class GitHubClient:
     def viewer_login(self) -> str:
         """Return the exact login owning this client's explicit credential."""
 
-        payload = self._json(["gh", "api", "user"])
+        return self._viewer_login(self._runner)
+
+    def _viewer_login(self, runner: CommandRunner) -> str:
+        payload = self._json_with_runner(runner, ["gh", "api", "user"])
         login = payload.get("login") if isinstance(payload, dict) else None
         if not isinstance(login, str) or not _LOGIN.fullmatch(login):
             raise GitHubClientError(
@@ -660,7 +710,14 @@ class GitHubClient:
         cached = self._actions_enabled_cache.get(repository)
         if not refresh and cached is not None and now - cached[1] < 60.0:
             return cached[0]
-        payload = self._json(["gh", "api", f"repos/{repository}/actions/permissions"])
+        runner = (
+            self._actions_permissions_runner
+            if repository in self._actions_permissions_repositories
+            else self._runner
+        )
+        payload = self._json_with_runner(
+            runner, ["gh", "api", f"repos/{repository}/actions/permissions"]
+        )
         if not isinstance(payload, dict) or not isinstance(
             payload.get("enabled"), bool
         ):
@@ -1264,8 +1321,12 @@ class GitHubClient:
         return payload
 
     def _json(self, argv: list[str]) -> object:
+        return self._json_with_runner(self._runner, argv)
+
+    @staticmethod
+    def _json_with_runner(runner: CommandRunner, argv: list[str]) -> object:
         try:
-            return json.loads(self._runner.run(argv))
+            return json.loads(runner.run(argv))
         except (json.JSONDecodeError, TypeError) as error:
             raise GitHubClientError("GitHub response was not valid JSON") from error
 

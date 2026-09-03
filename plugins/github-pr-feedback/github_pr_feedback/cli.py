@@ -724,9 +724,19 @@ def _github_client(policy: PluginPolicy) -> GitHubClient:
             "Hermes GitHub automation identity is not configured",
             code="automation_identity_not_configured",
         )
+    actions_settings = policy.github_actions_permissions_identity
     return factory(
         expected_login=settings.expected_login,
         token_env=settings.token_env,
+        actions_permissions_expected_login=(
+            actions_settings.expected_login if actions_settings is not None else None
+        ),
+        actions_permissions_gh_config_dir=(
+            actions_settings.gh_config_dir if actions_settings is not None else None
+        ),
+        actions_permissions_repositories=(
+            actions_settings.repositories if actions_settings is not None else frozenset()
+        ),
     )
 
 

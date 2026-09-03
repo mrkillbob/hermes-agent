@@ -52,6 +52,13 @@ plugins:
         github_identity:
           expected_login: mrkillbobbot
           token_env: HERMES_GITHUB_BOT_TOKEN
+        # Optional owner credential for the administrative Actions-permission
+        # read only. All public PR reads and writes still use github_identity.
+        github_actions_permissions_identity:
+          expected_login: example-owner
+          gh_config_dir: /absolute/path/to/human-gh-config
+          repositories:
+            - example-owner/example-repository
         include_self_feedback: false
         include_bot_feedback: false
         auto_dispatch: false
@@ -191,6 +198,14 @@ dedicated token authenticates as `mrkillbobbot`; it does not inherit the
 operator's `gh` keyring identity. Before a review write, `submit-review` also
 rereads the PR author, state, and exact head; it exits nonzero without posting
 a comment when the bot is the PR author.
+
+`github_actions_permissions_identity` is an exact repository allowlist for
+`GET repos/{owner}/{repo}/actions/permissions` only. Its `expected_login` must
+own every listed configured target, and `gh_config_dir` must be an existing
+absolute directory. Hermes removes token environment variables before using
+that profile and verifies its viewer login during client construction. Missing,
+partial, mismatched, or out-of-scope configuration fails closed; this setting
+never changes the bot identity used for PR reads or public writes.
 
 Set `HERMES_GITHUB_BOT_LOGIN=mrkillbobbot` alongside the token for Hermes core
 GitHub surfaces such as webhook comment delivery and merged-worktree checks.
