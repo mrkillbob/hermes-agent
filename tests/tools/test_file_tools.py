@@ -6,6 +6,7 @@ handling without requiring a running terminal environment.
 
 import json
 import logging
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -42,6 +43,147 @@ class TestReadFileHandler:
         assert "terminal not available" in result["error"]
 
 
+def test_successful_bounded_read_issues_opaque_grant(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    source = tmp_path / "source.py"
+    source.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    registry = SourceProvenanceRegistry()
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        result = json.loads(read_file_tool(str(source), offset=2, limit=1))
+
+    assert result["content"]
+    grant = registry.grants_for_request("request-1")[0]
+    assert (grant.line_start, grant.line_end) == (2, 2)
+    assert grant.content_sha256 == __import__("hashlib").sha256(b"two\n").hexdigest()
+
+
+def test_read_errors_or_untrusted_tool_text_cannot_issue_grants(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    registry = SourceProvenanceRegistry()
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        read_file_tool(str(tmp_path / "missing.py"), offset=1, limit=1)
+
+    assert registry.grants_for_request("request-1") == ()
+
+
+def test_symlink_read_cannot_issue_a_grant(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    source = tmp_path / "source.py"
+    source.write_text("one\n", encoding="utf-8")
+    linked = tmp_path / "linked.py"
+    linked.symlink_to(source)
+    registry = SourceProvenanceRegistry()
+
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        result = json.loads(read_file_tool(str(linked), offset=1, limit=1))
+
+    assert result["content"]
+    assert registry.grants_for_request("request-1") == ()
+
+
+def test_symlinked_ancestor_read_cannot_issue_a_grant(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    source = real_dir / "source.py"
+    source.write_text("one\n", encoding="utf-8")
+    linked_dir = tmp_path / "linked"
+    linked_dir.symlink_to(real_dir, target_is_directory=True)
+    registry = SourceProvenanceRegistry()
+
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        result = json.loads(read_file_tool(str(linked_dir / "source.py"), offset=1, limit=1))
+
+    assert result["content"]
+    assert registry.grants_for_request("request-1") == ()
+
+
+def test_line_display_truncation_cannot_issue_a_grant(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    source = tmp_path / "source.py"
+    source.write_text("x" * 20_000 + "\n", encoding="utf-8")
+    registry = SourceProvenanceRegistry()
+
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        result = json.loads(read_file_tool(str(source), offset=1, limit=1))
+
+    assert result["content"]
+    assert registry.grants_for_request("request-1") == ()
+
+
+def test_forged_read_result_cannot_issue_a_grant(tmp_path, monkeypatch):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_operations import ReadResult
+    from tools.file_tools import read_file_tool
+
+    source = tmp_path / "source.py"
+    source.write_text("actual\n", encoding="utf-8")
+
+    class ForgedFileOps:
+        env = None
+
+        @staticmethod
+        def read_file(*_args):
+            return ReadResult(content="1|forged", total_lines=1, file_size=7)
+
+        @staticmethod
+        def _add_line_numbers(content, offset):
+            return f"{offset}|{content}"
+
+    monkeypatch.setattr("tools.file_tools._get_file_ops", lambda _task_id: ForgedFileOps())
+    registry = SourceProvenanceRegistry()
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        read_file_tool(str(source), offset=1, limit=1)
+
+    assert registry.grants_for_request("request-1") == ()
+
+
 class TestWriteFileHandler:
     @patch("tools.file_tools._get_file_ops")
     def test_writes_content(self, mock_get):
@@ -54,7 +196,9 @@ class TestWriteFileHandler:
         from tools.file_tools import write_file_tool
         result = json.loads(write_file_tool("/tmp/out.txt", "hello world!\n"))
         assert result["status"] == "ok"
-        mock_ops.write_file.assert_called_once_with("/tmp/out.txt", "hello world!\n")
+        mock_ops.write_file.assert_called_once_with(
+            os.path.realpath("/tmp/out.txt"), "hello world!\n"
+        )
 
     @patch("tools.file_tools._get_file_ops")
     def test_permission_error_returns_error_json_without_error_log(self, mock_get, caplog):
@@ -145,7 +289,9 @@ class TestPatchHandler:
             old_string="foo", new_string="bar"
         ))
         assert result["status"] == "ok"
-        mock_ops.patch_replace.assert_called_once_with("/tmp/f.py", "foo", "bar", False)
+        mock_ops.patch_replace.assert_called_once_with(
+            os.path.realpath("/tmp/f.py"), "foo", "bar", False
+        )
 
 
     @patch("tools.file_tools._get_file_ops")
@@ -494,25 +640,36 @@ class TestSensitivePathCheck:
 
 
 class TestPatchSchemaShape:
-    """PATCH_SCHEMA must advertise per-mode required params via description
-    text (not JSON-schema ``required``), so strict models like kimi-k2.x stop
-    silently omitting old_string / new_string / patch content."""
+    """The BASE schema is replace-only (V4A layers on for OpenAI-family
+    mains via _patch_schema_overrides — see test_patch_v4a_gate.py). The
+    kimi-k2.x per-mode-description concern now applies to the V4A LAYER,
+    whose composed variant still documents both modes' requirements."""
 
-    def test_per_mode_required_params_documented_in_descriptions(self):
+    def test_base_schema_replace_only_with_real_required(self):
         desc = PATCH_SCHEMA["description"]
-        assert "REQUIRED PARAMETERS: mode, path, old_string, new_string" in desc
-        assert "REQUIRED PARAMETERS: mode, patch" in desc
+        assert "V4A" not in desc
         props = PATCH_SCHEMA["parameters"]["properties"]
-        for name in ("path", "old_string", "new_string"):
-            assert "REQUIRED when mode='replace'" in props[name]["description"]
-        assert "REQUIRED when mode='patch'" in props["patch"]["description"]
+        assert "mode" not in props and "patch" not in props
+        # replace-only means required can finally be the REAL contract —
+        # no per-mode description hedging needed on the base.
+        assert PATCH_SCHEMA["parameters"]["required"] == ["path", "old_string", "new_string"]
         assert "must differ from old_string" in props["new_string"]["description"]
 
-    def test_no_anyof_required_stays_mode_only(self):
-        # anyOf/oneOf at parameters level break Anthropic, Fireworks, and the
-        # Moonshot/Kimi schema sanitizer — description-level guidance is the
-        # only provider-safe signalling mechanism.
-        params = PATCH_SCHEMA["parameters"]
+    def test_v4a_layer_keeps_per_mode_documentation(self):
+        """When the V4A layer IS rendered (OpenAI-family), the strict-model
+        guidance survives: per-mode requirements in description text, no
+        anyOf/oneOf (breaks Anthropic/Fireworks/Kimi sanitizers)."""
+        from unittest.mock import patch as _p
+
+        import tools.file_tools as ft
+
+        with _p("agent.auxiliary_client._read_main_provider", return_value="openai"), \
+             _p("agent.auxiliary_client._read_main_model", return_value="gpt-5.2"):
+            o = ft._patch_schema_overrides()
+        desc = o["description"]
+        assert "REQUIRED PARAMETERS: mode, path, old_string, new_string" in desc
+        assert "REQUIRED PARAMETERS: mode, patch" in desc
+        params = o["parameters"]
         assert params["required"] == ["mode"]
         assert "anyOf" not in params and "oneOf" not in params
 

@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Any
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +333,7 @@ class SessionContext:
     session_id: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    cwd: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -346,6 +347,7 @@ class SessionContext:
             "session_id": self.session_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "cwd": self.cwd,
         }
 
 
@@ -793,6 +795,13 @@ class SessionEntry:
     platform: Optional[Platform] = None
     chat_type: str = "dm"
 
+    # An interactive Discord or Photon/iMessage root may be bound to a
+    # certified conversation worktree. Keep this on the routing entry (rather
+    # than a process-global cwd) so concurrent gateway conversations cannot
+    # leak their workspace into one another.
+    cwd: Optional[str] = None
+    conversation_worktree: Dict[str, str] = field(default_factory=dict)
+
     # Lightweight persisted key/value state scoped to this session entry
     # (e.g. Slack thread-context watermarks). Survives gateway restarts via
     # the routing index; must stay small and JSON-serializable.
@@ -880,6 +889,8 @@ class SessionEntry:
             "display_name": self.display_name,
             "platform": self.platform.value if self.platform else None,
             "chat_type": self.chat_type,
+            "cwd": self.cwd,
+            "conversation_worktree": self.conversation_worktree,
             "metadata": self.metadata,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -981,6 +992,14 @@ class SessionEntry:
             display_name=data.get("display_name"),
             platform=platform,
             chat_type=data.get("chat_type", "dm"),
+            cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else None,
+            conversation_worktree={
+                str(key): str(value)
+                for key, value in (data.get("conversation_worktree") or {}).items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            if isinstance(data.get("conversation_worktree"), dict)
+            else {},
             metadata=dict(data.get("metadata") or {}),
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
@@ -1208,6 +1227,16 @@ def build_session_key(
     if isolate_user and participant_id:
         key_parts.append(str(participant_id))
 
+    # A receiving adapter may attach a private lane marker for a distinct
+    # conversational surface that still replies through the same platform
+    # channel (for example, the Discord voice fast lane). Keep it out of
+    # SessionSource serialization and delivery metadata: it affects only
+    # durable conversation identity, so a short spoken exchange cannot pull
+    # a long text-task transcript into its prompt.
+    lane = str(getattr(source, "_session_key_lane", "") or "").strip()
+    if lane:
+        key_parts.extend(("lane", lane))
+
     return ":".join(str(part) for part in key_parts)
 
 
@@ -1242,6 +1271,38 @@ class AsyncSessionStore:
 _DB_UNPINNED = object()
 
 
+def _default_conversation_worktree_manager_factory(db):
+    """Build the enabled manager or fail before an interactive route exists."""
+    from agent.conversation_worktree import (
+        ConversationWorktreeError,
+        ConversationWorktreeManager,
+    )
+    from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+    from hermes_cli.config import load_config
+
+    try:
+        policy = resolve_conversation_worktree_policy(load_config())
+    except Exception as exc:
+        raise ConversationWorktreeError(
+            f"conversation worktree policy could not be resolved: {exc}",
+            phase="policy",
+        ) from exc
+    if not policy.enabled:
+        return None
+    if db is None:
+        raise ConversationWorktreeError(
+            "conversation worktree policy is enabled but SessionDB is unavailable",
+            phase="state",
+        )
+    try:
+        return ConversationWorktreeManager(policy, db)
+    except Exception as exc:
+        raise ConversationWorktreeError(
+            f"conversation worktree manager is unavailable: {exc}",
+            phase="state",
+        ) from exc
+
+
 class SessionStore:
     """
     Manages session storage and retrieval.
@@ -1250,8 +1311,13 @@ class SessionStore:
     Falls back to legacy JSONL files if SQLite is unavailable.
     """
     
-    def __init__(self, sessions_dir: Path, config: GatewayConfig,
-                 has_active_processes_fn=None):
+    def __init__(
+        self,
+        sessions_dir: Path,
+        config: GatewayConfig,
+        has_active_processes_fn=None,
+        conversation_worktree_manager_factory: Optional[Callable[[Any], Any]] = None,
+    ):
         self.sessions_dir = sessions_dir
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
@@ -1289,6 +1355,13 @@ class SessionStore:
         self._transcript_append_failures: Dict[str, int] = {}
         self._fts_rebuild_attempted = False
         self._has_active_processes_fn = has_active_processes_fn
+        self._conversation_worktree_manager_factory = (
+            conversation_worktree_manager_factory
+            if conversation_worktree_manager_factory is not None
+            else _default_conversation_worktree_manager_factory
+        )
+        self._conversation_root_leases: Dict[str, Any] = {}
+        self._conversation_root_leases_lock = threading.Lock()
         # Whether to keep writing the legacy sessions.json mirror alongside
         # the primary gateway_routing table in state.db. Default True for
         # backward compatibility; disable via gateway.write_sessions_json.
@@ -1319,16 +1392,221 @@ class SessionStore:
         self._db_pinned = _DB_UNPINNED
         self._db_handles: Dict[Path, Any] = {}
         self._db_handles_lock = threading.Lock()
+        # profile name -> its HERMES_HOME (or None to use the ambient scope).
+        # Memoized so the per-key store lookup stays a dict hit instead of a
+        # profile-directory stat on every transcript append.
+        self._profile_home_cache: Dict[str, Optional[Path]] = {}
+        # session_id -> owning routing key, for ids whose ownership is already
+        # proven but not yet published in ``_entries``. The compression
+        # continuation is the case that needs it: the child row is written
+        # before its reroute is published, so an index lookup would miss and
+        # fall back to the ambient store. Entries are dropped as soon as
+        # routing publishes.
+        self._session_owner_hints: Dict[str, str] = {}
         from gateway.session_db_recovery import RecoverableHandleCache
 
         self._db_handle_cache = RecoverableHandleCache(
             handles=self._db_handles,
             lock=self._db_handles_lock,
         )
+        # The routing index is one process-wide structure keyed by
+        # ``agent:<profile>:…``, not a per-profile one, so it needs exactly one
+        # home for its lifetime. The store is constructed at startup under the
+        # gateway's own home, before any profile scope exists, so capturing it
+        # here is what makes the index deterministic — see ``_routing_db``.
+        try:
+            from hermes_constants import get_hermes_home
+
+            self._routing_home: Optional[Path] = Path(get_hermes_home())
+        except Exception:
+            self._routing_home = None
         self._open_session_db_for_active_scope()
 
-    def _open_session_db_for_active_scope(self):
+    @staticmethod
+    def _supports_conversation_worktree(source: Optional[SessionSource]) -> bool:
+        """Only user-facing Discord and Photon/iMessage roots are in Task 6."""
+        platform = getattr(getattr(source, "platform", None), "value", "")
+        return str(platform).lower() in {"discord", "photon"}
+
+    def _conversation_worktree_manager(self):
+        factory = self._conversation_worktree_manager_factory
+        return factory(self._db) if factory is not None else None
+
+    @staticmethod
+    def _binding_metadata(binding) -> Dict[str, str]:
+        return {
+            "root_session_id": str(binding.root_session_id),
+            "path": str(binding.path),
+            "branch": str(binding.branch),
+            "base_commit": str(binding.base_commit),
+            "repo_common_dir": str(binding.repo_common_dir),
+        }
+
+    def _apply_conversation_worktree_binding(self, entry: SessionEntry, binding) -> bool:
+        lease_acquired = self._ensure_conversation_root_lease(binding)
+        entry.cwd = str(binding.path)
+        entry.conversation_worktree = SessionStore._binding_metadata(binding)
+        return lease_acquired
+
+    def _ensure_conversation_root_lease(self, binding) -> bool:
+        root_session_id = str(binding.root_session_id)
+        with self._conversation_root_leases_lock:
+            if root_session_id in self._conversation_root_leases:
+                return False
+            from agent.conversation_worktree import acquire_conversation_root_lease
+
+            self._conversation_root_leases[root_session_id] = (
+                acquire_conversation_root_lease(
+                    root_session_id=root_session_id,
+                    worktree_path=Path(binding.path),
+                    repo_common_dir=Path(binding.repo_common_dir),
+                    surface="gateway",
+                )
+            )
+            return True
+
+    def release_conversation_root_lease(self, root_session_id: str) -> bool:
+        """Release a root lease only after no active gateway route references it."""
+        root_session_id = str(root_session_id)
+        with self._lock:
+            self._ensure_loaded_locked()
+            if any(
+                str((entry.conversation_worktree or {}).get("root_session_id", ""))
+                == root_session_id
+                for entry in self._entries.values()
+            ):
+                return False
+        with self._conversation_root_leases_lock:
+            lease = self._conversation_root_leases.get(root_session_id)
+        if lease is None:
+            return True
+        lease.release()
+        with self._conversation_root_leases_lock:
+            if self._conversation_root_leases.get(root_session_id) is lease:
+                self._conversation_root_leases.pop(root_session_id, None)
+        return True
+
+    def reconcile_conversation_root_transition(
+        self,
+        displaced_entry: Any,
+        retained_entry: Any,
+    ) -> bool:
+        """Release only a displaced root that no published route still owns."""
+        displaced_metadata = (
+            displaced_entry
+            if isinstance(displaced_entry, dict)
+            else getattr(displaced_entry, "conversation_worktree", None)
+        ) or {}
+        retained_metadata = (
+            retained_entry
+            if isinstance(retained_entry, dict)
+            else getattr(retained_entry, "conversation_worktree", None)
+        ) or {}
+        displaced_root = str(
+            displaced_metadata.get("root_session_id", "")
+        )
+        retained_root = str(retained_metadata.get("root_session_id", ""))
+        if not displaced_root or displaced_root == retained_root:
+            return False
+        return self.release_conversation_root_lease(displaced_root)
+
+    def resolve_task_owned_workspace(
+        self, target_session_id: str, persisted_cwd: str
+    ) -> tuple[str, Dict[str, str]]:
+        """Verify a CLI handoff workspace and acquire its gateway ownership lease."""
+        from agent.conversation_worktree import ConversationWorktreeError
+
+        raw_cwd = str(persisted_cwd or "").strip()
+        path = Path(raw_cwd).expanduser()
+        if not raw_cwd or not path.is_absolute() or not path.is_dir():
+            raise ConversationWorktreeError(
+                "CLI handoff has no usable verified workspace",
+                phase="cwd",
+            )
+        path = path.resolve()
+
+        manager = self._conversation_worktree_manager()
+        if manager is None:
+            return str(path), {}
+        db = self._db
+        if db is None:
+            raise ConversationWorktreeError(
+                "conversation worktree policy is enabled but SessionDB is unavailable",
+                phase="state",
+            )
+        try:
+            root_session_id = db.get_conversation_root(target_session_id)
+            binding = manager.resolve_existing_session(root_session_id)
+        except ConversationWorktreeError:
+            raise
+        except Exception as exc:
+            raise ConversationWorktreeError(
+                f"could not verify CLI handoff workspace: {exc}",
+                phase="state",
+            ) from exc
+        if binding is None or Path(binding.path).resolve() != path:
+            raise ConversationWorktreeError(
+                "CLI handoff workspace does not match its ready conversation binding",
+                phase="recovery",
+            )
+        self._ensure_conversation_root_lease(binding)
+        return str(path), self._binding_metadata(binding)
+
+    def _bind_conversation_worktree_for_new_entry(
+        self,
+        entry: SessionEntry,
+        *,
+        conversation_kind: str,
+    ) -> None:
+        if conversation_kind not in {"interactive", "task"}:
+            raise ValueError("conversation_kind must be 'interactive' or 'task'")
+        if conversation_kind == "task" or not self._supports_conversation_worktree(entry.origin):
+            return
+        manager = self._conversation_worktree_manager()
+        if manager is None:
+            return
+        binding = manager.bind_new_root_session(
+            entry.session_id, conversation_kind="interactive"
+        )
+        if binding is not None:
+            self._apply_conversation_worktree_binding(entry, binding)
+
+    def _resolve_conversation_worktree_for_existing_entry(
+        self,
+        entry: SessionEntry,
+        *,
+        conversation_kind: str,
+    ) -> bool:
+        """Revalidate a stored binding without ever allocating a new root."""
+        if conversation_kind not in {"interactive", "task"}:
+            raise ValueError("conversation_kind must be 'interactive' or 'task'")
+        if conversation_kind == "task" or not self._supports_conversation_worktree(entry.origin):
+            return False
+        manager = self._conversation_worktree_manager()
+        if manager is None:
+            return False
+        root_session_id = entry.conversation_worktree.get("root_session_id") or entry.session_id
+        binding = manager.resolve_existing_session(root_session_id)
+        if binding is None:
+            if entry.conversation_worktree:
+                from agent.conversation_worktree import ConversationWorktreeError
+
+                raise ConversationWorktreeError(
+                    "saved conversation worktree is no longer ready; refusing source checkout fallback",
+                    phase="recovery",
+                )
+            return False
+        previous = (entry.cwd, dict(entry.conversation_worktree))
+        self._apply_conversation_worktree_binding(entry, binding)
+        return previous != (entry.cwd, entry.conversation_worktree)
+
+    def _open_session_db_for_active_scope(self, db_path: Optional[Path] = None):
         """Return the SessionDB for the profile scope active on this task.
+
+        ``db_path`` pins the store explicitly instead of consulting the
+        ambient scope.  ``_db_for_key`` uses it so work running outside
+        ``_profile_runtime_scope`` still reaches the profile that owns the
+        row it is about to touch.
 
         ``SessionDB(db_path=None)`` resolves ``_default_db_path()`` at call
         time, and that helper follows the context-local HERMES_HOME override
@@ -1343,12 +1621,16 @@ class SessionStore:
         once it expires, one caller reopens while concurrent callers keep
         using the JSONL fallback.
         """
-        from hermes_state import SessionDB, _default_db_path
+        from hermes_state import SessionDB, _default_db_path, get_shared_session_db
 
-        path = Path(_default_db_path())
+        path = Path(db_path) if db_path is not None else Path(_default_db_path())
         def _open():
             try:
-                return SessionDB()
+                # Route through the process-wide shared registry (#90837):
+                # every long-lived in-process caller (store, runner, cron,
+                # mirror, slash commands, tools) shares ONE writer
+                # connection per path instead of each minting its own.
+                return get_shared_session_db(path)
             except RuntimeError as e:
                 if "live-system guard" in str(e):
                     # Test-isolation guard fired: a pytest-context process
@@ -1381,13 +1663,180 @@ class SessionStore:
         resolves the scope so a multiplexed profile's writes reach its own
         store.
         """
-        if self._db_pinned is not _DB_UNPINNED:
-            return self._db_pinned
+        pinned = getattr(self, "_db_pinned", _DB_UNPINNED)
+        if pinned is not _DB_UNPINNED:
+            return pinned
         return self._open_session_db_for_active_scope()
 
     @_db.setter
     def _db(self, value) -> None:
         self._db_pinned = value
+
+    @property
+    def _routing_db(self):
+        """The one store that owns the routing index, whatever scope is active.
+
+        ``_entries`` is a single flat dict holding every profile's keys, so the
+        index it persists to has to be a single file too.  Reading it through
+        ``_db`` made that file whichever profile happened to be scoped at the
+        time: a whole-index rewrite during one profile's turn copied every
+        other profile's routing rows into that profile's store, and startup —
+        which runs unscoped — then loaded a different copy than the one the
+        last writer produced.  That is why a crash marker written while a
+        secondary profile was active is invisible to the startup recovery pass
+        (#66887).
+
+        A pinned handle still wins, so the suites that install a fake or
+        disable the DB keep working unchanged.
+        """
+        pinned = getattr(self, "_db_pinned", _DB_UNPINNED)
+        if pinned is not _DB_UNPINNED:
+            return pinned
+        home = getattr(self, "_routing_home", None)
+        try:
+            if home is None:
+                return self._db
+            return self._open_session_db_for_active_scope(db_path=home / "state.db")
+        except AttributeError:
+            # Bare test instances (object.__new__) lack _routing_home AND the
+            # handle cache behind the _db property; behave like main's old
+            # getattr(self, "_db", None) contract and report no DB.
+            return getattr(self, "_db_pinned", None) if getattr(self, "_db_pinned", _DB_UNPINNED) is not _DB_UNPINNED else None
+        except Exception:
+            return None
+
+    def _named_profile_for_key(self, session_key: Optional[str]) -> Optional[str]:
+        """The non-default profile that owns *session_key*, or None.
+
+        None means the ambient store is authoritative for this key —
+        multiplexing is off, or the key carries the legacy ``agent:main``
+        namespace.  It deliberately does NOT cover "that profile has no
+        directory": ownership and resolvability are different questions, and
+        ``_db_for_key`` has to answer them separately.
+        """
+        if not getattr(self.config, "multiplex_profiles", False):
+            return None
+        profile = self._profile_from_session_key(session_key)
+        if not profile or profile == "default":
+            return None
+        return profile
+
+    def _profile_home_for_key(self, session_key: Optional[str]) -> Optional[Path]:
+        """HERMES_HOME of the profile that owns *session_key*, or None.
+
+        None here means only "no live home to point at" — either the key has
+        no named owner, or that owner's directory could not be resolved.
+        Callers that mutate state must tell those two apart through
+        ``_named_profile_for_key``.
+        """
+        profile = self._named_profile_for_key(session_key)
+        if profile is None:
+            return None
+        cache = self._profile_home_cache
+        if profile in cache:
+            return cache[profile]
+        home: Optional[Path] = None
+        try:
+            from hermes_cli.profiles import get_profile_dir, profile_exists
+
+            if profile_exists(profile):
+                home = Path(get_profile_dir(profile))
+        except Exception as exc:
+            logger.debug(
+                "Could not resolve profile home for %r: %s", session_key, exc
+            )
+            home = None
+        # Only a hit is memoized. A profile directory can appear *after* the
+        # gateway started — the enrollment bridge provisions profiles/<name>/
+        # at runtime — and caching the miss would pin that profile's rows to
+        # the ambient store for the life of the process, which is the bug
+        # this helper exists to prevent. A miss costs one profile_exists()
+        # stat and only recurs for profiles that genuinely do not exist.
+        if home is not None:
+            cache[profile] = home
+        return home
+
+    def _db_for_key(self, session_key: Optional[str]):
+        """The SessionDB holding *session_key*'s rows, whatever scope is active.
+
+        ``_db`` follows the ambient HERMES_HOME, and only the inbound message
+        path installs one (``_profile_runtime_scope``).  Background work runs
+        unscoped while operating on every profile's keys out of the single
+        process-wide ``_entries`` dict — ``_session_expiry_watcher`` is the
+        clearest case — so it reads and writes the ROOT store for rows that
+        actually live under ``profiles/<name>/state.db``.  The two writers
+        then drift apart on the same logical session until the routing index
+        disagrees with the row and the #54878 self-heal drops a live
+        conversation (#66887).
+
+        The owning profile is already encoded in the key, so deriving the
+        store from it makes every caller agree on one file per session
+        without threading scope through each call site.
+        """
+        pinned = getattr(self, "_db_pinned", _DB_UNPINNED)
+        if pinned is not _DB_UNPINNED:
+            return pinned
+        profile = self._named_profile_for_key(session_key)
+        if profile is None:
+            # No named owner — the ambient store is authoritative, exactly as
+            # it was before this helper existed.
+            return self._db
+        home = self._profile_home_for_key(session_key)
+        if home is None:
+            # A named owner we cannot resolve: the profile is not provisioned
+            # yet (the enrollment bridge creates profiles/<name>/ at runtime,
+            # so a key legitimately arrives first), or the lookup failed.
+            # Falling back to the ambient store would put ONE qualified
+            # session identity in two physical stores — the split this helper
+            # exists to remove — because the first lookup would land in root
+            # and the next one, after provisioning, in the profile. Fail
+            # closed instead; callers already handle a missing DB.
+            logger.warning(
+                "gateway.session: profile %r has no resolvable home (key %r); "
+                "refusing to fall back to the ambient store",
+                profile, session_key,
+            )
+            return None
+        try:
+            return self._open_session_db_for_active_scope(db_path=home / "state.db")
+        except Exception:
+            # Same contract as ``_db``: a failed open degrades to the JSONL
+            # fallback rather than taking routing down.
+            return None
+
+    def _owner_key_for_session_id(self, session_id: Optional[str]) -> Optional[str]:
+        """The routing key that owns *session_id*, or None.
+
+        The published index is authoritative; ``_session_owner_hints`` covers
+        the window where ownership is already proven but routing has not been
+        published yet.  Deliberately lock-free: several callers already hold
+        ``_lock``.
+        """
+        if not session_id:
+            return None
+        try:
+            for entry in list(self._entries.values()):
+                if entry.session_id == session_id:
+                    return entry.session_key
+        except Exception:
+            pass
+        # getattr: suites build bare stores via ``object.__new__`` and never
+        # run __init__, the same reason the other optional maps are read
+        # defensively here.
+        return (getattr(self, "_session_owner_hints", None) or {}).get(session_id)
+
+    def _db_for_session_id(self, session_id: Optional[str]):
+        """The SessionDB holding *session_id*'s row.
+
+        Transcript, compression and rewind entry points are addressed by
+        session id rather than routing key, so the owning profile is
+        recovered from the index (or from a pre-published ownership hint).
+        An id nothing knows about still falls back to the ambient store —
+        the behavior that predates ``_db_for_key``.
+        """
+        if not session_id:
+            return self._db
+        return self._db_for_key(self._owner_key_for_session_id(session_id))
 
     def close_all_db_handles(self) -> None:
         """Close every SessionDB handle this store opened, one per resolved path.
@@ -1410,9 +1859,21 @@ class SessionStore:
         handle (``store._db = fake``) is deliberately not closed here — the
         pinner owns its lifecycle.
         """
-        def _close(db) -> None:
+        with self._conversation_root_leases_lock:
+            root_leases = list(self._conversation_root_leases.values())
+            self._conversation_root_leases.clear()
+        for lease in root_leases:
             try:
-                db.close()
+                lease.release()
+            except Exception as exc:
+                logger.debug("Conversation root lease release error: %s", exc)
+
+        def _close(db) -> None:
+            # Shared instances no-op on close() (the registry owns the
+            # lifecycle).  Release the refcount instead (#90837).
+            from hermes_state import release_or_close
+            try:
+                release_or_close(db)
             except Exception as exc:
                 logger.debug("SessionDB close error during handle sweep: %s", exc)
 
@@ -1470,7 +1931,7 @@ class SessionStore:
         # _prune_stale_sessions_locked).
         db_had_entries = False
         db_load_succeeded = False
-        _db = getattr(self, "_db", None)
+        _db = self._routing_db
         if _db:
             loader = getattr(_db, "load_gateway_routing_entries", None)
             if callable(loader):
@@ -1562,14 +2023,21 @@ class SessionStore:
         legacy) are left alone, and a ``None`` DB handle (SQLite unavailable) is
         a no-op. DB errors are non-fatal — startup must never fail here.
         """
-        db = getattr(self, "_db", None)
-        if not db or not self._entries:
+        if not self._entries:
             return
 
         stale_keys: list = []
         recovered_keys = 0
         try:
             for key, entry in self._entries.items():
+                # Whether a session ended is a per-session question, so ask the
+                # store that owns the key. A single ambient handle answered it
+                # for every profile at once, which is how a live secondary
+                # profile session could be pruned on the strength of the root
+                # store's copy of it.
+                db = self._db_for_key(key)
+                if db is None:
+                    continue
                 row = db.get_session(entry.session_id)
                 # row is None        -> not in DB (legacy / pre-SQLite) — keep
                 # end_reason is None  -> session alive — keep
@@ -1618,6 +2086,24 @@ class SessionStore:
                         recovered_keys += 1
                         continue
 
+                    # A non-None recovery with the SAME session id is a
+                    # successful resume (all recovery gates passed, row
+                    # reopened): keep the routing entry — it is proven valid,
+                    # not a dead route (#95957). Keep the ORIGINAL entry
+                    # object, not the recovered one: the recovered entry is
+                    # rebuilt minimal from the DB row and would silently drop
+                    # live state the existing entry carries (token/cost
+                    # counters, model_override, resume_pending/queued-work
+                    # markers, metadata). Nothing in sessions.json changes,
+                    # so no save is needed for this branch.
+                    if recovered_entry is not None:
+                        logger.info(
+                            "gateway.session: reopened ended session %s for "
+                            "sessions.json entry %r (end_reason=%r); keeping route",
+                            entry.session_id, key, row["end_reason"],
+                        )
+                        continue
+
                     logger.warning(
                         "gateway.session: pruning stale sessions.json entry "
                         "%r -> %s (end_reason=%r); left by a crashed gateway",
@@ -1660,7 +2146,7 @@ class SessionStore:
         if getattr(self, "_routing_db_loaded", False) or baseline is None:
             return
 
-        db = getattr(self, "_db", None)
+        db = self._routing_db
         loader = getattr(db, "load_gateway_routing_entries", None) if db else None
         if not callable(loader):
             return
@@ -1725,7 +2211,7 @@ class SessionStore:
                     if revision > generation:
                         data[key] = json.loads(entry_json)
             db_saved = False
-            _db = getattr(self, "_db", None)
+            _db = self._routing_db
             if _db:
                 replacer = getattr(_db, "replace_gateway_routing_entries", None)
                 if callable(replacer):
@@ -1883,7 +2369,7 @@ class SessionStore:
         if captured is None:
             return
         entry_json, revision, candidate_entry = captured
-        _db = getattr(self, "_db", None)
+        _db = self._routing_db
         saver = getattr(_db, "save_gateway_routing_entry", None) if _db else None
         if callable(saver):
             save_lock = getattr(self, "_save_lock", None)
@@ -2124,9 +2610,9 @@ class SessionStore:
         another team's session. The caller performs one explicit exact lookup
         of the old unscoped key instead.
         """
-        if not self._db:
+        if not self._db_for_key(session_key):
             return None
-        finder = getattr(self._db, "find_latest_gateway_session_for_peer", None)
+        finder = getattr(self._db_for_key(session_key), "find_latest_gateway_session_for_peer", None)
         if not callable(finder):
             return None
         try:
@@ -2164,10 +2650,17 @@ class SessionStore:
         resurrected as freshly active.
         """
         legacy_key = self._legacy_slack_session_key(source)
+        # A private lane is an intentional conversation boundary.  Its key
+        # may share platform/chat/user fields with an ordinary session, but a
+        # peer fallback would silently reattach the old transcript and defeat
+        # the boundary (notably the Discord voice fast lane).
+        allow_peer_fallback = legacy_key is None and not bool(
+            getattr(source, "_session_key_lane", "")
+        )
         recovered = self._find_gateway_session_row(
             session_key=session_key,
             source=source,
-            allow_peer_fallback=legacy_key is None,
+            allow_peer_fallback=allow_peer_fallback,
             raise_on_lookup_error=raise_on_lookup_error,
         )
         migrated_legacy = False
@@ -2208,11 +2701,11 @@ class SessionStore:
         reset_reason = self._should_reset(entry, source)
         if reset_reason:
             try:
-                promote = getattr(self._db, "promote_to_session_reset", None)
+                promote = getattr(self._db_for_key(session_key), "promote_to_session_reset", None)
                 if callable(promote):
                     promote(entry.session_id, reset_reason)
                 else:
-                    self._db.end_session(entry.session_id, reset_reason)
+                    self._db_for_key(session_key).end_session(entry.session_id, reset_reason)
             except Exception as exc:
                 logger.debug(
                     "Gateway recovered-session reset promotion failed for %s: %s",
@@ -2221,7 +2714,7 @@ class SessionStore:
                 )
             return None
         try:
-            self._db.reopen_session(entry.session_id)
+            self._db_for_key(session_key).reopen_session(entry.session_id)
         except Exception as exc:
             logger.debug("Gateway session DB reopen failed for %s: %s", session_key, exc)
         if migrated_legacy:
@@ -2243,10 +2736,15 @@ class SessionStore:
         evaluates the reset policy first and decides reset vs resume.
         """
         legacy_key = self._legacy_slack_session_key(source)
+        # See _recover_session_from_db: private lanes must only recover an
+        # exact matching key, never a same-peer transcript.
+        allow_peer_fallback = legacy_key is None and not bool(
+            getattr(source, "_session_key_lane", "")
+        )
         recovered = self._find_gateway_session_row(
             session_key=session_key,
             source=source,
-            allow_peer_fallback=legacy_key is None,
+            allow_peer_fallback=allow_peer_fallback,
         )
         migrated_legacy = False
         if (
@@ -2299,9 +2797,9 @@ class SessionStore:
         include_compression_ancestors: bool = False,
     ) -> None:
         """Persist the routing peer for an existing gateway session row."""
-        if not self._db or not source:
+        if not self._db_for_key(session_key) or not source:
             return
-        recorder = getattr(self._db, "record_gateway_session_peer", None)
+        recorder = getattr(self._db_for_key(session_key), "record_gateway_session_peer", None)
         if not callable(recorder):
             return
         try:
@@ -2359,8 +2857,12 @@ class SessionStore:
                 # rehydrate it after the in-memory override was popped.
                 entry.model_override = None
             self._save()
-        if self._db:
-            setter = getattr(self._db, "set_expiry_finalized", None)
+        # The expiry watcher calls this from a background task that never
+        # entered ``_profile_runtime_scope``, so resolve the store from the
+        # key rather than from the ambient scope (#66887).
+        _db = self._db_for_key(entry.session_key)
+        if _db:
+            setter = getattr(_db, "set_expiry_finalized", None)
             if callable(setter):
                 try:
                     setter(entry.session_id, True)
@@ -2379,7 +2881,7 @@ class SessionStore:
                 # live rows or rows ended with ``agent_close``.  Explicit
                 # boundaries (compression, session_reset, new_command, etc.)
                 # are preserved — the first writer wins.
-                self._db.promote_to_session_reset(entry.session_id)
+                _db.promote_to_session_reset(entry.session_id)
             except Exception as exc:
                 logger.debug(
                     "Session DB promote_to_session_reset failed for %s: %s",
@@ -2474,8 +2976,13 @@ class SessionStore:
         live routing key and silently swallow every subsequent message until
         the next restart (#54878 — the live-gateway variant of #52804/FM9).
         DB errors are non-fatal — never block routing on a failed lookup.
+
+        The store is resolved from the row's owning profile rather than the
+        ambient scope: an unscoped background writer keeps its own copy of
+        the same session, and comparing against that copy reports a live
+        session as ended (#66887).
         """
-        db = getattr(self, "_db", None)
+        db = self._db_for_session_id(session_id)
         if not db or not session_id:
             return False
         try:
@@ -2539,10 +3046,10 @@ class SessionStore:
         mapping pointing at the compressed parent.  Heal that on read so the
         next inbound message resumes the child instead of reloading the parent.
         """
-        if not session_id or self._db is None:
+        if not session_id or self._db_for_session_id(session_id) is None:
             return session_id
         try:
-            return self._db.get_compression_tip(session_id) or session_id
+            return self._db_for_session_id(session_id).get_compression_tip(session_id) or session_id
         except Exception:
             logger.debug(
                 "Compression-tip lookup failed for session %s",
@@ -2600,6 +3107,7 @@ class SessionStore:
         source: SessionSource,
         force_new: bool = False,
         touch_activity: bool = True,
+        conversation_kind: str = "interactive",
     ) -> SessionEntry:
         """Single-flight session lookup/create per routing key.
 
@@ -2639,6 +3147,7 @@ class SessionStore:
                 source,
                 force_new=force_new,
                 touch_activity=touch_activity,
+                conversation_kind=conversation_kind,
             )
             slot.result = result
             return result
@@ -2655,6 +3164,7 @@ class SessionStore:
         source: SessionSource,
         force_new: bool = False,
         touch_activity: bool = True,
+        conversation_kind: str = "interactive",
     ) -> SessionEntry:
         """Perform one session routing transition for the single-flight owner.
 
@@ -2782,6 +3292,7 @@ class SessionStore:
         _metadata_only_save = False
         _needs_recover = False
         entry: Optional[SessionEntry] = None
+        candidate: Optional[SessionEntry] = None
         was_auto_reset = False
         auto_reset_reason = None
         reset_had_activity = False
@@ -2873,7 +3384,7 @@ class SessionStore:
                     prev_session_id = recovered.session_id
                 else:
                     try:
-                        self._db.reopen_session(recovered.session_id)
+                        self._db_for_key(session_key).reopen_session(recovered.session_id)
                     except Exception as exc:
                         logger.debug(
                             "Gateway session DB reopen failed for %s: %s",
@@ -2905,6 +3416,12 @@ class SessionStore:
                 auto_reset_reason=auto_reset_reason,
                 reset_had_activity=reset_had_activity,
                 prev_session_id=prev_session_id,
+            )
+            # The manager claim/bootstrap is intentionally before publishing
+            # this routing entry or creating its state.db row. A failure must
+            # leave the caller without an agent-visible source-checkout entry.
+            self._bind_conversation_worktree_for_new_entry(
+                candidate, conversation_kind=conversation_kind
             )
             with self._lock:
                 current = self._entries.get(session_key)
@@ -2945,6 +3462,20 @@ class SessionStore:
                         else None
                     ),
                 }
+            else:
+                # The unpublished candidate may have acquired the mandatory
+                # gateway root lease during its pre-publication bind. Keep the
+                # route that won this key intact, but release a distinct loser
+                # root once no published entry can reference it.
+                self.reconcile_conversation_root_transition(candidate, entry)
+
+        if entry is not None and entry is not candidate:
+            _needs_save = (
+                self._resolve_conversation_worktree_for_existing_entry(
+                    entry, conversation_kind=conversation_kind
+                )
+                or _needs_save
+            )
 
         if _needs_save:
             if _metadata_only_save:
@@ -2953,7 +3484,7 @@ class SessionStore:
                 self._save_entries()
 
         # SQLite operations outside the lock (unchanged).
-        if self._db and db_end_session_id:
+        if self._db_for_key(session_key) and db_end_session_id:
             # Use the specific reset reason so state.db is auditable (e.g.
             # "resume_pending_expired" is distinguishable from a normal
             # "session_reset" caused by idle/daily expiry).
@@ -2964,11 +3495,11 @@ class SessionStore:
                 # (agent_close / ws_orphan_reap), which first-reason-wins
                 # end_session would preserve — leaving the reset session
                 # resurrectable by stale-route recovery (#61220, #61993).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
+                _promote = getattr(self._db_for_key(session_key), "promote_to_session_reset", None)
                 if callable(_promote):
                     _promote(db_end_session_id, _db_end_reason)
                 else:
-                    self._db.end_session(db_end_session_id, _db_end_reason)
+                    self._db_for_key(session_key).end_session(db_end_session_id, _db_end_reason)
             except Exception as e:
                 # A failed end-write leaves a zombie open row still holding
                 # this chat's session_key: restart recovery will resolve the
@@ -2981,9 +3512,9 @@ class SessionStore:
                     db_end_session_id, session_key, e,
                 )
 
-        if self._db and db_create_kwargs:
+        if self._db_for_key(session_key) and db_create_kwargs:
             try:
-                self._db.create_session(**db_create_kwargs)
+                self._db_for_key(session_key).create_session(**db_create_kwargs)
                 self._record_gateway_session_peer(
                     session_id,
                     session_key,
@@ -3398,8 +3929,13 @@ class SessionStore:
                 self._save()
         return count
 
-    def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
-        """Force reset a session, creating a new session ID."""
+    def reset_session(
+        self,
+        session_key: str,
+        display_name: Optional[str] = None,
+        conversation_kind: str = "interactive",
+    ) -> Optional[SessionEntry]:
+        """Force reset a session, certifying a new root before rotation."""
         db_end_session_id = None
         db_create_kwargs = None
         new_entry = None
@@ -3411,12 +3947,9 @@ class SessionStore:
                 return None
 
             old_entry = self._entries[session_key]
-            db_end_session_id = old_entry.session_id
-
             now = _now()
             session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-
-            new_entry = SessionEntry(
+            candidate = SessionEntry(
                 session_key=session_key,
                 session_id=session_id,
                 created_at=now,
@@ -3428,42 +3961,66 @@ class SessionStore:
                 is_fresh_reset=True,
             )
 
-            self._entries[session_key] = new_entry
-            self._save()
-            _reset_origin_json = None
-            if old_entry.origin is not None:
-                try:
-                    _reset_origin_json = json.dumps(old_entry.origin.to_dict())
-                except Exception:
-                    _reset_origin_json = None
-            db_create_kwargs = {
-                "session_id": session_id,
-                "source": old_entry.platform.value if old_entry.platform else "unknown",
-                "user_id": old_entry.origin.user_id if old_entry.origin else None,
-                "session_key": session_key,
-                "chat_id": old_entry.origin.chat_id if old_entry.origin else None,
-                "chat_type": old_entry.origin.chat_type if old_entry.origin else None,
-                "thread_id": old_entry.origin.thread_id if old_entry.origin else None,
-                "profile_name": old_entry.origin.profile if old_entry.origin else None,
-                # Identity + lineage land atomically in the INSERT (#82616,
-                # #12857) — see the get_or_create twin path.
-                "origin_json": _reset_origin_json,
-                "display_name": old_entry.display_name,
-                "parent_session_id": db_end_session_id,
-                "model_config": {"_reset_from": db_end_session_id},
-            }
+        # Do not invalidate the old session boundary until the new worktree is
+        # ready. This can block for bootstrap, so it deliberately runs outside
+        # the routing lock.
+        self._bind_conversation_worktree_for_new_entry(
+            candidate, conversation_kind=conversation_kind
+        )
 
-        if self._db and db_end_session_id:
+        lost_race = False
+        winner = None
+        with self._lock:
+            self._ensure_loaded_locked()
+            if self._entries.get(session_key) is not old_entry:
+                # Another reset won while this candidate was being prepared.
+                # Its entry remains authoritative; never overwrite it.
+                lost_race = True
+                winner = self._entries.get(session_key)
+            else:
+                db_end_session_id = old_entry.session_id
+                new_entry = candidate
+
+                self._entries[session_key] = new_entry
+                self._save()
+                _reset_origin_json = None
+                if old_entry.origin is not None:
+                    try:
+                        _reset_origin_json = json.dumps(old_entry.origin.to_dict())
+                    except Exception:
+                        _reset_origin_json = None
+                db_create_kwargs = {
+                    "session_id": session_id,
+                    "source": old_entry.platform.value if old_entry.platform else "unknown",
+                    "user_id": old_entry.origin.user_id if old_entry.origin else None,
+                    "session_key": session_key,
+                    "chat_id": old_entry.origin.chat_id if old_entry.origin else None,
+                    "chat_type": old_entry.origin.chat_type if old_entry.origin else None,
+                    "thread_id": old_entry.origin.thread_id if old_entry.origin else None,
+                    "profile_name": old_entry.origin.profile if old_entry.origin else None,
+                    # Identity + lineage land atomically in the INSERT (#82616,
+                    # #12857) — see the get_or_create twin path.
+                    "origin_json": _reset_origin_json,
+                    "display_name": old_entry.display_name,
+                    "parent_session_id": db_end_session_id,
+                    "model_config": {"_reset_from": db_end_session_id},
+                }
+
+        if lost_race:
+            self.reconcile_conversation_root_transition(candidate, winner)
+            return winner
+
+        if self._db_for_key(session_key) and db_end_session_id:
             try:
                 # Promote (not plain end_session): an accidental
                 # agent_close/ws_orphan_reap end must not survive an explicit
                 # user reset, or recovery resurrects the reset session
                 # (#61993 — the user's /new was silently undone).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
+                _promote = getattr(self._db_for_key(session_key), "promote_to_session_reset", None)
                 if callable(_promote):
                     _promote(db_end_session_id, "session_reset")
                 else:
-                    self._db.end_session(db_end_session_id, "session_reset")
+                    self._db_for_key(session_key).end_session(db_end_session_id, "session_reset")
             except Exception as e:
                 # Zombie hazard — see the get_or_create twin path (#82616).
                 logger.warning(
@@ -3473,9 +4030,9 @@ class SessionStore:
                     db_end_session_id, session_key, e,
                 )
 
-        if self._db and db_create_kwargs:
+        if self._db_for_key(session_key) and db_create_kwargs:
             try:
-                self._db.create_session(**db_create_kwargs)
+                self._db_for_key(session_key).create_session(**db_create_kwargs)
                 self._record_gateway_session_peer(
                     session_id,
                     session_key,
@@ -3531,7 +4088,15 @@ class SessionStore:
             self._save()
             return entry
 
-    def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
+    def switch_session(
+        self,
+        session_key: str,
+        target_session_id: str,
+        *,
+        task_owned_cwd: Optional[str] = None,
+        conversation_worktree: Optional[Dict[str, str]] = None,
+        new_interactive_root: bool = False,
+    ) -> Optional[SessionEntry]:
         """Switch a session key to point at an existing session ID.
 
         Used by ``/resume`` to restore a previously-named session.
@@ -3542,6 +4107,8 @@ class SessionStore:
         """
         db_end_session_id = None
         new_entry = None
+        candidate_root_session_id = ""
+        candidate_lease_acquired = False
 
         with self._lock:
             self._ensure_loaded_locked()
@@ -3555,40 +4122,117 @@ class SessionStore:
             if old_entry.session_id == target_session_id:
                 return old_entry
 
-            db_end_session_id = old_entry.session_id
+        now = _now()
+        new_entry = SessionEntry(
+            session_key=session_key,
+            session_id=target_session_id,
+            created_at=now,
+            updated_at=now,
+            origin=old_entry.origin,
+            display_name=old_entry.display_name,
+            platform=old_entry.platform,
+            chat_type=old_entry.chat_type,
+            cwd=task_owned_cwd,
+            conversation_worktree=dict(conversation_worktree or {}),
+        )
 
-            now = _now()
-            new_entry = SessionEntry(
-                session_key=session_key,
-                session_id=target_session_id,
-                created_at=now,
-                updated_at=now,
-                origin=old_entry.origin,
-                display_name=old_entry.display_name,
-                platform=old_entry.platform,
-                chat_type=old_entry.chat_type,
-            )
+        # A plain /resume carries only a persisted session id. Resolve its
+        # immutable root binding before publishing the replacement route so
+        # tools never fall back to the stable source checkout. A copied branch
+        # is deliberately different: it is a new interactive root, even
+        # though its transcript row has a parent_session_id for history.
+        try:
+            if self._supports_conversation_worktree(new_entry.origin):
+                manager = self._conversation_worktree_manager()
+                if manager is not None:
+                    requested = dict(new_entry.conversation_worktree)
+                    if new_interactive_root:
+                        if requested:
+                            raise ValueError(
+                                "new interactive roots cannot supply an existing worktree binding"
+                            )
+                        binding = manager.bind_new_root_session(
+                            target_session_id, conversation_kind="interactive"
+                        )
+                        if binding is None:
+                            from agent.conversation_worktree import ConversationWorktreeError
 
-            self._entries[session_key] = new_entry
-            self._save()
+                            raise ConversationWorktreeError(
+                                "new interactive conversation worktree did not bind",
+                                phase="create",
+                            )
+                    else:
+                        root_session_id = str(requested.get("root_session_id") or "")
+                        if not root_session_id:
+                            db = self._db
+                            root_session_id = (
+                                db.get_conversation_root(target_session_id)
+                                if db is not None
+                                else target_session_id
+                            )
+                        binding = manager.resolve_existing_session(root_session_id)
+                    if requested and (
+                        binding is None
+                        or Path(str(requested.get("path") or "")).resolve()
+                        != Path(binding.path).resolve()
+                    ):
+                        from agent.conversation_worktree import ConversationWorktreeError
 
-        if self._db and db_end_session_id:
+                        raise ConversationWorktreeError(
+                            "target conversation worktree identity does not match its durable binding",
+                            phase="recovery",
+                        )
+                    if binding is not None:
+                        candidate_root_session_id = str(binding.root_session_id)
+                        candidate_lease_acquired = self._apply_conversation_worktree_binding(
+                            new_entry, binding
+                        )
+
+            lost_race = False
+            concurrent_entry = None
+            with self._lock:
+                self._ensure_loaded_locked()
+                current_entry = self._entries.get(session_key)
+                if current_entry is not old_entry:
+                    lost_race = True
+                    concurrent_entry = current_entry
+                else:
+                    db_end_session_id = old_entry.session_id
+                    self._entries[session_key] = new_entry
+                    try:
+                        self._save()
+                    except Exception:
+                        self._entries[session_key] = old_entry
+                        raise
+        except Exception:
+            if candidate_lease_acquired and candidate_root_session_id:
+                self.reconcile_conversation_root_transition(new_entry, old_entry)
+            raise
+
+        if lost_race:
+            if candidate_lease_acquired and candidate_root_session_id:
+                self.reconcile_conversation_root_transition(
+                    new_entry, concurrent_entry
+                )
+            return concurrent_entry
+
+        if self._db_for_key(session_key) and db_end_session_id:
             try:
                 # Promote (not plain end_session): a stale agent_close /
                 # ws_orphan_reap end on the outgoing session must be upgraded
                 # to the explicit switch boundary, or recovery can resurrect
                 # it over the user's /resume choice (#61220 bug class).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
+                _promote = getattr(self._db_for_key(session_key), "promote_to_session_reset", None)
                 if callable(_promote):
                     _promote(db_end_session_id, "session_switch")
                 else:
-                    self._db.end_session(db_end_session_id, "session_switch")
+                    self._db_for_key(session_key).end_session(db_end_session_id, "session_switch")
             except Exception as e:
                 logger.debug("Session DB end_session failed: %s", e)
 
-        if self._db:
+        if self._db_for_key(session_key):
             try:
-                self._db.reopen_session(target_session_id)
+                self._db_for_key(session_key).reopen_session(target_session_id)
             except Exception as e:
                 logger.debug("Session DB reopen_session failed: %s", e)
             self._record_gateway_session_peer(
@@ -3650,17 +4294,21 @@ class SessionStore:
             entry = self._entries.get(session_key)
             return getattr(entry, "session_id", None) if entry else None
     
-    def append_to_transcript(self, session_id: str, message: Dict[str, Any], skip_db: bool = False) -> None:
-        """Serialize transcript draining across queue migration boundaries."""
-        if not self._db or skip_db:
-            return
+    def _get_transcript_drain_lock(self):
+        """Return the lock that serializes pending-queue drain boundaries."""
         drain_lock = getattr(self, "_transcript_drain_lock", None)
         if drain_lock is None:
             # Compatibility for old in-memory/test instances created via
             # object.__new__ before this field existed.
             drain_lock = threading.RLock()
             self._transcript_drain_lock = drain_lock
-        with drain_lock:
+        return drain_lock
+
+    def append_to_transcript(self, session_id: str, message: Dict[str, Any], skip_db: bool = False) -> None:
+        """Serialize transcript draining across queue migration boundaries."""
+        if not self._db_for_session_id(session_id) or skip_db:
+            return
+        with self._get_transcript_drain_lock():
             reroutes = getattr(self, "_transcript_reroutes", None)
             if reroutes is None:
                 reroutes = {}
@@ -3734,7 +4382,43 @@ class SessionStore:
             try:
                 self._append_transcript_message(session_id, msg)
             except Exception as exc:
-                from hermes_state import CompressionSessionClosedError
+                from hermes_state import CompressionSessionClosedError, StateDbReplacedError
+
+                if isinstance(exc, StateDbReplacedError):
+                    logger.error(
+                        "Session DB was replaced underneath the gateway for %s; "
+                        "stopping SQLite writes and diverting pending "
+                        "transcripts to the on-disk fallback: %s",
+                        session_id, exc,
+                    )
+                    with self._transcript_retry_lock:
+                        remaining = list(self._dirty_transcripts.get(queue_session_id, []))
+                        self._dirty_transcripts.pop(queue_session_id, None)
+                        self._transcript_append_failures.pop(session_id, None)
+                    for dropped in remaining:
+                        try:
+                            from gateway.shutdown_flush import (
+                                spool_dropped_transcript_message,
+                            )
+                            spool_dropped_transcript_message(session_id, dropped)
+                        except Exception:
+                            logger.warning(
+                                "pending fallback failed for replaced "
+                                "state.db transcript on %s",
+                                session_id,
+                                exc_info=True,
+                            )
+                    try:
+                        from hermes_state import divert_session_transcript_jsonl
+                        divert_session_transcript_jsonl(session_id, remaining)
+                    except Exception:
+                        logger.warning(
+                            "JSONL divert failed for replaced state.db "
+                            "transcript on %s",
+                            session_id,
+                            exc_info=True,
+                        )
+                    return
 
                 if isinstance(exc, CompressionSessionClosedError):
                     # Resolve the full continuation chain via the canonical
@@ -3743,13 +4427,38 @@ class SessionStore:
                     # ``get_compression_tip`` returns the input id when no
                     # continuation exists; adopt only a different, still-live
                     # tip, otherwise fail closed as before.
+                    #
+                    # The parent's id IS published in the routing index, so
+                    # its owner is already proven; the continuation's id is
+                    # not published until after the child write succeeds
+                    # (below), so resolving the child by id would miss and
+                    # fall back to the ambient store. Carry the proven handle
+                    # instead of re-deriving it from an id nothing points at
+                    # yet. ``_owner_db`` cannot be None here — the parent
+                    # append above just reached a real DB to raise this.
+                    _owner_key = self._owner_key_for_session_id(session_id)
+                    _owner_db = self._db_for_session_id(session_id)
                     child_id = ""
-                    tip = self._db.get_compression_tip(session_id)
-                    if tip and tip != session_id:
-                        tip_row = self._db.get_session(tip)
-                        if tip_row is not None and tip_row.get("ended_at") is None:
-                            child_id = str(tip)
+                    if _owner_db is not None:
+                        tip = _owner_db.get_compression_tip(session_id)
+                        if tip and tip != session_id:
+                            tip_row = _owner_db.get_session(tip)
+                            if tip_row is not None and tip_row.get("ended_at") is None:
+                                child_id = str(tip)
                     if child_id:
+                        # Record the child's owner BEFORE writing to it. The
+                        # reroute and the _entries update are published only
+                        # after this write succeeds — that ordering is
+                        # load-bearing for backlog order — so an index lookup
+                        # here would miss and fall back to the ambient store,
+                        # which is a live handle and would slip past the
+                        # fail-closed guard.
+                        if _owner_key:
+                            _hints = getattr(self, "_session_owner_hints", None)
+                            if _hints is None:
+                                _hints = {}
+                                self._session_owner_hints = _hints
+                            _hints[child_id] = _owner_key
                         try:
                             self._append_transcript_message(child_id, msg)
                         except Exception as reroute_exc:
@@ -3786,6 +4495,11 @@ class SessionStore:
                                     if entry.session_id == session_id:
                                         entry.session_id = child_id
                                 self._save()
+                            # Routing now points at the child, so the index is
+                            # authoritative again and the hint has no more work.
+                            _hints = getattr(self, "_session_owner_hints", None)
+                            if _hints:
+                                _hints.pop(child_id, None)
                             if not pending:
                                 return
                             msg = pending[0]
@@ -3875,7 +4589,15 @@ class SessionStore:
 
     def _append_transcript_message(self, session_id: str, message: Dict[str, Any]) -> None:
         """Write one transcript row. Caller handles retry queuing."""
-        self._db.append_message(
+        _db = self._db_for_session_id(session_id)
+        if _db is None:
+            # A named profile with no resolvable home yet. Defer instead of
+            # writing the row into the ambient store — the caller queues the
+            # message and a later attempt lands it once the profile exists.
+            raise RuntimeError(
+                f"no owning session store for {session_id}; deferring transcript write"
+            )
+        _db.append_message(
             session_id=session_id,
             role=message.get("role", "unknown"),
             content=message.get("content"),
@@ -3908,22 +4630,28 @@ class SessionStore:
 
     @staticmethod
     def _is_fts_corruption_error(exc: Exception) -> bool:
-        """True if *exc* looks like an FTS index corruption error.
+        """True only when the failure is provably scoped to the FTS index.
 
-        Matches the specific SQLite error strings for malformed disk images
-        and FTS table corruption — not bare ``"fts"`` substrings which match
-        unrelated words like ``"shifts"`` or ``"gifts"``.
+        A generic ``database disk image is malformed`` (bare SQLITE_CORRUPT)
+        can mean structural damage to canonical B-trees, not just the FTS
+        shadow tables — treating it as FTS-only here made the store rebuild
+        the index and retry transcript writes against a structurally corrupt
+        database (#97940). Only errors that name ``messages_fts`` or carry
+        FTS provenance per ``SessionDB._is_fts_write_corruption_error``
+        (``SQLITE_CORRUPT_VTAB`` result code, or explicit ``fts5:`` corrupt
+        structure text) may authorize the one-shot rebuild-and-retry.
+        Everything else falls through to the bounded retry/backoff path.
         """
         text = str(exc).lower()
-        return any(
-            marker in text
-            for marker in (
-                "database disk image is malformed",
-                "malformed database schema",
-                "messages_fts",
-                "no such table: messages_fts",
-            )
-        )
+        if "messages_fts" in text:
+            return True
+        import sqlite3
+
+        from hermes_state import SessionDB
+
+        if isinstance(exc, sqlite3.DatabaseError):
+            return SessionDB._is_fts_write_corruption_error(exc)
+        return False
 
     def _rebuild_fts_once(self) -> bool:
         """Attempt FTS5 ``rebuild`` command once per store lifetime.
@@ -3984,10 +4712,10 @@ class SessionStore:
         when no DB is available (in-memory sessions). Used by the gateway's
         transient-failure dedupe guard (#47237).
         """
-        if not self._db:
+        if not self._db_for_session_id(session_id):
             return False
         try:
-            return self._db.has_platform_message_id(
+            return self._db_for_session_id(session_id).has_platform_message_id(
                 session_id, platform_message_id
             )
         except Exception:
@@ -3999,6 +4727,7 @@ class SessionStore:
         session_id: str,
         messages: List[Dict[str, Any]],
         active_only: bool = False,
+        reject_active_turn_lease: bool = False,
     ) -> bool:
         """Replace the entire transcript for a session with new messages.
 
@@ -4019,16 +4748,26 @@ class SessionStore:
         change on top of a failed write — e.g. /compress repointing the live
         session onto a fresh session_id — must check it so they can surface an
         error instead of silently dropping the conversation.
+
+        ``reject_active_turn_lease`` is for user-initiated rewrites that do not
+        own the cross-process turn lease. It leaves internal rewrite policy
+        unchanged for existing callers unless they opt in explicitly.
         """
-        if not self._db:
+        if not self._db_for_session_id(session_id):
             return True
-        self._clear_dirty_transcript(session_id)
-        try:
-            self._db.replace_messages(session_id, messages, active_only=active_only)
+        with self._get_transcript_drain_lock():
+            try:
+                self._db_for_session_id(session_id).replace_messages(
+                    session_id,
+                    messages,
+                    active_only=active_only,
+                    reject_active_turn_lease=reject_active_turn_lease,
+                )
+            except Exception as e:
+                logger.debug("Failed to rewrite transcript in DB: %s", e)
+                return False
+            self._clear_dirty_transcript(session_id)
             return True
-        except Exception as e:
-            logger.debug("Failed to rewrite transcript in DB: %s", e)
-            return False
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript.
@@ -4044,7 +4783,7 @@ class SessionStore:
         "vanished" (disk=0) even though every message sat healthy under the
         child session.
         """
-        if not self._db:
+        if not self._db_for_session_id(session_id):
             return []
         # Follow the write-side reroute chain (cycle-guarded, same shape as
         # append_to_transcript).
@@ -4056,7 +4795,7 @@ class SessionStore:
         try:
             # Durable successor: a compression child published to state.db
             # survives restart even though the in-memory reroute map doesn't.
-            tip = self._db.get_compression_tip(session_id)
+            tip = self._db_for_session_id(session_id).get_compression_tip(session_id)
             if tip:
                 session_id = tip
         except Exception:
@@ -4066,7 +4805,7 @@ class SessionStore:
             # user;user wedge (e.g. a turn that persisted no assistant row)
             # would otherwise re-trigger the pre-request repair on every
             # request forever — heal it once at the restore boundary.
-            return self._db.get_messages_as_conversation(
+            return self._db_for_session_id(session_id).get_messages_as_conversation(
                 session_id, repair_alternation=True
             )
         except Exception as e:
@@ -4080,7 +4819,13 @@ class SessionStore:
             )
             return []
 
-    def rewind_session(self, session_id: str, n: int = 1) -> Optional[Dict[str, Any]]:
+    def rewind_session(
+        self,
+        session_id: str,
+        n: int = 1,
+        *,
+        require_retryable_composite: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """Back up ``n`` user turns via soft-delete, keeping rows for audit.
 
         Unlike :meth:`rewrite_transcript` (a hard replace used by /retry),
@@ -4091,47 +4836,87 @@ class SessionStore:
         Returns a dict ``{"rewound_count", "turns_undone", "target_text"}`` on
         success, or ``None`` if there's no DB or no user message to back up to.
         ``n`` clamps to the oldest user turn when it exceeds the turn count.
+        ``require_retryable_composite`` is the gateway ``/retry`` guard: the
+        selected current turn must still be a composite carrier, and its live
+        payload must be losslessly replayable as text before anything changes.
         """
-        if not self._db:
+        if not self._db_for_session_id(session_id):
             return None
-        self._clear_dirty_transcript(session_id)
-        if n < 1:
-            n = 1
-        try:
-            recents = self._db.list_recent_user_messages(session_id, limit=max(n, 10))
-        except Exception as e:
-            logger.debug("rewind_session: failed to list user messages: %s", e)
-            return None
-        if not recents:
-            return None
-        target_idx = min(n - 1, len(recents) - 1)
-        target_id = recents[target_idx]["id"]
-        try:
-            result = self._db.rewind_to_message(session_id, target_id)
-        except ValueError as e:
-            logger.debug("rewind_session: %s", e)
-            return None
-        except Exception as e:
-            logger.debug("rewind_session: rewind_to_message failed: %s", e)
-            return None
-        target_msg = result.get("target_message") or {}
-        content = target_msg.get("content") or ""
-        if isinstance(content, list):
-            parts = [
-                p.get("text", "")
-                for p in content
-                if isinstance(p, dict) and p.get("type") == "text"
-            ]
-            target_text = "\n".join(t for t in parts if t)
-        elif isinstance(content, str):
-            target_text = content
-        else:
-            target_text = ""
-        return {
-            "rewound_count": result.get("rewound_count", 0),
-            "turns_undone": target_idx + 1,
-            "target_text": target_text,
-        }
+        with self._get_transcript_drain_lock():
+            if n < 1:
+                n = 1
+            from agent.context_compressor import (
+                retryable_user_text,
+                split_user_originated_turn,
+                user_originated_turn_view,
+            )
+
+            try:
+                expected_active_ids = self._db_for_session_id(session_id).get_active_message_ids(session_id)
+                durable = self._db_for_session_id(session_id).get_messages_as_conversation(
+                    session_id,
+                    include_row_ids=True,
+                )
+                user_indices = [
+                    index
+                    for index, message in enumerate(durable)
+                    if user_originated_turn_view(message) is not None
+                ]
+                if not user_indices:
+                    return None
+                turns_undone = min(n, len(user_indices))
+                target = durable[user_indices[-turns_undone]]
+                target_id = target.get("_row_id")
+                if not isinstance(target_id, int):
+                    return None
+                handoff, target_view = split_user_originated_turn(target)
+                if target_view is None:
+                    return None
+                if require_retryable_composite and handoff is None:
+                    return None
+            except Exception as e:
+                logger.debug("rewind_session: failed to resolve canonical target: %s", e)
+                return None
+            if require_retryable_composite:
+                # Keep replay-policy failures distinct from persistence errors
+                # so /retry can explain why the selected carrier is unsafe.
+                target_text = retryable_user_text(target_view.get("content"))
+            try:
+                result = self._db_for_session_id(session_id).rewind_to_message(
+                    session_id,
+                    target_id,
+                    preserve_compaction_handoff=handoff is not None,
+                    expected_active_ids=expected_active_ids,
+                    expected_target_content=target_view.get("content"),
+                )
+            except ValueError as e:
+                logger.debug("rewind_session: %s", e)
+                return None
+            except Exception as e:
+                logger.debug("rewind_session: rewind_to_message failed: %s", e)
+                return None
+            self._clear_dirty_transcript(session_id)
+            # ``target_view`` is the canonical live projection of the physical DB
+            # row. For a composite carrier, the raw target contains the historical
+            # summary wrapper and must never be echoed back as the editable prompt.
+            if not require_retryable_composite:
+                content = target_view.get("content") or ""
+                if isinstance(content, list):
+                    parts = [
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    ]
+                    target_text = "\n".join(t for t in parts if t)
+                elif isinstance(content, str):
+                    target_text = content
+                else:
+                    target_text = ""
+            return {
+                "rewound_count": result.get("rewound_count", 0),
+                "turns_undone": turns_undone,
+                "target_text": target_text,
+            }
 
 
 def build_session_context(
@@ -4168,5 +4953,6 @@ def build_session_context(
         context.session_id = session_entry.session_id
         context.created_at = session_entry.created_at
         context.updated_at = session_entry.updated_at
+        context.cwd = session_entry.cwd or ""
     
     return context
