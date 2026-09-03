@@ -6,6 +6,8 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from hermes_cli.github_identity import GitHubAutomationIdentity, GitHubIdentityError
+
 from .git_stack import GitStackRunner
 from .github_client import GitHubClient, GitHubClientError
 from .policy import PluginPolicy, codex_review_trigger_comment
@@ -36,7 +38,9 @@ def _ordered(entries: tuple[StackEntry, ...], base: str) -> tuple[StackEntry, ..
 class StackController:
     def __init__(self, policy: PluginPolicy, *, github: GitHubClient | None = None) -> None:
         self.policy = policy
-        self.github = github or GitHubClient()
+        if github is None:
+            raise ValueError("StackController requires an identity-bound GitHub client")
+        self.github = github
         self.store = StackStore(get_default_hermes_root() / "github-pr-feedback" / "stacks")
 
     def create(
@@ -76,7 +80,16 @@ class StackController:
 
     def refresh(self, repository: str, stack_id: str, *, repository_path: Path) -> StackManifest:
         manifest = self.store.load(repository, stack_id)
-        runner = GitStackRunner(repository_path)
+        identity = self.policy.github_identity
+        if identity is None:
+            raise ValueError("GitHub automation identity is not configured")
+        try:
+            git_environment = GitHubAutomationIdentity(
+                identity.expected_login, identity.token_env
+            ).git_command_environment()
+        except GitHubIdentityError as error:
+            raise ValueError("GitHub automation credential is unavailable") from error
+        runner = GitStackRunner(repository_path, environment=git_environment)
         entries: list[StackEntry] = []
         for entry in _ordered(manifest.entries, manifest.base_branch):
             head = runner.branch_head(entry.branch)
