@@ -306,8 +306,13 @@ class MergeController:
             claimed_at=self._now(),
         )
         if lease is None:
+            blockers = (
+                ("merge_lease_unavailable",)
+                if self._ledger.is_merge_enrolled(self._policy.repository, number)
+                else ("merge_pr_not_enrolled",)
+            )
             blocked = MergeDecision(
-                False, ("merge_lease_unavailable",), None, first.snapshot_digest
+                False, blockers, None, first.snapshot_digest
             )
             return MergeRunResult(blocked, None)
         second_snapshot = self._source.snapshot(number)
@@ -320,7 +325,23 @@ class MergeController:
             )
             return MergeRunResult(raced, None)
         assert second.method is not None
-        write_error: Exception | None = None
+        authorized = self._ledger.authorize_merge_write(
+            lease, updated_at=self._now()
+        )
+        if not authorized:
+            self._ledger.finish_merge_lease(
+                lease,
+                status="failed",
+                updated_at=self._now(),
+                error="merge_pr_not_enrolled",
+            )
+            blocked = MergeDecision(
+                False,
+                ("merge_pr_not_enrolled",),
+                None,
+                second.snapshot_digest,
+            )
+            return MergeRunResult(blocked, None)
         try:
             self._github.merge_pull_request(
                 self._policy.repository,
@@ -328,8 +349,10 @@ class MergeController:
                 second_snapshot.pull_request.head_sha,
                 method=second.method,
             )
-        except GitHubClientError as error:
-            write_error = error
+        except GitHubClientError:
+            # A transport error cannot prove that GitHub rejected the write.
+            # Canonical readback below remains the only completion authority.
+            pass
         try:
             readback = self._github.get_merge_state(self._policy.repository, number)
         except GitHubClientError as error:
@@ -338,6 +361,7 @@ class MergeController:
                 status="verification_required",
                 updated_at=self._now(),
                 error=type(error).__name__,
+                expected_status="verification_required",
             )
             blocked = MergeDecision(
                 False, ("merge_verification_required",), None, second.snapshot_digest
@@ -352,9 +376,10 @@ class MergeController:
         ):
             self._ledger.finish_merge_lease(
                 lease,
-                status="verification_required" if write_error else "failed",
+                status="verification_required",
                 updated_at=self._now(),
                 error="canonical readback did not confirm the merge",
+                expected_status="verification_required",
             )
             blocked = MergeDecision(
                 False, ("merge_verification_required",), None, second.snapshot_digest
@@ -374,7 +399,11 @@ class MergeController:
             executor=self._owner,
         )
         self._ledger.finish_merge_lease(
-            lease, status="completed", updated_at=self._now(), receipt=receipt
+            lease,
+            status="completed",
+            updated_at=self._now(),
+            receipt=receipt,
+            expected_status="verification_required",
         )
         return MergeRunResult(second, receipt)
 
@@ -432,12 +461,17 @@ class CanonicalMergeEvidenceSource:
     """Build merge evidence only from canonical GitHub reads and typed ledger state."""
 
     def __init__(
-        self, plugin_policy: PluginPolicy, github: GitHubClient, ledger: FeedbackLedger
+        self,
+        plugin_policy: PluginPolicy,
+        github: GitHubClient,
+        ledger: FeedbackLedger,
+        merge_policy: MergeMaintainerPolicy | None = None,
     ) -> None:
-        if plugin_policy.merge_maintainer is None:
+        selected_policy = merge_policy or plugin_policy.merge_maintainer
+        if selected_policy is None:
             raise ValueError("merge maintainer is disabled")
         self._plugin_policy = plugin_policy
-        self._merge_policy = plugin_policy.merge_maintainer
+        self._merge_policy = selected_policy
         self._github = github
         self._ledger = ledger
 

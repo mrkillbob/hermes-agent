@@ -192,6 +192,10 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
         merge_maintainer = None
         release_maintenance = None
 
+        @staticmethod
+        def merge_policies():
+            return ()
+
     class Repair:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
@@ -245,8 +249,12 @@ def _run_scan_with_primary_result(
     class Policy:
         enabled = True
         repair_steward = object()
-        merge_maintainer = object()
+        merge_maintainer = None
         release_maintenance = object()
+
+        @staticmethod
+        def merge_policies():
+            return (object(), object())
 
     class Primary:
         def scan(self):
@@ -334,6 +342,84 @@ def test_scan_does_not_defer_secondary_fanout_for_read_cap_without_ci_backlog(
     assert order == ["primary", "repair", "merge", "release"]
     assert "required_local_ci_backlog" not in payload
     assert "deferred" not in payload
+
+
+def test_explicit_merge_scan_recognizes_multi_repository_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _merge_scan
+
+    class Policy:
+        merge_maintainer = None
+
+        @staticmethod
+        def merge_policies():
+            return (object(), object())
+
+    class Ledger:
+        @classmethod
+        def for_current_profile(cls):
+            return cls()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._load_policy_from_context", lambda _ctx: Policy()
+    )
+    monkeypatch.setattr("github_pr_feedback.cli.FeedbackLedger", Ledger)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_merge_scan",
+        lambda *_args: {"status": "ok", "processed": 0},
+    )
+
+    assert _merge_scan(object()) == 0
+    assert json.loads(capsys.readouterr().out) == {"processed": 0, "status": "ok"}
+
+
+def test_doctor_checks_assignees_for_every_merge_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from github_pr_feedback.cli import DoctorProbe
+
+    seen: set[str] = set()
+
+    class Runner:
+        @staticmethod
+        def which(executable: str) -> str:
+            return f"/opt/{executable}"
+
+    class Policy:
+        assignee = "fallback"
+        assignee_rules = ()
+        routing_rules = ()
+        local_ci_audit = None
+        repair_steward = None
+        release_maintenance = None
+        board = "repairs"
+        targets = {}
+
+        @staticmethod
+        def merge_policies():
+            return (
+                SimpleNamespace(assignee="hermes-maintainer"),
+                SimpleNamespace(assignee="luna-maintainer"),
+            )
+
+    probe = DoctorProbe(tmp_path, Runner(), hermes_source_root=tmp_path)
+    monkeypatch.setattr(probe, "_hermes_executable_ready", lambda _path: True)
+    monkeypatch.setattr(probe, "_board_exists", lambda _board: True)
+    monkeypatch.setattr(
+        probe, "_assignee_exists", lambda assignee: not seen.add(assignee)
+    )
+    monkeypatch.setattr(probe, "_ledger_access", lambda _path: True)
+    monkeypatch.setattr(probe, "_repositories_ready", lambda *_args: True)
+
+    checks = probe.checks(Policy(), tmp_path / "ledger.sqlite3")  # type: ignore[arg-type]
+
+    assert checks["assignee"] == "ok"
+    assert {"hermes-maintainer", "luna-maintainer"}.issubset(seen)
 
 
 def test_scan_payload_reports_catalogue_deferred_separately_from_skips() -> None:
@@ -1058,7 +1144,7 @@ def test_merge_maintainer_task_has_no_model_merge_authority(tmp_path: Path) -> N
     )
     decision = MergeDecision(False, ("ci_receipt_missing",), None, "d" * 64)
 
-    task = _merge_maintainer_task(loaded, pull, decision)
+    task = _merge_maintainer_task(loaded, loaded.merge_policies()[0], pull, decision)
 
     assert task.assignee == "pr-merge-maintainer"
     assert task.initial_status == "running"
@@ -1069,6 +1155,42 @@ def test_merge_maintainer_task_has_no_model_merge_authority(tmp_path: Path) -> N
     assert "not a blocker for this observability card" in task.instructions
     assert "immediately call kanban_complete" in task.instructions
     assert "kanban_block only if kanban_complete" in task.instructions
+
+
+def test_report_only_task_uses_the_selected_multi_repository_policy(
+    tmp_path: Path,
+) -> None:
+    from github_pr_feedback.cli import _merge_maintainer_task
+
+    selected = SimpleNamespace(
+        repository="mrkillbob/luna-bot",
+        assignee="luna-merge-maintainer",
+        report_only=True,
+    )
+    plugin_policy = SimpleNamespace(
+        targets={
+            "mrkillbob/luna-bot": SimpleNamespace(local_path=tmp_path),
+        },
+        board="repairs",
+    )
+    pull = PullRequest(
+        985,
+        "OPEN",
+        "mrkillbob/luna-bot",
+        "mrkillbob/luna-bot",
+        "mrkillbob",
+        "codex/fix",
+        "a" * 40,
+    )
+    decision = MergeDecision(True, (), "squash", "d" * 64)
+
+    task = _merge_maintainer_task(
+        plugin_policy, selected, pull, decision  # type: ignore[arg-type]
+    )
+
+    assert task.assignee == "luna-merge-maintainer"
+    assert task.evidence["repository"] == "mrkillbob/luna-bot"
+    assert task.evidence["report_only"] is True
 
 
 def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
@@ -1107,6 +1229,15 @@ def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
                     "codex/fix",
                     "a" * 40,
                 ),
+                PullRequest(
+                    18,
+                    "OPEN",
+                    "acme/widgets",
+                    "acme/widgets",
+                    "owner",
+                    "codex/not-enrolled",
+                    "b" * 40,
+                ),
             )
 
         def __getattr__(self, name: str):
@@ -1120,6 +1251,12 @@ def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
 
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     try:
+        ledger.enroll_merge_pr(
+            "acme/widgets",
+            17,
+            enrolled_at=datetime(2026, 8, 25, tzinfo=UTC),
+            enrolled_by="operator",
+        )
         result = _run_merge_scan(
             policy,
             ledger,
@@ -1179,6 +1316,9 @@ def test_merge_scan_reports_failed_exact_head_receipt_as_not_passing(
         status = "failed"
 
     class FailedLedger:
+        def enrolled_merge_pr_numbers(self, repository: str):
+            return (17,)
+
         def latest_ci_receipt(self, *args, **kwargs):
             return FailedReceipt()
 
@@ -1245,6 +1385,9 @@ def test_merge_scan_does_not_hide_failed_receipt_behind_manifest_mismatch(
         status = "failed"
 
     class MismatchedLedger:
+        def enrolled_merge_pr_numbers(self, repository: str):
+            return (17,)
+
         def latest_ci_receipt(self, *args, **kwargs):
             return None
 
@@ -1317,6 +1460,9 @@ def test_merge_scan_reconciles_verification_required_pr_that_is_no_longer_open(
             return ()
 
     class Ledger:
+        def enrolled_merge_pr_numbers(self, repository: str):
+            return ()
+
         def verification_required_merge_numbers(self, repository: str):
             return (149,)
 
@@ -1351,6 +1497,44 @@ def test_merge_scan_reconciles_verification_required_pr_that_is_no_longer_open(
             "merge_commit_oid": "c" * 40,
         }
     ]
+
+
+def test_single_pr_merge_handoff_requires_explicit_enrollment(tmp_path: Path) -> None:
+    from github_pr_feedback.cli import (
+        _load_policy_from_context,
+        _run_single_pr_merge_handoff,
+    )
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": False,
+        "post_merge": {"enabled": False},
+    }
+    policy = _load_policy_from_context(RecordingContext(settings))
+
+    class Ledger:
+        def is_merge_enrolled(self, repository: str, pr_number: int) -> bool:
+            assert (repository, pr_number) == ("acme/widgets", 17)
+            return False
+
+    result = _run_single_pr_merge_handoff(
+        policy,
+        Ledger(),  # type: ignore[arg-type]
+        17,
+        github=object(),  # type: ignore[arg-type]
+        kanban=object(),  # type: ignore[arg-type]
+    )
+
+    assert result == {"status": "blocked", "blockers": ["merge_pr_not_enrolled"]}
 
 
 def test_doctor_read_only_verifies_every_runtime_dependency(
@@ -1761,6 +1945,10 @@ def test_scan_and_retry_exit_nonzero_and_report_degraded_on_incomplete_work(
             repair_steward = None
             merge_maintainer = None
             release_maintenance = None
+
+            @staticmethod
+            def merge_policies():
+                return ()
 
         class Lock:
             def __enter__(self) -> bool:
@@ -2191,6 +2379,124 @@ def enabled_settings(repository: Path) -> dict[str, object]:
         "not_before": "2026-08-24T00:00:00Z",
         "assignee": "repair-agent",
         "board": "repairs",
+    }
+
+
+def test_merge_enable_and_disable_persist_operator_enrollment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _merge_disable, _merge_enable
+    from github_pr_feedback.github_client import PullRequestMergeState
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": False,
+        "post_merge": {"enabled": False},
+    }
+    state = PullRequestMergeState(
+        repository="acme/widgets",
+        number=17,
+        state="OPEN",
+        is_draft=False,
+        mergeable=True,
+        merge_state_status="CLEAN",
+        base_branch="stable",
+        base_sha="b" * 40,
+        head_repository="acme/widgets",
+        author_login="owner",
+        head_ref_name="codex/fix",
+        head_sha="a" * 40,
+        merged=False,
+        merge_commit_oid=None,
+    )
+
+    class GitHub:
+        def get_merge_state(self, repository: str, pr_number: int):
+            assert (repository, pr_number) == ("acme/widgets", 17)
+            return state
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    monkeypatch.setenv("USER", "operator")
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: GitHub())
+    context = RecordingContext(settings)
+    args = argparse.Namespace(repository="acme/widgets", pr_number=17)
+
+    assert _merge_enable(context, args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "enrolled"
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == (17,)
+    finally:
+        ledger.close()
+
+    assert _merge_disable(context, args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "unenrolled"
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == ()
+    finally:
+        ledger.close()
+
+
+def test_merge_disable_reports_in_progress_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _merge_disable
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": False,
+        "post_merge": {"enabled": False},
+    }
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        ledger.enroll_merge_pr(
+            "acme/widgets", 17, enrolled_at=datetime.now(UTC), enrolled_by="operator"
+        )
+        lease = ledger.claim_merge_lease(
+            "acme/widgets",
+            17,
+            "a" * 40,
+            owner="controller",
+            claimed_at=datetime.now(UTC),
+        )
+        assert lease is not None
+        assert ledger.authorize_merge_write(lease, updated_at=datetime.now(UTC))
+    finally:
+        ledger.close()
+
+    result = _merge_disable(
+        RecordingContext(settings),
+        argparse.Namespace(repository="acme/widgets", pr_number=17),
+    )
+
+    assert result == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "merge_in_progress",
+        "status": "unavailable",
     }
 
 

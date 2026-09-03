@@ -20,7 +20,7 @@ from github_pr_feedback.github_client import (
     RepositoryMergePolicy,
     ReviewState,
 )
-from github_pr_feedback.ledger import FeedbackLedger
+from github_pr_feedback.ledger import FeedbackLedger, LedgerStateError
 from github_pr_feedback.merge_controller import (
     CanonicalMergeEvidenceSource,
     MergeController,
@@ -106,6 +106,14 @@ def eligible_snapshot(**overrides: object) -> MergeSnapshot:
     }
     values.update(overrides)
     return MergeSnapshot(**values)
+
+
+def enrolled_ledger(tmp_path: Path) -> FeedbackLedger:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.enroll_merge_pr(
+        "acme/widgets", 17, enrolled_at=NOW, enrolled_by="operator"
+    )
+    return ledger
 
 
 @pytest.mark.parametrize(
@@ -296,15 +304,19 @@ class RecordingGitHub:
         readbacks: list[PullRequestMergeState | Exception],
         *,
         merge_error: Exception | None = None,
+        before_merge_return=None,
     ) -> None:
         self.readbacks = readbacks
         self.merge_error = merge_error
+        self.before_merge_return = before_merge_return
         self.merge_calls: list[tuple[str, int, str, str]] = []
 
     def merge_pull_request(
         self, repository: str, number: int, head_sha: str, *, method: str
     ) -> None:
         self.merge_calls.append((repository, number, head_sha, method))
+        if self.before_merge_return is not None:
+            self.before_merge_return()
         if self.merge_error is not None:
             raise self.merge_error
 
@@ -407,7 +419,7 @@ def test_merge_controller_rereads_under_lease_and_stops_on_a_race(tmp_path: Path
     first = eligible_snapshot()
     raced = replace(first, review_state=ReviewState("CHANGES_REQUESTED", 0))
     github = RecordingGitHub([])
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger = enrolled_ledger(tmp_path)
     controller = MergeController(
         policy(), SnapshotSource([first, raced]), github, ledger, owner="test", now=lambda: NOW
     )
@@ -426,7 +438,7 @@ def test_prewrite_failed_lease_can_retry_after_the_gate_is_cleared(tmp_path: Pat
     github = RecordingGitHub(
         [pr_state(state="CLOSED", merged=True, merge_commit_oid=MERGE_SHA)]
     )
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger = enrolled_ledger(tmp_path)
     controller = MergeController(
         policy(),
         SnapshotSource([snapshot, raced, snapshot, snapshot]),
@@ -453,7 +465,7 @@ def test_merge_controller_writes_once_and_records_canonical_readback(tmp_path: P
         state="CLOSED", merged=True, merge_commit_oid=MERGE_SHA, mergeable=True
     )
     github = RecordingGitHub([readback])
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger = enrolled_ledger(tmp_path)
     controller = MergeController(
         policy(),
         SnapshotSource([snapshot, snapshot]),
@@ -480,7 +492,7 @@ def test_ambiguous_merge_write_uses_readback_and_never_blindly_retries(tmp_path:
         [pr_state(state="CLOSED", merged=True, merge_commit_oid=MERGE_SHA)],
         merge_error=GitHubClientError("ambiguous transport failure"),
     )
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger = enrolled_ledger(tmp_path)
     controller = MergeController(
         policy(),
         SnapshotSource([snapshot, snapshot]),
@@ -498,6 +510,95 @@ def test_ambiguous_merge_write_uses_readback_and_never_blindly_retries(tmp_path:
     ledger.close()
 
 
+def test_successful_merge_command_with_unconfirmed_readback_is_never_resent(
+    tmp_path: Path,
+) -> None:
+    snapshot = eligible_snapshot()
+    github = RecordingGitHub([pr_state(), pr_state()])
+    ledger = enrolled_ledger(tmp_path)
+    controller = MergeController(
+        policy(),
+        SnapshotSource([snapshot, snapshot, snapshot, snapshot]),
+        github,
+        ledger,
+        owner="test",
+        now=lambda: NOW,
+    )
+
+    first = controller.run(17)
+    second = controller.run(17)
+
+    assert first.decision.blockers == ("merge_verification_required",)
+    assert second.decision.blockers == ("merge_verification_required",)
+    assert github.merge_calls == [("acme/widgets", 17, HEAD_SHA, "squash")]
+    assert ledger.verification_required_merge_numbers("acme/widgets") == (17,)
+    ledger.close()
+
+
+def test_merge_controller_rechecks_enrollment_after_lease_before_write(
+    tmp_path: Path,
+) -> None:
+    snapshot = eligible_snapshot()
+    github = RecordingGitHub([])
+    ledger = enrolled_ledger(tmp_path)
+
+    class RevokingSource:
+        calls = 0
+
+        def snapshot(self, number: int) -> MergeSnapshot:
+            self.calls += 1
+            if self.calls == 2:
+                ledger.unenroll_merge_pr("acme/widgets", number)
+            return snapshot
+
+    controller = MergeController(
+        policy(), RevokingSource(), github, ledger, owner="test", now=lambda: NOW
+    )
+
+    result = controller.run(17)
+
+    assert result.receipt is None
+    assert result.decision.blockers == ("merge_pr_not_enrolled",)
+    assert github.merge_calls == []
+    ledger.close()
+
+
+def test_merge_write_state_rejects_disable_without_locking_unrelated_writers(
+    tmp_path: Path,
+) -> None:
+    snapshot = eligible_snapshot()
+    database = tmp_path / "ledger.sqlite3"
+    ledger = enrolled_ledger(tmp_path)
+    disable_errors: list[str] = []
+
+    def concurrent_writes() -> None:
+        concurrent = FeedbackLedger(database)
+        try:
+            with pytest.raises(LedgerStateError) as raised:
+                concurrent.unenroll_merge_pr("acme/widgets", 17)
+            disable_errors.append(str(raised.value))
+            concurrent.enroll_merge_pr(
+                "other/widgets", 22, enrolled_at=NOW, enrolled_by="operator"
+            )
+        finally:
+            concurrent.close()
+
+    github = RecordingGitHub(
+        [pr_state(state="CLOSED", merged=True, merge_commit_oid=MERGE_SHA)],
+        before_merge_return=concurrent_writes,
+    )
+    controller = MergeController(
+        policy(), SnapshotSource([snapshot, snapshot]), github, ledger, owner="test", now=lambda: NOW
+    )
+
+    result = controller.run(17)
+
+    assert result.receipt is not None
+    assert disable_errors == ["merge_in_progress"]
+    assert ledger.enrolled_merge_pr_numbers("other/widgets") == (22,)
+    ledger.close()
+
+
 def test_verification_required_attempt_reconciles_canonical_merged_truth_without_rewrite(
     tmp_path: Path,
 ) -> None:
@@ -510,7 +611,7 @@ def test_verification_required_attempt_reconciles_canonical_merged_truth_without
         )
     )
     github = RecordingGitHub([GitHubClientError("readback unavailable")])
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger = enrolled_ledger(tmp_path)
     controller = MergeController(
         policy(),
         SnapshotSource([snapshot, snapshot, merged_snapshot]),

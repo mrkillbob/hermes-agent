@@ -314,6 +314,56 @@ def test_enabled_policy_parses_strict_merge_and_post_merge_settings(
     )
 
 
+def test_merge_enrollment_migrates_persists_and_is_repository_scoped(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "ledger.sqlite3"
+    legacy = sqlite3.connect(database)
+    legacy.execute("CREATE TABLE legacy_receipt (receipt_id TEXT PRIMARY KEY)")
+    legacy.close()
+
+    ledger = FeedbackLedger(database)
+    try:
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == ()
+        ledger.enroll_merge_pr(
+            "acme/widgets",
+            17,
+            enrolled_at=datetime(2026, 8, 25, tzinfo=UTC),
+            enrolled_by="operator",
+        )
+        assert ledger.is_merge_enrolled("acme/widgets", 17)
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == (17,)
+        assert ledger.enrolled_merge_pr_numbers("other/widgets") == ()
+    finally:
+        ledger.close()
+
+    reopened = FeedbackLedger(database)
+    try:
+        assert reopened.enrolled_merge_pr_numbers("acme/widgets") == (17,)
+        reopened.unenroll_merge_pr("acme/widgets", 17)
+        assert not reopened.is_merge_enrolled("acme/widgets", 17)
+    finally:
+        reopened.close()
+
+
+def test_merge_lease_claim_fails_closed_without_current_enrollment(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    try:
+        assert (
+            ledger.claim_merge_lease(
+                "acme/widgets",
+                17,
+                "a" * 40,
+                owner="controller",
+                claimed_at=datetime(2026, 8, 25, tzinfo=UTC),
+            )
+            is None
+        )
+        assert ledger.merge_status_counts()["claimed"] == 0
+    finally:
+        ledger.close()
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
