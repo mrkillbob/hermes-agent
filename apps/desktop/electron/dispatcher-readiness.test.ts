@@ -58,25 +58,33 @@ test('starts one supervised gateway when the dispatcher is offline and waits for
   ])
 })
 
-test.each(['disabled', 'unknown'])('blocks startup without starting a gateway for %s dispatcher state', async status => {
+test('allows Desktop startup when the embedded dispatcher is disabled', async () => {
+  const calls: string[] = []
+
+  const result = await ensureKanbanDispatcherReady('http://127.0.0.1:9000', 'session-token', async url => {
+    calls.push(url)
+    return { status: 'disabled', ready: false, gateway_pid: null, message: 'dispatcher is disabled' }
+  })
+
+  assert.equal(result.status, 'disabled')
+  assert.equal(result.ready, false)
+  assert.deepEqual(calls, ['http://127.0.0.1:9000/api/plugins/kanban/dispatcher-readiness'])
+})
+
+test('blocks startup without starting a gateway for unknown dispatcher state', async () => {
   const calls: string[] = []
 
   await assert.rejects(
     ensureKanbanDispatcherReady('http://127.0.0.1:9000', 'session-token', async url => {
       calls.push(url)
-      return {
-        status,
-        ready: false,
-        gateway_pid: null,
-        message: `dispatcher is ${status}`
-      }
+      return { status: 'unknown', ready: false, gateway_pid: null, message: 'dispatcher is unknown' }
     }),
     error => {
       assert.ok(error instanceof DispatcherReadinessError)
       assert.equal(error.code, 'dispatcher-offline')
       assert.equal(error.blocking, true)
       assert.match(error.message, /KANBAN_DISPATCHER_OFFLINE/)
-      assert.match(error.message, new RegExp(status))
+      assert.match(error.message, /unknown/)
 
       return true
     }

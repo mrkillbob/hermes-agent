@@ -68,6 +68,13 @@ export async function ensureKanbanDispatcherReady(
     return result as DispatcherReadiness
   }
 
+  // The standalone daemon is a supported configuration.  A disabled
+  // embedded dispatcher is an optional capability, not a failed Desktop
+  // backend boot; callers can still use chat and the WebSocket normally.
+  if (result.status === 'disabled') {
+    return result as DispatcherReadiness
+  }
+
   if (result.status !== 'offline') {
     throw new DispatcherReadinessError(readinessDetail(result))
   }
