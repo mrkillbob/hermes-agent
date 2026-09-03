@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 
 from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
+from hermes_cli.worktree_base import resolve_worktree_base
 
 _GIT_TIMEOUT = 30
 _GH_TIMEOUT = 30
@@ -809,6 +810,11 @@ def worktree_add(cwd: str, options: dict) -> dict:
             # checkout -b new` — so suppress it (parity with the Electron op).
             args.append("--no-track")
         args.append(base)
+    else:
+        base, _base_label = resolve_worktree_base(
+            root, prefer_current_upstream=False
+        )
+        args.extend(["--no-track", base])
     code, _, err = _git(root, args)
     if code != 0:
         if "already exists" in (err or "").lower():

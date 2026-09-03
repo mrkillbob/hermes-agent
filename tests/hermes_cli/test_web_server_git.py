@@ -194,3 +194,33 @@ def test_worktree_add_from_origin_base_does_not_track(client, repo_with_remote):
         cwd=repo_with_remote, capture_output=True, text=True,
     )
     assert probe.returncode != 0
+
+
+def test_worktree_add_without_base_uses_remote_default(client, repo_with_remote):
+    main_sha = subprocess.run(
+        ["git", "rev-parse", "origin/main"],
+        cwd=repo_with_remote,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(repo_with_remote, "switch", "-c", "parked-feature")
+    (repo_with_remote / "feature-only.txt").write_text("feature\n", encoding="utf-8")
+    _git(repo_with_remote, "add", "feature-only.txt")
+    _git(repo_with_remote, "commit", "-m", "feature only")
+
+    added = client.post(
+        "/api/git/worktree/add",
+        json={"path": str(repo_with_remote), "branch": "fresh-default"},
+    ).json()
+
+    tree = Path(added["path"])
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == main_sha
+    assert not (tree / "feature-only.txt").exists()
