@@ -1763,6 +1763,13 @@ class FeedbackLedger:
         ):
             raise ValueError("merge enrollment identity is invalid")
         with self._transaction():
+            in_progress = self._connection.execute(
+                "SELECT 1 FROM merge_attempts WHERE repository = ? AND pr_number = ? "
+                "AND status = 'verification_required' LIMIT 1",
+                (repository, pr_number),
+            ).fetchone()
+            if in_progress is not None:
+                raise LedgerStateError("merge_in_progress")
             self._connection.execute(
                 "DELETE FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
                 (repository, pr_number),
@@ -1913,28 +1920,31 @@ class FeedbackLedger:
                 return None
         return MergeLease(repository, pr_number, head_sha, owner, claimed_at)
 
-    @contextmanager
-    def authorized_merge_write(self, lease: MergeLease) -> Iterator[bool]:
-        """Serialize enrollment revocation against one governed GitHub merge write."""
+    def authorize_merge_write(
+        self, lease: MergeLease, *, updated_at: datetime
+    ) -> bool:
+        """Commit exact-lease authorization before releasing SQLite for the network write."""
 
+        updated_at = _aware_utc(updated_at, "updated_at")
         with self._transaction():
             authorized = self._connection.execute(
-                "SELECT 1 FROM merge_attempts AS attempts "
-                "JOIN merge_enrollments AS enrollments "
-                "ON enrollments.repository = attempts.repository "
-                "AND enrollments.pr_number = attempts.pr_number "
-                "WHERE attempts.repository = ? AND attempts.pr_number = ? "
-                "AND attempts.head_sha = ? AND attempts.status = 'claimed' "
-                "AND attempts.owner = ? AND attempts.claimed_at = ?",
+                "UPDATE merge_attempts SET status = 'verification_required', updated_at = ?, "
+                "last_error = 'merge_write_authorized' WHERE repository = ? AND pr_number = ? "
+                "AND head_sha = ? AND status = 'claimed' AND owner = ? AND claimed_at = ? "
+                "AND EXISTS (SELECT 1 FROM merge_enrollments WHERE repository = ? "
+                "AND pr_number = ?)",
                 (
+                    updated_at.isoformat(),
                     lease.repository,
                     lease.pr_number,
                     lease.head_sha,
                     lease.owner,
                     lease.claimed_at.isoformat(),
+                    lease.repository,
+                    lease.pr_number,
                 ),
-            ).fetchone()
-            yield authorized is not None
+            )
+            return authorized.rowcount == 1
 
     def finish_merge_lease(
         self,
@@ -1944,6 +1954,7 @@ class FeedbackLedger:
         updated_at: datetime,
         receipt: object | None = None,
         error: str | None = None,
+        expected_status: str = "claimed",
     ) -> None:
         from .merge_controller import MergeReceipt
 
@@ -1951,6 +1962,8 @@ class FeedbackLedger:
             raise ValueError("merge terminal status is invalid")
         if status == "completed" and not isinstance(receipt, MergeReceipt):
             raise ValueError("completed merge requires a typed receipt")
+        if expected_status not in {"claimed", "verification_required"}:
+            raise ValueError("merge expected status is invalid")
         updated_at = _aware_utc(updated_at, "updated_at")
         receipt_json = (
             json.dumps(receipt.to_payload(), sort_keys=True, separators=(",", ":"))
@@ -1961,7 +1974,7 @@ class FeedbackLedger:
             result = self._connection.execute(
                 "UPDATE merge_attempts SET status = ?, updated_at = ?, receipt_json = ?, "
                 "last_error = ? WHERE repository = ? AND pr_number = ? AND head_sha = ? "
-                "AND status = 'claimed' AND owner = ? AND claimed_at = ?",
+                "AND status = ? AND owner = ? AND claimed_at = ?",
                 (
                     status,
                     updated_at.isoformat(),
@@ -1970,6 +1983,7 @@ class FeedbackLedger:
                     lease.repository,
                     lease.pr_number,
                     lease.head_sha,
+                    expected_status,
                     lease.owner,
                     lease.claimed_at.isoformat(),
                 ),

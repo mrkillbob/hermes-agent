@@ -20,7 +20,7 @@ from github_pr_feedback.github_client import (
     RepositoryMergePolicy,
     ReviewState,
 )
-from github_pr_feedback.ledger import FeedbackLedger
+from github_pr_feedback.ledger import FeedbackLedger, LedgerStateError
 from github_pr_feedback.merge_controller import (
     CanonicalMergeEvidenceSource,
     MergeController,
@@ -304,15 +304,19 @@ class RecordingGitHub:
         readbacks: list[PullRequestMergeState | Exception],
         *,
         merge_error: Exception | None = None,
+        before_merge_return=None,
     ) -> None:
         self.readbacks = readbacks
         self.merge_error = merge_error
+        self.before_merge_return = before_merge_return
         self.merge_calls: list[tuple[str, int, str, str]] = []
 
     def merge_pull_request(
         self, repository: str, number: int, head_sha: str, *, method: str
     ) -> None:
         self.merge_calls.append((repository, number, head_sha, method))
+        if self.before_merge_return is not None:
+            self.before_merge_return()
         if self.merge_error is not None:
             raise self.merge_error
 
@@ -531,6 +535,42 @@ def test_merge_controller_rechecks_enrollment_after_lease_before_write(
     assert result.receipt is None
     assert result.decision.blockers == ("merge_pr_not_enrolled",)
     assert github.merge_calls == []
+    ledger.close()
+
+
+def test_merge_write_state_rejects_disable_without_locking_unrelated_writers(
+    tmp_path: Path,
+) -> None:
+    snapshot = eligible_snapshot()
+    database = tmp_path / "ledger.sqlite3"
+    ledger = enrolled_ledger(tmp_path)
+    disable_errors: list[str] = []
+
+    def concurrent_writes() -> None:
+        concurrent = FeedbackLedger(database)
+        try:
+            with pytest.raises(LedgerStateError) as raised:
+                concurrent.unenroll_merge_pr("acme/widgets", 17)
+            disable_errors.append(str(raised.value))
+            concurrent.enroll_merge_pr(
+                "other/widgets", 22, enrolled_at=NOW, enrolled_by="operator"
+            )
+        finally:
+            concurrent.close()
+
+    github = RecordingGitHub(
+        [pr_state(state="CLOSED", merged=True, merge_commit_oid=MERGE_SHA)],
+        before_merge_return=concurrent_writes,
+    )
+    controller = MergeController(
+        policy(), SnapshotSource([snapshot, snapshot]), github, ledger, owner="test", now=lambda: NOW
+    )
+
+    result = controller.run(17)
+
+    assert result.receipt is not None
+    assert disable_errors == ["merge_in_progress"]
+    assert ledger.enrolled_merge_pr_numbers("other/widgets") == (22,)
     ledger.close()
 
 

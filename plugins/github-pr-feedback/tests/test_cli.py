@@ -2449,6 +2449,57 @@ def test_merge_enable_and_disable_persist_operator_enrollment(
         ledger.close()
 
 
+def test_merge_disable_reports_in_progress_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _merge_disable
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": False,
+        "post_merge": {"enabled": False},
+    }
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        ledger.enroll_merge_pr(
+            "acme/widgets", 17, enrolled_at=datetime.now(UTC), enrolled_by="operator"
+        )
+        lease = ledger.claim_merge_lease(
+            "acme/widgets",
+            17,
+            "a" * 40,
+            owner="controller",
+            claimed_at=datetime.now(UTC),
+        )
+        assert lease is not None
+        assert ledger.authorize_merge_write(lease, updated_at=datetime.now(UTC))
+    finally:
+        ledger.close()
+
+    result = _merge_disable(
+        RecordingContext(settings),
+        argparse.Namespace(repository="acme/widgets", pr_number=17),
+    )
+
+    assert result == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "merge_in_progress",
+        "status": "unavailable",
+    }
+
+
 def test_submit_review_fails_closed_when_independent_identity_is_not_configured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
