@@ -55,7 +55,7 @@ LOCAL_CI_WORKER_MODEL = "qwen3.5:4b"
 # copy, so a repository-local root alone is too strict for the normal case.
 # Kept as an explicit allowlist -- an arbitrary symlink target introduced by
 # an untrusted PR branch must still be rejected.
-_ADDITIONAL_GOVERNED_VENV_ROOTS = (Path("/Users/mikedemott/TradingBotV18/.venv"),)
+_LUNABOT_ROOT = Path.home() / "LunaBot"
 _SHA = re.compile(r"^[0-9a-fA-F]{40,64}$")
 DEFAULT_CLAIM_LEASE = timedelta(minutes=5)
 LOCAL_CI_RETRY_BACKOFF = timedelta(minutes=5)
@@ -396,7 +396,7 @@ class LocalGitRepository:
             return
         resolved_source = source.resolve(strict=True)
         managed_venv_root = (repository_root.parent / "venvs").resolve(strict=False)
-        governed_roots = (*_ADDITIONAL_GOVERNED_VENV_ROOTS, managed_venv_root)
+        governed_roots = (_LUNABOT_ROOT / ".venv", managed_venv_root)
         is_governed_root = resolved_source.is_relative_to(repository_root) or any(
             resolved_source == root or resolved_source.is_relative_to(root)
             for root in governed_roots

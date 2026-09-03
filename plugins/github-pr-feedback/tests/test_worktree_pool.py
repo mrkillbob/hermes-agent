@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import github_pr_feedback.controller as controller
 from github_pr_feedback.controller import (
     LocalGitRepository,
     PooledLocalGitRepository,
@@ -252,6 +253,26 @@ def test_link_governed_venv_accepts_profile_managed_environment(tmp_path: Path) 
 
     assert (workspace / ".venv").is_symlink()
     assert (workspace / ".venv").resolve(strict=True) == managed_venv.resolve(strict=True)
+
+
+def test_link_governed_venv_accepts_consolidated_lunabot_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lunabot_root = tmp_path / "LunaBot"
+    lunabot_venv = lunabot_root / ".venv"
+    (lunabot_venv / "bin").mkdir(parents=True)
+    (lunabot_venv / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(controller, "_LUNABOT_ROOT", lunabot_root, raising=False)
+
+    repo = initialized_repository(tmp_path / "receipt-repository")
+    (repo / ".venv").symlink_to(lunabot_venv, target_is_directory=True)
+    workspace = tmp_path / "receipt-worktree"
+    workspace.mkdir()
+
+    LocalGitRepository._link_governed_venv(repo, workspace)
+
+    assert (workspace / ".venv").is_symlink()
+    assert (workspace / ".venv").resolve(strict=True) == lunabot_venv.resolve(strict=True)
 
 
 def test_link_governed_venv_repairs_only_an_untracked_broken_link(tmp_path: Path) -> None:
