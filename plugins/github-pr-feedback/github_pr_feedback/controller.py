@@ -978,15 +978,7 @@ class ScanController:
             actions_enabled: bool | None = None
             actions_state_unavailable = False
             local_ci_policy = self._policy.local_ci_audit
-            merge_policy = self._policy.merge_policy_for(repository)
-            budget_local_ci = bool(
-                local_ci_policy is not None
-                and local_ci_policy.required_for_open_prs
-                and local_ci_policy.audit_only
-                and not local_ci_policy.post_results
-                and merge_policy is not None
-                and merge_policy.allow_budget_exhausted_local_ci
-            )
+            budget_local_ci = self._policy.uses_budget_exhausted_local_ci(repository)
             if (
                 local_ci_policy is not None
                 and local_ci_policy.applies_to(repository)

@@ -1137,6 +1137,7 @@ def _run_grouped_exact_head_audit(
     worktree: Path,
     *,
     force_fresh: bool = False,
+    actions_enabled_hint: bool | None = None,
 ) -> CIAuditReceipt:
     """Run one immutable audit through the bounded grouped-coordination boundary."""
 
@@ -1159,8 +1160,17 @@ def _run_grouped_exact_head_audit(
         # thread; sharing one grouped connection would fail immediately with
         # sqlite3.ProgrammingError and lose a typed failed receipt.
         worker_ledger = FeedbackLedger.for_current_profile()
+        runner = (
+            LocalCIRunner(github, worker_ledger)
+            if actions_enabled_hint is None
+            else LocalCIRunner(
+                github,
+                worker_ledger,
+                actions_enabled_hint=actions_enabled_hint,
+            )
+        )
         return _ThreadOwnedCIRunner(
-            LocalCIRunner(github, worker_ledger),
+            runner,
             worker_ledger,
         )
 
@@ -1222,6 +1232,11 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
             identity,
             worktree,
             force_fresh=bool(getattr(args, "fresh", False)),
+            actions_enabled_hint=(
+                True
+                if policy.uses_budget_exhausted_local_ci(args.repository)
+                else None
+            ),
         )
     except (CIValidationError, GitHubClientError, LedgerStateError) as error:
         print(

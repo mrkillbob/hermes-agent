@@ -437,6 +437,7 @@ class LocalCIRunner:
         now: Callable[[], datetime] | None = None,
         supervisor_pid: Callable[[], int] | None = None,
         pid_is_alive: Callable[[int], bool] | None = None,
+        actions_enabled_hint: bool | None = None,
     ) -> None:
         self._github = github
         self._ledger = ledger
@@ -446,6 +447,18 @@ class LocalCIRunner:
         self._now = now or (lambda: datetime.now(UTC))
         self._supervisor_pid = supervisor_pid or os.getpid
         self._pid_is_alive = pid_is_alive or _pid_is_alive
+        if actions_enabled_hint is not None and not isinstance(actions_enabled_hint, bool):
+            raise TypeError("actions_enabled_hint must be a boolean or None")
+        self._actions_enabled_hint = actions_enabled_hint
+
+    def _check_state(self, repository: str, head_sha: str) -> CheckState:
+        if self._actions_enabled_hint is None:
+            return self._github.get_check_state(repository, head_sha)
+        return self._github.get_check_state(
+            repository,
+            head_sha,
+            actions_enabled_hint=self._actions_enabled_hint,
+        )
 
     def run(self, identity: CIAuditIdentity, worktree: Path) -> CIAuditReceipt:
         """Run exact-head CI under a durable, PID-backed single-owner lease."""
@@ -553,7 +566,7 @@ class LocalCIRunner:
         lanes = _required_lanes(manifest_bytes)
 
         initial_state = self._github.get_merge_state(identity.repository, identity.pr_number)
-        initial_checks = self._github.get_check_state(identity.repository, identity.head_sha)
+        initial_checks = self._check_state(identity.repository, identity.head_sha)
         _require_identity(identity, initial_state)
         if self._inspector.head_sha(worktree) != identity.head_sha:
             raise CIValidationError("CI worktree head does not match the receipt identity")
@@ -623,7 +636,7 @@ class LocalCIRunner:
                 command_evidence=tuple(evidence),
             )
         final_state = self._github.get_merge_state(identity.repository, identity.pr_number)
-        final_checks = self._github.get_check_state(identity.repository, identity.head_sha)
+        final_checks = self._check_state(identity.repository, identity.head_sha)
         _require_identity(identity, final_state)
         if final_checks != initial_checks:
             raise CIValidationError(

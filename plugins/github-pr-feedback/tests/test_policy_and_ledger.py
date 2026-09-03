@@ -393,6 +393,8 @@ def test_budget_exhausted_substitution_requires_audit_only_required_no_post_ci(
     assert policy.merge_maintainer.allow_budget_exhausted_local_ci is True
     assert policy.local_ci_audit is not None
     assert policy.local_ci_audit.audit_only is True
+    assert policy.uses_budget_exhausted_local_ci("acme/widgets") is True
+    assert policy.uses_budget_exhausted_local_ci("other/widgets") is False
 
 
 @pytest.mark.parametrize(
