@@ -934,7 +934,19 @@ def _parse_merge_maintainer(
     if not isinstance(enabled, bool):
         raise ValueError("merge_maintainer enabled must be a boolean")
     if not enabled:
-        if set(raw) != {"enabled"}:
+        allowed = {
+            "enabled",
+            "assignee",
+            "repository",
+            "author_login",
+            "base_branch",
+            "merge_methods",
+            "receipt_max_age_seconds",
+            "report_only",
+            "post_merge",
+            "require_per_pr_enrollment",
+        }
+        if set(raw) - allowed:
             raise ValueError("disabled merge_maintainer has unknown fields")
         return None
     expected = {
