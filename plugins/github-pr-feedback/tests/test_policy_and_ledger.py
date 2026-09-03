@@ -346,6 +346,24 @@ def test_merge_enrollment_migrates_persists_and_is_repository_scoped(
         reopened.close()
 
 
+def test_merge_lease_claim_fails_closed_without_current_enrollment(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    try:
+        assert (
+            ledger.claim_merge_lease(
+                "acme/widgets",
+                17,
+                "a" * 40,
+                owner="controller",
+                claimed_at=datetime(2026, 8, 25, tzinfo=UTC),
+            )
+            is None
+        )
+        assert ledger.merge_status_counts()["claimed"] == 0
+    finally:
+        ledger.close()
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

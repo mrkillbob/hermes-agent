@@ -244,11 +244,7 @@ class DoctorProbe:
                         if policy.local_ci_audit is not None
                         else []
                     ),
-                    *(
-                        [policy.merge_maintainer.assignee]
-                        if policy.merge_maintainer is not None
-                        else []
-                    ),
+                    *(item.assignee for item in policy.merge_policies()),
                     *(
                         [policy.repair_steward.assignee]
                         if policy.repair_steward is not None
@@ -857,7 +853,7 @@ def _scan(ctx: Any) -> int:
                     control_home=get_default_hermes_root(),
                 ).scan()
                 repair_payload = _scan_payload(repair)
-            if policy.merge_maintainer is not None and not required_ci_backlog:
+            if policy.merge_policies() and not required_ci_backlog:
                 merge_payload = _run_merge_scan(policy, ledger)
             if policy.release_maintenance is not None and not required_ci_backlog:
                 maintenance_payload = _run_release_maintenance_scan(policy, ledger)
@@ -1519,7 +1515,7 @@ def _merge_scan(ctx: Any) -> int:
     except ValueError:
         print(json.dumps({"status": "invalid_configuration"}, sort_keys=True))
         return 1
-    if policy.merge_maintainer is None:
+    if not policy.merge_policies():
         print(json.dumps({"status": "disabled"}, sort_keys=True))
         return 0
     ledger = FeedbackLedger.for_current_profile()
@@ -1735,7 +1731,9 @@ def _run_merge_scan_for_policy(
                 )
             try:
                 kanban.create_or_get_task(
-                    _merge_maintainer_task(policy, pull_request, result.decision)
+                    _merge_maintainer_task(
+                        policy, merge_policy, pull_request, result.decision
+                    )
                 )
                 tasks_created += 1
             except (RuntimeError, ValueError):
@@ -1864,11 +1862,8 @@ def _announce_ready_to_merge(github: GitHubClient, repository: str, pull_request
 
 
 def _merge_maintainer_task(
-    policy: PluginPolicy, pull_request, decision: MergeDecision
+    policy: PluginPolicy, merge_policy, pull_request, decision: MergeDecision
 ) -> KanbanTask:
-    merge_policy = policy.merge_maintainer
-    if merge_policy is None:
-        raise ValueError("merge maintainer is disabled")
     target = policy.targets[merge_policy.repository]
     evidence = {
         "repository": merge_policy.repository,
