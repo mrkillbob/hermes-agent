@@ -209,6 +209,18 @@ hermes github-pr-feedback scan
 hermes github-pr-feedback merge-status
 ```
 
+Enroll one exact configured pull request before it can enter the governed merge lane,
+or remove that durable enrollment without changing GitHub state:
+
+```sh
+hermes github-pr-feedback merge-enable --repository owner/repository --pr-number 123
+hermes github-pr-feedback merge-disable --repository owner/repository --pr-number 123
+```
+
+`merge-scan` considers only enrolled open pull requests. An earlier merge write whose
+outcome is ambiguous remains eligible for verification even if the PR is no longer open
+or its enrollment was later removed; this readback is required to reconcile durable state.
+
 `scan` is safe to repeat. It records durable receipt state and creates one
 Kanban card only for feedback that passes all admission checks. By default the
 card starts `blocked`. With the explicit `auto_dispatch: true` opt-in, it starts

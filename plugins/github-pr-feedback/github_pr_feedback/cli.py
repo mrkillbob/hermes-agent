@@ -1634,7 +1634,7 @@ def _run_merge_scan_for_policy(
             "merged": [],
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
-    source = CanonicalMergeEvidenceSource(policy, github, ledger)
+    source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     manifest_path = (
         policy.targets[merge_policy.repository].local_path
         / "tests"
@@ -1657,6 +1657,7 @@ def _run_merge_scan_for_policy(
     tasks_created = 0
     degraded = False
     open_by_number = {pull_request.number: pull_request for pull_request in pull_requests}
+    enrolled_numbers = ledger.enrolled_merge_pr_numbers(merge_policy.repository)
     pending_reader = getattr(ledger, "verification_required_merge_numbers", None)
     pending_numbers = tuple(
         pending_reader(merge_policy.repository) if callable(pending_reader) else ()
@@ -1664,7 +1665,11 @@ def _run_merge_scan_for_policy(
     pending_set = set(pending_numbers)
     numbers = (
         *pending_numbers,
-        *(number for number in open_by_number if number not in pending_set),
+        *(
+            number
+            for number in enrolled_numbers
+            if number in open_by_number and number not in pending_set
+        ),
     )
     for number in numbers:
         pull_request = open_by_number.get(number)
@@ -1793,9 +1798,11 @@ def _run_single_pr_merge_handoff(
     )
     if merge_policy is None:
         return {"status": "disabled", "blockers": ["merge_maintainer_disabled"]}
+    if not ledger.is_merge_enrolled(merge_policy.repository, pr_number):
+        return {"status": "blocked", "blockers": ["merge_pr_not_enrolled"]}
     github = github or _github_client(policy)
     kanban = kanban or KanbanSubprocessClient()
-    source = CanonicalMergeEvidenceSource(policy, github, ledger)
+    source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     try:
         result = MergeController(
             merge_policy,

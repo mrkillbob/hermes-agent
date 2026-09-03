@@ -1107,6 +1107,15 @@ def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
                     "codex/fix",
                     "a" * 40,
                 ),
+                PullRequest(
+                    18,
+                    "OPEN",
+                    "acme/widgets",
+                    "acme/widgets",
+                    "owner",
+                    "codex/not-enrolled",
+                    "b" * 40,
+                ),
             )
 
         def __getattr__(self, name: str):
@@ -1120,6 +1129,12 @@ def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
 
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     try:
+        ledger.enroll_merge_pr(
+            "acme/widgets",
+            17,
+            enrolled_at=datetime(2026, 8, 25, tzinfo=UTC),
+            enrolled_by="operator",
+        )
         result = _run_merge_scan(
             policy,
             ledger,
@@ -1179,6 +1194,9 @@ def test_merge_scan_reports_failed_exact_head_receipt_as_not_passing(
         status = "failed"
 
     class FailedLedger:
+        def enrolled_merge_pr_numbers(self, repository: str):
+            return (17,)
+
         def latest_ci_receipt(self, *args, **kwargs):
             return FailedReceipt()
 
@@ -1245,6 +1263,9 @@ def test_merge_scan_does_not_hide_failed_receipt_behind_manifest_mismatch(
         status = "failed"
 
     class MismatchedLedger:
+        def enrolled_merge_pr_numbers(self, repository: str):
+            return (17,)
+
         def latest_ci_receipt(self, *args, **kwargs):
             return None
 
@@ -1317,6 +1338,9 @@ def test_merge_scan_reconciles_verification_required_pr_that_is_no_longer_open(
             return ()
 
     class Ledger:
+        def enrolled_merge_pr_numbers(self, repository: str):
+            return ()
+
         def verification_required_merge_numbers(self, repository: str):
             return (149,)
 
@@ -1351,6 +1375,44 @@ def test_merge_scan_reconciles_verification_required_pr_that_is_no_longer_open(
             "merge_commit_oid": "c" * 40,
         }
     ]
+
+
+def test_single_pr_merge_handoff_requires_explicit_enrollment(tmp_path: Path) -> None:
+    from github_pr_feedback.cli import (
+        _load_policy_from_context,
+        _run_single_pr_merge_handoff,
+    )
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": False,
+        "post_merge": {"enabled": False},
+    }
+    policy = _load_policy_from_context(RecordingContext(settings))
+
+    class Ledger:
+        def is_merge_enrolled(self, repository: str, pr_number: int) -> bool:
+            assert (repository, pr_number) == ("acme/widgets", 17)
+            return False
+
+    result = _run_single_pr_merge_handoff(
+        policy,
+        Ledger(),  # type: ignore[arg-type]
+        17,
+        github=object(),  # type: ignore[arg-type]
+        kanban=object(),  # type: ignore[arg-type]
+    )
+
+    assert result == {"status": "blocked", "blockers": ["merge_pr_not_enrolled"]}
 
 
 def test_doctor_read_only_verifies_every_runtime_dependency(
@@ -2192,6 +2254,73 @@ def enabled_settings(repository: Path) -> dict[str, object]:
         "assignee": "repair-agent",
         "board": "repairs",
     }
+
+
+def test_merge_enable_and_disable_persist_operator_enrollment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _merge_disable, _merge_enable
+    from github_pr_feedback.github_client import PullRequestMergeState
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": False,
+        "post_merge": {"enabled": False},
+    }
+    state = PullRequestMergeState(
+        repository="acme/widgets",
+        number=17,
+        state="OPEN",
+        is_draft=False,
+        mergeable=True,
+        merge_state_status="CLEAN",
+        base_branch="stable",
+        base_sha="b" * 40,
+        head_repository="acme/widgets",
+        author_login="owner",
+        head_ref_name="codex/fix",
+        head_sha="a" * 40,
+        merged=False,
+        merge_commit_oid=None,
+    )
+
+    class GitHub:
+        def get_merge_state(self, repository: str, pr_number: int):
+            assert (repository, pr_number) == ("acme/widgets", 17)
+            return state
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    monkeypatch.setenv("USER", "operator")
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: GitHub())
+    context = RecordingContext(settings)
+    args = argparse.Namespace(repository="acme/widgets", pr_number=17)
+
+    assert _merge_enable(context, args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "enrolled"
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == (17,)
+    finally:
+        ledger.close()
+
+    assert _merge_disable(context, args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "unenrolled"
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == ()
+    finally:
+        ledger.close()
 
 
 def test_submit_review_fails_closed_when_independent_identity_is_not_configured(
