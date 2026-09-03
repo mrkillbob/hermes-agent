@@ -1,18 +1,6 @@
-/**
- * A bot row click is "go to this bot", not "open its Bot Chat". Before this,
- * every click resolved the canonical chat by name and opened it as a tab — and
- * with no record of a close anywhere (this plugin keeps no closed set; core's
- * tile bucket only forgets), a Bot Chat the user closed came back beside every
- * newer thread on every bot switch. Now a bot whose workspace already holds
- * tabs comes back to the one the user left; the forever-chat is opened only
- * when nothing is open, or on the explicit ask (the row menu's "Open Bot Chat").
- *
- * Ported from tests/bot-row-keeps-closed-chat.test.mjs, which drove a `vm`
- * copy of plugin.js. Its two source-reading cases are dropped for real
- * assertions: the menu's call site is now a render in bot-row.test.tsx, and
- * the reclaim guard's text is asserted here as the claim-shape invariant the
- * guard actually reads.
- */
+/** A bot row click consistently lands on the canonical Bot Chat represented
+ * by that row. An already-open verified canonical tab is fronted; stale or
+ * unverifiable tiles fall through to the authoritative registry open. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -39,11 +27,21 @@ const { host } = await import('@hermes/plugin-sdk')
 const { $openBotChat, $selectedBot } = await import('./bot-state')
 const { openRosterBot } = await import('./roster-actions')
 
-const bot = { connectionId: 'local', name: 'alpha' } as RosterRow
+const bot = {
+  connectionId: 'local',
+  name: 'alpha',
+  canonical_session: { id: 'bot-chat', resolved_id: 'bot-chat-tip' }
+} as RosterRow
 
 /** Swap in a focus API for one test, restoring whatever the SDK really has —
  *  including its absence, which is the older-shell case. */
-function withFocusApi(impl: null | (() => null | string)) {
+function withFocusApi(
+  impl: null | ((
+    key: string,
+    isStaleTile?: (tile: { storedSessionId: string; workspaceTabTitle?: string }) => boolean,
+    canonicalIds?: readonly string[]
+  ) => null | string)
+) {
   const had = Object.hasOwn(host, 'focusOpenWorkspaceSession')
   const original = host.focusOpenWorkspaceSession
 
@@ -81,7 +79,11 @@ describe('a row click returns to the tabs the bot already has open', () => {
     try {
       await expect(openRosterBot(bot)).resolves.toBe(true)
 
-      expect(focus).toHaveBeenCalledWith('bot:alpha', expect.any(Function))
+      expect(focus).toHaveBeenCalledWith(
+        'bot:alpha',
+        expect.any(Function),
+        ['bot-chat', 'bot-chat-tip']
+      )
       expect(openBotCanonicalChat).not.toHaveBeenCalled()
       // Open tabs need no source activation either — the bot is already live.
       expect(prepareBotSource).not.toHaveBeenCalled()
@@ -91,7 +93,7 @@ describe('a row click returns to the tabs the bot already has open', () => {
     }
   })
 
-  it('claims only the fronted tab, with no registry id', async () => {
+  it('claims the fronted canonical tab with both exact identities', async () => {
     const restore = withFocusApi(() => 'thread-2')
 
     try {
@@ -99,7 +101,7 @@ describe('a row click returns to the tabs the bot already has open', () => {
 
       expect($openBotChat.get()).toEqual({
         key: 'local::alpha',
-        openedRegistryId: '',
+        openedRegistryId: 'bot-chat',
         openedSessionId: 'thread-2'
       })
     } finally {
@@ -123,14 +125,14 @@ describe('the canonical chat still opens when it is what was asked for', () => {
     }
   })
 
-  it('skips the open-tab shortcut on the explicit ask', async () => {
+  it('uses the verified canonical open-tab shortcut on the explicit ask', async () => {
     const focus = vi.fn(() => 'thread-2')
     const restore = withFocusApi(focus)
 
     try {
-      await expect(openRosterBot(bot, { canonical: true })).resolves.toBe(true)
+      await expect(openRosterBot(bot)).resolves.toBe(true)
 
-      expect(focus).not.toHaveBeenCalled()
+      expect(focus).toHaveBeenCalled()
       expect($openBotChat.get()?.openedRegistryId).toBe('bot-chat')
     } finally {
       restore()
@@ -165,7 +167,7 @@ describe('the fronted-tab shortcut reconciles with the canonical registry (#9010
 
   it('classifies a canonical-titled tile at a foreign id as stale', async () => {
     const { focus, probe } = captureProbe()
-    const restore = withFocusApi(focus as unknown as () => null | string)
+    const restore = withFocusApi(focus)
 
     try {
       await openRosterBot(staleBot)
@@ -179,7 +181,7 @@ describe('the fronted-tab shortcut reconciles with the canonical registry (#9010
 
   it('keeps the tile that matches the registry row or its lineage tip', async () => {
     const { focus, probe } = captureProbe()
-    const restore = withFocusApi(focus as unknown as () => null | string)
+    const restore = withFocusApi(focus)
 
     try {
       await openRosterBot(staleBot)
@@ -194,7 +196,7 @@ describe('the fronted-tab shortcut reconciles with the canonical registry (#9010
 
   it('never judges side-chat tabs — only canonical-titled tiles carry registry identity', async () => {
     const { focus, probe } = captureProbe()
-    const restore = withFocusApi(focus as unknown as () => null | string)
+    const restore = withFocusApi(focus)
 
     try {
       await openRosterBot(staleBot)
@@ -207,15 +209,17 @@ describe('the fronted-tab shortcut reconciles with the canonical registry (#9010
     }
   })
 
-  it('an older gateway without canonical_session cannot judge — every tile survives', async () => {
+  it('an older gateway without canonical_session skips tile judgment', async () => {
     const { focus, probe } = captureProbe()
-    const restore = withFocusApi(focus as unknown as () => null | string)
+    const restore = withFocusApi(focus)
+    const olderBot = { connectionId: 'local', name: 'alpha' } as RosterRow
 
     try {
-      await openRosterBot(bot) // no canonical_session on this row
+      await openRosterBot(olderBot)
 
-      const isStale = probe()!
-      expect(isStale({ storedSessionId: 'anything', workspaceTabTitle: 'Bot Chat' })).toBe(false)
+      expect(probe()).toBeUndefined()
+      expect(focus).not.toHaveBeenCalled()
+      expect(openBotCanonicalChat).toHaveBeenCalled()
     } finally {
       restore()
     }
@@ -265,18 +269,14 @@ describe('a shell that cannot report open tabs behaves as it did before', () => 
   })
 })
 
-describe('the claim a fronted tab records cannot resurrect the closed chat', () => {
-  // The reclaim listener re-resolves the canonical chat for a claim it owns,
-  // and guards on the registry id to avoid doing so for a fronted tab. That
-  // guard is only correct because a fronted-tab claim leaves the id empty
-  // while a real canonical open always fills it — the invariant asserted here.
-  it('leaves the registry id empty for a fronted tab', async () => {
+describe('the claim records exact canonical identity', () => {
+  it('fills the registry id for a fronted canonical tab', async () => {
     const restore = withFocusApi(() => 'thread-2')
 
     try {
       await openRosterBot(bot)
 
-      expect($openBotChat.get()?.openedRegistryId).toBe('')
+      expect($openBotChat.get()?.openedRegistryId).toBe('bot-chat')
       expect($openBotChat.get()?.openedSessionId).toBeTruthy()
     } finally {
       restore()

@@ -241,15 +241,17 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
 
   const fronted = focusExistingBotTab(bot)
 
-    if (focused) {
-      // Legacy visibility repair is profile-scoped and demand-driven: opening
-      // this bot may inspect this bot, but an idle Desktop never scans peers.
-      void reconcileBotProfileSessions(bot)
-      // Open tabs win: no source activation, no registry consult, no open. The
-      // claim carries only the fronted tab so the focus edge it fires keeps it
-      // (releaseStaleOpenBotChat) and no registry id is recorded, because none
-      // was resolved.
-      $openBotChat.set({ key, openedRegistryId: '', openedSessionId: focused })
+  if (fronted) {
+    // Legacy visibility repair is profile-scoped and demand-driven: opening
+    // this bot may inspect this bot, but an idle Desktop never scans peers.
+    void reconcileBotProfileSessions(bot)
+    // The canonical chat is already on screen. Preserve both exact identities
+    // so reclaim and activity tracking treat it like a registry-backed open.
+    $openBotChat.set({
+      key,
+      openedRegistryId: fronted.registryId,
+      openedSessionId: fronted.storedSessionId
+    })
 
     return true
   }
