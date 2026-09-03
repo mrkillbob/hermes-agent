@@ -78,6 +78,65 @@ def test_subprocess_runner_retries_one_bounded_rate_limit_failure(
     assert gate.deferrals == [1.0]
 
 
+def test_automation_identity_uses_only_dedicated_token_and_verifies_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = RecordingRunner({("gh", "api", "user"): {"login": "mrkillbobbot"}})
+    captured: list[dict[str, str | None]] = []
+
+    def runner_factory(*, env_overrides, **_kwargs):
+        captured.append(dict(env_overrides))
+        return runner
+
+    monkeypatch.setattr(
+        "github_pr_feedback.github_client.SubprocessCommandRunner", runner_factory
+    )
+
+    GitHubClient.for_automation_identity(
+        expected_login="mrkillbobbot",
+        token_env="HERMES_GITHUB_BOT_TOKEN",
+        environ={
+            "HERMES_GITHUB_BOT_TOKEN": "bot-secret",
+            "GH_TOKEN": "human-secret",
+            "GITHUB_TOKEN": "ci-secret",
+        },
+    )
+
+    assert captured == [{"GH_TOKEN": "bot-secret", "GITHUB_TOKEN": None}]
+    assert runner.calls == [("gh", "api", "user")]
+
+
+@pytest.mark.parametrize(
+    ("environ", "code"),
+    (
+        ({"GH_TOKEN": "human-secret"}, "automation_credential_missing"),
+        (
+            {"HERMES_GITHUB_BOT_TOKEN": "bot-secret"},
+            "automation_identity_mismatch",
+        ),
+    ),
+)
+def test_automation_identity_never_falls_back_or_accepts_wrong_viewer(
+    monkeypatch: pytest.MonkeyPatch,
+    environ: dict[str, str],
+    code: str,
+) -> None:
+    runner = RecordingRunner({("gh", "api", "user"): {"login": "mrkillbob"}})
+    monkeypatch.setattr(
+        "github_pr_feedback.github_client.SubprocessCommandRunner",
+        lambda **_kwargs: runner,
+    )
+
+    with pytest.raises(GitHubClientError) as caught:
+        GitHubClient.for_automation_identity(
+            expected_login="mrkillbobbot",
+            token_env="HERMES_GITHUB_BOT_TOKEN",
+            environ=environ,
+        )
+
+    assert caught.value.code == code
+
+
 def test_request_gate_shares_secondary_limit_cooldown_across_instances(tmp_path) -> None:
     now = [100.0]
     sleeps: list[float] = []

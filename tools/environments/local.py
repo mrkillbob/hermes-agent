@@ -743,6 +743,12 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
             if resolved is not None:
                 sanitized[key] = resolved
 
+    for key in _ALWAYS_STRIP_KEYS:
+        sanitized.pop(key, None)
+    sanitized["GH_CONFIG_DIR"] = os.devnull
+    sanitized["GIT_CONFIG_GLOBAL"] = os.devnull
+    sanitized["GIT_TERMINAL_PROMPT"] = "0"
+
     _inject_context_hermes_home(sanitized)
 
     from hermes_constants import apply_subprocess_home_env
@@ -800,6 +806,7 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     # GitHub auth
     "GH_TOKEN",
     "GITHUB_TOKEN",
+    "HERMES_GITHUB_BOT_TOKEN",
     "GITHUB_APP_ID",
     "GITHUB_APP_PRIVATE_KEY_PATH",
     "GITHUB_APP_INSTALLATION_ID",
@@ -868,6 +875,13 @@ def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str
     # Tier 1 — always strip.
     for key in _ALWAYS_STRIP_KEYS:
         env.pop(key, None)
+    # Raw `gh` in an agent-controlled terminal must not fall through to the
+    # operator's shared keyring profile. Governed GitHub automation runs in
+    # process and injects the dedicated bot token only into its fixed-argv
+    # child calls.
+    env["GH_CONFIG_DIR"] = os.devnull
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
     for key in _plugin_terminal_env_strip_keys():
         env.pop(key, None)
     # Internal routing hints and Hermes-internal dynamic secrets
