@@ -263,6 +263,12 @@ def test_local_ci_runner_passes_prevalidated_actions_hint_to_both_exact_head_rea
         def __init__(self) -> None:
             self.states = [state, state]
             self.hints: list[bool | None] = []
+            self.permission_refreshes = 0
+
+        def actions_enabled(self, _repository: str, *, refresh: bool = False) -> bool:
+            assert refresh is True
+            self.permission_refreshes += 1
+            return True
 
         def get_merge_state(self, _repository: str, _number: int) -> PullRequestMergeState:
             return self.states.pop(0)
@@ -301,7 +307,55 @@ def test_local_ci_runner_passes_prevalidated_actions_hint_to_both_exact_head_rea
     )
 
     assert github.hints == [True, True]
+    assert github.permission_refreshes == 2
     assert receipt.ci_mode == CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT
+    ledger.close()
+
+
+def test_local_ci_runner_rejects_actions_permission_change_during_audit(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+    state = merge_state()
+
+    class ChangingGitHub:
+        def __init__(self) -> None:
+            self.states = [state, state]
+            self.permissions = iter((False, True))
+
+        def get_merge_state(self, _repository: str, _number: int) -> PullRequestMergeState:
+            return self.states.pop(0)
+
+        def actions_enabled(self, _repository: str, *, refresh: bool = False) -> bool:
+            assert refresh is True
+            return next(self.permissions)
+
+        def get_check_state(
+            self,
+            _repository: str,
+            _head_sha: str,
+            *,
+            actions_enabled_hint: bool | None = None,
+        ) -> CheckState:
+            assert actions_enabled_hint is False
+            return CheckState(False, True, 0)
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    receipt = LocalCIRunner(
+        ChangingGitHub(),
+        ledger,
+        command_runner=RecordingRunner(),
+        inspector=FakeInspector(),
+        python_argv=("python3",),
+        now=lambda: NOW,
+        supervisor_pid=lambda: 4242,
+        pid_is_alive=lambda _pid: True,
+        actions_enabled_hint=False,
+    ).run(CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), worktree)
+
+    assert receipt.status == "failed"
+    assert "Actions permission changed" in (receipt.failure_reason or "")
     ledger.close()
 
 

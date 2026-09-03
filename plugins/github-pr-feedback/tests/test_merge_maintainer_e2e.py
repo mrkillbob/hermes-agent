@@ -94,7 +94,7 @@ class CanonicalFakeGitHub:
         return ReviewState("APPROVED", 0)
 
     def get_check_state(self, repository: str, head_sha: str) -> CheckState:
-        return CheckState(False, True, 0)
+        return CheckState(True, True, 1)
 
     def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
         return self.feedback
@@ -147,7 +147,13 @@ def open_state() -> PullRequestMergeState:
     )
 
 
-def configured_policy(repository: Path, *, report_only: bool = False):
+def configured_policy(
+    repository: Path,
+    *,
+    report_only: bool = False,
+    actions_disabled_local_ci: bool = False,
+    bot_identity: bool = False,
+):
     return load_policy(
         {
             "enabled": True,
@@ -160,9 +166,10 @@ def configured_policy(repository: Path, *, report_only: bool = False):
                     "branch_prefixes": ["codex/"],
                 }
             ],
-            "reviewer_logins": ["reviewer"],
+            "reviewer_logins": ["reviewer", *(["mrkillbobbot"] if bot_identity else [])],
             "reviewer_associations": [],
             "include_self_feedback": True,
+            "include_bot_feedback": bot_identity,
             "not_before": "2026-08-24T00:00:00Z",
             "assignee": "repair-agent",
             "board": "repairs",
@@ -175,13 +182,39 @@ def configured_policy(repository: Path, *, report_only: bool = False):
                 "merge_methods": ["squash", "rebase", "merge"],
                 "receipt_max_age_seconds": 21600,
                 "report_only": report_only,
+                "allow_budget_exhausted_local_ci": actions_disabled_local_ci,
                 "post_merge": {"enabled": False},
             },
+            **(
+                {
+                    "local_ci_audit": {
+                        "enabled": True,
+                        "assignee": "pr-local-ci-auditor",
+                        "post_results": False,
+                        "audit_only": True,
+                        "required_for_open_prs": True,
+                    }
+                }
+                if actions_disabled_local_ci
+                else {}
+            ),
+            **(
+                {
+                    "github_identity": {
+                        "expected_login": "mrkillbobbot",
+                        "token_env": "HERMES_GITHUB_BOT_TOKEN",
+                    }
+                }
+                if bot_identity
+                else {}
+            ),
         }
     )
 
 
-def prepare_receipt(repository: Path, ledger: FeedbackLedger) -> None:
+def prepare_receipt(
+    repository: Path, ledger: FeedbackLedger, *, actions_disabled: bool = False
+) -> None:
     manifest = repository / "tests/manifests/test_lanes.toml"
     manifest.parent.mkdir(parents=True)
     manifest.write_text('[lanes.unit]\nci_status = "required"\n', encoding="utf-8")
@@ -190,17 +223,23 @@ def prepare_receipt(repository: Path, ledger: FeedbackLedger) -> None:
     started_at = now - timedelta(minutes=2)
     completed_at = now - timedelta(minutes=1)
     identity = CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA)
-    commands = (
+    commands = tuple(
         CommandEvidence(
-            argv=("python3", "scripts/run_test_lane.py"),
-            cwd=str(repository),
+            argv=argv,
+            cwd=".",
             returncode=0,
             duration_ms=1,
             timed_out=False,
             stdout_sha256="0" * 64,
             stderr_sha256="0" * 64,
             classification="passed",
-        ),
+        )
+        for argv in (
+            ("python3", "scripts/check_ci_governance.py"),
+            ("python3", "scripts/run_static_lane.py"),
+            ("python3", "scripts/run_hygiene_lane.py"),
+            ("python3", "scripts/run_test_lane.py", "--lane", "unit"),
+        )
     )
     ledger.record_ci_receipt(
         CIAuditReceipt(
@@ -210,7 +249,11 @@ def prepare_receipt(repository: Path, ledger: FeedbackLedger) -> None:
             status="passed",
             started_at=started_at,
             completed_at=completed_at,
-            actions_state=CheckState(False, True, 0),
+            actions_state=(
+                CheckState(False, True, 0)
+                if actions_disabled
+                else CheckState(True, True, 1)
+            ),
             commands=commands,
         )
     )
@@ -344,6 +387,100 @@ def test_codexs_own_review_summary_tracker_does_not_block_merge(tmp_path: Path) 
     )
 
     assert payload["merged"][0]["pr_number"] == 17
+    ledger.close()
+
+
+def test_actions_disabled_repository_uses_only_full_manifest_bound_local_ci(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    prepare_receipt(repository, ledger, actions_disabled=True)
+    merged = replace(open_state(), state="CLOSED", merged=True, merge_commit_oid=MERGE_SHA)
+
+    class DisabledActionsGitHub(CanonicalFakeGitHub):
+        def actions_enabled(self, repository: str, *, refresh: bool = False) -> bool:
+            assert refresh is True
+            return False
+
+        def get_check_state(
+            self,
+            repository: str,
+            head_sha: str,
+            *,
+            actions_enabled_hint: bool | None = None,
+        ) -> CheckState:
+            assert actions_enabled_hint is False
+            return CheckState(False, True, 0)
+
+    github = DisabledActionsGitHub([open_state(), open_state(), merged])
+
+    payload = _run_merge_scan(
+        configured_policy(repository, actions_disabled_local_ci=True),
+        ledger,
+        github=github,
+        kanban=RecordingKanban(),
+    )
+
+    assert payload["merged"][0]["pr_number"] == 17
+    assert github.merge_calls == [("acme/widgets", 17, HEAD_SHA, "rebase")]
+    ledger.close()
+
+
+def test_exact_head_governed_bot_approval_is_not_pending_feedback(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    prepare_receipt(repository, ledger)
+    approval = Feedback(
+        "review",
+        "5518897121",
+        Reviewer("mrkillbobbot", "MEMBER"),
+        "Independent review complete. Exact reviewed head: " + HEAD_SHA + ".",
+        datetime(2026, 8, 25, 20, 18, tzinfo=UTC),
+        False,
+        review_state="APPROVED",
+        reviewed_head_sha=HEAD_SHA,
+    )
+    merged = replace(open_state(), state="CLOSED", merged=True, merge_commit_oid=MERGE_SHA)
+    github = CanonicalFakeGitHub([open_state(), open_state(), merged], feedback=(approval,))
+
+    payload = _run_merge_scan(
+        configured_policy(repository, bot_identity=True),
+        ledger,
+        github=github,
+        kanban=RecordingKanban(),
+    )
+
+    assert payload["merged"][0]["pr_number"] == 17
+    ledger.close()
+
+
+def test_actionable_configured_bot_feedback_remains_merge_blocking(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    prepare_receipt(repository, ledger)
+    finding = Feedback(
+        "review_comment",
+        "5518897122",
+        Reviewer("mrkillbobbot", "MEMBER"),
+        "This exact-head race still needs correction.",
+        datetime(2026, 8, 25, 20, 18, tzinfo=UTC),
+        True,
+    )
+    github = CanonicalFakeGitHub([open_state()], feedback=(finding,))
+
+    payload = _run_merge_scan(
+        configured_policy(repository, bot_identity=True),
+        ledger,
+        github=github,
+        kanban=RecordingKanban(),
+    )
+
+    assert payload["blocked"] == {"17": ["feedback_unprocessed"]}
+    assert github.merge_calls == []
     ledger.close()
 
 

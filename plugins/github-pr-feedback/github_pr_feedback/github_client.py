@@ -342,6 +342,8 @@ class Feedback:
     body: str
     created_at: datetime
     is_bot: bool
+    review_state: str | None = None
+    reviewed_head_sha: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,11 +654,11 @@ class GitHubClient:
             payload, expected_repository=repository, expected_number=number
         )
 
-    def actions_enabled(self, repository: str) -> bool:
+    def actions_enabled(self, repository: str, *, refresh: bool = False) -> bool:
         repository = _validated_repository(repository)
         now = time.monotonic()
         cached = self._actions_enabled_cache.get(repository)
-        if cached is not None and now - cached[1] < 60.0:
+        if not refresh and cached is not None and now - cached[1] < 60.0:
             return cached[0]
         payload = self._json(["gh", "api", f"repos/{repository}/actions/permissions"])
         if not isinstance(payload, dict) or not isinstance(
@@ -1345,6 +1347,15 @@ def _feedback(kind: str, row: dict[str, Any], *, timestamp_key: str) -> Feedback
             body = ""
         if not isinstance(body, str):
             raise TypeError("body must be a string")
+        review_state = None
+        reviewed_head_sha = None
+        if kind == "review":
+            raw_state = row.get("state")
+            raw_head = row.get("commit_id")
+            if isinstance(raw_state, str):
+                review_state = raw_state.upper()
+            if isinstance(raw_head, str) and _SHA.fullmatch(raw_head):
+                reviewed_head_sha = raw_head.casefold()
         return Feedback(
             kind=kind,
             feedback_id=str(row["id"]),
@@ -1352,6 +1363,8 @@ def _feedback(kind: str, row: dict[str, Any], *, timestamp_key: str) -> Feedback
             body=body[:MAX_FEEDBACK_BODY_CHARS],
             created_at=_timestamp(row[timestamp_key]),
             is_bot=user.get("type") == "Bot",
+            review_state=review_state,
+            reviewed_head_sha=reviewed_head_sha,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise GitHubClientError(

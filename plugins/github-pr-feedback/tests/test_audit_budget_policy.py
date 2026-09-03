@@ -4,12 +4,15 @@ import argparse
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from github_pr_feedback.ci_runner import CIAuditReceipt
 from github_pr_feedback.github_client import CheckState, PullRequestMergeState
 
 
-def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("actions_enabled", [False, True])
+def test_audit_pr_passes_fresh_canonical_actions_state_to_exact_head_runner(
+    monkeypatch, tmp_path, actions_enabled: bool
 ) -> None:
     from github_pr_feedback.ci_runner import CIAuditIdentity
     from github_pr_feedback.cli import _audit_pr
@@ -44,6 +47,11 @@ def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
         def get_merge_state(self, _repository: str, _number: int):
             return state
 
+        def actions_enabled(self, repository: str, *, refresh: bool = False) -> bool:
+            assert repository == "acme/widgets"
+            assert refresh is True
+            return actions_enabled
+
     class Ledger:
         def close(self) -> None:
             pass
@@ -69,13 +77,15 @@ def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
             started_at=datetime(2026, 9, 3, tzinfo=UTC),
             completed_at=datetime(2026, 9, 3, tzinfo=UTC),
             actions_state=CheckState(
-                actions_enabled=True,
-                all_green=False,
-                check_count=1,
-                billing_blocked=True,
+                actions_enabled=actions_enabled,
+                all_green=not actions_enabled,
+                check_count=1 if actions_enabled else 0,
+                billing_blocked=actions_enabled,
             ),
             commands=(),
-            ci_mode="budget-exhausted-local-equivalent",
+            ci_mode=(
+                "budget-exhausted-local-equivalent" if actions_enabled else "standard"
+            ),
         )
 
     monkeypatch.setattr("github_pr_feedback.cli._load_policy_from_context", lambda _ctx: policy)
@@ -99,4 +109,4 @@ def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
     )
 
     assert result == 0
-    assert captured == [True]
+    assert captured == [actions_enabled]

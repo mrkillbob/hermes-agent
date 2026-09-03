@@ -1281,6 +1281,11 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
         identity = CIAuditIdentity(
             args.repository, args.pr_number, state.base_sha, state.head_sha
         )
+        actions_enabled_hint = (
+            github.actions_enabled(args.repository, refresh=True)
+            if policy.uses_budget_exhausted_local_ci(args.repository)
+            else None
+        )
     except (ValueError, CIValidationError, GitHubClientError):
         print(json.dumps({"status": "invalid_or_raced_audit_identity"}, sort_keys=True))
         return 1
@@ -1292,11 +1297,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
             identity,
             worktree,
             force_fresh=bool(getattr(args, "fresh", False)),
-            actions_enabled_hint=(
-                True
-                if policy.uses_budget_exhausted_local_ci(args.repository)
-                else None
-            ),
+            actions_enabled_hint=actions_enabled_hint,
         )
     except (CIValidationError, GitHubClientError, LedgerStateError) as error:
         print(

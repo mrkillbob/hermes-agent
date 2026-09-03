@@ -840,6 +840,27 @@ def test_github_client_accepts_a_submitted_review_with_no_text_body() -> None:
     assert review.body == ""
 
 
+def test_github_client_preserves_review_event_and_exact_reviewed_head() -> None:
+    responses = feedback_responses("ordinary")
+    reviews_key = (
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        "repos/acme/widgets/pulls/17/reviews?per_page=100",
+    )
+    review_row = canonical_feedback(
+        "review-approved", "Independent review complete.", submitted_at="2026-08-24T00:00:00Z"
+    )
+    review_row.update({"state": "APPROVED", "commit_id": "a" * 40})
+    responses[reviews_key] = [[review_row]]
+
+    review = GitHubClient(RecordingRunner(responses)).list_feedback("acme/widgets", 17)[-1]
+
+    assert review.review_state == "APPROVED"
+    assert review.reviewed_head_sha == "a" * 40
+
+
 def test_github_client_gets_the_current_pull_request_with_fixed_argv() -> None:
     argv = ("gh", "api", "repos/acme/widgets/pulls/17")
     runner = RecordingRunner({argv: canonical_pull()})
@@ -901,6 +922,26 @@ def test_github_client_refreshes_actions_enabled_after_cache_ttl(
     assert client.actions_enabled("acme/widgets") is False
     now[0] += 61.0
     assert client.actions_enabled("acme/widgets") is True
+    assert runner.calls == [argv, argv]
+
+
+def test_github_client_can_bypass_actions_permission_cache_for_merge_gate() -> None:
+    argv = ("gh", "api", "repos/acme/widgets/actions/permissions")
+    responses = iter(({"enabled": True}, {"enabled": False}))
+
+    class ChangingRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, command: list[str]) -> str:
+            self.calls.append(tuple(command))
+            return json.dumps(next(responses))
+
+    runner = ChangingRunner()
+    client = GitHubClient(runner)
+
+    assert client.actions_enabled("acme/widgets") is True
+    assert client.actions_enabled("acme/widgets", refresh=True) is False
     assert runner.calls == [argv, argv]
 
 

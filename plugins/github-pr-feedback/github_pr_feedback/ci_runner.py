@@ -97,6 +97,16 @@ class CommandEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionsDisabledLocalCIEvidence:
+    """Manifest-derived proof that a disabled-Actions PR ran the full local lane set."""
+
+    receipt_id: str
+    manifest_digest: str
+    command_count: int
+    required_command_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class CIAuditReceipt:
     receipt_id: str
     identity: CIAuditIdentity
@@ -454,10 +464,13 @@ class LocalCIRunner:
     def _check_state(self, repository: str, head_sha: str) -> CheckState:
         if self._actions_enabled_hint is None:
             return self._github.get_check_state(repository, head_sha)
+        actions_enabled = self._github.actions_enabled(repository, refresh=True)
+        if actions_enabled != self._actions_enabled_hint:
+            raise CIValidationError("GitHub Actions permission changed during CI execution")
         return self._github.get_check_state(
             repository,
             head_sha,
-            actions_enabled_hint=self._actions_enabled_hint,
+            actions_enabled_hint=actions_enabled,
         )
 
     def run(self, identity: CIAuditIdentity, worktree: Path) -> CIAuditReceipt:
@@ -807,6 +820,61 @@ def _required_lanes(manifest_bytes: bytes) -> tuple[str, ...]:
     if not required:
         raise CIValidationError("CI lane manifest has no required lanes")
     return required
+
+
+def actions_disabled_local_ci_evidence(
+    receipt: CIAuditReceipt | None, manifest_bytes: bytes
+) -> ActionsDisabledLocalCIEvidence | None:
+    """Bind a standard exact-head receipt to every manifest-required local CI job."""
+
+    if (
+        receipt is None
+        or receipt.status != "passed"
+        or receipt.ci_mode != CI_MODE_STANDARD
+        or receipt.actions_state.actions_enabled
+        or receipt.actions_state.billing_blocked
+    ):
+        return None
+    lanes = _required_lanes(manifest_bytes)
+    required: list[tuple[str, ...]] = [
+        ("scripts/check_ci_governance.py",),
+        ("scripts/run_static_lane.py",),
+        ("scripts/run_hygiene_lane.py",),
+    ]
+    for lane in lanes:
+        if lane == "locked_install_parity":
+            required.append(("scripts/run_local_ci_audit.py", "--job", lane, "--output"))
+        else:
+            required.append(("scripts/run_test_lane.py", "--lane", lane))
+    commands = receipt.commands
+    required_commands = commands
+    if commands and _command_covers_required_job(
+        commands[0].argv,
+        ("scripts/bootstrap_agent_workspace.py", "--venv", "link"),
+    ):
+        required_commands = commands[1:]
+    if len(required_commands) < len(required):
+        return None
+    for command, suffix in zip(required_commands, required, strict=False):
+        if command.cwd != "." or not _command_covers_required_job(command.argv, suffix):
+            return None
+    return ActionsDisabledLocalCIEvidence(
+        receipt_id=receipt.receipt_id,
+        manifest_digest=receipt.manifest_digest,
+        command_count=len(commands),
+        required_command_count=len(required),
+    )
+
+
+def _command_covers_required_job(argv: tuple[str, ...], expected: tuple[str, ...]) -> bool:
+    try:
+        script_index = argv.index(expected[0])
+    except ValueError:
+        return False
+    arguments = argv[script_index:]
+    if expected[-1] == "--output":
+        return len(arguments) == len(expected) + 1 and arguments[:-1] == expected
+    return arguments == expected
 
 
 def _require_identity(identity: CIAuditIdentity, state: PullRequestMergeState) -> None:

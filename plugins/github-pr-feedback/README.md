@@ -109,6 +109,10 @@ plugins:
           merge_methods: [squash, rebase, merge]
           receipt_max_age_seconds: 21600
           report_only: true
+          # Allows a complete manifest-bound local receipt only when the
+          # canonical repository setting proves Actions is disabled, or when
+          # enabled Actions is canonically billing-blocked.
+          allow_budget_exhausted_local_ci: false
           post_merge:
             enabled: false
         # Optional end-stage repository maintenance. It never runs while any
@@ -313,6 +317,14 @@ PRs carrying a `sweeper:risk-*`, `sweeper:blast-broad`,
 `sweeper:blast-massive`, or `telemetry` label also require the explicit
 `ci-reviewed` label. This gate is evaluated again on both exact-head snapshots;
 task prose cannot satisfy it.
+
+When `allow_budget_exhausted_local_ci` is enabled together with required,
+audit-only, no-post local CI, the same exact-head receipt may substitute for
+hosted checks in only two canonical repository states: Actions is explicitly
+disabled, or Actions is enabled and its exact-head runs carry GitHub's billing
+lockout annotations. Disabled Actions requires every manifest-required local
+job in the receipt; merely absent checks, a partial receipt, or an enabled
+repository with no green checks remains blocked.
 
 Typed `routing_rules` do not execute model classification. The controller
 matches canonical PR labels and bounded feedback text, then records the chosen

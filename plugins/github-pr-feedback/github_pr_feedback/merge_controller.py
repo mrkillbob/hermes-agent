@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from .ci_runner import (
+    ActionsDisabledLocalCIEvidence,
     CIAuditReceipt,
     CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
+    actions_disabled_local_ci_evidence,
 )
 from .github_client import (
     CheckState,
@@ -42,6 +44,7 @@ class MergeSnapshot:
     base_head_sha: str
     intent_review_pending: bool = False
     codex_review_pending: bool = False
+    actions_disabled_local_ci: ActionsDisabledLocalCIEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +148,19 @@ def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
     return False
 
 
+def _is_governed_approval_receipt(
+    feedback: Feedback, *, expected_login: str, head_sha: str
+) -> bool:
+    """Recognize only the configured automation identity's exact-head approval review."""
+
+    return bool(
+        feedback.kind == "review"
+        and feedback.reviewer.login.casefold() == expected_login.casefold()
+        and feedback.review_state == "APPROVED"
+        and feedback.reviewed_head_sha == head_sha.casefold()
+    )
+
+
 def _allowed_merge_method(
     policy: MergeMaintainerPolicy, repository_policy: RepositoryMergePolicy
 ) -> str | None:
@@ -225,6 +241,18 @@ def evaluate_merge(
         and not snapshot.check_state.billing_blocked
     ):
         blockers.append("github_checks_not_green")
+    elif not snapshot.check_state.actions_enabled:
+        local_evidence = snapshot.actions_disabled_local_ci
+        if (
+            not policy.allow_budget_exhausted_local_ci
+            or receipt is None
+            or local_evidence is None
+            or local_evidence.receipt_id != receipt.receipt_id
+            or local_evidence.manifest_digest != snapshot.manifest_digest
+            or local_evidence.command_count != len(receipt.commands)
+            or local_evidence.command_count < local_evidence.required_command_count
+        ):
+            blockers.append("github_actions_disabled")
     if snapshot.review_state.review_decision == "CHANGES_REQUESTED":
         blockers.append("changes_requested")
     if snapshot.review_state.unresolved_thread_count:
@@ -482,7 +510,8 @@ class CanonicalMergeEvidenceSource:
         manifest_path = target.local_path / "tests/manifests/test_lanes.toml"
         if not manifest_path.is_file():
             raise GitHubClientError("CI manifest was unavailable")
-        manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        manifest_bytes = manifest_path.read_bytes()
+        manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
         receipt = self._ledger.latest_ci_receipt(
             policy.repository,
             number,
@@ -492,18 +521,24 @@ class CanonicalMergeEvidenceSource:
         )
         if receipt is not None and not isinstance(receipt, CIAuditReceipt):
             raise GitHubClientError("CI receipt had an invalid type")
-        feedback_clear = self._feedback_clear(pull)
         feedback = self._github.list_feedback(policy.repository, number)
+        feedback_clear = self._feedback_clear(pull, feedback)
         intent_pending = pending_intent_review(feedback, owner_login=target.owner_login)
         codex_pending = not _codex_reviewed_head(feedback, pull.head_sha)
-        check_state = (
-            self._github.get_check_state(
+        if self._plugin_policy.uses_budget_exhausted_local_ci(policy.repository):
+            actions_enabled = self._github.actions_enabled(policy.repository, refresh=True)
+            check_state = self._github.get_check_state(
                 policy.repository,
                 pull.head_sha,
-                actions_enabled_hint=True,
+                actions_enabled_hint=actions_enabled,
             )
-            if self._plugin_policy.uses_budget_exhausted_local_ci(policy.repository)
-            else self._github.get_check_state(policy.repository, pull.head_sha)
+        else:
+            check_state = self._github.get_check_state(policy.repository, pull.head_sha)
+        actions_disabled_evidence = (
+            actions_disabled_local_ci_evidence(receipt, manifest_bytes)
+            if not check_state.actions_enabled
+            and self._plugin_policy.uses_budget_exhausted_local_ci(policy.repository)
+            else None
         )
         return MergeSnapshot(
             repository_private=self._github.repository_is_private(policy.repository),
@@ -524,9 +559,12 @@ class CanonicalMergeEvidenceSource:
             ),
             intent_review_pending=intent_pending,
             codex_review_pending=codex_pending,
+            actions_disabled_local_ci=actions_disabled_evidence,
         )
 
-    def _feedback_clear(self, pull: PullRequestMergeState) -> bool:
+    def _feedback_clear(
+        self, pull: PullRequestMergeState, feedback_items: tuple[Feedback, ...]
+    ) -> bool:
         from .controller import (
             _ci_receipt_feedback_reason,
             _is_codex_review_summary_tracker,
@@ -545,13 +583,24 @@ class CanonicalMergeEvidenceSource:
             head_ref_name=pull.head_ref_name,
             head_sha=pull.head_sha,
         )
-        for feedback in self._github.list_feedback(pull.repository, pull.number):
+        automation_login = (
+            policy.github_identity.expected_login if policy.github_identity is not None else None
+        )
+        for feedback in feedback_items:
             if policy.not_before is not None and feedback.created_at < policy.not_before:
                 continue
             if (
                 _is_non_actionable_review_container(feedback)
                 or _is_codex_review_summary_tracker(feedback)
                 or _is_self_resolution_receipt(feedback, owner_login=target.owner_login)
+                or (
+                    automation_login is not None
+                    and _is_governed_approval_receipt(
+                        feedback,
+                        expected_login=automation_login,
+                        head_sha=pull.head_sha,
+                    )
+                )
             ):
                 continue
             receipt = FeedbackReceipt(
@@ -611,6 +660,18 @@ def _snapshot_digest(snapshot: MergeSnapshot, receipt: CIAuditReceipt | None) ->
         "ci_mode": receipt.ci_mode if receipt else None,
         "manifest": snapshot.manifest_digest,
         "feedback_clear": snapshot.feedback_clear,
+        "actions_disabled_local_ci": (
+            {
+                "receipt_id": snapshot.actions_disabled_local_ci.receipt_id,
+                "manifest_digest": snapshot.actions_disabled_local_ci.manifest_digest,
+                "command_count": snapshot.actions_disabled_local_ci.command_count,
+                "required_command_count": (
+                    snapshot.actions_disabled_local_ci.required_command_count
+                ),
+            }
+            if snapshot.actions_disabled_local_ci is not None
+            else None
+        ),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

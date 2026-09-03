@@ -8,9 +8,14 @@ from pathlib import Path
 import pytest
 
 from github_pr_feedback.ci_runner import (
+    ActionsDisabledLocalCIEvidence,
     CIAuditIdentity,
     CIAuditReceipt,
     CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
+    CommandEvidence,
+    CompletedCommand,
+    LocalCIRunner,
+    actions_disabled_local_ci_evidence,
 )
 from github_pr_feedback.github_client import (
     CheckState,
@@ -26,6 +31,7 @@ from github_pr_feedback.merge_controller import (
     MergeController,
     MergeSnapshot,
     _codex_reviewed_head,
+    _is_governed_approval_receipt,
     evaluate_merge,
 )
 from github_pr_feedback.policy import MergeMaintainerPolicy, Reviewer, load_policy
@@ -55,6 +61,10 @@ def policy(
     )
 
 
+def passed_command(*argv: str) -> CommandEvidence:
+    return CommandEvidence(tuple(argv), ".", 0, 1, False, "1" * 64, "2" * 64, "passed")
+
+
 def ci_receipt(**overrides: object) -> CIAuditReceipt:
     values: dict[str, object] = {
         "receipt_id": "d" * 64,
@@ -63,7 +73,7 @@ def ci_receipt(**overrides: object) -> CIAuditReceipt:
         "status": "passed",
         "started_at": NOW - timedelta(minutes=5),
         "completed_at": NOW - timedelta(minutes=4),
-        "actions_state": CheckState(False, True, 0),
+        "actions_state": CheckState(True, True, 1),
         "commands": (),
     }
     values.update(overrides)
@@ -98,7 +108,7 @@ def eligible_snapshot(**overrides: object) -> MergeSnapshot:
         "branch_allowed": True,
         "repository_merge_policy": RepositoryMergePolicy(True, True, True),
         "review_state": ReviewState("APPROVED", 0),
-        "check_state": CheckState(False, True, 0),
+        "check_state": CheckState(True, True, 1),
         "ci_receipt": ci_receipt(),
         "manifest_digest": "e" * 64,
         "feedback_clear": True,
@@ -222,6 +232,76 @@ def test_evaluate_merge_rejects_standard_receipt_as_budget_substitution() -> Non
     assert "github_actions_budget_exhausted" in decision.blockers
 
 
+def test_evaluate_merge_requires_typed_full_local_evidence_when_actions_are_disabled() -> None:
+    receipt = ci_receipt(
+        actions_state=CheckState(False, True, 0),
+        commands=(passed_command("python", "scripts/check_ci_governance.py"),),
+    )
+    snapshot = eligible_snapshot(check_state=CheckState(False, True, 0), ci_receipt=receipt)
+
+    decision = evaluate_merge(
+        policy(allow_budget_exhausted_local_ci=True), snapshot, now=NOW
+    )
+
+    assert decision.eligible is False
+    assert "github_actions_disabled" in decision.blockers
+
+
+def test_evaluate_merge_accepts_bound_actions_disabled_full_local_evidence() -> None:
+    receipt = ci_receipt(
+        actions_state=CheckState(False, True, 0),
+        commands=(passed_command("python", "scripts/check_ci_governance.py"),),
+    )
+    evidence = ActionsDisabledLocalCIEvidence(
+        receipt_id=receipt.receipt_id,
+        manifest_digest=receipt.manifest_digest,
+        command_count=1,
+        required_command_count=1,
+    )
+    snapshot = eligible_snapshot(
+        check_state=CheckState(False, True, 0),
+        ci_receipt=receipt,
+        actions_disabled_local_ci=evidence,
+    )
+
+    decision = evaluate_merge(
+        policy(allow_budget_exhausted_local_ci=True), snapshot, now=NOW
+    )
+
+    assert decision.eligible is True
+
+
+def test_actions_disabled_evidence_requires_every_manifest_lane() -> None:
+    manifest = b'[lanes.unit]\nci_status = "required"\n[lanes.static]\nci_status = "required"\n'
+    commands = (
+        passed_command("python", "scripts/check_ci_governance.py"),
+        passed_command("python", "scripts/run_static_lane.py"),
+        passed_command("python", "scripts/run_hygiene_lane.py"),
+        passed_command("python", "scripts/run_test_lane.py", "--lane", "unit"),
+    )
+    receipt = ci_receipt(actions_state=CheckState(False, True, 0), commands=commands)
+
+    assert actions_disabled_local_ci_evidence(receipt, manifest) is None
+
+
+def test_actions_disabled_evidence_allows_the_owned_workspace_bootstrap() -> None:
+    manifest = b'[lanes.unit]\nci_status = "required"\n'
+    commands = (
+        passed_command("python3", "scripts/bootstrap_agent_workspace.py", "--venv", "link"),
+        passed_command(".venv/bin/python", "scripts/check_ci_governance.py"),
+        passed_command(".venv/bin/python", "scripts/run_static_lane.py"),
+        passed_command(".venv/bin/python", "scripts/run_hygiene_lane.py"),
+        passed_command(".venv/bin/python", "scripts/run_test_lane.py", "--lane", "unit"),
+    )
+    receipt = ci_receipt(actions_state=CheckState(False, True, 0), commands=commands)
+
+    evidence = actions_disabled_local_ci_evidence(receipt, manifest)
+
+    assert evidence is not None
+    assert evidence.command_count == 5
+    assert evidence.required_command_count == 4
+
+
 def test_evaluate_merge_reports_action_required_instead_of_the_generic_not_green_code() -> None:
     """A precise code, not the generic red-X one, so an action_required PR routes
     to human/escalation handling instead of being treated as an ordinary failing
@@ -327,14 +407,24 @@ class RecordingGitHub:
         return readback
 
 
-def test_canonical_snapshot_uses_budget_policy_hint_for_exact_head_check_read(
+def test_audit_produced_actions_disabled_receipt_is_merge_eligible(
     tmp_path: Path,
 ) -> None:
     repository = tmp_path / "repo"
     subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
     manifest = repository / "tests/manifests/test_lanes.toml"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text("version = 1\n", encoding="utf-8")
+    manifest.write_text('[lanes.unit]\nci_status = "required"\n', encoding="utf-8")
+    for relative in (
+        "scripts/check_ci_governance.py",
+        "scripts/run_hygiene_lane.py",
+        "scripts/run_static_lane.py",
+        "scripts/run_test_lane.py",
+        "scripts/run_local_ci_audit.py",
+    ):
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# fixture\n", encoding="utf-8")
     plugin_policy = load_policy(
         {
             "enabled": True,
@@ -382,7 +472,21 @@ def test_canonical_snapshot_uses_budget_policy_hint_for_exact_head_check_read(
             return pr_state()
 
         def list_feedback(self, repository: str, number: int):
-            return ()
+            return (
+                Feedback(
+                    "issue_comment",
+                    "codex-summary",
+                    Reviewer("chatgpt-codex-connector[bot]", None),
+                    (
+                        "<!-- codex-pull-request-review-summary -->\n"
+                        "| Review | Status | Commit | Trigger |\n"
+                        "| Code | Completed <relative-time>now</relative-time> | "
+                        f"`{HEAD_SHA[:7]}` | push |"
+                    ),
+                    NOW,
+                    True,
+                ),
+            )
 
         def repository_is_private(self, repository: str) -> bool:
             return True
@@ -401,7 +505,11 @@ def test_canonical_snapshot_uses_budget_policy_hint_for_exact_head_check_read(
             actions_enabled_hint: bool | None = None,
         ):
             self.check_hints.append(actions_enabled_hint)
-            return CheckState(True, False, 1, True)
+            return CheckState(False, True, 0)
+
+        def actions_enabled(self, repository: str, *, refresh: bool = False) -> bool:
+            assert refresh is True
+            return False
 
         def get_branch_head(self, repository: str, branch: str) -> str:
             return BASE_SHA
@@ -409,10 +517,75 @@ def test_canonical_snapshot_uses_budget_policy_hint_for_exact_head_check_read(
     github = HintGitHub()
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
 
-    CanonicalMergeEvidenceSource(plugin_policy, github, ledger).snapshot(17)
+    class Inspector:
+        def head_sha(self, worktree: Path) -> str:
+            return HEAD_SHA
 
-    assert github.check_hints == [True]
+        def is_clean(self, worktree: Path) -> bool:
+            return True
+
+        def changed_files(
+            self, worktree: Path, base_sha: str, head_sha: str
+        ) -> tuple[str, ...]:
+            return ("src/example.py",)
+
+    class Commands:
+        def run(self, argv, *, cwd, env, timeout):
+            return CompletedCommand(0, "", "", 1, False)
+
+    receipt = LocalCIRunner(
+        github,
+        ledger,
+        command_runner=Commands(),
+        inspector=Inspector(),
+        python_argv=("python3",),
+        now=lambda: NOW,
+        supervisor_pid=lambda: 4242,
+        pid_is_alive=lambda _pid: True,
+        actions_enabled_hint=False,
+    ).run(CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), repository)
+
+    snapshot = CanonicalMergeEvidenceSource(plugin_policy, github, ledger).snapshot(17)
+    decision = evaluate_merge(plugin_policy.merge_maintainer, snapshot, now=NOW)
+
+    assert receipt.actions_state == CheckState(False, True, 0)
+    assert len(receipt.commands) == 4
+    assert snapshot.actions_disabled_local_ci is not None
+    assert decision.eligible is True
+    assert github.check_hints == [False, False, False]
     ledger.close()
+
+
+def test_governed_bot_approval_receipt_requires_identity_event_and_exact_head() -> None:
+    valid = Feedback(
+        "review",
+        "5518897121",
+        Reviewer("mrkillbobbot", "MEMBER"),
+        "Independent review complete. Exact reviewed head: " + HEAD_SHA + ".",
+        NOW,
+        False,
+        review_state="APPROVED",
+        reviewed_head_sha=HEAD_SHA,
+    )
+
+    assert _is_governed_approval_receipt(
+        valid, expected_login="mrkillbobbot", head_sha=HEAD_SHA
+    )
+    assert not _is_governed_approval_receipt(
+        replace(valid, review_state="COMMENTED"),
+        expected_login="mrkillbobbot",
+        head_sha=HEAD_SHA,
+    )
+    assert not _is_governed_approval_receipt(
+        replace(valid, reviewed_head_sha="c" * 40),
+        expected_login="mrkillbobbot",
+        head_sha=HEAD_SHA,
+    )
+    assert not _is_governed_approval_receipt(
+        replace(valid, reviewer=Reviewer("some-other-bot", "MEMBER")),
+        expected_login="mrkillbobbot",
+        head_sha=HEAD_SHA,
+    )
 
 
 def test_merge_controller_rereads_under_lease_and_stops_on_a_race(tmp_path: Path) -> None:
