@@ -510,6 +510,31 @@ def test_ambiguous_merge_write_uses_readback_and_never_blindly_retries(tmp_path:
     ledger.close()
 
 
+def test_successful_merge_command_with_unconfirmed_readback_is_never_resent(
+    tmp_path: Path,
+) -> None:
+    snapshot = eligible_snapshot()
+    github = RecordingGitHub([pr_state(), pr_state()])
+    ledger = enrolled_ledger(tmp_path)
+    controller = MergeController(
+        policy(),
+        SnapshotSource([snapshot, snapshot, snapshot, snapshot]),
+        github,
+        ledger,
+        owner="test",
+        now=lambda: NOW,
+    )
+
+    first = controller.run(17)
+    second = controller.run(17)
+
+    assert first.decision.blockers == ("merge_verification_required",)
+    assert second.decision.blockers == ("merge_verification_required",)
+    assert github.merge_calls == [("acme/widgets", 17, HEAD_SHA, "squash")]
+    assert ledger.verification_required_merge_numbers("acme/widgets") == (17,)
+    ledger.close()
+
+
 def test_merge_controller_rechecks_enrollment_after_lease_before_write(
     tmp_path: Path,
 ) -> None:

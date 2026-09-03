@@ -325,7 +325,6 @@ class MergeController:
             )
             return MergeRunResult(raced, None)
         assert second.method is not None
-        write_error: Exception | None = None
         authorized = self._ledger.authorize_merge_write(
             lease, updated_at=self._now()
         )
@@ -350,8 +349,10 @@ class MergeController:
                 second_snapshot.pull_request.head_sha,
                 method=second.method,
             )
-        except GitHubClientError as error:
-            write_error = error
+        except GitHubClientError:
+            # A transport error cannot prove that GitHub rejected the write.
+            # Canonical readback below remains the only completion authority.
+            pass
         try:
             readback = self._github.get_merge_state(self._policy.repository, number)
         except GitHubClientError as error:
@@ -375,7 +376,7 @@ class MergeController:
         ):
             self._ledger.finish_merge_lease(
                 lease,
-                status="verification_required" if write_error else "failed",
+                status="verification_required",
                 updated_at=self._now(),
                 error="canonical readback did not confirm the merge",
                 expected_status="verification_required",
