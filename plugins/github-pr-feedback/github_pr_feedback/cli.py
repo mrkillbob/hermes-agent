@@ -219,10 +219,19 @@ class DoctorProbe:
     """Read-only readiness probes with an injected external-command boundary."""
 
     def __init__(
-        self, hermes_root: Path, runner: DoctorCommandRunner | None = None
+        self,
+        hermes_root: Path,
+        runner: DoctorCommandRunner | None = None,
+        *,
+        hermes_source_root: Path | None = None,
     ) -> None:
         self._hermes_root = Path(hermes_root)
         self._runner = runner or SubprocessDoctorRunner()
+        if hermes_source_root is None:
+            from hermes_cli._startup_fast import project_root_str
+
+            hermes_source_root = Path(project_root_str())
+        self._hermes_source_root = Path(hermes_source_root).resolve()
 
     def checks(self, policy: PluginPolicy, ledger_path: Path) -> dict[str, str]:
         gh = self._runner.which("gh")
@@ -230,7 +239,7 @@ class DoctorProbe:
         checks = {
             "gh_executable": gh is not None,
             "hermes_executable": bool(
-                hermes and self._command_ok([hermes, "--version"])
+                hermes and self._hermes_executable_ready(hermes)
             ),
             "board": self._board_exists(policy.board or ""),
             "assignee": all(
@@ -275,10 +284,27 @@ class DoctorProbe:
         }
         return {name: "ok" if ok else "failed" for name, ok in checks.items()}
 
-    def _command_ok(self, argv: list[str]) -> bool:
+    def _hermes_executable_ready(self, executable: str) -> bool:
         try:
-            return self._runner.run(argv).returncode == 0
+            result = self._runner.run([executable, "--version-local"])
         except Exception:  # noqa: BLE001 - doctor reports failure and continues.
+            return False
+        if result.returncode != 0:
+            return False
+        install_lines = [
+            line.removeprefix("Install directory:").strip()
+            for line in result.stdout.splitlines()
+            if line.startswith("Install directory:")
+        ]
+        if len(install_lines) != 1 or not install_lines[0]:
+            return False
+        try:
+            reported_root = Path(install_lines[0])
+            return (
+                reported_root.is_absolute()
+                and reported_root.resolve() == self._hermes_source_root
+            )
+        except OSError:
             return False
 
     def _board_exists(self, board: str) -> bool:

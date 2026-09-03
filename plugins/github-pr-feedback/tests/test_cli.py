@@ -1368,7 +1368,10 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     context = RecordingContext(settings)
     responses = {
         ("/opt/tools/gh", "auth", "status", "--hostname", "github.com"): (0, ""),
-        ("/opt/tools/hermes", "--version"): (0, "Hermes Agent test"),
+        ("/opt/tools/hermes", "--version-local"): (
+            0,
+            "Hermes Agent test\nInstall directory: /opt/hermes-source\n",
+        ),
         ("/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"): (
             0,
             f"{repository}\n",
@@ -1388,7 +1391,9 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
 
     exit_code = _doctor(
         context,
-        probe=DoctorProbe(profile_root, runner),
+        probe=DoctorProbe(
+            profile_root, runner, hermes_source_root=Path("/opt/hermes-source")
+        ),
         ledger_path=ledger_path,
     )
 
@@ -1405,7 +1410,7 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
         "repository_worktree": "ok",
     }
     assert runner.calls == [
-        ["/opt/tools/hermes", "--version"],
+        ["/opt/tools/hermes", "--version-local"],
         ["/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"],
         ["/opt/tools/git", "-C", str(repository), "rev-parse", "--git-common-dir"],
         ["/opt/tools/git", "-C", str(repository), "worktree", "list", "--porcelain"],
@@ -1426,7 +1431,10 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
     ledger_path = profile_root / "github-pr-feedback" / "ledger.sqlite3"
     responses = {
         ("/opt/tools/gh", "auth", "status", "--hostname", "github.com"): (1, ""),
-        ("/opt/tools/hermes", "--version"): (0, "Hermes Agent test"),
+        ("/opt/tools/hermes", "--version-local"): (
+            0,
+            "Hermes Agent test\nInstall directory: /opt/hermes-source\n",
+        ),
         ("/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"): (
             0,
             f"{repository}\n",
@@ -1444,7 +1452,9 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
 
     exit_code = _doctor(
         RecordingContext(enabled_settings(repository)),
-        probe=DoctorProbe(profile_root, runner),
+        probe=DoctorProbe(
+            profile_root, runner, hermes_source_root=Path("/opt/hermes-source")
+        ),
         ledger_path=ledger_path,
     )
 
@@ -1486,7 +1496,10 @@ def test_doctor_requires_the_configured_local_ci_auditor_profile(
     policy = load_policy(settings)
     responses = {
         ("/opt/tools/gh", "auth", "status", "--hostname", "github.com"): (0, ""),
-        ("/opt/tools/hermes", "--version"): (0, "Hermes Agent test"),
+        ("/opt/tools/hermes", "--version-local"): (
+            0,
+            "Hermes Agent test\nInstall directory: /opt/hermes-source\n",
+        ),
         ("/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"): (
             0,
             f"{repository}\n",
@@ -1500,11 +1513,55 @@ def test_doctor_requires_the_configured_local_ci_auditor_profile(
             f"worktree {repository}\n",
         ),
     }
-    probe = DoctorProbe(profile_root, RecordingDoctorRunner(responses))
+    probe = DoctorProbe(
+        profile_root,
+        RecordingDoctorRunner(responses),
+        hermes_source_root=Path("/opt/hermes-source"),
+    )
 
     checks = probe.checks(policy, profile_root / "ledger.sqlite3")
 
     assert checks["assignee"] == "failed"
+
+
+def test_doctor_rejects_a_hermes_executable_from_another_source_tree(
+    tmp_path: Path,
+) -> None:
+    from github_pr_feedback.cli import DoctorProbe
+    from github_pr_feedback.policy import load_policy
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    policy = load_policy(enabled_settings(repository))
+    runner = RecordingDoctorRunner(
+        {
+            ("/opt/tools/hermes", "--version-local"): (
+                0,
+                "Hermes Agent test\nInstall directory: /opt/stale-hermes\n",
+            ),
+            ("/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"): (
+                0,
+                f"{repository}\n",
+            ),
+            ("/opt/tools/git", "-C", str(repository), "rev-parse", "--git-common-dir"): (
+                0,
+                ".git\n",
+            ),
+            ("/opt/tools/git", "-C", str(repository), "worktree", "list", "--porcelain"): (
+                0,
+                f"worktree {repository}\n",
+            ),
+        }
+    )
+    probe = DoctorProbe(
+        tmp_path,
+        runner,
+        hermes_source_root=Path("/opt/hermes-source"),
+    )
+
+    checks = probe.checks(policy, tmp_path / "ledger.sqlite3")
+
+    assert checks["hermes_executable"] == "failed"
 
 
 def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
