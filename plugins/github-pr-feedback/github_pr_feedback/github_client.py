@@ -892,7 +892,7 @@ class GitHubClient:
                 "api",
                 label_endpoint,
                 "--method",
-                "PUT",
+                "PATCH",
                 "--field",
                 f"new_name={label}",
                 "--field",
