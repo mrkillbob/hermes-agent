@@ -326,17 +326,9 @@ class MergeController:
             return MergeRunResult(raced, None)
         assert second.method is not None
         write_error: Exception | None = None
-        with self._ledger.authorized_merge_write(lease) as authorized:
-            if authorized:
-                try:
-                    self._github.merge_pull_request(
-                        self._policy.repository,
-                        number,
-                        second_snapshot.pull_request.head_sha,
-                        method=second.method,
-                    )
-                except GitHubClientError as error:
-                    write_error = error
+        authorized = self._ledger.authorize_merge_write(
+            lease, updated_at=self._now()
+        )
         if not authorized:
             self._ledger.finish_merge_lease(
                 lease,
@@ -352,6 +344,15 @@ class MergeController:
             )
             return MergeRunResult(blocked, None)
         try:
+            self._github.merge_pull_request(
+                self._policy.repository,
+                number,
+                second_snapshot.pull_request.head_sha,
+                method=second.method,
+            )
+        except GitHubClientError as error:
+            write_error = error
+        try:
             readback = self._github.get_merge_state(self._policy.repository, number)
         except GitHubClientError as error:
             self._ledger.finish_merge_lease(
@@ -359,6 +360,7 @@ class MergeController:
                 status="verification_required",
                 updated_at=self._now(),
                 error=type(error).__name__,
+                expected_status="verification_required",
             )
             blocked = MergeDecision(
                 False, ("merge_verification_required",), None, second.snapshot_digest
@@ -376,6 +378,7 @@ class MergeController:
                 status="verification_required" if write_error else "failed",
                 updated_at=self._now(),
                 error="canonical readback did not confirm the merge",
+                expected_status="verification_required",
             )
             blocked = MergeDecision(
                 False, ("merge_verification_required",), None, second.snapshot_digest
@@ -395,7 +398,11 @@ class MergeController:
             executor=self._owner,
         )
         self._ledger.finish_merge_lease(
-            lease, status="completed", updated_at=self._now(), receipt=receipt
+            lease,
+            status="completed",
+            updated_at=self._now(),
+            receipt=receipt,
+            expected_status="verification_required",
         )
         return MergeRunResult(second, receipt)
 
