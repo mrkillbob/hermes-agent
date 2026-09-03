@@ -254,6 +254,35 @@ def test_link_governed_venv_accepts_profile_managed_environment(tmp_path: Path) 
     assert (workspace / ".venv").resolve(strict=True) == managed_venv.resolve(strict=True)
 
 
+def test_link_governed_venv_repairs_only_an_untracked_broken_link(tmp_path: Path) -> None:
+    repo = initialized_repository(tmp_path / "repo")
+    make_governed_venv(repo)
+    workspace = initialized_repository(tmp_path / "receipt-worktree")
+    broken_target = tmp_path / "deleted-checkout" / ".venv"
+    destination = workspace / ".venv"
+    destination.symlink_to(broken_target, target_is_directory=True)
+
+    LocalGitRepository._link_governed_venv(repo, workspace)
+
+    assert destination.is_symlink()
+    assert destination.resolve(strict=True) == (repo / ".venv").resolve(strict=True)
+
+
+def test_link_governed_venv_preserves_a_tracked_broken_link(tmp_path: Path) -> None:
+    repo = initialized_repository(tmp_path / "repo")
+    make_governed_venv(repo)
+    workspace = initialized_repository(tmp_path / "receipt-worktree")
+    destination = workspace / ".venv"
+    destination.symlink_to(tmp_path / "deleted-checkout" / ".venv", target_is_directory=True)
+    subprocess.run(["git", "-C", str(workspace), "add", ".venv"], check=True)
+
+    with pytest.raises(RuntimeError, match="virtualenv target is inconsistent"):
+        LocalGitRepository._link_governed_venv(repo, workspace)
+
+    assert destination.is_symlink()
+    assert not destination.exists()
+
+
 class FakeKanban:
     def __init__(self, statuses: dict[tuple[str, str], str | None]) -> None:
         self._statuses = statuses

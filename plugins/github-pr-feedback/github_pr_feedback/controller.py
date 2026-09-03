@@ -408,7 +408,55 @@ class LocalGitRepository:
         ):
             raise RuntimeError("project virtualenv is not a governed local environment")
         if destination.is_symlink():
-            if destination.resolve(strict=True) != resolved_source:
+            try:
+                resolved_destination = destination.resolve(strict=True)
+            except FileNotFoundError:
+                original_target = os.readlink(destination)
+                try:
+                    tracked = subprocess.run(
+                        (
+                            "git",
+                            "-C",
+                            str(workspace_root),
+                            "ls-files",
+                            "--stage",
+                            "--",
+                            ".venv",
+                        ),
+                        check=False,
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    raise RuntimeError(
+                        "receipt worktree virtualenv ownership is unavailable"
+                    ) from error
+                if tracked.returncode != 0 or tracked.stdout.strip():
+                    raise RuntimeError(
+                        "receipt worktree virtualenv target is inconsistent"
+                    )
+                replacement = workspace / ".venv.hermes-repair"
+                if replacement.exists() or replacement.is_symlink():
+                    raise RuntimeError(
+                        "receipt worktree virtualenv repair path is occupied"
+                    )
+                os.symlink(resolved_source, replacement, target_is_directory=True)
+                try:
+                    if (
+                        not destination.is_symlink()
+                        or os.readlink(destination) != original_target
+                    ):
+                        raise RuntimeError(
+                            "receipt worktree virtualenv target changed during repair"
+                        )
+                    os.replace(replacement, destination)
+                finally:
+                    if replacement.is_symlink():
+                        replacement.unlink()
+                return
+            if resolved_destination != resolved_source:
                 raise RuntimeError("receipt worktree virtualenv target is inconsistent")
             return
         if destination.exists():
