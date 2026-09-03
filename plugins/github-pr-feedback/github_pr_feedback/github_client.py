@@ -14,7 +14,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import quote
 
 try:
@@ -221,6 +221,7 @@ class SubprocessCommandRunner:
         rate_limit_backoff: float = 60.0,
         timeout_retry_backoff: float = 1.0,
         request_gate: GitHubRequestGate | None = None,
+        env_overrides: Mapping[str, str] | None = None,
     ) -> None:
         self._sleeper = sleeper
         self._rate_limit_backoff = max(1.0, min(float(rate_limit_backoff), 900.0))
@@ -228,6 +229,7 @@ class SubprocessCommandRunner:
             0.0, min(float(timeout_retry_backoff), 30.0)
         )
         self._request_gate = request_gate or GitHubRequestGate()
+        self._env = None if env_overrides is None else {**os.environ, **env_overrides}
 
     def run(self, argv: list[str]) -> str:
         for attempt in range(2):
@@ -240,6 +242,7 @@ class SubprocessCommandRunner:
                         capture_output=True,
                         text=True,
                         timeout=60,
+                        env=self._env,
                     )
                     if completed.returncode != 0 and _is_rate_limit_failure(
                         completed.stderr
