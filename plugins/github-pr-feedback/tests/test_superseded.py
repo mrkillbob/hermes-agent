@@ -169,6 +169,46 @@ def test_close_superseded_rereads_exact_identity_and_closes_without_branch_delet
     assert all("push" not in call and "rebase" not in call for call in git_calls)
 
 
+def test_close_superseded_allows_stacked_base_when_head_is_on_merge_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    git_calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv, **_kwargs):
+        git_calls.append(tuple(argv))
+        stdout = "git@github.com:acme/widgets.git\n" if "get-url" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr("github_pr_feedback.superseded.subprocess.run", fake_run)
+    github = FakeGitHub(
+        [
+            pull(base="codex/stack-parent"),
+            pull(base="codex/stack-parent"),
+            pull(state="CLOSED", base="codex/stack-parent"),
+        ]
+    )
+
+    result = SupersededPullRequestController(
+        policy(tmp_path), github=github  # type: ignore[arg-type]
+    ).close(
+        "acme/widgets", 17, SHA, repository_path=tmp_path, git_environment={}
+    )
+
+    assert result.state == "CLOSED"
+    assert result.base_branch == "stable"
+    assert github.reads == 3
+    assert len(github.closes) == 1
+    assert (
+        "git",
+        "-C",
+        str(tmp_path),
+        "merge-base",
+        "--is-ancestor",
+        SHA,
+        "refs/remotes/origin/stable",
+    ) in git_calls
+
+
 def test_close_superseded_rejects_nonancestor_without_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -229,7 +269,12 @@ def test_close_superseded_rejects_head_drift_immediately_before_close(
             "",
         ),
     )
-    github = FakeGitHub([pull(), pull(head_sha="c" * 40)])
+    github = FakeGitHub(
+        [
+            pull(base="codex/stack-parent"),
+            pull(head_sha="c" * 40, base="codex/stack-parent"),
+        ]
+    )
 
     with pytest.raises(SupersededCloseError, match="head changed"):
         SupersededPullRequestController(
@@ -242,11 +287,40 @@ def test_close_superseded_rejects_head_drift_immediately_before_close(
     assert github.closes == []
 
 
+def test_close_superseded_rejects_actual_base_drift_immediately_before_close(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    git_calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv, **_kwargs):
+        git_calls.append(tuple(argv))
+        stdout = "git@github.com:acme/widgets.git\n" if "get-url" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr("github_pr_feedback.superseded.subprocess.run", fake_run)
+    github = FakeGitHub(
+        [
+            pull(base="codex/stack-parent"),
+            pull(base="codex/different-parent"),
+        ]
+    )
+
+    with pytest.raises(SupersededCloseError, match="base changed"):
+        SupersededPullRequestController(
+            policy(tmp_path), github=github  # type: ignore[arg-type]
+        ).close(
+            "acme/widgets", 17, SHA, repository_path=tmp_path, git_environment={}
+        )
+
+    assert github.reads == 2
+    assert github.closes == []
+    assert any("merge-base" in call for call in git_calls)
+
+
 @pytest.mark.parametrize(
     "changed",
     (
         replace(pull(), state="CLOSED"),
-        replace(pull(), base_branch="main"),
         replace(pull(), head_repository="fork/widgets"),
         replace(pull(), author_login="intruder"),
         replace(pull(), head_ref_name="feature/unowned"),
