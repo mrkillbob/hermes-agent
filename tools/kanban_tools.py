@@ -1099,7 +1099,7 @@ def _handle_complete(args: dict, **kw) -> str:
                     "done in this attempt, call kanban_block with the exact "
                     "evidence blocker instead of kanban_complete."
                 )
-            rejection = _goal_mode_handoff_rejection(
+            gate_verdict, rejection = _goal_mode_handoff_rejection(
                 task,
                 (summary or result or "").strip(),
             )
