@@ -91,6 +91,7 @@ from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urlparse
 
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
+from hermes_cli.worktree_base import resolve_worktree_base
 from toolsets import get_toolset_names
 
 _log = logging.getLogger(__name__)
@@ -8202,9 +8203,12 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
     if _git_branch_exists(repo_root, branch_name):
         cmd = ["git", "-C", str(repo_root), "worktree", "add", str(target), branch_name]
     else:
+        base_ref, _base_label = resolve_worktree_base(
+            str(repo_root), prefer_current_upstream=False
+        )
         cmd = [
-            "git", "-C", str(repo_root), "worktree", "add", "-b", branch_name,
-            str(target), "HEAD",
+            "git", "-C", str(repo_root), "worktree", "add", "--no-track", "-b",
+            branch_name, str(target), base_ref,
         ]
     result = subprocess.run(
         cmd,
