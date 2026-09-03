@@ -843,10 +843,23 @@ class GitHubClient:
             unresolved_thread_count=sum(not node["isResolved"] for node in nodes),
         )
 
-    def get_check_state(self, repository: str, head_sha: str) -> CheckState:
+    def get_check_state(
+        self,
+        repository: str,
+        head_sha: str,
+        *,
+        actions_enabled_hint: bool | None = None,
+    ) -> CheckState:
         repository = _validated_repository(repository)
         head_sha = _validated_sha(head_sha)
-        if not self.actions_enabled(repository):
+        if actions_enabled_hint is not None and not isinstance(actions_enabled_hint, bool):
+            raise TypeError("actions_enabled_hint must be a boolean or None")
+        actions_enabled = (
+            self.actions_enabled(repository)
+            if actions_enabled_hint is None
+            else actions_enabled_hint
+        )
+        if not actions_enabled:
             return CheckState(actions_enabled=False, all_green=True, check_count=0)
         check_payload = self._read_object(
             f"repos/{repository}/commits/{head_sha}/check-runs?per_page=100"

@@ -476,6 +476,21 @@ class PluginPolicy:
             None,
         )
 
+    def uses_budget_exhausted_local_ci(self, repository: str) -> bool:
+        """Return whether one repository has the fully validated local-budget policy."""
+
+        local_ci = self.local_ci_audit
+        merge = self.merge_policy_for(repository)
+        return bool(
+            local_ci is not None
+            and local_ci.applies_to(repository)
+            and local_ci.required_for_open_prs
+            and local_ci.audit_only
+            and not local_ci.post_results
+            and merge is not None
+            and merge.allow_budget_exhausted_local_ci
+        )
+
     def assignee_for(self, body: str) -> str:
         """Choose the unique highest-scoring specialist, otherwise the fallback."""
 

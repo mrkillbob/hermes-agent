@@ -1188,6 +1188,61 @@ def test_github_client_detects_a_billing_lockout_from_check_run_annotations() ->
     )
 
 
+def test_github_client_actions_enabled_hint_still_reads_exact_head_billing_annotations() -> None:
+    checks_argv = (
+        "gh",
+        "api",
+        "repos/acme/widgets/commits/" + "a" * 40 + "/check-runs?per_page=100",
+    )
+    statuses_argv = (
+        "gh",
+        "api",
+        "repos/acme/widgets/commits/" + "a" * 40 + "/status?per_page=100",
+    )
+    annotations_argv = (
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        "repos/acme/widgets/check-runs/98764105373/annotations",
+    )
+    runner = RecordingRunner(
+        {
+            checks_argv: {
+                "total_count": 1,
+                "check_runs": [
+                    {
+                        "id": 98764105373,
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "output": {"annotations_count": 1},
+                    }
+                ],
+            },
+            statuses_argv: {"state": "failure", "statuses": []},
+            annotations_argv: [
+                [
+                    {
+                        "message": (
+                            "The job was not started because recent account payments "
+                            "have failed or your spending limit needs to be increased."
+                        )
+                    }
+                ]
+            ],
+        }
+    )
+
+    state = GitHubClient(runner).get_check_state(
+        "acme/widgets", "a" * 40, actions_enabled_hint=True
+    )
+
+    assert state == CheckState(
+        actions_enabled=True, all_green=False, check_count=1, billing_blocked=True
+    )
+    assert runner.calls == [checks_argv, statuses_argv, annotations_argv]
+
+
 def test_github_client_does_not_flag_a_genuine_test_failure_as_billing_blocked() -> None:
     permissions_argv = ("gh", "api", "repos/acme/widgets/actions/permissions")
     checks_argv = (
