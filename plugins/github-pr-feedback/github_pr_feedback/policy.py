@@ -81,6 +81,8 @@ _MERGE_METHODS = frozenset({"squash", "rebase", "merge"})
 _ROUTING_PRIORITIES = frozenset({"P0", "P1", "P2", "P3", "P4"})
 _BLAST_RADII = frozenset({"contained", "moderate", "broad", "massive"})
 _MAINTENANCE_LANE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+_SECRET_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_SHARED_GITHUB_TOKEN_ENVS = frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
 MAX_MAINTENANCE_LANES = 8
 
 
@@ -425,6 +427,28 @@ class ReleaseMaintenancePolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class GitHubIdentityPolicy:
+    """Credential selector for all governed Hermes GitHub automation.
+
+    The token itself remains a secret in the process environment. Configuration
+    contains only its environment-variable name and the exact login Hermes must
+    observe before it is allowed to write a review.
+    """
+
+    expected_login: str
+    token_env: str
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubActionsPermissionsIdentityPolicy:
+    """Human-owned gh profile admitted only for repository Actions settings reads."""
+
+    expected_login: str
+    gh_config_dir: Path
+    repositories: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class PluginPolicy:
     enabled: bool
     targets: Mapping[str, RepositoryTarget]
@@ -443,6 +467,24 @@ class PluginPolicy:
     merge_maintainer: MergeMaintainerPolicy | None = None
     repair_steward: RepairStewardPolicy | None = None
     release_maintenance: ReleaseMaintenancePolicy | None = None
+    merge_maintainers: tuple[MergeMaintainerPolicy, ...] = ()
+    github_identity: GitHubIdentityPolicy | None = None
+    github_actions_permissions_identity: GitHubActionsPermissionsIdentityPolicy | None = None
+
+    def merge_policies(self) -> tuple[MergeMaintainerPolicy, ...]:
+        """Return configured merge lanes, preserving the legacy singular field."""
+
+        if self.merge_maintainers:
+            return self.merge_maintainers
+        if self.merge_maintainer is not None:
+            return (self.merge_maintainer,)
+        return ()
+
+    def merge_policy_for(self, repository: str) -> MergeMaintainerPolicy | None:
+        return next(
+            (candidate for candidate in self.merge_policies() if candidate.repository == repository),
+            None,
+        )
 
     def uses_budget_exhausted_local_ci(self, repository: str) -> bool:
         """Return whether one repository has the fully validated local-budget policy."""
@@ -1123,6 +1165,87 @@ def _parse_release_maintenance(
     )
 
 
+def _parse_github_identity(
+    raw: object,
+    *,
+    targets: Mapping[str, RepositoryTarget],
+    reviewer_logins: frozenset[str],
+) -> GitHubIdentityPolicy:
+    if not isinstance(raw, Mapping) or set(raw) != {"expected_login", "token_env"}:
+        raise ValueError("github_identity must contain exactly expected_login and token_env")
+    expected_login = _nonempty_string(
+        raw["expected_login"], "github_identity expected_login"
+    ).casefold()
+    token_env = _nonempty_string(raw["token_env"], "github_identity token_env")
+    if not _SECRET_ENV_NAME.fullmatch(token_env) or token_env in _SHARED_GITHUB_TOKEN_ENVS:
+        raise ValueError(
+            "github_identity token_env must name a dedicated secret environment variable"
+        )
+    author_logins = {target.owner_login.casefold() for target in targets.values()}
+    if expected_login in author_logins:
+        raise ValueError("github_identity expected_login must be independent of PR authors")
+    if expected_login not in reviewer_logins:
+        raise ValueError("github_identity expected_login must be an admitted reviewer_login")
+    return GitHubIdentityPolicy(expected_login=expected_login, token_env=token_env)
+
+
+def _parse_github_actions_permissions_identity(
+    raw: object,
+    *,
+    targets: Mapping[str, RepositoryTarget],
+    github_identity: GitHubIdentityPolicy | None,
+) -> GitHubActionsPermissionsIdentityPolicy:
+    required = {"expected_login", "gh_config_dir", "repositories"}
+    if not isinstance(raw, Mapping) or set(raw) != required:
+        raise ValueError(
+            "github_actions_permissions_identity must contain exactly "
+            "expected_login, gh_config_dir, and repositories"
+        )
+    expected_login = _nonempty_string(
+        raw["expected_login"], "github_actions_permissions_identity expected_login"
+    ).casefold()
+    config_value = _nonempty_string(
+        raw["gh_config_dir"], "github_actions_permissions_identity gh_config_dir"
+    )
+    config_path = Path(config_value)
+    if not config_path.is_absolute():
+        raise ValueError("github_actions_permissions_identity gh_config_dir must be absolute")
+    try:
+        gh_config_dir = config_path.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(
+            "github_actions_permissions_identity gh_config_dir must exist"
+        ) from error
+    if not gh_config_dir.is_dir():
+        raise ValueError("github_actions_permissions_identity gh_config_dir must be a directory")
+    repositories = frozenset(
+        _string_list(
+            raw["repositories"],
+            "github_actions_permissions_identity repositories",
+        )
+    )
+    if not repositories or not repositories.issubset(targets):
+        raise ValueError(
+            "github_actions_permissions_identity repositories must be a non-empty target subset"
+        )
+    if any(
+        repository.partition("/")[0].casefold() != expected_login
+        for repository in repositories
+    ):
+        raise ValueError(
+            "github_actions_permissions_identity expected_login must own every scoped target"
+        )
+    if github_identity is not None and github_identity.expected_login == expected_login:
+        raise ValueError(
+            "github_actions_permissions_identity must differ from github_identity"
+        )
+    return GitHubActionsPermissionsIdentityPolicy(
+        expected_login=expected_login,
+        gh_config_dir=gh_config_dir,
+        repositories=repositories,
+    )
+
+
 def load_policy(raw: object) -> PluginPolicy:
     """Parse plugin configuration, retaining no enabled behavior on any omission."""
 
@@ -1156,6 +1279,8 @@ def load_policy(raw: object) -> PluginPolicy:
         "merge_maintainers",
         "repair_steward",
         "release_maintenance",
+        "github_identity",
+        "github_actions_permissions_identity",
     }
     if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("enabled configuration has missing or unknown fields")
@@ -1242,6 +1367,15 @@ def load_policy(raw: object) -> PluginPolicy:
             raise ValueError(
                 "budget-exhausted CI substitution requires required, audit-only, no-post local CI"
             )
+    github_identity = (
+        _parse_github_identity(
+            raw["github_identity"],
+            targets=targets,
+            reviewer_logins=reviewer_logins,
+        )
+        if "github_identity" in raw
+        else None
+    )
     return PluginPolicy(
         enabled=True,
         targets=targets,
@@ -1276,6 +1410,17 @@ def load_policy(raw: object) -> PluginPolicy:
         release_maintenance=(
             _parse_release_maintenance(raw["release_maintenance"], targets=targets)
             if "release_maintenance" in raw
+            else None
+        ),
+        merge_maintainers=merge_policies,
+        github_identity=github_identity,
+        github_actions_permissions_identity=(
+            _parse_github_actions_permissions_identity(
+                raw["github_actions_permissions_identity"],
+                targets=targets,
+                github_identity=github_identity,
+            )
+            if "github_actions_permissions_identity" in raw
             else None
         ),
     )

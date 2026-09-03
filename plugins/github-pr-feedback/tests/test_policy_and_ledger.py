@@ -683,6 +683,130 @@ def test_enabled_config_rejects_empty_string_reviewer_list(tmp_path: Path) -> No
         load_policy(raw)
 
 
+def test_github_identity_requires_an_admitted_independent_login(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    raw = enabled_raw_config(repository)
+    raw["github_identity"] = {
+        "expected_login": "trusted-reviewer",
+        "token_env": "HERMES_GITHUB_BOT_TOKEN",
+    }
+
+    policy = load_policy(raw)
+
+    assert policy.github_identity is not None
+    assert policy.github_identity.expected_login == "trusted-reviewer"
+    assert policy.github_identity.token_env == "HERMES_GITHUB_BOT_TOKEN"
+
+
+def test_actions_permissions_identity_is_explicit_and_repository_scoped(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    gh_config_dir = tmp_path / "human-gh"
+    gh_config_dir.mkdir()
+    raw = enabled_raw_config(repository)
+    raw["github_actions_permissions_identity"] = {
+        "expected_login": "acme",
+        "gh_config_dir": str(gh_config_dir),
+        "repositories": ["acme/widgets"],
+    }
+
+    policy = load_policy(raw)
+
+    identity = policy.github_actions_permissions_identity
+    assert identity is not None
+    assert identity.expected_login == "acme"
+    assert identity.gh_config_dir == gh_config_dir.resolve()
+    assert identity.repositories == frozenset({"acme/widgets"})
+
+
+@pytest.mark.parametrize(
+    "identity",
+    (
+        {
+            "expected_login": "owner",
+            "gh_config_dir": "relative/gh",
+            "repositories": ["acme/widgets"],
+        },
+        {
+            "expected_login": "stranger",
+            "gh_config_dir": "/tmp/gh",
+            "repositories": ["acme/widgets"],
+        },
+        {
+            "expected_login": "owner",
+            "gh_config_dir": "/tmp/gh",
+            "repositories": ["other/widgets"],
+        },
+        {
+            "expected_login": "owner",
+            "gh_config_dir": "/tmp/gh",
+            "repositories": [],
+        },
+    ),
+)
+def test_actions_permissions_identity_fails_closed_on_unsafe_scope(
+    tmp_path: Path, identity: dict[str, object]
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    raw = enabled_raw_config(repository)
+    raw["github_actions_permissions_identity"] = identity
+
+    with pytest.raises(ValueError):
+        load_policy(raw)
+
+
+def test_actions_permissions_identity_rejects_pr_author_who_does_not_own_namespace(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    gh_config_dir = tmp_path / "human-gh"
+    gh_config_dir.mkdir()
+    raw = enabled_raw_config(repository)
+    raw["repositories"] = [
+        {
+            "base_repository": "NousResearch/hermes-agent",
+            "head_repository": "mrkillbob/hermes-agent",
+            "local_path": str(repository),
+            "owner_login": "mrkillbob",
+            "branch_prefixes": ["codex/"],
+        }
+    ]
+    raw["github_actions_permissions_identity"] = {
+        "expected_login": "mrkillbob",
+        "gh_config_dir": str(gh_config_dir),
+        "repositories": ["NousResearch/hermes-agent"],
+    }
+
+    with pytest.raises(ValueError, match="must own every scoped target"):
+        load_policy(raw)
+
+
+@pytest.mark.parametrize(
+    "github_identity",
+    (
+        {"expected_login": "owner", "token_env": "HERMES_GITHUB_BOT_TOKEN"},
+        {"expected_login": "stranger", "token_env": "HERMES_GITHUB_BOT_TOKEN"},
+        {"expected_login": "trusted-reviewer", "token_env": "GH_TOKEN"},
+        {"expected_login": "trusted-reviewer", "token_env": "not-valid"},
+    ),
+)
+def test_github_identity_rejects_author_untrusted_or_shared_credentials(
+    tmp_path: Path, github_identity: dict[str, str]
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    raw = enabled_raw_config(repository)
+    raw["github_identity"] = github_identity
+
+    with pytest.raises(ValueError):
+        load_policy(raw)
+
+
 @pytest.mark.parametrize("not_before", [None, "", "2026-08-24T00:00:00", "not-a-time"])
 def test_enabled_policy_requires_a_timezone_aware_iso8601_intake_boundary(
     tmp_path: Path, not_before: object
