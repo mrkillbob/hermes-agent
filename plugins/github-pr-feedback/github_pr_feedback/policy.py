@@ -421,8 +421,8 @@ class ReleaseMaintenancePolicy:
 
 
 @dataclass(frozen=True, slots=True)
-class ReviewSubmissionPolicy:
-    """Credential selector for independently authored GitHub reviews.
+class GitHubIdentityPolicy:
+    """Credential selector for all governed Hermes GitHub automation.
 
     The token itself remains a secret in the process environment. Configuration
     contains only its environment-variable name and the exact login Hermes must
@@ -453,7 +453,7 @@ class PluginPolicy:
     repair_steward: RepairStewardPolicy | None = None
     release_maintenance: ReleaseMaintenancePolicy | None = None
     merge_maintainers: tuple[MergeMaintainerPolicy, ...] = ()
-    review_submission: ReviewSubmissionPolicy | None = None
+    github_identity: GitHubIdentityPolicy | None = None
 
     def merge_policies(self) -> tuple[MergeMaintainerPolicy, ...]:
         """Return configured merge lanes, preserving the legacy singular field."""
@@ -1112,30 +1112,28 @@ def _parse_release_maintenance(
     )
 
 
-def _parse_review_submission(
+def _parse_github_identity(
     raw: object,
     *,
     targets: Mapping[str, RepositoryTarget],
     reviewer_logins: frozenset[str],
-) -> ReviewSubmissionPolicy:
+) -> GitHubIdentityPolicy:
     if not isinstance(raw, Mapping) or set(raw) != {"expected_login", "token_env"}:
-        raise ValueError(
-            "review_submission must contain exactly expected_login and token_env"
-        )
+        raise ValueError("github_identity must contain exactly expected_login and token_env")
     expected_login = _nonempty_string(
-        raw["expected_login"], "review_submission expected_login"
+        raw["expected_login"], "github_identity expected_login"
     ).casefold()
-    token_env = _nonempty_string(raw["token_env"], "review_submission token_env")
+    token_env = _nonempty_string(raw["token_env"], "github_identity token_env")
     if not _SECRET_ENV_NAME.fullmatch(token_env) or token_env in _SHARED_GITHUB_TOKEN_ENVS:
         raise ValueError(
-            "review_submission token_env must name a dedicated secret environment variable"
+            "github_identity token_env must name a dedicated secret environment variable"
         )
     author_logins = {target.owner_login.casefold() for target in targets.values()}
     if expected_login in author_logins:
-        raise ValueError("review_submission expected_login must be independent of PR authors")
+        raise ValueError("github_identity expected_login must be independent of PR authors")
     if expected_login not in reviewer_logins:
-        raise ValueError("review_submission expected_login must be an admitted reviewer_login")
-    return ReviewSubmissionPolicy(expected_login=expected_login, token_env=token_env)
+        raise ValueError("github_identity expected_login must be an admitted reviewer_login")
+    return GitHubIdentityPolicy(expected_login=expected_login, token_env=token_env)
 
 
 def load_policy(raw: object) -> PluginPolicy:
@@ -1170,7 +1168,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "merge_maintainer",
         "repair_steward",
         "release_maintenance",
-        "review_submission",
+        "github_identity",
     }
     if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("enabled configuration has missing or unknown fields")
@@ -1257,13 +1255,13 @@ def load_policy(raw: object) -> PluginPolicy:
             else None
         ),
         merge_maintainers=merge_policies,
-        review_submission=(
-            _parse_review_submission(
-                raw["review_submission"],
+        github_identity=(
+            _parse_github_identity(
+                raw["github_identity"],
                 targets=targets,
                 reviewer_logins=reviewer_logins,
             )
-            if "review_submission" in raw
+            if "github_identity" in raw
             else None
         ),
     )

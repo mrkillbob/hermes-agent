@@ -209,6 +209,7 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
     monkeypatch.setattr("github_pr_feedback.cli.FeedbackLedger", Ledger)
     monkeypatch.setattr("github_pr_feedback.cli.RepairController", Repair)
     monkeypatch.setattr("github_pr_feedback.cli._controller", lambda *_args: Feedback())
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: object())
 
     assert _scan(object()) == 1
     assert order == ["feedback", "repair"]
@@ -284,6 +285,7 @@ def _run_scan_with_primary_result(
     monkeypatch.setattr(
         "github_pr_feedback.cli._run_release_maintenance_scan", release
     )
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: object())
 
     returncode = _scan(object())
     payload = json.loads(capsys.readouterr().out)
@@ -1334,6 +1336,7 @@ def test_merge_scan_reconciles_verification_required_pr_that_is_no_longer_open(
 
 def test_doctor_read_only_verifies_every_runtime_dependency(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from github_pr_feedback.cli import DoctorProbe, _doctor
@@ -1379,6 +1382,7 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     }
     runner = RecordingDoctorRunner(responses)
     before = profile_snapshot(profile_root)
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: object())
 
     exit_code = _doctor(
         context,
@@ -1392,14 +1396,13 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     assert payload["checks"] == {
         "assignee": "ok",
         "board": "ok",
-        "gh_auth": "ok",
         "gh_executable": "ok",
+        "github_identity": "ok",
         "hermes_executable": "ok",
         "ledger_access": "ok",
         "repository_worktree": "ok",
     }
     assert runner.calls == [
-        ["/opt/tools/gh", "auth", "status", "--hostname", "github.com"],
         ["/opt/tools/hermes", "--version"],
         ["/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"],
         ["/opt/tools/git", "-C", str(repository), "rev-parse", "--git-common-dir"],
@@ -1446,17 +1449,17 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
     assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "degraded"
-    assert payload["checks"]["gh_auth"] == "failed"
+    assert payload["checks"]["github_identity"] == "failed"
     assert set(payload["checks"]) == {
         "assignee",
         "board",
-        "gh_auth",
         "gh_executable",
+        "github_identity",
         "hermes_executable",
         "ledger_access",
         "repository_worktree",
     }
-    assert len(runner.calls) == 5
+    assert len(runner.calls) == 4
 
 
 def test_doctor_requires_the_configured_local_ci_auditor_profile(
@@ -1635,7 +1638,7 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "merge_maintainers",
             "repair_steward",
             "release_maintenance",
-            "review_submission",
+            "github_identity",
             "not_before",
         "assignee",
         "board",
@@ -2005,7 +2008,7 @@ def test_submit_review_fails_closed_when_independent_identity_is_not_configured(
 
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
     monkeypatch.setattr(
-        "github_pr_feedback.cli._review_github_client",
+        "github_pr_feedback.cli._github_client",
         lambda *_args: pytest.fail("GitHub must not be called without reviewer config"),
     )
 
@@ -2036,11 +2039,11 @@ def test_submit_review_refuses_pr_author_without_comment_fallback(
 
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
     settings = enabled_settings(tmp_path)
-    settings["review_submission"] = {
+    settings["github_identity"] = {
         "expected_login": "reviewer",
-        "token_env": "HERMES_GITHUB_REVIEWER_TOKEN",
+        "token_env": "HERMES_GITHUB_BOT_TOKEN",
     }
-    monkeypatch.setenv("HERMES_GITHUB_REVIEWER_TOKEN", "secret-reviewer-token")
+    monkeypatch.setenv("HERMES_GITHUB_BOT_TOKEN", "secret-reviewer-token")
     writes: list[str] = []
 
     class FakeGitHub:
@@ -2059,7 +2062,7 @@ def test_submit_review_refuses_pr_author_without_comment_fallback(
             writes.append("comment")
 
     monkeypatch.setattr(
-        "github_pr_feedback.cli._review_github_client", lambda *_args: FakeGitHub()
+        "github_pr_feedback.cli._github_client", lambda *_args: FakeGitHub()
     )
 
     exit_code = _submit_review(
@@ -2090,11 +2093,11 @@ def test_submit_review_uses_exact_configured_independent_identity(
 
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
     settings = enabled_settings(tmp_path)
-    settings["review_submission"] = {
+    settings["github_identity"] = {
         "expected_login": "reviewer",
-        "token_env": "HERMES_GITHUB_REVIEWER_TOKEN",
+        "token_env": "HERMES_GITHUB_BOT_TOKEN",
     }
-    monkeypatch.setenv("HERMES_GITHUB_REVIEWER_TOKEN", "secret-reviewer-token")
+    monkeypatch.setenv("HERMES_GITHUB_BOT_TOKEN", "secret-reviewer-token")
     writes: list[tuple[str, int, str, str]] = []
 
     class FakeGitHub:
@@ -2112,7 +2115,7 @@ def test_submit_review_uses_exact_configured_independent_identity(
             writes.append((repository, number, event, body))
 
     monkeypatch.setattr(
-        "github_pr_feedback.cli._review_github_client", lambda *_args: FakeGitHub()
+        "github_pr_feedback.cli._github_client", lambda *_args: FakeGitHub()
     )
 
     exit_code = _submit_review(

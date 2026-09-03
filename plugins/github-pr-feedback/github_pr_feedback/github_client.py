@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import quote
 
+from hermes_cli.github_identity import GitHubAutomationIdentity, GitHubIdentityError
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows falls back to process-local serialization.
@@ -59,6 +61,7 @@ MAX_FEEDBACK_BODY_CHARS = 16_384
 MAX_DISCOVERED_PULL_REQUESTS = 300
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _MERGE_FLAGS = {"squash": "--squash", "rebase": "--rebase", "merge": "--merge"}
 _PROCESS_REQUEST_LOCK = threading.Lock()
 
@@ -221,7 +224,7 @@ class SubprocessCommandRunner:
         rate_limit_backoff: float = 60.0,
         timeout_retry_backoff: float = 1.0,
         request_gate: GitHubRequestGate | None = None,
-        env_overrides: Mapping[str, str] | None = None,
+        env_overrides: Mapping[str, str | None] | None = None,
     ) -> None:
         self._sleeper = sleeper
         self._rate_limit_backoff = max(1.0, min(float(rate_limit_backoff), 900.0))
@@ -229,7 +232,15 @@ class SubprocessCommandRunner:
             0.0, min(float(timeout_retry_backoff), 30.0)
         )
         self._request_gate = request_gate or GitHubRequestGate()
-        self._env = None if env_overrides is None else {**os.environ, **env_overrides}
+        if env_overrides is None:
+            self._env = None
+        else:
+            self._env = dict(os.environ)
+            for key, value in env_overrides.items():
+                if value is None:
+                    self._env.pop(key, None)
+                else:
+                    self._env[key] = value
 
     def run(self, argv: list[str]) -> str:
         for attempt in range(2):
@@ -412,6 +423,43 @@ class GitHubClient:
         self._runner = runner or SubprocessCommandRunner()
         self._actions_enabled_cache: dict[str, tuple[bool, float]] = {}
 
+    @classmethod
+    def for_automation_identity(
+        cls,
+        *,
+        expected_login: str,
+        token_env: str,
+        environ: Mapping[str, str] | None = None,
+    ) -> "GitHubClient":
+        """Build a client bound only to the configured Hermes bot credential."""
+
+        try:
+            child_env = GitHubAutomationIdentity(
+                expected_login=expected_login,
+                token_env=token_env,
+            ).command_environment(environ)
+        except GitHubIdentityError as error:
+            raise GitHubClientError(
+                "Hermes GitHub automation credential is missing",
+                code="automation_credential_missing",
+            ) from error
+        client = cls(
+            SubprocessCommandRunner(
+                env_overrides={
+                    "GH_TOKEN": child_env["GH_TOKEN"],
+                    # Never allow a generic CI or user token to act as fallback.
+                    "GITHUB_TOKEN": None,
+                }
+            )
+        )
+        actual_login = client.viewer_login()
+        if actual_login.casefold() != expected_login.casefold():
+            raise GitHubClientError(
+                "Hermes GitHub automation identity does not match policy",
+                code="automation_identity_mismatch",
+            )
+        return client
+
     def list_open_pull_requests(
         self, repository: str, owner_login: str
     ) -> tuple[PullRequest, ...]:
@@ -432,6 +480,7 @@ class GitHubClient:
                 "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
             ]
         )
+
         if not isinstance(payload, list) or any(
             not isinstance(row, dict) for row in payload
         ):
@@ -443,6 +492,47 @@ class GitHubClient:
                 "GitHub owned pull request query reached its coverage cap"
             )
         return tuple(_listed_pull_request(repository, row) for row in payload)
+
+    def viewer_login(self) -> str:
+        """Return the exact login owning this client's explicit credential."""
+
+        payload = self._json(["gh", "api", "user"])
+        login = payload.get("login") if isinstance(payload, dict) else None
+        if not isinstance(login, str) or not _LOGIN.fullmatch(login):
+            raise GitHubClientError(
+                "GitHub viewer login was unavailable", code="viewer_login_invalid"
+            )
+        return login
+
+    def submit_pull_request_review(
+        self,
+        repository: str,
+        number: int,
+        *,
+        event: str,
+        body: str,
+    ) -> None:
+        """Submit one bounded pull-request review using fixed argv."""
+
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        normalized_event = _required_string(event).upper()
+        if normalized_event not in {"APPROVE", "REQUEST_CHANGES", "COMMENT"}:
+            raise ValueError("review event is invalid")
+        body = _bounded_text(body, "review body", MAX_FEEDBACK_BODY_CHARS, allow_newlines=True)
+        self._runner.run(
+            [
+                "gh",
+                "api",
+                "-X",
+                "POST",
+                f"repos/{repository}/pulls/{number}/reviews",
+                "-f",
+                f"event={normalized_event}",
+                "-f",
+                f"body={body}",
+            ]
+        )
 
     def list_all_open_pull_requests(self, repository: str) -> tuple[PullRequest, ...]:
         """Read every open PR so maintenance never races an unmerged change."""

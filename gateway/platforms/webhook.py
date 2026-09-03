@@ -45,6 +45,8 @@ from collections import deque
 from contextlib import nullcontext
 from typing import Any, Deque, Dict, List, Optional
 
+from hermes_cli.github_identity import run_as_github_automation
+
 try:
     from aiohttp import web
 
@@ -1413,7 +1415,7 @@ class WebhookAdapter(BasePlatformAdapter):
             # subprocess runs; the worker thread is bounded by the
             # subprocess timeout below.
             result = await asyncio.to_thread(
-                subprocess.run,
+                run_as_github_automation,
                 [
                     "gh",
                     "pr",
@@ -1424,8 +1426,6 @@ class WebhookAdapter(BasePlatformAdapter):
                     "--body",
                     content,
                 ],
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
                 timeout=30,
             )
             if result.returncode == 0:

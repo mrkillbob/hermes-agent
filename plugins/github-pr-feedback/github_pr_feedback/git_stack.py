@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 from .stack import _branch
 
@@ -22,12 +23,15 @@ class GitStackError(RuntimeError):
 
 
 class GitStackRunner:
-    def __init__(self, repository: Path) -> None:
+    def __init__(self, repository: Path, *, environment: Mapping[str, str] | None = None) -> None:
         self.repository = Path(repository)
+        self._environment = None if environment is None else dict(environment)
 
     def _run(self, *args: str) -> GitEvidence:
         argv = ("git", "-C", str(self.repository), *args)
-        result = subprocess.run(argv, check=False, capture_output=True, text=True)
+        result = subprocess.run(
+            argv, check=False, capture_output=True, text=True, env=self._environment
+        )
         evidence = GitEvidence(argv, result.returncode, result.stdout, result.stderr)
         if result.returncode:
             raise GitStackError(result.stderr.strip() or "git command failed")
