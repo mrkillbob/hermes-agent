@@ -306,6 +306,42 @@ def test_scan_applies_one_exact_branch_label_and_confirms_readback(
     assert github.current.labels == ("codex",)
 
 
+def test_scan_does_not_label_repository_outside_agent_label_scope(
+    tmp_path: Path,
+) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        agent_labels=True,
+        agent_label_repositories=("owned/widgets",),
+    )
+    pull_request = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        head_sha,
+        updated_at=datetime(2026, 8, 26, 8, 0, tzinfo=UTC),
+    )
+    github = FakeGitHub(pull_request, ())
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy,
+        ledger,
+        github,
+        RecordingKanban(),
+        RecordingLocalGit(),
+    ).scan()
+
+    assert result.degraded is False
+    assert github.ensure_label_calls == []
+    assert github.label_calls == []
+
+
 def test_scan_stops_label_attempts_after_a_github_label_read_failure(
     tmp_path: Path,
 ) -> None:
@@ -2339,6 +2375,33 @@ def test_scan_fails_closed_and_reports_degraded_when_actions_state_is_unavailabl
     ledger.close()
 
 
+def test_scan_budget_local_ci_does_not_require_hosted_actions_permissions(
+    tmp_path: Path,
+) -> None:
+    class UnavailableActionsGitHub(FakeGitHub):
+        def actions_enabled(self, repository: str) -> bool:
+            raise AssertionError("hosted Actions permissions must not be queried")
+
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        local_ci_audit=True,
+        merge_maintainer=True,
+        budget_local_ci=True,
+    )
+    github = UnavailableActionsGitHub(admitted_pull_request(sha), ())
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+
+    assert result.degraded is False
+    assert result.created == 1
+    assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
+    ledger.close()
+
+
 def test_scan_dispatches_a_new_local_ci_audit_when_the_pr_head_changes(
     tmp_path: Path,
 ) -> None:
@@ -4020,6 +4083,8 @@ def configured_policy(
     local_ci_audit: bool = False,
     merge_maintainer: bool = False,
     agent_labels: bool = False,
+    budget_local_ci: bool = False,
+    agent_label_repositories: tuple[str, ...] = (),
 ):
     raw = {
             "enabled": True,
@@ -4045,7 +4110,9 @@ def configured_policy(
         raw["local_ci_audit"] = {
             "enabled": True,
             "assignee": "pr-local-ci-auditor",
-            "post_results": True,
+            "post_results": not budget_local_ci,
+            "audit_only": budget_local_ci,
+            "required_for_open_prs": budget_local_ci,
         }
         raw["routing_rules"] = [
             {
@@ -4080,6 +4147,8 @@ def configured_policy(
                 },
             ],
         }
+        if agent_label_repositories:
+            raw["agent_labels"]["repositories"] = list(agent_label_repositories)
     if merge_maintainer:
         raw["merge_maintainer"] = {
             "enabled": True,
@@ -4090,6 +4159,7 @@ def configured_policy(
             "merge_methods": ["squash"],
             "receipt_max_age_seconds": 3600,
             "report_only": False,
+            "allow_budget_exhausted_local_ci": budget_local_ci,
             "post_merge": {"enabled": False},
         }
     return load_policy(raw)

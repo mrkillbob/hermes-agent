@@ -977,9 +977,20 @@ class ScanController:
             local_ci_dispatched = 0
             actions_enabled: bool | None = None
             actions_state_unavailable = False
+            local_ci_policy = self._policy.local_ci_audit
+            merge_policy = self._policy.merge_policy_for(repository)
+            budget_local_ci = bool(
+                local_ci_policy is not None
+                and local_ci_policy.required_for_open_prs
+                and local_ci_policy.audit_only
+                and not local_ci_policy.post_results
+                and merge_policy is not None
+                and merge_policy.allow_budget_exhausted_local_ci
+            )
             if (
-                self._policy.local_ci_audit is not None
-                and self._policy.local_ci_audit.applies_to(repository)
+                local_ci_policy is not None
+                and local_ci_policy.applies_to(repository)
+                and not budget_local_ci
             ):
                 try:
                     actions_enabled = self._github.actions_enabled(repository)
@@ -1011,7 +1022,11 @@ class ScanController:
             label_updates = 0
             label_attempts = 0
             label_policy = self._policy.agent_labels
-            if label_policy is not None and label_policy.enabled:
+            if (
+                label_policy is not None
+                and label_policy.enabled
+                and label_policy.applies_to(repository)
+            ):
                 for pull_request in pull_requests:
                     desired_label = label_policy.label_for_branch(
                         pull_request.head_ref_name
