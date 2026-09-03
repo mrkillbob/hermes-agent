@@ -708,7 +708,7 @@ def test_actions_permissions_identity_is_explicit_and_repository_scoped(
     gh_config_dir.mkdir()
     raw = enabled_raw_config(repository)
     raw["github_actions_permissions_identity"] = {
-        "expected_login": "owner",
+        "expected_login": "acme",
         "gh_config_dir": str(gh_config_dir),
         "repositories": ["acme/widgets"],
     }
@@ -717,7 +717,7 @@ def test_actions_permissions_identity_is_explicit_and_repository_scoped(
 
     identity = policy.github_actions_permissions_identity
     assert identity is not None
-    assert identity.expected_login == "owner"
+    assert identity.expected_login == "acme"
     assert identity.gh_config_dir == gh_config_dir.resolve()
     assert identity.repositories == frozenset({"acme/widgets"})
 
@@ -756,6 +756,33 @@ def test_actions_permissions_identity_fails_closed_on_unsafe_scope(
     raw["github_actions_permissions_identity"] = identity
 
     with pytest.raises(ValueError):
+        load_policy(raw)
+
+
+def test_actions_permissions_identity_rejects_pr_author_who_does_not_own_namespace(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    gh_config_dir = tmp_path / "human-gh"
+    gh_config_dir.mkdir()
+    raw = enabled_raw_config(repository)
+    raw["repositories"] = [
+        {
+            "base_repository": "NousResearch/hermes-agent",
+            "head_repository": "mrkillbob/hermes-agent",
+            "local_path": str(repository),
+            "owner_login": "mrkillbob",
+            "branch_prefixes": ["codex/"],
+        }
+    ]
+    raw["github_actions_permissions_identity"] = {
+        "expected_login": "mrkillbob",
+        "gh_config_dir": str(gh_config_dir),
+        "repositories": ["NousResearch/hermes-agent"],
+    }
+
+    with pytest.raises(ValueError, match="must own every scoped target"):
         load_policy(raw)
 
 

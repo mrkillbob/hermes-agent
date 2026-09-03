@@ -1229,7 +1229,7 @@ def _parse_github_actions_permissions_identity(
             "github_actions_permissions_identity repositories must be a non-empty target subset"
         )
     if any(
-        targets[repository].owner_login.casefold() != expected_login
+        repository.partition("/")[0].casefold() != expected_login
         for repository in repositories
     ):
         raise ValueError(

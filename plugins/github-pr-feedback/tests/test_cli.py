@@ -2398,7 +2398,7 @@ def test_github_client_binds_repository_scoped_actions_permissions_identity(
         "token_env": "HERMES_GITHUB_BOT_TOKEN",
     }
     settings["github_actions_permissions_identity"] = {
-        "expected_login": "owner",
+        "expected_login": "acme",
         "gh_config_dir": str(gh_config_dir),
         "repositories": ["acme/widgets"],
     }
@@ -2418,7 +2418,7 @@ def test_github_client_binds_repository_scoped_actions_permissions_identity(
     assert captured == {
         "expected_login": "reviewer",
         "token_env": "HERMES_GITHUB_BOT_TOKEN",
-        "actions_permissions_expected_login": "owner",
+        "actions_permissions_expected_login": "acme",
         "actions_permissions_gh_config_dir": gh_config_dir.resolve(),
         "actions_permissions_repositories": frozenset({"acme/widgets"}),
     }
