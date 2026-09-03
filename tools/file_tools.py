@@ -24,6 +24,7 @@ from tools.file_operations import (
 )
 from tools import file_state
 from agent.redact import redact_sensitive_text
+from agent.source_provenance_tools import issue_active_read_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,9 @@ def _terminal_env_type_for_task(task_id: str = "default") -> str:
                 return "modal"
             if "daytona" in name:
                 return "daytona"
+            stamped = getattr(env, "_hermes_backend_name", None)
+            if isinstance(stamped, str) and stamped:
+                return stamped
         cfg = _get_env_config()
         return str(cfg.get("env_type") or os.getenv("TERMINAL_ENV") or "local").lower()
     except Exception:
@@ -209,12 +213,13 @@ def _terminal_env_type_for_task(task_id: str = "default") -> str:
 
 
 def _uses_container_paths(task_id: str = "default") -> bool:
+    env_type = _terminal_env_type_for_task(task_id)
     try:
-        from tools.terminal_tool import _CONTAINER_BACKENDS
-        container_backends = _CONTAINER_BACKENDS
+        from tools.terminal_tool import _is_container_backend
+
+        return _is_container_backend(env_type)
     except Exception:
-        container_backends = _CONTAINER_PATH_BACKENDS_FALLBACK
-    return _terminal_env_type_for_task(task_id) in container_backends
+        return env_type in _CONTAINER_PATH_BACKENDS_FALLBACK
 
 
 def _normalize_without_host_deref(path: str | Path | PurePosixPath) -> PurePosixPath:
@@ -252,7 +257,11 @@ def _configured_terminal_cwd() -> str | None:
     relative to, which is exactly the ambiguity that misroutes worktree edits.
     Only an absolute, sentinel-free value is honored.
     """
-    return _sentinel_free_abs_cwd(os.environ.get("TERMINAL_CWD"))
+    # Scope-aware: under gateway multiplexing the routed profile's cwd lives in
+    # the per-turn terminal scope, not the process env (#68559).
+    from agent.runtime_cwd import scope_terminal_cwd
+
+    return _sentinel_free_abs_cwd(scope_terminal_cwd() or None)
 
 
 def _registered_task_cwd_override(task_id: str = "default") -> str | None:
@@ -288,11 +297,17 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
          register a raw-keyed cwd before any tool runs). Normally already
          mirrored into the record at registration; kept as a direct fallback
          so a cleared/never-written record still resolves the workspace.
-      3. A sentinel-free absolute ``$TERMINAL_CWD`` (the worktree path set by
+      3. The active parent session's cwd when a delegated/background task has
+         its own task id but inherits that session's context. This session
+         anchor intentionally precedes ``$TERMINAL_CWD``: the environment
+         value is the session's launch directory, while the recorded cwd may
+         reflect a later ``cd`` in the active conversation.
+      4. A sentinel-free absolute ``$TERMINAL_CWD`` (the worktree path set by
          ``cli.py``/``main.py`` for ``-w`` sessions).
 
-    Returns ``None`` only when there is genuinely no reliable anchor, in which
-    case callers fall back to the process cwd.
+    Returns ``None`` only when there is genuinely no recorded task, inherited
+    session, or environment anchor, in which case callers fall back to the
+    process cwd.
     """
     try:
         from tools.terminal_tool import get_session_cwd
@@ -300,11 +315,39 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
         recorded = get_session_cwd(task_id)
     except Exception:
         recorded = None
+    registered = _registered_task_cwd_override(task_id)
+    try:
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        candidate = recorded or registered
+        worker_cwd = resolve_kanban_worker_cwd(candidate)
+    except Exception:
+        worker_cwd = None
+    if worker_cwd and not _uses_container_paths(task_id):
+        return worker_cwd
     if recorded:
         return recorded
-    registered = _registered_task_cwd_override(task_id)
     if registered:
         return registered
+
+    # Delegated/background agents keep a distinct task id for observability
+    # while inheriting the desktop/gateway session ContextVar so they share the
+    # parent's environment.  The cwd registry is deliberately keyed by the raw
+    # session id, not by the child task id.  Without this bridge, a child's
+    # first relative file read falls through to the process cwd until it runs a
+    # terminal command of its own, producing false "File not found" results in
+    # a worktree that already contains the file.
+    try:
+        from tools.terminal_tool import _current_session_key, get_session_cwd
+
+        current_session_key = _current_session_key()
+        if current_session_key and current_session_key != task_id:
+            inherited = get_session_cwd(current_session_key)
+            if inherited:
+                return inherited
+    except Exception:
+        logger.debug("session cwd inheritance unavailable", exc_info=True)
+
     return _configured_terminal_cwd()
 
 
@@ -1060,36 +1103,28 @@ def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | Non
 
 
 def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | None:
-    """Return a soft-guard warning when ``filepath`` lands in another Hermes
-    profile's scoped area, a host-side sandbox-mirror of authoritative profile
-    state, or the Docker container's sandbox mirror of Hermes state.
+    """Return a soft-guard warning when ``filepath`` lands on a host-side
+    sandbox-mirror of authoritative profile state, or the Docker
+    container's sandbox mirror of Hermes state.
 
-    Three detectors run in order:
+    Two detectors (both #32049): these catch writes that would be
+    SILENTLY LOST — the host Hermes process never reads the mirror, so
+    the write succeeds but changes nothing. That is a lost-work guard,
+    not profile isolation.
 
-    * cross-profile — writes that hit another profile's
-      ``skills/plugins/cron/memories`` directory.
-    * sandbox-mirror (#32049) — writes that hit the
-      ``…/sandboxes/<backend>/<task>/home/.hermes/…`` mirror created by a
-      non-local terminal backend (Docker, Daytona, etc.), where the host
-      Hermes process never reads the mirror and the authoritative file is
-      left untouched.
-    * container-mirror (#32049 follow-up) — writes from inside a Docker
-      container whose bind-mounted home strips the ``sandboxes/`` prefix, so
-      the agent sees a plain ``/root/.hermes/…`` path.
+    NOTE: the third detector this shared check used to run — the
+    cross-PROFILE write guard (another profile's skills/plugins/cron/
+    memories) — was removed by maintainer decision: profiles were never
+    isolated (same OS user; terminal writes anywhere), so the guard was
+    ceremony. The system prompt's profile hint remains the only
+    steering. ``cross_profile=True`` still bypasses the mirror guards
+    (name kept for replay/transcript compat).
 
     Returns ``None`` when the write is in-scope or outside Hermes scope.
-    All detectors are soft guards — the agent can override any by
-    passing ``cross_profile=True`` to its write tool after explicit user
-    direction. Defense-in-depth, NOT a security boundary — the terminal
-    tool runs as the same OS user and can write any of these paths
-    directly. See ``agent/file_safety.classify_cross_profile_target``,
-    ``classify_sandbox_mirror_target`` and ``classify_container_mirror_target``
-    for the detection rules.
     """
     try:
         from agent.file_safety import (
             get_container_mirror_warning,
-            get_cross_profile_warning,
             get_sandbox_mirror_warning,
         )
     except Exception:
@@ -1097,17 +1132,12 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
         # plus the write_denied list still apply.
         return None
 
-    # Resolve via the task's cwd so a relative ``skills/foo/SKILL.md``
-    # in a session that cd'd into ``~/.hermes/profiles/other/`` is
-    # classified against the right base.
+    # Resolve via the task's cwd so a relative path in a session that
+    # cd'd elsewhere is classified against the right base.
     try:
         resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError):
         resolved = filepath
-
-    warning = get_cross_profile_warning(resolved)
-    if warning is not None:
-        return warning
 
     warning = get_sandbox_mirror_warning(resolved)
     if warning is not None:
@@ -1137,9 +1167,13 @@ _file_ops_cache: dict = {}
 #   "consecutive":  how many times that exact call has been repeated in a row
 #   "read_history": set of (path, offset, limit) tuples for get_read_files_summary
 #   "dedup":        dict mapping (resolved_path, offset, limit) → mtime float
-#                   Used to skip re-reads of unchanged files.  Reset on
-#                   context compression (the original content is summarised
-#                   away so the model needs the full content again).
+#                   Used to skip re-reads of unchanged files.  Survives
+#                   context compression so unchanged files can resume
+#                   returning lightweight stubs after one recovery read.
+#   "dedup_generation_reads": set of dedup keys whose full content has been
+#                   served since the latest compaction boundary. Cleared on
+#                   compression so the first post-compaction read can recover
+#                   exact bytes that the summary may have omitted.
 #   "read_timestamps": dict mapping resolved_path → modification-time float
 #                      recorded when the file was last read (or written) by
 #                      this task.  Used by write_file and patch to detect
@@ -1243,6 +1277,15 @@ def _cap_read_tracker_data(task_data: dict) -> None:
             try:
                 dedup_hits.pop(next(iter(dedup_hits)))
             except (StopIteration, KeyError):
+                break
+
+    generation_reads = task_data.get("dedup_generation_reads")
+    if generation_reads is not None and len(generation_reads) > _DEDUP_CAP:
+        excess = len(generation_reads) - _DEDUP_CAP
+        for _ in range(excess):
+            try:
+                generation_reads.pop()
+            except KeyError:
                 break
 
     ts = task_data.get("read_timestamps")
@@ -1530,7 +1573,9 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
             logger.info("Creating new %s environment for task %s...", env_type, task_id[:8])
 
             container_config = None
-            if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
+            from tools.terminal_tool import _is_container_backend as _is_container
+
+            if _is_container(env_type):
                 container_config = {
                     "container_cpu": config.get("container_cpu", 1),
                     "container_memory": config.get("container_memory", 5120),
@@ -1542,6 +1587,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                     "docker_forward_env": config.get("docker_forward_env", []),
                     "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
                     "docker_network": config.get("docker_network", True),
+                    "docker_isolate_host_data": config.get("docker_isolate_host_data", False),
                 }
 
             ssh_config = None
@@ -1642,6 +1688,11 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 "block or produce infinite output."
             )
 
+        _source_path = None
+        if not _uses_container_paths(task_id):
+            _source_path = Path(_expand_tilde(path))
+            if not _source_path.is_absolute():
+                _source_path = Path(_resolve_base_dir(task_id)) / _source_path
         _resolved = _resolve_path_for_task(path, task_id)
 
         # ── Special-file type guard (stat-based) ──────────────────────
@@ -1802,7 +1853,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             task_data = _read_tracker.setdefault(task_id, {
                 "last_key": None, "consecutive": 0,
                 "read_history": set(), "dedup": {},
-                "dedup_hits": {}, "read_timestamps": {},
+                "dedup_hits": {}, "dedup_generation_reads": set(),
+                "read_timestamps": {},
             })
             # Backward-compat for pre-existing tracker entries that predate
             # dedup_hits/read_timestamps (long-lived task or crossed an
@@ -1811,12 +1863,14 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 task_data["dedup_hits"] = {}
             if "read_timestamps" not in task_data:
                 task_data["read_timestamps"] = {}
+            generation_reads = task_data.setdefault("dedup_generation_reads", set())
             cached_mtime = task_data.get("dedup", {}).get(dedup_key)
+            content_served_in_generation = dedup_key in generation_reads
 
         if cached_mtime is not None:
             try:
                 current_mtime = os.path.getmtime(resolved_str)
-                if current_mtime == cached_mtime:
+                if current_mtime == cached_mtime and content_served_in_generation:
                     # Count repeated stub returns so weak tool-followers that
                     # ignore the "refer to earlier result" hint don't burn
                     # their iteration budget in an infinite read loop.  After
@@ -1852,7 +1906,14 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
 
         # ── Perform the read ──────────────────────────────────────────
         file_ops = _get_file_ops(task_id)
-        result = file_ops.read_file(path, offset, limit)
+        # Host-backed environments can be shared by several sessions whose
+        # authoritative cwd records differ.  Resolve relative paths once at
+        # the tool boundary and pass that exact absolute target downstream;
+        # otherwise ShellFileOperations re-resolves against the shared
+        # backend's stale cwd and can read a different checkout than the path
+        # used for guards, tracking, and source-provenance verification.
+        read_path = str(_resolved) if _file_ops_uses_host_paths(file_ops) else path
+        result = file_ops.read_file(read_path, offset, limit)
         result_dict = result.to_dict()
 
         # ── Populate negative-result cache on not-found ───────────────
@@ -1912,6 +1973,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             content_len = len(trimmed)
 
         # ── Redact secrets (after guard check to skip oversized content) ──
+        content_before_redaction = result.content or ""
         if result.content:
             result.content = redact_sensitive_text(result.content, file_read=True)
             result_dict["content"] = result.content
@@ -1940,6 +2002,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             # reset its hit counter.  (File either changed or stat failed
             # earlier and we fell through.)
             task_data["dedup_hits"].pop(dedup_key, None)
+            task_data.setdefault("dedup_generation_reads", set()).add(dedup_key)
             task_data["read_history"].add((path, offset, limit))
             if task_data["last_key"] == read_key:
                 task_data["consecutive"] += 1
@@ -1970,11 +2033,29 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
         # truncated (large file with more content than limit covered).
         # Outside the _read_tracker_lock so the registry's own locking
         # isn't nested under ours.
+        _partial = (offset > 1) or bool(result_dict.get("truncated"))
         try:
-            _partial = (offset > 1) or bool(result_dict.get("truncated"))
             file_state.record_read(task_id, resolved_str, partial=_partial)
         except Exception:
             logger.debug("file_state.record_read failed", exc_info=True)
+
+        # Background-review read-before-write guard integration (#61521):
+        # when the self-improvement review fork reads a skill file with
+        # read_file (now whitelisted dispatch-side), register the read the
+        # same way skill_view does, so a follow-up
+        # skill_manage(action='patch') on the loaded file is accepted.
+        # A partial read doesn't count — the guard requires the CURRENT
+        # full content to have been seen. No-op outside review forks
+        # (mark_background_review_skill_read gates on is_background_review).
+        if not _partial:
+            try:
+                from tools.skill_manager_tool import mark_background_review_skill_read
+
+                mark_background_review_skill_read(Path(resolved_str))
+            except Exception:
+                logger.debug(
+                    "background-review read-mark failed", exc_info=True
+                )
 
         if count >= 4:
             # Hard block: stop returning content to break the loop
@@ -1992,6 +2073,17 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 "If you are stuck in a loop, stop reading and proceed with writing or responding."
             )
 
+        if result.content == content_before_redaction:
+            issue_active_read_provenance(
+                resolved=_resolved,
+                source_path=_source_path,
+                offset=offset,
+                limit=limit,
+                returned_content=result.content,
+                result_dict=result_dict,
+                file_ops=file_ops,
+            )
+
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         return tool_error(str(e))
@@ -2000,30 +2092,29 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
 
 
 def reset_file_dedup(task_id: str = None):
-    """Clear the deduplication cache for file reads.
+    """Advance the read-dedup generation after context compression.
 
-    Called after context compression — the original read content has been
-    summarised away, so the model needs the full content if it reads the
-    same file again.  Without this, reads after compression would return
-    a "file unchanged" stub pointing at content that no longer exists in
-    context.
+    Called after context compression.  The per-key ``dedup`` mtime map is
+    preserved, but the generation-read set is cleared. The first unchanged
+    read of each key after compaction therefore returns full content that may
+    have been summarized away; later reads in the same generation return the
+    lightweight stub. Stub-hit counters are also cleared so the hard block
+    restarts fresh (issue #84857).
 
-    Call with a task_id to clear just that task, or without to clear all.
+    Call with a task_id to reset just that task, or without to reset all.
     """
     with _read_tracker_lock:
         if task_id:
             task_data = _read_tracker.get(task_id)
             if task_data:
-                if "dedup" in task_data:
-                    task_data["dedup"].clear()
                 if "dedup_hits" in task_data:
                     task_data["dedup_hits"].clear()
+                task_data.setdefault("dedup_generation_reads", set()).clear()
         else:
             for task_data in _read_tracker.values():
-                if "dedup" in task_data:
-                    task_data["dedup"].clear()
                 if "dedup_hits" in task_data:
                     task_data["dedup_hits"].clear()
+                task_data.setdefault("dedup_generation_reads", set()).clear()
 
 
 def notify_other_tool_call(task_id: str = "default"):
@@ -2230,11 +2321,10 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
                     session_id: str | None = None) -> str:
     """Write content to a file.
 
-    ``cross_profile`` opts out of the soft cross-Hermes-profile guard. The
-    guard fires only on writes that land in another profile's
-    skills/plugins/cron/memories directory; everything else is unaffected.
-    Pass ``True`` after explicit user direction — same shape as ``force``
-    on the terminal tool.
+    ``cross_profile`` bypasses the #32049 sandbox-mirror lost-write
+    guards (writes the host process would never read). Unadvertised in
+    the schema — the mirror rejection error teaches it. The cross-PROFILE
+    guard this flag was named for is removed (profiles are not isolated).
     """
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
@@ -2323,9 +2413,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                session_id: str | None = None) -> str:
     """Patch a file using replace mode or V4A patch format.
 
-    ``cross_profile`` opts out of the soft cross-Hermes-profile guard for
-    targets under another profile's skills/plugins/cron/memories
-    directory. Same shape as ``write_file``'s flag.
+    ``cross_profile``: same semantics as ``write_file``'s flag (mirror-guard
+    bypass only; unadvertised).
     """
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     _paths_to_check = []
@@ -2657,11 +2746,19 @@ def _check_file_reqs():
 
 READ_FILE_SCHEMA = {
     "name": "read_file",
-    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are truncated on a line boundary and return a next_offset; continue with offset to read the rest. Jupyter notebooks (.ipynb), Word documents (.docx), and Excel workbooks (.xlsx) are auto-extracted to readable text; PDF, legacy Office (.doc/.ppt/.xls), OpenDocument, RTF, and EPUB convert too when the optional anydoc converter is available (auto-installed on first use where installs are permitted). PDF conversion reads the text layer only: scanned/image pages yield no text, and when many pages come back empty the output ends with an EXTRACTION COVERAGE WARNING listing the affected pages — follow its instructions (render pages with pdftoppm and inspect via vision_analyze, or OCR) instead of treating the extraction as complete. NOTE: Cannot read images or other binary files — use vision_analyze for images.",
+    # Document formats are stated unconditionally: firecrawl-anydoc is a
+    # core dependency (bundled), so its absence is a broken install, not a
+    # configuration — the teaching error in read_extract handles that rare
+    # case with the pip-install fix. The ONE dynamic word: "PDF (text
+    # layer)" upgrades to "PDF (scanned or text)" when hosted OCR has a
+    # route we trust (_read_file_schema_overrides). Scanned-page coverage
+    # teaching lives in the response-time NEEDS-OCR warning
+    # (read_extract.py); the schema doesn't pre-teach it.
+    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are truncated on a line boundary and return a next_offset; continue with offset to read the rest. Documents auto-extract to readable text: .ipynb, Office (.docx/.xlsx/.pptx and legacy .doc/.ppt/.xls), PDF (text layer), OpenDocument, RTF, EPUB. Cannot read images/binary — use vision_analyze for images.",
     "parameters": {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
+            "path": {"type": "string", "description": "Path to the file to read (absolute or relative)"},
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
             "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 2000, max: 2000). Reads are additionally capped at a ~100K-character budget with a next_offset continuation.", "default": 2000, "maximum": 2000}
         },
@@ -2677,11 +2774,11 @@ WRITE_FILE_SCHEMA = {
         "properties": {
             "path": {"type": "string", "description": "Path to the file to write (will be created if it doesn't exist, overwritten if it does)"},
             "content": {"type": "string", "description": "Complete content to write to the file"},
-            "cross_profile": {
-                "type": "boolean",
-                "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories — by default these writes are blocked with a warning because they affect a different profile than the one this session is running under.",
-                "default": False,
-            },
+            # NOTE: the handler still accepts `cross_profile` (bool) — it now
+            # bypasses only the #32049 sandbox-mirror lost-write guards, whose
+            # rejection error teaches it. Unadvertised: the cross-PROFILE
+            # guard it was named for was removed (profiles are not isolated,
+            # maintainer decision), and mirror hits are rare + self-teaching.
         },
         "required": ["path", "content"]
     }
@@ -2689,58 +2786,104 @@ WRITE_FILE_SCHEMA = {
 
 PATCH_SCHEMA = {
     "name": "patch",
+    # BASE = replace-only (what nearly every model family was trained on).
+    # The V4A patch mode (mode + patch params, dual-mode description) is
+    # LAYERED ON dynamically for OpenAI-family mains only — V4A is the
+    # OpenAI apply_patch dialect their models emit natively; advertising
+    # it to everyone cost every other session ~148 tok/call
+    # (_patch_schema_overrides below). The handler accepts BOTH shapes
+    # from any model regardless (replay compat + strong models that know
+    # V4A anyway): mode defaults to 'replace' when omitted.
     "description": (
         "Targeted find-and-replace edits in files. Use this instead of sed/awk in terminal. "
         "Uses fuzzy matching (9 strategies) so minor whitespace/indentation differences won't break it. "
-        "Returns a unified diff. Auto-runs syntax checks after editing.\n\n"
-        "REPLACE MODE (mode='replace', default): find a unique string and replace it. "
-        "REQUIRED PARAMETERS: mode, path, old_string, new_string.\n"
-        "PATCH MODE (mode='patch'): apply V4A multi-file patches for bulk changes. "
-        "REQUIRED PARAMETERS: mode, patch."
+        "Returns a unified diff. Auto-runs syntax checks after editing. "
+        "Finds a unique string and replaces it."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "mode": {
-                "type": "string",
-                "enum": ["replace", "patch"],
-                "description": "Edit mode. 'replace' (default): requires path + old_string + new_string. 'patch': requires patch content only.",
-                "default": "replace",
-            },
             "path": {
                 "type": "string",
-                "description": "REQUIRED when mode='replace'. File path to edit.",
+                "description": "File path to edit.",
             },
             "old_string": {
                 "type": "string",
-                "description": "REQUIRED when mode='replace'. Exact text to find and replace. Must be unique in the file unless replace_all=true. Include surrounding context lines to ensure uniqueness.",
+                "description": "Exact text to find and replace. Must be unique in the file unless replace_all=true. Include surrounding context lines to ensure uniqueness.",
             },
             "new_string": {
                 "type": "string",
-                "description": "REQUIRED when mode='replace'. Changed replacement text; it must differ from old_string. Pass empty string '' to delete the matched text.",
+                "description": "Changed replacement text; it must differ from old_string. Pass empty string '' to delete the matched text.",
             },
             "replace_all": {
                 "type": "boolean",
                 "description": "Replace all occurrences instead of requiring a unique match (default: false)",
                 "default": False,
             },
-            "patch": {
-                "type": "string",
-                "description": "REQUIRED when mode='patch'. V4A format patch content. Format:\n*** Begin Patch\n*** Update File: path/to/file\n@@ context hint @@\n context line\n-removed line\n+added line\n*** End Patch",
-            },
-            "cross_profile": {
-                "type": "boolean",
-                "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories.",
-                "default": False,
-            },
+            # NOTE: handler still accepts `cross_profile` — see write_file's
+            # NOTE (mirror-guard bypass only; unadvertised by design).
+            # NOTE: handler still accepts `mode` + `patch` (V4A) from ANY
+            # model — the schema just doesn't advertise them off-family.
         },
-        "required": ["mode"],
+        "required": ["path", "old_string", "new_string"],
     },
 }
 
+
+# V4A layer, rendered only for OpenAI-family main models (see PATCH_SCHEMA
+# comment). Kept as data so the override composes it deterministically.
+_PATCH_V4A_DESCRIPTION = (
+    "Targeted find-and-replace edits in files. Use this instead of sed/awk in terminal. "
+    "Uses fuzzy matching (9 strategies) so minor whitespace/indentation differences won't break it. "
+    "Returns a unified diff. Auto-runs syntax checks after editing.\n\n"
+    "REPLACE MODE (mode='replace', default): find a unique string and replace it. "
+    "REQUIRED PARAMETERS: mode, path, old_string, new_string.\n"
+    "PATCH MODE (mode='patch'): apply V4A multi-file patches for bulk changes. "
+    "REQUIRED PARAMETERS: mode, patch."
+)
+
+_PATCH_V4A_PARAMS = {
+    "mode": {
+        "type": "string",
+        "enum": ["replace", "patch"],
+        "description": "Edit mode. 'replace' (default): requires path + old_string + new_string. 'patch': requires patch content only.",
+        "default": "replace",
+    },
+    "patch": {
+        "type": "string",
+        "description": "REQUIRED when mode='patch'. V4A format patch content. Format:\n*** Begin Patch\n*** Update File: path/to/file\n@@ context hint @@\n context line\n-removed line\n+added line\n*** End Patch",
+    },
+}
+
+
+def _is_openai_family_main() -> bool:
+    """Whether the active main provider/model is the OpenAI/codex family —
+    the population trained on the V4A apply_patch dialect.
+
+    Provider-family-coarse on purpose (no per-model training-diet table to
+    go stale): direct OpenAI providers always qualify; on aggregators
+    (openrouter/nous/azure...) the MODEL slug decides (gpt-*/o-series/
+    codex). Fail-closed to the universal replace-only schema.
+    """
+    try:
+        from agent.auxiliary_client import _read_main_model, _read_main_provider
+
+        provider = (_read_main_provider() or "").strip().lower()
+        model = (_read_main_model() or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        return False
+    if provider in {"openai", "openai-chat", "openai-codex", "azure-openai", "codex"}:
+        return True
+    # Aggregators: the model slug carries the family.
+    slug = model.split("/", 1)[-1]
+    if slug.startswith(("gpt-", "gpt.", "chatgpt", "codex", "o1", "o3", "o4", "o5")):
+        return True
+    return "openai/" in model
+
+
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
+    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. On macOS, broad searches above the user home automatically skip TCC-protected folders (Desktop, Documents, Downloads, Library, Movies, Music, Pictures); target one directly when access is intentional.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -2812,7 +2955,50 @@ def _handle_search_files(args, **kw):
         output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
 
 
-registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000)
+def _read_file_schema_overrides():
+    """One-word capability upgrade: "PDF (text layer)" → "PDF (scanned or
+    text)" when hosted OCR has a trusted route (see
+    read_extract.hosted_ocr_available). Config/env probe only — no
+    network at schema-build time. Compaction's tool refresh (#97073)
+    picks up a key added mid-session.
+    """
+    try:
+        from tools.read_extract import hosted_ocr_available
+
+        if hosted_ocr_available():
+            return {
+                "description": READ_FILE_SCHEMA["description"].replace(
+                    "PDF (text layer)", "PDF (scanned or text)"
+                )
+            }
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000, dynamic_schema_overrides=_read_file_schema_overrides)
 registry.register(name="write_file", toolset="file", schema=WRITE_FILE_SCHEMA, handler=_handle_write_file, check_fn=_check_file_reqs, emoji="✍️", max_result_size_chars=100_000)
-registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000)
+def _patch_schema_overrides():
+    """Layer the V4A patch mode onto the base replace-only schema for
+    OpenAI-family mains (see PATCH_SCHEMA comment). Config/context probe
+    only — no I/O at schema-build time; compaction's tool refresh
+    (#97073) re-evaluates on model switches."""
+    try:
+        if not _is_openai_family_main():
+            return {}
+        params = {
+            "type": "object",
+            "properties": {
+                "mode": _PATCH_V4A_PARAMS["mode"],
+                **PATCH_SCHEMA["parameters"]["properties"],
+                "patch": _PATCH_V4A_PARAMS["patch"],
+            },
+            "required": ["mode"],
+        }
+        return {"description": _PATCH_V4A_DESCRIPTION, "parameters": params}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000, dynamic_schema_overrides=_patch_schema_overrides)
 registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000)

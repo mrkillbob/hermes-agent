@@ -20,7 +20,7 @@ import shlex
 from pathlib import Path
 from typing import Dict, Any, Optional, Set
 
-from agent.prompt_builder import _scan_context_content
+from agent.prompt_builder import _read_text_with_timeout, _scan_context_content
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ class SubdirectoryHintTracker:
             try:
                 if not candidate.is_file():
                     continue
-                content = candidate.read_text(encoding="utf-8").strip()
+                content = (_read_text_with_timeout(candidate) or "").strip()
             except (OSError, UnicodeDecodeError):
                 continue
             if content:
@@ -285,7 +285,7 @@ class SubdirectoryHintTracker:
             except OSError:
                 continue
             try:
-                content = hint_path.read_text(encoding="utf-8").strip()
+                content = (_read_text_with_timeout(hint_path) or "").strip()
                 if not content:
                     continue
                 # Skip content we've already injected. The same AGENTS.md is
@@ -314,8 +314,9 @@ class SubdirectoryHintTracker:
                     rel_path = str(hint_path.relative_to(self.working_dir))
                 except (ValueError, RuntimeError):
                     try:
-                        rel_path = str(hint_path.relative_to(Path.home()))
-                        rel_path = "~/" + rel_path
+                        # as_posix: "~/" shorthand implies POSIX rendering
+                        # (avoids ~/AppData\Local\... chimeras on Windows).
+                        rel_path = "~/" + hint_path.relative_to(Path.home()).as_posix()
                     except (ValueError, RuntimeError):
                         pass  # keep absolute
                 found_hints.append((rel_path, content))

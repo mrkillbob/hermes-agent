@@ -31,7 +31,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Optional
+import re
+from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
@@ -47,6 +48,204 @@ logger = logging.getLogger(__name__)
 
 KANBAN_LIST_DEFAULT_LIMIT = 50
 KANBAN_LIST_MAX_LIMIT = 200
+_PARENT_HANDOFF_SUMMARY_MAX_BYTES = 4096
+_PARENT_HANDOFF_METADATA_STRING_MAX_BYTES = 2048
+_PARENT_HANDOFF_METADATA_MAX_ITEMS = 32
+_PARENT_HANDOFF_METADATA_MAX_DEPTH = 4
+
+# A direct user/dashboard root can legitimately need a follow-up choice.  A
+# worker-, decomposer-, or cron-created card cannot: it was created only after
+# a producer had chosen its scope and owner.  Letting those cards reopen their
+# assignment as ``needs_input`` produces unblock loops from local models (and
+# lets a scheduled audit claim a prior timeout is a human prerequisite).
+# Real external access failures remain evidence-backed ``capability`` blocks.
+_NEEDS_INPUT_ROOT_CREATORS = frozenset({"user", "dashboard"})
+
+_PRIVATE_PATH_IN_TEXT = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"/(?:Users|home|private|var/folders|root|Volumes)/[^\s\"'`)]+"
+    r"|~(?:/|\\)[^\s\"'`)]+"
+    r"|[A-Za-z]:\\+(?:Users|Documents and Settings)\\+[^\s\"'`)]+"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_remote_worker_payload(
+    value: Any,
+    *,
+    workspace_path: str | None,
+    control_home: str,
+) -> Any:
+    """Make Kanban state useful to a remote worker without host path egress."""
+
+    if isinstance(value, str):
+        text = redact_sensitive_text(
+            value,
+            force=True,
+            redact_url_credentials=True,
+        )
+        if workspace_path:
+            text = text.replace(
+                str(workspace_path), "$HERMES_KANBAN_WORKSPACE"
+            )
+        if control_home:
+            text = text.replace(str(control_home), "$HERMES_CONTROL_HOME")
+        return _PRIVATE_PATH_IN_TEXT.sub("<private-path>", text)
+    if isinstance(value, dict):
+        return {
+            _sanitize_remote_worker_payload(
+                key,
+                workspace_path=workspace_path,
+                control_home=control_home,
+            ): _sanitize_remote_worker_payload(
+                item,
+                workspace_path=workspace_path,
+                control_home=control_home,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _sanitize_remote_worker_payload(
+                item,
+                workspace_path=workspace_path,
+                control_home=control_home,
+            )
+            for item in value
+        ]
+    return value
+
+
+def _truncate_utf8(text: Any, max_bytes: int) -> str:
+    rendered = text if isinstance(text, str) else str(text or "")
+    encoded = rendered.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return rendered
+    suffix = "\n<truncated>"
+    budget = max(0, max_bytes - len(suffix.encode("utf-8")))
+    return encoded[:budget].decode("utf-8", errors="ignore") + suffix
+
+
+def _bounded_parent_metadata(value: Any, *, depth: int = 0) -> Any:
+    """Keep a small JSON-safe completion handoff, never historical attempt text."""
+
+    if depth >= _PARENT_HANDOFF_METADATA_MAX_DEPTH:
+        return "<depth-capped>"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _truncate_utf8(value, _PARENT_HANDOFF_METADATA_STRING_MAX_BYTES)
+    if isinstance(value, dict):
+        bounded: dict[str, Any] = {}
+        for key, item in list(value.items())[:_PARENT_HANDOFF_METADATA_MAX_ITEMS]:
+            bounded[_truncate_utf8(key, 256)] = _bounded_parent_metadata(
+                item,
+                depth=depth + 1,
+            )
+        return bounded
+    if isinstance(value, (list, tuple)):
+        return [
+            _bounded_parent_metadata(item, depth=depth + 1)
+            for item in list(value)[:_PARENT_HANDOFF_METADATA_MAX_ITEMS]
+        ]
+    return _truncate_utf8(value, _PARENT_HANDOFF_METADATA_STRING_MAX_BYTES)
+
+
+def _bounded_completed_parent_handoffs(value: Any) -> list[dict[str, Any]]:
+    handoffs: list[dict[str, Any]] = []
+    if not isinstance(value, list):
+        return handoffs
+    for item in value[:_PARENT_HANDOFF_METADATA_MAX_ITEMS]:
+        if not isinstance(item, dict) or item.get("status") != "done":
+            continue
+        handoffs.append(
+            {
+                "id": _truncate_utf8(item.get("id"), 64),
+                "title": _truncate_utf8(item.get("title"), 512),
+                "completed_at": _truncate_utf8(item.get("completed_at"), 64),
+                "summary": _truncate_utf8(
+                    item.get("summary"),
+                    _PARENT_HANDOFF_SUMMARY_MAX_BYTES,
+                ),
+                "metadata": _bounded_parent_metadata(item.get("metadata") or {}),
+            }
+        )
+    return handoffs
+
+
+def _project_remote_worker_state(payload: dict, *, current_run_id: str | None) -> dict:
+    """Expose current task truth without recycling obsolete attempt failures."""
+
+    del current_run_id
+    task = dict(payload.get("task") or {})
+    if task.get("current_run_id") is not None:
+        task["current_run_id"] = "$HERMES_KANBAN_RUN_ID"
+    # The dispatcher has already rooted terminal and file tools in the exact
+    # task workspace. Exposing the shell token as structured ``workspace_path``
+    # tempts models to copy it into the tool's literal ``workdir`` field, where
+    # ``$`` is (correctly) rejected as a metacharacter. Keep the token only in
+    # sanitized command text, where the shell can expand the exact grant.
+    task["workspace_path"] = None
+    task["workspace_access"] = "dispatcher_current_directory"
+    review_assignment = False
+    if task.get("status") in {"review", "running"}:
+        for run in reversed(payload.get("runs") or []):
+            if not isinstance(run, dict):
+                continue
+            state = str(run.get("outcome") or run.get("status") or "").strip()
+            if state in {"running", "claimed", "spawned", ""}:
+                continue
+            review_assignment = state == "review_requested"
+            break
+    worker_context = (
+        "Work only from the current task body and current repository state. "
+        "Terminal and file tools already start in the dispatcher-selected task "
+        "workspace; do not pass an environment token as a tool workdir. "
+        "Prior crash, protocol, manual-reclaim, local-fallback, and blocked "
+        "records are attempt evidence only and cannot block this retry."
+    )
+    if review_assignment:
+        worker_context = (
+            "This is a review run. Do not redo the implementation assignment. "
+            "Terminal and file tools already start in the dispatcher-selected "
+            "task workspace; do not pass an environment token as a tool workdir. "
+            "Inspect the current deliverable and canonical state, verify the "
+            "claimed evidence, then complete it or request concrete changes. "
+            "Block only on a newly reproduced external dependency."
+        )
+    worker_context += (
+        " A safe role-owned decision is work, not human input: make it and "
+        "record the rationale. If canonical verification shows no change is needed, "
+        "complete with that evidence instead of idling, rejecting, or blocking. "
+        "Use needs_input only for a decision whose authority is genuinely outside "
+        "the assigned role."
+    )
+    return {
+        "task": task,
+        "parents": payload.get("parents", []),
+        "children": payload.get("children", []),
+        "parent_handoffs": _bounded_completed_parent_handoffs(
+            payload.get("parent_handoffs")
+        ),
+        # Boolean current-state signal only: review summaries remain excluded
+        # with all other historical run text from the remote egress boundary.
+        "review_assignment": review_assignment,
+        # The task body is the authoritative bounded assignment. Historical
+        # worker comments are attempt evidence and previously caused agents to
+        # re-enact already-repaired failures.
+        "comments": [],
+        # Run/event counters are local lifecycle metadata and are not needed
+        # to execute the current assignment. The worker reports liveness via
+        # its lifecycle tools instead of replaying those identifiers remotely.
+        "events": [],
+        "runs": [],
+        "worker_context": worker_context,
+        "history_policy": (
+            "Verify canonical current state. Do not repeat or summarize obsolete "
+            "attempt failures. Finish, or report one newly reproduced blocker."
+        ),
+    }
 
 
 def _profile_has_kanban_toolset() -> bool:
@@ -251,10 +450,16 @@ def _goal_judge_available() -> bool:
     return client is not None and bool(model)
 
 
-def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
-    """Return a rejection reason when a goal-mode terminal handoff is premature."""
+def _goal_mode_handoff_rejection(task, evidence: str):
+    """Return ``(verdict, reason_or_None)`` for a goal-mode terminal handoff.
+
+    ``{"done", None}`` means the judge allows the handoff; anything else is
+    a rejection whose verdict disambiguates the guidance the caller gives
+    the worker (``continue`` = not done yet, ``blocked`` = judged
+    unachievable — see #100954).
+    """
     if not task or not task.goal_mode or not _goal_judge_available():
-        return None
+        return ("done", None)
     verdict = "done"
     reason = ""
     try:
@@ -270,7 +475,68 @@ def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
             judge_exc,
             exc_info=True,
         )
-    return reason if verdict != "done" else None
+    return (verdict, None if verdict == "done" else reason)
+
+
+_PYTEST_NON_EVIDENCE_EXIT_RE = re.compile(
+    r"\bpytest\b.{0,160}?\b(?:exit(?:ed)?(?:\s+code)?|rc)\s*[:=]?\s*([2-5])\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_VERIFICATION_UNAVAILABLE_RE = re.compile(
+    r"\b(?:behavioral|focused|regression|test)\s+(?:verification|evidence|result)"
+    r"\s+(?:is\s+)?(?:unavailable|absent|missing)\b"
+    r"|\bno\s+(?:behavioral|focused|regression)\s+(?:test\s+)?"
+    r"(?:verification|evidence|result)\b",
+    re.IGNORECASE,
+)
+
+
+def _verifier_handoff_rejection(
+    task: Any,
+    evidence: str,
+    metadata: Optional[dict],
+) -> Optional[str]:
+    """Reject verifier completion when pytest never produced test evidence.
+
+    Pytest exit 1 can be a legitimate verifier finding: tests ran and exposed
+    a concrete regression.  Exit 2-5 instead means interruption, internal
+    error, usage error, or no tests collected.  A contract verifier reporting
+    one of those outcomes has not satisfied its evidence boundary and must
+    block for workspace/toolchain repair rather than release downstream work.
+
+    Keep this deterministic gate narrow to verification-shaped tasks.  Audit
+    and research cards are allowed to complete with negative findings because
+    reporting the failure can itself be their deliverable.
+    """
+    if task is None:
+        return None
+    title = str(getattr(task, "title", "") or "")
+    assignee = str(getattr(task, "assignee", "") or "")
+    body = str(getattr(task, "body", "") or "")
+    verification_shaped = (
+        title.strip().lower().startswith(("verify ", "verification "))
+        or "test-contract" in assignee.lower()
+        or "review-verification" in assignee.lower()
+    )
+    if not verification_shaped or "test" not in f"{title}\n{body}".lower():
+        return None
+
+    metadata_text = ""
+    if isinstance(metadata, dict):
+        try:
+            metadata_text = json.dumps(metadata, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            metadata_text = str(metadata)
+    handoff = f"{evidence}\n{metadata_text}"
+    pytest_exit = _PYTEST_NON_EVIDENCE_EXIT_RE.search(handoff)
+    if pytest_exit:
+        return (
+            f"pytest exit {pytest_exit.group(1)} did not produce valid test "
+            "evidence"
+        )
+    if _VERIFICATION_UNAVAILABLE_RE.search(handoff):
+        return "required behavioral test evidence is unavailable"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -298,14 +564,23 @@ _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0
 
 
-def heartbeat_current_worker_from_env() -> bool:
+def heartbeat_current_worker_from_env(
+    *,
+    on_lease_lost: Callable[[str], None] | None = None,
+) -> bool:
     """Best-effort: extend the kanban claim + bump board heartbeat for the
     current dispatcher-spawned worker, using identity from env vars.
 
     Returns True if a write was attempted (whether or not it succeeded);
     False if the call was skipped (not a kanban worker, rate-limited, or
-    swallowed exception). The boolean is informational — callers should
-    not branch on it.
+    swallowed exception). The boolean is informational.
+
+    When the board explicitly rejects either the claim heartbeat or the
+    run-pinned worker heartbeat, this process has been reclaimed or
+    superseded. ``on_lease_lost`` is called once for that attempt so the agent
+    can self-fence even if the dispatcher's termination signal did not land.
+    Transport/database exceptions remain fail-open: unavailable board state is
+    not evidence that a valid worker lost ownership.
 
     Identity comes from:
       * ``HERMES_KANBAN_TASK`` — task id (required; absence means no-op)
@@ -330,10 +605,12 @@ def heartbeat_current_worker_from_env() -> bool:
     _auto_heartbeat_last_attempt = now
     try:
         kb, conn = _connect()
+        lease_lost = False
         try:
             claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
             try:
-                kb.heartbeat_claim(conn, tid, claimer=claim_lock)
+                claim_owned = kb.heartbeat_claim(conn, tid, claimer=claim_lock)
+                lease_lost = claim_owned is False
             except Exception:
                 logger.debug("auto-heartbeat: heartbeat_claim failed", exc_info=True)
             run_id_raw = os.environ.get("HERMES_KANBAN_RUN_ID")
@@ -343,7 +620,13 @@ def heartbeat_current_worker_from_env() -> bool:
             except (TypeError, ValueError):
                 run_id = None
             try:
-                kb.heartbeat_worker(conn, tid, note=None, expected_run_id=run_id)
+                run_owned = kb.heartbeat_worker(
+                    conn,
+                    tid,
+                    note=None,
+                    expected_run_id=run_id,
+                )
+                lease_lost = lease_lost or run_owned is False
             except Exception:
                 logger.debug("auto-heartbeat: heartbeat_worker failed", exc_info=True)
         finally:
@@ -351,6 +634,11 @@ def heartbeat_current_worker_from_env() -> bool:
                 conn.close()
             except Exception:
                 pass
+        if lease_lost and on_lease_lost is not None:
+            try:
+                on_lease_lost(tid)
+            except Exception:
+                logger.debug("auto-heartbeat: lease-loss callback failed", exc_info=True)
         return True
     except Exception:
         logger.debug("auto-heartbeat: bridge failed", exc_info=True)
@@ -560,10 +848,11 @@ def _handle_show(args: dict, **kw) -> str:
                     "started_at": r.started_at, "ended_at": r.ended_at,
                 }
 
-            return json.dumps({
+            payload = {
                 "task": _task_dict(task),
                 "parents": parents,
                 "children": children,
+                "parent_handoffs": [],
                 "comments": [
                     {"author": c.author, "body": c.body,
                      "created_at": c.created_at}
@@ -580,7 +869,52 @@ def _handle_show(args: dict, **kw) -> str:
                 # the same string build_worker_context returns to the
                 # dispatcher at spawn time.
                 "worker_context": kb.build_worker_context(conn, tid),
-            })
+            }
+            for parent_id in parents:
+                parent = kb.get_task(conn, parent_id)
+                if parent is None or parent.status != "done":
+                    continue
+                parent_runs = kb.list_runs(conn, parent_id)
+                terminal_run = next(
+                    (
+                        run
+                        for run in reversed(parent_runs)
+                        if str(run.outcome or run.status or "").strip()
+                        not in {"", "running", "claimed", "spawned"}
+                    ),
+                    None,
+                )
+                payload["parent_handoffs"].append(
+                    {
+                        "id": parent.id,
+                        "title": parent.title,
+                        "status": parent.status,
+                        "completed_at": parent.completed_at,
+                        "summary": (
+                            terminal_run.summary
+                            if terminal_run is not None and terminal_run.summary
+                            else parent.result
+                        ),
+                        "metadata": (
+                            terminal_run.metadata
+                            if terminal_run is not None and terminal_run.metadata
+                            else {}
+                        ),
+                    }
+                )
+            if os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1":
+                from hermes_constants import get_default_hermes_root
+
+                payload = _project_remote_worker_state(
+                    payload,
+                    current_run_id=task.current_run_id,
+                )
+                payload = _sanitize_remote_worker_payload(
+                    payload,
+                    workspace_path=task.workspace_path,
+                    control_home=str(get_default_hermes_root()),
+                )
+            return json.dumps(payload)
         finally:
             conn.close()
     except ValueError as e:
@@ -752,10 +1086,31 @@ def _handle_complete(args: dict, **kw) -> str:
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
             task = kb.get_task(conn, tid)
+            verifier_rejection = _verifier_handoff_rejection(
+                task,
+                (summary or result or "").strip(),
+                metadata,
+            )
+            if verifier_rejection is not None:
+                return tool_error(
+                    f"Verifier completion rejected: {verifier_rejection}. "
+                    "The task is still running. Repair the workspace or test "
+                    "invocation and rerun verification; if that cannot be "
+                    "done in this attempt, call kanban_block with the exact "
+                    "evidence blocker instead of kanban_complete."
+                )
             rejection = _goal_mode_handoff_rejection(
                 task,
                 (summary or result or "").strip(),
             )
+            if gate_verdict == "blocked":
+                return tool_error(
+                    f"Goal completion rejected: judge ruled the goal "
+                    f"unachievable — {rejection}. The task will NOT complete "
+                    f"silently. Either re-scope the task with kanban_edit, "
+                    f"or record the block with kanban_block and hand the "
+                    f"decision to a human / reviewer."
+                )
             if rejection is not None:
                 return tool_error(
                     f"Goal completion rejected by judge: {rejection}. "
@@ -864,6 +1219,38 @@ def _handle_block(args: dict, **kw) -> str:
                 f"another reason, call kanban_complete instead — the "
                 f"completion judge will evaluate it."
             )
+        if kind == "capability":
+            command = args.get("command")
+            stderr = args.get("stderr")
+            if not isinstance(command, str) or not command.strip() or not isinstance(stderr, str):
+                conn.close()
+                return tool_error(
+                    "capability blocks require command and stderr from a "
+                    "current failing tool invocation. Run the bounded command "
+                    "first; use its literal argv and redacted stderr, or "
+                    "complete with the factual no-op/result."
+                )
+            command = _truncate_utf8(
+                redact_sensitive_text(command, force=True), 1200
+            )
+            stderr = _truncate_utf8(
+                redact_sensitive_text(stderr, force=True), 2400
+            )
+            reason = (
+                f"{reason}\n\nReproduced command: {command}\n"
+                f"stderr: {stderr}"
+            )
+        creator = (task.created_by or "").strip().lower() if task else ""
+        worker_or_cron_created = bool(creator) and creator not in _NEEDS_INPUT_ROOT_CREATORS
+        if kind == "needs_input" and worker_or_cron_created:
+            conn.close()
+            return tool_error(
+                "worker- and cron-created tasks cannot block with needs_input: "
+                "their producer already fixed the scope and decision owner. "
+                "Make the role-owned decision and complete with factual "
+                "evidence; use kind='capability' only for a newly reproduced "
+                "external access or credential failure."
+            )
         try:
             ok = kb.block_task(
                 conn, tid,
@@ -937,7 +1324,13 @@ def _handle_request_review(args: dict, **kw) -> str:
         kb, conn = _connect(board=board)
         try:
             task = kb.get_task(conn, tid)
-            rejection = _goal_mode_handoff_rejection(task, summary)
+            gate_verdict, rejection = _goal_mode_handoff_rejection(task, summary)
+            if gate_verdict == "blocked":
+                return tool_error(
+                    f"Goal review handoff rejected: judge ruled the goal "
+                    f"unachievable — {rejection}. Record the block with "
+                    f"kanban_block instead of requesting review."
+                )
             if rejection is not None:
                 return tool_error(
                     f"Goal review handoff rejected by judge: {rejection}. "
@@ -1391,6 +1784,13 @@ def _handle_create(args: dict, **kw) -> str:
     _inherit_project = workspace_kind is None and workspace_path is None
     if workspace_kind is None:
         workspace_kind = "scratch"
+    if str(workspace_kind) == "scratch":
+        # Worker/model supplied paths are not workspace authority. A guessed
+        # path (commonly ``/home/user/...`` on macOS) otherwise persists into
+        # the task and makes every reviewer spawn fail before the first turn.
+        # Let the DB resolver materialize the task-id-keyed directory under
+        # the active board's managed scratch root instead.
+        workspace_path = None
     triage, bool_error = _parse_bool_arg(args, "triage")
     if bool_error:
         return tool_error(bool_error)
@@ -1868,7 +2268,9 @@ KANBAN_BLOCK_SCHEMA = {
         "``reason`` is shown to the human on the board. If a task keeps "
         "getting unblocked and re-blocked for the same reason, it is "
         "auto-escalated to triage. Use for genuine blockers only — don't "
-        "block on things you can resolve yourself."
+        "block on things you can resolve yourself. A safe decision owned by "
+        "your assigned role is not human input; make it and complete the task. "
+        "If verification finds no change is needed, complete with that evidence."
     ),
     "parameters": {
         "type": "object",
@@ -1877,12 +2279,26 @@ KANBAN_BLOCK_SCHEMA = {
                 "type": "string",
                 "description": _DESC_TASK_ID_DEFAULT,
             },
-            "reason": {
+        "reason": {
                 "type": "string",
                 "description": (
                     "What you need answered or what stopped you, in one or "
                     "two sentences. Don't paste the whole conversation; the "
                     "human has the board and can ask follow-ups via comments."
+                ),
+            },
+            "command": {
+                "type": "string",
+                "description": (
+                    "Required for kind='capability': literal command or tool "
+                    "operation that just failed in this run."
+                ),
+            },
+            "stderr": {
+                "type": "string",
+                "description": (
+                    "Required for kind='capability': its current stderr or "
+                    "tool error, with secrets omitted."
                 ),
             },
             "kind": {
