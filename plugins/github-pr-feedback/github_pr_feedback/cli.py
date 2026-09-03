@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - native Windows
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
 import hashlib
 import json
 import os
@@ -725,14 +729,26 @@ def _exclusive_scan_lock(control_home: Path | None = None) -> Iterator[bool]:
     acquired = False
     try:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write("\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             acquired = True
-        except BlockingIOError:
+        except (BlockingIOError, OSError):
             pass
         yield acquired
     finally:
         if acquired:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            else:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         handle.close()
 
 
