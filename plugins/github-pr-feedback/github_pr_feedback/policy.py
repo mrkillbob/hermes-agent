@@ -344,7 +344,11 @@ class AgentLabelPolicy:
     enabled: bool
     max_updates_per_scan: int = 1
     create_missing: bool = False
+    repositories: frozenset[str] = frozenset()
     mappings: tuple[AgentLabelMapping, ...] = ()
+
+    def applies_to(self, repository: str) -> bool:
+        return not self.repositories or repository in self.repositories
 
     def label_for_branch(self, branch: str) -> str | None:
         matches = [
@@ -783,8 +787,9 @@ def _parse_agent_labels(raw: object) -> AgentLabelPolicy | None:
         if set(raw) != {"enabled"}:
             raise ValueError("disabled agent_labels has unknown fields")
         return None
-    expected = {"enabled", "max_updates_per_scan", "create_missing", "mappings"}
-    if set(raw) != expected:
+    required = {"enabled", "max_updates_per_scan", "create_missing", "mappings"}
+    optional = {"repositories"}
+    if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("agent_labels has missing or unknown fields")
     max_updates = raw["max_updates_per_scan"]
     if (
@@ -832,6 +837,11 @@ def _parse_agent_labels(raw: object) -> AgentLabelPolicy | None:
         enabled=True,
         max_updates_per_scan=max_updates,
         create_missing=create_missing,
+        repositories=(
+            frozenset(_string_list(raw["repositories"], "agent_labels repositories"))
+            if "repositories" in raw
+            else frozenset()
+        ),
         mappings=tuple(mappings),
     )
 

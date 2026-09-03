@@ -72,6 +72,10 @@ plugins:
           enabled: false
           max_updates_per_scan: 25
           create_missing: true
+          # Limit writes to repositories where the configured identity can
+          # manage issue labels. Omit for all configured repositories.
+          repositories:
+            - example-owner/example-repository
           mappings:
             - branch_prefix: codex/
               label: codex

@@ -508,6 +508,7 @@ def test_enabled_policy_parses_bounded_agent_label_mappings(tmp_path: Path) -> N
         "enabled": True,
         "max_updates_per_scan": 12,
         "create_missing": True,
+        "repositories": ["acme/widgets"],
         "mappings": [
             {
                 "branch_prefix": "codex/",
@@ -531,6 +532,8 @@ def test_enabled_policy_parses_bounded_agent_label_mappings(tmp_path: Path) -> N
     assert policy.agent_labels.label_for_branch("hermes/repair") == "hermes"
     assert policy.agent_labels.label_for_branch("feature/plain") is None
     assert policy.agent_labels.create_missing is True
+    assert policy.agent_labels.applies_to("acme/widgets") is True
+    assert policy.agent_labels.applies_to("upstream/widgets") is False
 
 
 def test_dispatched_feedback_is_not_actioned_until_explicit_exact_head_acknowledgement(
