@@ -10,6 +10,7 @@ import pytest
 from github_pr_feedback.ci_runner import (
     CIAuditIdentity,
     CIAuditReceipt,
+    CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
     CIValidationError,
     CompletedCommand,
     LocalCIRunner,
@@ -278,6 +279,31 @@ def test_local_ci_runner_executes_only_required_lanes_and_records_exact_head_rec
         manifest_digest=receipt.manifest_digest,
         not_before=NOW - timedelta(hours=1),
     ) == receipt
+    ledger.close()
+
+
+def test_local_ci_receipt_types_budget_exhausted_full_local_substitution(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+    github = FakeGitHub(merge_state())
+    billing_state = CheckState(True, False, 4, True)
+    github.checks = [billing_state, billing_state]
+    runner, ledger, commands = build_runner(tmp_path, github=github)
+
+    receipt = runner.run(
+        CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), worktree
+    )
+
+    assert receipt.status == "passed"
+    assert receipt.ci_mode == CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT
+    assert len(commands.calls) == 4
+    assert CIAuditReceipt.from_payload(receipt.to_payload()) == receipt
+    tampered = receipt.to_payload()
+    tampered["ci_mode"] = "standard"
+    with pytest.raises(ValueError, match="receipt_id"):
+        CIAuditReceipt.from_payload(tampered)
     ledger.close()
 
 
@@ -630,5 +656,10 @@ def test_ci_receipt_round_trip_rejects_coerced_or_dropped_evidence(
     payload["commands"] = []
     payload["receipt_id"] = "0" * 64
     with pytest.raises(ValueError, match="no command evidence"):
+        CIAuditReceipt.from_payload(payload)
+
+    payload = receipt.to_payload()
+    payload["ci_mode"] = "budget-exhausted-local-equivalent"
+    with pytest.raises(ValueError, match="billing-blocked"):
         CIAuditReceipt.from_payload(payload)
     ledger.close()

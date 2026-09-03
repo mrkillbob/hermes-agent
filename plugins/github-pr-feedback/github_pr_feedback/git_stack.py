@@ -41,22 +41,17 @@ class GitStackRunner:
         _branch(branch, "branch")
         return self._run("rev-parse", f"refs/remotes/origin/{branch}").stdout.strip()
 
-    def rebase_branch(self, branch: str, base_branch: str) -> GitEvidence:
+    def merge_base_into_branch(self, branch: str, base_branch: str) -> GitEvidence:
         _branch(branch, "branch")
         _branch(base_branch, "base_branch")
         self._run("fetch", "origin", base_branch, branch)
         self._run("switch", branch)
-        return self._run("rebase", f"origin/{base_branch}")
+        return self._run("merge", "--no-edit", "--no-ff", f"origin/{base_branch}")
 
-    def push_branch(self, branch: str, expected_remote_head: str) -> GitEvidence:
+    def push_branch(self, branch: str) -> GitEvidence:
         _branch(branch, "branch")
-        if len(expected_remote_head) != 40 or any(
-            character not in "0123456789abcdefABCDEF" for character in expected_remote_head
-        ):
-            raise ValueError("expected_remote_head must be a full Git object ID")
         return self._run(
             "push",
-            f"--force-with-lease=refs/heads/{branch}:{expected_remote_head}",
             "origin",
             f"HEAD:refs/heads/{branch}",
         )

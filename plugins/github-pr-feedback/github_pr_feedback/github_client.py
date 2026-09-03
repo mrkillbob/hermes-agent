@@ -941,6 +941,38 @@ class GitHubClient:
             ]
         )
 
+    def close_pull_request_with_comment(
+        self,
+        repository: str,
+        number: int,
+        *,
+        head_sha: str,
+        comment: str,
+    ) -> None:
+        """Close one already-verified exact head without deleting its branch."""
+
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        _validated_sha(head_sha)
+        comment = _bounded_text(
+            comment,
+            "close comment",
+            MAX_FEEDBACK_BODY_CHARS,
+            allow_newlines=True,
+        )
+        self._runner.run(
+            [
+                "gh",
+                "pr",
+                "close",
+                str(number),
+                "--repo",
+                repository,
+                "--comment",
+                comment,
+            ]
+        )
+
     def post_issue_comment(self, repository: str, number: int, body: str) -> None:
         """Post one bounded factual PR comment through fixed argv."""
 

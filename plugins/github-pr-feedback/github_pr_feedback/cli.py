@@ -51,6 +51,7 @@ from .policy import (
 from .post_merge import PostMergeExecutor
 from .stack import StackEntry
 from .stack_controller import StackController, _ordered
+from .superseded import SupersededPullRequestController
 from .repair_controller import (
     PR_REPAIR_ATTRIBUTION_PREFIX,
     RepairController,
@@ -518,7 +519,7 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
         "--entry", action="append", required=True, metavar="BRANCH=BASE:TITLE"
     )
     stack_refresh = subcommands.add_parser(
-        "stack-refresh", help="Rebase and safely push merged-stack descendants"
+        "stack-refresh", help="Merge the configured base and normally push stack descendants"
     )
     stack_refresh.add_argument("--repository", required=True)
     stack_refresh.add_argument("--stack-id", required=True)
@@ -529,6 +530,14 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     stack_merge.add_argument("--repository", required=True)
     stack_merge.add_argument("--stack-id", required=True)
     stack_merge.add_argument("--repository-path", required=True, type=Path)
+    close_superseded = subcommands.add_parser(
+        "close-superseded",
+        help="Close an exact PR head already contained by its configured base",
+    )
+    close_superseded.add_argument("--repository", required=True)
+    close_superseded.add_argument("--pr-number", required=True, type=int)
+    close_superseded.add_argument("--head-sha", required=True)
+    close_superseded.add_argument("--repository-path", required=True, type=Path)
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
@@ -585,6 +594,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _stack_refresh(ctx, args)
     if action == "stack-merge":
         return _stack_merge(ctx, args)
+    if action == "close-superseded":
+        return _close_superseded(ctx, args)
     if action == "complete-feedback":
         return _complete_feedback(ctx, args)
     if action == "complete-maintenance":
@@ -1158,6 +1169,7 @@ def _ci_receipt_payload(receipt: CIAuditReceipt) -> dict[str, object]:
         "head_sha": receipt.identity.head_sha,
         "manifest_digest": receipt.manifest_digest,
         "command_count": len(receipt.commands),
+        "ci_mode": receipt.ci_mode,
         "handoff_status": "pending",
     }
 
@@ -1212,7 +1224,22 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
             final_state = github.get_merge_state(args.repository, args.pr_number)
             if final_state.head_sha != receipt.identity.head_sha:
                 raise CIValidationError("canonical PR head changed after audit")
-            if policy.local_ci_audit.post_results:
+            if policy.local_ci_audit.audit_only:
+                print(
+                    json.dumps(
+                        {
+                            "status": "audit_only_complete",
+                            "receipt_id": receipt.receipt_id,
+                            "ci_mode": receipt.ci_mode,
+                            "posted": False,
+                            "merge_handoff": False,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                return_code = 0 if receipt.status == "passed" else 1
+            elif policy.local_ci_audit.post_results:
                 feedback = github.list_feedback(
                     receipt.identity.repository, receipt.identity.pr_number
                 )
@@ -1222,7 +1249,9 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                         receipt.identity.pr_number,
                         _ci_audit_comment(receipt),
                     )
-            if receipt.status == "failed":
+            if policy.local_ci_audit.audit_only:
+                pass
+            elif receipt.status == "failed":
                 repair_status = _controller(policy, ledger).dispatch_ci_failure(receipt)
                 if repair_status not in {"scheduled", "duplicate"}:
                     raise RuntimeError(f"typed CI repair handoff failed: {repair_status}")
@@ -1231,6 +1260,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     policy,
                     ledger,
                     receipt.identity.pr_number,
+                    repository=receipt.identity.repository,
                     github=github,
                 )
                 handoff_status = str(merge_handoff.get("status", ""))
@@ -1439,7 +1469,7 @@ def _run_merge_scan(
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
 ) -> dict[str, object]:
-    merge_policies = _merge_policies(policy)
+    merge_policies = policy.merge_policies()
     if not merge_policies:
         return {
             "status": "disabled",
@@ -1655,12 +1685,17 @@ def _run_single_pr_merge_handoff(
     ledger: FeedbackLedger,
     pr_number: int,
     *,
+    repository: str | None = None,
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
 ) -> dict[str, object]:
     """Attempt one exact PR merge, then admit at most one successor repair."""
 
-    merge_policy = policy.merge_maintainer
+    merge_policy = (
+        policy.merge_policy_for(repository)
+        if repository is not None
+        else (policy.merge_policies()[0] if len(policy.merge_policies()) == 1 else None)
+    )
     if merge_policy is None:
         return {"status": "disabled", "blockers": ["merge_maintainer_disabled"]}
     github = github or _github_client(policy)
@@ -1976,6 +2011,35 @@ def _stack_merge(ctx: Any, args: argparse.Namespace) -> int:
         return 1
 
 
+def _close_superseded(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        result = SupersededPullRequestController(
+            policy, github=_github_client(policy)
+        ).close(
+            args.repository,
+            args.pr_number,
+            args.head_sha,
+            repository_path=args.repository_path,
+        )
+    except (GitHubClientError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "blocked", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "closed_superseded",
+                "repository": result.repository,
+                "pr_number": result.pr_number,
+                "head_sha": result.head_sha,
+                "base_branch": result.base_branch,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _merge_disable(ctx: Any, args: argparse.Namespace) -> int:
     try:
         policy = _load_policy_from_context(ctx)
@@ -2079,6 +2143,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "local_ci_audit",
         "agent_labels",
         "merge_maintainer",
+        "merge_maintainers",
         "repair_steward",
         "release_maintenance",
         "github_identity",

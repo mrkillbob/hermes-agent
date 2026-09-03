@@ -99,8 +99,9 @@ class StackController:
                 parent = next(item for item in manifest.entries if item.branch == entry.base_branch)
                 parent_state = self.github.get_merge_state(repository, parent.pr_number or 0)
                 if parent_state.merged:
-                    runner.rebase_branch(entry.branch, manifest.base_branch)
-                    runner.push_branch(entry.branch, head)
+                    runner.merge_base_into_branch(entry.branch, manifest.base_branch)
+                    runner.push_branch(entry.branch)
+                    head = runner.branch_head(entry.branch)
                     self.github.post_issue_comment(
                         repository,
                         entry.pr_number or 0,
@@ -110,9 +111,8 @@ class StackController:
                         repository,
                         entry.pr_number or 0,
                         base=manifest.base_branch,
-                        expected_head_sha=runner.branch_head(entry.branch),
+                        expected_head_sha=head,
                     )
-                    head = runner.branch_head(entry.branch)
             entries.append(replace(entry, head_sha=head))
         refreshed = replace(manifest, entries=tuple(entries), updated_at=datetime.now(UTC))
         self.store.save(refreshed)

@@ -187,6 +187,7 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
             pass
 
     class Policy:
+        enabled = True
         repair_steward = object()
         merge_maintainer = None
         release_maintenance = None
@@ -242,6 +243,7 @@ def _run_scan_with_primary_result(
             pass
 
     class Policy:
+        enabled = True
         repair_steward = object()
         merge_maintainer = object()
         release_maintenance = object()
@@ -1524,7 +1526,9 @@ def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
             return ScanResult(1, {})
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    monkeypatch.setattr(cli, "ScanController", RevalidatingController)
+    monkeypatch.setattr(
+        cli, "_controller", lambda _policy, _ledger: RevalidatingController()
+    )
     context = RecordingContext({"enabled": False})
     parser = argparse.ArgumentParser()
     cli.setup_cli(context, parser)
@@ -1580,6 +1584,29 @@ def test_scan_and_retry_exit_nonzero_and_report_degraded_on_incomplete_work(
     monkeypatch.setattr(
         cli, "_controller", lambda _policy, _ledger: DegradedController()
     )
+    if action == "scan":
+        class EnabledPolicy:
+            enabled = True
+            repair_steward = None
+            merge_maintainer = None
+            release_maintenance = None
+
+        class Lock:
+            def __enter__(self) -> bool:
+                return True
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        class Ledger:
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(cli, "_load_policy_from_context", lambda _ctx: EnabledPolicy())
+        monkeypatch.setattr(cli, "_exclusive_scan_lock", lambda: Lock())
+        monkeypatch.setattr(
+            cli.FeedbackLedger, "for_current_profile", lambda: Ledger()
+        )
     parser = argparse.ArgumentParser()
     cli.setup_cli(RecordingContext({"enabled": False}), parser)
     argv = [action]
@@ -1662,9 +1689,6 @@ def test_scan_fails_closed_for_an_incomplete_enabled_configuration(
 def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh(
     tmp_path: Path,
 ) -> None:
-    hermes = shutil.which("hermes")
-    if hermes is None:
-        pytest.skip("Hermes executable is not installed on this host")
     plugin_root = Path(__file__).resolve().parents[1]
     profile = tmp_path / "profile"
     installed = profile / "plugins" / "github-pr-feedback"
@@ -1712,7 +1736,7 @@ def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh
         environment.pop(name, None)
 
     completed = subprocess.run(
-        [hermes, "github-pr-feedback", "scan"],
+        [sys.executable, "-m", "hermes_cli.main", "github-pr-feedback", "scan"],
         check=False,
         cwd=tmp_path,
         env=environment,
@@ -2361,6 +2385,7 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
     assert rendered == [
         {
             "command_count": 1,
+            "ci_mode": "standard",
             "head_sha": head_sha,
             "manifest_digest": receipt.manifest_digest,
             "pr_number": 17,
@@ -2578,6 +2603,117 @@ def test_blocked_merge_handoff_blocks_task_with_exact_blockers(
         "receipt_id": receipt.receipt_id,
         "retryable": False,
         "status": "audit_handoff_blocked",
+    }
+
+
+def test_audit_only_records_receipt_without_post_repair_or_merge_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt
+    from github_pr_feedback.cli import _audit_pr
+    from github_pr_feedback.github_client import CheckState, PullRequestMergeState
+
+    head_sha = "a" * 40
+    base_sha = "b" * 40
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["local_ci_audit"] = {
+        "enabled": True,
+        "assignee": "pr-local-ci-auditor",
+        "post_results": False,
+        "audit_only": True,
+        "required_for_open_prs": True,
+    }
+    receipt = CIAuditReceipt(
+        receipt_id="d" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, base_sha, head_sha),
+        manifest_digest="e" * 64,
+        status="passed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+
+    class GitHub:
+        def get_merge_state(self, _repository: str, _pr_number: int):
+            return PullRequestMergeState(
+                repository="acme/widgets",
+                number=17,
+                state="OPEN",
+                is_draft=False,
+                merged=False,
+                mergeable=True,
+                merge_state_status="CLEAN",
+                base_branch="main",
+                base_sha=base_sha,
+                head_repository="acme/widgets",
+                author_login="owner",
+                head_ref_name="codex/fix",
+                head_sha=head_sha,
+                merge_commit_oid=None,
+            )
+
+        def list_feedback(self, *_args: object):
+            raise AssertionError("audit-only must not read feedback for posting")
+
+        def post_issue_comment(self, *_args: object):
+            raise AssertionError("audit-only must not post")
+
+    class Ledger:
+        def close(self) -> None:
+            pass
+
+    completed: list[CIAuditReceipt] = []
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", GitHub)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli.FeedbackLedger.for_current_profile", lambda: Ledger()
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_grouped_exact_head_audit",
+        lambda *_args, **_kwargs: receipt,
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._controller",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("audit-only must not dispatch repairs")
+        ),
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_single_pr_merge_handoff",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("audit-only must not hand off a merge")
+        ),
+    )
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._complete_current_ci_task",
+        lambda audit: completed.append(audit),
+    )
+    monkeypatch.setattr("github_pr_feedback.cli._terminate_current_ci_worker", lambda: None)
+
+    result = _audit_pr(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha=head_sha,
+            worktree=str(repository),
+            fresh=True,
+        ),
+    )
+
+    assert result == 0
+    assert completed == [receipt]
+    rendered = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert rendered[-1] == {
+        "ci_mode": "standard",
+        "merge_handoff": False,
+        "posted": False,
+        "receipt_id": receipt.receipt_id,
+        "status": "audit_only_complete",
     }
 
 

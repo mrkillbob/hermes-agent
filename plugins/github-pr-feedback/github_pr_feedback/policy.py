@@ -321,6 +321,7 @@ class LocalCIAuditPolicy:
     required_for_open_prs: bool = False
     max_dispatches_per_scan: int = 1
     max_open_prs_per_scan: int = 300
+    audit_only: bool = False
 
     def applies_to(self, repository: str) -> bool:
         return not self.repositories or repository in self.repositories
@@ -380,6 +381,7 @@ class MergeMaintainerPolicy:
     receipt_max_age_seconds: int
     report_only: bool
     post_merge: PostMergePolicy | None
+    allow_budget_exhausted_local_ci: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -727,6 +729,7 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
         "required_for_open_prs",
         "max_dispatches_per_scan",
         "max_open_prs_per_scan",
+        "audit_only",
     }
     if not required.issubset(raw) or set(raw).difference(required | optional):
         raise ValueError("local_ci_audit has missing or unknown fields")
@@ -735,6 +738,7 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
     required_for_open_prs = raw.get("required_for_open_prs", False)
     max_dispatches_per_scan = raw.get("max_dispatches_per_scan", 1)
     max_open_prs_per_scan = raw.get("max_open_prs_per_scan", 300)
+    audit_only = raw.get("audit_only", False)
     if (
         not isinstance(enabled, bool)
         or not isinstance(post_results, bool)
@@ -745,8 +749,11 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
         or not isinstance(max_open_prs_per_scan, int)
         or isinstance(max_open_prs_per_scan, bool)
         or max_open_prs_per_scan < 1
+        or not isinstance(audit_only, bool)
     ):
         raise ValueError("local_ci_audit booleans are invalid")
+    if audit_only and post_results:
+        raise ValueError("audit-only local CI must not post results")
     assignee = _nonempty_string(raw["assignee"], "local_ci_audit assignee")
     repositories = (
         frozenset(_string_list(raw["repositories"], "local_ci_audit repositories"))
@@ -762,6 +769,7 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
         required_for_open_prs=required_for_open_prs,
         max_dispatches_per_scan=max_dispatches_per_scan,
         max_open_prs_per_scan=max_open_prs_per_scan,
+        audit_only=audit_only,
     )
 
 
@@ -926,6 +934,9 @@ def _parse_post_merge(
     deployment_path = deployment_path.resolve()
     if deployment_path == target.local_path:
         raise ValueError("deployment_path must be distinct from the audit worktree")
+    relaunch_argv = _command_argv(raw["relaunch_argv"], "relaunch_argv")
+    if relaunch_argv != ("/usr/bin/open", "-n"):
+        raise ValueError("relaunch_argv must be exactly /usr/bin/open -n")
     return PostMergePolicy(
         deployment_path=deployment_path,
         protected_runtime_entry=_relative_path(
@@ -936,7 +947,7 @@ def _parse_post_merge(
         bundle_identifier=_nonempty_string(
             raw["bundle_identifier"], "bundle_identifier"
         ),
-        relaunch_argv=_command_argv(raw["relaunch_argv"], "relaunch_argv"),
+        relaunch_argv=relaunch_argv,
     )
 
 
@@ -952,7 +963,7 @@ def _parse_merge_maintainer(
         if set(raw) != {"enabled"}:
             raise ValueError("disabled merge_maintainer has unknown fields")
         return None
-    expected = {
+    required = {
         "enabled",
         "assignee",
         "repository",
@@ -963,7 +974,8 @@ def _parse_merge_maintainer(
         "report_only",
         "post_merge",
     }
-    if set(raw) != expected:
+    optional = {"allow_budget_exhausted_local_ci"}
+    if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("merge_maintainer has missing or unknown fields")
     repository = _repository(raw["repository"], "merge_maintainer repository")
     target = targets.get(repository)
@@ -998,6 +1010,11 @@ def _parse_merge_maintainer(
     report_only = raw["report_only"]
     if not isinstance(report_only, bool):
         raise ValueError("report_only must be a boolean")
+    allow_budget_exhausted_local_ci = raw.get(
+        "allow_budget_exhausted_local_ci", False
+    )
+    if not isinstance(allow_budget_exhausted_local_ci, bool):
+        raise ValueError("allow_budget_exhausted_local_ci must be a boolean")
     return MergeMaintainerPolicy(
         assignee=_nonempty_string(raw["assignee"], "merge_maintainer assignee"),
         repository=repository,
@@ -1007,6 +1024,7 @@ def _parse_merge_maintainer(
         receipt_max_age_seconds=receipt_max_age_seconds,
         report_only=report_only,
         post_merge=_parse_post_merge(raw["post_merge"], target=target),
+        allow_budget_exhausted_local_ci=allow_budget_exhausted_local_ci,
     )
 
 
@@ -1166,6 +1184,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "local_ci_audit",
         "agent_labels",
         "merge_maintainer",
+        "merge_maintainers",
         "repair_steward",
         "release_maintenance",
         "github_identity",
@@ -1214,6 +1233,47 @@ def load_policy(raw: object) -> PluginPolicy:
     )
     if not reviewer_logins and not reviewer_associations:
         raise ValueError("at least one reviewer login or association is required")
+    singular_merge_policy = (
+        _parse_merge_maintainer(raw["merge_maintainer"], targets=targets)
+        if "merge_maintainer" in raw
+        else None
+    )
+    raw_merge_policies = raw.get("merge_maintainers")
+    if singular_merge_policy is not None and raw_merge_policies is not None:
+        raise ValueError("use merge_maintainer or merge_maintainers, not both")
+    if raw_merge_policies is None:
+        merge_policies = (
+            (singular_merge_policy,) if singular_merge_policy is not None else ()
+        )
+    else:
+        if (
+            isinstance(raw_merge_policies, (str, bytes))
+            or not isinstance(raw_merge_policies, Sequence)
+            or not raw_merge_policies
+        ):
+            raise ValueError("merge_maintainers must be a non-empty list")
+        merge_policies = tuple(
+            _parse_merge_maintainer(item, targets=targets)
+            for item in raw_merge_policies
+        )
+        if len({item.repository for item in merge_policies}) != len(merge_policies):
+            raise ValueError("merge_maintainers repositories must be unique")
+    local_ci_audit = _validated_local_ci_audit(raw, targets)
+    if any(policy.allow_budget_exhausted_local_ci for policy in merge_policies):
+        if (
+            local_ci_audit is None
+            or not local_ci_audit.audit_only
+            or local_ci_audit.post_results
+            or not local_ci_audit.required_for_open_prs
+            or any(
+                not local_ci_audit.applies_to(policy.repository)
+                for policy in merge_policies
+                if policy.allow_budget_exhausted_local_ci
+            )
+        ):
+            raise ValueError(
+                "budget-exhausted CI substitution requires required, audit-only, no-post local CI"
+            )
     return PluginPolicy(
         enabled=True,
         targets=targets,
@@ -1233,17 +1293,13 @@ def load_policy(raw: object) -> PluginPolicy:
         routing_rules=(
             _parse_routing_rules(raw["routing_rules"]) if "routing_rules" in raw else ()
         ),
-        local_ci_audit=_validated_local_ci_audit(raw, targets),
+        local_ci_audit=local_ci_audit,
         agent_labels=(
             _parse_agent_labels(raw["agent_labels"])
             if "agent_labels" in raw
             else None
         ),
-        merge_maintainer=(
-            _parse_merge_maintainer(raw["merge_maintainer"], targets=targets)
-            if "merge_maintainer" in raw
-            else None
-        ),
+        merge_maintainer=singular_merge_policy,
         repair_steward=(
             _parse_repair_steward(raw["repair_steward"], targets=targets)
             if "repair_steward" in raw

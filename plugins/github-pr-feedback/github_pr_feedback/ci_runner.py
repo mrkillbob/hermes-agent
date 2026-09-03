@@ -32,6 +32,11 @@ _REQUIRED_SCRIPTS = (
 _COMMAND_TIMEOUT_SECONDS = 3600
 _BOOTSTRAP_TIMEOUT_SECONDS = 900
 _CI_RUN_LEASE = timedelta(hours=2)
+CI_MODE_STANDARD = "standard"
+CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT = "budget-exhausted-local-equivalent"
+_CI_MODES = frozenset(
+    {CI_MODE_STANDARD, CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT}
+)
 
 
 class CIValidationError(RuntimeError):
@@ -101,6 +106,7 @@ class CIAuditReceipt:
     completed_at: datetime
     actions_state: CheckState
     commands: tuple[CommandEvidence, ...]
+    ci_mode: str = CI_MODE_STANDARD
     failure_reason: str | None = None
 
     def validate(self) -> None:
@@ -112,6 +118,13 @@ class CIAuditReceipt:
             raise ValueError("CI receipt payload has invalid manifest digest")
         if self.completed_at < self.started_at:
             raise ValueError("CI receipt payload has inverted timestamps")
+        if self.ci_mode not in _CI_MODES:
+            raise ValueError("CI receipt payload has invalid CI mode")
+        if (
+            self.ci_mode == CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT
+            and not self.actions_state.billing_blocked
+        ):
+            raise ValueError("budget-exhausted local CI requires a billing-blocked state")
         for command in self.commands:
             if not re.fullmatch(r"[0-9a-f]{64}", command.stdout_sha256, re.IGNORECASE):
                 raise ValueError("CI receipt payload has invalid stdout digest")
@@ -134,8 +147,19 @@ class CIAuditReceipt:
                 self.status,
                 self.completed_at,
                 self.commands,
+                ci_mode=self.ci_mode,
             )
-            if self.receipt_id.casefold() != expected_id:
+            legacy_standard_id = _receipt_id(
+                self.identity,
+                self.manifest_digest,
+                self.status,
+                self.completed_at,
+                self.commands,
+            )
+            if self.receipt_id.casefold() != expected_id and not (
+                self.ci_mode == CI_MODE_STANDARD
+                and self.receipt_id.casefold() == legacy_standard_id
+            ):
                 raise ValueError("CI receipt payload receipt_id does not match its evidence")
 
     def to_payload(self) -> dict[str, object]:
@@ -149,6 +173,7 @@ class CIAuditReceipt:
             },
             "manifest_digest": self.manifest_digest,
             "status": self.status,
+            "ci_mode": self.ci_mode,
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat(),
             "actions_state": {
@@ -238,6 +263,9 @@ class CIAuditReceipt:
             ),
             manifest_digest=manifest_digest,
             status=status,
+            ci_mode=_required_text(
+                payload.get("ci_mode", CI_MODE_STANDARD), "CI mode", 64
+            ),
             started_at=_required_timestamp(payload.get("started_at"), "started_at"),
             completed_at=_required_timestamp(payload.get("completed_at"), "completed_at"),
             actions_state=CheckState(
@@ -611,8 +639,18 @@ class LocalCIRunner:
         failed_commands = tuple(
             item for item in evidence if item.returncode != 0 or item.timed_out
         )
+        ci_mode = (
+            CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT
+            if initial_checks.billing_blocked
+            else CI_MODE_STANDARD
+        )
         receipt_id = _receipt_id(
-            identity, manifest_digest, status, completed_at, tuple(evidence)
+            identity,
+            manifest_digest,
+            status,
+            completed_at,
+            tuple(evidence),
+            ci_mode=ci_mode,
         )
         receipt = CIAuditReceipt(
             receipt_id=receipt_id,
@@ -623,6 +661,7 @@ class LocalCIRunner:
             completed_at=completed_at,
             actions_state=initial_checks,
             commands=tuple(evidence),
+            ci_mode=ci_mode,
             failure_reason=(
                 None
                 if not failed_commands
@@ -800,6 +839,8 @@ def _receipt_id(
     status: str,
     completed_at: datetime,
     evidence: tuple[CommandEvidence, ...],
+    *,
+    ci_mode: str | None = None,
 ) -> str:
     payload = {
         "identity": [
@@ -813,6 +854,8 @@ def _receipt_id(
         "completed_at": completed_at.isoformat(),
         "commands": [command.stdout_sha256 + command.stderr_sha256 for command in evidence],
     }
+    if ci_mode is not None:
+        payload["ci_mode"] = ci_mode
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -828,7 +871,14 @@ def _failed_receipt(
     """Persist typed failure evidence when validation aborts before lane output."""
 
     reason = f"{type(error).__name__}: {error}"[:1000]
-    receipt_id = _receipt_id(identity, manifest_digest, "failed", completed_at, commands)
+    receipt_id = _receipt_id(
+        identity,
+        manifest_digest,
+        "failed",
+        completed_at,
+        commands,
+        ci_mode=CI_MODE_STANDARD,
+    )
     return CIAuditReceipt(
         receipt_id=receipt_id,
         identity=identity,
