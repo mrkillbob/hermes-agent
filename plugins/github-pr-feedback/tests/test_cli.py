@@ -699,6 +699,23 @@ def test_cli_exposes_status_doctor_and_an_exact_immutable_retry_identity() -> No
     )
     assert retry.github_pr_feedback_action == "retry"
     assert retry.repository == "acme/widgets"
+    dispatch = parser.parse_args(
+        [
+            "dispatch-feedback",
+            "--repository",
+            "acme/widgets",
+            "--pr-number",
+            "17",
+            "--feedback-kind",
+            "review_comment",
+            "--feedback-id",
+            "120",
+            "--head-sha",
+            "c" * 40,
+        ]
+    )
+    assert dispatch.github_pr_feedback_action == "dispatch-feedback"
+    assert dispatch.head_sha == "c" * 40
     with pytest.raises(SystemExit):
         parser.parse_args(["retry", "--repository", "acme/widgets"])
 
@@ -1618,6 +1635,103 @@ def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
         "skipped": {},
         "status": "ok",
     }
+
+
+def test_dispatch_feedback_passes_one_exact_receipt_to_controller_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback import cli
+    from github_pr_feedback.controller import ScanResult
+
+    seen: list[FeedbackReceipt] = []
+
+    class RevalidatingController:
+        def dispatch_feedback(self, receipt: FeedbackReceipt) -> ScanResult:
+            seen.append(receipt)
+            return ScanResult(1, {})
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setattr(
+        cli, "_controller", lambda _policy, _ledger: RevalidatingController()
+    )
+    context = RecordingContext({"enabled": False})
+    parser = argparse.ArgumentParser()
+    cli.setup_cli(context, parser)
+
+    exit_code = cli.handle_cli_with_context(
+        context,
+        parser.parse_args(
+            [
+                "dispatch-feedback",
+                "--repository",
+                "acme/widgets",
+                "--pr-number",
+                "17",
+                "--feedback-kind",
+                "review_comment",
+                "--feedback-id",
+                "120",
+                "--head-sha",
+                "a" * 40,
+            ]
+        ),
+    )
+
+    assert exit_code == 0
+    assert seen == [
+        FeedbackReceipt("acme/widgets", 17, "review_comment", "120", "a" * 40)
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "created": 1,
+        "skipped": {},
+        "status": "ok",
+    }
+
+
+def test_dispatch_feedback_rejects_a_non_sha_before_controller_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback import cli
+
+    called = False
+
+    def controller(*_args: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("invalid identity must not reach the controller")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setattr(cli, "_controller", controller)
+    context = RecordingContext({"enabled": False})
+    parser = argparse.ArgumentParser()
+    cli.setup_cli(context, parser)
+
+    exit_code = cli.handle_cli_with_context(
+        context,
+        parser.parse_args(
+            [
+                "dispatch-feedback",
+                "--repository",
+                "acme/widgets",
+                "--pr-number",
+                "17",
+                "--feedback-kind",
+                "review_comment",
+                "--feedback-id",
+                "120",
+                "--head-sha",
+                "not-a-sha",
+            ]
+        ),
+    )
+
+    assert exit_code == 1
+    assert called is False
+    assert json.loads(capsys.readouterr().out) == {"status": "invalid_configuration"}
 
 
 @pytest.mark.parametrize("action", ["scan", "retry"])

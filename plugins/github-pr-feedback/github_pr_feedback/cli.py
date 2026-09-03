@@ -508,6 +508,15 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     retry.add_argument("--feedback-kind", required=True)
     retry.add_argument("--feedback-id", required=True)
     retry.add_argument("--head-sha", required=True)
+    dispatch_feedback = subcommands.add_parser(
+        "dispatch-feedback",
+        help="Dispatch one exact, canonically revalidated feedback item",
+    )
+    dispatch_feedback.add_argument("--repository", required=True)
+    dispatch_feedback.add_argument("--pr-number", required=True, type=int)
+    dispatch_feedback.add_argument("--feedback-kind", required=True)
+    dispatch_feedback.add_argument("--feedback-id", required=True)
+    dispatch_feedback.add_argument("--head-sha", required=True)
     audit = subcommands.add_parser(
         "audit-pr", help="Run deterministic CI for one exact PR head"
     )
@@ -618,6 +627,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _submit_review(ctx, args)
     if action == "retry":
         return _retry(ctx, args)
+    if action == "dispatch-feedback":
+        return _dispatch_feedback(ctx, args)
     if action == "audit-pr":
         return _audit_pr(ctx, args)
     if action == "merge-scan":
@@ -975,6 +986,33 @@ def _retry(ctx: Any, args: argparse.Namespace) -> int:
     ledger = FeedbackLedger.for_current_profile()
     try:
         result = _controller(policy, ledger).retry_failed(receipt)
+    finally:
+        ledger.close()
+    print(json.dumps(_scan_payload(result), sort_keys=True))
+    return 1 if result.degraded else 0
+
+
+def _dispatch_feedback(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        if (
+            not isinstance(args.head_sha, str)
+            or _FULL_SHA.fullmatch(args.head_sha) is None
+        ):
+            raise ValueError("head_sha must be a full hexadecimal SHA")
+        receipt = FeedbackReceipt(
+            args.repository,
+            args.pr_number,
+            args.feedback_kind,
+            args.feedback_id,
+            args.head_sha.casefold(),
+        )
+    except ValueError:
+        print(json.dumps({"status": "invalid_configuration"}, sort_keys=True))
+        return 1
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        result = _controller(policy, ledger).dispatch_feedback(receipt)
     finally:
         ledger.close()
     print(json.dumps(_scan_payload(result), sort_keys=True))

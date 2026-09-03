@@ -3749,6 +3749,193 @@ def test_explicit_retry_revalidates_canonical_head_before_claiming_failed_receip
     ledger.close()
 
 
+def test_explicit_dispatch_revalidates_and_dispatches_one_exact_feedback_item(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "target", sha)
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (feedback("other"), feedback("target")),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy, ledger, github, kanban, RecordingLocalGit()
+    ).dispatch_feedback(receipt)
+
+    assert result.created == 1
+    assert result.skipped == {}
+    assert github.current_calls == [("acme/widgets", 17)]
+    assert github.feedback_calls == [("acme/widgets", 17)]
+    assert github.label_calls == []
+    assert github.ensure_label_calls == []
+    assert len(kanban.tasks) == 1
+    assert receipt_status(ledger, receipt) == "completed"
+    ledger.close()
+
+
+def test_explicit_dispatch_fails_closed_when_canonical_head_drifted(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    receipt = FeedbackReceipt("acme/widgets", 17, "issue_comment", "target", sha)
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (feedback("target"),),
+        admitted_pull_request("b" * 40),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy, ledger, github, kanban, RecordingLocalGit()
+    ).dispatch_feedback(receipt)
+
+    assert result.created == 0
+    assert result.skipped == {"head_changed": 1}
+    assert kanban.tasks == []
+    assert (
+        ledger._connection.execute(
+            "SELECT COUNT(*) FROM feedback_receipts"
+        ).fetchone()[0]
+        == 0
+    )
+    ledger.close()
+
+
+def test_explicit_dispatch_serializes_pending_sibling_feedback(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (feedback("first"), feedback("second")),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    scanner = ScanController(policy, ledger, github, kanban, RecordingLocalGit())
+
+    first = scanner.dispatch_feedback(
+        FeedbackReceipt("acme/widgets", 17, "issue_comment", "first", sha)
+    )
+    second_receipt = FeedbackReceipt(
+        "acme/widgets", 17, "issue_comment", "second", sha
+    )
+    second = scanner.dispatch_feedback(second_receipt)
+
+    assert first.created == 1
+    assert second.created == 0
+    assert second.skipped == {"duplicate": 1}
+    assert len(kanban.tasks) == 1
+    assert (
+        ledger._connection.execute(
+            "SELECT COUNT(*) FROM feedback_receipts WHERE feedback_id = 'second'"
+        ).fetchone()[0]
+        == 0
+    )
+    ledger.close()
+
+
+def test_explicit_dispatch_rejects_unknown_feedback_without_a_receipt(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("present"),))
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy, ledger, github, kanban, RecordingLocalGit()
+    ).dispatch_feedback(
+        FeedbackReceipt("acme/widgets", 17, "issue_comment", "missing", sha)
+    )
+
+    assert result.created == 0
+    assert result.skipped == {"feedback_not_found": 1}
+    assert kanban.tasks == []
+    assert (
+        ledger._connection.execute(
+            "SELECT COUNT(*) FROM feedback_receipts"
+        ).fetchone()[0]
+        == 0
+    )
+    ledger.close()
+
+
+def test_scan_does_not_watermark_unclaimed_serialized_feedback(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    updated_at = datetime(2026, 8, 24, 13, 0, tzinfo=UTC)
+    pull_request = replace(admitted_pull_request(sha), updated_at=updated_at)
+    github = FakeGitHub(
+        pull_request,
+        (feedback("first"), feedback("second")),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    scanner = ScanController(policy, ledger, github, kanban, RecordingLocalGit())
+
+    first = scanner.scan()
+    first_receipt = FeedbackReceipt(
+        "acme/widgets", 17, "issue_comment", "first", sha
+    )
+    ledger.begin_feedback_action(
+        first_receipt,
+        resolved_head_sha=sha,
+        actioned_at=datetime(2026, 8, 24, 13, 1, tzinfo=UTC),
+    )
+    ledger.mark_feedback_actioned(
+        first_receipt,
+        resolved_head_sha=sha,
+        actioned_at=datetime(2026, 8, 24, 13, 1, tzinfo=UTC),
+    )
+    second = scanner.scan()
+
+    assert first.created == 1
+    assert second.created == 1
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == [
+        "first",
+        "second",
+    ]
+    assert github.feedback_calls == [
+        ("acme/widgets", 17),
+        ("acme/widgets", 17),
+    ]
+    ledger.close()
+
+
+def test_scan_watermarks_a_snapshot_with_no_actionable_feedback(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    pull_request = replace(
+        admitted_pull_request(sha),
+        updated_at=datetime(2026, 8, 24, 13, 0, tzinfo=UTC),
+    )
+    github = FakeGitHub(pull_request, ())
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    scanner = ScanController(
+        policy, ledger, github, RecordingKanban(), RecordingLocalGit()
+    )
+
+    first = scanner.scan()
+    second = scanner.scan()
+
+    assert first.created == 0
+    assert second.created == 0
+    assert github.feedback_calls == [("acme/widgets", 17)]
+    ledger.close()
+
+
 def test_explicit_retry_recovers_a_lost_kanban_response_with_the_same_receipt_key(tmp_path: Path) -> None:
     local_path, sha = initialized_repository(tmp_path)
     policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
