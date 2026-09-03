@@ -306,8 +306,13 @@ class MergeController:
             claimed_at=self._now(),
         )
         if lease is None:
+            blockers = (
+                ("merge_lease_unavailable",)
+                if self._ledger.is_merge_enrolled(self._policy.repository, number)
+                else ("merge_pr_not_enrolled",)
+            )
             blocked = MergeDecision(
-                False, ("merge_lease_unavailable",), None, first.snapshot_digest
+                False, blockers, None, first.snapshot_digest
             )
             return MergeRunResult(blocked, None)
         second_snapshot = self._source.snapshot(number)
@@ -321,15 +326,31 @@ class MergeController:
             return MergeRunResult(raced, None)
         assert second.method is not None
         write_error: Exception | None = None
-        try:
-            self._github.merge_pull_request(
-                self._policy.repository,
-                number,
-                second_snapshot.pull_request.head_sha,
-                method=second.method,
+        with self._ledger.authorized_merge_write(lease) as authorized:
+            if authorized:
+                try:
+                    self._github.merge_pull_request(
+                        self._policy.repository,
+                        number,
+                        second_snapshot.pull_request.head_sha,
+                        method=second.method,
+                    )
+                except GitHubClientError as error:
+                    write_error = error
+        if not authorized:
+            self._ledger.finish_merge_lease(
+                lease,
+                status="failed",
+                updated_at=self._now(),
+                error="merge_pr_not_enrolled",
             )
-        except GitHubClientError as error:
-            write_error = error
+            blocked = MergeDecision(
+                False,
+                ("merge_pr_not_enrolled",),
+                None,
+                second.snapshot_digest,
+            )
+            return MergeRunResult(blocked, None)
         try:
             readback = self._github.get_merge_state(self._policy.repository, number)
         except GitHubClientError as error:

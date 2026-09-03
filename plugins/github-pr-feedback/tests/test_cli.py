@@ -192,6 +192,10 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
         merge_maintainer = None
         release_maintenance = None
 
+        @staticmethod
+        def merge_policies():
+            return ()
+
     class Repair:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
@@ -245,8 +249,12 @@ def _run_scan_with_primary_result(
     class Policy:
         enabled = True
         repair_steward = object()
-        merge_maintainer = object()
+        merge_maintainer = None
         release_maintenance = object()
+
+        @staticmethod
+        def merge_policies():
+            return (object(), object())
 
     class Primary:
         def scan(self):
@@ -334,6 +342,84 @@ def test_scan_does_not_defer_secondary_fanout_for_read_cap_without_ci_backlog(
     assert order == ["primary", "repair", "merge", "release"]
     assert "required_local_ci_backlog" not in payload
     assert "deferred" not in payload
+
+
+def test_explicit_merge_scan_recognizes_multi_repository_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _merge_scan
+
+    class Policy:
+        merge_maintainer = None
+
+        @staticmethod
+        def merge_policies():
+            return (object(), object())
+
+    class Ledger:
+        @classmethod
+        def for_current_profile(cls):
+            return cls()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._load_policy_from_context", lambda _ctx: Policy()
+    )
+    monkeypatch.setattr("github_pr_feedback.cli.FeedbackLedger", Ledger)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_merge_scan",
+        lambda *_args: {"status": "ok", "processed": 0},
+    )
+
+    assert _merge_scan(object()) == 0
+    assert json.loads(capsys.readouterr().out) == {"processed": 0, "status": "ok"}
+
+
+def test_doctor_checks_assignees_for_every_merge_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from github_pr_feedback.cli import DoctorProbe
+
+    seen: set[str] = set()
+
+    class Runner:
+        @staticmethod
+        def which(executable: str) -> str:
+            return f"/opt/{executable}"
+
+    class Policy:
+        assignee = "fallback"
+        assignee_rules = ()
+        routing_rules = ()
+        local_ci_audit = None
+        repair_steward = None
+        release_maintenance = None
+        board = "repairs"
+        targets = {}
+
+        @staticmethod
+        def merge_policies():
+            return (
+                SimpleNamespace(assignee="hermes-maintainer"),
+                SimpleNamespace(assignee="luna-maintainer"),
+            )
+
+    probe = DoctorProbe(tmp_path, Runner(), hermes_source_root=tmp_path)
+    monkeypatch.setattr(probe, "_hermes_executable_ready", lambda _path: True)
+    monkeypatch.setattr(probe, "_board_exists", lambda _board: True)
+    monkeypatch.setattr(
+        probe, "_assignee_exists", lambda assignee: not seen.add(assignee)
+    )
+    monkeypatch.setattr(probe, "_ledger_access", lambda _path: True)
+    monkeypatch.setattr(probe, "_repositories_ready", lambda *_args: True)
+
+    checks = probe.checks(Policy(), tmp_path / "ledger.sqlite3")  # type: ignore[arg-type]
+
+    assert checks["assignee"] == "ok"
+    assert {"hermes-maintainer", "luna-maintainer"}.issubset(seen)
 
 
 def test_scan_payload_reports_catalogue_deferred_separately_from_skips() -> None:
@@ -1058,7 +1144,7 @@ def test_merge_maintainer_task_has_no_model_merge_authority(tmp_path: Path) -> N
     )
     decision = MergeDecision(False, ("ci_receipt_missing",), None, "d" * 64)
 
-    task = _merge_maintainer_task(loaded, pull, decision)
+    task = _merge_maintainer_task(loaded, loaded.merge_policies()[0], pull, decision)
 
     assert task.assignee == "pr-merge-maintainer"
     assert task.initial_status == "running"
@@ -1069,6 +1155,42 @@ def test_merge_maintainer_task_has_no_model_merge_authority(tmp_path: Path) -> N
     assert "not a blocker for this observability card" in task.instructions
     assert "immediately call kanban_complete" in task.instructions
     assert "kanban_block only if kanban_complete" in task.instructions
+
+
+def test_report_only_task_uses_the_selected_multi_repository_policy(
+    tmp_path: Path,
+) -> None:
+    from github_pr_feedback.cli import _merge_maintainer_task
+
+    selected = SimpleNamespace(
+        repository="mrkillbob/luna-bot",
+        assignee="luna-merge-maintainer",
+        report_only=True,
+    )
+    plugin_policy = SimpleNamespace(
+        targets={
+            "mrkillbob/luna-bot": SimpleNamespace(local_path=tmp_path),
+        },
+        board="repairs",
+    )
+    pull = PullRequest(
+        985,
+        "OPEN",
+        "mrkillbob/luna-bot",
+        "mrkillbob/luna-bot",
+        "mrkillbob",
+        "codex/fix",
+        "a" * 40,
+    )
+    decision = MergeDecision(True, (), "squash", "d" * 64)
+
+    task = _merge_maintainer_task(
+        plugin_policy, selected, pull, decision  # type: ignore[arg-type]
+    )
+
+    assert task.assignee == "luna-merge-maintainer"
+    assert task.evidence["repository"] == "mrkillbob/luna-bot"
+    assert task.evidence["report_only"] is True
 
 
 def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
@@ -1823,6 +1945,10 @@ def test_scan_and_retry_exit_nonzero_and_report_degraded_on_incomplete_work(
             repair_steward = None
             merge_maintainer = None
             release_maintenance = None
+
+            @staticmethod
+            def merge_policies():
+                return ()
 
         class Lock:
             def __enter__(self) -> bool:

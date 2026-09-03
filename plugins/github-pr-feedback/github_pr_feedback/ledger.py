@@ -1863,6 +1863,12 @@ class FeedbackLedger:
             raise ValueError("merge lease owner must be a non-empty string")
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         with self._transaction():
+            enrolled = self._connection.execute(
+                "SELECT 1 FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
+                (repository, pr_number),
+            ).fetchone()
+            if enrolled is None:
+                return None
             completed = self._connection.execute(
                 "SELECT 1 FROM merge_attempts WHERE repository = ? AND pr_number = ? "
                 "AND status = 'completed' LIMIT 1",
@@ -1906,6 +1912,29 @@ class FeedbackLedger:
             else:
                 return None
         return MergeLease(repository, pr_number, head_sha, owner, claimed_at)
+
+    @contextmanager
+    def authorized_merge_write(self, lease: MergeLease) -> Iterator[bool]:
+        """Serialize enrollment revocation against one governed GitHub merge write."""
+
+        with self._transaction():
+            authorized = self._connection.execute(
+                "SELECT 1 FROM merge_attempts AS attempts "
+                "JOIN merge_enrollments AS enrollments "
+                "ON enrollments.repository = attempts.repository "
+                "AND enrollments.pr_number = attempts.pr_number "
+                "WHERE attempts.repository = ? AND attempts.pr_number = ? "
+                "AND attempts.head_sha = ? AND attempts.status = 'claimed' "
+                "AND attempts.owner = ? AND attempts.claimed_at = ?",
+                (
+                    lease.repository,
+                    lease.pr_number,
+                    lease.head_sha,
+                    lease.owner,
+                    lease.claimed_at.isoformat(),
+                ),
+            ).fetchone()
+            yield authorized is not None
 
     def finish_merge_lease(
         self,
