@@ -390,7 +390,10 @@ def _review_push(cwd: str) -> None:
         return
     branch = _git_out(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).strip()
     if branch and branch != "HEAD":
-        _git_ok(cwd, ["push", "-u", "origin", branch])
+        push_remote = _git_out(cwd, ["config", "--get", "remote.pushDefault"]).strip()
+        if not push_remote:
+            push_remote = "origin"
+        _git_ok(cwd, ["push", "-u", push_remote, branch])
 
 
 def review_push(cwd: str) -> dict:
@@ -730,8 +733,8 @@ def worktree_add(cwd: str, options: dict) -> dict:
     branch = _sanitize_branch(options.get("branch") or "") or f"hermes/{slug}"
     target = _unique_dir(os.path.join(root, ".worktrees", slug))
     args = ["worktree", "add", "-b", branch, target]
-    if options.get("base"):
-        base = str(options["base"])
+    base = str(options.get("base") or "").strip()
+    if base:
         # Remote-tracking branches may be stale or missing; fetch just that
         # branch so the local ref is up to date before branching. Ignore fetch
         # failures (offline / no remote) — git will use whatever local ref
