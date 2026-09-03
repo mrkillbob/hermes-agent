@@ -462,6 +462,15 @@ class CanonicalMergeEvidenceSource:
         feedback = self._github.list_feedback(policy.repository, number)
         intent_pending = pending_intent_review(feedback, owner_login=target.owner_login)
         codex_pending = not _codex_reviewed_head(feedback, pull.head_sha)
+        check_state = (
+            self._github.get_check_state(
+                policy.repository,
+                pull.head_sha,
+                actions_enabled_hint=True,
+            )
+            if self._plugin_policy.uses_budget_exhausted_local_ci(policy.repository)
+            else self._github.get_check_state(policy.repository, pull.head_sha)
+        )
         return MergeSnapshot(
             repository_private=self._github.repository_is_private(policy.repository),
             pull_request=pull,
@@ -472,7 +481,7 @@ class CanonicalMergeEvidenceSource:
                 policy.repository
             ),
             review_state=self._github.get_review_state(policy.repository, number),
-            check_state=self._github.get_check_state(policy.repository, pull.head_sha),
+            check_state=check_state,
             ci_receipt=receipt,
             manifest_digest=manifest_digest,
             feedback_clear=feedback_clear,

@@ -2677,6 +2677,75 @@ def test_completed_feedback_schedules_local_ci_when_actions_are_billing_blocked(
     ledger.close()
 
 
+def test_completed_feedback_uses_budget_policy_hint_for_exact_head_check_read(
+    tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        auto_dispatch=True,
+        local_ci_audit=True,
+        merge_maintainer=True,
+        budget_local_ci=True,
+    )
+    item = feedback("fixed")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    receipt = FeedbackReceipt("acme/widgets", 17, item.kind, item.feedback_id, sha)
+    lease = ledger.claim(
+        receipt,
+        owner="feedback-worker",
+        claimed_at=datetime(2026, 8, 24, 1, 0, tzinfo=UTC),
+        stale_before=datetime(2026, 8, 24, 0, 55, tzinfo=UTC),
+    )
+    assert lease is not None
+    ledger.finalize(receipt, "feedback-task", lease)
+    ledger.mark_feedback_actioned(
+        receipt,
+        resolved_head_sha=sha,
+        actioned_at=datetime(2026, 8, 24, 2, 0, tzinfo=UTC),
+    )
+
+    class HintGitHub(FakeGitHub):
+        def __init__(self) -> None:
+            super().__init__(admitted_pull_request(sha), (item,))
+            self.check_hints: list[bool | None] = []
+
+        def get_check_state(
+            self,
+            repository: str,
+            head_sha: str,
+            *,
+            actions_enabled_hint: bool | None = None,
+        ) -> CheckState:
+            self.check_hints.append(actions_enabled_hint)
+            assert repository == "acme/widgets"
+            assert head_sha == sha
+            return CheckState(
+                actions_enabled=True,
+                all_green=False,
+                check_count=1,
+                billing_blocked=True,
+            )
+
+    github = HintGitHub()
+    kanban = RecordingKanban()
+    controller = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+    )
+
+    status = controller.dispatch_local_ci_after_feedback(admitted_pull_request(sha))
+
+    assert status == "scheduled"
+    assert github.check_hints == [True]
+    assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
+    ledger.close()
+
+
 def test_duplicate_local_ci_receipts_do_not_starve_a_new_head_after_comment_fixes(
     tmp_path: Path,
 ) -> None:

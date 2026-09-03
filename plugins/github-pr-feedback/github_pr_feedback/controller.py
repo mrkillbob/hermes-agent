@@ -150,7 +150,13 @@ class GitHubReader(Protocol):
 
     def get_branch_head(self, repository: str, branch: str) -> str: ...
 
-    def get_check_state(self, repository: str, head_sha: str) -> CheckState: ...
+    def get_check_state(
+        self,
+        repository: str,
+        head_sha: str,
+        *,
+        actions_enabled_hint: bool | None = None,
+    ) -> CheckState: ...
 
     def add_issue_labels(
         self, repository: str, number: int, labels: tuple[str, ...]
@@ -1383,8 +1389,18 @@ class ScanController:
         if audit_policy is None or not audit_policy.applies_to(current.base_repository):
             return "local_ci_disabled"
         try:
-            checks = self._github.get_check_state(
-                current.base_repository, current.head_sha
+            checks = (
+                self._github.get_check_state(
+                    current.base_repository,
+                    current.head_sha,
+                    actions_enabled_hint=True,
+                )
+                if self._policy.uses_budget_exhausted_local_ci(
+                    current.base_repository
+                )
+                else self._github.get_check_state(
+                    current.base_repository, current.head_sha
+                )
             )
             if checks.actions_enabled and not checks.billing_blocked:
                 return "github_ci_enabled"
