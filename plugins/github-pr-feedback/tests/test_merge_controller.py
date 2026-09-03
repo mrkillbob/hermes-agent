@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,12 +22,13 @@ from github_pr_feedback.github_client import (
 )
 from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.merge_controller import (
+    CanonicalMergeEvidenceSource,
     MergeController,
     MergeSnapshot,
     _codex_reviewed_head,
     evaluate_merge,
 )
-from github_pr_feedback.policy import MergeMaintainerPolicy, Reviewer
+from github_pr_feedback.policy import MergeMaintainerPolicy, Reviewer, load_policy
 
 
 BASE_SHA = "b" * 40
@@ -311,6 +313,94 @@ class RecordingGitHub:
         if isinstance(readback, Exception):
             raise readback
         return readback
+
+
+def test_canonical_snapshot_uses_budget_policy_hint_for_exact_head_check_read(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    manifest = repository / "tests/manifests/test_lanes.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("version = 1\n", encoding="utf-8")
+    plugin_policy = load_policy(
+        {
+            "enabled": True,
+            "repositories": [
+                {
+                    "base_repository": "acme/widgets",
+                    "head_repository": "acme/widgets",
+                    "local_path": str(repository),
+                    "owner_login": "owner",
+                    "branch_prefixes": ["codex/"],
+                }
+            ],
+            "reviewer_logins": ["reviewer"],
+            "reviewer_associations": [],
+            "not_before": "2026-08-25T00:00:00Z",
+            "assignee": "fallback",
+            "board": "repairs",
+            "local_ci_audit": {
+                "enabled": True,
+                "assignee": "pr-local-ci-auditor",
+                "post_results": False,
+                "audit_only": True,
+                "required_for_open_prs": True,
+            },
+            "merge_maintainer": {
+                "enabled": True,
+                "assignee": "pr-merge-maintainer",
+                "repository": "acme/widgets",
+                "author_login": "owner",
+                "base_branch": "stable",
+                "merge_methods": ["squash"],
+                "receipt_max_age_seconds": 3600,
+                "report_only": False,
+                "allow_budget_exhausted_local_ci": True,
+                "post_merge": {"enabled": False},
+            },
+        }
+    )
+
+    class HintGitHub:
+        def __init__(self) -> None:
+            self.check_hints: list[bool | None] = []
+
+        def get_merge_state(self, repository: str, number: int):
+            return pr_state()
+
+        def list_feedback(self, repository: str, number: int):
+            return ()
+
+        def repository_is_private(self, repository: str) -> bool:
+            return True
+
+        def get_repository_merge_policy(self, repository: str):
+            return RepositoryMergePolicy(True, True, True)
+
+        def get_review_state(self, repository: str, number: int):
+            return ReviewState("APPROVED", 0)
+
+        def get_check_state(
+            self,
+            repository: str,
+            head_sha: str,
+            *,
+            actions_enabled_hint: bool | None = None,
+        ):
+            self.check_hints.append(actions_enabled_hint)
+            return CheckState(True, False, 1, True)
+
+        def get_branch_head(self, repository: str, branch: str) -> str:
+            return BASE_SHA
+
+    github = HintGitHub()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    CanonicalMergeEvidenceSource(plugin_policy, github, ledger).snapshot(17)
+
+    assert github.check_hints == [True]
+    ledger.close()
 
 
 def test_merge_controller_rereads_under_lease_and_stops_on_a_race(tmp_path: Path) -> None:
