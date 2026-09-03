@@ -7,8 +7,9 @@ explicitly configured lane can also schedule read-only local CI audits for PR
 heads when repository GitHub Actions are disabled. A separately opt-in,
 deterministic maintainer can merge an exact tested head after all configured
 safety gates pass. Models never own merge authority, construct merge argv, or
-create passing receipts. The plugin never pushes source branches, approves,
-changes GitHub settings, deletes branches, or handles credentials.
+create passing receipts. The plugin never pushes source branches, changes
+GitHub settings, or deletes branches. Exact-head reviews use only the separately
+configured reviewer credential described below.
 An optional release-maintenance steward waits for the merge queue to become
 quiet, pins the exact base SHA, and dispatches specialist end-stage audits.
 
@@ -46,6 +47,11 @@ plugins:
         reviewer_logins:
           - trusted-reviewer
         reviewer_associations: []
+        # Required for APPROVE/REQUEST_CHANGES submissions. Store the token
+        # only in the named secret environment variable; never in this file.
+        review_submission:
+          expected_login: mrkillbobbot
+          token_env: HERMES_GITHUB_REVIEWER_TOKEN
         include_self_feedback: false
         include_bot_feedback: false
         auto_dispatch: false
@@ -168,11 +174,20 @@ plugins:
         board: repairs
 ```
 
+`review_submission` deliberately rejects the shared `GH_TOKEN` and
+`GITHUB_TOKEN` names. Give `HERMES_GITHUB_REVIEWER_TOKEN` a fine-grained token
+owned by `mrkillbobbot`, with access only to the enrolled repositories and
+pull-request write permission. The account must have repository access that
+allows reviews. Before every write, `submit-review` rereads the authenticated
+login, PR author, state, and exact head; it exits nonzero without posting a
+comment when the credential is absent, does not resolve to `mrkillbobbot`, or
+resolves to the PR author.
+
 The plugin receives these values only through Hermes's namespaced plugin
 context (`plugins.entries.github-pr-feedback.settings`); it does not parse
-global YAML itself. GitHub authentication remains the existing local `gh`
-authentication. Do not put tokens, private keys, or GitHub secrets in this
-configuration.
+global YAML itself. Ordinary reads retain the existing local `gh`
+authentication; review writes use only the dedicated token environment variable.
+Do not put tokens, private keys, or GitHub secrets in this configuration.
 
 Run the readiness check before enabling or scanning:
 

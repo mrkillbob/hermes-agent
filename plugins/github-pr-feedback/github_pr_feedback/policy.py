@@ -81,6 +81,8 @@ _MERGE_METHODS = frozenset({"squash", "rebase", "merge"})
 _ROUTING_PRIORITIES = frozenset({"P0", "P1", "P2", "P3", "P4"})
 _BLAST_RADII = frozenset({"contained", "moderate", "broad", "massive"})
 _MAINTENANCE_LANE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+_SECRET_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_SHARED_GITHUB_TOKEN_ENVS = frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
 MAX_MAINTENANCE_LANES = 8
 
 
@@ -419,6 +421,19 @@ class ReleaseMaintenancePolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewSubmissionPolicy:
+    """Credential selector for independently authored GitHub reviews.
+
+    The token itself remains a secret in the process environment. Configuration
+    contains only its environment-variable name and the exact login Hermes must
+    observe before it is allowed to write a review.
+    """
+
+    expected_login: str
+    token_env: str
+
+
+@dataclass(frozen=True, slots=True)
 class PluginPolicy:
     enabled: bool
     targets: Mapping[str, RepositoryTarget]
@@ -437,6 +452,23 @@ class PluginPolicy:
     merge_maintainer: MergeMaintainerPolicy | None = None
     repair_steward: RepairStewardPolicy | None = None
     release_maintenance: ReleaseMaintenancePolicy | None = None
+    merge_maintainers: tuple[MergeMaintainerPolicy, ...] = ()
+    review_submission: ReviewSubmissionPolicy | None = None
+
+    def merge_policies(self) -> tuple[MergeMaintainerPolicy, ...]:
+        """Return configured merge lanes, preserving the legacy singular field."""
+
+        if self.merge_maintainers:
+            return self.merge_maintainers
+        if self.merge_maintainer is not None:
+            return (self.merge_maintainer,)
+        return ()
+
+    def merge_policy_for(self, repository: str) -> MergeMaintainerPolicy | None:
+        return next(
+            (candidate for candidate in self.merge_policies() if candidate.repository == repository),
+            None,
+        )
 
     def assignee_for(self, body: str) -> str:
         """Choose the unique highest-scoring specialist, otherwise the fallback."""
@@ -1080,6 +1112,32 @@ def _parse_release_maintenance(
     )
 
 
+def _parse_review_submission(
+    raw: object,
+    *,
+    targets: Mapping[str, RepositoryTarget],
+    reviewer_logins: frozenset[str],
+) -> ReviewSubmissionPolicy:
+    if not isinstance(raw, Mapping) or set(raw) != {"expected_login", "token_env"}:
+        raise ValueError(
+            "review_submission must contain exactly expected_login and token_env"
+        )
+    expected_login = _nonempty_string(
+        raw["expected_login"], "review_submission expected_login"
+    ).casefold()
+    token_env = _nonempty_string(raw["token_env"], "review_submission token_env")
+    if not _SECRET_ENV_NAME.fullmatch(token_env) or token_env in _SHARED_GITHUB_TOKEN_ENVS:
+        raise ValueError(
+            "review_submission token_env must name a dedicated secret environment variable"
+        )
+    author_logins = {target.owner_login.casefold() for target in targets.values()}
+    if expected_login in author_logins:
+        raise ValueError("review_submission expected_login must be independent of PR authors")
+    if expected_login not in reviewer_logins:
+        raise ValueError("review_submission expected_login must be an admitted reviewer_login")
+    return ReviewSubmissionPolicy(expected_login=expected_login, token_env=token_env)
+
+
 def load_policy(raw: object) -> PluginPolicy:
     """Parse plugin configuration, retaining no enabled behavior on any omission."""
 
@@ -1112,6 +1170,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "merge_maintainer",
         "repair_steward",
         "release_maintenance",
+        "review_submission",
     }
     if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("enabled configuration has missing or unknown fields")
@@ -1195,6 +1254,16 @@ def load_policy(raw: object) -> PluginPolicy:
         release_maintenance=(
             _parse_release_maintenance(raw["release_maintenance"], targets=targets)
             if "release_maintenance" in raw
+            else None
+        ),
+        merge_maintainers=merge_policies,
+        review_submission=(
+            _parse_review_submission(
+                raw["review_submission"],
+                targets=targets,
+                reviewer_logins=reviewer_logins,
+            )
+            if "review_submission" in raw
             else None
         ),
     )

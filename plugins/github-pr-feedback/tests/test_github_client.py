@@ -208,7 +208,9 @@ def test_subprocess_runner_exposes_safe_failure_code_without_output(
         ),
     )
     with pytest.raises(GitHubClientError) as raised:
-        SubprocessCommandRunner(sleeper=lambda _delay: None).run(["gh", "api", "labels"])
+        SubprocessCommandRunner(
+            sleeper=lambda _delay: None, request_gate=RecordingGate()
+        ).run(["gh", "api", "labels"])
     assert raised.value.code == code
     assert stderr not in str(raised.value)
 
@@ -230,6 +232,28 @@ def test_subprocess_runner_does_not_retry_an_ordinary_failure(
         ).run(["gh", "api", "missing"])
 
     assert calls == [["gh", "api", "missing"]]
+
+
+def test_subprocess_runner_scopes_reviewer_token_to_child_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[dict[str, str]] = []
+
+    def fake_run(argv, **kwargs):
+        observed.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    monkeypatch.setenv("GH_TOKEN", "author-token")
+    monkeypatch.setattr("github_pr_feedback.github_client.subprocess.run", fake_run)
+
+    runner = SubprocessCommandRunner(
+        env_overrides={"GH_TOKEN": "independent-token"},
+        request_gate=RecordingGate(),
+    )
+
+    assert runner.run(["gh", "api", "user"]) == "{}"
+    assert observed[0]["GH_TOKEN"] == "independent-token"
+    assert "independent-token" not in ["gh", "api", "user"]
 
 
 def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -> None:

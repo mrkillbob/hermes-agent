@@ -569,6 +569,43 @@ def test_enabled_config_rejects_empty_string_reviewer_list(tmp_path: Path) -> No
         load_policy(raw)
 
 
+def test_review_submission_requires_an_admitted_independent_login(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    raw = enabled_raw_config(repository)
+    raw["review_submission"] = {
+        "expected_login": "trusted-reviewer",
+        "token_env": "HERMES_GITHUB_REVIEWER_TOKEN",
+    }
+
+    policy = load_policy(raw)
+
+    assert policy.review_submission is not None
+    assert policy.review_submission.expected_login == "trusted-reviewer"
+    assert policy.review_submission.token_env == "HERMES_GITHUB_REVIEWER_TOKEN"
+
+
+@pytest.mark.parametrize(
+    "review_submission",
+    (
+        {"expected_login": "owner", "token_env": "HERMES_GITHUB_REVIEWER_TOKEN"},
+        {"expected_login": "stranger", "token_env": "HERMES_GITHUB_REVIEWER_TOKEN"},
+        {"expected_login": "trusted-reviewer", "token_env": "GH_TOKEN"},
+        {"expected_login": "trusted-reviewer", "token_env": "not-valid"},
+    ),
+)
+def test_review_submission_rejects_author_untrusted_or_shared_credentials(
+    tmp_path: Path, review_submission: dict[str, str]
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    raw = enabled_raw_config(repository)
+    raw["review_submission"] = review_submission
+
+    with pytest.raises(ValueError):
+        load_policy(raw)
+
+
 @pytest.mark.parametrize("not_before", [None, "", "2026-08-24T00:00:00", "not-a-time"])
 def test_enabled_policy_requires_a_timezone_aware_iso8601_intake_boundary(
     tmp_path: Path, not_before: object

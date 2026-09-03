@@ -28,7 +28,7 @@ from .ci_runner import (
     LocalCIRunner,
     _required_lanes,
 )
-from .github_client import GitHubClient, GitHubClientError
+from .github_client import GitHubClient, GitHubClientError, SubprocessCommandRunner
 from .ledger import (
     FeedbackLedger,
     LedgerStateError,
@@ -43,6 +43,7 @@ from .merge_controller import (
 from .policy import (
     FeedbackReceipt,
     PluginPolicy,
+    ReviewSubmissionPolicy,
     codex_review_trigger_comment,
     codex_review_trigger_requested,
     hermes_attribution_line,
@@ -98,6 +99,7 @@ _PR_REPAIR_RECEIPT_COMMENT = re.compile(
 _MARKER_REQUIRED_FEEDBACK_KINDS = frozenset(
     {"pr_repair", "issue_comment", "review_comment", "review"}
 )
+_REVIEW_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES", "COMMENT"})
 
 
 def _factual_reply_is_missing(
@@ -467,6 +469,14 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     )
     inspect.add_argument("--repository", required=True)
     inspect.add_argument("--pr-number", required=True, type=int)
+    submit_review = subcommands.add_parser(
+        "submit-review", help="Submit an exact-head review with an independent identity"
+    )
+    submit_review.add_argument("--repository", required=True)
+    submit_review.add_argument("--pr-number", required=True, type=int)
+    submit_review.add_argument("--head-sha", required=True)
+    submit_review.add_argument("--event", required=True)
+    submit_review.add_argument("--body", required=True)
     retry = subcommands.add_parser(
         "retry", help="Retry one failed, immutable feedback receipt"
     )
@@ -560,6 +570,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _doctor(ctx)
     if action == "inspect-pr":
         return _inspect_pr(ctx, args)
+    if action == "submit-review":
+        return _submit_review(ctx, args)
     if action == "retry":
         return _retry(ctx, args)
     if action == "audit-pr":
@@ -639,6 +651,134 @@ def cli_bindings(ctx: Any) -> tuple[Any, Any]:
     """Bind host-supplied settings access without reading global YAML."""
 
     return partial(setup_cli, ctx), partial(handle_cli_with_context, ctx)
+
+
+def _review_github_client(settings: ReviewSubmissionPolicy, token: str) -> GitHubClient:
+    """Create a GitHub client whose credential is scoped to its child processes."""
+
+    return GitHubClient(
+        SubprocessCommandRunner(env_overrides={"GH_TOKEN": token})
+    )
+
+
+def _submit_review(ctx: Any, args: argparse.Namespace) -> int:
+    """Submit a review only after proving an independent configured identity."""
+
+    try:
+        policy = _load_policy_from_context(ctx)
+        if not policy.enabled or args.repository not in policy.targets:
+            raise ValueError("repository is not a configured target")
+        if not isinstance(args.head_sha, str) or not _FULL_SHA.fullmatch(args.head_sha):
+            raise ValueError("head_sha must be a full hexadecimal SHA")
+        event = str(args.event or "").strip().upper().replace("-", "_")
+        if event not in _REVIEW_EVENTS:
+            raise ValueError("review event must be APPROVE, REQUEST_CHANGES, or COMMENT")
+        settings = policy.review_submission
+        if settings is None:
+            print(
+                json.dumps(
+                    {
+                        "status": "review_identity_unavailable",
+                        "reason": "independent_reviewer_not_configured",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        token = os.environ.get(settings.token_env)
+        if not isinstance(token, str) or not token:
+            print(
+                json.dumps(
+                    {
+                        "status": "review_identity_unavailable",
+                        "reason": "independent_reviewer_credential_missing",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        github = _review_github_client(settings, token)
+        viewer_login = github.viewer_login()
+        pull_request = github.get_pull_request(args.repository, args.pr_number)
+        if viewer_login.casefold() == pull_request.author_login.casefold():
+            print(
+                json.dumps(
+                    {
+                        "status": "review_identity_unavailable",
+                        "reason": "viewer_is_pr_author",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        if viewer_login.casefold() != settings.expected_login:
+            print(
+                json.dumps(
+                    {
+                        "status": "review_identity_unavailable",
+                        "reason": "reviewer_identity_mismatch",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        expected_head_sha = args.head_sha.casefold()
+        if pull_request.head_sha != expected_head_sha:
+            print(
+                json.dumps(
+                    {
+                        "status": "stale_head",
+                        "repository": args.repository,
+                        "pr_number": args.pr_number,
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": pull_request.head_sha,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        if str(pull_request.state or "").strip().upper() != "OPEN":
+            print(
+                json.dumps(
+                    {
+                        "status": "not_reviewable",
+                        "reason": "pull_request_not_open",
+                        "repository": args.repository,
+                        "pr_number": args.pr_number,
+                        "head_sha": pull_request.head_sha,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        github.submit_pull_request_review(
+            args.repository,
+            args.pr_number,
+            event=event,
+            body=args.body,
+        )
+    except (GitHubClientError, TypeError, ValueError) as error:
+        print(
+            json.dumps(
+                {"status": "review_unavailable", "reason": str(error)},
+                sort_keys=True,
+            )
+        )
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "submitted",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+                "head_sha": pull_request.head_sha,
+                "event": event,
+                "reviewer": viewer_login,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _scan(ctx: Any) -> int:
@@ -1881,6 +2021,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "merge_maintainer",
         "repair_steward",
         "release_maintenance",
+        "review_submission",
         "not_before",
         "assignee",
         "board",

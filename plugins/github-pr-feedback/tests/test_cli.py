@@ -144,6 +144,22 @@ def test_register_exposes_the_github_feedback_cli_command() -> None:
     parser = argparse.ArgumentParser()
     command["setup_fn"](parser)
     assert parser.parse_args(["scan"]).github_pr_feedback_action == "scan"
+    review = parser.parse_args(
+        [
+            "submit-review",
+            "--repository",
+            "acme/widgets",
+            "--pr-number",
+            "17",
+            "--head-sha",
+            "a" * 40,
+            "--event",
+            "APPROVE",
+            "--body",
+            "Reviewed.",
+        ]
+    )
+    assert review.github_pr_feedback_action == "submit-review"
 
 
 def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
@@ -1616,9 +1632,11 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "local_ci_audit",
         "agent_labels",
         "merge_maintainer",
-        "repair_steward",
-        "release_maintenance",
-        "not_before",
+        "merge_maintainers",
+            "repair_steward",
+            "release_maintenance",
+            "review_submission",
+            "not_before",
         "assignee",
         "board",
     ]
@@ -1975,6 +1993,148 @@ def enabled_settings(repository: Path) -> dict[str, object]:
         "not_before": "2026-08-24T00:00:00Z",
         "assignee": "repair-agent",
         "board": "repairs",
+    }
+
+
+def test_submit_review_fails_closed_when_independent_identity_is_not_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _submit_review
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._review_github_client",
+        lambda *_args: pytest.fail("GitHub must not be called without reviewer config"),
+    )
+
+    exit_code = _submit_review(
+        RecordingContext(enabled_settings(tmp_path)),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha="a" * 40,
+            event="APPROVE",
+            body="Independent review passed.",
+        ),
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "independent_reviewer_not_configured",
+        "status": "review_identity_unavailable",
+    }
+
+
+def test_submit_review_refuses_pr_author_without_comment_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _submit_review
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    settings = enabled_settings(tmp_path)
+    settings["review_submission"] = {
+        "expected_login": "reviewer",
+        "token_env": "HERMES_GITHUB_REVIEWER_TOKEN",
+    }
+    monkeypatch.setenv("HERMES_GITHUB_REVIEWER_TOKEN", "secret-reviewer-token")
+    writes: list[str] = []
+
+    class FakeGitHub:
+        def viewer_login(self) -> str:
+            return "owner"
+
+        def get_pull_request(self, *_args: object) -> PullRequest:
+            return PullRequest(
+                17, "OPEN", "acme/widgets", "acme/widgets", "owner", "codex/fix", "a" * 40
+            )
+
+        def submit_pull_request_review(self, *_args: object, **_kwargs: object) -> None:
+            writes.append("review")
+
+        def post_issue_comment(self, *_args: object, **_kwargs: object) -> None:
+            writes.append("comment")
+
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._review_github_client", lambda *_args: FakeGitHub()
+    )
+
+    exit_code = _submit_review(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha="a" * 40,
+            event="APPROVE",
+            body="Independent review passed.",
+        ),
+    )
+
+    assert exit_code == 1
+    assert writes == []
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "viewer_is_pr_author",
+        "status": "review_identity_unavailable",
+    }
+
+
+def test_submit_review_uses_exact_configured_independent_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _submit_review
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    settings = enabled_settings(tmp_path)
+    settings["review_submission"] = {
+        "expected_login": "reviewer",
+        "token_env": "HERMES_GITHUB_REVIEWER_TOKEN",
+    }
+    monkeypatch.setenv("HERMES_GITHUB_REVIEWER_TOKEN", "secret-reviewer-token")
+    writes: list[tuple[str, int, str, str]] = []
+
+    class FakeGitHub:
+        def viewer_login(self) -> str:
+            return "reviewer"
+
+        def get_pull_request(self, *_args: object) -> PullRequest:
+            return PullRequest(
+                17, "OPEN", "acme/widgets", "acme/widgets", "owner", "codex/fix", "a" * 40
+            )
+
+        def submit_pull_request_review(
+            self, repository: str, number: int, *, event: str, body: str
+        ) -> None:
+            writes.append((repository, number, event, body))
+
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._review_github_client", lambda *_args: FakeGitHub()
+    )
+
+    exit_code = _submit_review(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            head_sha="a" * 40,
+            event="APPROVE",
+            body="Independent review passed.",
+        ),
+    )
+
+    assert exit_code == 0
+    assert writes == [("acme/widgets", 17, "APPROVE", "Independent review passed.")]
+    assert json.loads(capsys.readouterr().out) == {
+        "event": "APPROVE",
+        "head_sha": "a" * 40,
+        "pr_number": 17,
+        "repository": "acme/widgets",
+        "reviewer": "reviewer",
+        "status": "submitted",
     }
 
 
