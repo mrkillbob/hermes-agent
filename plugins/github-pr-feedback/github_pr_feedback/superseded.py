@@ -125,12 +125,16 @@ class SupersededPullRequestController:
                 "repository is not configured for merge maintenance"
             )
         initial = self.github.get_pull_request(repository, pr_number)
+        try:
+            actual_base_branch = _branch(initial.base_branch, "pull request base")
+        except ValueError as error:
+            raise SupersededCloseError("pull request base is invalid") from error
         self._require_exact_open_pull(
             initial,
             repository=repository,
             pr_number=pr_number,
             head_sha=head_sha,
-            base_branch=merge_policy.base_branch,
+            base_branch=actual_base_branch,
         )
         if git_environment is None:
             identity = self.policy.github_identity
@@ -164,7 +168,7 @@ class SupersededPullRequestController:
             repository=repository,
             pr_number=pr_number,
             head_sha=head_sha,
-            base_branch=merge_policy.base_branch,
+            base_branch=actual_base_branch,
         )
         comment = (
             f"{hermes_attribution_line(merge_policy.assignee, action='superseded PR close')}\n\n"
@@ -183,7 +187,7 @@ class SupersededPullRequestController:
             repository=repository,
             pr_number=pr_number,
             head_sha=head_sha,
-            base_branch=merge_policy.base_branch,
+            base_branch=actual_base_branch,
         )
         if closed.state != "CLOSED":
             raise GitHubClientError("pull request did not close")
