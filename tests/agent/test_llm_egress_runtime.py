@@ -3043,6 +3043,30 @@ def test_codex_responses_restores_source_metadata_from_one_input_text_result():
     ]
 
 
+def test_codex_responses_consumes_sidecar_once_across_input_carriers():
+    """One source record cannot authorize both normalized input carriers."""
+
+    call_id = "call_read_file_123"
+    result = '{"path":"source.py","content":"1|safe = True"}'
+    output = {"type": "function_call_output", "call_id": call_id, "output": result}
+    sidecar = [
+        {
+            "message_index": 0,
+            "tool_call_id": call_id,
+            "content_sha256": sha256(result.encode("utf-8")).hexdigest(),
+            "request_id": "turn-1:api:1",
+            "source_grant_digests": ["grant-digest"],
+            "presentation_kind": "read_file_json_v1",
+        }
+    ]
+    body = {"input": [dict(output)], "extra_body": {"input": [dict(output)]}}
+
+    restored = _restore_source_provenance_sidecar(body, sidecar)
+
+    assert "_source_provenance" in restored["input"][0]
+    assert "_source_provenance" not in restored["extra_body"]["input"][0]
+
+
 @pytest.mark.parametrize(
     "output",
     (

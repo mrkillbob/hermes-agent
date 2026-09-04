@@ -2850,6 +2850,7 @@ def _restore_source_provenance_sidecar(
                 if key in entry
             }
             copied_input[index] = copied
+            consumed_entries.add(entry_index)
             changed = True
         return copied_input if changed else input_items, changed
 
