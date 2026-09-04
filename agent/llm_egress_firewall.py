@@ -900,7 +900,9 @@ def _source_text_for_base64_scan(text: str) -> str:
             # metavariables.  They are command syntax, not encoded payloads;
             # keep this exception enumerated so arbitrary values such as
             # ``PAYLOAD`` remain visible to the fail-closed scanner.
-            or source_atom in {"PROVIDER", "TOOLSETS"}
+            # SQL snippets in source comments/queries likewise use fixed
+            # keywords whose short uppercase spelling can decode by chance.
+            or source_atom in {"PROVIDER", "TOOLSETS", "OPEN", "LIKE"}
         )
 
     masked = _BASE64_CANDIDATE.sub(

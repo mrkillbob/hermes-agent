@@ -261,12 +261,12 @@ def test_source_grant_allows_pr_metadata_without_disabling_base64_detection(tmp_
 
 
 def test_source_grant_allows_only_known_cli_usage_metavariables(tmp_path):
-    """Argparse's fixed uppercase placeholders are not encoded payloads."""
+    """Argparse and SQL's fixed uppercase syntax words are not payloads."""
 
-    source = "--provider PROVIDER\n--toolsets TOOLSETS\n"
+    source = "--provider PROVIDER\n--toolsets TOOLSETS\nquery LIKE OPEN\n"
     path = tmp_path / "usage.txt"
     path.write_text(source, encoding="utf-8")
-    grant = _source_grant(path, end=2)
+    grant = _source_grant(path, end=3)
 
     decision = firewall(tmp_path).preflight(
         _typed_request(_request(source), source_grant=grant),
