@@ -1455,7 +1455,7 @@ def _model_flow_azure_foundry(config, current_model=""):
     else:
         try:
             model_name = line_input(
-                f"Model / deployment name [{current_model or 'e.g. gpt-5.4, claude-sonnet-4-6'}]: "
+                f"Model / deployment name [{current_model or 'e.g. gpt-5.5, gpt-5.4'}]: "
             ).strip()
         except (KeyboardInterrupt, EOFError):
             print("\nCancelled.")
@@ -3286,7 +3286,7 @@ def _model_flow_anthropic(config, current_model=""):
         )
     else:
         try:
-            selected = line_input("Model name (e.g., claude-sonnet-4-20250514): ").strip()
+            selected = line_input("Model name (e.g., gpt-5.5): ").strip()
         except (KeyboardInterrupt, EOFError):
             selected = None
 

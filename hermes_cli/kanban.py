@@ -76,8 +76,10 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "result": t.result,
         "skills": list(t.skills) if t.skills else [],
         "max_retries": t.max_retries,
+        "max_runtime_seconds": t.max_runtime_seconds,
         "model_override": t.model_override,
         "provider_override": t.provider_override,
+        "reasoning_effort": t.reasoning_effort,
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
@@ -133,6 +135,89 @@ def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     return branch
 
 
+def _dispatcher_readiness(hermes_home: Optional[Path] = None) -> dict[str, Any]:
+    """Return strict, machine-readable gateway dispatcher readiness.
+
+    Unlike the legacy CLI warning wrapper below, uncertainty is not treated as
+    ready.  Startup/readiness gates use this strict result so a dashboard-only
+    ``hermes serve`` process cannot silently strand assigned ready work.
+    """
+    try:
+        from gateway.status import resolve_gateway_liveness  # type: ignore
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": None,
+            "message": f"Gateway dispatcher readiness could not be verified: {exc}",
+        }
+    try:
+        liveness = resolve_gateway_liveness(
+            profile_dir=hermes_home, use_cache=False
+        )
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": None,
+            "message": f"Gateway dispatcher readiness probe failed: {exc}",
+        }
+    if liveness.probe_error:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": liveness.pid,
+            "message": "Gateway dispatcher readiness probe returned an unreadable state",
+        }
+
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        cfg = load_config_readonly()
+        dispatch_on = bool(cfg.get("kanban", {}).get("dispatch_in_gateway", True))
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": liveness.pid,
+            "message": f"Kanban dispatcher configuration could not be read: {exc}",
+        }
+
+    pid = liveness.pid
+    if pid and dispatch_on:
+        return {
+            "status": "ready",
+            "ready": True,
+            "gateway_pid": pid,
+            "message": f"gateway pid={pid}, dispatch enabled",
+        }
+    if pid:
+        return {
+            "status": "disabled",
+            "ready": False,
+            "gateway_pid": pid,
+            "message": (
+                "Gateway is running but kanban.dispatch_in_gateway=false in "
+                "config.yaml — the task will sit in 'ready' until you flip it "
+                "back on and restart the gateway, OR run the legacy "
+                "standalone daemon (`hermes kanban daemon --force`)."
+            ),
+        }
+    return {
+        "status": "offline",
+        "ready": False,
+        "gateway_pid": None,
+        "message": (
+            "No gateway is running — the task will sit in 'ready' until you "
+            "start it. Run:\n"
+            "    hermes gateway start\n"
+            "The gateway hosts an embedded dispatcher (tick interval 60s by "
+            "default); your task will be picked up on the next tick after "
+            "the gateway comes up."
+        ),
+    }
+
+
 def _check_dispatcher_presence(
     hermes_home: Optional[Path] = None,
 ) -> tuple[bool, str]:
@@ -158,55 +243,13 @@ def _check_dispatcher_presence(
     against a perfectly healthy profile gateway (#71211). CLI callers leave
     it ``None`` and keep the existing process-level behavior.
     """
-    try:
-        from gateway.status import resolve_gateway_liveness  # type: ignore
-    except Exception:
-        return (True, "")  # can't probe — silent
-    try:
-        # Same shared ladder the dashboard status endpoints use, so a
-        # PID-file-less (launch-service-managed) or cross-container gateway
-        # is not misreported as absent. use_cache=False: this is a one-shot
-        # CLI/create-time probe, not a polling loop, and it must observe the
-        # gateway's state right now rather than a cached snapshot.
-        liveness = resolve_gateway_liveness(
-            profile_dir=hermes_home, use_cache=False
-        )
-    except Exception:
-        return (True, "")  # probe errored — silent
-    if liveness.probe_error:
-        # The resolver swallows per-rung failures so status endpoints never
-        # 500. This caller must still fail OPEN: an unreadable probe means
-        # "can't tell", not "no gateway", and warning on it cries wolf.
+    readiness = _dispatcher_readiness(hermes_home=hermes_home)
+    if readiness["status"] == "unknown":
+        # Preserve the established create-time warning behavior: uncertainty
+        # must not emit a false warning. Strict startup callers use the typed
+        # function directly and fail closed instead.
         return (True, "")
-    pid = liveness.pid
-
-    # Even if the gateway is up, dispatch_in_gateway may be off.
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
-        dispatch_on = bool(cfg.get("kanban", {}).get("dispatch_in_gateway", True))
-    except Exception:
-        dispatch_on = True  # can't tell — assume default
-
-    if pid and dispatch_on:
-        return (True, f"gateway pid={pid}, dispatch enabled")
-    if pid and not dispatch_on:
-        return (
-            False,
-            "Gateway is running but kanban.dispatch_in_gateway=false in "
-            "config.yaml — the task will sit in 'ready' until you flip it "
-            "back on and restart the gateway, OR run the legacy "
-            "standalone daemon (`hermes kanban daemon --force`)."
-        )
-    return (
-        False,
-        "No gateway is running — the task will sit in 'ready' until you "
-        "start it. Run:\n"
-        "    hermes gateway start\n"
-        "The gateway hosts an embedded dispatcher (tick interval 60s by "
-        "default); your task will be picked up on the next tick after "
-        "the gateway comes up."
-    )
+    return (bool(readiness["ready"]), str(readiness["message"]))
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +461,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Provider the --model belongs to (passed as "
                                "--provider <name> to the worker). Requires "
                                "--model.")
+    p_create.add_argument("--reasoning", default=None, dest="reasoning_effort",
+                          help="Pin the worker reasoning effort for this task "
+                               "(none, minimal, low, medium, high, xhigh, "
+                               "max, or ultra).")
     p_create.add_argument("--goal", action="store_true", dest="goal_mode",
                           help="Run the worker in a goal loop: after each "
                                "turn a judge checks the response against the "
@@ -531,6 +578,19 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--provider", default=None,
         help="Provider the model belongs to (worker is spawned with "
              "--provider <name>). Cleared together with the model.",
+    )
+
+    # --- set-reasoning (per-task reasoning override) ---
+    p_set_reasoning = sub.add_parser(
+        "set-reasoning",
+        help="Set or clear a task's reasoning-effort override "
+             "(takes effect on the next dispatch)",
+    )
+    p_set_reasoning.add_argument("task_id")
+    p_set_reasoning.add_argument(
+        "effort",
+        help="Reasoning effort to pin (none, minimal, low, medium, high, "
+             "xhigh, max, ultra) or 'inherit' to clear the override",
     )
 
     # --- reclaim / reassign (recovery) ---
@@ -1152,6 +1212,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "show":     _cmd_show,
             "assign":   _cmd_assign,
             "set-model": _cmd_set_model,
+            "set-reasoning": _cmd_set_reasoning,
             "reclaim":  _cmd_reclaim,
             "reassign": _cmd_reassign,
             "diagnostics": _cmd_diagnostics,
@@ -1216,6 +1277,14 @@ def _profile_author() -> str:
         return get_active_profile_name() or "user"
     except Exception:
         return "user"
+
+
+def _unblock_author() -> str:
+    """Distinguish an operator CLI transition from a worker retry."""
+
+    if str(os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+        return _profile_author()
+    return "operator"
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
@@ -1683,6 +1752,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             max_retries=max_retries,
             model_override=getattr(args, "model_override", None),
             provider_override=getattr(args, "provider_override", None),
+            reasoning_effort=getattr(args, "reasoning_effort", None),
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
@@ -1990,6 +2060,31 @@ def _cmd_set_model(args: argparse.Namespace) -> int:
     else:
         print(f"Cleared model override on {args.task_id} "
               "(worker uses its profile default)")
+    return 0
+
+
+def _cmd_set_reasoning(args: argparse.Namespace) -> int:
+    raw_effort = args.effort.strip().lower()
+    effort = (
+        None
+        if raw_effort in {"inherit", "default", "-", "null"}
+        else raw_effort
+    )
+    try:
+        with kb.connect_closing() as conn:
+            ok = kb.set_reasoning_effort(conn, args.task_id, effort)
+    except (ValueError, RuntimeError) as exc:
+        print(f"kanban: {exc}", file=sys.stderr)
+        return 2
+    if not ok:
+        print(f"no such task: {args.task_id}", file=sys.stderr)
+        return 1
+    if effort is None:
+        print(f"Cleared reasoning effort on {args.task_id} "
+              "(worker uses its profile default)")
+    else:
+        print(f"Set reasoning effort on {args.task_id}: {effort} "
+              "(applies on next dispatch)")
     return 0
 
 
@@ -2459,12 +2554,35 @@ def _cmd_block(args: argparse.Namespace) -> int:
         for tid in ids:
             if reason:
                 kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
+            expected_run_id = _worker_run_id_for(tid)
+            task = kb.get_task(conn, tid)
+            # A worker blocks itself through the model tool and must remain
+            # alive long enough to receive that tool result. An operator CLI
+            # block is different: it is an external stop request. Reclaim the
+            # live worker first and refuse to hide the card if termination
+            # cannot be verified, otherwise the process becomes an orphan.
+            if (
+                task is not None
+                and task.status == "running"
+                and expected_run_id is None
+                and not kb.reclaim_task(
+                    conn,
+                    tid,
+                    reason=reason or "operator block",
+                )
+            ):
+                failed.append(tid)
+                print(
+                    f"cannot block {tid}: worker termination was not verified",
+                    file=sys.stderr,
+                )
+                continue
             if not kb.block_task(
                 conn,
                 tid,
                 reason=reason,
                 kind=kind,
-                expected_run_id=_worker_run_id_for(tid),
+                expected_run_id=expected_run_id,
             ):
                 failed.append(tid)
                 print(f"cannot block {tid}", file=sys.stderr)
@@ -2516,7 +2634,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     reason = getattr(args, "reason", None)
     if reason is not None:
         reason = reason.strip() or None
-    author = _profile_author() if reason else None
+    author = _unblock_author() if reason else None
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
@@ -2765,22 +2883,54 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_in_progress_per_profile = _coerce_positive_int(
             _kanban_cfg.get("max_in_progress_per_profile")
         )
+        max_in_progress_per_model = _coerce_positive_int(
+            _kanban_cfg.get("max_in_progress_per_model")
+        )
+        raw_profile_caps = _kanban_cfg.get("max_in_progress_by_profile", {})
+        max_in_progress_by_profile = {}
+        if isinstance(raw_profile_caps, dict):
+            for profile, raw_cap in raw_profile_caps.items():
+                cap = _coerce_positive_int(raw_cap)
+                if isinstance(profile, str) and profile.strip() and cap is not None:
+                    max_in_progress_by_profile[profile.strip()] = cap
+        raw_model_caps = _kanban_cfg.get("max_in_progress_by_model", {})
+        max_in_progress_by_model = {}
+        if isinstance(raw_model_caps, dict):
+            for model_key, raw_cap in raw_model_caps.items():
+                cap = _coerce_positive_int(raw_cap)
+                if isinstance(model_key, str) and model_key.strip() and cap is not None:
+                    max_in_progress_by_model[model_key.strip()] = cap
         max_in_progress = _coerce_positive_int(_kanban_cfg.get("max_in_progress"))
         # Memory-derived default when unset (OOF-30/OOF-77) — same
         # fallback the gateway-embedded dispatcher applies, so behaviour
         # matches regardless of which path runs the tick.
-        max_in_progress = kb.resolve_max_in_progress(max_in_progress)
+        max_in_progress = kb.resolve_max_in_progress(
+            max_in_progress,
+            priority_runtime_guard=_kanban_cfg.get("priority_runtime_guard"),
+        )
         # CLI --max overrides config kanban.max_spawn when both are present;
         # CLI is the more explicit signal so it wins.
         cli_max = getattr(args, "max", None)
         max_spawn = cli_max if cli_max is not None else _coerce_positive_int(
             _kanban_cfg.get("max_spawn")
         )
-    except Exception:
-        default_assignee = None
-        max_in_progress_per_profile = None
-        max_in_progress = None
-        max_spawn = getattr(args, "max", None)
+    except Exception as error:
+        # Dispatch caps are a safety boundary.  Clearing them after a config
+        # read failure turns an unavailable configuration into an unbounded
+        # spawn tick, which can overwhelm the host and strand cards.  Fail
+        # closed so the next governed tick can retry after the config is
+        # readable again.
+        if getattr(args, "json", False):
+            print(json.dumps({
+                "status": "config_unavailable",
+                "error": type(error).__name__,
+            }, sort_keys=True))
+        else:
+            print(
+                f"kanban: dispatch configuration unavailable ({type(error).__name__})",
+                file=sys.stderr,
+            )
+        return 1
     with kb.connect_closing() as conn:
         res = kb.dispatch_once(
             conn,
@@ -2790,6 +2940,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            max_in_progress_by_profile=max_in_progress_by_profile,
+            max_in_progress_per_model=max_in_progress_per_model,
+            max_in_progress_by_model=max_in_progress_by_model,
         )
     if getattr(args, "json", False):
         print(json.dumps({
@@ -2808,6 +2961,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "skipped_per_profile_capped": [
                 {"task_id": tid, "assignee": who, "current": current}
                 for (tid, who, current) in res.skipped_per_profile_capped
+            ],
+            "skipped_per_model_capped": [
+                {"task_id": tid, "provider": provider, "model": model, "current": current}
+                for (tid, provider, model, current) in res.skipped_per_model_capped
             ],
             "auto_assigned_default": res.auto_assigned_default,
         }, indent=2))
@@ -2841,6 +2998,11 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         for tid, who, current in res.skipped_per_profile_capped:
             print(
                 f"Deferred ({who} at per-profile cap, {current} running): {tid}"
+            )
+    if res.skipped_per_model_capped:
+        for tid, provider, model, current in res.skipped_per_model_capped:
+            print(
+                f"Deferred ({provider}:{model} at per-model cap, {current} running): {tid}"
             )
     if res.skipped_nonspawnable:
         print(

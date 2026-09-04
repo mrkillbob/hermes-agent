@@ -422,6 +422,7 @@ class ToolCallGuardrailController:
         self._same_tool_failure_counts: dict[str, int] = {}
         # signature -> a mutating call succeeded since its last failure
         self._progress_since_failure: dict[ToolCallSignature, bool] = {}
+        self._same_tool_failure_result_hashes: dict[str, str] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
         # Identical-call loop-breaker state (agent.stall_guards): tracks the
@@ -537,8 +538,21 @@ class ToolCallGuardrailController:
             self._exact_failure_counts[signature] = exact_count
             self._no_progress.pop(signature, None)
 
-            same_count = self._same_tool_failure_counts.get(tool_name, 0) + 1
+            # Count a same-tool failure *streak* only while the failure cause
+            # remains the same. Coding workers legitimately run several
+            # different diagnostic commands that return non-zero (for example
+            # reproducing a failing test, then probing a missing path). Those
+            # are separate evidence, not one broken tool path. Exact repeated
+            # calls are still bounded independently by ``_exact_failure_counts``.
+            failure_hash = _result_hash(result)
+            prior_failure_hash = self._same_tool_failure_result_hashes.get(tool_name)
+            same_count = (
+                self._same_tool_failure_counts.get(tool_name, 0) + 1
+                if prior_failure_hash == failure_hash
+                else 1
+            )
             self._same_tool_failure_counts[tool_name] = same_count
+            self._same_tool_failure_result_hashes[tool_name] = failure_hash
 
             # same_tool_failure counts DIFFERENT args on one tool. For tools
             # whose non-zero exit is ordinary work output (terminal,
@@ -593,6 +607,7 @@ class ToolCallGuardrailController:
 
         self._exact_failure_counts.pop(signature, None)
         self._same_tool_failure_counts.pop(tool_name, None)
+        self._same_tool_failure_result_hashes.pop(tool_name, None)
 
         # A successful mutation is progress for every failing signature still
         # being counted this turn: the next identical retry runs against

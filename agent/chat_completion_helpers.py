@@ -918,6 +918,39 @@ def _bedrock_reasoning_stale_floor(model_id: object) -> "float | None":
     return None
 
 
+_EGRESS_PROTECTED_PROVIDERS = frozenset(
+    {"anthropic", "openai-codex", "nous", "nous-portal", "nousresearch"}
+)
+
+
+def _attach_source_provenance_sidecar(
+    agent, kwargs: dict, messages: list | None = None, *, sidecar: list | None = None
+) -> dict:
+    """Carry internal read proofs around strict wire-message conversion."""
+
+    provider = str(getattr(agent, "provider", "") or "").strip().lower()
+    if provider not in _EGRESS_PROTECTED_PROVIDERS:
+        return kwargs
+    from agent.source_provenance_tools import build_source_provenance_sidecar
+
+    if sidecar is None:
+        sidecar = build_source_provenance_sidecar(messages)
+    if not sidecar:
+        return kwargs
+    return {**kwargs, "_hermes_source_provenance": sidecar}
+
+
+def _dispatch_provider_request(agent, request, callback):
+    """Apply the exact provider-bound egress policy at a physical call site."""
+
+    provider = str(getattr(agent, "provider", "") or "").strip().lower()
+    if provider not in _EGRESS_PROTECTED_PROVIDERS:
+        return callback(request)
+    from agent.llm_egress_runtime import dispatch_authorized_agent_request
+
+    return dispatch_authorized_agent_request(agent, request, callback)
+
+
 def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     """Run one non-streaming LLM request for the active api_mode and return it.
 
@@ -948,7 +981,13 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         request_client = make_client(
             "anthropic_messages_request", kind="anthropic_messages"
         )
-        return agent._anthropic_messages_create(api_kwargs, client=request_client)
+        return _dispatch_provider_request(
+            agent,
+            api_kwargs,
+            lambda request: agent._anthropic_messages_create(
+                request, client=request_client
+            ),
+        )
     if agent.api_mode == "bedrock_converse":
         # Bedrock uses boto3 directly — no OpenAI client needed.
         # normalize_converse_response produces an OpenAI-compatible
@@ -1001,7 +1040,11 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
             api_kwargs.pop("_moa_prepared_request", None)
         return agent.client.chat.completions.create(**api_kwargs)
     request_client = make_client("chat_completion_request")
-    return request_client.chat.completions.create(**api_kwargs)
+    return _dispatch_provider_request(
+        agent,
+        api_kwargs,
+        lambda request: request_client.chat.completions.create(**request),
+    )
 
 
 def should_use_direct_api_call(agent) -> bool:
@@ -2018,6 +2061,12 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
     # One-shot continuation override — consumed exactly once, on the FIRST
     # request this call builds (only one api_mode branch runs per invocation).
     _wire_reasoning_config = _reasoning_config_for_wire(agent)
+    # Capture internal provenance before any transport converts or sanitizes
+    # messages. Codex Responses removes internal tool-message keys entirely,
+    # and some chat transports normalize the list in place.
+    from agent.source_provenance_tools import build_source_provenance_sidecar
+
+    _source_sidecar = build_source_provenance_sidecar(api_messages)
     if tools_for_api is None:
         tools_for_api = agent.tools
     # The one place request_overrides are consumed: static /fast values are
@@ -2126,7 +2175,7 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
                     getattr(agent, "log_prefix", ""), exc,
                 )
 
-        return _ct.build_kwargs(
+        _codex_kwargs = _ct.build_kwargs(
             model=agent.model,
             messages=_msgs_for_codex,
             tools=tools_for_api,
@@ -2147,9 +2196,13 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
             ),
             context_management=_context_management,
         )
+        return _attach_source_provenance_sidecar(
+            agent, _codex_kwargs, sidecar=_source_sidecar
+        )
 
     # ── chat_completions (default) ─────────────────────────────────────
     _ct = agent._get_transport()
+    _source_sidecar_messages = api_messages
 
     # xAI's chat-completions endpoint reserves the function name
     # ``tool_search`` for its native server-side tool and rejects the whole
@@ -2278,7 +2331,7 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
         # registered providers with profiles were bypassing the strip.
         api_messages = agent._prepare_messages_for_non_vision_model(api_messages)
 
-        return _ct.build_kwargs(
+        _chat_kwargs = _ct.build_kwargs(
             model=agent.model,
             messages=api_messages,
             tools=tools_for_api,
@@ -2300,6 +2353,9 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
             supports_reasoning=agent._supports_reasoning_extra_body(),
             qwen_session_metadata=_qwen_meta,
         )
+        return _attach_source_provenance_sidecar(
+            agent, _chat_kwargs, _source_sidecar_messages, sidecar=_source_sidecar
+        )
 
     # ── Legacy flag path ────────────────────────────────────────────
     # Reached only when get_provider_profile() returns None — i.e. a
@@ -2311,7 +2367,7 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
     # Strip image parts for non-vision models (no-op when vision-capable).
     _msgs_for_chat = agent._prepare_messages_for_non_vision_model(api_messages)
 
-    return _ct.build_kwargs(
+    _chat_kwargs = _ct.build_kwargs(
         model=agent.model,
         messages=_msgs_for_chat,
         tools=tools_for_api,
@@ -2347,6 +2403,9 @@ def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | 
         lmstudio_reasoning_options=agent._lmstudio_reasoning_options_cached() if _is_lmstudio else None,
         anthropic_max_output=_ant_max,
         provider_name=agent.provider,
+    )
+    return _attach_source_provenance_sidecar(
+        agent, _chat_kwargs, _source_sidecar_messages, sidecar=_source_sidecar
     )
 
 
@@ -2666,6 +2725,42 @@ def _fallback_entry_unavailable_without_network(agent, fb: dict) -> Optional[str
     return None
 
 
+def _fallback_destination_class(fb: dict):
+    """Resolve a fallback's configured destination for egress-aware routing.
+
+    Egress policy failures must never walk another remote provider with the
+    same unsafe request.  A fallback entry may omit ``base_url`` and rely on
+    the provider definition in config.yaml, so resolve that URL here rather
+    than trusting the provider label (provider names are not a security
+    boundary).
+    """
+    from agent.llm_egress_firewall import classify_destination
+
+    base_url = (fb.get("base_url") or "").strip()
+    if not base_url:
+        try:
+            from hermes_cli.config import load_config
+
+            provider_cfg = (load_config() or {}).get("providers", {}).get(
+                (fb.get("provider") or "").strip(), {}
+            )
+            if isinstance(provider_cfg, dict):
+                base_url = str(
+                    provider_cfg.get("api")
+                    or provider_cfg.get("base_url")
+                    or ""
+                ).strip()
+        except Exception:
+            # Unknown destination must remain unknown and therefore cannot
+            # inherit local trust after an egress policy rejection.
+            base_url = ""
+    return classify_destination(
+        str(fb.get("provider") or ""),
+        base_url,
+        fb.get("api_mode") or "chat_completions",
+    )
+
+
 def _fallback_reason_text(reason: "FailoverReason | None") -> str:
     """Return a concise operator-facing explanation for a fallback switch."""
     if reason is None:
@@ -2686,10 +2781,14 @@ def _fallback_reason_text(reason: "FailoverReason | None") -> str:
         FailoverReason.model_not_found: "model not found",
         FailoverReason.provider_policy_blocked: "provider policy blocked the request",
         FailoverReason.content_policy_blocked: "content policy blocked the request",
+        FailoverReason.egress_policy_blocked: (
+            "local egress policy blocked the request"
+        ),
         FailoverReason.format_error: "request format rejected",
         FailoverReason.invalid_encrypted_content: "encrypted reasoning state rejected",
         FailoverReason.multimodal_tool_content_unsupported: "multimodal tool content unsupported",
         FailoverReason.thinking_signature: "thinking signature rejected",
+        FailoverReason.unsupported_thinking: "model does not support thinking",
         FailoverReason.long_context_tier: "long-context tier unavailable",
         FailoverReason.oauth_long_context_beta_forbidden: "OAuth long-context beta unavailable",
         FailoverReason.llama_cpp_grammar_pattern: "grammar pattern rejected",
@@ -2714,6 +2813,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     auth resolution and client construction — no duplicated provider→key
     mappings.
     """
+    if reason == FailoverReason.unsupported_thinking:
+        # Deterministic local model capability/configuration drift. Never hide
+        # it by routing a protected local request to a remote fallback.
+        logger.warning(
+            "Fallback suppressed: selected model does not support thinking"
+        )
+        return False
+
     if reason in {FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit}:
         # Only start cooldown when leaving the primary provider.  If we're
         # already on a fallback and chain-switching, the primary wasn't the
@@ -2767,6 +2874,29 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     fb_model = (fb.get("model") or "").strip()
     if not fb_provider or not fb_model:
         return agent._try_activate_fallback(reason)  # skip invalid, try next
+
+    # An egress policy rejection is deterministic for the current payload.
+    # Only a local/loopback fallback can legally receive that same payload;
+    # skip remote and unknown entries without constructing clients or making
+    # another provider attempt.  This preserves the fail-closed firewall while
+    # preventing the misleading Nous -> OpenAI -> local cascade.
+    if reason == FailoverReason.egress_policy_blocked:
+        from agent.llm_egress_firewall import DestinationClass
+
+        destination = _fallback_destination_class(fb)
+        if destination not in {
+            DestinationClass.LOCAL_PROCESS,
+            DestinationClass.LOOPBACK,
+        }:
+            unavailable.add(fb_key)
+            logger.info(
+                "Fallback skip: %s/%s is not local after egress policy "
+                "blocked the current request (destination=%s)",
+                fb_provider,
+                fb_model,
+                destination.value,
+            )
+            return agent._try_activate_fallback(reason)
 
     local_skip_reason = _fallback_entry_unavailable_without_network(agent, fb)
     if local_skip_reason:
@@ -3219,21 +3349,33 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     def _managed_summary_call(request, callback, *, retry_count: int):
         from agent import relay_llm
 
-        return relay_llm.execute_current(
-            request,
-            callback,
-            name=str(getattr(agent, "provider", "") or "provider"),
-            model_name=str(getattr(agent, "model", "") or ""),
-            metadata={
-                "api_mode": str(
-                    getattr(agent, "api_mode", "") or "chat_completions"
-                ),
-                "api_request_id": summary_api_request_id,
-                "call_role": "iteration_summary",
-                "retry_count": retry_count,
-            },
-            defer_logical_completion=True,
+        raw_callback = callback
+        callback = lambda payload: _dispatch_provider_request(
+            agent, payload, raw_callback
         )
+        previous_request_id = str(
+            getattr(agent, "_current_api_request_id", "") or ""
+        )
+        agent._current_api_request_id = summary_api_request_id
+
+        try:
+            return relay_llm.execute_current(
+                request,
+                callback,
+                name=str(getattr(agent, "provider", "") or "provider"),
+                model_name=str(getattr(agent, "model", "") or ""),
+                metadata={
+                    "api_mode": str(
+                        getattr(agent, "api_mode", "") or "chat_completions"
+                    ),
+                    "api_request_id": summary_api_request_id,
+                    "call_role": "iteration_summary",
+                    "retry_count": retry_count,
+                },
+                defer_logical_completion=True,
+            )
+        finally:
+            agent._current_api_request_id = previous_request_id
 
     # Shared constant so compaction recognizers can identify this runtime nudge
     # by its stable content after SessionDB projection strips metadata flags
@@ -3361,6 +3503,62 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             from agent.portal_tags import nous_portal_tags as _portal_tags
             summary_extra_body["tags"] = _portal_tags()
 
+        # The summary call bypasses ChatCompletionsTransport, so project the
+        # provider's canonical reasoning policy here as well.  This matters
+        # for reasoning-mandatory Nous routes: their profile deliberately
+        # omits an attempted disable, while the generic block above would
+        # otherwise send it and receive HTTP 400.
+        summary_profile_top_level = {}
+        provider_preferences = _provider_preferences_for_agent(agent)
+        profile_extra_body = {}
+        try:
+            from providers import get_provider_profile
+            provider_profile = get_provider_profile(agent.provider)
+            if provider_profile is not None:
+                profile_extra_body = provider_profile.build_extra_body(
+                    session_id=getattr(agent, "session_id", None),
+                    provider_preferences=provider_preferences or None,
+                    model=agent.model,
+                    base_url=agent.base_url,
+                    reasoning_config=agent.reasoning_config,
+                )
+                profile_reasoning_extra, summary_profile_top_level = (
+                    provider_profile.build_api_kwargs_extras(
+                        reasoning_config=agent.reasoning_config,
+                        supports_reasoning=agent._supports_reasoning_extra_body(),
+                        model=agent.model,
+                        base_url=agent.base_url,
+                        session_id=getattr(agent, "session_id", None),
+                    )
+                )
+                profile_reasoning_keys = {
+                    "reasoning",
+                    "reasoning_effort",
+                    "thinking",
+                    "enable_thinking",
+                }
+                profile_owns_reasoning = provider_profile.owns_reasoning_policy(
+                    reasoning_config=agent.reasoning_config,
+                    supports_reasoning=agent._supports_reasoning_extra_body(),
+                    model=agent.model,
+                    base_url=agent.base_url,
+                    session_id=getattr(agent, "session_id", None),
+                ) or bool(
+                    profile_reasoning_keys.intersection(profile_reasoning_extra or {})
+                    or profile_reasoning_keys.intersection(
+                        summary_profile_top_level or {}
+                    )
+                )
+                if profile_owns_reasoning:
+                    summary_extra_body.pop("reasoning", None)
+                summary_extra_body.update(profile_reasoning_extra or {})
+        except Exception as exc:
+            logger.warning(
+                "Summary provider policy projection failed for %s: %s",
+                agent.provider,
+                exc,
+            )
+
         if agent.api_mode == "codex_responses":
             codex_kwargs = agent._build_api_kwargs(api_messages)
             codex_kwargs.pop("tools", None)
@@ -3379,26 +3577,12 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 summary_kwargs.update(agent._max_tokens_param(agent.max_tokens))
             if _lm_reasoning_effort is not None:
                 summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
+            # Profile top-level kwargs intentionally override generic summary
+            # defaults because the profile owns the provider wire contract.
+            summary_kwargs.update(summary_profile_top_level or {})
 
             # Merge the profile's canonical body even when routing is unset:
             # profiles may always emit required metadata such as Portal tags.
-            provider_preferences = _provider_preferences_for_agent(agent)
-            profile_extra_body = {}
-            try:
-                from providers import get_provider_profile
-
-                provider_profile = get_provider_profile(agent.provider)
-                if provider_profile is not None:
-                    profile_extra_body = provider_profile.build_extra_body(
-                        session_id=getattr(agent, "session_id", None),
-                        provider_preferences=provider_preferences or None,
-                        model=agent.model,
-                        base_url=agent.base_url,
-                        reasoning_config=agent.reasoning_config,
-                    )
-            except Exception:
-                pass
-
             if profile_extra_body:
                 summary_extra_body.update(profile_extra_body)
             if provider_preferences and "provider" not in profile_extra_body and (
@@ -3514,6 +3698,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                     summary_kwargs.update(agent._max_tokens_param(agent.max_tokens))
                 if _lm_reasoning_effort is not None:
                     summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
+                summary_kwargs.update(summary_profile_top_level or {})
                 if summary_extra_body:
                     summary_kwargs["extra_body"] = summary_extra_body
 
@@ -4302,7 +4487,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             attempt_request_client["value"] = request_client
             last_chunk_time["t"] = time.time()
             agent._touch_activity("waiting for provider response (streaming)")
-            return request_client.chat.completions.create(**stream_kwargs)
+            return _dispatch_provider_request(
+                agent,
+                stream_kwargs,
+                lambda request: request_client.chat.completions.create(**request),
+            )
 
         def _stream_created(raw_stream: Any) -> None:
             response = getattr(raw_stream, "response", None)

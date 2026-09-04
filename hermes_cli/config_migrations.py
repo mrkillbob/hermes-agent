@@ -884,6 +884,22 @@ def _migrate_to_40(results: Dict[str, Any], quiet: bool) -> None:
         if not quiet:
             print("  ✓ Model catalog now refreshes every 20 minutes (model_catalog.ttl_minutes)")
 
+    desktop = config.get("desktop")
+    if isinstance(desktop, dict) and "conversation_worktree" in desktop:
+        legacy_policy = desktop.pop("conversation_worktree")
+        if "conversation_worktree" not in config:
+            config["conversation_worktree"] = copy.deepcopy(legacy_policy)
+        config["desktop"] = desktop
+        _persist_migration(config)
+        results["config_added"].append(
+            "conversation_worktree (migrated from desktop.conversation_worktree)"
+        )
+        if not quiet:
+            print(
+                "  ✓ Moved desktop.conversation_worktree to the canonical "
+                "top-level conversation_worktree policy."
+            )
+
 
 #: Registry of (target_version, migration_fn), strictly ascending. The driver
 #: applies every entry whose target version is greater than the on-disk

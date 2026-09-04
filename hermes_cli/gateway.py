@@ -5,6 +5,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
 
 import asyncio
+import atexit
 from hermes_cli.cli_output import line_input
 import json
 import logging
@@ -8546,6 +8547,26 @@ def _block_until_terminated() -> None:
         threading.Event().wait()
 
 
+def _clear_stale_drain_request_before_start(*, all_profiles: bool) -> None:
+    """Resume gateways after a desktop drain marker survived shutdown.
+
+    Desktop shutdown requests a drain before stopping supervised gateways. If
+    the stop helper is interrupted after writing its marker, the next launch
+    must treat ``gateway start`` as the explicit resume operation; otherwise a
+    healthy supervisor starts in ``draining`` forever and desktop readiness
+    falsely reports Kanban offline.
+    """
+    from gateway.drain_control import clear_drain_request
+
+    homes = (get_hermes_home(),)
+    if all_profiles:
+        from hermes_cli.gateway_desktop_drain import desktop_profile_homes
+
+        homes = tuple(dict.fromkeys((*desktop_profile_homes(), *homes)))
+    for home in homes:
+        clear_drain_request(home=home)
+
+
 def _gateway_command_inner(args):
     subcmd = getattr(args, "gateway_command", None)
 
@@ -8734,6 +8755,8 @@ def _gateway_command_inner(args):
         system = getattr(args, "system", False)
         start_all = getattr(args, "all", False)
 
+        _clear_stale_drain_request_before_start(all_profiles=start_all)
+
         # Phase 4: inside a container with s6, dispatch via the service
         # manager instead of falling through to systemd/launchd/windows.
         # `--all` isn't meaningful here (each profile has its own service
@@ -8820,6 +8843,21 @@ def _gateway_command_inner(args):
 
         stop_all = getattr(args, "all", False)
         system = getattr(args, "system", False)
+
+        if getattr(args, "drain", False):
+            if not stop_all:
+                print_error("`gateway stop --drain` requires `--all` so no profile can launch duplicate work.")
+                sys.exit(2)
+            from gateway.drain_control import clear_drain_request
+            from hermes_cli.gateway_desktop_drain import (
+                desktop_profile_homes,
+                drain_all_desktop_work,
+            )
+
+            drain_homes = desktop_profile_homes()
+            for drain_home in drain_homes:
+                atexit.register(clear_drain_request, home=drain_home)
+            drain_all_desktop_work()
 
         # Phase 4: inside a container with s6, dispatch via the service
         # manager. ``--all`` iterates every registered profile gateway

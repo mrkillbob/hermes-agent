@@ -236,6 +236,7 @@ def copilot_device_code_login(
 
     This replicates the flow used by opencode and the Copilot CLI.
     """
+    import urllib.error
     import urllib.request
     import urllib.parse
 
@@ -308,6 +309,26 @@ def copilot_device_code_login(
         try:
             with urllib.request.urlopen(poll_req, timeout=10) as resp:
                 result = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            retry_after = (exc.headers or {}).get("Retry-After", "").strip()
+            if exc.code in {403, 429}:
+                wait_hint = (
+                    f" Please wait {retry_after} seconds before trying again."
+                    if retry_after.isdigit()
+                    else " Please wait before trying again."
+                )
+                logger.warning(
+                    "GitHub rate limited Copilot device-code polling (HTTP %s)%s",
+                    exc.code,
+                    f"; retry after {retry_after}s" if retry_after else "",
+                )
+                print(f"\n  ✗ GitHub rate limited this sign-in.{wait_hint}")
+                return None
+            logger.warning(
+                "GitHub rejected Copilot device-code polling (HTTP %s)", exc.code
+            )
+            print("\n  ✗ GitHub rejected this sign-in. Please start a new flow later.")
+            return None
         except Exception:
             print(".", end="", flush=True)
             continue

@@ -554,16 +554,71 @@ def review_pr_list(cwd: str, branches: list[str], numbers: list[int] = None) -> 
 
 
 def review_create_pr(cwd: str) -> dict:
-    """Create a PR for the current branch (push first), letting gh fill title/body."""
+    """Create or reuse the PR for the current exact branch head.
+
+    GitHub emits one pull-request event per open PR, even when many PRs point
+    at the same branch and commit.  A writer that blindly calls ``pr create``
+    can therefore multiply every branch update into a hosted-CI fanout.  Push
+    first, then fail closed unless GitHub proves whether this exact head
+    already has an open PR.
+    """
+    _review_push(cwd)
+    branch = _git_out(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    head_sha = _git_out(cwd, ["rev-parse", "--verify", "HEAD"]).strip().casefold()
+    if not branch or branch == "HEAD" or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        raise RuntimeError("cannot verify the current branch and exact head")
+
+    listed, raw = _gh(
+        cwd,
+        [
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--head",
+            branch,
+            "--limit",
+            "100",
+            "--json",
+            "number,url,headRefName,headRefOid",
+        ],
+    )
+    if not listed:
+        raise RuntimeError("cannot verify existing pull requests for the exact head")
     try:
-        _review_push(cwd)
-    except RuntimeError:
-        pass
+        candidates = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            "cannot verify existing pull requests for the exact head"
+        ) from error
+    if not isinstance(candidates, list):
+        raise RuntimeError("cannot verify existing pull requests for the exact head")
+
+    exact = sorted(
+        (
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and candidate.get("headRefName") == branch
+            and str(candidate.get("headRefOid") or "").casefold() == head_sha
+            and isinstance(candidate.get("number"), int)
+            and str(candidate.get("url") or "").strip()
+        ),
+        key=lambda candidate: int(candidate["number"]),
+    )
+    if exact:
+        existing = exact[0]
+        return {
+            "url": str(existing["url"]),
+            "number": int(existing["number"]),
+            "reused": True,
+        }
+
     created, out = _gh(cwd, ["pr", "create", "--fill"])
     if not created:
         raise RuntimeError("gh pr create failed (is gh installed and authenticated?)")
     url = next((line for line in reversed(out.strip().splitlines()) if line.strip()), "")
-    return {"url": url}
+    return {"url": url, "reused": False}
 
 
 # ── worktrees & branches ─────────────────────────────────────────────────────
@@ -721,8 +776,18 @@ def worktree_add(cwd: str, options: dict) -> dict:
             # the last known ref is still there to branch from.
             _git(root, ["fetch", remote, existing])
             _git_ok(root, ["worktree", "add", "--track", "-b", existing, target, requested])
+            from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
+            bootstrap_worktree_environments(
+                Path(root), Path(target), environment_names=(".venv",)
+            )
             return {"path": target, "branch": existing, "repoRoot": root}
         _git_ok(root, ["worktree", "add", target, existing])
+        from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
+        bootstrap_worktree_environments(
+            Path(root), Path(target), environment_names=(".venv",)
+        )
         return {"path": target, "branch": existing, "repoRoot": root}
 
     slug = _slugify(options.get("name") or f"work-{os.urandom(4).hex()}")
@@ -750,6 +815,9 @@ def worktree_add(cwd: str, options: dict) -> dict:
             _git_ok(root, ["worktree", "add", target, branch])
         else:
             raise RuntimeError(err.strip() or "git worktree add failed")
+    from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
+    bootstrap_worktree_environments(Path(root), Path(target), environment_names=(".venv",))
     return {"path": target, "branch": branch, "repoRoot": root}
 
 

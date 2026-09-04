@@ -472,6 +472,7 @@ def load_cli_config() -> Dict[str, Any]:
             "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
             "docker_volumes": [],  # host:container volume mounts for Docker backend
             "docker_mount_cwd_to_workspace": False,  # explicit opt-in only; default off for sandbox isolation
+            "docker_isolate_host_data": False,
             "docker_shared_container_key": "",
         },
         "browser": {
@@ -649,14 +650,22 @@ def load_cli_config() -> Dict[str, Any]:
     
     # CWD resolution for CLI/TUI. The gateway has its own config bridge in
     # gateway/run.py but may lazily import cli.py (triggering this code).
-    # Local backend: always os.getcwd(). Use `cd /dir && hermes` to control it.
+    # Local backend: use the dispatcher-owned workspace for Kanban workers;
+    # otherwise use os.getcwd(). Use `cd /dir && hermes` to control a normal
+    # interactive CLI. The worker pin must win over both the profile's default
+    # cwd and the launcher's cwd or the worker can inspect/edit the wrong repo.
     # Non-local with placeholder: pop so terminal_tool uses its per-backend default.
     # Non-local with explicit path: keep as-is.
     _CWD_PLACEHOLDERS = (".", "auto", "cwd")
     effective_backend = terminal_config.get("env_type", "local")
 
     if effective_backend == "local":
-        terminal_config["cwd"] = os.getcwd()
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        terminal_config["cwd"] = (
+            resolve_kanban_worker_cwd(os.environ.get("TERMINAL_CWD"))
+            or os.getcwd()
+        )
         defaults["terminal"]["cwd"] = terminal_config["cwd"]
     elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
         terminal_config.pop("cwd", None)
@@ -689,6 +698,7 @@ def load_cli_config() -> Dict[str, Any]:
         "docker_extra_args": "TERMINAL_DOCKER_EXTRA_ARGS",
         "docker_shm_size": "TERMINAL_DOCKER_SHM_SIZE",
         "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
+        "docker_isolate_host_data": "TERMINAL_DOCKER_ISOLATE_HOST_DATA",
         "docker_network": "TERMINAL_DOCKER_NETWORK",
         "docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
         "docker_persist_across_processes": "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
@@ -946,6 +956,51 @@ def _sync_process_session_id(session_id: str) -> None:
     from gateway.session_context import set_current_session_id
 
     set_current_session_id(session_id)
+
+
+def _interactive_cli_conversation_worktree_applies() -> bool:
+    """Return whether this process owns a user-started CLI conversation root."""
+    source = os.environ.get("HERMES_SESSION_SOURCE", "cli").strip().lower() or "cli"
+    return source == "cli" and not os.environ.get("HERMES_KANBAN_TASK", "").strip()
+
+
+def _build_cli_conversation_worktree_manager(config, db):
+    """Build the shared manager only for policy-owned interactive CLI roots."""
+    from agent.conversation_worktree import (
+        ConversationWorktreeError,
+        ConversationWorktreeManager,
+    )
+    from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+
+    policy = resolve_conversation_worktree_policy(config)
+    if not policy.enabled or not _interactive_cli_conversation_worktree_applies():
+        return None
+    if db is None:
+        raise ConversationWorktreeError("state.db is unavailable", phase="state")
+    return ConversationWorktreeManager(policy, db)
+
+
+def _should_use_legacy_worktree(*, worktree: bool, shorthand: bool, config) -> bool:
+    """Keep manual ``-w`` ownership separate from managed conversation roots."""
+    requested = bool(worktree or shorthand or config.get("worktree", False))
+    if not requested:
+        return False
+
+    from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+
+    policy = resolve_conversation_worktree_policy(config)
+    managed_root = policy.enabled and _interactive_cli_conversation_worktree_applies()
+    return not managed_root
+
+
+def _cli_conversation_worktree_prompt_fragment(binding) -> str:
+    """Match the desktop's certified-worktree instruction for CLI roots."""
+    return (
+        "This interactive conversation is isolated in a certified Git worktree. "
+        f"Use {binding.path} as its workspace (branch {binding.branch or 'unknown'}, "
+        f"base {binding.base_commit or 'unknown'}). "
+        "Do not switch to the stable source checkout."
+    )
 
 # Cron job system for scheduled tasks (execution is handled by the gateway)
 def get_job(*args, **kwargs):
@@ -1957,6 +2012,13 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
         _cprint(f"\033[31m✗ Failed to create worktree: {e}\033[0m")
         return None
 
+    # A Git worktree does not contain ignored directories from the source
+    # checkout. Link the source repository's verified Python environment before
+    # the session starts so ``./.venv/bin/python`` is stable in this worktree.
+    from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
+    bootstrap_worktree_environments(Path(repo_root), wt_path, environment_names=(".venv",))
+
     # Copy files listed in .worktreeinclude (gitignored files the agent needs)
     include_file = Path(repo_root) / ".worktreeinclude"
     if include_file.exists():
@@ -2783,6 +2845,10 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
     import re
     import subprocess
     import time
+    from agent.conversation_worktree import (
+        conversation_worktree_is_manager_owned,
+        conversation_worktree_reclaim_guard,
+    )
 
     worktrees_dir = Path(repo_root) / ".worktrees"
     if not worktrees_dir.exists():
@@ -2860,6 +2926,11 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
 
     def _classify(item):
         entry, mtime, force = item
+        ownership = conversation_worktree_is_manager_owned(entry)
+        if ownership is True:
+            return (entry, mtime, force, "conversation-owned", None)
+        if ownership is None:
+            return (entry, mtime, force, "conversation-unknown", None)
         # Never delete real work, regardless of age or tier. Uncommitted
         # changes and unpushed commits may be a crashed session's in-flight
         # work; only clean, fully-merged/pushed trees (the scratch trees that
@@ -2945,34 +3016,89 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
         if verdict == "locked-live":
             logger.debug("Skipping live-locked worktree: %s", entry.name)
             continue
+        if verdict == "conversation-owned":
+            logger.debug("Skipping manager-owned conversation worktree: %s", entry.name)
+            continue
+        if verdict == "conversation-unknown":
+            logger.debug(
+                "Skipping worktree with uncertain conversation ownership: %s", entry.name
+            )
+            continue
 
-        if lock_state == "dead":
-            try:
-                subprocess.run(
-                    ["git", "worktree", "unlock", str(entry)],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-                )
-            except Exception as e:
-                logger.debug("Failed to unlock dead worktree %s: %s", entry.name, e)
-
-        # Safe to remove
         try:
-            branch_result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, cwd=str(entry),
-            )
-            branch = branch_result.stdout.strip()
+            with conversation_worktree_reclaim_guard(
+                Path(repo_root), entry
+            ) as manager_owned:
+                if manager_owned is True:
+                    logger.debug(
+                        "Skipping newly manager-owned conversation worktree: %s",
+                        entry.name,
+                    )
+                    continue
+                if manager_owned is None:
+                    logger.debug(
+                        "Skipping worktree with uncertain conversation ownership: %s",
+                        entry.name,
+                    )
+                    continue
 
-            remove_result = subprocess.run(
-                ["git", "worktree", "remove", str(entry), "--force"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, cwd=repo_root,
-            )
-            if remove_result.returncode != 0:
-                # Removal failed — keep the branch so any commits stay
-                # reachable rather than orphaning it.
+                if lock_state == "dead":
+                    try:
+                        subprocess.run(
+                            ["git", "worktree", "unlock", str(entry)],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=10,
+                            cwd=repo_root,
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to unlock dead worktree %s: %s", entry.name, e
+                        )
+
+                branch_result = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5,
+                    cwd=str(entry),
+                )
+                branch = branch_result.stdout.strip()
+
+                remove_result = subprocess.run(
+                    ["git", "worktree", "remove", str(entry), "--force"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                    cwd=repo_root,
+                )
+                if remove_result.returncode != 0:
+                    # Removal failed — keep the branch so any commits stay
+                    # reachable rather than orphaning it.
+                    logger.debug(
+                        "Failed to remove worktree %s: %s",
+                        entry.name,
+                        remove_result.stderr.strip(),
+                    )
+                    continue
+                if branch:
+                    subprocess.run(
+                        ["git", "branch", "-D", branch],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=10,
+                        cwd=repo_root,
+                    )
                 logger.debug(
-                    "Failed to remove worktree %s: %s",
-                    entry.name, remove_result.stderr.strip(),
+                    "Pruned stale worktree: %s (force=%s)", entry.name, force
                 )
                 continue
             if branch and verdict == "reap-keep-branch":
@@ -5226,6 +5352,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         checkpoints: bool = False,
         pass_session_id: bool = False,
         ignore_rules: bool = False,
+        manage_conversation_worktree: bool = True,
     ):
         """
         Initialize the Hermes CLI.
@@ -5702,6 +5829,56 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
+
+        # Conversation worktrees are bound after the durable root identity is
+        # known but before any agent or tool can be constructed. Resume only
+        # resolves an existing root binding; it must never create a replacement
+        # or fall back to the stable source checkout.
+        self._conversation_worktree_manager = (
+            _build_cli_conversation_worktree_manager(CLI_CONFIG, self._session_db)
+            if manage_conversation_worktree
+            else None
+        )
+        self._conversation_worktree_binding = None
+        self._conversation_worktree_prompt_note = ""
+        self._conversation_root_lease = None
+        if self._conversation_worktree_manager is not None:
+            if resume:
+                try:
+                    root_session_id = self._session_db.get_conversation_root(self.session_id)
+                except Exception as exc:
+                    from agent.conversation_worktree import ConversationWorktreeError
+
+                    raise ConversationWorktreeError(
+                        "could not resolve the durable CLI conversation root",
+                        phase="state",
+                    ) from exc
+                binding = self._conversation_worktree_manager.resolve_existing_session(
+                    root_session_id
+                )
+                if binding is None:
+                    from agent.conversation_worktree import ConversationWorktreeError
+
+                    raise ConversationWorktreeError(
+                        f"no ready conversation worktree for CLI root {root_session_id}",
+                        phase="recovery",
+                    )
+            else:
+                binding = self._conversation_worktree_manager.bind_new_root_session(
+                    self.session_id, conversation_kind="interactive"
+                )
+                if binding is None:
+                    from agent.conversation_worktree import ConversationWorktreeError
+
+                    raise ConversationWorktreeError(
+                        f"conversation worktree policy did not bind CLI root {self.session_id}",
+                        phase="create",
+                    )
+            self._apply_conversation_worktree_binding(binding)
+            self._conversation_root_lease = self._acquire_conversation_root_lease(
+                binding, surface="cli"
+            )
+            atexit.register(self._release_active_session)
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
         
         # History file for persistent input recall across sessions
@@ -5720,6 +5897,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # don't auto-queue another continuation on top of a user-cancelled
         # turn (which would make Ctrl+C feel like it did nothing).
         self._last_turn_interrupted = False
+        # Raw run_conversation() result dict for the turn that just finished
+        # (or None before the first turn / on an early return). See the reset
+        # in chat() for the single-query kanban-worker consumer.
+        self._last_turn_result = None
         # When stdout/PTY raises EIO (broken pipe after a stream-stall
         # interrupt), freeze further UI paints so we don't spin the main
         # thread at hundreds of escape-sequence writes/sec (#81521).
@@ -5904,14 +6085,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
     def _release_active_session(self) -> None:
         lease = getattr(self, "_active_session_lease", None)
-        if lease is None:
-            return
-        try:
-            lease.release()
-        except Exception:
-            logger.debug("Failed to release active session slot", exc_info=True)
-        finally:
-            self._active_session_lease = None
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception:
+                logger.debug("Failed to release active session slot", exc_info=True)
+            finally:
+                self._active_session_lease = None
+        root_lease = getattr(self, "_conversation_root_lease", None)
+        if root_lease is not None:
+            try:
+                root_lease.release()
+            except Exception:
+                logger.debug("Failed to release conversation root lease", exc_info=True)
+            finally:
+                self._conversation_root_lease = None
 
     def _mark_terminal_io_broken(self, reason: str = "") -> None:
         """Stop UI paints after the PTY/stdout becomes unusable (#81521)."""
@@ -9197,6 +9385,42 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         self._console_print()
 
+    def _apply_conversation_worktree_binding(self, binding) -> None:
+        """Retarget CLI-owned tools and prompt context to a certified binding."""
+        managed_path = str(binding.path)
+        try:
+            os.chdir(managed_path)
+        except OSError as exc:
+            from agent.conversation_worktree import ConversationWorktreeError
+
+            raise ConversationWorktreeError(
+                f"could not enter managed conversation worktree {managed_path}: {exc}",
+                phase="cwd",
+            ) from exc
+
+        prior_note = getattr(self, "_conversation_worktree_prompt_note", "")
+        if prior_note:
+            rendered_prior = f"\n\n[System note: {prior_note}]"
+            self.system_prompt = (self.system_prompt or "").replace(rendered_prior, "")
+
+        note = _cli_conversation_worktree_prompt_fragment(binding)
+        self._conversation_worktree_binding = binding
+        self._conversation_worktree_prompt_note = note
+        self.working_directory = managed_path
+        os.environ["TERMINAL_CWD"] = self.working_directory
+        self.system_prompt = (self.system_prompt or "") + f"\n\n[System note: {note}]"
+
+    @staticmethod
+    def _acquire_conversation_root_lease(binding, *, surface: str):
+        from agent.conversation_worktree import acquire_conversation_root_lease
+
+        return acquire_conversation_root_lease(
+            root_session_id=str(binding.root_session_id),
+            worktree_path=Path(binding.path),
+            repo_common_dir=Path(binding.repo_common_dir),
+            surface=surface,
+        )
+
     def _restore_session_cwd(self, session_meta: dict, *, quiet: bool = False) -> None:
         """Relaunch a resumed session in the directory it was started from.
 
@@ -9212,6 +9436,50 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         A missing directory degrades to a single dim warning rather than a
         crash — repos get moved and deleted.
         """
+        managed_binding = getattr(self, "_conversation_worktree_binding", None)
+        if managed_binding is not None:
+            # Persisted cwd from an older session row is subordinate to the
+            # durable manager binding. Resolve from the current session id so
+            # an in-process /resume targets the selected conversation's root,
+            # not the binding from the session that was just left.
+            try:
+                root_session_id = self._session_db.get_conversation_root(self.session_id)
+                managed_binding = (
+                    self._conversation_worktree_manager.resolve_existing_session(
+                        root_session_id
+                    )
+                )
+            except Exception as exc:
+                from agent.conversation_worktree import ConversationWorktreeError
+
+                raise ConversationWorktreeError(
+                    "could not resolve the resumed CLI conversation worktree",
+                    phase="state",
+                ) from exc
+            if managed_binding is None:
+                from agent.conversation_worktree import ConversationWorktreeError
+
+                raise ConversationWorktreeError(
+                    f"no ready conversation worktree for CLI root {root_session_id}",
+                    phase="recovery",
+                )
+            next_root_lease = self._acquire_conversation_root_lease(
+                managed_binding, surface="cli"
+            )
+            try:
+                self._apply_conversation_worktree_binding(managed_binding)
+            except Exception:
+                next_root_lease.release()
+                raise
+            prior_root_lease = getattr(self, "_conversation_root_lease", None)
+            self._conversation_root_lease = next_root_lease
+            if prior_root_lease is not None:
+                try:
+                    prior_root_lease.release()
+                except Exception:
+                    logger.debug("Failed to release prior root lease", exc_info=True)
+            return
+
         recorded = (session_meta or {}).get("cwd")
         if not recorded:
             return
@@ -10425,6 +10693,50 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
     def new_session(self, silent=False, title=None):
         """Start a fresh session with a new session ID and cleared agent state."""
         old_session_id = self.session_id
+        new_session_start = datetime.now()
+        timestamp_str = new_session_start.strftime("%Y%m%d_%H%M%S")
+        short_uuid = uuid.uuid4().hex[:6]
+        new_session_id = f"{timestamp_str}_{short_uuid}"
+        new_worktree_binding = None
+
+        # Claim, certify, and enter the new root before finalizing, flushing,
+        # or resetting the current conversation. A failed create or cwd
+        # transition leaves every old-session identity and in-memory state
+        # untouched and usable.
+        conversation_worktree_manager = getattr(
+            self, "_conversation_worktree_manager", None
+        )
+        if conversation_worktree_manager is not None:
+            try:
+                new_worktree_binding = (
+                    conversation_worktree_manager.bind_new_root_session(
+                        new_session_id, conversation_kind="interactive"
+                    )
+                )
+                if new_worktree_binding is None:
+                    raise RuntimeError("manager returned no conversation worktree binding")
+                new_root_lease = self._acquire_conversation_root_lease(
+                    new_worktree_binding, surface="cli"
+                )
+                try:
+                    self._apply_conversation_worktree_binding(new_worktree_binding)
+                except Exception:
+                    new_root_lease.release()
+                    raise
+                prior_root_lease = getattr(self, "_conversation_root_lease", None)
+                self._conversation_root_lease = new_root_lease
+                if prior_root_lease is not None:
+                    try:
+                        prior_root_lease.release()
+                    except Exception:
+                        logger.debug("Failed to release prior root lease", exc_info=True)
+            except Exception as exc:
+                _cprint(
+                    f"  Cannot start new session {new_session_id}: "
+                    f"conversation worktree setup failed: {exc}"
+                )
+                return False
+
         _boundary_snapshot = None
         if self.agent and self.conversation_history:
             # Deliver the context-engine boundary synchronously and get back
@@ -10462,10 +10774,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # /resume and `hermes sessions list` (gemini-cli#27770 port).
             self._discard_session_if_empty(old_session_id)
 
-        self.session_start = datetime.now()
-        timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
-        short_uuid = uuid.uuid4().hex[:6]
-        self.session_id = f"{timestamp_str}_{short_uuid}"
+        self.session_start = new_session_start
+        self.session_id = new_session_id
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
         self.conversation_history = []
         self._pending_title = None
@@ -10632,6 +10942,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 print(f"(^_^)v New session started: {title}")
             else:
                 print("(^_^)v New session started!")
+        return True
 
 
     def _consume_pending_resume_selection(self, text: str) -> bool:
@@ -16981,9 +17292,28 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # this to True. Early returns (credential refresh failure, etc.)
         # leave it False, which is correct — those aren't user interrupts.
         self._last_turn_interrupted = False
+        # Raw run_conversation() result for this turn, including "failed" /
+        # "failure_reason" — chat() itself only returns a response string, so
+        # single-query kanban-worker callers (main()'s `-q` branch, which
+        # _default_spawn always uses) read this afterward to detect a turn
+        # that failed outright (all providers/retries exhausted) with no
+        # further assistant turn able to call kanban_complete/kanban_block.
+        # None here means "no result yet" (early return before run_conversation).
+        self._last_turn_result = None
 
         # Refresh provider credentials if needed (handles key rotation transparently)
         if not self._ensure_runtime_credentials():
+            # Kanban workers are supervised through this result rather than
+            # the human-facing return value.  Preserve the distinction
+            # between a preflight/provider failure and a process that exited
+            # cleanly without making a terminal Kanban call; otherwise the
+            # dispatcher sees rc=0 + no result and misclassifies a missing
+            # credential as a protocol violation, causing futile retries.
+            self._last_turn_result = {
+                "failed": True,
+                "failure_reason": "credentials",
+                "error": "runtime credentials unavailable",
+            }
             return None
 
         turn_route = self._resolve_turn_agent_config(message)
@@ -17079,8 +17409,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     self.model, base_url=self.base_url or "", api_key=self.api_key or "",
                     provider=self.provider or "",
                     config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None)
+                from agent.source_provenance import (
+                    clear_agent_source_provenance,
+                    provenance_kwargs_for_agent,
+                )
                 _ctx_result = preprocess_context_references(
-                    message, cwd=os.getcwd(), context_length=_ctx_len)
+                    message,
+                    cwd=os.getcwd(),
+                    context_length=_ctx_len,
+                    **provenance_kwargs_for_agent(agent, establish_turn=True),
+                )
                 if _ctx_result.expanded or _ctx_result.blocked:
                     if _ctx_result.references:
                         _cprint(
@@ -17089,9 +17427,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     for w in _ctx_result.warnings:
                         _cprint(f"  {_DIM}⚠ {w}{_RST}")
                     if _ctx_result.blocked:
+                        clear_agent_source_provenance(agent)
                         return "\n".join(_ctx_result.warnings) or "Context injection refused."
                     message = _ctx_result.message
             except Exception as e:
+                try:
+                    clear_agent_source_provenance(agent)
+                except Exception:
+                    pass
                 logging.debug("@ context reference expansion failed: %s", e)
 
         # Sanitize surrogate characters that can arrive via clipboard paste from
@@ -17538,6 +17881,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
             # Get the final response
             response = result.get("final_response", "") if result else ""
+            # Stash the raw result — see the reset at the top of chat() for why.
+            self._last_turn_result = result
 
             # Session titling now runs at TURN START (agent/turn_context.py)
             # from the user's message alone, so it is already done — or in
@@ -18433,6 +18778,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # See constructor note. Mirrored here for the run() path that skips
         # the earlier __init__ branch.
         self._last_turn_interrupted = False
+        self._last_turn_result = None
         self._should_exit = False
         self._last_ctrl_c_time = 0  # Track double Ctrl+C for force exit
 
@@ -21868,7 +22214,16 @@ def main(
         # ── Git worktree isolation (#652) ──
         # Create an isolated worktree so this agent instance doesn't collide
         # with other agents working on the same repo.
-        use_worktree = worktree or w or CLI_CONFIG.get("worktree", False)
+        # Managed interactive roots and the legacy ephemeral ``-w`` path are
+        # mutually exclusive. Policy resolution happens before legacy setup so
+        # an invalid managed policy fails closed instead of quietly creating a
+        # remote-tip worktree that is deleted at process exit. Task/tool-owned
+        # invocations remain on the explicit legacy contract.
+        use_worktree = _should_use_legacy_worktree(
+            worktree=worktree,
+            shorthand=w,
+            config=CLI_CONFIG,
+        )
         wt_info = None
         if use_worktree:
             # Overlap tool discovery with the network/subprocess-bound
@@ -21996,6 +22351,7 @@ def main(
             checkpoints=checkpoints,
             pass_session_id=pass_session_id,
             ignore_rules=ignore_rules,
+            manage_conversation_worktree=not list_tools and not list_toolsets,
         )
     except ImportError as e:
         # Direct `python cli.py` / `python -m cli` bypasses cmd_chat's
@@ -22110,16 +22466,32 @@ def main(
         # the flush against any rare blocking-I/O case (the reporter measured
         # flush in <1ms; the alarm is a failsafe, not the common path).
         if os.environ.get("HERMES_KANBAN_TASK"):
+            # Exit with a code that survives os._exit()'s WIFEXITED-not-
+            # WIFSIGNALED reporting so detect_crashed_workers can tell "caught
+            # a termination signal and exited fast on purpose" apart from a
+            # worker whose own turn quietly finished with nothing left to do
+            # (both used to report exit 0 and were indistinguishable —
+            # investigation for t_80e6f80b, mechanism 2). Falls back to the
+            # literal 143 if the import ever fails so the handler still exits
+            # non-zero rather than raising.
+            try:
+                from hermes_cli.kanban_db import (
+                    KANBAN_SIGNAL_EXIT_CODE as _SIG_EXIT_CODE,
+                )
+            except Exception:
+                _SIG_EXIT_CODE = 143
             try:
                 import signal as _sig_mod
                 if hasattr(_sig_mod, "SIGALRM"):
                     # Cancel any pre-existing alarm to avoid colliding with
                     # caller-installed timers.
-                    _sig_mod.signal(_sig_mod.SIGALRM, lambda *_: os._exit(0))
+                    _sig_mod.signal(
+                        _sig_mod.SIGALRM, lambda *_: os._exit(_SIG_EXIT_CODE)
+                    )
                     _sig_mod.alarm(5)
             except Exception:
                 pass
-            # os._exit(0) skips atexit AND SessionDB's token-drain hook, so
+            # os._exit() skips atexit AND SessionDB's token-drain hook, so
             # flush + finalize the session store here or the worker's turn
             # (and its usage deltas) never become durable (#88583 / #50881
             # class). Best-effort under the SIGALRM deadman above.
@@ -22137,7 +22509,7 @@ def main(
                     _stream.flush()
                 except Exception:
                     pass
-            os._exit(0)
+            os._exit(_SIG_EXIT_CODE)
         raise KeyboardInterrupt()
     try:
         import signal as _signal
@@ -22412,6 +22784,37 @@ def main(
                 cli._show_security_advisories()
                 cli.chat(query, images=single_query_images or None)
                 cli._print_exit_summary(clear_screen=False)
+
+                # Kanban worker safety net (t_80e6f80b investigation,
+                # mechanism 1): _default_spawn always launches kanban workers
+                # via this human `-q` branch, never the `-Q` quiet branch
+                # above. Unlike that branch, chat() here never used to be
+                # checked for a turn that failed outright (all providers /
+                # retries exhausted) — such a turn has no further assistant
+                # turn left to call kanban_complete/kanban_block itself, so
+                # the process fell through to a plain exit 0. That reads to
+                # detect_crashed_workers as "worker exited cleanly without
+                # calling kanban_complete or kanban_block" (a protocol
+                # violation, tripping the tighter violation-streak breaker)
+                # even though the real cause was an ordinary provider/task
+                # failure. Mirror the -Q branch's failure check so the exit
+                # code tells the truth instead.
+                if os.environ.get("HERMES_KANBAN_TASK"):
+                    _last_result = getattr(cli, "_last_turn_result", None)
+                    if isinstance(_last_result, dict) and _last_result.get("failed"):
+                        _exit_code = 1
+                        if _last_result.get("failure_reason") in (
+                            "rate_limit",
+                            "billing",
+                        ):
+                            try:
+                                from hermes_cli.kanban_db import (
+                                    KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
+                                )
+                                _exit_code = _RL_CODE
+                            except Exception:
+                                _exit_code = 1
+                        sys.exit(_exit_code)
         finally:
             _finalize_single_query(cli)
         return

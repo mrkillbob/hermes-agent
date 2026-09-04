@@ -1300,6 +1300,25 @@ def judge_goal(
             timeout=timeout,
         )
     except Exception as exc:
+        # A fail-closed egress decision means the judge was deliberately not
+        # sent untrusted or oversized context. It is neither an unavailable
+        # provider nor evidence that the goal itself failed, so do not spend
+        # the goal loop's transport-failure budget and auto-pause after five
+        # otherwise healthy worker turns.
+        from agent.llm_egress_firewall import EgressBlocked
+
+        if isinstance(exc, EgressBlocked):
+            logger.info(
+                "goal judge: remote evaluation deferred by egress policy (%s)",
+                ",".join(exc.decision.reason_codes),
+            )
+            return (
+                "continue",
+                "judge deferred: remote policy withheld untrusted or oversized context",
+                False,
+                None,
+                False,
+            )
         logger.info("goal judge: API call failed (%s) — falling through to continue", exc)
         return "continue", f"judge error: {type(exc).__name__}", False, None, True
 

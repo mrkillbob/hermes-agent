@@ -11996,8 +11996,19 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
 
     try:
-        from hermes_cli.web_server import should_require_dashboard_auth
-        if not should_require_dashboard_auth(host):
+        from hermes_cli.web_server import (
+            is_desktop_local_backend,
+            should_require_dashboard_auth,
+        )
+        desktop_local = is_desktop_local_backend(
+            host,
+            int(getattr(args, "port", 9119)),
+            bool(getattr(args, "headless_backend", False)),
+        )
+        if not should_require_dashboard_auth(
+            host,
+            desktop_local=desktop_local,
+        ):
             return  # local-only bind and URL — gate does not engage
     except Exception:
         return  # if we can't tell, defer to start_server's own gate
@@ -12683,7 +12694,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "send", "sessions", "setup",
         "skin", "skills", "slack", "status", "sync", "tools", "uninstall", "update",
         "webhook", "whatsapp", "whatsapp-cloud", "worktree", "chat", "secrets", "security",
-        "browser",
+        "secure-worker", "browser",
         "verify",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
@@ -13802,6 +13813,22 @@ def main():
         return args.func(args)
 
     secrets_parser.set_defaults(func=_dispatch_secrets)
+
+    # =========================================================================
+    # secure-worker command — sanitized remote-model workspace boundary
+    # =========================================================================
+    secure_worker_parser = subparsers.add_parser(
+        "secure-worker",
+        help="Build and audit fail-closed sanitized remote-model workspaces",
+        description=(
+            "Create manifest-bound context packs, render secure local/remote profiles, "
+            "verify proposal diffs, and destroy disposable packs. This command never "
+            "falls back from Docker to the host."
+        ),
+    )
+    from hermes_cli import secure_worker_cli as _secure_worker_cli
+
+    _secure_worker_cli.register_cli(secure_worker_parser)
 
     # =========================================================================
     # egress command — iron-proxy outbound credential-injection firewall

@@ -6821,7 +6821,7 @@ def run_conversation(
                             agent._buffer_status("⚠️ TLS certificate verification failed — trying fallback...")
                         else:
                             agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
-                    if agent._try_activate_fallback():
+                    if agent._try_activate_fallback(reason=classified.reason):
                         active_system_prompt = _sync_failover_system_message(
                             agent, api_messages, active_system_prompt)
                         retry_count = 0
@@ -8189,6 +8189,33 @@ def run_conversation(
                                 pass
                     break
 
+                # A successful terminal Kanban tool has already committed the
+                # task/run transition and the executor has durably flushed its
+                # tool-result row.  Do not ask the model for another step: the
+                # worker no longer owns work, and continuing here can create an
+                # unbounded post-completion command loop.  This cooperative
+                # exit affects only the current dispatcher-owned worker; it
+                # never signals a PID or touches an unrelated process.
+                try:
+                    from agent.kanban_stop import (
+                        successful_kanban_terminal_transition,
+                    )
+
+                    _kanban_transitioned = successful_kanban_terminal_transition(
+                        messages=messages,
+                        tool_calls=assistant_message.tool_calls,
+                    )
+                except Exception:
+                    logger.debug(
+                        "kanban terminal transition check failed",
+                        exc_info=True,
+                    )
+                    _kanban_transitioned = False
+                if _kanban_transitioned:
+                    _turn_exit_reason = "kanban_terminal_transition"
+                    final_response = "Kanban task lifecycle transition recorded."
+                    break
+
                 # Reset per-turn retry counters after successful tool
                 # execution so a single truncation doesn't poison the
                 # entire conversation.
@@ -9071,13 +9098,17 @@ def run_conversation(
                     continue
 
                 # ── Kanban worker terminal-tool stop guard ─────────────
-                # Workers must end with kanban_complete / kanban_block.
+                # Workers must end with a terminal board transition (complete,
+                # block, request review, or request changes).
                 # Models sometimes narrate the next step ("Let me write the
                 # report") and stop with finish_reason=stop — a clean exit
                 # that the dispatcher records as protocol_violation. Nudge
                 # once or twice before allowing that exit.
                 try:
-                    from agent.kanban_stop import build_kanban_stop_nudge
+                    from agent.kanban_stop import (
+                        build_kanban_stop_nudge,
+                        reconcile_kanban_stop_to_review,
+                    )
 
                     _kanban_nudge = build_kanban_stop_nudge(
                         messages=messages,
@@ -9107,7 +9138,7 @@ def run_conversation(
                     )
                     agent._emit_status(
                         "⚠️ Kanban worker tried to exit without "
-                        "kanban_complete/kanban_block — nudging to finish"
+                        "a terminal Kanban transition — nudging to finish"
                     )
                     # Same finalizer contract as verify-on-stop: clear
                     # final_response while continuing so a later budget
@@ -9119,6 +9150,34 @@ def run_conversation(
                     )
                     final_response = None
                     continue
+
+                # The bounded nudge budget was spent and the worker still
+                # returned prose. Preserve that output as review evidence via
+                # the normal ownership/redaction/goal-judge tool path. Review
+                # is terminal for this worker but does NOT infer completion.
+                # If the handoff is rejected, leave lifecycle ownership to the
+                # dispatcher exactly as before.
+                try:
+                    _kanban_review_handoff = reconcile_kanban_stop_to_review(
+                        messages=messages,
+                        final_response=final_response,
+                        attempts=getattr(agent, "_kanban_stop_nudges", 0),
+                    )
+                except Exception:
+                    logger.debug(
+                        "kanban stop-loop review handoff failed", exc_info=True
+                    )
+                    _kanban_review_handoff = False
+                if _kanban_review_handoff:
+                    logger.info(
+                        "kanban stop-loop handed task=%s to review after %d nudge(s)",
+                        os.environ.get("HERMES_KANBAN_TASK", ""),
+                        getattr(agent, "_kanban_stop_nudges", 0),
+                    )
+                    agent._emit_status(
+                        "✅ Kanban worker output handed to review after the "
+                        "terminal-transition nudge budget"
+                    )
 
                 append_message(messages, final_msg)
                 # Make the completed answer durable before leaving the loop —

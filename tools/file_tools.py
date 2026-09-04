@@ -24,6 +24,7 @@ from tools.file_operations import (
 )
 from tools import file_state
 from agent.redact import redact_sensitive_text
+from agent.source_provenance_tools import issue_active_read_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -296,11 +297,17 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
          register a raw-keyed cwd before any tool runs). Normally already
          mirrored into the record at registration; kept as a direct fallback
          so a cleared/never-written record still resolves the workspace.
-      3. A sentinel-free absolute ``$TERMINAL_CWD`` (the worktree path set by
+      3. The active parent session's cwd when a delegated/background task has
+         its own task id but inherits that session's context. This session
+         anchor intentionally precedes ``$TERMINAL_CWD``: the environment
+         value is the session's launch directory, while the recorded cwd may
+         reflect a later ``cd`` in the active conversation.
+      4. A sentinel-free absolute ``$TERMINAL_CWD`` (the worktree path set by
          ``cli.py``/``main.py`` for ``-w`` sessions).
 
-    Returns ``None`` only when there is genuinely no reliable anchor, in which
-    case callers fall back to the process cwd.
+    Returns ``None`` only when there is genuinely no recorded task, inherited
+    session, or environment anchor, in which case callers fall back to the
+    process cwd.
     """
     try:
         from tools.terminal_tool import get_session_cwd
@@ -308,11 +315,39 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
         recorded = get_session_cwd(task_id)
     except Exception:
         recorded = None
+    registered = _registered_task_cwd_override(task_id)
+    try:
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        candidate = recorded or registered
+        worker_cwd = resolve_kanban_worker_cwd(candidate)
+    except Exception:
+        worker_cwd = None
+    if worker_cwd and not _uses_container_paths(task_id):
+        return worker_cwd
     if recorded:
         return recorded
-    registered = _registered_task_cwd_override(task_id)
     if registered:
         return registered
+
+    # Delegated/background agents keep a distinct task id for observability
+    # while inheriting the desktop/gateway session ContextVar so they share the
+    # parent's environment.  The cwd registry is deliberately keyed by the raw
+    # session id, not by the child task id.  Without this bridge, a child's
+    # first relative file read falls through to the process cwd until it runs a
+    # terminal command of its own, producing false "File not found" results in
+    # a worktree that already contains the file.
+    try:
+        from tools.terminal_tool import _current_session_key, get_session_cwd
+
+        current_session_key = _current_session_key()
+        if current_session_key and current_session_key != task_id:
+            inherited = get_session_cwd(current_session_key)
+            if inherited:
+                return inherited
+    except Exception:
+        logger.debug("session cwd inheritance unavailable", exc_info=True)
+
     return _configured_terminal_cwd()
 
 
@@ -1552,6 +1587,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                     "docker_forward_env": config.get("docker_forward_env", []),
                     "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
                     "docker_network": config.get("docker_network", True),
+                    "docker_isolate_host_data": config.get("docker_isolate_host_data", False),
                 }
 
             ssh_config = None
@@ -1669,6 +1705,11 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 "block or produce infinite output."
             )
 
+        _source_path = None
+        if not _uses_container_paths(task_id):
+            _source_path = Path(_expand_tilde(path))
+            if not _source_path.is_absolute():
+                _source_path = Path(_resolve_base_dir(task_id)) / _source_path
         _resolved = _resolve_path_for_task(path, task_id)
 
         # ── Special-file type guard (stat-based) ──────────────────────
@@ -1882,7 +1923,14 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
 
         # ── Perform the read ──────────────────────────────────────────
         file_ops = _get_file_ops(task_id)
-        result = file_ops.read_file(path, offset, limit)
+        # Host-backed environments can be shared by several sessions whose
+        # authoritative cwd records differ.  Resolve relative paths once at
+        # the tool boundary and pass that exact absolute target downstream;
+        # otherwise ShellFileOperations re-resolves against the shared
+        # backend's stale cwd and can read a different checkout than the path
+        # used for guards, tracking, and source-provenance verification.
+        read_path = str(_resolved) if _file_ops_uses_host_paths(file_ops) else path
+        result = file_ops.read_file(read_path, offset, limit)
         result_dict = result.to_dict()
 
         # ── Populate negative-result cache on not-found ───────────────
@@ -1942,6 +1990,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             content_len = len(trimmed)
 
         # ── Redact secrets (after guard check to skip oversized content) ──
+        content_before_redaction = result.content or ""
         if result.content:
             result.content = redact_sensitive_text(result.content, file_read=True)
             result_dict["content"] = result.content
@@ -2039,6 +2088,17 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 f"You have read this exact file region {count} times consecutively. "
                 "The content has not changed since your last read. Use the information you already have. "
                 "If you are stuck in a loop, stop reading and proceed with writing or responding."
+            )
+
+        if result.content == content_before_redaction:
+            issue_active_read_provenance(
+                resolved=_resolved,
+                source_path=_source_path,
+                offset=offset,
+                limit=limit,
+                returned_content=result.content,
+                result_dict=result_dict,
+                file_ops=file_ops,
             )
 
         return json.dumps(result_dict, ensure_ascii=False)
@@ -2718,7 +2778,7 @@ READ_FILE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
+            "path": {"type": "string", "description": "Path to the file to read (absolute or relative)"},
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
             "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 2000, max: 2000). Reads are additionally capped at a ~100K-character budget with a next_offset continuation.", "default": 2000, "maximum": 2000}
         },
