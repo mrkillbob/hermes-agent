@@ -927,6 +927,30 @@ def test_source_presentation_allows_code_constants_and_secret_identifiers(tmp_pa
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_bounded_git_metadata(tmp_path):
+    source = (
+        "8ad4da4e0457672fa035776cbe4e79feb4a1fc39 fix(egress): classify source code assignments safely\n"
+        " .../asset-board.glb |  Bin 0 -> 49600114 bytes\n"
+        " .../manifest.json   |  332 ++++\n"
+        "2\t0\tcontributors/emails/298902573+pierrenode@users.noreply.github.com\n"
+    )
+    path = tmp_path / "git-output.txt"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=4)
+    presentation = json.dumps(
+        {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1))}
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
 def test_source_presentation_still_rejects_quoted_secret_after_code_mask(tmp_path):
     path = tmp_path / "source.py"
     source = "token = super-secret-value\n"

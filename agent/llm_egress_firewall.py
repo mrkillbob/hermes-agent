@@ -401,6 +401,24 @@ _BOUNDED_SOURCE_ADVISORY_KEY = re.compile(
 _BOUNDED_SOURCE_GIT_HEAD_OUTPUT = re.compile(
     r"(?m)^(?P<full>[0-9a-f]{40})\n(?P<prefix>[0-9a-f]{10})[0-9a-f]{0,30} [^\n]*$"
 )
+_BOUNDED_SOURCE_GIT_LOG_ENTRY = re.compile(
+    r"(?m)^(?P<sha>[0-9a-f]{40})(?= "
+    r"(?:fix|feat|test|docs|chore|refactor|perf|build|ci|style|revert|Merge)"
+    r"(?:\(|:|\s))"
+)
+_BOUNDED_SOURCE_DIFF_STAT_BINARY = re.compile(
+    r"(?m)^(?P<prefix>[^\n|]*\|\s+Bin\s+\d+\s*->\s+)"
+    r"(?P<size>\d+)(?P<suffix>\s+bytes\s*)$"
+)
+_BOUNDED_SOURCE_DIFF_STAT_COUNT = re.compile(
+    r"(?m)^(?P<prefix>[^\n|]*\|\s+)(?P<count>\d{1,8})"
+    r"(?P<suffix>\s+[+]+\s*)$"
+)
+_BOUNDED_SOURCE_NUMSTAT_PATH = re.compile(
+    r"(?m)^(?P<prefix>\d+\t\d+\t)(?P<path>"
+    r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.+@-]+(?:\.[A-Za-z0-9_.-]+)?"
+    r"|[A-Za-z0-9_.+@-]+\.[A-Za-z0-9_.-]+)\s*$"
+)
 _BOUNDED_SOURCE_PATH_FRAGMENT = re.compile(
     r"^[A-Za-z0-9]/[A-Za-z0-9._-]{2,}(?:/[A-Za-z0-9._-]{2,})+$"
 )
@@ -1203,8 +1221,21 @@ def _source_text_for_base64_scan(
         return "<diff metadata>"
 
     masked = _BOUNDED_SOURCE_DIFF_METADATA.sub(mask_diff_metadata, masked)
+    masked = _BOUNDED_SOURCE_GIT_LOG_ENTRY.sub("<source-control-sha>", masked)
     masked = _BOUNDED_SOURCE_GIT_HEAD_OUTPUT.sub(
         lambda match: f"<source-control-sha>\n<source-control-sha> {match.group(0).split(' ', 1)[1]}",
+        masked,
+    )
+    masked = _BOUNDED_SOURCE_DIFF_STAT_BINARY.sub(
+        "<source stat bytes>",
+        masked,
+    )
+    masked = _BOUNDED_SOURCE_DIFF_STAT_COUNT.sub(
+        "<source stat count>",
+        masked,
+    )
+    masked = _BOUNDED_SOURCE_NUMSTAT_PATH.sub(
+        "<source stat path>",
         masked,
     )
     masked = _BOUNDED_SOURCE_CLI_VALUE.sub(
