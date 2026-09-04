@@ -6823,8 +6823,6 @@ def _service_unit_supports_graceful_sigusr1_restart(svc_name: str) -> bool:
 
 def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
     """Print an explicit incomplete-update warning for unrestarted units."""
-    from hermes_cli.gateway import is_macos
-
     if not failed_units:
         return
     # Preserve discovery order while de-duplicating.
@@ -6839,7 +6837,7 @@ def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
     print("⚠ Update incomplete — some units were not restarted:")
     for name in ordered:
         print(f"    - {name}")
-    if is_macos():
+    if all(name.startswith("ai.hermes.") for name in ordered):
         # A launchd label reaches this list when launchd was not supervising a
         # live process after the restart (#88848), so the unit is not merely
         # stale — it is very likely deregistered, and `launchctl kickstart`
@@ -6850,6 +6848,7 @@ def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
         print("    launchctl list | grep <label>")
         print("    launchctl bootstrap gui/$(id -u) "
               "~/Library/LaunchAgents/<label>.plist")
+        print("    launchctl kickstart -k gui/$UID/<label>   # verify restart")
         return
     print("  Skipped units may still be running pre-update code (mixed")
     print("  sys.modules). Restart them manually, then verify:")

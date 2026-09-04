@@ -2708,6 +2708,7 @@ if _config_path.exists():
                 "docker_extra_args": "TERMINAL_DOCKER_EXTRA_ARGS",
                 "docker_shm_size": "TERMINAL_DOCKER_SHM_SIZE",
                 "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
+                "docker_isolate_host_data": "TERMINAL_DOCKER_ISOLATE_HOST_DATA",
                 "docker_network": "TERMINAL_DOCKER_NETWORK",
                 "docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
                 "docker_persist_across_processes": "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
@@ -5824,7 +5825,28 @@ class TurnRunner:
         if cfg_channel_prompt:
             combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
 
+        voice_fast_lane = bool(getattr(ctx.source, "_voice_fast_lane", False))
+        voice_fast_lane_task = (
+            voice_fast_lane
+            and self._runner._voice_fast_lane_requests_work(ctx.message or "")
+        )
+        if voice_fast_lane:
+            if voice_fast_lane_task:
+                lane_prompt = (
+                    "[Voice fast lane: the user explicitly requested work. "
+                    "Proceed normally, but acknowledge the task briefly before details.]"
+                )
+            else:
+                lane_prompt = (
+                    "[Voice fast lane: answer in one to three brief, natural spoken "
+                    "sentences. Do not offer or attempt tools, background work, or a "
+                    "multi-step plan unless the user explicitly asks you to perform work.]"
+                )
+            combined_ephemeral = (combined_ephemeral + "\n\n" + lane_prompt).strip()
+
         max_iterations = _current_max_iterations()
+        if voice_fast_lane and not voice_fast_lane_task:
+            max_iterations = min(max_iterations, 2)
 
         try:
             model, runtime_kwargs = self._runner._resolve_session_agent_runtime(
@@ -5967,6 +5989,10 @@ class TurnRunner:
         _plat_gw_cfg = _platforms_gw_cfg.get(platform_key) or {}
         _skip_context = _plat_gw_cfg.get("skip_context_files")
         skip_context_files = bool(_skip_context) if _skip_context is not None else False
+        if voice_fast_lane and not voice_fast_lane_task:
+            # The persona remains loaded, while expensive project-context
+            # discovery stays out of short spoken exchanges.
+            skip_context_files = True
 
         # Check agent cache — reuse the AIAgent from the previous message
         # in this session to preserve the frozen system prompt and tool
@@ -11043,6 +11069,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _busy_state = self._peek_session_state(session_key)
         running_agent = _busy_state.turn.agent if _busy_state else None
 
+        # Discord's voice fast lane always queues a later utterance. The
+        # global default is intentionally interrupt for typed correction
+        # workflows, but speech often arrives in several STT chunks and an
+        # interrupt here otherwise discards a nearly-complete spoken answer.
+        # The FIFO retains MessageType.VOICE so the eventual reply still goes
+        # through TTS. Explicit /stop and /new take their separate command
+        # path before this handler and remain forceful controls.
+        if self._is_voice_fast_lane_event(event):
+            self._queue_or_replace_pending_event(session_key, event)
+            logger.info("Queued voice fast-lane follow-up for busy session %s", session_key)
+            return True
+
         busy_text_mode = self._effective_busy_text_mode(event.source)
         if (
             event.message_type == MessageType.TEXT
@@ -14967,17 +15005,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             profile=handoff_profile,
         )
 
-        # Make sure there's an entry in the session_store for this key. If
-        # the home channel has never been used, get_or_create_session
-        # creates one; switch_session then re-points it.
-        await self.async_session_store.get_or_create_session(dest_source)
+        # Verify the CLI-owned workspace before publishing any destination
+        # route. This is an ownership transfer, not a new interactive root:
+        # it must never claim a second conversation worktree for the channel.
+        handoff_cwd, handoff_binding = (
+            await self.async_session_store.resolve_task_owned_workspace(
+                cli_session_id, str(row.get("cwd") or "")
+            )
+        )
+
+        # Make sure there's a task-owned destination entry for this key. If
+        # the home channel has never been used, this creates routing state but
+        # deliberately bypasses interactive conversation allocation.
+        prior_entry = await self.async_session_store.get_or_create_session(
+            dest_source, conversation_kind="task"
+        )
 
         # Re-bind the destination key to the CLI session_id. switch_session
         # ends the prior session in SQLite and reopens the CLI session under
         # the new key. The CLI's transcript becomes the active one for the
         # gateway from this moment on.
-        switched = await self.async_session_store.switch_session(session_key, cli_session_id)
+        switched = await self.async_session_store.switch_session(
+            session_key,
+            cli_session_id,
+            task_owned_cwd=handoff_cwd,
+            conversation_worktree=handoff_binding,
+        )
         if switched is None:
+            await self.async_session_store.reconcile_conversation_root_transition(
+                handoff_binding, None
+            )
             raise RuntimeError(
                 f"could not switch session key {session_key} → {cli_session_id}"
             )
@@ -14989,6 +15046,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Cancel any in-flight running-agent state for the destination key
         # so the synthetic turn isn't queued behind a stale running flag.
         self._release_running_agent_state(session_key)
+        await self.async_session_store.reconcile_conversation_root_transition(
+            prior_entry, switched
+        )
 
         synthetic_text = (
             f"[Session was just handed off from CLI (\"{cli_title}\") to this "
@@ -17770,6 +17830,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return None
 
+        await self.async_session_store.reconcile_conversation_root_transition(
+            session_entry, switched
+        )
+
         logger.info(
             "Pinned async-delegation completion to owning session %s "
             "(was %s) for routing key %s (#57498)",
@@ -19622,6 +19686,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "please resend shortly."
             )
 
+        # Discord and Photon interactive roots must be certified before the
+        # active-turn lease/generation is claimed. A missing SessionDB or
+        # manager is therefore a user-visible refusal with no agent, context,
+        # cache, or generation mutation and no process-cwd fallback.
+        if (
+            not is_internal
+            and SessionStore._supports_conversation_worktree(source)
+        ):
+            from agent.conversation_worktree import ConversationWorktreeError
+
+            try:
+                prepared_entry = await self.async_session_store.get_or_create_session(
+                    source, conversation_kind="interactive"
+                )
+            except ConversationWorktreeError as exc:
+                logger.warning(
+                    "Refusing interactive message because conversation worktree "
+                    "setup failed: %s",
+                    exc,
+                )
+                return (
+                    "Cannot start this conversation: conversation worktree "
+                    f"setup failed: {exc}"
+                )
+            setattr(event, "_gateway_prepared_session_entry", prepared_entry)
+
         # ── Claim this session before any await ───────────────────────
         # Between here and _run_agent registering the real AIAgent, there
         # are numerous await points (hooks, vision enrichment, STT,
@@ -20525,14 +20615,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 return
         else:
-            # Internal wakes must observe reset policy without becoming user
-            # activity themselves. Otherwise periodic Kanban/process
-            # notifications keep the stable routing key alive across every
-            # daily/idle boundary.
-            session_entry = await self.async_session_store.get_or_create_session(
-                source,
-                touch_activity=not bool(getattr(event, "internal", False)),
-            )
+            prepared_entry = getattr(event, "_gateway_prepared_session_entry", None)
+            if prepared_entry is not None:
+                session_entry = prepared_entry
+            else:
+                # Internal wakes must observe reset policy without becoming user
+                # activity themselves. Otherwise periodic Kanban/process
+                # notifications keep the stable routing key alive across every
+                # daily/idle boundary.
+                session_entry = await self.async_session_store.get_or_create_session(
+                    source,
+                    touch_activity=not bool(getattr(event, "internal", False)),
+                    # Cron, Kanban, plugin, and delegated completion events may
+                    # target a chat before its user root exists. They retain their
+                    # task-owned cwd and must never allocate a conversation tree.
+                    conversation_kind=(
+                        "task"
+                        if bool(getattr(event, "internal", False))
+                        else "interactive"
+                    ),
+                )
         session_key = session_entry.session_key
         if not strict_session and pinned_session_id:
             resolved_entry = await self._resolve_async_delegation_session(
@@ -22576,6 +22678,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 new_entry = await self.async_session_store.reset_session(session_key)
                 self._evict_cached_agent(session_key)
+                await self.async_session_store.reconcile_conversation_root_transition(
+                    session_entry, new_entry
+                )
                 # Conversation boundary: one funnel call clears every
                 # conversation-scoped per-session dict (#58403 and siblings).
                 # See _CONVERSATION_SCOPED_STATE.
@@ -23981,6 +24086,75 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         recent_store[key] = recent[-5:]
         return False
 
+    @staticmethod
+    def _voice_fast_lane_requests_work(transcript: str) -> bool:
+        """Return True only for an explicit operational request in voice.
+
+        The voice fast lane is deliberately fail-closed: ordinary conversation
+        gets no tool schemas, which avoids model tool loops and makes the
+        prompt much smaller. Operators retain a natural escape hatch by plainly
+        asking Hermes to inspect, change, test, or otherwise perform work.
+        This is a routing guard, not an authorization grant; normal tool
+        approvals and platform permissions still apply.
+        """
+        text = (transcript or "").strip().lower()
+        if not text:
+            return False
+        return bool(
+            re.search(
+                r"\b(?:analy[sz]e|build|change|check|commit|configure|create|"
+                r"debug|deploy|diagnose|edit|fix|implement|inspect|install|"
+                r"investigate|look\s+up|merge|patch|pull|push|review|run|"
+                r"search|test|update|write)\b",
+                text,
+            )
+        )
+
+    @staticmethod
+    def _voice_fast_lane_config() -> dict:
+        """Read the optional Discord-only voice fast-lane configuration."""
+        try:
+            config = _load_gateway_config()
+        except Exception:
+            return {}
+        discord = config.get("discord") if isinstance(config, dict) else None
+        if not isinstance(discord, dict):
+            return {}
+        policy = discord.get("voice_fast_lane")
+        return dict(policy) if isinstance(policy, dict) else {}
+
+    def _voice_fast_lane_matches(
+        self, adapter, guild_id: int, user_id: int
+    ) -> tuple[bool, str]:
+        """Match an inbound speaker to the configured Discord voice fast lane.
+
+        Matching requires the exact configured voice channel and an allowlisted
+        speaker. Missing/malformed config or incomplete Discord state disables
+        the lane rather than broadening it to another guild/channel.
+        """
+        policy = self._voice_fast_lane_config()
+        if policy.get("enabled") is not True:
+            return False, ""
+        channel_id = str(policy.get("channel_id") or "").strip()
+        user_ids = policy.get("user_ids")
+        if not channel_id or not isinstance(user_ids, list):
+            return False, ""
+        if str(user_id) not in {str(item) for item in user_ids}:
+            return False, ""
+        clients = getattr(adapter, "_voice_clients", None)
+        client = clients.get(guild_id) if isinstance(clients, dict) else None
+        actual_channel_id = str(getattr(getattr(client, "channel", None), "id", "") or "")
+        if actual_channel_id != channel_id:
+            return False, ""
+        return True, channel_id
+
+    @staticmethod
+    def _is_voice_fast_lane_event(event: MessageEvent) -> bool:
+        return bool(
+            getattr(event, "message_type", None) == MessageType.VOICE
+            and getattr(getattr(event, "source", None), "_voice_fast_lane", False)
+        )
+
     async def _handle_voice_channel_input(
         self, guild_id: int, user_id: int, transcript: str
     ):
@@ -24057,6 +24231,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             raw_message=SimpleNamespace(guild_id=guild_id, guild=None),
             channel_prompt=channel_prompt,
         )
+
+        fast_lane, voice_channel_id = self._voice_fast_lane_matches(
+            adapter, guild_id, user_id
+        )
+        if fast_lane:
+            # Keep delivery in the bound text channel while assigning this
+            # spoken conversation its own small session. These are private
+            # transport hints and intentionally do not serialize with Source.
+            source._voice_fast_lane = True
+            source._session_key_lane = f"discord-voice:{voice_channel_id}"
+            event.metadata["voice_fast_lane"] = True
+            logger.info(
+                "Voice fast lane enabled for guild=%s channel=%s user=%s",
+                guild_id,
+                voice_channel_id,
+                user_id,
+            )
 
         await adapter.handle_message(event)
 
@@ -26523,6 +26714,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             session_key=context.session_key,
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
+            cwd=context.cwd,
             async_delivery=_async_delivery,
             cron_session="",
         )
@@ -30280,6 +30472,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from agent.skill_utils import parse_config_string_list
 
         disabled_toolsets = parse_config_string_list(agent_cfg_local.get("disabled_toolsets")) or None
+        if (
+            bool(getattr(source, "_voice_fast_lane", False))
+            and not self._voice_fast_lane_requests_work(message)
+        ):
+            # No autonomous tool loop for conversational voice. An explicit
+            # operation request retains the configured Discord toolsets and
+            # every downstream approval/authorization guard.
+            enabled_toolsets = []
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):

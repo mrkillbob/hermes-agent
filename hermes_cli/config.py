@@ -2383,6 +2383,21 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
 
     issues: List[ConfigIssue] = []
 
+    # ── code_execution.max_tool_calls: non-negative integer ─────────────
+    code_execution_cfg = config.get("code_execution")
+    if isinstance(code_execution_cfg, dict) and "max_tool_calls" in code_execution_cfg:
+        max_tool_calls = code_execution_cfg.get("max_tool_calls")
+        if (
+            not isinstance(max_tool_calls, int)
+            or isinstance(max_tool_calls, bool)
+            or max_tool_calls < 0
+        ):
+            issues.append(ConfigIssue(
+                "error",
+                "code_execution.max_tool_calls must be a non-negative integer",
+                "Set a positive limit, or zero for unlimited tool calls",
+            ))
+
     # ── voice.submit_mode: direct | draft ────────────────────────────────
     voice_cfg = config.get("voice")
     if isinstance(voice_cfg, dict) and "submit_mode" in voice_cfg:
@@ -3930,6 +3945,7 @@ TERMINAL_CONFIG_ENV_MAP = {
     "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
     "docker_env": "TERMINAL_DOCKER_ENV",
     "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
+    "docker_isolate_host_data": "TERMINAL_DOCKER_ISOLATE_HOST_DATA",
     "docker_network": "TERMINAL_DOCKER_NETWORK",
     "docker_extra_args": "TERMINAL_DOCKER_EXTRA_ARGS",
     "docker_shm_size": "TERMINAL_DOCKER_SHM_SIZE",
@@ -4005,6 +4021,9 @@ def apply_terminal_config_to_env(
     missing env vars; they never replace unrelated exported/.env values.
     """
     target = os.environ if env is None else env
+    from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+    worker_workspace = resolve_kanban_worker_cwd(env=target)
 
     raw_config = read_raw_config()
     raw_terminal_cfg = raw_config.get("terminal")
@@ -4036,10 +4055,39 @@ def apply_terminal_config_to_env(
     for cfg_key, env_var in TERMINAL_CONFIG_ENV_MAP.items():
         if cfg_key not in terminal_cfg:
             continue
+        pinned_worker_cwd = False
+        if (
+            cfg_key == "cwd"
+            and target.get("HERMES_KANBAN_TASK")
+            and target.get("HERMES_KANBAN_WORKSPACE")
+            and target.get("TERMINAL_CWD")
+        ):
+            try:
+                pinned_worker_cwd = Path(target["TERMINAL_CWD"]).resolve().is_relative_to(
+                    Path(target["HERMES_KANBAN_WORKSPACE"]).resolve()
+                )
+            except (OSError, RuntimeError):
+                pinned_worker_cwd = False
+        if pinned_worker_cwd:
+            # Dispatcher-owned workers are already pinned to their isolated
+            # task worktree or one of its subdirectories. A profile's default
+            # terminal.cwd is only a launch fallback and must not redirect tools
+            # back into the stable base.
+            continue
         value = terminal_cfg[cfg_key]
         if not _terminal_config_value_is_bridgeable(cfg_key, value):
             continue
         if cfg_key == "cwd":
+            # The dispatcher already resolved and validated this task's
+            # workspace before spawning the worker.  A profile-level
+            # terminal.cwd is the profile's stable launch base, not authority
+            # for this individual task.  Keep the worker pin across every
+            # config bridge (including terminal_tool's late first-use bridge),
+            # otherwise relative terminal/file operations escape the assigned
+            # worktree even though Popen used the correct cwd.
+            if worker_workspace is not None:
+                target[env_var] = worker_workspace
+                continue
             raw_cwd = str(value or "").strip()
             if isinstance(value, str) and not _is_ssh_remote_tilde_cwd(
                 terminal_backend, raw_cwd
