@@ -330,6 +330,7 @@ _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS = frozenset(
         "EXTO",
         "FIRE",
         "GATE",
+        "HOST",
         "INIT",
         "INTRADAY",
         "KEYS",

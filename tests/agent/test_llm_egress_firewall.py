@@ -912,6 +912,7 @@ def test_source_presentation_allows_bounded_worker_source_syntax(tmp_path):
         "run: pwsh -NoProfile -ExecutionPolicy Bypass -File test.ps1\n"
         "pytest -o addopts= -v -p no:cacheprovider\n"
         "# REAL detection runs against the live process\n"
+        "// callback hooks belong to the HOST component\n"
     )
     path = tmp_path / "worker-source.py"
     path.write_text(source, encoding="utf-8")
