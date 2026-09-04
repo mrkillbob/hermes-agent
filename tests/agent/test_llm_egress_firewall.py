@@ -903,6 +903,55 @@ def test_source_presentation_allows_fixed_github_actions_literals(tmp_path):
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_bounded_worker_source_syntax(tmp_path):
+    source = (
+        "_SDK_CONTROL_KEYS=frozenset({\"_hermes_source_provenance\"})\n"
+        "# arm a short cooldown so the NEXT turn stays gated\n"
+        "# Why this job: the image is 5GB+; passing it is expensive\n"
+        "group: installer-tests-${{ github.ref }}\n"
+        "run: pwsh -NoProfile -ExecutionPolicy Bypass -File test.ps1\n"
+        "pytest -o addopts= -v -p no:cacheprovider\n"
+        "# REAL detection runs against the live process\n"
+    )
+    path = tmp_path / "worker-source.py"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=len(source.splitlines()))
+    presentation = json.dumps(
+        {
+            "content": "\n".join(
+                f"{index}|{line}"
+                for index, line in enumerate(source.split("\n"), 1)
+            )
+        }
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
+def test_source_presentation_still_rejects_short_encoded_payload(tmp_path):
+    source = "AQID\n"
+    path = tmp_path / "encoded.txt"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path)
+    presentation = json.dumps({"content": "1|AQID\n2|"})
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _source_presentation_request(grant, presentation),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "base64_payload" in exc_info.value.decision.reason_codes
+
+
 def test_source_presentation_allows_code_constants_and_secret_identifiers(tmp_path):
     path = tmp_path / "source.py"
     source = (
