@@ -51,8 +51,8 @@ on:
         value: ${{ jobs.aggregate.outputs.critical_findings }}
 
 permissions:
-  pull-requests: write
   contents: read
+  pull-requests: read
 
 jobs:
   scan:
