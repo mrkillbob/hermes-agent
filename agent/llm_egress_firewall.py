@@ -388,6 +388,16 @@ _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS = frozenset(
         "top_slowest_",
         "atr_",
         "adx_",
+        # Exact atoms observed in authorized PR repair source presentations.
+        # Keep these source-presentation-only; untrusted/generated context
+        # still goes through the ordinary fail-closed Base64 detector.
+        "400+",
+        "262_144",
+        "SAME",
+        "DOES",
+        "DISABLE",
+        "LOOPBACK",
+        "compression-SUMMARY",
     }
 )
 # Source-granted PR diffs contain bounded command filters, issue keys, and

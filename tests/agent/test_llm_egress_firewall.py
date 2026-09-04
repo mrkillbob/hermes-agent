@@ -903,6 +903,33 @@ def test_source_presentation_allows_fixed_github_actions_literals(tmp_path):
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_exact_repair_source_atoms_but_not_payloads(tmp_path):
+    source = (
+        "SAME\n"
+        "400+\n"
+        "compression-SUMMARY\n"
+        "DOES\n"
+        "DISABLE\n"
+        "262_144\n"
+        "LOOPBACK\n"
+    )
+    path = tmp_path / "repair-source.py"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=7)
+    presentation = json.dumps(
+        {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1))}
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
 def test_source_presentation_allows_bounded_worker_source_syntax(tmp_path):
     source = (
         "_SDK_CONTROL_KEYS=frozenset({\"_hermes_source_provenance\"})\n"
