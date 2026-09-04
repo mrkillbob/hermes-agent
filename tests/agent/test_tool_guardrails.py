@@ -33,6 +33,27 @@ def test_tool_call_signature_hashes_canonical_nested_unicode_args_without_exposi
     assert "☤" not in json.dumps(metadata)
 
 
+def test_default_config_is_soft_warning_only_with_hard_stop_disabled():
+    cfg = ToolCallGuardrailConfig()
+
+    assert cfg.warnings_enabled is True
+    assert cfg.hard_stop_enabled is False
+    assert cfg.non_interactive_hard_stop_enabled is True
+    assert cfg.exact_failure_warn_after == 2
+    assert cfg.same_tool_failure_warn_after == 3
+    assert cfg.no_progress_warn_after == 2
+    assert cfg.exact_failure_block_after == 5
+    assert cfg.same_tool_failure_halt_after == 8
+    assert cfg.no_progress_block_after == 5
+
+
+def test_guardrail_progress_state_is_initialized_for_each_turn():
+    controller = ToolCallGuardrailController()
+
+    assert controller._progress_since_failure == {}
+    controller._progress_since_failure[ToolCallSignature.from_call("terminal", {})] = True
+    controller.reset_for_turn()
+    assert controller._progress_since_failure == {}
 
 
 def test_config_parses_nested_warn_and_hard_stop_thresholds():
@@ -61,6 +82,29 @@ def test_config_parses_nested_warn_and_hard_stop_thresholds():
     assert cfg.exact_failure_block_after == 6
     assert cfg.same_tool_failure_halt_after == 7
     assert cfg.no_progress_block_after == 8
+
+
+def test_gateway_platform_defaults_to_hard_stop_without_changing_interactive_defaults():
+    interactive_configs = [
+        ToolCallGuardrailConfig.from_mapping({}, platform=platform)
+        for platform in ("cli", "tui", "desktop", "acp")
+    ]
+    telegram_cfg = ToolCallGuardrailConfig.from_mapping({}, platform="telegram")
+    cron_cfg = ToolCallGuardrailConfig.from_mapping({}, platform="cron")
+
+    assert all(cfg.hard_stop_enabled is False for cfg in interactive_configs)
+    assert telegram_cfg.hard_stop_enabled is True
+    assert cron_cfg.hard_stop_enabled is True
+
+
+def test_non_interactive_hard_stop_can_be_disabled_explicitly():
+    cfg = ToolCallGuardrailConfig.from_mapping(
+        {"non_interactive_hard_stop_enabled": False},
+        platform="telegram",
+    )
+
+    assert cfg.hard_stop_enabled is False
+    assert cfg.non_interactive_hard_stop_enabled is False
 
 
 def test_default_repeated_identical_failed_call_warns_without_blocking():
@@ -107,6 +151,39 @@ def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution()
     assert blocked.count == 2
 
 
+def test_distinct_terminal_failure_causes_do_not_accumulate_as_one_broken_path():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            exact_failure_block_after=2,
+            same_tool_failure_warn_after=2,
+            same_tool_failure_halt_after=3,
+        )
+    )
+
+    decisions = [
+        controller.after_call(
+            "terminal",
+            {"command": "git status"},
+            '{"exit_code":1,"stderr":"not a git repository"}',
+            failed=True,
+        ),
+        controller.after_call(
+            "terminal",
+            {"command": "pytest focused"},
+            '{"exit_code":1,"stderr":"assertion reproduced"}',
+            failed=True,
+        ),
+        controller.after_call(
+            "terminal",
+            {"command": "rg expected path"},
+            '{"exit_code":2,"stderr":"path missing"}',
+            failed=True,
+        ),
+    ]
+
+    assert [decision.action for decision in decisions] == ["allow", "allow", "allow"]
+    assert controller.halt_decision is None
 
 
 
@@ -117,6 +194,43 @@ def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution()
 
 
 
+
+
+
+
+def test_skill_read_tools_are_idempotent_and_block_repeated_identical_success_output():
+    cases = [
+        (
+            "skill_view",
+            {"name": "gui-agent-ml-operations"},
+            '{"success":true,"name":"gui-agent-ml-operations","content":"same"}',
+        ),
+        (
+            "skills_list",
+            {"category": "mlops"},
+            '{"success":true,"skills":[{"name":"gui-agent-ml-operations"}]}',
+        ),
+    ]
+
+    for tool_name, args, result in cases:
+        controller = ToolCallGuardrailController(
+            ToolCallGuardrailConfig(
+                hard_stop_enabled=True,
+                no_progress_warn_after=2,
+                no_progress_block_after=2,
+            )
+        )
+
+        assert controller.before_call(tool_name, args).action == "allow"
+        assert controller.after_call(tool_name, args, result, failed=False).action == "allow"
+        assert controller.before_call(tool_name, args).action == "allow"
+        warn = controller.after_call(tool_name, args, result, failed=False)
+        assert warn.action == "warn"
+        assert warn.code == "idempotent_no_progress_warning"
+
+        blocked = controller.before_call(tool_name, args)
+        assert blocked.action == "block"
+        assert blocked.code == "idempotent_no_progress_block"
 
 
 def test_mutating_or_unknown_tools_are_not_blocked_for_repeated_identical_success_output_by_default():
@@ -129,6 +243,49 @@ def test_mutating_or_unknown_tools_are_not_blocked_for_repeated_identical_succes
         assert controller.after_call("write_file", {"path": "/tmp/x", "content": "x"}, "ok", failed=False).action == "allow"
         assert controller.before_call("custom_tool", {"x": 1}).action == "allow"
         assert controller.after_call("custom_tool", {"x": 1}, "ok", failed=False).action == "allow"
+
+
+def test_identical_call_streak_halts_any_tool_when_hard_stop_enabled():
+    # #89069 / #100849 bundle: a model replaying the same SUCCESSFUL
+    # terminal/skill_view call with a byte-identical result is not covered by
+    # the idempotent_tools no-progress block. The consecutive-identical
+    # streak (observe_call) is tool-agnostic; under hard_stop it must halt.
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(hard_stop_enabled=True, no_progress_block_after=5)
+    )
+    args = {"command": "hermes config get memory.provider"}
+    for i in range(1, 5):
+        controller.after_call("terminal", args, "local\n", failed=False)
+        controller.observe_call("terminal", args, "local\n", failed=False)
+        assert controller.halt_decision is None, f"halted early at {i}"
+
+    controller.after_call("terminal", args, "local\n", failed=False)
+    controller.observe_call("terminal", args, "local\n", failed=False)
+    halt = controller.halt_decision
+    assert halt is not None and halt.should_halt
+    assert halt.code == "identical_call_streak_halt"
+    assert halt.tool_name == "terminal" and halt.count == 5
+
+
+def test_identical_call_streak_never_halts_when_hard_stop_disabled_or_for_pollers():
+    soft = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(hard_stop_enabled=False, no_progress_block_after=2)
+    )
+    for _ in range(6):
+        soft.observe_call("terminal", {"command": "ls"}, "a\nb\n", failed=False)
+    assert soft.halt_decision is None  # notice-only in interactive sessions
+
+    hard = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(hard_stop_enabled=True, no_progress_block_after=2)
+    )
+    for _ in range(6):
+        hard.observe_call("process_manage", {"action": "poll", "session_id": "p1"}, "running", failed=False)
+    assert hard.halt_decision is None  # an unchanged poll is legitimate progress
+
+    # A changed result resets the streak.
+    for i in range(6):
+        hard.observe_call("terminal", {"command": "date"}, f"t{i}", failed=False)
+    assert hard.halt_decision is None
 
 
 
@@ -167,8 +324,6 @@ def test_web_search_cap_blocks_after_limit_regardless_of_hard_stop():
     assert decision.action == "block"
     assert decision.code == "loop_web_search_cap"
     assert decision.should_halt is True
-
-
 
 
 

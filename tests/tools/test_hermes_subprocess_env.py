@@ -15,6 +15,7 @@ import os
 from unittest.mock import patch
 
 from tools.environments.local import (
+    _sanitize_subprocess_env,
     hermes_subprocess_env,
     _ALWAYS_STRIP_KEYS,
     _HERMES_PROVIDER_ENV_FORCE_PREFIX,
@@ -23,6 +24,7 @@ from tools.environments.local import (
 
 _TIER1_SAMPLE = {
     "GH_TOKEN": "ghp_secret",
+    "HERMES_GITHUB_BOT_TOKEN": "github_pat_bot_secret",
     "TELEGRAM_BOT_TOKEN": "bot-token",
     "SLACK_APP_TOKEN": "xapp-secret",
     "MODAL_TOKEN_SECRET": "modal-secret",
@@ -62,10 +64,42 @@ class TestStripByDefault:
         for var in _TIER1_SAMPLE:
             assert var not in result, f"{var} leaked (Tier-1) with inherit_credentials=False"
 
+    def test_buzz_platform_vars_stripped_by_default(self):
+        """BUZZ_* first-party platform credentials must NOT reach the
+        non-terminal spawn surface (browser / TUI host / copilot-executor),
+        even though they pass through to terminal children (issue #78026)."""
+        buzz_sample = {
+            "BUZZ_PRIVATE_KEY": "nsec1fake",
+            "BUZZ_AUTH_TAG": '["tag","data","kind","sig"]',
+            "BUZZ_RELAY_URL": "https://mycommunity.communities.buzz.xyz",
+        }
+        result = _build(buzz_sample)
+        for var in buzz_sample:
+            assert var not in result, f"{var} leaked via hermes_subprocess_env"
+
 
     def test_pythonutf8_set(self):
         result = _build()
         assert result.get("PYTHONUTF8") == "1"
+
+    def test_raw_gh_cannot_fall_through_to_operator_keyring(self):
+        result = _build({"GH_CONFIG_DIR": "/home/user/.config/gh"})
+        assert result["GH_CONFIG_DIR"] == os.devnull
+        assert result["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert result["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_terminal_env_also_blocks_bot_token_and_operator_keyring(self):
+        result = _sanitize_subprocess_env(
+            {
+                "PATH": "/usr/bin:/bin",
+                "GH_CONFIG_DIR": "/home/user/.config/gh",
+                "HERMES_GITHUB_BOT_TOKEN": "github_pat_bot_secret",
+            }
+        )
+        assert "HERMES_GITHUB_BOT_TOKEN" not in result
+        assert result["GH_CONFIG_DIR"] == os.devnull
+        assert result["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert result["GIT_TERMINAL_PROMPT"] == "0"
 
 
 class TestInheritCredentials:

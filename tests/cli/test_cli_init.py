@@ -465,6 +465,25 @@ class TestNestedDictModelDefaultPairing:
         assert "unrestricted" in output
         assert "Slash commands: all available" in output
 
+    def test_provider_prefixed_startup_model_overrides_stale_provider(self):
+        cli = _make_cli(
+            config_overrides={
+                "model": {
+                    "default": "anthropic/claude-opus-4.6",
+                    "provider": "anthropic",
+                },
+                "providers": {
+                    "nous": {
+                        "base_url": "https://inference-api.nousresearch.com/v1",
+                    },
+                },
+            },
+            model="nous/deepseek-v4-pro",
+        )
+
+        assert cli.model == "deepseek-v4-pro"
+        assert cli.requested_provider == "nous"
+
 
 class TestRootLevelProviderOverride:
     """Root-level provider/base_url in config.yaml must NOT override model.provider."""
@@ -560,6 +579,36 @@ class TestRootLevelProviderOverride:
 
         assert cfg["terminal"]["vercel_runtime"] == "python3.13"
         assert os.environ["TERMINAL_VERCEL_RUNTIME"] == "python3.13"
+
+    def test_kanban_worker_workspace_survives_cli_config_load(
+        self, tmp_path, monkeypatch
+    ):
+        """A profile cwd must not redirect a dispatcher-owned worker."""
+        import yaml
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        profile_cwd = tmp_path / "stable"
+        profile_cwd.mkdir()
+        workspace = tmp_path / "worktree"
+        workspace.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"terminal": {"backend": "local", "cwd": str(profile_cwd)}}
+            )
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_example")
+        monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+        monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+
+        import cli
+
+        monkeypatch.setattr(cli, "_hermes_home", hermes_home)
+        cfg = cli.load_cli_config()
+
+        assert cfg["terminal"]["cwd"] == str(workspace)
+        assert os.environ["TERMINAL_CWD"] == str(workspace)
 
     def test_normalize_root_model_keys_moves_to_model(self):
         """_normalize_root_model_keys migrates root keys into model section."""
@@ -692,6 +741,5 @@ class TestRootLevelProviderOverride:
         })
         assert result["model"]["default"] == "flat-default-model"
         assert result["model"]["provider"] == "auto"
-
 
 

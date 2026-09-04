@@ -31,6 +31,7 @@ EXCLUDED_SKILL_DIRS = frozenset(
         ".github",
         ".hub",
         ".archive",
+        ".curator_backups",
         ".venv",
         "venv",
         "node_modules",
@@ -434,6 +435,15 @@ def _load_raw_config() -> Dict[str, Any]:
     return parsed
 
 
+# Skills that must stay available regardless of configuration. The
+# `hermes-agent` skill is the agent's own operating manual — it drives
+# configuring, extending, and troubleshooting Hermes itself, and the system
+# prompt unconditionally points at it. Disabling it leaves the agent unable
+# to help with Hermes, so disable requests for these names are ignored
+# everywhere the disabled list is consulted.
+ESSENTIAL_SKILLS: frozenset = frozenset({"hermes-agent"})
+
+
 def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     """Read disabled skill names from config.yaml.
 
@@ -468,8 +478,10 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
             resolved_platform
         )
         if platform_disabled is not None:
-            return global_disabled | _normalize_string_set(platform_disabled)
-    return global_disabled
+            return (
+                global_disabled | _normalize_string_set(platform_disabled)
+            ) - ESSENTIAL_SKILLS
+    return global_disabled - ESSENTIAL_SKILLS
 
 
 def parse_config_string_list(value) -> List[str]:
@@ -602,11 +614,76 @@ def get_external_skills_dirs() -> List[Path]:
     return result
 
 
+def get_skill_create_dir() -> Optional[Path]:
+    """Return the configured ``skills.create_dir``, or ``None`` when unset.
+
+    When set, agent-created skills (``skill_manage`` action=create) land in
+    this directory instead of the profile-local ``~/.hermes/skills/``, and
+    every user-facing instruction string that names the creation path renders
+    this directory instead of the default.
+
+    The entry is expanded (``~`` and ``${VAR}``); relative paths resolve
+    against HERMES_HOME.  A value that resolves to the local skills dir is
+    treated as unset (that is already the default behaviour).  The directory
+    does NOT need to exist yet — skill creation mkdirs it on first write.
+    """
+    parsed = _load_raw_config()
+    if not parsed:
+        return None
+    skills_cfg = parsed.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return None
+    raw = skills_cfg.get("create_dir")
+    if not raw or not isinstance(raw, (str, os.PathLike)):
+        return None
+    entry = str(raw).strip()
+    if not entry:
+        return None
+
+    from hermes_constants import get_hermes_home
+
+    expanded = os.path.expanduser(os.path.expandvars(entry))
+    p = Path(expanded)
+    if not p.is_absolute():
+        p = get_hermes_home() / p
+    try:
+        resolved = p.resolve()
+    except OSError:
+        resolved = p
+    try:
+        if resolved == get_skills_dir().resolve():
+            return None
+    except OSError:
+        pass
+    return resolved
+
+
+def display_skill_create_dir() -> str:
+    """User-facing display string for where new skills are created.
+
+    Renders the configured ``skills.create_dir`` (with ``~/`` shorthand when
+    under the user's home) or the default ``<home>/skills/`` path.  Used by
+    instruction text (tool schema descriptions, prompts, docs strings) so a
+    configured creation dir changes every instruction that names the path.
+    """
+    from hermes_constants import display_hermes_home
+
+    create_dir = get_skill_create_dir()
+    if create_dir is None:
+        return f"{display_hermes_home()}/skills/"
+    try:
+        return "~/" + create_dir.relative_to(Path.home()).as_posix() + "/"
+    except ValueError:
+        return create_dir.as_posix() + "/"
+
+
 def get_all_skills_dirs() -> List[Path]:
     """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
 
     The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    yet — callers handle that).  When ``skills.create_dir`` is configured, it
+    follows immediately after the local dir (so agent-created skills are
+    discovered, trusted, and modifiable).  External dirs follow in config order.
 
     NOTE: trusted project-local dirs (``./.hermes/skills`` at the git root) are
     NOT part of this list — they have *higher* precedence than the local dir,
@@ -615,7 +692,12 @@ def get_all_skills_dirs() -> List[Path]:
     precedence-ordered list.
     """
     dirs = [get_skills_dir()]
-    dirs.extend(get_external_skills_dirs())
+    create_dir = get_skill_create_dir()
+    if create_dir is not None and create_dir.is_dir():
+        dirs.append(create_dir)
+    for d in get_external_skills_dirs():
+        if d not in dirs:
+            dirs.append(d)
     return dirs
 
 
@@ -674,7 +756,9 @@ def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
     """
     try:
         if start is None:
-            env_cwd = os.environ.get("TERMINAL_CWD")
+            from agent.runtime_cwd import scope_terminal_cwd
+
+            env_cwd = scope_terminal_cwd()
             start = Path(env_cwd) if env_cwd else Path.cwd()
         cur = Path(start).resolve()
     except OSError:
@@ -721,10 +805,65 @@ def _project_trusted_dirs_from_config() -> Set[Path]:
     return result
 
 
-def is_project_root_trusted(root: Path) -> bool:
-    """True when *root* is listed in ``skills.trusted_project_dirs``."""
+def _git_common_dir(root: Path) -> Optional[Path]:
+    """Resolve the common Git directory shared by a checkout and its worktrees."""
+    marker = Path(root) / ".git"
     try:
-        return Path(root).resolve() in _project_trusted_dirs_from_config()
+        if marker.is_dir():
+            return marker.resolve()
+        if not marker.is_file():
+            return None
+        prefix = "gitdir:"
+        line = marker.read_text(encoding="utf-8").strip()
+        if not line.casefold().startswith(prefix):
+            return None
+        git_dir = Path(line[len(prefix) :].strip())
+        if not git_dir.is_absolute():
+            git_dir = marker.parent / git_dir
+        git_dir = git_dir.resolve()
+        common_marker = git_dir / "commondir"
+        if not common_marker.is_file():
+            return git_dir
+        common = Path(common_marker.read_text(encoding="utf-8").strip())
+        return (common if common.is_absolute() else git_dir / common).resolve()
+    except (OSError, UnicodeError):
+        return None
+
+
+def is_project_root_trusted(root: Path) -> bool:
+    """True for an explicit root, its linked worktree, or an owned worker root."""
+    try:
+        resolved_root = Path(root).resolve()
+        trusted_roots = _project_trusted_dirs_from_config()
+        if resolved_root in trusted_roots:
+            return True
+
+        common_dir = _git_common_dir(resolved_root)
+        if common_dir is not None and any(
+            _git_common_dir(candidate) == common_dir for candidate in trusted_roots
+        ):
+            return True
+
+        task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+        workspace = os.environ.get("HERMES_KANBAN_WORKSPACE", "").strip()
+        workspaces_root = os.environ.get(
+            "HERMES_KANBAN_WORKSPACES_ROOT", ""
+        ).strip()
+        if not task_id or task_id != resolved_root.name or not workspace or not workspaces_root:
+            return False
+        resolved_workspace = Path(workspace).resolve()
+        resolved_workspaces_root = Path(workspaces_root).resolve()
+        board_owned_workspace = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent == resolved_workspaces_root
+            and resolved_workspaces_root.parent in trusted_roots
+        )
+        migrated_trusted_worktree = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent.name == ".worktrees"
+            and resolved_root.parent.parent in trusted_roots
+        )
+        return board_owned_workspace or migrated_trusted_worktree
     except OSError:
         return False
 
@@ -799,8 +938,7 @@ def get_scan_ordered_skills_dirs() -> List[Path]:
     priority over profile-local and external ones.
     """
     dirs = list(get_project_skills_dirs())
-    dirs.append(get_skills_dir())
-    dirs.extend(get_external_skills_dirs())
+    dirs.extend(get_all_skills_dirs())
     return dirs
 
 
@@ -914,12 +1052,15 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     # Look the primary skills root up on tools.skills_tool at CALL time
     # (not via get_skills_dir()): callers and tests patch
     # ``tools.skills_tool.SKILLS_DIR`` and skill_view() itself resolves
-    # against that module attribute, so normalization must agree with the
-    # exact root skill_view() will enforce.  Import deferred to avoid a
-    # module cycle (tools.skills_tool imports agent.skill_utils).
+    # against ``_skills_dir()`` — which honors that patch and otherwise
+    # follows the live profile-scoped HERMES_HOME (the import-time
+    # SKILLS_DIR is frozen to the launch home, #67277) — so normalization
+    # must agree with the exact root skill_view() will enforce.  Import
+    # deferred to avoid a module cycle (tools.skills_tool imports
+    # agent.skill_utils).
     try:
         from tools import skills_tool as _skills_tool
-        primary_root = Path(_skills_tool.SKILLS_DIR)
+        primary_root = _skills_tool._skills_dir()
     except Exception:
         primary_root = get_skills_dir()
 
@@ -1007,6 +1148,13 @@ def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
         "requires_toolsets": hermes.get("requires_toolsets", []),
         "fallback_for_tools": hermes.get("fallback_for_tools", []),
         "requires_tools": hermes.get("requires_tools", []),
+        # Gateway-channel gate (maintainer-directed, skills-index slim):
+        # list of session platforms (e.g. ["msteams"]) the skill is FOR.
+        # Unlike top-level ``platforms:`` (host OS), this hides the skill
+        # from the index on every other channel — the teams-meeting
+        # pipeline has no business in a desktop or telegram session's
+        # index. Empty/absent = visible everywhere (backward compat).
+        "session_platforms": hermes.get("session_platforms", []),
     }
 
 
