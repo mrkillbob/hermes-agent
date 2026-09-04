@@ -59,6 +59,10 @@ def _build_agent(monkeypatch):
     agent._cleanup_task_resources = lambda task_id: None
     agent._persist_session = lambda messages, history=None: None
     agent._save_trajectory = lambda messages, user_message, completed: None
+    agent.session_id = "session-codex-tests"
+    agent._current_turn_id = "turn-codex-tests"
+    agent._current_api_request_id = "turn-codex-tests:api:1"
+    agent._llm_egress_state_dir = Path(tempfile.mkdtemp(prefix="hermes-codex-egress-"))
     return agent
 
 

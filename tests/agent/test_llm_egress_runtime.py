@@ -141,7 +141,9 @@ def test_runtime_scans_extra_headers_and_query_as_request_content(tmp_path):
             {
                 "model": "test-model",
                 "messages": [{"role": "user", "content": "Fix CI now."}],
-                "extra_headers": {"Authorization": "token=secret-value"},
+                "extra_headers": {
+                    "Authorization": "Bearer sk-test-credential-1234567890"
+                },
                 "extra_query": {"trace": "safe"},
             },
             lambda request: calls.append(request),
@@ -181,7 +183,7 @@ def test_runtime_verifies_authorized_payload_at_provider_boundary(
 @pytest.mark.parametrize(
     "text",
     [
-        "token=super-secret-value",
+        "SECRET_TOKEN=super-secret-value",
         "Read /Users/private/repository/file.py",
         "ZW5jb2RlZCBwcml2YXRlIGRldGFpbA==",
     ],
@@ -343,7 +345,9 @@ def test_codex_generated_context_still_hard_blocks_secrets(tmp_path):
             agent,
             {
                 "model": "gpt-5.6-terra",
-                "input": [{"role": "system", "content": "token=super-secret-value"}],
+                "input": [
+                    {"role": "system", "content": "SECRET_TOKEN=super-secret-value"}
+                ],
             },
         )
 
@@ -697,7 +701,7 @@ def test_protected_nous_keeps_generated_cloud_secrets_blocked(tmp_path):
             {
                 "model": "poolside/laguna-xs-2.1:free",
                 "messages": [
-                    {"role": "system", "content": "token=super-secret-value"}
+                    {"role": "system", "content": "SECRET_TOKEN=super-secret-value"}
                 ],
             },
         )
@@ -2001,7 +2005,7 @@ def test_protected_kanban_admits_exact_pr_receipt_decomposer_structure(
     ("unsafe_text", "reason"),
     [
         ("c2VjcmV0LXBheWxvYWQ=", "base64_payload"),
-        ("token=super-secret-value", "secret_detected"),
+        ("SECRET_TOKEN=super-secret-value", "secret_detected"),
         ("AABBCCDDEEFFGGHHIIJJKKLLMMNNOOPP", "base64_payload"),
         (
             "raw review source: def _approved_sanitized_segments(value): "
@@ -2796,7 +2800,10 @@ def test_tool_syntax_without_recognized_terminal_call_remains_blocked(
                     {
                         "role": "tool",
                         "tool_call_id": "call_unbound123",
-                        "content": "https://github.com/acme/widget.git run_id=1129",
+                        "content": (
+                            "https://github.com/acme/widget.git "
+                            "token=opaqueValue123456789"
+                        ),
                     }
                 ],
             },
