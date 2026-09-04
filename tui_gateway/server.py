@@ -2594,6 +2594,15 @@ def _startup_system_prompt(cfg: dict, task_id: str) -> str:
     return system_prompt
 
 
+def _session_auth_user_id(session: dict | None) -> str | None:
+    """User id the WS-upgrade credential authenticated for ``session``'s transport, or None for the legacy
+    token, stdio, and the server-internal credential the PTY child connects with."""
+    identity = getattr((session or {}).get("transport"), "auth_identity", None)
+    if _methods_browser_control._is_authenticated_identity(identity):
+        return str(identity["user_id"]).strip()
+    return None
+
+
 def _make_agent(
     sid: str, key: str, session_id: str | None = None, session_db=None,
     model_override: dict | str | None = None, provider_override: str | None = None,
@@ -2628,6 +2637,8 @@ def _make_agent(
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
     from agent.runtime_cwd import set_session_cwd
     cwd_token = set_session_cwd(conversation_worktree["path"]) if conversation_worktree else None
+    with _sessions_lock:
+        session = _sessions.get(sid)
     try:
         agent = AIAgent(
             model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
@@ -2643,6 +2654,7 @@ def _make_agent(
             providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
             provider_sort=_pr.get("sort"), provider_require_parameters=_pr.get("require_parameters", False),
             provider_data_collection=_pr.get("data_collection"), platform=platform, session_id=session_id or key,
+            user_id=_session_auth_user_id(session),
             session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
             checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
             pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
@@ -2652,8 +2664,7 @@ def _make_agent(
         if cwd_token is not None:
             cwd_token.var.reset(cwd_token)
     if context_cwd_is_launch_artifact is None:
-        with _sessions_lock:
-            context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(_sessions.get(sid))
+        context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)
     return agent
 
