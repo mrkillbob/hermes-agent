@@ -489,6 +489,15 @@ _BOUNDED_SOURCE_UPPER_SECRET_CODE_ASSIGNMENT = re.compile(
     r"API_KEY|PRIVATE_KEY|CREDENTIALS|KEYS)[A-Z0-9_]*"
     r"\s*=\s*[A-Za-z_][A-Za-z0-9_]*(?:\([^\n]*\))?"
 )
+_BOUNDED_SOURCE_SECRET_EXPRESSION_ASSIGNMENT = re.compile(
+    r"(?im)\b(?:[a-z][a-z0-9_-]*[_-])?"
+    r"(?:token|tokens|secret|secrets|password|passwd|api[_-]?key|"
+    r"private[_-]?key|credential|credentials)\b"
+    r"\s*:\s*\$\{\{[^}\n]+\}\}"
+    r"|\b[A-Z][A-Z0-9_]*(?:TOKEN|TOKENS|SECRET|SECRETS|PASSWORD|"
+    r"PASSWD|API_KEY|PRIVATE_KEY|CREDENTIALS|KEYS)[A-Z0-9_]*\b"
+    r"\s*:\s*\$\{\{[^}\n]+\}\}"
+ )
 # Bounded operational tokens are emitted by ordinary CLI/test tooling. They
 # can decode as Base64 by coincidence, but are not opaque encoded payloads.
 _BOUNDED_SHORT_CLI_OPTION = re.compile(r"^-[A-Za-z]{1,8}$")
@@ -1298,6 +1307,9 @@ def _generated_context_text_for_base64_scan(text: str) -> str:
 def _source_text_for_secret_scan(text: str) -> str:
     """Mask code identifiers that resemble secret names, not secret values."""
 
+    text = _BOUNDED_SOURCE_SECRET_EXPRESSION_ASSIGNMENT.sub(
+        "<source-secret-expression>", text
+    )
     text = _BOUNDED_SOURCE_SECRET_ENV_NAME.sub("<source-secret-name>", text)
     text = _BOUNDED_SOURCE_UPPER_SECRET_CODE_ASSIGNMENT.sub("<code>", text)
     text = _BOUNDED_SOURCE_SECRET_PLACEHOLDER.sub("<source-placeholder>", text)

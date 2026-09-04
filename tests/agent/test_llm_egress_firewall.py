@@ -930,6 +930,31 @@ def test_source_presentation_allows_exact_repair_source_atoms_but_not_payloads(t
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_secret_shaped_github_expressions_only(tmp_path):
+    source = (
+        "private-key: ${{ inputs.private-key }}\n"
+        "token: ${{ steps.app-token.outputs.token }}\n"
+        "password: ${{ secrets.DOCKERHUB_TOKEN }}\n"
+    )
+    path = tmp_path / "action.yml"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=3)
+    presentation = json.dumps(
+        {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1))}
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(_sanitized_request(presentation), _route())
+    assert "secret_detected" in exc_info.value.decision.reason_codes
+
+
 def test_source_presentation_allows_bounded_worker_source_syntax(tmp_path):
     source = (
         "_SDK_CONTROL_KEYS=frozenset({\"_hermes_source_provenance\"})\n"
