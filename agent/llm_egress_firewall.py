@@ -232,6 +232,10 @@ _LOCAL_PROCESS_MODES = frozenset({"local_process", "in_process"})
 _BASE64_CANDIDATE = re.compile(
     r"(?<![A-Za-z0-9_+/\-])([A-Za-z0-9_+/\-]{4,}={0,2})(?![A-Za-z0-9_+/=\-])"
 )
+_CHUNKED_BASE64_CANDIDATE = re.compile(
+    r"(?<![A-Za-z0-9_+/=-])(?:[A-Za-z0-9_+/=-]{2,4}\s+){2,}"
+    r"[A-Za-z0-9_+/=-]{2,4}(?![A-Za-z0-9_+/=-])"
+)
 _HERMES_TASK_ID = re.compile(r"^t_[0-9a-f]{8}$")
 _PROMPT_CACHE_KEY = re.compile(r"^pck_[0-9a-f]{24}$")
 _CODEX_ENCRYPTED_REASONING_REPLAY = re.compile(r"^gAAAA[A-Za-z0-9_=-]{20,}$")
@@ -246,11 +250,65 @@ _SAFE_DIAGNOSTIC_STATUS_WORDS = frozenset({
     "HANDLING",
     "VERIFICATION",
     "ADVISORY",
+    "FAIL",
+    "SHA1",
+    "CRITICAL",
 })
+_LINTER_DIAGNOSTIC_CODE = re.compile(r"^[A-Z][0-9]{3,4}$")
+_PYTHON_DUNDER_IDENTIFIER = re.compile(r"^__[a-z][a-z0-9_]{0,62}__$")
+_PYTHON_PRIVATE_IDENTIFIER = re.compile(r"^_[A-Za-z][A-Za-z0-9_]{1,63}$")
+_PYTHON_MIXED_CASE_IDENTIFIER = re.compile(
+    r"^[a-z][A-Za-z0-9]*_[A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*$"
+)
 _BOUNDED_SOURCE_CODE_ATOM = re.compile(
     r"(?:[a-z][a-z0-9]{0,63}(?:_[a-z0-9]{1,64}){1,7}"
+    r"|[A-Z][A-Z0-9]{0,63}(?:_[A-Z0-9]{1,64}){1,7}"
     r"|[a-z][a-z0-9]{0,63}(?:-[a-z][a-z0-9]{0,63}){1,7}"
     r"|[A-Z][0-9]{3,4})"
+)
+# Source-granted PR diffs contain bounded command filters, issue keys, and
+# unified-diff marker lines. Their URL-safe alphabet can resemble encoded
+# payloads, but the surrounding source grammar proves they are presentation
+# metadata. These masks apply only after an exact source grant is validated.
+_BOUNDED_SOURCE_CLI_VALUE = re.compile(
+    r"(?P<prefix>--[a-z][a-z0-9]*(?:-[a-z0-9]+)*=)"
+    r"(?P<value>[A-Z]{3,8})(?P<suffix>[^A-Za-z0-9_+/=-])"
+)
+_BOUNDED_SOURCE_CODE_ASSIGNMENT = re.compile(
+    r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,7}="
+)
+_BOUNDED_SOURCE_ISSUE_KEY = re.compile(
+    r"\b[A-Z]{1,8}\d{2,}-[A-Z0-9]+(?:-[A-Z0-9]+){1,8}\b"
+)
+_BOUNDED_SOURCE_DIFF_METADATA = re.compile(
+    r"(?m)^\+[A-Za-z0-9+/=_-]{1,128}\s*$"
+)
+# Bounded operational tokens are emitted by ordinary CLI/test tooling. They
+# can decode as Base64 by coincidence, but are not opaque encoded payloads.
+_BOUNDED_SHORT_CLI_OPTION = re.compile(r"^-[A-Za-z]{1,8}$")
+_BOUNDED_LINE_RANGE_OR_UNIT = re.compile(
+    r"^(?:L?[0-9]{1,6}(?:-[0-9]{1,6})?|[0-9]{1,6}[A-Za-z])$"
+)
+_BOUNDED_STATUS_COUNT = re.compile(
+    r"^(?:passed|failed|skipped|warnings?)/[0-9]{1,6}$"
+)
+_BOUNDED_VERSIONED_IDENTIFIER = re.compile(
+    r"^(?:[a-z][a-z0-9]*(?:[-_][a-z][a-z0-9]*){1,7}[-_]?[0-9][a-z0-9]*"
+    r"|[a-z][a-z0-9]*(?:_[a-z0-9]+){1,7}_[0-9]{4,8})$"
+)
+_BOUNDED_TEST_ARTIFACT = re.compile(
+    r"^(?:tmp|test)_[a-z0-9]+(?:_[a-z0-9]+){2,7}$"
+)
+_BOUNDED_FUNCTION_IDENTIFIER = re.compile(
+    r"^_[a-z][a-z0-9]*(?:_[a-z0-9]+){2,7}_"
+    r"(?:task|test|runner|command|path|id|status|result)$"
+)
+_BOUNDED_COMMAND_PATH = re.compile(r"^/[a-z][a-z0-9_.-]{2,31}$")
+_BOUNDED_RENDER_MARKER = re.compile(r"^[nN]---$")
+_BOUNDED_SOURCE_CONTROL_FRAGMENT = re.compile(r"^[0-9a-f]{13,39}$")
+_SOURCE_CONTROL_CONTEXT = re.compile(
+    r"\b(?:commit|sha(?:1|256)?|head|base|revision|digest|hash)\b",
+    re.IGNORECASE,
 )
 # Any-case letters + optional trailing slash: GitHub-style org/repo slugs
 # ("NousResearch/hermes") and vault/skill paths ("Memories/Shared/") use
@@ -259,9 +317,9 @@ _BOUNDED_SOURCE_CODE_ATOM = re.compile(
 # repo/org segment containing one, like "hermes-agent", is handled by
 # _BOUNDED_KEBAB_WORD below and by the two combining at the call site).
 _BOUNDED_SLASH_WORDS = re.compile(
-    r"^(?://[A-Za-z]{2,}"
-    r"|(?:/{1,2})?[A-Za-z]{2,}(?:/[A-Za-z]{2,})+/?"
-    r"|[A-Za-z]{2,}/)$"
+    r"^(?://[A-Za-z0-9]{2,}"
+    r"|(?:/{1,2})?[A-Za-z0-9]{2,}(?:/[A-Za-z0-9]{2,})+/?"
+    r"|[A-Za-z0-9]{2,}/)$"
 )
 _MAX_BASE64_CANDIDATE_CHARS = 262_144
 _VALIDATED_TOOL_SYNTAX = {
@@ -307,6 +365,16 @@ _PRIVATE_ABSOLUTE_PATH = re.compile(
     r"|[A-Za-z]:\\+(?:Users|Documents and Settings)\\+[^\s\"'`)]+"
     r")",
     re.IGNORECASE,
+)
+# Remote egress needs a stricter assignment scan than ordinary log redaction.
+# ``redact_sensitive_text`` intentionally leaves bare ``token=...`` in prose
+# alone to avoid false positives, but a provider-bound request must fail closed
+# when it contains an explicit credential-shaped assignment.
+_EGRESS_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])"
+    r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|"
+    r"password|passwd|api[_-]?key|apikey|client[_-]?secret|private[_-]?key)"
+    r"\s*[:=]\s*(?!<redacted>)[^\s,}\"']+"
 )
 # These are fixed provider-protocol grammar atoms, not a caller-configurable
 # egress allowlist. Several happen to round-trip as unpadded Base64 even though
@@ -416,6 +484,8 @@ _PROTOCOL_GRAMMAR_ATOMS = frozenset(
         "find-and-replace",
         "function_call",
         "function_call_output",
+        "+for",
+        "repeated_exact_failure_block",
         "_force_close_actionable_pending_routes_for_cycle",
         "github-code-review",
         "grep/rg/find/ls",
@@ -578,6 +648,38 @@ def _canonical_base64_candidate(candidate: str) -> bool:
         # Exact status labels are not an encoding channel; treating them as
         # Base64 strands workers while replaying ordinary CLI output.
         return False
+    if _LINTER_DIAGNOSTIC_CODE.fullmatch(candidate):
+        # Ruff/flake8-style findings are ordinary bounded CI metadata. They
+        # are not source excerpts or opaque encoded payloads, even when a
+        # tool result is carried as a SanitizedSegment rather than generated
+        # context where the source-atom mask would already apply.
+        return False
+    if _PYTHON_DUNDER_IDENTIFIER.fullmatch(candidate):
+        # Python's bounded dunder names are source-language structure, not
+        # encoded content (for example __file__ and __main__ in CI scripts).
+        return False
+    if (
+        _BOUNDED_VERSIONED_IDENTIFIER.fullmatch(candidate)
+        or _BOUNDED_TEST_ARTIFACT.fullmatch(candidate)
+        or _BOUNDED_FUNCTION_IDENTIFIER.fullmatch(candidate)
+    ):
+        # Filenames, test names, model slugs, and config identifiers are
+        # normal generated/tool context. They are not encoded content merely
+        # because their lexical shape happens to decode canonically.
+        return False
+    if (
+        _BOUNDED_SHORT_CLI_OPTION.fullmatch(candidate)
+        or _BOUNDED_LINE_RANGE_OR_UNIT.fullmatch(candidate)
+        or _BOUNDED_STATUS_COUNT.fullmatch(candidate)
+        or _BOUNDED_COMMAND_PATH.fullmatch(candidate)
+        or _BOUNDED_RENDER_MARKER.fullmatch(candidate)
+    ):
+        return False
+    if _BOUNDED_SLASH_WORDS.fullmatch(candidate):
+        # Bounded relative paths such as venv/lib/python3 are ordinary local
+        # CI metadata, not encoded content. Keep the grammar narrow so an
+        # unrecognized underscore atom remains fail-closed below.
+        return False
     if _BOUNDED_DURATION.fullmatch(candidate):
         return False
     if re.fullmatch(r"0x[0-9a-fA-F]+", candidate):
@@ -626,6 +728,32 @@ def _canonical_base64_candidate(candidate: str) -> bool:
     return False
 
 
+def _canonical_chunked_base64_candidate(candidate: str) -> bool:
+    """Recognize fixed-width wrapped encodings without joining ordinary prose."""
+
+    chunks = re.findall(r"[A-Za-z0-9_+/=-]{2,4}", candidate)
+    if len(chunks) < 3:
+        return False
+    if all(_LINTER_DIAGNOSTIC_CODE.fullmatch(chunk) for chunk in chunks):
+        # A run of bounded Ruff/flake8 findings is structured CI output, not
+        # a wrapped encoding. Without this guard, ``E501 F821 W391`` is joined
+        # across spaces and can happen to decode canonically.
+        return False
+    width = len(chunks[0])
+    if not all(len(chunk) == width for chunk in chunks[:-1]):
+        return False
+    if len(chunks[-1]) > width:
+        return False
+    joined = "".join(chunks)
+    has_encoding_signal = any(
+        character.isupper() or character.isdigit() or character in "+/_="
+        for character in joined
+    )
+    if len(chunks) < 8 and not has_encoding_signal:
+        return False
+    return _canonical_base64_candidate(joined)
+
+
 # GitHub's legacy GraphQL global node id: base64 of a fixed
 # ``<digits>:<TypeName><digits>`` grammar (e.g. "05:Issue160502814" ->
 # "MDU6SXNzdWUxNjA1MDI4MTQ0"). `gh api` / `gh issue|pr list` return these in
@@ -666,10 +794,21 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
         for match in _BASE64_CANDIDATE.finditer(value):
             candidate = match.group(1)
             prefix = value[max(0, match.start() - 16) : match.start()].lower()
+            source_control_window = value[
+                max(0, match.start() - 48) : min(len(value), match.end() + 16)
+            ]
             if re.fullmatch(
                 r"[0-9a-f]{7,12}|[0-9a-f]{40}|[0-9a-f]{64}",
                 candidate.lower(),
             ):
+                continue
+            if (
+                _BOUNDED_SOURCE_CONTROL_FRAGMENT.fullmatch(candidate.lower())
+                and _SOURCE_CONTROL_CONTEXT.search(source_control_window)
+            ):
+                # Shortened git object IDs are ordinary source-control
+                # metadata when explicitly labeled as such. Without that
+                # context, arbitrary hex remains fail-closed.
                 continue
             if candidate.isdigit():
                 before = value[: match.start(1)].rstrip()[-1:]
@@ -708,13 +847,8 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
         # Providers and source-control tools sometimes wrap an otherwise
         # canonical encoding at a fixed column. Normalize only bounded chunks
         # so ordinary prose words are not concatenated into a false candidate.
-        chunked = re.compile(
-            r"(?<![A-Za-z0-9_+/=-])(?:[A-Za-z0-9_+/=-]{2,4}\s+){2,}"
-            r"[A-Za-z0-9_+/=-]{2,4}(?![A-Za-z0-9_+/=-])"
-        )
-        for match in chunked.finditer(value):
-            candidate = re.sub(r"\s+", "", match.group(0))
-            if _canonical_base64_candidate(candidate):
+        for match in _CHUNKED_BASE64_CANDIDATE.finditer(value):
+            if _canonical_chunked_base64_candidate(match.group(0)):
                 return True
         return False
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -747,13 +881,54 @@ def _source_text_for_base64_scan(text: str) -> str:
     unchanged and are still rejected by the canonical scanner.
     """
 
-    return _BASE64_CANDIDATE.sub(
+    def is_source_code_atom(candidate: str) -> bool:
+        # ``_BASE64_CANDIDATE`` includes padding characters in the match, so
+        # a source keyword such as ``line_ranges=`` arrives here with its
+        # trailing assignment marker attached. Strip only that marker; a
+        # padded encoded value remains unchanged and fail-closed.
+        source_atom = candidate[:-1] if candidate.endswith("=") else candidate
+        return (
+            _BOUNDED_SOURCE_CODE_ATOM.fullmatch(source_atom) is not None
+            or _PYTHON_DUNDER_IDENTIFIER.fullmatch(source_atom) is not None
+            or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(source_atom) is not None
+            or _PYTHON_MIXED_CASE_IDENTIFIER.fullmatch(source_atom) is not None
+        )
+
+    masked = _BASE64_CANDIDATE.sub(
         lambda match: (
             "<code>"
-            if _BOUNDED_SOURCE_CODE_ATOM.fullmatch(match.group(1))
+            if is_source_code_atom(match.group(1))
             else match.group(0)
         ),
         text,
+    )
+    # CLI filter values such as ``--diff-filter=ACMR`` are source syntax, not
+    # opaque payloads. Keep this grammar tied to a long-option assignment so
+    # short quoted Base64 values elsewhere remain rejected.
+    masked = _BOUNDED_SOURCE_CODE_ASSIGNMENT.sub("<code>", masked)
+    masked = _BOUNDED_SOURCE_ISSUE_KEY.sub("<source issue key>", masked)
+
+    def mask_diff_metadata(match: re.Match[str]) -> str:
+        line = match.group(0)
+        candidate = line[1:].strip()
+        # A unified-diff marker is metadata only when the added line itself
+        # is not an encoded payload. Keep canonical Base64 (including wrapped
+        # form) visible to the fail-closed scanner.
+        if _canonical_base64_candidate(candidate) or _canonical_chunked_base64_candidate(
+            candidate
+        ):
+            # Separate the marker from the candidate. The candidate regex
+            # includes ``+`` in its URL-safe alphabet, so returning ``+blob``
+            # would change the bytes being tested and accidentally hide a
+            # real encoded payload behind the diff marker.
+            suffix = "\n" if line.endswith("\n") else ""
+            return "+ " + candidate + suffix
+        return "<diff metadata>"
+
+    masked = _BOUNDED_SOURCE_DIFF_METADATA.sub(mask_diff_metadata, masked)
+    return _BOUNDED_SOURCE_CLI_VALUE.sub(
+        lambda match: f"{match.group('prefix')}<code>{match.group('suffix')}",
+        masked,
     )
 
 
@@ -777,7 +952,7 @@ def _contains_secret(value: Any, *, seen: set[int] | None = None) -> bool:
             value,
             force=True,
             redact_url_credentials=True,
-        ) != value
+        ) != value or _EGRESS_SECRET_ASSIGNMENT.search(value) is not None
     if isinstance(value, (bytes, bytearray, memoryview)):
         # Binary request material is not safely inspectable as text.
         return True
@@ -911,13 +1086,9 @@ def redact_remote_unsafe_text(text: str) -> str:
         return match.group(0)
 
     redacted = _BASE64_CANDIDATE.sub(replace_base64, redacted)
-    chunked = re.compile(
-        r"(?<![A-Za-z0-9_+/=-])(?:[A-Za-z0-9_+/=-]{2,4}\s+){2,}"
-        r"[A-Za-z0-9_+/=-]{2,4}(?![A-Za-z0-9_+/=-])"
-    )
-    return chunked.sub(
+    return _CHUNKED_BASE64_CANDIDATE.sub(
         lambda match: "<redacted-base64>"
-        if _canonical_base64_candidate(re.sub(r"\s+", "", match.group(0)))
+        if _canonical_chunked_base64_candidate(match.group(0))
         else match.group(0),
         redacted,
     )
@@ -966,8 +1137,9 @@ def _contains_grant_substring(grant_content: bytes, candidate: bytes) -> bool:
     """Reject source-derived proper substrings in sanitized text.
 
     Newline-trimmed line grants commonly appear in JSON without their source
-    line ending. A fixed eight-byte window detects meaningful excerpts in
-    linear time and avoids quadratic work on large source slices.
+    line ending. Exact containment catches short excerpts; otherwise require
+    a 32-byte shared window so ordinary words such as ``checkout`` do not make
+    unrelated generated context look source-derived.
     """
 
     if not grant_content or not candidate:
@@ -978,10 +1150,8 @@ def _contains_grant_substring(grant_content: bytes, candidate: bytes) -> bool:
             continue
         if variant in candidate:
             return True
-        if len(candidate) < len(variant) and candidate in variant and len(candidate) >= 4:
-            return True
-        window = min(8, len(candidate), len(variant))
-        if window >= 4:
+        window = min(32, len(candidate), len(variant))
+        if window >= 32:
             source_windows = {
                 variant[offset : offset + window]
                 for offset in range(0, len(variant) - window + 1)
@@ -1625,7 +1795,7 @@ class LLMEgressFirewall:
                 source_segment_count += 1
                 scan_values.append(segment.text)
                 base64_scan_values.append(
-                    _source_text_for_base64_scan(segment.text)
+                    _source_text_for_base64_scan(raw_text)
                 )
                 return segment.text
             if isinstance(segment, UntrustedProvenanceSegment):
