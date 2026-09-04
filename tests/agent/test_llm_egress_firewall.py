@@ -903,6 +903,47 @@ def test_source_presentation_allows_fixed_github_actions_literals(tmp_path):
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_code_constants_and_secret_identifiers(tmp_path):
+    path = tmp_path / "source.py"
+    source = (
+        "MAX_SOURCE_SLICE_BYTES = 262_144\n"
+        "token = _active_context.set(context)\n"
+        "redact_url_credentials=True\n"
+    )
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=3)
+    presentation = json.dumps(
+        {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(source.splitlines(), 1)) + "\n4|"}
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "secret_detected" not in decision.reason_codes
+    assert "base64_payload" not in decision.reason_codes
+
+
+def test_source_presentation_still_rejects_quoted_secret_after_code_mask(tmp_path):
+    path = tmp_path / "source.py"
+    source = "token = super-secret-value\n"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path)
+    presentation = json.dumps({"content": "1|" + source + "2|"})
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _source_presentation_request(grant, presentation),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "secret_detected" in exc_info.value.decision.reason_codes
+
+
 @pytest.mark.parametrize(
     "text",
     [

@@ -425,6 +425,15 @@ _BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT = re.compile(
     r"\b(?P<name>[a-z][a-z0-9_]*_(?:pass|token|secret|password|auth|key))"
     r"\s*=\s*(?P<value>_[a-z][a-z0-9_]*(?:\([^\n]*\))?|[a-z][a-z0-9_]*)"
 )
+_BOUNDED_SOURCE_SECRET_CODE_ASSIGNMENT = re.compile(
+    r"\b(?P<name>(?:token|secret|password|passwd|api[_-]?key|apikey|"
+    r"client[_-]?secret|private[_-]?key|(?:[a-z][a-z0-9_]*_)?credentials))"
+    r"\s*=\s*(?P<value>_[A-Za-z][A-Za-z0-9_]*(?:\([^\n]*\))?|"
+    r"[A-Za-z][A-Za-z0-9_]*(?:\([^\n]*\))?)(?![A-Za-z0-9_-])"
+)
+_BOUNDED_SOURCE_NUMERIC_CONSTANT_ASSIGNMENT = re.compile(
+    r"\b[A-Z][A-Z0-9_]{2,63}\s*=\s*[0-9][0-9_]{2,63}\b"
+)
 _BOUNDED_SOURCE_SECRET_PLACEHOLDER = re.compile(
     r"(?i)\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|"
     r"password|passwd|api[_-]?key|apikey|client[_-]?secret|private[_-]?key)"
@@ -1148,6 +1157,9 @@ def _source_text_for_base64_scan(
     # token before that scan; an opaque payload cannot contain a dot.
     masked = _BOUNDED_SOURCE_FILE_TOKEN.sub("<source-file>", text)
     masked = _BOUNDED_ISO_DURATION.sub("<source-duration>", masked)
+    masked = _BOUNDED_SOURCE_NUMERIC_CONSTANT_ASSIGNMENT.sub(
+        "<source-constant>", masked
+    )
     masked = _BASE64_CANDIDATE.sub(
         lambda match: (
             "<code>"
@@ -1224,6 +1236,7 @@ def _source_text_for_secret_scan(text: str) -> str:
     """Mask code identifiers that resemble secret names, not secret values."""
 
     text = _BOUNDED_SOURCE_SECRET_PLACEHOLDER.sub("<source-placeholder>", text)
+    text = _BOUNDED_SOURCE_SECRET_CODE_ASSIGNMENT.sub("<code>", text)
     return _BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT.sub("<code>", text)
 
 
