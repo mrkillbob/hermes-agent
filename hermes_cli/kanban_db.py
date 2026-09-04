@@ -3922,9 +3922,10 @@ def reconcile_legacy_dispatch_task(
 
     This is intentionally narrow. It only mutates a blocked card whose
     idempotency key matches and whose body still contains the old intake-only
-    policy marker. Cards with a current body, a different receipt, an active
-    claim, or any other status are left untouched so this cannot become a
-    generic task rewrite path.
+    policy marker, or whose latest blocked event is the known protected
+    terminal replay failure. Cards with a different receipt, an active claim,
+    or any other status are left untouched so this cannot become a generic
+    task rewrite path.
     """
     if not task_id.strip() or not idempotency_key.strip() or not body.strip():
         raise ValueError("task identity and body are required")
@@ -3938,11 +3939,22 @@ def reconcile_legacy_dispatch_task(
         ).fetchone()
         if row is None:
             return False
+        legacy_intake = (
+            "This card is intake-only and starts blocked; an operator must validate"
+            in (row["body"] or "")
+        )
+        egress_failure = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' "
+            "AND payload LIKE '%protected terminal route%' "
+            "AND payload LIKE '%omitted_from_remote_replay%' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
         if (
             row["status"] != "blocked"
             or row["idempotency_key"] != idempotency_key
-            or "This card is intake-only and starts blocked; an operator must validate"
-            not in (row["body"] or "")
+            or not legacy_intake and egress_failure is None
             or row["current_run_id"] is not None
             or row["claim_lock"] is not None
         ):
