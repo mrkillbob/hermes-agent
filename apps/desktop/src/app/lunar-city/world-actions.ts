@@ -9,6 +9,9 @@ export interface WorldActionContext {
     reassignTask: (id: string, profile: string) => Promise<unknown>
   }
   createSession?: (params: Record<string, unknown>) => Promise<unknown> | unknown
+  sendDialogue?: (params: { message: string; sessionId?: string; targetProfile?: string }) => Promise<unknown>
+  sendVoice?: (params: { audioId?: string; transcript?: string; sessionId?: string; targetProfile?: string }) => Promise<unknown>
+  respondApproval?: (params: { actionId: string; approved: boolean; sessionId?: string }) => Promise<unknown>
   requestApproval?: (params: Record<string, unknown>) => Promise<unknown>
 }
 
@@ -21,13 +24,16 @@ export interface WorldActionContextTarget {
 
 export type WorldActionIntent =
   | { kind: 'inspect' | 'inspect_blocker' | 'show_source'; target: WorldActionContextTarget }
+  | { kind: 'approval_response'; actionId: string; approved: boolean; sessionId?: string }
   | { body: string; kind: 'comment'; taskId: string }
   | { kind: 'create_session'; params: Record<string, unknown> }
   | { kind: 'create_task'; body: Record<string, unknown> }
+  | { kind: 'dialogue_send'; message: string; sessionId?: string; targetProfile?: string }
   | { kind: 'recover_task'; patch: Record<string, unknown>; taskId: string }
   | { kind: 'reassign_task'; profile: string; taskId: string }
   | { kind: 'reclaim_task'; taskId: string }
   | { kind: 'request_approval'; params: Record<string, unknown> }
+  | { kind: 'voice_send'; audioId?: string; transcript?: string; sessionId?: string; targetProfile?: string }
 
 export type WorldActionResult =
   | { kind: 'completed'; ok: true; value?: unknown }
@@ -96,6 +102,40 @@ export function createWorldActionRunner(context: WorldActionContext): WorldActio
             return context.createSession
               ? completed(await context.createSession(intent.params))
               : failed(new Error('New sessions are unavailable'))
+
+          case 'dialogue_send':
+            return context.sendDialogue
+              ? completed(
+                  await context.sendDialogue({
+                    message: intent.message,
+                    sessionId: intent.sessionId,
+                    targetProfile: intent.targetProfile
+                  })
+                )
+              : failed(new Error('Dialogue is unavailable'))
+
+          case 'voice_send':
+            return context.sendVoice
+              ? completed(
+                  await context.sendVoice({
+                    audioId: intent.audioId,
+                    sessionId: intent.sessionId,
+                    targetProfile: intent.targetProfile,
+                    transcript: intent.transcript
+                  })
+                )
+              : failed(new Error('Voice is unavailable'))
+
+          case 'approval_response':
+            return context.respondApproval
+              ? completed(
+                  await context.respondApproval({
+                    actionId: intent.actionId,
+                    approved: intent.approved,
+                    sessionId: intent.sessionId
+                  })
+                )
+              : failed(new Error('Approval response is unavailable'))
 
           case 'request_approval':
             return context.requestApproval
