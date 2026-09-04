@@ -253,6 +253,11 @@ _SAFE_DIAGNOSTIC_STATUS_WORDS = frozenset({
     "FAIL",
     "SHA1",
     "CRITICAL",
+    # Fixed command-syntax metavariables in the built-in Kanban guidance.
+    # They are not payloads even though their short all-caps forms can decode
+    # as canonical Base64 by coincidence.
+    "APPROVE",
+    "TEXT",
 })
 _LINTER_DIAGNOSTIC_CODE = re.compile(r"^[A-Z][0-9]{3,4}$")
 _PYTHON_DUNDER_IDENTIFIER = re.compile(r"^__[a-z][a-z0-9_]{0,62}__$")

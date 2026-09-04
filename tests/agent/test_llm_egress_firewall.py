@@ -1307,6 +1307,8 @@ def test_source_presentation_allows_mixed_case_python_names(tmp_path):
         "skills/plugins/cron/memories",
         "MIME",
         "REQUIRED",
+        "APPROVE",
+        "TEXT",
         "2000",
         "2026",
         "4dae",
