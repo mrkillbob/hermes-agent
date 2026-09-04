@@ -446,6 +446,9 @@ _BOUNDED_SOURCE_ISSUE_KEY = re.compile(
 _BOUNDED_SOURCE_DIFF_METADATA = re.compile(
     r"(?m)^\+[A-Za-z0-9+/=_-]{1,128}\s*$"
 )
+_BOUNDED_SOURCE_DIFF_HUNK = re.compile(
+    r"(?m)^@@ -\d{1,8}(?:,\d{1,8})? \+\d{1,8}(?:,\d{1,8})? @@[^\n]*$"
+)
 _BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT = re.compile(
     r"\b(?P<name>[a-z][a-z0-9_]*_(?:pass|token|secret|password|auth|key))"
     r"\s*=\s*(?P<value>_[a-z][a-z0-9_]*(?:\([^\n]*\))?|[a-z][a-z0-9_]*)"
@@ -1232,6 +1235,7 @@ def _source_text_for_base64_scan(
         return "<diff metadata>"
 
     masked = _BOUNDED_SOURCE_DIFF_METADATA.sub(mask_diff_metadata, masked)
+    masked = _BOUNDED_SOURCE_DIFF_HUNK.sub("<source diff hunk>", masked)
     masked = _BOUNDED_SOURCE_GIT_LOG_ENTRY.sub("<source-control-sha>", masked)
     masked = _BOUNDED_SOURCE_GIT_HEAD_OUTPUT.sub(
         lambda match: f"<source-control-sha>\n<source-control-sha> {match.group(0).split(' ', 1)[1]}",

@@ -1040,6 +1040,25 @@ def test_source_presentation_allows_bounded_git_metadata(tmp_path):
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_unified_diff_hunk_headers(tmp_path):
+    source = "@@ -704,15 +704,11 @@ def _pid_is_alive(pid: int) -> bool:\n"
+    path = tmp_path / "diff.txt"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path)
+    presentation = json.dumps(
+        {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1))}
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
 def test_source_presentation_still_rejects_quoted_secret_after_code_mask(tmp_path):
     path = tmp_path / "source.py"
     source = "token = super-secret-value\n"
