@@ -324,9 +324,13 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         # exception below is swallowed, and stale refs get compared against
         # HEAD — silently degrading the passive check until a human removes
         # the lock (git never self-heals these).
-        from hermes_cli.gitlock import clear_stale_git_locks
+        from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
 
         clear_stale_git_locks(repo_dir)
+        # The passive check is the main tmp_pack GENERATOR on flaky lines
+        # (several aborted fetches per day) — it must also be the janitor,
+        # or debris accumulates unbounded between manual updates (#93732).
+        clear_stale_tmp_packs(repo_dir)
 
         # Scope the fetch to the one branch the behind-count compares against.
         # An unscoped ``git fetch origin`` transfers every remote head (~1,400
@@ -340,13 +344,37 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         if is_shallow:
             fetch_args += ["--depth", "1"]
         fetch_args.append("--quiet")
-        subprocess.run(
+        fetch_proc = subprocess.run(
             fetch_args,
             capture_output=True, timeout=10,
             cwd=str(repo_dir),
         )
+        fetch_ok = fetch_proc.returncode == 0
     except Exception:
-        pass  # Offline or timeout — use stale refs, that's fine
+        fetch_ok = False  # Offline or timeout — don't use stale refs
+
+    # When the fetch fails, the local origin/main tracking ref is stale. It
+    # cannot prove *currentness* (a 0 behind-count may just mean the stale ref
+    # hasn't caught up), but if it already shows HEAD behind, that is sound
+    # evidence an update exists — the ref was good at some point in the past.
+    # Return the positive stale count; return None (inconclusive) otherwise so
+    # the caller doesn't cache a false "up to date". (#82166, review #92578)
+    if not fetch_ok:
+        if not is_shallow:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-list", "--count", "HEAD..origin/main"],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=5,
+                    cwd=str(repo_dir),
+                )
+                if result.returncode == 0:
+                    behind = int(result.stdout.strip())
+                    if behind > 0:
+                        return behind
+            except Exception:
+                pass
+        return None
 
     if is_shallow:
         # No history to count across the shallow boundary. `origin/main` may not
@@ -396,6 +424,19 @@ def check_for_updates() -> Optional[int]:
     hermes_home = get_hermes_home()
     cache_file = hermes_home / ".update_check"
     embedded_rev = os.environ.get("HERMES_REVISION") or None
+    # A Git install has no embedded revision, so VERSION alone is not a
+    # sufficient cache key: a branch refresh can keep the same package
+    # version while changing the checkout HEAD (and therefore its behind
+    # count). Capture the running checkout identity before consulting the
+    # cache so an old result cannot survive a normal update or merge.
+    repo_dir: Path | None = None
+    cache_rev = embedded_rev
+    if not embedded_rev:
+        repo_dir = Path(__file__).parent.parent.resolve()
+        if not (repo_dir / ".git").exists():
+            repo_dir = hermes_home / "hermes-agent"
+        if (repo_dir / ".git").exists():
+            cache_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
 
     # Docker images have no working tree to count commits against — the
     # published image excludes `.git` (see .dockerignore) and sets no
@@ -419,7 +460,7 @@ def check_for_updates() -> Optional[int]:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
             if (
                 now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
-                and cached.get("rev") == embedded_rev
+                and cached.get("rev") == cache_rev
                 and cached.get("ver") == VERSION
             ):
                 return cached.get("behind")
@@ -432,10 +473,7 @@ def check_for_updates() -> Optional[int]:
         # Prefer the running code's location over the profile-scoped path.
         # $HERMES_HOME/hermes-agent/ may be a stale copy from --clone-all;
         # Path(__file__) always resolves to the actual installed checkout.
-        repo_dir = Path(__file__).parent.parent.resolve()
-        if not (repo_dir / ".git").exists():
-            repo_dir = hermes_home / "hermes-agent"
-        if not (repo_dir / ".git").exists():
+        if repo_dir is None or not (repo_dir / ".git").exists():
             # No git checkout and no embedded revision — can't determine
             # update status. This is the Docker path (already short-circuited
             # above) or an unsupported install without a source tree.
@@ -444,10 +482,16 @@ def check_for_updates() -> Optional[int]:
             behind = _check_via_local_git(repo_dir)
 
     try:
-        cache_file.write_text(
-            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}),
-            encoding="utf-8",
-        )
+        # Don't cache inconclusive results (None). A None means the check
+        # could not run — typically a failed git fetch. Caching None would
+        # suppress retries for the full 6-hour cache window, leaving the
+        # user with a stale "up to date" or no information for hours after
+        # connectivity is restored (#82166).
+        if behind is not None:
+            cache_file.write_text(
+                json.dumps({"ts": now, "behind": behind, "rev": cache_rev, "ver": VERSION}),
+                encoding="utf-8",
+            )
     except Exception:
         pass
 
