@@ -528,17 +528,36 @@ def _is_legacy_intake_task(details: object, task: KanbanTask) -> bool:
         evidence = json.loads(body.rsplit("\n", 1)[-1]) if isinstance(body, str) else None
     except (TypeError, json.JSONDecodeError):
         evidence = None
-    return (
-        details.get("status") == "blocked"
-        and isinstance(body, str)
-        and "This card is intake-only and starts blocked; an operator must validate" in body
-        and isinstance(evidence, dict)
+    exact_receipt = (
+        isinstance(evidence, dict)
         and evidence.get("repository") == task.evidence.get("repository")
         and evidence.get("pr_number") == task.evidence.get("pr_number")
         and evidence.get("feedback_kind") == task.evidence.get("feedback_kind")
         and evidence.get("feedback_id") == task.evidence.get("feedback_id")
         and evidence.get("expected_head_sha") == task.evidence.get("expected_head_sha")
     )
+    if not (
+        details.get("status") == "blocked"
+        and isinstance(body, str)
+        and exact_receipt
+    ):
+        return False
+    if "This card is intake-only and starts blocked; an operator must validate" in body:
+        return True
+    events = details.get("_events")
+    if not isinstance(events, list):
+        return False
+    for event in reversed(events):
+        if not isinstance(event, dict) or event.get("kind") != "blocked":
+            continue
+        payload = event.get("payload")
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        return (
+            isinstance(reason, str)
+            and "protected terminal route" in reason
+            and "omitted_from_remote_replay" in reason
+        )
+    return False
 
 
 def _kanban_reconcile_argv(task_id: str, task: KanbanTask) -> list[str]:
