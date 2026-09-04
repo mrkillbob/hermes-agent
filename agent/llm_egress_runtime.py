@@ -87,6 +87,7 @@ _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES = frozenset({"kanban_attachments"})
 # fail on otherwise harmless page identifiers or encoded-looking text.
 _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES = frozenset({"terminal", "browser_exec"})
 _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"search_files"})
+_REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"tool_search"})
 _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file"})
 _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES = frozenset({"web_extract", "web_search"})
 _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES = frozenset({"patch", "write_file"})
@@ -310,6 +311,15 @@ def _project_bound_search_files(value: str) -> GeneratedContextSegment:
         )
     )
     return GeneratedContextSegment(safe)
+
+
+def _project_bound_tool_search(value: str) -> GeneratedContextSegment:
+    """Replay only the bounded outcome of local tool catalog discovery."""
+
+    return GeneratedContextSegment(
+        "tool_search completed locally. Its catalog result was omitted from "
+        "remote replay; use the already connected terminal tool."
+    )
 
 
 def _project_web_search_replay(value: str) -> SanitizedSegment:
@@ -2432,6 +2442,7 @@ def _typed_payload(
     elided_kanban_tool_call_ids: frozenset[str] = frozenset(),
     kanban_attachment_tool_call_ids: frozenset[str] = frozenset(),
     search_projection_tool_call_ids: frozenset[str] = frozenset(),
+    tool_search_projection_tool_call_ids: frozenset[str] = frozenset(),
     read_file_projection_tool_call_ids: frozenset[str] = frozenset(),
     web_replay_tool_call_ids: frozenset[str] = frozenset(),
     file_mutation_replay_tool_call_ids: frozenset[str] = frozenset(),
@@ -2532,6 +2543,14 @@ def _typed_payload(
         is_search_projection_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in search_projection_tool_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
+        is_tool_search_projection_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in tool_search_projection_tool_call_ids
             and (
                 value.get("role") == "tool"
                 or value.get("type") == "function_call_output"
@@ -2704,6 +2723,7 @@ def _typed_payload(
                 is_elided_kanban_tool_result,
                 is_kanban_attachment_result,
                 is_search_projection_tool_result,
+                is_tool_search_projection_result,
                 is_read_file_projection_tool_result,
                 is_web_replay_tool_result,
                 is_file_mutation_replay_result,
@@ -2762,6 +2782,7 @@ def _typed_payload(
                     is_elided_kanban_tool_result,
                     is_kanban_attachment_result,
                     is_search_projection_tool_result,
+                    is_tool_search_projection_result,
                     is_read_file_projection_tool_result,
                     is_web_replay_tool_result,
                     is_file_mutation_replay_result,
@@ -2895,6 +2916,7 @@ def _typed_payload(
                 continue
             if is_structured_result and (
                 is_search_projection_tool_result
+                or is_tool_search_projection_result
                 or is_git_grep_projection_tool_result
                 or is_rg_projection_tool_result
             ):
@@ -3009,6 +3031,13 @@ def _typed_payload(
                 and isinstance(item, str)
             ):
                 typed[key] = _project_bound_search_files(item)
+                continue
+            if (
+                is_tool_search_projection_result
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                typed[key] = _project_bound_tool_search(item)
                 continue
             if (
                 is_web_replay_tool_result
@@ -3284,6 +3313,7 @@ def _typed_payload(
                     field_name=key,
                     generated_context=True,
                     redact_generated_context=True,
+                    tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
                     registry=registry,
                     request_identity=request_identity,
                 )
@@ -3298,6 +3328,7 @@ def _typed_payload(
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
                 kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
                 search_projection_tool_call_ids=search_projection_tool_call_ids,
+                tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
                 read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
                 web_replay_tool_call_ids=web_replay_tool_call_ids,
                 file_mutation_replay_tool_call_ids=file_mutation_replay_tool_call_ids,
@@ -3357,6 +3388,7 @@ def _typed_payload(
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
                 kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
                 search_projection_tool_call_ids=search_projection_tool_call_ids,
+                tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
                 read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
                 web_replay_tool_call_ids=web_replay_tool_call_ids,
                 file_mutation_replay_tool_call_ids=file_mutation_replay_tool_call_ids,
@@ -3843,6 +3875,13 @@ def authorize_agent_sdk_kwargs(
         search_projection_tool_call_ids=(
             _recognized_tool_call_ids(
                 body, _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES
+            )
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
+        tool_search_projection_tool_call_ids=(
+            _recognized_tool_call_ids(
+                body, _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES
             )
             if protected_kanban_remote and protected_provider_route
             else frozenset()

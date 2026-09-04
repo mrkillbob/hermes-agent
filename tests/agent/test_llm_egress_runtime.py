@@ -2526,6 +2526,42 @@ def test_protected_kanban_search_result_projects_source_content_to_locations(
     }
 
 
+def test_protected_kanban_tool_search_result_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "nous"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_tool_search_projection",
+                        "type": "function",
+                        "function": {
+                            "name": "tool_search",
+                            "arguments": '{"query":"github feedback"}',
+                        },
+                    }],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_tool_search_projection",
+                    "content": '{"total_available":1,"results":[]}',
+                },
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    assert authorized["messages"][1]["content"].startswith(
+        "tool_search completed locally."
+    )
+
+
 def test_protected_kanban_search_file_listing_projects_safe_relative_paths(
     tmp_path, monkeypatch
 ):
