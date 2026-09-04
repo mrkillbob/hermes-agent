@@ -3905,6 +3905,81 @@ def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
     return Task.from_row(row) if row else None
 
 
+def reconcile_legacy_dispatch_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    idempotency_key: str,
+    head_sha: str,
+    body: str,
+    assignee: str,
+    workspace_path: str,
+    branch_name: str,
+    max_retries: int,
+    max_runtime_seconds: Optional[int],
+) -> bool:
+    """Upgrade one exact legacy intake card into an executable ready card.
+
+    This is intentionally narrow. It only mutates a blocked card whose
+    idempotency key matches and whose body still contains the old intake-only
+    policy marker. Cards with a current body, a different receipt, an active
+    claim, or any other status are left untouched so this cannot become a
+    generic task rewrite path.
+    """
+    if not task_id.strip() or not idempotency_key.strip() or not body.strip():
+        raise ValueError("task identity and body are required")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha or ""):
+        raise ValueError("head_sha must be a full 40-character hexadecimal SHA")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, idempotency_key, body, current_run_id, claim_lock "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if (
+            row["status"] != "blocked"
+            or row["idempotency_key"] != idempotency_key
+            or "This card is intake-only and starts blocked; an operator must validate"
+            not in (row["body"] or "")
+            or row["current_run_id"] is not None
+            or row["claim_lock"] is not None
+        ):
+            return False
+        updated = conn.execute(
+            "UPDATE tasks SET body = ?, assignee = ?, status = 'ready', "
+            "workspace_path = ?, branch_name = ?, max_retries = ?, "
+            "max_runtime_seconds = ?, current_run_id = NULL, claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL, last_failure_error = NULL "
+            "WHERE id = ? AND status = 'blocked' AND idempotency_key = ?",
+            (
+                body,
+                _canonical_assignee(assignee),
+                workspace_path,
+                branch_name,
+                int(max_retries),
+                int(max_runtime_seconds) if max_runtime_seconds else None,
+                task_id,
+                idempotency_key,
+            ),
+        )
+        if updated.rowcount != 1:
+            return False
+        _append_event(
+            conn,
+            task_id,
+            "dispatch_reconciled",
+            {
+                "reason": "legacy intake-only policy replaced by authorized autonomous dispatch",
+                "head_sha": head_sha,
+                "workspace_path": workspace_path,
+                "branch_name": branch_name,
+            },
+        )
+    return True
+
+
 # Canonical sort-order mappings for ``hermes kanban list --sort``.
 # Each value is a raw SQL fragment appended after ``ORDER BY``.
 VALID_SORT_ORDERS: dict[str, str] = {

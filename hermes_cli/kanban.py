@@ -486,6 +486,21 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "to skip the brief running-to-blocked transition.")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
+    p_reconcile = sub.add_parser(
+        "reconcile-dispatch",
+        help="Upgrade one exact legacy intake card to the current autonomous dispatch contract",
+    )
+    p_reconcile.add_argument("task_id")
+    p_reconcile.add_argument("--idempotency-key", required=True)
+    p_reconcile.add_argument("--head-sha", required=True)
+    p_reconcile.add_argument("--body", required=True)
+    p_reconcile.add_argument("--assignee", required=True)
+    p_reconcile.add_argument("--workspace-path", required=True)
+    p_reconcile.add_argument("--branch-name", required=True)
+    p_reconcile.add_argument("--max-retries", required=True, type=int)
+    p_reconcile.add_argument("--max-runtime", required=True, type=int)
+    p_reconcile.add_argument("--json", action="store_true")
+
     # --- swarm ---
     p_swarm = sub.add_parser(
         "swarm",
@@ -1206,6 +1221,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         handlers = {
             "init":     _cmd_init,
             "create":   _cmd_create,
+            "reconcile-dispatch": _cmd_reconcile_dispatch,
             "swarm":    _cmd_swarm,
             "list":     _cmd_list,
             "ls":       _cmd_list,
@@ -1774,6 +1790,34 @@ def _cmd_create(args: argparse.Namespace) -> int:
             running, message = _check_dispatcher_presence()
             if not running and message:
                 print(f"\n⚠  {message}", file=sys.stderr)
+    return 0
+
+
+def _cmd_reconcile_dispatch(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        updated = kb.reconcile_legacy_dispatch_task(
+            conn,
+            args.task_id,
+            idempotency_key=args.idempotency_key,
+            head_sha=args.head_sha,
+            body=args.body,
+            assignee=args.assignee,
+            workspace_path=args.workspace_path,
+            branch_name=args.branch_name,
+            max_retries=args.max_retries,
+            max_runtime_seconds=args.max_runtime,
+        )
+        task = kb.get_task(conn, args.task_id)
+    if not updated:
+        print(
+            f"cannot reconcile {args.task_id}: card is not the exact legacy intake shape",
+            file=sys.stderr,
+        )
+        return 1
+    if args.json:
+        print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
+    else:
+        print(f"Reconciled {args.task_id} -> ready")
     return 0
 
 

@@ -180,6 +180,8 @@ class KanbanClient(Protocol):
 
     def task_status(self, board: str, task_id: str) -> str | None: ...
 
+    def task_details(self, board: str, task_id: str) -> Mapping[str, object] | None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class GitCommandResult:
@@ -304,6 +306,7 @@ def _claim_with_orphan_recovery(
     if lease is not None:
         return lease
     task_status = getattr(kanban, "task_status", None)
+    task_details = getattr(kanban, "task_details", None)
     if exact_dispatch_only:
         binding = ledger.exact_pending_task_binding(receipt)
         bindings = (binding,) if binding is not None else ()
@@ -316,6 +319,22 @@ def _claim_with_orphan_recovery(
             status = task_status(board, binding.task_id)
         except RuntimeError:
             return None
+        if (
+            exact_dispatch_only
+            and status == "blocked"
+            and callable(task_details)
+        ):
+            try:
+                details = task_details(board, binding.task_id)
+            except RuntimeError:
+                return None
+            if _is_legacy_intake_task(details, receipt):
+                return ledger.reopen_legacy_exact_dispatch(
+                    receipt,
+                    blocked=binding,
+                    owner=owner,
+                    claimed_at=claimed_at,
+                )
         if status != "archived":
             return None
     if exact_dispatch_only:
@@ -330,6 +349,26 @@ def _claim_with_orphan_recovery(
         archived=bindings,
         owner=owner,
         claimed_at=claimed_at,
+    )
+
+
+_LEGACY_INTAKE_ONLY_MARKER = (
+    "This card is intake-only and starts blocked; an operator must validate"
+)
+
+
+def _is_legacy_intake_task(
+    details: Mapping[str, object] | None, receipt: FeedbackReceipt
+) -> bool:
+    """Recognize only the old, un-executable card shape for re-admission."""
+    if not isinstance(details, Mapping):
+        return False
+    body = details.get("body")
+    return (
+        details.get("status") == "blocked"
+        and details.get("idempotency_key") == _receipt_idempotency_key(receipt)
+        and isinstance(body, str)
+        and _LEGACY_INTAKE_ONLY_MARKER in body
     )
 
 
@@ -1286,11 +1325,15 @@ class ScanController:
                         skipped["admission_cap"] += 1
                         continue
                     claimed_at = self._clock()
-                    lease = self._ledger.claim(
+                    lease = _claim_with_orphan_recovery(
+                        self._ledger,
+                        self._kanban,
                         receipt,
+                        board=self._policy.board or "",
                         owner=self._claim_owner,
                         claimed_at=claimed_at,
                         stale_before=claimed_at - self._claim_lease,
+                        exact_dispatch_only=True,
                     )
                     if lease is None:
                         skipped["duplicate"] += 1
@@ -1827,7 +1870,10 @@ class ScanController:
         revalidated = self._revalidate(receipt, skipped)
         if revalidated is None:
             return _scan_result(0, skipped)
-        if self._ledger.was_completed_on_any_head(receipt):
+        if (
+            self._ledger.was_completed_on_any_head(receipt)
+            and not self._legacy_dispatch_is_reopenable(receipt)
+        ):
             skipped["already_queued"] += 1
             return _scan_result(0, skipped)
         feedback, target, labels = revalidated
@@ -1845,6 +1891,18 @@ class ScanController:
             skipped[dispatch_error] += 1
             return _scan_result(0, skipped)
         return _scan_result(1, skipped)
+
+    def _legacy_dispatch_is_reopenable(self, receipt: FeedbackReceipt) -> bool:
+        """Check the exact pending card before bypassing completed-ledger dedupe."""
+        binding = self._ledger.exact_pending_task_binding(receipt)
+        details_reader = getattr(self._kanban, "task_details", None)
+        if binding is None or not callable(details_reader):
+            return False
+        try:
+            details = details_reader(self._policy.board or "", binding.task_id)
+        except RuntimeError:
+            return False
+        return _is_legacy_intake_task(details, receipt)
 
     def dispatch_feedback(self, receipt: FeedbackReceipt) -> ScanResult:
         """Dispatch one exact feedback item after canonical reread and admission."""

@@ -422,9 +422,17 @@ class KanbanSubprocessClient:
         task_id = payload.get("id") if isinstance(payload, dict) else None
         if not isinstance(task_id, str) or not task_id.strip():
             raise RuntimeError("Kanban task creation failed")
-        return task_id.strip()
+        task_id = task_id.strip()
+        existing = (
+            payload.get("task")
+            if isinstance(payload, dict) and isinstance(payload.get("task"), dict)
+            else payload
+        )
+        if _is_legacy_intake_task(existing, task):
+            self.reconcile_dispatch_task(task_id, task)
+        return task_id
 
-    def task_status(self, board: str, task_id: str) -> str | None:
+    def task_details(self, board: str, task_id: str) -> dict[str, object] | None:
         result = self._runner.run(
             ["hermes", "kanban", "--board", board, "show", task_id, "--json"]
         )
@@ -439,10 +447,21 @@ class KanbanSubprocessClient:
         except (TypeError, json.JSONDecodeError) as error:
             raise RuntimeError("Kanban task lookup failed") from error
         task = payload.get("task") if isinstance(payload, dict) else None
+        return task if isinstance(task, dict) else None
+
+    def task_status(self, board: str, task_id: str) -> str | None:
+        task = self.task_details(board, task_id)
+        if task is None:
+            return None
         status = task.get("status") if isinstance(task, dict) else None
         if not isinstance(status, str) or not status.strip():
             raise RuntimeError("Kanban task lookup failed")
         return status.strip()
+
+    def reconcile_dispatch_task(self, task_id: str, task: KanbanTask) -> None:
+        result = self._runner.run(_kanban_reconcile_argv(task_id, task))
+        if result.returncode != 0:
+            raise RuntimeError(_kanban_create_error(result))
 
 
 def _kanban_create_error(result: KanbanCommandResult) -> str:
@@ -489,6 +508,50 @@ def _kanban_create_argv(task: KanbanTask) -> list[str]:
         argv.extend(["--initial-status", task.initial_status])
     argv.append("--json")
     return argv
+
+
+def _is_legacy_intake_task(details: object, task: KanbanTask) -> bool:
+    if not isinstance(details, dict):
+        return False
+    body = details.get("body")
+    return (
+        details.get("status") == "blocked"
+        and details.get("idempotency_key") == task.idempotency_key
+        and isinstance(body, str)
+        and "This card is intake-only and starts blocked; an operator must validate" in body
+    )
+
+
+def _kanban_reconcile_argv(task_id: str, task: KanbanTask) -> list[str]:
+    body = (
+        f"{task.instructions}\n\n{task.evidence_heading}:\n"
+        f"{json.dumps(task.evidence, sort_keys=True)}"
+    )
+    return [
+        "hermes",
+        "kanban",
+        "--board",
+        task.board,
+        "reconcile-dispatch",
+        task_id,
+        "--idempotency-key",
+        task.idempotency_key,
+        "--head-sha",
+        task.head_sha,
+        "--body",
+        body,
+        "--assignee",
+        task.assignee,
+        "--workspace-path",
+        str(task.repository_path),
+        "--branch-name",
+        task.branch,
+        "--max-retries",
+        str(task.max_retries),
+        "--max-runtime",
+        str(task.max_runtime_seconds or 0),
+        "--json",
+    ]
 
 
 def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:

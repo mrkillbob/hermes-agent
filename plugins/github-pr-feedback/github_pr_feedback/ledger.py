@@ -950,6 +950,60 @@ class FeedbackLedger:
                 raise LedgerStateError("exact archived dispatch changed during replacement")
             return ClaimLease(owner, claimed_at, version)
 
+    def reopen_legacy_exact_dispatch(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        blocked: PendingTaskBinding,
+        owner: str,
+        claimed_at: datetime,
+    ) -> ClaimLease | None:
+        """Re-admit an exact dispatch stranded by the old intake-only policy.
+
+        The old policy finalized a receipt when it created a deliberately
+        blocked intake card. Once autonomous dispatch is explicitly enabled,
+        that receipt becomes claimable again, but only while the exact
+        pending card binding is still present. The controller proves that the
+        card is the legacy intake shape before this CAS is attempted.
+        """
+        owner = owner.strip() if isinstance(owner, str) else ""
+        if not owner or blocked.receipt != receipt or not blocked.task_id.strip():
+            raise ValueError("claim owner and exact blocked binding must be valid")
+        claimed_at = _aware_utc(claimed_at, "claimed_at")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT task_id, status, action_status, lease_version "
+                "FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+                receipt.key,
+            ).fetchone()
+            if (
+                row is None
+                or row[0] != blocked.task_id
+                or row[1] != "completed"
+                or row[2] != "pending"
+            ):
+                return None
+            version = int(row[3] or 0) + 1
+            reopened = self._connection.execute(
+                "UPDATE feedback_receipts SET status = 'claimed', task_id = NULL, "
+                "last_error = NULL, attempts = attempts + 1, claim_owner = ?, "
+                "claimed_at = ?, lease_version = ? "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ? AND status = 'completed' "
+                "AND action_status = 'pending' AND task_id = ?",
+                (
+                    owner,
+                    claimed_at.isoformat(),
+                    version,
+                    *receipt.key,
+                    blocked.task_id,
+                ),
+            )
+            if reopened.rowcount != 1:
+                raise LedgerStateError("exact legacy dispatch changed during re-admission")
+            return ClaimLease(owner, claimed_at, version)
+
     def replace_archived_dispatches(
         self,
         receipt: FeedbackReceipt,
