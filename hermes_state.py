@@ -34,6 +34,7 @@ import uuid
 import weakref
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
