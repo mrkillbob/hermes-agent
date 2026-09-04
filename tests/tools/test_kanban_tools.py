@@ -182,6 +182,35 @@ def test_remote_worker_projection_preserves_dispatcher_python_token():
     assert "$HERMES_KANBAN_WORKTREE_PYTHON -m hermes_cli.main" in body
 
 
+def test_remote_worker_projection_separates_canonical_hermes_python_token():
+    from tools.kanban_tools import _sanitize_remote_worker_payload
+
+    project_python = "/Users/operator/project/.venv/bin/python"
+    dispatcher_python = "/Users/operator/.codex/worktrees/hermes/venv/bin/python"
+    payload = {
+        "task": {
+            "body": (
+                f"Use {dispatcher_python} -m hermes_cli.main github-pr-feedback "
+                f"after project checks use {project_python}."
+            )
+        }
+    }
+
+    sanitized = _sanitize_remote_worker_payload(
+        payload,
+        workspace_path="/Users/operator/.hermes/workspaces/t_12345678",
+        control_home="/Users/operator/.hermes",
+        worker_python=project_python,
+        dispatcher_python=dispatcher_python,
+    )
+
+    body = sanitized["task"]["body"]
+    assert dispatcher_python not in body
+    assert project_python not in body
+    assert "$HERMES_KANBAN_HERMES_PYTHON -m hermes_cli.main" in body
+    assert "$HERMES_KANBAN_WORKTREE_PYTHON" in body
+
+
 def test_remote_worker_projection_excludes_obsolete_attempt_history():
     from tools.kanban_tools import _project_remote_worker_state
 

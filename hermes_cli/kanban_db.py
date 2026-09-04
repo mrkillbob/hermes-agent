@@ -12837,6 +12837,11 @@ def _default_spawn(
     from hermes_constants import get_default_hermes_root
 
     env["HERMES_CONTROL_HOME"] = str(get_default_hermes_root())
+    # Protected task payloads use this token for commands that must import the
+    # canonical Hermes control plane. Keep it separate from
+    # HERMES_KANBAN_WORKTREE_PYTHON, which is pinned to the assigned
+    # repository's environment for project-local commands.
+    env["HERMES_KANBAN_HERMES_PYTHON"] = os.path.abspath(sys.executable)
     # Tag the worker's session so it lands in state.db as `kanban`, not as an
     # untitled `cli` row. A worker is a dispatcher-owned run whose transcript is
     # read on the board and in `hermes kanban log` — it is not a conversation

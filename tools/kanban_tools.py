@@ -85,28 +85,28 @@ def _sanitize_remote_worker_payload(
     workspace_path: str | None,
     control_home: str,
     worker_python: str | None = None,
+    dispatcher_python: str | None = None,
 ) -> Any:
     """Make Kanban state useful to a remote worker without host path egress."""
 
-    # A protected worker still needs to run the Hermes interpreter that owns
-    # its dependencies.  Preserve that executable as an environment token,
-    # rather than exposing the host checkout path or forcing the worker onto
-    # the system Python.  The dispatcher injects this variable into the child.
+    # A protected worker needs two distinct Python identities. The project
+    # interpreter owns the assigned checkout's dependencies, while the
+    # dispatcher interpreter owns Hermes' control-plane modules (for example
+    # the github-pr-feedback plugin). Conflating them makes a canonical
+    # ``python -m hermes_cli.main`` command resolve modules from the PR
+    # checkout and silently lose the control-plane command. Preserve each
+    # executable as its own environment token rather than exposing host paths.
     worker_python = (
         worker_python
         or os.environ.get("HERMES_KANBAN_WORKTREE_PYTHON")
         or sys.executable
     )
+    dispatcher_python = dispatcher_python or sys.executable
     worker_python_paths = tuple(
-        dict.fromkeys(
-            path
-            for path in (
-                worker_python,
-                os.environ.get("HERMES_KANBAN_WORKTREE_PYTHON"),
-                sys.executable,
-            )
-            if path
-        )
+        dict.fromkeys(path for path in (
+            worker_python,
+            os.environ.get("HERMES_KANBAN_WORKTREE_PYTHON"),
+        ) if path)
     )
 
     if isinstance(value, str):
@@ -125,6 +125,10 @@ def _sanitize_remote_worker_payload(
             text = text.replace(
                 str(python_path), "$HERMES_KANBAN_WORKTREE_PYTHON"
             )
+        if dispatcher_python:
+            text = text.replace(
+                str(dispatcher_python), "$HERMES_KANBAN_HERMES_PYTHON"
+            )
         return _PRIVATE_PATH_IN_TEXT.sub("<private-path>", text)
     if isinstance(value, dict):
         sanitized: dict[Any, Any] = {}
@@ -134,6 +138,7 @@ def _sanitize_remote_worker_payload(
                 workspace_path=workspace_path,
                 control_home=control_home,
                 worker_python=worker_python,
+                dispatcher_python=dispatcher_python,
             )
             if _REMOTE_PAYLOAD_SECRET_KEY.search(str(key)) or (
                 _REMOTE_PAYLOAD_SECRET_KEY.search(str(safe_key))
@@ -145,6 +150,7 @@ def _sanitize_remote_worker_payload(
                     workspace_path=workspace_path,
                     control_home=control_home,
                     worker_python=worker_python,
+                    dispatcher_python=dispatcher_python,
                 )
         return sanitized
     if isinstance(value, list):
@@ -154,6 +160,7 @@ def _sanitize_remote_worker_payload(
                 workspace_path=workspace_path,
                 control_home=control_home,
                 worker_python=worker_python,
+                dispatcher_python=dispatcher_python,
             )
             for item in value
         ]
@@ -967,6 +974,7 @@ def _handle_show(args: dict, **kw) -> str:
                     workspace_path=task.workspace_path,
                     control_home=str(get_default_hermes_root()),
                     worker_python=os.environ.get("HERMES_KANBAN_WORKTREE_PYTHON"),
+                    dispatcher_python=sys.executable,
                 )
             return json.dumps(payload)
         finally:
