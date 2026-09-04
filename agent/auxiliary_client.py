@@ -62,13 +62,6 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse, parse_qs, urlunparse
 
-from agent.codex_headers import (
-    CODEX_AUX_BASE_URL as _CODEX_AUX_BASE_URL,
-    apply_required_codex_headers as _apply_required_codex_headers,
-    codex_cloudflare_headers as _codex_cloudflare_headers,
-    is_official_codex_base_url as _is_official_codex_base_url,
-)
-
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # openai SDK pulls a large type tree (~240 ms cold, including responses/*,
 # graders/*). We expose `OpenAI` here as a thin proxy that imports the SDK on
@@ -577,14 +570,6 @@ _CODEX_PROGRESS_DELTA_TYPES = frozenset(
         "response.reasoning_text.delta",
     }
 )
-
-
-# Progress-aware auxiliary stream deadlines (Aug 2026, masoria report):
-# a dead stream fails fast at the no-progress window (first token AND
-# between tokens), a live stream re-arms per substantive event and is
-# bounded only by _aux_stream_total_ceiling() (shared with the streamed
-# chat.completions path).
-_AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS = 60.0
 
 
 def _codex_event_has_content(event: Any) -> bool:
@@ -1492,24 +1477,96 @@ NOUS_EXTRA_BODY = _nous_extra_body()
 # Set at resolve time — True if the auxiliary client points to Nous Portal
 auxiliary_is_nous: bool = False
 
-# Default auxiliary models per provider.
-# _OPENROUTER_MODEL is the BUILT-IN fallback used only when the user never set
-# auxiliary.openrouter_model — it MUST be a :free SKU: this lane engages
-# silently (auxiliary tasks, no user prompt), and a paid built-in default here
-# meant silent real OpenRouter spend the user never opted into (#81952). The
-# SKU matches the one the free_only warning below recommends. User-configured
-# auxiliary.openrouter_model values are honored untouched (paid allowed when
-# the user chose it; _warn_paid_lane_once still fires for that case).
-_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+# Default auxiliary models per provider
+_OPENROUTER_MODEL = "google/gemini-3.6-flash"
 _NOUS_MODEL = "google/gemini-3.6-flash"
 _NOUS_DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1"
 _ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 _AUTH_JSON_PATH = get_hermes_home() / "auth.json"
 
-# Codex helpers live in a small leaf module so fresh client builders never
-# request newly added exports from a stale, long-lived auxiliary router. The
-# private aliases above preserve the established import surface for plugins and
-# tests while new production consumers import the leaf directly.
+# Codex OAuth endpoint used when a caller explicitly requests
+# provider="openai-codex".  There is deliberately no hardcoded default
+# model: the set of models OpenAI accepts on this endpoint for
+# ChatGPT-account auth is an undocumented, shifting allow-list, and
+# pinning one here has drifted silently twice (gpt-5.3-codex → gpt-5.2-codex
+# → gpt-5.4 over 6 weeks in early 2026).  Callers must pass the model
+# they want explicitly (from config.yaml model.model, auxiliary.<task>.model,
+# or the user's active Codex model selection).
+_CODEX_AUX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+
+def _is_official_codex_base_url(base_url: str) -> bool:
+    """Identify OpenAI's Codex endpoint without matching custom proxies."""
+    try:
+        parsed = urlparse(base_url)
+        path = parsed.path.rstrip("/")
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "chatgpt.com"
+            and parsed.port in (None, 443)
+            and (path == "/backend-api/codex" or path.startswith("/backend-api/codex/"))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _codex_cloudflare_headers(
+    access_token: str, *, base_url: str = _CODEX_AUX_BASE_URL,
+) -> Dict[str, str]:
+    """Identity and account headers for chatgpt.com/backend-api/codex.
+
+    OpenAI requires third-party harnesses to identify themselves. Requests to
+    the official endpoint always send Hermes' originator and version. Custom
+    endpoints retain the existing compatibility identity. In either case,
+    preserve ``ChatGPT-Account-ID`` from the OAuth JWT's
+    ``chatgpt_account_id`` claim.
+
+    Malformed tokens are tolerated — we drop the account-ID header rather than
+    raise, so a bad token still surfaces as an auth error (401) instead of a
+    crash at client construction.
+    """
+    headers = {
+        "User-Agent": "codex_cli_rs/0.0.0 (Hermes Agent)",
+        "originator": "codex_cli_rs",
+    }
+    if _is_official_codex_base_url(base_url):
+        from hermes_cli import __version__
+
+        headers.update({
+            "User-Agent": f"HermesAgent/{__version__}",
+            "originator": "hermes-agent",
+        })
+    if not isinstance(access_token, str) or not access_token.strip():
+        return headers
+    try:
+        import base64
+        parts = access_token.split(".")
+        if len(parts) < 2:
+            return headers
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+        acct_id = claims.get("https://api.openai.com/auth", {}).get("chatgpt_account_id")
+        if isinstance(acct_id, str) and acct_id:
+            headers["ChatGPT-Account-ID"] = acct_id
+    except Exception:
+        pass
+    return headers
+
+
+def _apply_required_codex_headers(
+    client_kwargs: Dict[str, Any], *, access_token: str, base_url: str,
+) -> None:
+    """Keep required Codex identity after user/provider header overrides."""
+    if not _is_official_codex_base_url(base_url):
+        return
+    required = _codex_cloudflare_headers(access_token, base_url=base_url)
+    required_names = {name.lower() for name in required}
+    existing = client_kwargs.get("default_headers") or {}
+    client_kwargs["default_headers"] = {
+        **{name: value for name, value in existing.items()
+           if str(name).lower() not in required_names},
+        **required,
+    }
 
 
 # Hosts that expose BOTH an Anthropic-style ``…/anthropic`` path and a sibling
@@ -1825,25 +1882,6 @@ class _CodexCompletionsAdapter:
         # same behavior as the main agent's Codex transport.
         extra_body = kwargs.get("extra_body") or {}
         if isinstance(extra_body, dict):
-            # Fast mode / Priority Processing is a top-level Responses field.
-            # Auxiliary callers express provider controls through
-            # auxiliary.<task>.extra_body, so project service_tier here just as
-            # the main Codex transport projects request_overrides. xAI's
-            # Responses endpoint rejects this field; keep the same xAI-only
-            # guard as agent/transports/codex.py.
-            service_tier = extra_body.get("service_tier")
-            client_base_url = str(getattr(self._client, "base_url", "") or "")
-            is_xai_responses = (
-                base_url_host_matches(client_base_url, "x.ai")
-                or base_url_host_matches(client_base_url, "api.x.ai")
-            )
-            if (
-                isinstance(service_tier, str)
-                and service_tier.strip()
-                and not is_xai_responses
-            ):
-                resp_kwargs["service_tier"] = service_tier.strip()
-
             reasoning_cfg = extra_body.get("reasoning")
             if isinstance(reasoning_cfg, dict):
                 if reasoning_cfg.get("enabled") is False:
@@ -2012,12 +2050,7 @@ class _CodexCompletionsAdapter:
         progress_deadline = [_start_monotonic + no_progress_timeout]
         saw_content = threading.Event()
         timed_out = threading.Event()
-        # Set only when the timeout WON the attempt (not when the owner
-        # hard-cancelled first): tells the owning thread's ``finally`` that
-        # the shared client's FDs still need a real close (#29507).
-        timeout_release_pending = threading.Event()
-        stream_finished = threading.Event()
-        timeout_timer: List[Optional[threading.Timer]] = [None]
+        timeout_timer: Optional[threading.Timer] = None
         # A protected provider call may outlive its owning compression attempt:
         # the owner returns promptly on hard cancellation while this adapter is
         # still blocked in the SDK stream on its isolated worker. Timer threads
@@ -2028,38 +2061,9 @@ class _CodexCompletionsAdapter:
         )
         attempt_stream_lock = threading.Lock()
         attempt_stream: List[Any] = []
-        # The thread driving this request owns its transport's file
-        # descriptors — see the FD-ownership note in _close_client_on_timeout.
-        owner_tid = threading.get_ident()
-
-        def _effective_deadline() -> float:
-            with deadline_lock:
-                return min(hard_deadline, progress_deadline[0])
-
-        def _record_stream_progress() -> None:
-            # A substantive payload re-arms the no-progress window. The hard
-            # ceiling is never extended.
-            with deadline_lock:
-                progress_deadline[0] = time.monotonic() + no_progress_timeout
 
         def _timeout_message() -> str:
-            elapsed = time.monotonic() - _start_monotonic
-            if time.monotonic() >= hard_deadline:
-                return (
-                    "Codex auxiliary Responses stream exceeded "
-                    f"{hard_deadline - _start_monotonic:.1f}s hard ceiling"
-                )
-            if not saw_content.is_set():
-                return (
-                    "Codex auxiliary Responses stream produced no output "
-                    f"within {float(no_progress_timeout):.1f}s "
-                    f"(no-progress timeout, {elapsed:.1f}s elapsed)"
-                )
-            return (
-                "Codex auxiliary Responses stream stalled: no new output "
-                f"for {float(no_progress_timeout):.1f}s "
-                f"({elapsed:.1f}s elapsed)"
-            )
+            return f"Codex auxiliary Responses stream exceeded {float(total_timeout):.1f}s total timeout"
 
         def _close_client_on_timeout() -> None:
             begin_timeout_cleanup = getattr(
@@ -2094,58 +2098,12 @@ class _CodexCompletionsAdapter:
                             exc_info=True,
                         )
                 return
-            # FD-ownership contract (#29507 / #67142 / #70773): only the
-            # thread driving the request may RELEASE this client's file
-            # descriptors. This callback has two callers — ``_check_cancelled``
-            # on the owning thread, and the daemon watchdog ``threading.Timer``,
-            # which is a stranger thread. From a stranger thread we may only
-            # ``shutdown()`` the pooled sockets: ``close()`` releases the raw
-            # TLS fd while the owner's OpenSSL BIO still caches that integer,
-            # the kernel recycles it into the next ``open()`` in this process
-            # (a SessionDB / kanban.db handle), and the owner's unwinding TLS
-            # flush writes an application-data record into that database file.
-            # ``shutdown()`` from any thread is FD-safe; ``close()`` is not.
-            # The owning thread performs the real close in the ``finally``
-            # below, which is where the FD release belongs.
-            timeout_release_pending.set()
-            if threading.get_ident() == owner_tid:
-                close = getattr(self._client, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        logger.debug("Codex auxiliary: client close during timeout failed", exc_info=True)
-            else:
+            close = getattr(self._client, "close", None)
+            if callable(close):
                 try:
-                    from agent.agent_runtime_helpers import force_close_tcp_sockets
-
-                    shutdown_count = force_close_tcp_sockets(self._client)
-                    logger.info(
-                        "Codex auxiliary client aborted (timeout, tcp_force_closed=%d, "
-                        "deferred_close=stranger_thread)",
-                        shutdown_count,
-                    )
+                    close()
                 except Exception:
-                    logger.debug("Codex auxiliary: client abort during timeout failed", exc_info=True)
-                # Socket shutdown wakes a reader blocked on a REAL transport,
-                # but the owner may be blocked inside the SDK's event stream
-                # (or a test double with no sockets). Closing the attempt-
-                # owned stream is the same attempt-scoped wake the hard-cancel
-                # branch above performs from this Timer thread — it releases
-                # the owner without touching the shared client's FDs; the
-                # owner then does the real close in its ``finally``.
-                with attempt_stream_lock:
-                    stream = attempt_stream[0] if attempt_stream else None
-                close_stream = getattr(stream, "close", None)
-                if callable(close_stream):
-                    try:
-                        close_stream()
-                    except Exception:
-                        logger.debug(
-                            "Codex auxiliary: attempt stream close during "
-                            "stranger-thread timeout failed",
-                            exc_info=True,
-                        )
+                    logger.debug("Codex auxiliary: client close during timeout failed", exc_info=True)
             # The cached auxiliary client wraps this same ``self._client``
             # (or *is* a ``CodexAuxiliaryClient`` whose ``_real_client`` is
             # this instance).  After we close the httpx transport above, the
@@ -2158,7 +2116,7 @@ class _CodexCompletionsAdapter:
                 logger.debug("Codex auxiliary: cache eviction on timeout failed", exc_info=True)
 
         def _check_cancelled() -> None:
-            if total_timeout is not None and time.monotonic() >= _effective_deadline():
+            if deadline is not None and time.monotonic() >= deadline:
                 if not timed_out.is_set():
                     _close_client_on_timeout()
                 raise TimeoutError(_timeout_message())
@@ -2180,30 +2138,11 @@ class _CodexCompletionsAdapter:
                 # new failure mode for auxiliary calls.
                 pass
 
-        def _watchdog_fire() -> None:
-            # Re-armable watchdog: if progress moved the deadline forward
-            # since this timer was scheduled, reschedule instead of killing
-            # a live stream. Only kill when the effective deadline (progress
-            # window or hard ceiling, whichever is sooner) has truly passed.
-            remaining = _effective_deadline() - time.monotonic()
-            if remaining > 0:
-                if timed_out.is_set() or stream_finished.is_set():
-                    return
-                t = threading.Timer(remaining, _watchdog_fire)
-                t.daemon = True
-                timeout_timer[0] = t
-                t.start()
-                return
-            _close_client_on_timeout()
-
         try:
             if total_timeout:
-                timeout_timer[0] = threading.Timer(
-                    max(_effective_deadline() - time.monotonic(), 0.0),
-                    _watchdog_fire,
-                )
-                timeout_timer[0].daemon = True
-                timeout_timer[0].start()
+                timeout_timer = threading.Timer(float(total_timeout), _close_client_on_timeout)
+                timeout_timer.daemon = True
+                timeout_timer.start()
             _check_cancelled()
 
             # Event-driven Responses streaming via the low-level
@@ -2235,13 +2174,7 @@ class _CodexCompletionsAdapter:
                 # compression commit fence) counts only substantive
                 # payloads — lifecycle and keepalive events must not reset
                 # the compression idle clock.
-                # The transport no-progress window likewise re-arms only on
-                # substantive payloads: a zombie stream that drips SSE
-                # keepalives but never produces output dies at the same 60s
-                # window as a fully dead connection.
                 if _codex_event_has_content(_event):
-                    _record_stream_progress()
-                    saw_content.set()
                     _notify_aux_provider_response()
                 else:
                     _notify_aux_timing_response()
@@ -2336,26 +2269,8 @@ class _CodexCompletionsAdapter:
             logger.debug("Codex auxiliary Responses API call failed: %s", exc)
             raise
         finally:
-            stream_finished.set()
-            _t = timeout_timer[0]
-            if _t is not None:
-                _t.cancel()
-            # A stranger-thread timeout only shut the sockets down; the FDs
-            # are still open and this — the owning thread, now unwound — is
-            # the one context that may release them (#29507). Gated on
-            # timeout_release_pending, NOT timed_out: in the hard-cancel
-            # branch (timeout_won=False) the shared client must stay usable
-            # for other sessions.
-            if timeout_release_pending.is_set():
-                close = getattr(self._client, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        logger.debug(
-                            "Codex auxiliary: owner-thread close after timeout failed",
-                            exc_info=True,
-                        )
+            if timeout_timer is not None:
+                timeout_timer.cancel()
 
         content = "".join(text_parts).strip() or None
 
@@ -4065,8 +3980,12 @@ def _compat_runtime_main() -> Optional[Dict[str, Any]]:
 
     ``set_runtime_main`` mirrors values into the old module attributes for
     introspection, but those mirrors must never become runtime inputs. A direct
-    patch is recognized only when it differs from the mirrored snapshot and
-    only on the main thread, keeping concurrent session workers isolated.
+    patch is recognized only when it differs from the mirrored snapshot; only
+    the fields that differ are treated as overrides. This matters for legacy
+    tests and integrations that patch just a live endpoint: carrying the
+    mirrored provider/model along with that partial patch can resurrect a stale
+    route from an earlier turn. The compatibility path is main-thread-only so
+    concurrent session workers remain isolated.
     """
     if threading.current_thread() is not threading.main_thread():
         return None
@@ -4078,9 +3997,16 @@ def _compat_runtime_main() -> Optional[Dict[str, Any]]:
         _RUNTIME_MAIN_API_MODE,
         _RUNTIME_MAIN_AUTH_MODE,
     )
-    if values == _RUNTIME_MAIN_COMPAT_SNAPSHOT:
+    changed = {
+        field: value
+        for field, value, snapshot in zip(
+            _MAIN_RUNTIME_FIELDS, values, _RUNTIME_MAIN_COMPAT_SNAPSHOT
+        )
+        if value != snapshot
+    }
+    if not changed:
         return None
-    return dict(zip(_MAIN_RUNTIME_FIELDS, values))
+    return changed
 
 
 def _runtime_main_value(field: str) -> Any:
@@ -7396,40 +7322,6 @@ def resolve_provider_client(
                 custom_key = build_command_token_provider(
                     custom_key_cmd, custom_entry.get("name") or provider
                 ) or custom_key
-            if not custom_key:
-                try:
-                    from agent.credential_pool import (
-                        custom_provider_pool_key_candidates,
-                        load_pool,
-                    )
-
-                    pool_name = (
-                        custom_entry.get("provider_key")
-                        or custom_entry.get("name")
-                        or provider
-                    )
-                    for pool_key in custom_provider_pool_key_candidates(
-                        custom_base, pool_name
-                    ):
-                        try:
-                            pool = load_pool(pool_key)
-                        except Exception:
-                            continue
-                        if not pool.has_credentials():
-                            continue
-                        pool_entry = pool.select()
-                        if pool_entry is None:
-                            continue
-                        pool_api_key = (
-                            getattr(pool_entry, "runtime_api_key", None)
-                            or getattr(pool_entry, "access_token", "")
-                            or ""
-                        )
-                        if str(pool_api_key).strip():
-                            custom_key = str(pool_api_key).strip()
-                            break
-                except Exception:
-                    pass
             custom_key = custom_key or "no-key-required"
             if custom_key == "no-key-required":
                 logger.warning(
@@ -10062,94 +9954,7 @@ def _provider_requires_stream(provider: str, base_url: Optional[str]) -> bool:
     return False
 
 
-_AFFORDABLE_TOKENS_RE = re.compile(
-    r"can only afford\s+([0-9][0-9,]*)", re.IGNORECASE
-)
-
-# Below this, the affordable budget can't fit a useful auxiliary output
-# (summaries, titles, vision descriptions) — treat as genuine exhaustion.
-_AFFORDABLE_RETRY_FLOOR_TOKENS = 512
-# Headroom under the provider's stated budget so token-count rounding on
-# their side can't 402 the retry (same margin PR #49785 used).
-_AFFORDABLE_RETRY_MARGIN_TOKENS = 64
-
-
-def _affordable_max_tokens_from_error(exc: Exception) -> Optional[int]:
-    """Extract the affordable output budget from a credit-limited 402.
-
-    OpenRouter's insufficient-credit rejection states the budget explicitly:
-    ``402 - This request requires more credits, or fewer max_tokens. You
-    requested up to 65536 tokens, but can only afford 7117.`` The account
-    HAS usable credit — the request just asked for (or defaulted to) an
-    output cap larger than the balance covers. Returns the retryable cap
-    (affordable minus a safety margin), or ``None`` when the error carries
-    no affordable count or the budget is too small to be useful.
-    """
-    if not _is_payment_error(exc):
-        return None
-    match = _AFFORDABLE_TOKENS_RE.search(str(exc))
-    if not match:
-        return None
-    try:
-        affordable = int(match.group(1).replace(",", ""))
-    except (TypeError, ValueError):
-        return None
-    capped = affordable - _AFFORDABLE_RETRY_MARGIN_TOKENS
-    if capped < _AFFORDABLE_RETRY_FLOOR_TOKENS:
-        return None
-    return capped
-
-
 def _create_with_progress(
-    client: Any,
-    kwargs: Dict[str, Any],
-    task: Optional[str] = None,
-    *,
-    force_stream: bool = False,
-) -> Any:
-    """Credit-aware wrapper over :func:`_create_with_progress_once`.
-
-    A 402 that names an affordable output budget ("can only afford N
-    tokens") is NOT terminal billing exhaustion — the account can pay for
-    the call at a lower ``max_tokens``. Retry ONCE with the provider-stated
-    cap (masoria debug bundle, Aug 2026: compression fell back to
-    OpenRouter, which defaulted the omitted cap to the model's full 65,536
-    window and 402'd three times in a row on an account that could afford
-    7,117 tokens — plenty for a summary). Only lowers, never raises, an
-    existing cap; anything else re-raises for the normal recovery chains.
-    """
-    try:
-        return _create_with_progress_once(
-            client, kwargs, task, force_stream=force_stream,
-        )
-    except Exception as exc:
-        affordable = _affordable_max_tokens_from_error(exc)
-        if affordable is None:
-            raise
-        existing_cap = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
-        if isinstance(existing_cap, (int, float)) and 0 < existing_cap <= affordable:
-            # The request was already within the stated budget — the error
-            # is something else (e.g. prompt-side cost). Don't spin.
-            raise
-        retry_kwargs = dict(kwargs)
-        retry_kwargs.pop("max_tokens", None)
-        retry_kwargs.pop("max_completion_tokens", None)
-        retry_kwargs.update(
-            auxiliary_max_tokens_param(
-                affordable, model=str(kwargs.get("model") or "") or None,
-            )
-        )
-        logger.info(
-            "Auxiliary %s: credit-limited 402 (affordable=%d tokens); "
-            "retrying once with a clamped output cap instead of failing: %s",
-            task or "call", affordable, exc,
-        )
-        return _create_with_progress_once(
-            client, retry_kwargs, task, force_stream=force_stream,
-        )
-
-
-def _create_with_progress_once(
     client: Any,
     kwargs: Dict[str, Any],
     task: Optional[str] = None,
@@ -10282,7 +10087,6 @@ class _ChatStreamAccumulator:
         self._host_deadline = host_deadline
         self.content_parts: List[str] = []
         self.reasoning_parts: List[str] = []
-        self.reasoning_details: List[Any] = []
         self.tool_calls_acc: Dict[int, Dict[str, Any]] = {}
         self.finish_reason = None
         self.usage = None
@@ -10337,24 +10141,6 @@ class _ChatStreamAccumulator:
         if reasoning_piece and isinstance(reasoning_piece, str):
             self.reasoning_parts.append(reasoning_piece)
             made_progress = True
-        # OpenRouter-compatible reasoning models may stream their entire
-        # thinking phase through ``reasoning_details`` instead of
-        # ``reasoning`` / ``reasoning_content``.  Treat only details carrying
-        # actual text as forward progress: structural/signed envelopes must
-        # not keep an otherwise stalled compression alive indefinitely.
-        reasoning_details = getattr(delta, "reasoning_details", None)
-        if reasoning_details is None:
-            model_extra = getattr(delta, "model_extra", None)
-            if isinstance(model_extra, dict):
-                reasoning_details = model_extra.get("reasoning_details")
-        if isinstance(reasoning_details, list):
-            for detail in reasoning_details:
-                self.reasoning_details.append(detail)
-                if isinstance(detail, dict) and any(
-                    isinstance(detail.get(field), str) and detail[field]
-                    for field in ("summary", "thinking", "content", "text")
-                ):
-                    made_progress = True
         for tc in (getattr(delta, "tool_calls", None) or []):
             idx = getattr(tc, "index", 0) or 0
             acc = self.tool_calls_acc.setdefault(
@@ -10396,7 +10182,6 @@ class _ChatStreamAccumulator:
             content="".join(self.content_parts),
             tool_calls=tool_calls,
             reasoning="".join(self.reasoning_parts) or None,
-            reasoning_details=self.reasoning_details or None,
         )
         choice = SimpleNamespace(
             index=0,
@@ -10868,6 +10653,44 @@ def _call_llm_impl(
                     "Auxiliary %s: timeout on the critical path; "
                     "skipping same-provider retry and falling back: %s",
                     task, transient_err,
+                )
+                raise
+            # Compression is on the critical preflight path: a user cannot
+            # continue or resume an oversized session until it compacts. A
+            # same-provider retry on a timeout means another full ``timeout``-
+            # long wall-clock block before the except-chain below can fall
+            # back — doubling the user-visible stall (issue #54465). Skip the
+            # same-provider retry for compression on a full-budget timeout and
+            # fall straight through to provider/model fallback; fast blips (a
+            # streaming-close or a 5xx) still retry, since those are cheap.
+            if task == "compression" and _is_timeout_error(transient_err):
+                # A fast first-token fail (dead stream detected within the
+                # 60s no-progress window, zero output seen) is cheap — take
+                # the normal same-provider retry chain first; the provider
+                # is often fine and only that one stream was stillborn. A
+                # mid-stream stall or hard-ceiling timeout skips straight to
+                # fallback, because re-running a multi-minute summary on the
+                # same provider doubles the user-visible stall (#54465).
+                if "no-progress timeout" not in str(transient_err):
+                    logger.info(
+                        "Auxiliary compression: timeout on the critical path; "
+                        "skipping same-provider retry and falling back: %s",
+                        transient_err,
+                    )
+                    raise
+            # Compression is on the critical preflight path: a user cannot
+            # continue or resume an oversized session until it compacts. A
+            # same-provider retry on a timeout means another full ``timeout``-
+            # long wall-clock block before the except-chain below can fall
+            # back — doubling the user-visible stall (issue #54465). Skip the
+            # same-provider retry for compression on a full-budget timeout and
+            # fall straight through to provider/model fallback; fast blips (a
+            # streaming-close or a 5xx) still retry, since those are cheap.
+            if task == "compression" and _is_timeout_error(transient_err):
+                logger.info(
+                    "Auxiliary compression: timeout on the critical path; "
+                    "skipping same-provider retry and falling back: %s",
+                    transient_err,
                 )
                 raise
             _max_transient_retries = _transient_retry_count()
@@ -11381,38 +11204,7 @@ def _call_llm_impl(
         raise
 
 
-def _coerce_llm_message(response):
-    """Pull a message (dict, object, or str) out of a response-or-message value.
-
-    Compression and some OpenAI-compatible proxies hand us a dict-shaped
-    response or a bare message; vision/oneshot callers pass a ChatCompletion
-    object. MagicMock ``reasoning_*`` attrs are not strings — callers that
-    want the empty-content failure path rely on that.
-    """
-    if response is None or isinstance(response, str):
-        return response
-    if isinstance(response, dict):
-        if "choices" not in response:
-            return response
-        choices = response.get("choices") or []
-        if not choices:
-            return None
-        first = choices[0]
-        return first.get("message") if isinstance(first, dict) else getattr(first, "message", None)
-    choices = getattr(response, "choices", None)
-    if not choices:
-        return response
-    first = choices[0]
-    return first.get("message") if isinstance(first, dict) else getattr(first, "message", None)
-
-
-def _message_field(msg, name):
-    if isinstance(msg, dict):
-        return msg.get(name)
-    return getattr(msg, name, None)
-
-
-def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = None) -> str:
+def extract_content_or_reasoning(response) -> str:
     """Extract content from an LLM response, falling back to reasoning fields.
 
     Mirrors the main agent loop's behavior when a reasoning model (DeepSeek-R1,
@@ -11425,24 +11217,12 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
          structured reasoning fields (DeepSeek, Moonshot, NovitaAI, etc.).
       3. ``message.reasoning_details`` — OpenRouter unified array format.
 
-    Accepts a full response or a bare message (dict or object). When
-    ``max_reasoning_chars`` is set, a reasoning-field fallback is truncated
-    so an unbounded chain-of-thought cannot become the compaction summary.
-
     Returns the best available text, or ``""`` if nothing found.
     """
     import re
 
-    msg = _coerce_llm_message(response)
-    if msg is None:
-        return ""
-    if isinstance(msg, str):
-        return msg.strip()
-
-    raw = _message_field(msg, "content")
-    if not isinstance(raw, str):
-        raw = str(raw) if raw else ""
-    content = raw.strip()
+    msg = response.choices[0].message
+    content = (msg.content or "").strip()
 
     if content:
         # Strip inline think/reasoning blocks (mirrors _strip_think_blocks)
@@ -11458,11 +11238,11 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
     # Content is empty or reasoning-only — try structured reasoning fields
     reasoning_parts: list[str] = []
     for field in ("reasoning", "reasoning_content"):
-        val = _message_field(msg, field)
+        val = getattr(msg, field, None)
         if val and isinstance(val, str) and val.strip() and val not in reasoning_parts:
             reasoning_parts.append(val.strip())
 
-    details = _message_field(msg, "reasoning_details")
+    details = getattr(msg, "reasoning_details", None)
     if details and isinstance(details, list):
         for detail in details:
             if isinstance(detail, dict):
@@ -11474,18 +11254,10 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
                 if summary and summary not in reasoning_parts:
                     reasoning_parts.append(summary.strip() if isinstance(summary, str) else str(summary))
 
-    if not reasoning_parts:
-        return ""
+    if reasoning_parts:
+        return "\n\n".join(reasoning_parts)
 
-    text = "\n\n".join(reasoning_parts)
-    if max_reasoning_chars is not None and len(text) > max_reasoning_chars:
-        logger.warning(
-            "fell back to reasoning fields (%d chars); truncating to %d",
-            len(text),
-            max_reasoning_chars,
-        )
-        return text[:max_reasoning_chars]
-    return text
+    return ""
 
 
 @_relay_auxiliary_call_async
