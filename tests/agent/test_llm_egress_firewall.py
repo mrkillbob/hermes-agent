@@ -955,11 +955,13 @@ def test_source_presentation_still_rejects_short_encoded_payload(tmp_path):
 def test_source_presentation_allows_secret_env_name_but_not_value(tmp_path):
     source = (
         "token_env: HERMES_GITHUB_BOT_TOKEN\n"
+        "_SDK_CONTROL_KEYS = frozenset({\"_hermes_source_provenance\"})\n"
+        "_REMOTE_KANBAN_SECRET_ASSIGNMENT = re.compile(\"token\")\n"
         "token_value: ghp_012345678901234567890123456789012345\n"
     )
     path = tmp_path / "README.md"
     path.write_text(source, encoding="utf-8")
-    grant = _source_grant(path, end=2)
+    grant = _source_grant(path, end=4)
     presentation = json.dumps(
         {
             "content": "\n".join(
@@ -978,9 +980,13 @@ def test_source_presentation_allows_secret_env_name_but_not_value(tmp_path):
 
     assert "secret_detected" in exc_info.value.decision.reason_codes
 
-    safe_source = "token_env: HERMES_GITHUB_BOT_TOKEN\n"
+    safe_source = (
+        "token_env: HERMES_GITHUB_BOT_TOKEN\n"
+        "_SDK_CONTROL_KEYS = frozenset({\"_hermes_source_provenance\"})\n"
+        "_REMOTE_KANBAN_SECRET_ASSIGNMENT = re.compile(\"token\")\n"
+    )
     path.write_text(safe_source, encoding="utf-8")
-    safe_grant = _source_grant(path)
+    safe_grant = _source_grant(path, end=3)
     safe_presentation = json.dumps(
         {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(safe_source.split("\n"), 1))}
     )
