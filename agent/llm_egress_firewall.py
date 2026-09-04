@@ -1036,6 +1036,12 @@ def _generated_context_text_for_base64_scan(text: str) -> str:
     the final scan; arbitrary encoded values remain untouched and fail closed.
     """
 
+    # A protected Kanban assignment may contain this fixed worker result
+    # marker. It is application protocol text, not an encoded payload, but its
+    # all-caps/underscore spelling is a valid Base64 candidate. Keep the
+    # marker visible on the wire and mask it only in the generated-context
+    # scan; arbitrary task markers remain fail-closed.
+    text = text.replace("PAPER_SAFETY_SENTINEL_OK", "<protocol-marker>")
     return _source_text_for_base64_scan(text)
 
 

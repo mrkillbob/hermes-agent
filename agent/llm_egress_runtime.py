@@ -91,6 +91,19 @@ _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"tool_search"})
 _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file"})
 _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES = frozenset({"web_extract", "web_search"})
 _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES = frozenset({"patch", "write_file"})
+_REMOTE_KANBAN_LIFECYCLE_TOOL_NAMES = frozenset(
+    {
+        "kanban_attach",
+        "kanban_attach_url",
+        "kanban_block",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_heartbeat",
+        "kanban_link",
+        "kanban_request_changes",
+        "kanban_request_review",
+    }
+)
 _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES = frozenset(
     {
         "kanban_show",
@@ -192,6 +205,19 @@ _REMOTE_KANBAN_ATTACHMENT_ELISION = (
     "kanban_attachments completed locally; attachment metadata and contents "
     "were omitted from remote replay. Continue with the assigned work or use a lifecycle tool."
 )
+_REMOTE_KANBAN_LIFECYCLE_ELISION = (
+    "Kanban lifecycle action completed locally; its raw control-plane result "
+    "was omitted from remote replay."
+)
+
+
+def _project_bound_kanban_lifecycle(value: str) -> GeneratedContextSegment:
+    """Replay only a fixed outcome for an exact local lifecycle call."""
+
+    # Lifecycle results can include comment text, paths, opaque ids, or
+    # backend errors. The worker only needs the fact that its local action
+    # returned; exact call-id binding is enforced by the caller.
+    return GeneratedContextSegment(_REMOTE_KANBAN_LIFECYCLE_ELISION)
 
 
 def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
@@ -2473,6 +2499,7 @@ def _typed_payload(
     syntax_tool_call_ids: frozenset[str] = frozenset(),
     elided_kanban_tool_call_ids: frozenset[str] = frozenset(),
     kanban_attachment_tool_call_ids: frozenset[str] = frozenset(),
+    kanban_lifecycle_tool_call_ids: frozenset[str] = frozenset(),
     search_projection_tool_call_ids: frozenset[str] = frozenset(),
     tool_search_projection_tool_call_ids: frozenset[str] = frozenset(),
     read_file_projection_tool_call_ids: frozenset[str] = frozenset(),
@@ -2567,6 +2594,14 @@ def _typed_payload(
         is_kanban_attachment_result = (
             isinstance(output_call_id, str)
             and output_call_id in kanban_attachment_tool_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
+        is_kanban_lifecycle_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in kanban_lifecycle_tool_call_ids
             and (
                 value.get("role") == "tool"
                 or value.get("type") == "function_call_output"
@@ -2754,6 +2789,7 @@ def _typed_payload(
                 is_recognized_tool_result,
                 is_elided_kanban_tool_result,
                 is_kanban_attachment_result,
+                is_kanban_lifecycle_result,
                 is_search_projection_tool_result,
                 is_tool_search_projection_result,
                 is_read_file_projection_tool_result,
@@ -2813,6 +2849,7 @@ def _typed_payload(
                     is_recognized_tool_result,
                     is_elided_kanban_tool_result,
                     is_kanban_attachment_result,
+                    is_kanban_lifecycle_result,
                     is_search_projection_tool_result,
                     is_tool_search_projection_result,
                     is_read_file_projection_tool_result,
@@ -2870,6 +2907,9 @@ def _typed_payload(
             structured_text = (
                 _structured_tool_output_text(item) if is_structured_result else None
             )
+            if is_structured_result and is_kanban_lifecycle_result:
+                typed[key] = _project_bound_kanban_lifecycle(structured_text or "")
+                continue
             if is_kanban_assignees_result and structured_text is not None:
                 projected = _project_kanban_assignees_terminal_result(structured_text)
                 if projected is not None:
@@ -3234,6 +3274,13 @@ def _typed_payload(
                 typed[key] = GeneratedContextSegment(_GITHUB_PLAIN_LIST_OUTPUT_REPLAY)
                 continue
             if (
+                is_kanban_lifecycle_result
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                typed[key] = _project_bound_kanban_lifecycle(item)
+                continue
+            if (
                 isinstance(combined_github_list_limit, int)
                 and key in {"content", "output"}
                 and isinstance(item, str)
@@ -3359,6 +3406,7 @@ def _typed_payload(
                 syntax_tool_call_ids=syntax_tool_call_ids,
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
                 kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
+                kanban_lifecycle_tool_call_ids=kanban_lifecycle_tool_call_ids,
                 search_projection_tool_call_ids=search_projection_tool_call_ids,
                 tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
                 read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
@@ -3419,6 +3467,7 @@ def _typed_payload(
                 syntax_tool_call_ids=syntax_tool_call_ids,
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
                 kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
+                kanban_lifecycle_tool_call_ids=kanban_lifecycle_tool_call_ids,
                 search_projection_tool_call_ids=search_projection_tool_call_ids,
                 tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
                 read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
@@ -3901,6 +3950,11 @@ def authorize_agent_sdk_kwargs(
         ),
         kanban_attachment_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES)
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
+        kanban_lifecycle_tool_call_ids=(
+            _recognized_tool_call_ids(body, _REMOTE_KANBAN_LIFECYCLE_TOOL_NAMES)
             if protected_kanban_remote and protected_provider_route
             else frozenset()
         ),

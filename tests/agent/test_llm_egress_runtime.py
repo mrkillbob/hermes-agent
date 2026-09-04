@@ -560,6 +560,7 @@ def test_protected_codex_kanban_projection_replays_only_versioned_task_spec(
                 "title": "Repair the current PR feedback worker",
                 "body": (
                     "Inspect the current checkout and report the result. "
+                    "PAPER_SAFETY_SENTINEL_OK "
                     "token=super-secret-value c2VjcmV0LXBheWxvYWQ= "
                     "/Users/private/source.py"
                 ),
@@ -592,6 +593,7 @@ def test_protected_codex_kanban_projection_replays_only_versioned_task_spec(
     assert receipt.allowed
     assert "Repair the current PR feedback worker" in rendered
     assert "Inspect the current checkout and report the result." in rendered
+    assert "PAPER_SAFETY_SENTINEL_OK" in rendered
     assert "obsolete attempt" not in rendered
     assert "super-secret-value" not in rendered
     assert "c2VjcmV0LXBheWxvYWQ=" not in rendered
@@ -707,6 +709,50 @@ def test_protected_codex_allows_benign_bound_kanban_attachments_output(
     assert receipt.allowed
     assert authorized["input"][1]["output"].startswith(
         "kanban_attachments completed locally;"
+    )
+
+
+def test_protected_codex_projects_bound_kanban_lifecycle_result(
+    tmp_path, monkeypatch
+):
+    """Lifecycle results replay only a fixed outcome, never raw control-plane text."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_kanban_comment_result"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": "gpt-5.6-terra",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": "kanban_comment",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(
+                        {
+                            "ok": True,
+                            "comment": "raw private path /Users/private/source.py",
+                        }
+                    ),
+                },
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    assert authorized["input"][1]["output"] == (
+        "Kanban lifecycle action completed locally; its raw control-plane result "
+        "was omitted from remote replay."
     )
 
 
