@@ -260,6 +260,23 @@ def test_source_grant_allows_pr_metadata_without_disabling_base64_detection(tmp_
     assert decision.allowed is True
 
 
+def test_source_grant_allows_only_known_cli_usage_metavariables(tmp_path):
+    """Argparse's fixed uppercase placeholders are not encoded payloads."""
+
+    source = "--provider PROVIDER\n--toolsets TOOLSETS\n"
+    path = tmp_path / "usage.txt"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=2)
+
+    decision = firewall(tmp_path).preflight(
+        _typed_request(_request(source), source_grant=grant),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+
+
 def test_source_grant_still_rejects_encoded_payload_next_to_pr_metadata(tmp_path):
     path = tmp_path / "pr.diff"
     encoded = base64.b64encode(b"private source that must not leave the host").decode()
