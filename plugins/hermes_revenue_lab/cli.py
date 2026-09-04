@@ -44,7 +44,15 @@ def _run(
     *,
     check: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, cwd=root, check=check, text=True, capture_output=True)
+    return subprocess.run(
+        args,
+        cwd=root,
+        check=check,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
 
 
 def _git_value(root: Path, args: tuple[str, ...], default: str = "") -> str:
@@ -100,6 +108,8 @@ def _run_python_script(root: Path, script: str, extra: tuple[str, ...]) -> int:
         cwd=root,
         env=_subprocess_env(root),
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return proc.returncode
 
@@ -128,6 +138,8 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
         cwd=root,
         env=_subprocess_env(root),
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return proc.returncode
 
