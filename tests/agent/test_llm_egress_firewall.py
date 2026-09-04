@@ -829,6 +829,30 @@ def test_source_presentation_still_rejects_actual_base64_payload(tmp_path):
     assert "base64_payload" in exc_info.value.decision.reason_codes
 
 
+def test_source_presentation_allows_fixed_github_actions_literals(tmp_path):
+    path = tmp_path / "ci.yaml"
+    source = (
+        "SECURITY\n"
+        "TEMPORARILY\n"
+        "DISABLED\n"
+        "ci-timings-baseline-\n"
+    )
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=4)
+    presentation = json.dumps(
+        {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1))}
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
 @pytest.mark.parametrize(
     "text",
     [

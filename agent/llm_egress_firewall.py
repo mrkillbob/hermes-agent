@@ -340,6 +340,13 @@ _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS = frozenset(
         "RUNTIME",
         "SEAM",
         "SELL",
+        # Fixed GitHub Actions workflow literals. These occur in exact
+        # source-granted YAML presentations; they are syntax/metadata, not
+        # encoded content. Keep the exception source-presentation-only.
+        "SECURITY",
+        "TEMPORARILY",
+        "DISABLED",
+        "ci-timings-baseline-",
         "SOUL",
         "SIM-",
         "TRUE",
