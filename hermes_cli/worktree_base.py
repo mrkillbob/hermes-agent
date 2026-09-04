@@ -50,22 +50,28 @@ def resolve_worktree_base(
         except Exception:
             return False
 
-    def _fetch_head_age() -> float | None:
+    def _ref_age(ref: str) -> float | None:
+        # ``FETCH_HEAD`` records the most recent fetch of *any* remote/branch,
+        # not necessarily ``ref``. Freshness must be tied to the tracking ref
+        # actually being used, so use the mtime of its own loose ref file
+        # (``.git/refs/remotes/<remote>/<branch>``) instead. If the ref has
+        # been packed (no loose file) its per-ref freshness can't be verified
+        # this way, so return ``None`` and let the caller re-fetch.
         try:
-            result = _git(["rev-parse", "--git-path", "FETCH_HEAD"])
+            result = _git(["rev-parse", "--git-path", f"refs/remotes/{ref}"])
             if result.returncode != 0:
                 return None
-            fetch_head = Path(result.stdout.strip())
-            if not fetch_head.is_absolute():
-                fetch_head = Path(repo_root) / fetch_head
-            if not fetch_head.exists():
+            ref_path = Path(result.stdout.strip())
+            if not ref_path.is_absolute():
+                ref_path = Path(repo_root) / ref_path
+            if not ref_path.exists():
                 return None
-            return max(0.0, time.time() - fetch_head.stat().st_mtime)
+            return max(0.0, time.time() - ref_path.stat().st_mtime)
         except Exception:
             return None
 
     def _refresh(remote: str, branch: str, ref: str) -> tuple[str, str]:
-        age = _fetch_head_age()
+        age = _ref_age(ref)
         if age is not None and age < freshness_window and _ref_exists(ref):
             return ref, f"{ref} (fetched {int(age)}s ago)"
         try:

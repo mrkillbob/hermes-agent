@@ -270,8 +270,15 @@ _BOUNDED_SOURCE_CODE_ATOM = re.compile(
 # unified-diff marker lines. Their URL-safe alphabet can resemble encoded
 # payloads, but the surrounding source grammar proves they are presentation
 # metadata. These masks apply only after an exact source grant is validated.
+# The option name is deliberately an enumerated allowlist (not any long
+# option) so an attacker cannot smuggle an encoded payload through an
+# arbitrary ``--payload=<base64>``-shaped grant; only known metadata options
+# that take short uppercase-letter filter values are eligible.
+_BOUNDED_SOURCE_CLI_KNOWN_OPTIONS = ("diff-filter",)
 _BOUNDED_SOURCE_CLI_VALUE = re.compile(
-    r"(?P<prefix>--[a-z][a-z0-9]*(?:-[a-z0-9]+)*=)"
+    r"(?P<prefix>--(?:"
+    + "|".join(re.escape(option) for option in _BOUNDED_SOURCE_CLI_KNOWN_OPTIONS)
+    + r")=)"
     r"(?P<value>[A-Z]{3,8})(?P<suffix>[^A-Za-z0-9_+/=-])"
 )
 _BOUNDED_SOURCE_CODE_ASSIGNMENT = re.compile(
@@ -370,12 +377,45 @@ _PRIVATE_ABSOLUTE_PATH = re.compile(
 # ``redact_sensitive_text`` intentionally leaves bare ``token=...`` in prose
 # alone to avoid false positives, but a provider-bound request must fail closed
 # when it contains an explicit credential-shaped assignment.
+#
+# ``:`` is also Python's type-annotation delimiter (``token: str``,
+# ``api_key: str | None = None``), so unlike ``=`` it carries no assignment
+# semantics on its own. The value side is captured separately so a ``:``
+# match can be required to look credential-shaped before it counts as a
+# secret; a bare type name (``str``, ``None``, ``Optional[str]``, ...) does
+# not.
 _EGRESS_SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?<![A-Za-z0-9_])"
     r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|"
     r"password|passwd|api[_-]?key|apikey|client[_-]?secret|private[_-]?key)"
-    r"\s*[:=]\s*(?!<redacted>)[^\s,}\"']+"
+    r"\s*(?P<delim>[:=])\s*(?!<redacted>)(?P<value>[^\s,}\"']+)"
 )
+# A plausible token/key value: only "word" characters plus common token
+# punctuation, long enough to be a credential rather than a short type
+# keyword, and containing at least one digit -- real secrets are almost
+# always drawn from an alphabet that includes digits, while Python type
+# annotations (``str``, ``int``, ``bool``, ``Optional[str]``, a class name,
+# ...) are not.
+_CREDENTIAL_SHAPED_VALUE = re.compile(
+    r"^(?=[A-Za-z0-9_.+/-]{12,}$)(?=[^0-9]*[0-9])[A-Za-z0-9_.+/-]+$"
+)
+
+
+def _is_egress_secret_assignment(text: str) -> bool:
+    """Return True if ``text`` contains a credential-shaped secret assignment.
+
+    ``=`` is always treated as an assignment. ``:`` is additionally required
+    to have a credential-shaped value, so ordinary type annotations like
+    ``def request(token: str)`` are not mistaken for a leaked secret.
+    """
+
+    for match in _EGRESS_SECRET_ASSIGNMENT.finditer(text):
+        if match.group("delim") == ":" and not _CREDENTIAL_SHAPED_VALUE.match(
+            match.group("value")
+        ):
+            continue
+        return True
+    return False
 # These are fixed provider-protocol grammar atoms, not a caller-configurable
 # egress allowlist. Several happen to round-trip as unpadded Base64 even though
 # they are required JSON schema words. They still go through the final secret
@@ -952,7 +992,7 @@ def _contains_secret(value: Any, *, seen: set[int] | None = None) -> bool:
             value,
             force=True,
             redact_url_credentials=True,
-        ) != value or _EGRESS_SECRET_ASSIGNMENT.search(value) is not None
+        ) != value or _is_egress_secret_assignment(value)
     if isinstance(value, (bytes, bytearray, memoryview)):
         # Binary request material is not safely inspectable as text.
         return True

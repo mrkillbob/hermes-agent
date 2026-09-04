@@ -8,12 +8,12 @@ import path from 'node:path'
 
 import { resolveRequestedPathForIpc } from './hardening'
 
-function runGit(gitBin, args, cwd): Promise<string> {
+function runGit(gitBin, args, cwd, timeoutMs = 30_000): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       gitBin,
       args,
-      { cwd, windowsHide: true, timeout: 30_000, maxBuffer: 8 * 1024 * 1024 },
+      { cwd, windowsHide: true, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
           err.stderr = String(stderr || '')
@@ -175,16 +175,47 @@ async function defaultBranch(gitBin, cwd) {
   return ''
 }
 
+// Bounded fetch + freshness window for base resolution, mirroring the Python
+// resolver (hermes_cli/worktree_base.py): an offline/slow remote must not
+// stall "Start work" for `runGit`'s full 30s default timeout.
+const BASE_FETCH_TIMEOUT_MS = 5_000
+const BASE_FRESHNESS_WINDOW_MS = 300_000
+
+// Age of `ref`'s own remote-tracking ref file, or null when it can't be
+// determined (packed refs, missing ref, ...). Tied to the specific ref being
+// used rather than the repo-wide `FETCH_HEAD`, which records the most recent
+// fetch of *any* remote/branch and would otherwise let an unrelated fetch
+// mask a stale `origin/main`.
+async function refAgeMs(gitBin, cwd, ref) {
+  try {
+    const gitPath = await gitLine(gitBin, ['rev-parse', '--git-path', `refs/remotes/${ref}`], cwd)
+
+    if (!gitPath) {
+      return null
+    }
+
+    const refPath = path.isAbsolute(gitPath) ? gitPath : path.join(cwd, gitPath)
+    const stat = fs.statSync(refPath)
+
+    return Math.max(0, Date.now() - stat.mtimeMs)
+  } catch {
+    return null
+  }
+}
+
 async function newWorktreeBase(gitBin, cwd) {
   const defaultRef = await gitLine(gitBin, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], cwd)
 
   if (defaultRef && defaultRef.startsWith('origin/')) {
     const branch = defaultRef.slice('origin/'.length)
+    const ageMs = await refAgeMs(gitBin, cwd, defaultRef)
 
-    try {
-      await runGit(gitBin, ['fetch', 'origin', branch], cwd)
-    } catch {
-      // Offline is fail-soft when the cached remote-tracking ref still exists.
+    if (ageMs === null || ageMs >= BASE_FRESHNESS_WINDOW_MS) {
+      try {
+        await runGit(gitBin, ['fetch', 'origin', branch], cwd, BASE_FETCH_TIMEOUT_MS)
+      } catch {
+        // Offline/slow is fail-soft when the cached remote-tracking ref still exists.
+      }
     }
 
     if (await gitOk(gitBin, ['rev-parse', '--verify', '--quiet', `${defaultRef}^{commit}`], cwd)) {
