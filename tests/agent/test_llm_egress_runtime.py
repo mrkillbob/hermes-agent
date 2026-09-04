@@ -2158,6 +2158,95 @@ def test_protected_codex_projects_git_diff_name_only_output(tmp_path, monkeypatc
     assert projection["omitted_files"] == 1
 
 
+def test_protected_codex_projects_bound_file_mutation_outcome(tmp_path, monkeypatch):
+    """A patch receipt keeps outcome facts while dropping its unified diff."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_patch_outcome"
+    patch_result = json.dumps(
+        {
+            "success": True,
+            "diff": "@@ -1 +1 @@\n-secret\n+changed\n",
+            "files_modified": ["/Users/private/worktree/hermes_state.py"],
+        }
+    )
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "patch",
+                    "call_id": call_id,
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": patch_result,
+                },
+            ],
+        },
+    )
+
+    rendered = json.loads(authorized["input"][1]["output"])
+    assert receipt.allowed
+    assert rendered == {
+        "file_mutation": "completed",
+        "success": True,
+        "files_modified_count": 1,
+    }
+    assert "secret" not in receipt.payload_bytes.decode("utf-8")
+
+
+def test_protected_codex_projects_bound_file_mutation_error(tmp_path, monkeypatch):
+    """A failed patch keeps a bounded safe error for the next model turn."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_patch_error"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "patch",
+                    "call_id": call_id,
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(
+                        {
+                            "success": False,
+                            "error": "Patch validation failed (no files were modified): missing symbol",
+                        }
+                    ),
+                },
+            ],
+        },
+    )
+
+    rendered = json.loads(authorized["input"][1]["output"])
+    assert receipt.allowed
+    assert rendered["file_mutation"] == "completed"
+    assert rendered["success"] is False
+    assert "missing symbol" in rendered["error"]
+
+
 def test_protected_codex_projects_github_pr_feedback_output(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
     agent = _agent(tmp_path)

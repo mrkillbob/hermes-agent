@@ -159,6 +159,7 @@ _GIT_DIFF_NAME_ONLY_MAX_FILES = 200
 _GIT_REVIEW_SUMMARY_MAX_FILES = 200
 _PYTEST_DIAGNOSTIC_MAX_LINES = 32
 _PYTEST_DIAGNOSTIC_MAX_BYTES = 4096
+_FILE_MUTATION_ERROR_MAX_BYTES = 1024
 _GITHUB_API_EXTRACT_ARGUMENT_REPLAY = (
     '{"urls":["https://api.github.com/repos/<owner>/<repo>/<list>"]}'
 )
@@ -3094,7 +3095,8 @@ def _typed_payload(
                     typed[key] = _project_web_search_replay(structured_text)
                     continue
             if is_structured_result and is_file_mutation_replay_result:
-                typed[key] = GeneratedContextSegment(_FILE_MUTATION_REPLAY_ELISION)
+                projected = _project_file_mutation_result(structured_text or "")
+                typed[key] = GeneratedContextSegment(projected)
                 continue
             if is_structured_result and is_git_workspace_diagnostic_result:
                 typed[key] = GeneratedContextSegment(
@@ -3197,7 +3199,9 @@ def _typed_payload(
                 and key in {"content", "output"}
                 and isinstance(item, str)
             ):
-                typed[key] = GeneratedContextSegment(_FILE_MUTATION_REPLAY_ELISION)
+                typed[key] = GeneratedContextSegment(
+                    _project_file_mutation_result(item)
+                )
                 continue
             if (
                 is_kanban_assignees_result
@@ -3681,6 +3685,57 @@ def _pytest_terminal_result(output: str) -> str:
         },
         separators=(",", ":"),
     )
+
+
+def _project_file_mutation_result(output: str) -> str:
+    """Replay bounded mutation outcome metadata without source or diff text.
+
+    A protected worker must be able to distinguish a landed patch from a
+    validation failure. The old fixed elision hid that distinction, so a
+    worker could re-apply an already-landed edit or report a false blocker.
+    Keep only typed outcome/count fields and a short sanitized error; never
+    replay the unified diff, source, or absolute paths.
+    """
+
+    try:
+        parsed = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = None
+    if not isinstance(parsed, Mapping):
+        return _FILE_MUTATION_REPLAY_ELISION
+    projection: dict[str, Any] = {
+        "file_mutation": "completed",
+        "success": bool(parsed.get("success")),
+    }
+    if parsed.get("no_change") is True:
+        projection["no_change"] = True
+    for field in ("files_modified", "files_created", "files_deleted"):
+        values = parsed.get(field)
+        if isinstance(values, list) and values:
+            projection[field + "_count"] = len(values)
+    error = parsed.get("error")
+    if isinstance(error, str) and error.strip():
+        safe_error = redact_remote_unsafe_text(
+            redact_sensitive_text(
+                error.strip()[:_FILE_MUTATION_ERROR_MAX_BYTES],
+                force=True,
+                redact_url_credentials=True,
+            )
+        )
+        if safe_error:
+            projection["error"] = safe_error
+    note = parsed.get("note")
+    if isinstance(note, str) and note.strip():
+        safe_note = redact_remote_unsafe_text(
+            redact_sensitive_text(
+                note.strip()[:_FILE_MUTATION_ERROR_MAX_BYTES],
+                force=True,
+                redact_url_credentials=True,
+            )
+        )
+        if safe_note:
+            projection["note"] = safe_note
+    return json.dumps(projection, separators=(",", ":"))
 
 
 def _github_pr_feedback_terminal_result(output: str) -> str:
