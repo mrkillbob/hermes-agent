@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from contextlib import AbstractContextManager
 
@@ -18,6 +19,44 @@ from github_pr_feedback.github_client import (
     ReviewState,
     SubprocessCommandRunner,
 )
+
+
+def test_automation_identity_replaces_scrubbed_gh_config_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """Cron's /dev/null gh sentinel must not break governed bot reads."""
+    import github_pr_feedback.github_client as github_client_module
+
+    runners = []
+
+    class FakeRunner:
+        def __init__(self, *, env_overrides=None, **_kwargs):
+            env = dict(os.environ)
+            env.update({key: value for key, value in (env_overrides or {}).items() if value is not None})
+            for key, value in (env_overrides or {}).items():
+                if value is None:
+                    env.pop(key, None)
+            self.env = env
+            runners.append(self)
+
+        def run(self, _argv):
+            return json.dumps({"login": "mrkillbobbot"})
+
+    monkeypatch.setattr(github_client_module, "SubprocessCommandRunner", FakeRunner)
+    monkeypatch.setattr(github_client_module, "get_default_hermes_root", lambda: tmp_path)
+    monkeypatch.setenv("GH_CONFIG_DIR", os.devnull)
+    monkeypatch.setenv("HERMES_GITHUB_BOT_TOKEN", "test-token")
+
+    github_client_module.GitHubClient.for_automation_identity(
+        expected_login="mrkillbobbot",
+        token_env="HERMES_GITHUB_BOT_TOKEN",
+    )
+
+    assert len(runners) == 1
+    config_dir = tmp_path / "github-pr-feedback" / "bot-gh-config"
+    assert runners[0].env["GH_CONFIG_DIR"] == str(config_dir)
+    assert config_dir.is_dir()
+    assert runners[0].env["GH_TOKEN"] == "test-token"
 
 
 class RecordingRunner:

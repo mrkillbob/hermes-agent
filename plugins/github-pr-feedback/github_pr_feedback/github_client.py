@@ -66,6 +66,28 @@ _MERGE_FLAGS = {"squash": "--squash", "rebase": "--rebase", "merge": "--merge"}
 _PROCESS_REQUEST_LOCK = threading.Lock()
 
 
+def _automation_gh_config_dir() -> Path:
+    """Return an isolated ``gh`` config directory for bot-authenticated reads.
+
+    Cron and terminal child environments deliberately set ``GH_CONFIG_DIR`` to
+    ``/dev/null`` so a model-driven child cannot reuse the operator's GitHub
+    login.  ``gh`` still requires a directory, even when authentication is
+    supplied through ``GH_TOKEN``.  Give the governed bot client an empty,
+    Hermes-owned directory instead of inheriting the scrub sentinel or the
+    human CLI profile.
+    """
+    config_dir = get_default_hermes_root() / "github-pr-feedback" / "bot-gh-config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        config_dir.chmod(0o700)
+    except OSError:
+        # Permissions are best effort on platforms/filesystems without chmod;
+        # the directory remains isolated by path and never contains the human
+        # GitHub config.
+        pass
+    return config_dir
+
+
 class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
     """Serialize GitHub requests and share secondary-limit cooldowns on disk.
 
@@ -480,6 +502,11 @@ class GitHubClient:
                 "GH_TOKEN": child_env["GH_TOKEN"],
                 # Never allow a generic CI or user token to act as fallback.
                 "GITHUB_TOKEN": None,
+                # The scheduler's child scrubber uses /dev/null as a sentinel
+                # for GH_CONFIG_DIR.  Replace it with an empty bot-owned
+                # directory so gh can start without reading the operator's
+                # human profile.
+                "GH_CONFIG_DIR": str(_automation_gh_config_dir()),
             }
         )
         actions_runner = None
