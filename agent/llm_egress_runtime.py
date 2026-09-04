@@ -2740,6 +2740,10 @@ def _restore_source_provenance_sidecar(
     messages = restored.get("messages")
     if not isinstance(sidecar, list):
         return restored
+    extra_body = restored.get("extra_body")
+    responses_input_present = isinstance(restored.get("input"), list) or (
+        isinstance(extra_body, Mapping) and isinstance(extra_body.get("input"), list)
+    )
     consumed_entries: set[int] = set()
     if isinstance(messages, list):
         copied_messages = list(messages)
@@ -2763,6 +2767,14 @@ def _restore_source_provenance_sidecar(
                 or entry.get("content_sha256")
                 != sha256(content.encode("utf-8")).hexdigest()
             ):
+                continue
+            if responses_input_present:
+                # A Responses request may still carry the pre-conversion
+                # ``messages`` copy in an SDK-visible kwargs dict. Consume
+                # its sidecar entry for duplicate protection, but leave the
+                # legacy tool result unattached so the Responses projection
+                # path elides it instead of replaying the same source twice.
+                consumed_entries.add(entry_index)
                 continue
             copied = dict(message)
             copied["_source_provenance"] = {
@@ -2848,7 +2860,6 @@ def _restore_source_provenance_sidecar(
     # The consumer-Codex SDK transform can move the normalized input under
     # ``extra_body`` immediately before dispatch. Preserve the same exact
     # source binding there; no other nested shape is accepted.
-    extra_body = restored.get("extra_body")
     if isinstance(extra_body, Mapping):
         restored_extra_input, extra_input_changed = _restore_input_items(
             extra_body.get("input")
