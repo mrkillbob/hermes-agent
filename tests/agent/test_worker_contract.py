@@ -272,14 +272,18 @@ def test_consensus_quorum_cannot_exceed_worker_reports():
     assert record.to_dict()["quorum"] == 2
 
 
-def test_contract_mapping_recognizes_new_workforce_contracts():
+def test_contract_mapping_rejects_incomplete_workforce_contracts():
     for kind in ("worker_constitution", "job_contract", "emergency_authority"):
-        assert validate_contract_mapping({"kind": kind})["kind"] == kind
+        with pytest.raises(ContractValidationError, match="missing field"):
+            validate_contract_mapping({"kind": kind})
 
     assert (
         validate_contract_mapping({
             "kind": "consensus",
             "worker_reports": [],
+            "agreement": [],
+            "dissent": [],
+            "status": "pending",
             "quorum": 1,
         })["quorum"]
         == 1

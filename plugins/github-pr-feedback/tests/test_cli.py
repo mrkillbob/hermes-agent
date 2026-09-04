@@ -171,9 +171,13 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
             pass
 
     class Policy:
+        enabled = True
         repair_steward = object()
         merge_maintainer = None
         release_maintenance = None
+
+        def merge_policies(self):
+            return ()
 
     class Repair:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -197,6 +201,7 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
     monkeypatch.setattr("github_pr_feedback.cli.FeedbackLedger", Ledger)
     monkeypatch.setattr("github_pr_feedback.cli.RepairController", Repair)
     monkeypatch.setattr("github_pr_feedback.cli._controller", lambda *_args: Feedback())
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: object())
 
     assert _scan(object()) == 1
     assert order == ["feedback", "repair"]
@@ -229,9 +234,13 @@ def _run_scan_with_primary_result(
             pass
 
     class Policy:
+        enabled = True
         repair_steward = object()
         merge_maintainer = object()
         release_maintenance = object()
+
+        def merge_policies(self):
+            return (self.merge_maintainer,)
 
     class Primary:
         def scan(self, *, apply_labels: bool):
@@ -272,6 +281,7 @@ def _run_scan_with_primary_result(
     monkeypatch.setattr(
         "github_pr_feedback.cli._controller", lambda *_args: Primary()
     )
+    monkeypatch.setattr("github_pr_feedback.cli._github_client", lambda _policy: object())
     monkeypatch.setattr("github_pr_feedback.cli._run_merge_scan", merge)
     monkeypatch.setattr(
         "github_pr_feedback.cli._run_release_maintenance_scan", release
@@ -328,9 +338,13 @@ def test_scan_runs_label_side_lane_after_merge_maintainer(
             pass
 
     class Policy:
+        enabled = True
         repair_steward = None
         merge_maintainer = object()
         release_maintenance = None
+
+        def merge_policies(self):
+            return (self.merge_maintainer,)
 
     class Primary:
         def scan(self, *, apply_labels: bool):
@@ -1090,7 +1104,9 @@ def test_merge_maintainer_task_has_no_model_merge_authority(tmp_path: Path) -> N
     )
     decision = MergeDecision(False, ("ci_receipt_missing",), None, "d" * 64)
 
-    task = _merge_maintainer_task(loaded, pull, decision)
+    merge_policy = loaded.merge_policy_for("acme/widgets")
+    assert merge_policy is not None
+    task = _merge_maintainer_task(loaded, merge_policy, pull, decision)
 
     assert task.assignee == "pr-merge-maintainer"
     assert task.initial_status == "running"
@@ -1151,6 +1167,12 @@ def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
             )
 
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    ledger.enroll_merge_pr(
+        "acme/widgets",
+        17,
+        enrolled_at=datetime(2026, 8, 25, tzinfo=UTC),
+        enrolled_by="test",
+    )
     try:
         result = _run_merge_scan(
             policy,
@@ -1211,6 +1233,9 @@ def test_merge_scan_reports_failed_exact_head_receipt_as_not_passing(
         status = "failed"
 
     class FailedLedger:
+        def enrolled_merge_pr_numbers(self, repository: str):
+            return (17,)
+
         def latest_ci_receipt(self, *args, **kwargs):
             return FailedReceipt()
 
@@ -1277,6 +1302,9 @@ def test_merge_scan_does_not_hide_failed_receipt_behind_manifest_mismatch(
         status = "failed"
 
     class MismatchedLedger:
+        def enrolled_merge_pr_numbers(self, repository: str):
+            return (17,)
+
         def latest_ci_receipt(self, *args, **kwargs):
             return None
 
@@ -1352,6 +1380,9 @@ def test_merge_scan_reconciles_verification_required_pr_that_is_no_longer_open(
         def verification_required_merge_numbers(self, repository: str):
             return (149,)
 
+        def enrolled_merge_pr_numbers(self, repository: str):
+            return ()
+
     class Controller:
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -1387,6 +1418,7 @@ def test_merge_scan_reconciles_verification_required_pr_that_is_no_longer_open(
 
 def test_doctor_read_only_verifies_every_runtime_dependency(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from github_pr_feedback.cli import DoctorProbe, _doctor
@@ -1416,7 +1448,7 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     context = RecordingContext(settings)
     responses = {
         ("/opt/tools/gh", "auth", "status", "--hostname", "github.com"): (0, ""),
-        ("/opt/tools/hermes", "--version"): (0, "Hermes Agent test"),
+        ("/opt/tools/hermes", "--version-local"): (0, "Install directory: /opt/hermes\n"),
         ("/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"): (
             0,
             f"{repository}\n",
@@ -1432,10 +1464,13 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     }
     runner = RecordingDoctorRunner(responses)
     before = profile_snapshot(profile_root)
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._github_client", lambda _policy: object()
+    )
 
     exit_code = _doctor(
         context,
-        probe=DoctorProbe(profile_root, runner),
+        probe=DoctorProbe(profile_root, runner, hermes_source_root=Path("/opt/hermes")),
         ledger_path=ledger_path,
     )
 
@@ -1445,15 +1480,14 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     assert payload["checks"] == {
         "assignee": "ok",
         "board": "ok",
-        "gh_auth": "ok",
         "gh_executable": "ok",
+        "github_identity": "ok",
         "hermes_executable": "ok",
         "ledger_access": "ok",
         "repository_worktree": "ok",
     }
     assert runner.calls == [
-        ["/opt/tools/gh", "auth", "status", "--hostname", "github.com"],
-        ["/opt/tools/hermes", "--version"],
+        ["/opt/tools/hermes", "--version-local"],
         ["/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"],
         ["/opt/tools/git", "-C", str(repository), "rev-parse", "--git-common-dir"],
         ["/opt/tools/git", "-C", str(repository), "worktree", "list", "--porcelain"],
@@ -1474,7 +1508,7 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
     ledger_path = profile_root / "github-pr-feedback" / "ledger.sqlite3"
     responses = {
         ("/opt/tools/gh", "auth", "status", "--hostname", "github.com"): (1, ""),
-        ("/opt/tools/hermes", "--version"): (0, "Hermes Agent test"),
+        ("/opt/tools/hermes", "--version-local"): (0, "Install directory: /opt/hermes\n"),
         ("/opt/tools/git", "-C", str(repository), "rev-parse", "--show-toplevel"): (
             0,
             f"{repository}\n",
@@ -1499,17 +1533,17 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
     assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "degraded"
-    assert payload["checks"]["gh_auth"] == "failed"
+    assert payload["checks"]["github_identity"] == "failed"
     assert set(payload["checks"]) == {
         "assignee",
         "board",
-        "gh_auth",
         "gh_executable",
+        "github_identity",
         "hermes_executable",
         "ledger_access",
         "repository_worktree",
     }
-    assert len(runner.calls) == 5
+    assert len(runner.calls) == 4
 
 
 def test_doctor_requires_the_configured_local_ci_auditor_profile(
@@ -1574,8 +1608,10 @@ def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
             return ScanResult(1, {})
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    monkeypatch.setattr(cli, "ScanController", RevalidatingController)
-    context = RecordingContext({"enabled": False})
+    monkeypatch.setattr(cli, "_controller", lambda _policy, _ledger: RevalidatingController())
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    context = RecordingContext(enabled_settings(repository))
     parser = argparse.ArgumentParser()
     cli.setup_cli(context, parser)
 
@@ -1631,11 +1667,12 @@ def test_scan_and_retry_exit_nonzero_and_report_degraded_on_incomplete_work(
             return ScanResult(0, {"dispatch_failed": 1}, degraded=True)
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    monkeypatch.setattr(
-        cli, "_controller", lambda _policy, _ledger: DegradedController()
-    )
+    monkeypatch.setattr(cli, "_controller", lambda _policy, _ledger: DegradedController())
     parser = argparse.ArgumentParser()
-    cli.setup_cli(RecordingContext({"enabled": False}), parser)
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    context = RecordingContext(enabled_settings(repository))
+    cli.setup_cli(context, parser)
     argv = [action]
     if action == "retry":
         argv.extend(
@@ -1654,7 +1691,7 @@ def test_scan_and_retry_exit_nonzero_and_report_degraded_on_incomplete_work(
         )
 
     exit_code = cli.handle_cli_with_context(
-        RecordingContext({"enabled": False}),
+        RecordingContext(enabled_settings(repository)),
         parser.parse_args(argv),
     )
 
@@ -1689,8 +1726,11 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "local_ci_audit",
         "agent_labels",
         "merge_maintainer",
+        "merge_maintainers",
         "repair_steward",
         "release_maintenance",
+        "github_identity",
+        "github_actions_permissions_identity",
         "not_before",
         "assignee",
         "board",
@@ -2271,6 +2311,7 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
     assert rendered == [
         {
             "command_count": 1,
+            "ci_mode": "standard",
             "head_sha": head_sha,
             "manifest_digest": receipt.manifest_digest,
             "pr_number": 17,

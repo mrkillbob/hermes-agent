@@ -1494,6 +1494,9 @@ def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
             self.wal_attempts = 0
             self.current_mode = "delete"
 
+        def close(self):
+            pass
+
         def execute(self, sql):
             if sql == "PRAGMA journal_mode":
                 return Cursor(self.current_mode)
@@ -1521,7 +1524,7 @@ def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
     result = ledger_module._connect_ledger(tmp_path / "ledger.sqlite3")
 
     assert result is connection
-    assert connect_attempts == 2
+    assert connect_attempts == 3
     assert connection.wal_attempts == 2
     connection.wal_attempts = 0
     ledger_module._enable_wal_with_bounded_retry(connection)

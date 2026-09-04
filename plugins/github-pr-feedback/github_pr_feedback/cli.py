@@ -892,7 +892,7 @@ def _scan(ctx: Any) -> int:
                     control_home=get_default_hermes_root(),
                 ).scan()
                 repair_payload = _scan_payload(repair)
-            if policy.merge_policies() and not required_ci_backlog:
+            if policy.merge_policies():
                 merge_payload = _run_merge_scan(policy, ledger)
             if policy.release_maintenance is not None and not required_ci_backlog:
                 maintenance_payload = _run_release_maintenance_scan(policy, ledger)
