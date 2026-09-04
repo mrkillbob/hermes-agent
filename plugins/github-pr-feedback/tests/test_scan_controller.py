@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from github_pr_feedback.controller import (
     _ci_receipt_feedback_reason,
     _is_self_resolution_receipt,
     _intent_review_task,
+    _is_reopenable_egress_failure,
     _local_ci_feedback_id,
     _select_local_ci_candidates,
     _task,
@@ -70,6 +72,38 @@ def test_intent_review_card_uses_valid_zero_retry_encoding(tmp_path: Path) -> No
     assert task.max_retries == 1
     assert task.idempotency_key.startswith("github-pr-feedback:intent-review:")
     assert "operator intent decision" in task.instructions.casefold()
+
+
+def test_reopenable_egress_failure_requires_exact_receipt_and_marker() -> None:
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "review_comment", "comment-1", "a" * 40
+    )
+    evidence = {
+        "repository": receipt.repository,
+        "pr_number": receipt.pr_number,
+        "feedback_kind": receipt.feedback_kind,
+        "feedback_id": receipt.feedback_id,
+        "expected_head_sha": receipt.head_sha,
+    }
+    details = {
+        "status": "blocked",
+        "body": "assignment\n" + json.dumps(evidence),
+        "_events": [
+            {
+                "kind": "blocked",
+                "payload": {
+                    "reason": (
+                        "protected terminal route omitted stderr; "
+                        "raw_output=omitted_from_remote_replay"
+                    )
+                },
+            }
+        ],
+    }
+
+    assert _is_reopenable_egress_failure(details, receipt)
+    details["_events"][0]["payload"]["reason"] = "operator decision required"
+    assert not _is_reopenable_egress_failure(details, receipt)
 
 
 class FakeGitHub:

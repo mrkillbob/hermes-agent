@@ -329,7 +329,9 @@ def _claim_with_orphan_recovery(
                 details = task_details(board, binding.task_id)
             except RuntimeError:
                 return None
-            if _is_legacy_intake_task(details, receipt):
+            if _is_legacy_intake_task(details, receipt) or _is_reopenable_egress_failure(
+                details, receipt
+            ):
                 return ledger.reopen_legacy_exact_dispatch(
                     receipt,
                     blocked=binding,
@@ -377,6 +379,40 @@ def _is_legacy_intake_task(
         and evidence.get("feedback_id") == receipt.feedback_id
         and evidence.get("expected_head_sha") == receipt.head_sha
     )
+
+
+def _is_reopenable_egress_failure(
+    details: Mapping[str, object] | None, receipt: FeedbackReceipt
+) -> bool:
+    """Recognize only the known protected-terminal replay failure on this receipt."""
+    if not isinstance(details, Mapping) or details.get("status") != "blocked":
+        return False
+    body = details.get("body")
+    evidence = _legacy_task_evidence(body)
+    if not isinstance(body, str) or not isinstance(evidence, Mapping):
+        return False
+    if (
+        evidence.get("repository") != receipt.repository
+        or evidence.get("pr_number") != receipt.pr_number
+        or evidence.get("feedback_kind") != receipt.feedback_kind
+        or evidence.get("feedback_id") != receipt.feedback_id
+        or evidence.get("expected_head_sha") != receipt.head_sha
+    ):
+        return False
+    events = details.get("_events")
+    if not isinstance(events, list):
+        return False
+    for event in reversed(events):
+        if not isinstance(event, Mapping) or event.get("kind") != "blocked":
+            continue
+        payload = event.get("payload")
+        reason = payload.get("reason") if isinstance(payload, Mapping) else None
+        return (
+            isinstance(reason, str)
+            and "protected terminal route" in reason
+            and "omitted_from_remote_replay" in reason
+        )
+    return False
 
 
 def _legacy_task_evidence(body: object) -> Mapping[str, object] | None:

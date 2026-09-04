@@ -447,7 +447,17 @@ class KanbanSubprocessClient:
         except (TypeError, json.JSONDecodeError) as error:
             raise RuntimeError("Kanban task lookup failed") from error
         task = payload.get("task") if isinstance(payload, dict) else None
-        return task if isinstance(task, dict) else None
+        if not isinstance(task, dict):
+            return None
+        # Controller recovery needs the last bounded lifecycle event to
+        # distinguish the known protected-terminal replay failure from an
+        # unrelated human or infrastructure block. Keep it internal; this
+        # metadata is never sent to the remote worker.
+        enriched = dict(task)
+        events = payload.get("events") if isinstance(payload, dict) else None
+        if isinstance(events, list):
+            enriched["_events"] = events
+        return enriched
 
     def task_status(self, board: str, task_id: str) -> str | None:
         task = self.task_details(board, task_id)
