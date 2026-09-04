@@ -106,6 +106,9 @@ _GIT_GREP_TERMINAL_MAX_MATCHES = 200
 _GITHUB_API_EXTRACT_ARGUMENT_REPLAY = (
     '{"urls":["https://api.github.com/repos/<owner>/<repo>/<list>"]}'
 )
+_GITHUB_API_PAGINATE_ARGUMENT_REPLAY = (
+    '{"command":"gh api --paginate GitHub REST list (details omitted)"}'
+)
 _GITHUB_API_CURL_ARGUMENT_REPLAY = (
     '{"command":"curl GitHub REST list (details omitted)"}'
 )
@@ -968,6 +971,104 @@ def _github_api_curl_terminal_call_ids(value: Any) -> frozenset[str]:
 
     visit(value)
     return frozenset(recognized)
+
+
+def _github_api_paginate_terminal_call_limits(value: Any) -> dict[str, int]:
+    """Bind exact paginated GitHub issue/PR list calls to bounded projection.
+
+    ``gh api --paginate`` is the repository-owned command required by the
+    White-Knight intake.  Its output contains opaque ids and other fields that
+    are not useful to the remote reasoning turn, so only the two public list
+    endpoints are admitted and projected through the same bounded row filter
+    as ``gh issue/pr list --json``.  Other ``gh api`` commands remain
+    fail-closed.
+    """
+
+    limits: dict[str, int] = {}
+
+    def command_limit(arguments: Any) -> int | None:
+        try:
+            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+            command = parsed.get("command") if isinstance(parsed, Mapping) else None
+            tokens = shlex.split(command) if isinstance(command, str) else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if len(tokens) != 4 or tokens[:3] != ["gh", "api", "--paginate"]:
+            return None
+        path = tokens[3]
+        if not re.fullmatch(
+            r"/repos/[^/\s]+/[^/\s]+/(?:issues|pulls)\?state=open(?:&per_page=[1-9]\d{0,2})?",
+            path,
+        ):
+            return None
+        query = parse_qs(urlsplit(path).query, keep_blank_values=True)
+        if query.get("state") != ["open"]:
+            return None
+        raw_per_page = query.get("per_page", [str(_GITHUB_LIST_TERMINAL_MAX_ROWS)])[0]
+        try:
+            limit = int(raw_per_page)
+        except (TypeError, ValueError):
+            return None
+        return limit if 0 < limit <= _GITHUB_LIST_TERMINAL_MAX_ROWS else None
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            function = item.get("function")
+            name = function.get("name") if isinstance(function, Mapping) else item.get("name")
+            arguments = function.get("arguments") if isinstance(function, Mapping) else item.get("arguments")
+            call_id = item.get("call_id") or item.get("id")
+            limit = (
+                command_limit(arguments)
+                if item.get("type") in {"function", "function_call"}
+                and name == "terminal"
+                else None
+            )
+            if limit is not None and isinstance(call_id, str):
+                for variant in tool_result_id_variants(call_id):
+                    limits[variant] = limit
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return limits
+
+
+def _project_github_api_paginate_terminal_result(
+    text: str, *, max_rows: int
+) -> str | None:
+    """Project concatenated JSON arrays returned by ``gh api --paginate``."""
+
+    try:
+        wrapper = json.loads(text)
+        raw_output = wrapper.get("output") if isinstance(wrapper, Mapping) else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw_output, str):
+        return None
+    decoder = json.JSONDecoder()
+    rows: list[Any] = []
+    cursor = 0
+    while True:
+        while cursor < len(raw_output) and raw_output[cursor].isspace():
+            cursor += 1
+        if cursor >= len(raw_output):
+            break
+        try:
+            decoded, cursor = decoder.raw_decode(raw_output, cursor)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(decoded, list):
+            return None
+        rows.extend(decoded)
+    return _project_github_list_terminal_result(
+        json.dumps(
+            {"exit_code": wrapper.get("exit_code"), "output": json.dumps(rows)}
+        ),
+        max_rows=max_rows,
+    )
 
 
 def _plain_github_list_terminal_call_ids(value: Any) -> frozenset[str]:
@@ -1928,6 +2029,7 @@ def _typed_payload(
     kanban_assignees_terminal_call_ids: frozenset[str] = frozenset(),
     github_list_terminal_call_limits: Mapping[str, int] | None = None,
     github_api_extract_call_limits: Mapping[str, int] | None = None,
+    github_api_paginate_call_limits: Mapping[str, int] | None = None,
     github_api_curl_terminal_call_ids: frozenset[str] = frozenset(),
     plain_github_list_terminal_call_ids: frozenset[str] = frozenset(),
     combined_github_list_terminal_call_limits: Mapping[str, int] | None = None,
@@ -2092,6 +2194,12 @@ def _typed_payload(
             and isinstance(output_call_id, str)
             else None
         )
+        github_api_paginate_limit = (
+            github_api_paginate_call_limits.get(output_call_id)
+            if isinstance(github_api_paginate_call_limits, Mapping)
+            and isinstance(output_call_id, str)
+            else None
+        )
         direct_function = value.get("function")
         direct_name = (
             direct_function.get("name")
@@ -2166,6 +2274,7 @@ def _typed_payload(
                 is_kanban_assignees_result,
                 isinstance(github_list_limit, int),
                 isinstance(github_api_extract_limit, int),
+                isinstance(github_api_paginate_limit, int),
                 is_github_api_curl_terminal_call,
                 is_plain_github_list_terminal_result,
                 isinstance(combined_github_list_limit, int),
@@ -2272,6 +2381,18 @@ def _typed_payload(
                 )
                 if projected is not None:
                     typed[key] = GeneratedContextSegment(projected)
+                    continue
+            if (
+                isinstance(github_api_paginate_limit, int)
+                and structured_text is not None
+            ):
+                projected = _project_github_api_paginate_terminal_result(
+                    structured_text, max_rows=github_api_paginate_limit
+                )
+                if projected is not None:
+                    typed[key] = GeneratedContextSegment(
+                        redact_remote_unsafe_text(projected)
+                    )
                     continue
             if (
                 isinstance(combined_github_list_limit, int)
@@ -2476,6 +2597,19 @@ def _typed_payload(
                     )
                     continue
             if (
+                isinstance(github_api_paginate_limit, int)
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                projected = _project_github_api_paginate_terminal_result(
+                    item, max_rows=github_api_paginate_limit
+                )
+                if projected is not None:
+                    typed[key] = GeneratedContextSegment(
+                        redact_remote_unsafe_text(projected)
+                    )
+                    continue
+            if (
                 isinstance(github_api_extract_limit, int)
                 and key in {"content", "output"}
                 and isinstance(item, str)
@@ -2498,6 +2632,15 @@ def _typed_payload(
                 # repository path atoms can resemble an encoded payload.
                 typed[key] = GeneratedContextSegment(
                     _GITHUB_API_EXTRACT_ARGUMENT_REPLAY
+                )
+                continue
+            if (
+                isinstance(github_api_paginate_limit, int)
+                and key == "arguments"
+                and isinstance(item, str)
+            ):
+                typed[key] = GeneratedContextSegment(
+                    _GITHUB_API_PAGINATE_ARGUMENT_REPLAY
                 )
                 continue
             if is_github_api_curl_terminal_call and key == "arguments":
@@ -2635,6 +2778,7 @@ def _typed_payload(
                 kanban_assignees_terminal_call_ids=kanban_assignees_terminal_call_ids,
                 github_list_terminal_call_limits=github_list_terminal_call_limits,
                 github_api_extract_call_limits=github_api_extract_call_limits,
+                github_api_paginate_call_limits=github_api_paginate_call_limits,
                 github_api_curl_terminal_call_ids=github_api_curl_terminal_call_ids,
                 plain_github_list_terminal_call_ids=plain_github_list_terminal_call_ids,
                 combined_github_list_terminal_call_limits=combined_github_list_terminal_call_limits,
@@ -2690,6 +2834,7 @@ def _typed_payload(
                 kanban_assignees_terminal_call_ids=kanban_assignees_terminal_call_ids,
                 github_list_terminal_call_limits=github_list_terminal_call_limits,
                 github_api_extract_call_limits=github_api_extract_call_limits,
+                github_api_paginate_call_limits=github_api_paginate_call_limits,
                 github_api_curl_terminal_call_ids=github_api_curl_terminal_call_ids,
                 plain_github_list_terminal_call_ids=plain_github_list_terminal_call_ids,
                 combined_github_list_terminal_call_limits=combined_github_list_terminal_call_limits,
@@ -3136,6 +3281,11 @@ def authorize_agent_sdk_kwargs(
         ),
         github_api_extract_call_limits=(
             _github_api_extract_call_limits(body)
+            if protected_kanban_remote and protected_provider_route
+            else None
+        ),
+        github_api_paginate_call_limits=(
+            _github_api_paginate_terminal_call_limits(body)
             if protected_kanban_remote and protected_provider_route
             else None
         ),

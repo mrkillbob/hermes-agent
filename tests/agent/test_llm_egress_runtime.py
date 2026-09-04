@@ -1597,6 +1597,66 @@ def test_protected_codex_elides_bound_browser_exec_output(
     }
 
 
+def test_protected_codex_projects_bound_paginated_github_api_output(
+    tmp_path, monkeypatch
+):
+    """The White-Knight ``gh api --paginate`` list path stays bounded."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_github_api_paginate_output"
+    command = (
+        "gh api --paginate "
+        "'/repos/NousResearch/hermes-agent/issues?state=open'"
+    )
+    raw_output = json.dumps(
+        [
+            {
+                "id": "c2VjcmV0LXBheWxvYWQ=",
+                "number": 102658,
+                "title": "Encoded-looking title is still bounded",
+                "state": "open",
+                "user": {"id": 42, "login": "contributor"},
+            }
+        ]
+    )
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "terminal",
+                    "call_id": call_id,
+                    "arguments": json.dumps({"command": command}),
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps({"exit_code": 0, "output": raw_output}),
+                },
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    assert "c2VjcmV0LXBheWxvYWQ=" not in json.dumps(authorized)
+    assert "NousResearch" not in authorized["input"][0]["arguments"]
+    projected = json.loads(authorized["input"][1]["output"])
+    assert json.loads(projected["output"])["items"] == [
+        {
+            "number": 102658,
+            "state": "open",
+            "title": "Encoded-looking title is still bounded",
+        }
+    ]
+
+
 def test_protected_codex_elides_structured_rg_output(tmp_path, monkeypatch):
     """Structured search output never falls through to recursive text replay."""
 
