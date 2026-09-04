@@ -721,6 +721,59 @@ def test_source_presentation_allows_bounded_code_and_config_atoms(tmp_path):
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_bounded_pascal_case_identifiers(tmp_path):
+    source = (
+        "from hermes_state import ConversationWorktreeConflict, SessionDB\n"
+        "with pytest.raises(ConversationWorktreeConflict):\n"
+        "    pass\n"
+    )
+    path = tmp_path / "test_bindings.py"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=3)
+    presentation = json.dumps(
+        {
+            "content": "\n".join(
+                f"{number}|{line}"
+                for number, line in enumerate(source.split("\n"), start=1)
+            )
+        }
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
+def test_source_presentation_still_rejects_pascal_case_payload(tmp_path):
+    encoded = base64.b64encode(b"private source that must not leave the host").decode()
+    source = f"from hermes_state import {encoded}\n"
+    path = tmp_path / "test_bindings.py"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path)
+    presentation = json.dumps(
+        {
+            "content": "\n".join(
+                f"{number}|{line}"
+                for number, line in enumerate(source.split("\n"), start=1)
+            )
+        }
+    )
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _source_presentation_request(grant, presentation),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "base64_payload" in exc_info.value.decision.reason_codes
+
+
 def test_source_presentation_scans_raw_source_not_json_line_number_artifacts(tmp_path):
     source_lines = ["PR_CI_RECEIPT_V1 = True", *[f"value_{number} = {number}" for number in range(1, 121)]]
     source = "\n".join(source_lines) + "\n"

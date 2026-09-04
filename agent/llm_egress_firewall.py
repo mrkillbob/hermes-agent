@@ -260,6 +260,9 @@ _PYTHON_PRIVATE_IDENTIFIER = re.compile(r"^_[A-Za-z][A-Za-z0-9_]{1,63}$")
 _PYTHON_MIXED_CASE_IDENTIFIER = re.compile(
     r"^[a-z][A-Za-z0-9]*_[A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*$"
 )
+_BOUNDED_PASCAL_CASE_IDENTIFIER = re.compile(
+    r"^[A-Z][a-z0-9]{2,63}(?:[A-Z][a-z0-9]{2,63}){2,7}$"
+)
 _BOUNDED_SOURCE_CODE_ATOM = re.compile(
     r"(?:[a-z][a-z0-9]{0,63}(?:_[a-z0-9]{1,64}){1,7}"
     r"|[A-Z][A-Z0-9]{0,63}(?:_[A-Z0-9]{1,64}){1,7}"
@@ -892,6 +895,7 @@ def _source_text_for_base64_scan(text: str) -> str:
             or _PYTHON_DUNDER_IDENTIFIER.fullmatch(source_atom) is not None
             or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(source_atom) is not None
             or _PYTHON_MIXED_CASE_IDENTIFIER.fullmatch(source_atom) is not None
+            or _BOUNDED_PASCAL_CASE_IDENTIFIER.fullmatch(source_atom) is not None
             # argparse usage renders a small, fixed set of all-caps
             # metavariables.  They are command syntax, not encoded payloads;
             # keep this exception enumerated so arbitrary values such as
