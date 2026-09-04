@@ -1957,7 +1957,9 @@ class ScanController:
             details = details_reader(self._policy.board or "", binding.task_id)
         except RuntimeError:
             return False
-        return _is_legacy_intake_task(details, receipt)
+        return _is_legacy_intake_task(details, receipt) or _is_reopenable_egress_failure(
+            details, receipt
+        )
 
     def dispatch_feedback(self, receipt: FeedbackReceipt) -> ScanResult:
         """Dispatch one exact feedback item after canonical reread and admission."""
