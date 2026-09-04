@@ -401,6 +401,48 @@ class TestGatewayStopCleanup:
 
         assert events[:2] == ["drain", "stop"]
 
+    def test_stop_drain_without_all_scopes_to_current_profile(self, tmp_path, monkeypatch):
+        """Desktop's own quit path (no --all) must drain only its profile.
+
+        A gateway for a different profile — a standalone systemd/launchd
+        service, or a different Desktop installation — must be left alone.
+        """
+        unit_path = tmp_path / "hermes-gateway.service"
+        unit_path.write_text("unit\n", encoding="utf-8")
+        events = []
+        all_homes_calls = []
+
+        monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: True)
+        monkeypatch.setattr(gateway_cli, "is_termux", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_windows", lambda: False)
+        monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
+        monkeypatch.setattr(gateway_cli, "systemd_stop", lambda system=False: events.append("stop"))
+        monkeypatch.setattr(gateway_cli, "kill_gateway_processes", lambda **kwargs: 0)
+        monkeypatch.setattr(gateway_cli, "_dispatch_all_via_service_manager_if_s6", lambda action: False)
+        monkeypatch.setattr(gateway_cli.atexit, "register", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_desktop_drain.desktop_profile_homes",
+            lambda: all_homes_calls.append(1) or (tmp_path, tmp_path / "other-profile"),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.gateway_desktop_drain.current_desktop_profile_home",
+            lambda: (tmp_path,),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.gateway_desktop_drain.drain_desktop_work",
+            lambda homes: events.append(("drain", tuple(homes))),
+        )
+
+        gateway_cli.gateway_command(
+            SimpleNamespace(gateway_command="stop", all=False, system=False, drain=True)
+        )
+
+        assert events[0] == ("drain", (tmp_path,))
+        assert events[1] == "stop"
+        # The all-profiles sweep must never run for a scoped drain.
+        assert all_homes_calls == []
+
     @pytest.mark.linux_only
     def test_stop_only_kills_current_profile_by_default(self, tmp_path, monkeypatch):
         """Without --all, stop uses systemd (if available) and does NOT call

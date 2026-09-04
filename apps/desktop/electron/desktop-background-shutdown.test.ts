@@ -27,10 +27,10 @@ describe('Desktop background-service shutdown', () => {
     child.emit('exit', 0, null)
 
     await expect(stopped).resolves.toBe(true)
-    expect(resolveBackend).toHaveBeenCalledWith(['gateway', 'stop', '--all', '--drain'])
+    expect(resolveBackend).toHaveBeenCalledWith(['gateway', 'stop', '--drain'])
     expect(spawnFn).toHaveBeenCalledWith(
       '/runtime/bin/hermes',
-      ['gateway', 'stop', '--all', '--drain'],
+      ['gateway', 'stop', '--drain'],
       expect.objectContaining({
         cwd: '/runtime',
         env: expect.objectContaining({ HERMES_HOME: '/profiles', RUNTIME_MARKER: '1' }),

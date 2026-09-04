@@ -1326,6 +1326,17 @@ class ConversationWorktreeManager:
                     "ready conversation worktree failed identity validation",
                     phase="recovery",
                 )
+            # Persist the accepted rename into the durable record. Explicit
+            # cleanup (`_inspect_cleanup_record`) re-derives the *expected*
+            # branch from policy and compares it against `record.branch`; if
+            # the record still names the original branch, a clean, fully
+            # integrated renamed worktree can never pass cleanup ("mismatched
+            # identity") because that comparison would fail forever.
+            updated = self._db.update_conversation_worktree_branch(
+                record.root_session_id, actual_branch
+            )
+            if updated is not None:
+                record = updated
         ancestor = self._run_git(
             path,
             ["merge-base", "--is-ancestor", record.base_commit, "HEAD"],
