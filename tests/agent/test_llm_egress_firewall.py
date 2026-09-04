@@ -741,10 +741,11 @@ def test_source_presentation_allows_long_python_boundary_identifiers(tmp_path):
         'event = "FIRE"\n'
         "epsilon = 1e-6\n"
         "sources = sources\n"
+        'runbooks = sorted(root.glob("hrl-*.md"))\n'
     )
     path = tmp_path / "live_runner.py"
     path.write_text(source, encoding="utf-8")
-    grant = _source_grant(path, end=7)
+    grant = _source_grant(path, end=8)
     presentation = json.dumps(
         {
             "content": "\n".join(

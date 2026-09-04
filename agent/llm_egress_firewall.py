@@ -328,6 +328,7 @@ _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS = frozenset(
         "INTRADAY",
         "LIVE",
         "MPLCONFIGDIR",
+        "hrl-",
         "NONE",
         "NULL",
         "PERF",
