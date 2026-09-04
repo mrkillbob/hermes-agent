@@ -202,14 +202,17 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
     if not isinstance(task, dict):
         return GeneratedContextSegment(_REMOTE_KANBAN_PROJECTION_ELISION)
 
+    # The assignment title/body and dependency records are local board data,
+    # not remote-reasoning input.  Replaying them leaks arbitrary operator
+    # text (and routinely trips the encoding scanner on dates and filenames).
+    # The worker already has its assignment in the dispatcher context; retain
+    # only the bounded lifecycle state needed to interpret a follow-up call.
     projection = {
         "task": {
             key: task[key]
-            for key in ("title", "body", "status", "workspace_access")
+            for key in ("status", "workspace_access")
             if key in task
         },
-        "parents": payload.get("parents", []),
-        "children": payload.get("children", []),
         "worker_instruction": (
             "Use the dispatcher-assigned current workspace. Do not invent or search "
             "for alternate worktrees; report an unresolved assignment and stop."

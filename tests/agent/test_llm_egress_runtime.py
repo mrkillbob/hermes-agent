@@ -482,11 +482,63 @@ def test_protected_codex_elides_bound_kanban_show_result(tmp_path, monkeypatch):
 
     rendered = authorized["messages"][1]["content"]
     assert receipt.allowed
-    assert "untrusted" in rendered
     assert rendered.startswith("kanban_show completed locally.")
     assert "c2VjcmV0LXBheWxvYWQ=" not in rendered
     assert "super-secret-value" not in rendered
     assert "/Users/private/source.py" not in rendered
+
+
+def test_protected_codex_kanban_projection_drops_raw_assignment_text(
+    tmp_path, monkeypatch
+):
+    """A valid board record cannot replay arbitrary title/body text remotely."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_kanban_show_projection_boundary"
+    board_text = json.dumps(
+        {
+            "task": {
+                "title": "[Audit] Paper-safety posture 20260903",
+                "body": "private assignment c2VjcmV0LXBheWxvYWQ=",
+                "status": "blocked",
+                "workspace_access": "assigned",
+            },
+            "parents": [{"body": "private dependency detail"}],
+            "children": [{"body": "private child detail"}],
+        }
+    )
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": "kanban_show",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": board_text,
+                },
+            ],
+        },
+    )
+
+    rendered = authorized["input"][1]["output"]
+    assert receipt.allowed
+    assert "20260903" not in rendered
+    assert "private assignment" not in rendered
+    assert "private dependency" not in rendered
+    assert "c2VjcmV0LXBheWxvYWQ=" not in rendered
+    assert '"status": "blocked"' in rendered
 
 
 def test_protected_codex_elides_responses_kanban_show_output(tmp_path, monkeypatch):

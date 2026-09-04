@@ -295,6 +295,10 @@ _BOUNDED_SOURCE_DASHED_TITLE = re.compile(
     r"^[A-Z][A-Za-z0-9]+(?:-[A-Za-z][A-Za-z0-9]+)+$"
 )
 _BOUNDED_SOURCE_LINE_LABEL = re.compile(r"^[nN][0-9]{2,6}$")
+_BOUNDED_SOURCE_FILE_TOKEN = re.compile(
+    r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z][A-Za-z0-9]*)+\.[A-Za-z0-9]{1,8}\b"
+)
+_BOUNDED_ISO_DURATION = re.compile(r"\bP[0-9]{1,4}[DWMY]\b")
 _BOUNDED_SOURCE_CODE_ASSIGNMENT = re.compile(
     r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,7}="
 )
@@ -953,7 +957,18 @@ def _source_text_for_base64_scan(text: str) -> str:
             or _BOUNDED_SOURCE_PATH_FRAGMENT.fullmatch(source_atom) is not None
             or _BOUNDED_SOURCE_DASHED_TITLE.fullmatch(source_atom) is not None
             or _BOUNDED_SOURCE_LINE_LABEL.fullmatch(source_atom) is not None
-            or source_atom in {"LICENSE", "BM25", "HTML", "PKCS", "IANA", "CONTRIBUTING", "sprmn24"}
+            or source_atom in {
+                "LICENSE",
+                "BM25",
+                "HTML",
+                "PKCS",
+                "IANA",
+                "CONTRIBUTING",
+                "sprmn24",
+                "BOUNDARY",
+                "CASH",
+                "FIFO",
+            }
             # argparse usage renders a small, fixed set of all-caps
             # metavariables.  They are command syntax, not encoded payloads;
             # keep this exception enumerated so arbitrary values such as
@@ -963,6 +978,12 @@ def _source_text_for_base64_scan(text: str) -> str:
             or source_atom in {"PROVIDER", "TOOLSETS", "OPEN", "LIKE"}
         )
 
+    # A source path such as ``execution_submit_boundary.py`` is one lexical
+    # token, but the Base64 candidate regex sees its uppercase suffix after
+    # the underscore as a standalone candidate. Mask the whole path-shaped
+    # token before that scan; an opaque payload cannot contain a dot.
+    masked = _BOUNDED_SOURCE_FILE_TOKEN.sub("<source-file>", text)
+    masked = _BOUNDED_ISO_DURATION.sub("<source-duration>", masked)
     masked = _BASE64_CANDIDATE.sub(
         lambda match: (
             "<code>"
