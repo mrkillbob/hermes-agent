@@ -185,6 +185,9 @@ _REMOTE_KANBAN_PROJECTION_ELISION = (
     "present in your worker context; do not request or repeat the raw board "
     "record remotely. Continue with the assigned work or use a lifecycle tool."
 )
+_REMOTE_KANBAN_TASK_SPEC_VERSION = "v1"
+_REMOTE_KANBAN_TASK_TITLE_MAX_BYTES = 1024
+_REMOTE_KANBAN_TASK_BODY_MAX_BYTES = 8 * 1024
 _REMOTE_KANBAN_ATTACHMENT_ELISION = (
     "kanban_attachments completed locally; attachment metadata and contents "
     "were omitted from remote replay. Continue with the assigned work or use a lifecycle tool."
@@ -202,17 +205,43 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
     if not isinstance(task, dict):
         return GeneratedContextSegment(_REMOTE_KANBAN_PROJECTION_ELISION)
 
-    # The assignment title/body and dependency records are local board data,
-    # not remote-reasoning input.  Replaying them leaks arbitrary operator
-    # text (and routinely trips the encoding scanner on dates and filenames).
-    # The worker already has its assignment in the dispatcher context; retain
-    # only the bounded lifecycle state needed to interpret a follow-up call.
+    # Only the exact versioned producer contract may carry assignment text.
+    # Forged/unbound board-shaped JSON stays on the elision path. The producer
+    # has already capped the fields and the redaction/final scans remain
+    # mandatory before this generated context can leave the host.
+    task_spec = payload.get("protected_task_spec")
+
+    def bounded_text(item: Any, max_bytes: int) -> str:
+        text = item if isinstance(item, str) else ""
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+        suffix = "\n<truncated>"
+        budget = max(0, max_bytes - len(suffix.encode("utf-8")))
+        return encoded[:budget].decode("utf-8", errors="ignore") + suffix
+
+    projected_task: dict[str, Any] = {
+        key: task[key]
+        for key in ("status", "workspace_access")
+        if key in task
+    }
+    if (
+        isinstance(task_spec, dict)
+        and task_spec.get("version") == _REMOTE_KANBAN_TASK_SPEC_VERSION
+    ):
+        projected_task.update(
+            {
+                "title": bounded_text(
+                    task_spec.get("title"), _REMOTE_KANBAN_TASK_TITLE_MAX_BYTES
+                ),
+                "body": bounded_text(
+                    task_spec.get("body"), _REMOTE_KANBAN_TASK_BODY_MAX_BYTES
+                ),
+            }
+        )
+
     projection = {
-        "task": {
-            key: task[key]
-            for key in ("status", "workspace_access")
-            if key in task
-        },
+        "task": projected_task,
         "worker_instruction": (
             "Use the dispatcher-assigned current workspace. Do not invent or search "
             "for alternate worktrees; report an unresolved assignment and stop."

@@ -149,6 +149,8 @@ def test_remote_worker_payload_replaces_private_paths_with_local_tokens():
     assert "/home/" not in rendered
     assert sanitized["task"]["workspace_path"] is None
     assert sanitized["task"]["workspace_access"] == "dispatcher_current_directory"
+    assert sanitized["protected_task_spec"]["version"] == "v1"
+    assert sanitized["protected_task_spec"]["body"] == sanitized["task"]["body"]
     assert "$HERMES_CONTROL_HOME" in sanitized["task"]["body"]
     assert "--worktree $HERMES_KANBAN_WORKSPACE. Then" in sanitized["task"]["body"]
     assert "--worktree .." not in sanitized["task"]["body"]
@@ -187,6 +189,8 @@ def test_remote_worker_projection_excludes_obsolete_attempt_history():
     projected = _project_remote_worker_state(payload, current_run_id="run-current")
 
     rendered = json.dumps(projected)
+    assert projected["protected_task_spec"]["version"] == "v1"
+    assert projected["protected_task_spec"]["body"] == "Repair current PR state."
     assert "run-old" not in rendered
     assert "old failure" not in rendered
     assert "protocol violation" not in rendered

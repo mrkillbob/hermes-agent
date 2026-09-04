@@ -541,6 +541,63 @@ def test_protected_codex_kanban_projection_drops_raw_assignment_text(
     assert '"status": "blocked"' in rendered
 
 
+def test_protected_codex_kanban_projection_replays_only_versioned_task_spec(
+    tmp_path, monkeypatch
+):
+    """The trusted producer contract restores the assignment without history."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_kanban_show_task_spec"
+    board_text = json.dumps(
+        {
+            "task": {"status": "running", "workspace_access": "assigned"},
+            "protected_task_spec": {
+                "version": "v1",
+                "title": "Repair the current PR feedback worker",
+                "body": (
+                    "Inspect the current checkout and report the result. "
+                    "token=super-secret-value c2VjcmV0LXBheWxvYWQ= "
+                    "/Users/private/source.py"
+                ),
+            },
+            "comments": [{"body": "obsolete attempt"}],
+        }
+    )
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": "kanban_show",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": board_text,
+                },
+            ],
+        },
+    )
+
+    rendered = authorized["input"][1]["output"]
+    assert receipt.allowed
+    assert "Repair the current PR feedback worker" in rendered
+    assert "Inspect the current checkout and report the result." in rendered
+    assert "obsolete attempt" not in rendered
+    assert "super-secret-value" not in rendered
+    assert "c2VjcmV0LXBheWxvYWQ=" not in rendered
+    assert "/Users/private/source.py" not in rendered
+
+
 def test_protected_codex_elides_responses_kanban_show_output(tmp_path, monkeypatch):
     """Responses API function output follows the same no-egress boundary."""
 

@@ -52,6 +52,9 @@ _PARENT_HANDOFF_SUMMARY_MAX_BYTES = 4096
 _PARENT_HANDOFF_METADATA_STRING_MAX_BYTES = 2048
 _PARENT_HANDOFF_METADATA_MAX_ITEMS = 32
 _PARENT_HANDOFF_METADATA_MAX_DEPTH = 4
+_PROTECTED_TASK_SPEC_VERSION = "v1"
+_PROTECTED_TASK_TITLE_MAX_BYTES = 1024
+_PROTECTED_TASK_BODY_MAX_BYTES = 8 * 1024
 
 # A direct user/dashboard root can legitimately need a follow-up choice.  A
 # worker-, decomposer-, or cron-created card cannot: it was created only after
@@ -198,6 +201,15 @@ def _project_remote_worker_state(payload: dict, *, current_run_id: str | None) -
     # sanitized command text, where the shell can expand the exact grant.
     task["workspace_path"] = None
     task["workspace_access"] = "dispatcher_current_directory"
+    # A protected worker still needs the current assignment to act. Publish
+    # only a small, versioned contract so the egress runtime can distinguish
+    # this producer-owned task spec from arbitrary board-shaped JSON. The
+    # complete payload is sanitized below before it reaches the runtime.
+    task_spec = {
+        "version": _PROTECTED_TASK_SPEC_VERSION,
+        "title": _truncate_utf8(task.get("title"), _PROTECTED_TASK_TITLE_MAX_BYTES),
+        "body": _truncate_utf8(task.get("body"), _PROTECTED_TASK_BODY_MAX_BYTES),
+    }
     review_assignment = False
     if task.get("status") in {"review", "running"}:
         for run in reversed(payload.get("runs") or []):
@@ -233,6 +245,7 @@ def _project_remote_worker_state(payload: dict, *, current_run_id: str | None) -
     )
     return {
         "task": task,
+        "protected_task_spec": task_spec,
         "parents": payload.get("parents", []),
         "children": payload.get("children", []),
         "parent_handoffs": _bounded_completed_parent_handoffs(
