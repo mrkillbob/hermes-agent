@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -59,6 +60,61 @@ def make_governed_venv(repo: Path) -> None:
     venv = repo / ".venv" / "bin"
     venv.mkdir(parents=True)
     (venv / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+
+
+def commit_case_colliding_paths(repo: Path) -> str:
+    """Create a commit whose tree has two paths that collide on macOS."""
+
+    blobs: list[tuple[str, str]] = []
+    for path, content in (
+        ("agent@Agents-Mac-mini.local", "upper\n"),
+        ("agent@agents-Mac-mini.local", "lower\n"),
+    ):
+        result = subprocess.run(
+            ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+            input=content,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        blobs.append((path, result.stdout.strip()))
+    emails_tree = subprocess.run(
+        ["git", "-C", str(repo), "mktree"],
+        input="".join(f"100644 blob {sha}\t{path}\n" for path, sha in blobs),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    contributors_tree = subprocess.run(
+        ["git", "-C", str(repo), "mktree"],
+        input=f"040000 tree {emails_tree}\temails\n",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    root_tree = subprocess.run(
+        ["git", "-C", str(repo), "mktree"],
+        input=f"040000 tree {contributors_tree}\tcontributors\n",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    }
+    result = subprocess.run(
+        ["git", "-C", str(repo), "commit-tree", root_tree],
+        input="case-collision\n",
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return result.stdout.strip()
 
 
 def test_pool_reuses_the_same_slot_directory_after_release(tmp_path: Path) -> None:
@@ -495,3 +551,39 @@ def test_receipt_preparation_uses_exact_head_overflow_when_pool_is_exhausted(
 
     assert prepared.expected_sha == sha
     assert prepared.path.is_relative_to(tmp_path / "overflow-worktrees")
+
+
+def test_pool_excludes_case_colliding_tracked_paths_on_case_insensitive_fs(
+    tmp_path: Path,
+) -> None:
+    repo = initialized_repository(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.ignorecase", "true"],
+        check=True,
+    )
+    sha = commit_case_colliding_paths(repo)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    pool = PooledLocalGitRepository(
+        ledger, tmp_path / "pool", slot_count=1, owner_pid=lambda: 4242
+    )
+
+    prepared = pool.prepare_receipt_worktree(repo, receipt(sha))
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(prepared.path),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":!.venv",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout == ""
+    ledger.close()

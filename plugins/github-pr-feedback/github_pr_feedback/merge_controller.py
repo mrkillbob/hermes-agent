@@ -255,6 +255,8 @@ def evaluate_merge(
             blockers.append("github_actions_disabled")
     if snapshot.review_state.review_decision == "CHANGES_REQUESTED":
         blockers.append("changes_requested")
+    elif snapshot.review_state.review_decision == "REVIEW_REQUIRED":
+        blockers.append("review_required")
     if snapshot.review_state.unresolved_thread_count:
         blockers.append("unresolved_review_threads")
     labels = {label.casefold() for label in pull.labels}
