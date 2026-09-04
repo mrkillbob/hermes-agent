@@ -1801,7 +1801,7 @@ def test_protected_codex_elides_structured_terminal_output(
                     "name": "terminal",
                     "call_id": call_id,
                     "arguments": json.dumps(
-                        {"command": "python3 -m pytest tests/unit -q"}
+                        {"command": "printf test-output"}
                     ),
                 },
                 {
@@ -1820,6 +1820,57 @@ def test_protected_codex_elides_structured_terminal_output(
         "exit_code": None,
         "raw_output": "omitted_from_remote_replay",
     }
+
+
+def test_protected_codex_projects_bound_pytest_failure_diagnostics(
+    tmp_path, monkeypatch
+):
+    """A bound pytest call retains safe failure facts without replaying source."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_pytest_failure"
+    raw_output = (
+        "============================= test session starts =============================\n"
+        "ERROR collecting tests/test_state.py\n"
+        "E   ImportError: cannot import name 'ConversationWorktreeRecord'\n"
+        "=========================== short test summary info ============================\n"
+        "ERROR tests/test_state.py - ImportError: missing state API\n"
+        "!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n"
+    )
+    terminal_result = json.dumps({"exit_code": 1, "output": raw_output})
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "terminal",
+                    "call_id": call_id,
+                    "arguments": json.dumps(
+                        {"command": "python3 -m pytest -q tests"}
+                    ),
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": [{"type": "input_text", "text": terminal_result}],
+                },
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    rendered = json.loads(authorized["input"][1]["output"])
+    assert rendered["terminal_result"] == "pytest"
+    assert rendered["exit_code"] == 1
+    assert "ConversationWorktreeRecord" in "\n".join(rendered["diagnostics"])
+    assert raw_output not in json.dumps(authorized)
 
 
 def test_protected_codex_elides_bound_browser_exec_output(

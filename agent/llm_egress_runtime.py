@@ -157,6 +157,8 @@ _GITHUB_LIST_TERMINAL_MAX_OUTPUT_BYTES = 10_240
 _GIT_GREP_TERMINAL_MAX_MATCHES = 200
 _GIT_DIFF_NAME_ONLY_MAX_FILES = 200
 _GIT_REVIEW_SUMMARY_MAX_FILES = 200
+_PYTEST_DIAGNOSTIC_MAX_LINES = 32
+_PYTEST_DIAGNOSTIC_MAX_BYTES = 4096
 _GITHUB_API_EXTRACT_ARGUMENT_REPLAY = (
     '{"urls":["https://api.github.com/repos/<owner>/<repo>/<list>"]}'
 )
@@ -792,6 +794,50 @@ def _recognized_syntax_tool_call_ids(value: Any) -> frozenset[str]:
     """Return preceding terminal calls eligible for strict syntax parsing."""
 
     return _recognized_tool_call_ids(value, _VALIDATED_SYNTAX_TOOL_NAMES)
+
+
+def _pytest_terminal_call_ids(value: Any) -> frozenset[str]:
+    """Bind bounded pytest diagnostics to exact local test calls."""
+
+    recognized: set[str] = set()
+
+    def is_pytest_command(arguments: Any) -> bool:
+        try:
+            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+            command = parsed.get("command") if isinstance(parsed, Mapping) else None
+            tokens = shlex.split(command) if isinstance(command, str) else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if "pytest" not in tokens:
+            return False
+        index = tokens.index("pytest")
+        return index == 0 or tokens[index - 1] in {"-m", "run"}
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            function = item.get("function")
+            name = function.get("name") if isinstance(function, Mapping) else item.get("name")
+            arguments = (
+                function.get("arguments")
+                if isinstance(function, Mapping)
+                else item.get("arguments")
+            )
+            call_id = item.get("call_id") or item.get("id")
+            if (
+                item.get("type") in {"function", "function_call"}
+                and name == "terminal"
+                and is_pytest_command(arguments)
+                and isinstance(call_id, str)
+            ):
+                recognized.update(tool_result_id_variants(call_id))
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return frozenset(recognized)
 
 
 def _scratch_read_file_tool_call_ids(value: Any) -> frozenset[str]:
@@ -2498,6 +2544,7 @@ def _typed_payload(
     sanitized_cap: int,
     field_name: str | None = None,
     syntax_tool_call_ids: frozenset[str] = frozenset(),
+    pytest_terminal_call_ids: frozenset[str] = frozenset(),
     elided_kanban_tool_call_ids: frozenset[str] = frozenset(),
     kanban_attachment_tool_call_ids: frozenset[str] = frozenset(),
     kanban_lifecycle_tool_call_ids: frozenset[str] = frozenset(),
@@ -2693,6 +2740,14 @@ def _typed_payload(
                 or value.get("type") == "function_call_output"
             )
         )
+        is_pytest_terminal_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in pytest_terminal_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
         is_github_pr_feedback_terminal_result = (
             isinstance(output_call_id, str)
             and output_call_id in github_pr_feedback_terminal_call_ids
@@ -2802,6 +2857,7 @@ def _typed_payload(
                 is_rg_projection_tool_result,
                 is_git_diff_name_only_projection_tool_result,
                 is_git_review_summary_projection_tool_result,
+                is_pytest_terminal_result,
                 is_github_pr_feedback_terminal_result,
                 is_kanban_assignees_result,
                 isinstance(github_list_limit, int),
@@ -2862,6 +2918,7 @@ def _typed_payload(
                     is_rg_projection_tool_result,
                     is_git_diff_name_only_projection_tool_result,
                     is_git_review_summary_projection_tool_result,
+                    is_pytest_terminal_result,
                     is_github_pr_feedback_terminal_result,
                     is_kanban_assignees_result,
                     is_plain_github_list_terminal_result,
@@ -3019,6 +3076,15 @@ def _typed_payload(
                         redact_remote_unsafe_text(projected)
                     )
                     continue
+            if (
+                is_structured_result
+                and is_pytest_terminal_result
+                and structured_text is not None
+            ):
+                typed[key] = GeneratedContextSegment(
+                    _pytest_terminal_result(structured_text)
+                )
+                continue
             if (
                 is_structured_result
                 and is_web_replay_tool_result
@@ -3193,6 +3259,13 @@ def _typed_payload(
                         redact_remote_unsafe_text(projected)
                     )
                     continue
+            if (
+                is_pytest_terminal_result
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                typed[key] = GeneratedContextSegment(_pytest_terminal_result(item))
+                continue
             if (
                 is_github_pr_feedback_terminal_result
                 and key in {"content", "output"}
@@ -3405,6 +3478,7 @@ def _typed_payload(
                 sanitized_cap=sanitized_cap,
                 field_name=key,
                 syntax_tool_call_ids=syntax_tool_call_ids,
+                pytest_terminal_call_ids=pytest_terminal_call_ids,
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
                 kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
                 kanban_lifecycle_tool_call_ids=kanban_lifecycle_tool_call_ids,
@@ -3466,6 +3540,7 @@ def _typed_payload(
                 sanitized_cap=sanitized_cap,
                 field_name=field_name,
                 syntax_tool_call_ids=syntax_tool_call_ids,
+                pytest_terminal_call_ids=pytest_terminal_call_ids,
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
                 kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
                 kanban_lifecycle_tool_call_ids=kanban_lifecycle_tool_call_ids,
@@ -3545,6 +3620,63 @@ def _terminal_replay_result(output: str) -> str:
         {
             "terminal_result": "completed",
             "exit_code": exit_code if isinstance(exit_code, int) else None,
+            "raw_output": "omitted_from_remote_replay",
+        },
+        separators=(",", ":"),
+    )
+
+
+def _pytest_terminal_result(output: str) -> str:
+    """Replay bounded pytest failure facts without source or raw stdout."""
+
+    try:
+        parsed = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = None
+    exit_code = parsed.get("exit_code") if isinstance(parsed, Mapping) else None
+    raw_output = parsed.get("output") if isinstance(parsed, Mapping) else None
+    if not isinstance(raw_output, str):
+        raw_output = ""
+
+    diagnostics: list[str] = []
+    diagnostic_bytes = 0
+    for raw_line in raw_output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        summary = (
+            line.startswith(("FAILED ", "ERROR ", "E   ", "INTERNALERROR>"))
+            or line.startswith("collected ")
+            or line.startswith("!!!!!!!!!!!!!!!!")
+            or (
+                line.startswith("=")
+                and line.endswith("=")
+                and re.search(
+                    r"\b(?:passed|failed|error|errors|skipped|warnings)\b",
+                    line,
+                    re.IGNORECASE,
+                )
+                is not None
+            )
+        )
+        if not summary:
+            continue
+        safe = redact_remote_unsafe_text(
+            redact_sensitive_text(line, force=True, redact_url_credentials=True)
+        )
+        encoded = safe.encode("utf-8")
+        if not encoded or diagnostic_bytes + len(encoded) + 1 > _PYTEST_DIAGNOSTIC_MAX_BYTES:
+            break
+        diagnostics.append(safe)
+        diagnostic_bytes += len(encoded) + 1
+        if len(diagnostics) >= _PYTEST_DIAGNOSTIC_MAX_LINES:
+            break
+
+    return json.dumps(
+        {
+            "terminal_result": "pytest",
+            "exit_code": exit_code if isinstance(exit_code, int) else None,
+            "diagnostics": diagnostics,
             "raw_output": "omitted_from_remote_replay",
         },
         separators=(",", ":"),
@@ -3960,6 +4092,11 @@ def authorize_agent_sdk_kwargs(
         syntax_tool_call_ids=(
             _recognized_syntax_tool_call_ids(body)
             if protected_kanban_remote
+            else frozenset()
+        ),
+        pytest_terminal_call_ids=(
+            _pytest_terminal_call_ids(body)
+            if protected_kanban_remote and protected_provider_route
             else frozenset()
         ),
         elided_kanban_tool_call_ids=(
