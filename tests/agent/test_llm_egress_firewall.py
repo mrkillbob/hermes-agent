@@ -239,6 +239,44 @@ def test_remote_raw_request_is_never_authorized_even_with_a_valid_grant(tmp_path
     assert "typed_request_required" in exc_info.value.decision.reason_codes
 
 
+def test_source_grant_allows_pr_metadata_without_disabling_base64_detection(tmp_path):
+    """PR diffs and issue keys are metadata, not encoded source payloads."""
+
+    path = tmp_path / "pr.diff"
+    source = (
+        "Q383-LIVE-RUNNER-STAGE1-CONTRACT-GAP-FREEZE\n"
+        "--diff-filter=ACMR\n"
+        "+status\n"
+    )
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=3)
+
+    decision = firewall(tmp_path).preflight(
+        _typed_request(_request(source), source_grant=grant),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+
+
+def test_source_grant_still_rejects_encoded_payload_next_to_pr_metadata(tmp_path):
+    path = tmp_path / "pr.diff"
+    encoded = base64.b64encode(b"private source that must not leave the host").decode()
+    source = f"Q383-LIVE-RUNNER-STAGE1-CONTRACT-GAP-FREEZE\n+{encoded}\n"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=2)
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _typed_request(_request(source), source_grant=grant),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "base64_payload" in exc_info.value.decision.reason_codes
+
+
 def test_source_bytes_cannot_be_smuggled_as_a_sanitized_literal(tmp_path):
     path = tmp_path / "private.py"
     path.write_text("private source\n", encoding="utf-8")
