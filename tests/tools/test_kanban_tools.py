@@ -157,6 +157,31 @@ def test_remote_worker_payload_replaces_private_paths_with_local_tokens():
     assert "<private-path>" in sanitized["task"]["body"]
 
 
+def test_remote_worker_projection_preserves_dispatcher_python_token():
+    from tools.kanban_tools import _sanitize_remote_worker_payload
+
+    canonical_python = "/Users/operator/.codex/worktrees/hermes/venv/bin/python"
+    payload = {
+        "task": {
+            "body": (
+                "Run env HERMES_HOME=$HERMES_CONTROL_HOME "
+                f"{canonical_python} -m hermes_cli.main inspect-pr."
+            )
+        }
+    }
+
+    sanitized = _sanitize_remote_worker_payload(
+        payload,
+        workspace_path="/Users/operator/.hermes/workspaces/t_12345678",
+        control_home="/Users/operator/.hermes",
+        worker_python=canonical_python,
+    )
+
+    body = sanitized["task"]["body"]
+    assert canonical_python not in body
+    assert "$HERMES_KANBAN_WORKTREE_PYTHON -m hermes_cli.main" in body
+
+
 def test_remote_worker_projection_excludes_obsolete_attempt_history():
     from tools.kanban_tools import _project_remote_worker_state
 

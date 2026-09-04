@@ -148,6 +148,7 @@ _GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS = frozenset(
         "resolved_head_sha",
         "review_thread_resolved",
         "status",
+        "error_excerpt",
     }
 )
 _GITHUB_LIST_TERMINAL_MAX_ROWS = 100
@@ -3553,8 +3554,20 @@ def _terminal_replay_result(output: str) -> str:
 def _github_pr_feedback_terminal_result(output: str) -> str:
     """Replay bounded JSON status from governed PR-feedback commands."""
 
+    def safe_failure_excerpt(value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        safe = redact_remote_unsafe_text(
+            redact_sensitive_text(value, force=True, redact_url_credentials=True)
+        )
+        encoded = safe.encode("utf-8")
+        if len(encoded) > 1200:
+            safe = encoded[:1190].decode("utf-8", errors="ignore") + "\n<truncated>"
+        return safe
+
     exit_code = None
     text = output
+    failure_excerpt = None
     try:
         parsed = json.loads(output)
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -3563,6 +3576,10 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
         maybe_exit = parsed.get("exit_code")
         if isinstance(maybe_exit, int):
             exit_code = maybe_exit
+        for key in ("stderr", "error"):
+            failure_excerpt = safe_failure_excerpt(parsed.get(key))
+            if failure_excerpt:
+                break
         for key in ("stdout", "output", "content"):
             value = parsed.get(key)
             if isinstance(value, str):
@@ -3599,6 +3616,8 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
     }
     if payload is not None:
         replay["json"] = payload
+    if failure_excerpt:
+        replay["error_excerpt"] = failure_excerpt
     return json.dumps(replay, sort_keys=True, separators=(",", ":"))
 
 

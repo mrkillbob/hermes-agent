@@ -1430,6 +1430,59 @@ def test_protected_codex_projects_combined_github_issue_views(tmp_path, monkeypa
     assert [item["number"] for item in json.loads(json.loads(replay)["output"])["items"]] == [98168, 98160]
 
 
+def test_protected_codex_replays_bounded_pr_feedback_failure_excerpt(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_pr_feedback_failure"
+    kwargs = {
+        "model": agent.model,
+        "input": [
+            {
+                "type": "function_call",
+                "name": "terminal",
+                "call_id": call_id,
+                "arguments": json.dumps(
+                    {
+                        "command": (
+                            "env HERMES_HOME=$HERMES_CONTROL_HOME python3 -m "
+                            "hermes_cli.main github-pr-feedback inspect-pr "
+                            "--repository acme/widgets --pr-number 17"
+                        )
+                    }
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps(
+                    {
+                        "exit_code": 1,
+                        "stderr": (
+                            "Traceback: ModuleNotFoundError: No module named "
+                            "dotenv at /Users/operator/private.py"
+                        ),
+                    }
+                ),
+            },
+        ],
+    }
+
+    authorized, receipt = authorize_agent_sdk_kwargs(agent, kwargs)
+
+    rendered = json.loads(authorized["input"][1]["output"])
+    assert receipt.allowed
+    assert rendered["terminal_result"] == "github_pr_feedback"
+    assert rendered["exit_code"] == 1
+    assert "ModuleNotFoundError" in rendered["error_excerpt"]
+    assert "/Users/operator" not in rendered["error_excerpt"]
+    assert "raw_output" in rendered
+
+
 def test_protected_codex_omits_rejected_terminal_command_replay(
     tmp_path, monkeypatch
 ):
