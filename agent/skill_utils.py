@@ -51,6 +51,20 @@ EXCLUDED_SKILL_DIRS = frozenset(
 # archive workflow preserves a complete old skill package under references/.
 SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
 
+# ── User-shared skills ───────────────────────────────────────────
+#
+# ``~/.agents/skills`` is the cross-agent user skill root shared by Codex,
+# Claude, and Hermes. Hermes profile-local skills keep higher precedence for
+# compatibility and intentional overrides, while this default root prevents
+# launcher-specific copies from drifting when the same operator skill should be
+# available everywhere.
+
+
+def get_shared_user_skills_dir() -> Path:
+    """Return the cross-agent user skill root."""
+    return Path.home() / ".agents" / "skills"
+
+
 # ── Org-shared skills (sync contract) ───────────────────────────
 # Org mirrors live under ~/.hermes/skills/_org/<org_id>/. Resolution is
 # TOKEN-GATED via a marker file the sync client writes after verifying the
@@ -584,6 +598,7 @@ def get_external_skills_dirs() -> List[Path]:
 
     hermes_home = get_hermes_home()
     local_skills = get_skills_dir().resolve()
+    shared_skills = get_shared_user_skills_dir().resolve()
     seen: Set[Path] = set()
     result = []
 
@@ -599,7 +614,7 @@ def get_external_skills_dirs() -> List[Path]:
             p = (hermes_home / p).resolve()
         else:
             p = p.resolve()
-        if p == local_skills:
+        if p == local_skills or p == shared_skills:
             continue
         if p in seen:
             continue
@@ -677,13 +692,31 @@ def display_skill_create_dir() -> str:
         return create_dir.as_posix() + "/"
 
 
+def _append_unique_dir(dirs: List[Path], path: Path) -> None:
+    """Append *path* once, comparing resolved paths when possible."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    for existing in dirs:
+        try:
+            if existing.resolve() == resolved:
+                return
+        except OSError:
+            if existing == path:
+                return
+    dirs.append(path)
+
+
 def get_all_skills_dirs() -> List[Path]:
-    """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
+    """Return all skill directories in user-scope precedence order.
 
     The local dir is always first (and always included even if it doesn't exist
     yet — callers handle that).  When ``skills.create_dir`` is configured, it
     follows immediately after the local dir (so agent-created skills are
-    discovered, trusted, and modifiable).  External dirs follow in config order.
+    discovered, trusted, and modifiable).  The cross-agent shared root
+    ``~/.agents/skills`` follows when it exists.  Explicit external dirs follow
+    in config order.
 
     NOTE: trusted project-local dirs (``./.hermes/skills`` at the git root) are
     NOT part of this list — they have *higher* precedence than the local dir,
@@ -694,10 +727,12 @@ def get_all_skills_dirs() -> List[Path]:
     dirs = [get_skills_dir()]
     create_dir = get_skill_create_dir()
     if create_dir is not None and create_dir.is_dir():
-        dirs.append(create_dir)
+        _append_unique_dir(dirs, create_dir)
+    shared_dir = get_shared_user_skills_dir()
+    if shared_dir.is_dir():
+        _append_unique_dir(dirs, shared_dir)
     for d in get_external_skills_dirs():
-        if d not in dirs:
-            dirs.append(d)
+        _append_unique_dir(dirs, d)
     return dirs
 
 

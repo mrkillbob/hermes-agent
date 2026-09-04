@@ -870,6 +870,74 @@ def test_inspect_pr_emits_canonical_identity_from_the_shared_github_client(
     }
 
 
+def test_inspect_pr_projects_requested_feedback_excerpt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _inspect_pr
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    expected = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        "a" * 40,
+        base_branch="main",
+        base_sha="b" * 40,
+    )
+    feedback = Feedback(
+        kind="review_comment",
+        feedback_id="120",
+        reviewer=Reviewer("reviewer", "MEMBER"),
+        body=(
+            "<details>huge raw logs</details><!--hidden-->"
+            "Fix this path. token=abc123 https://example.invalid/img.png "
+            "![shot](https://example.invalid/shot.png)"
+        ),
+        created_at=datetime(2026, 9, 4, tzinfo=UTC),
+        is_bot=False,
+    )
+
+    class FakeGitHub:
+        def get_pull_request(self, repository: str, number: int) -> PullRequest:
+            assert repository == "acme/widgets"
+            assert number == 17
+            return expected
+
+        def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
+            assert repository == "acme/widgets"
+            assert number == 17
+            return (feedback,)
+
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", FakeGitHub)
+
+    exit_code = _inspect_pr(
+        RecordingContext(settings),
+        argparse.Namespace(
+            repository="acme/widgets",
+            pr_number=17,
+            feedback_id="120",
+        ),
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["feedback_id"] == "120"
+    assert payload["feedback_kind"] == "review_comment"
+    assert payload["feedback_reviewer"] == "reviewer"
+    assert payload["feedback_is_bot"] is False
+    assert "Fix this path." in payload["feedback_body_excerpt"]
+    assert "abc123" not in payload["feedback_body_excerpt"]
+    assert "<details>" not in payload["feedback_body_excerpt"]
+    assert "https://example.invalid" not in payload["feedback_body_excerpt"]
+
+
 def test_namespaced_context_preserves_auto_dispatch_and_local_ci_audit_settings(
     tmp_path: Path,
 ) -> None:

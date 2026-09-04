@@ -97,12 +97,51 @@ _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES = frozenset(
         "search_files",
         "read_file",
         "web_extract",
+        "web_search",
+    }
+)
+_GITHUB_PR_FEEDBACK_TERMINAL_SUBCOMMANDS = frozenset(
+    {
+        "inspect-pr",
+        "complete-feedback",
+        "submit-review",
+        "status",
+    }
+)
+_GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS = frozenset(
+    {
+        "base_branch",
+        "base_sha",
+        "codex_retrigger_status",
+        "event",
+        "expected_head_sha",
+        "fallback",
+        "feedback_body_excerpt",
+        "feedback_id",
+        "feedback_is_bot",
+        "feedback_kind",
+        "feedback_reviewer",
+        "head_ref_name",
+        "head_repository",
+        "head_sha",
+        "local_ci_status",
+        "number",
+        "observed_head_sha",
+        "pr_number",
+        "pr_state",
+        "reason",
+        "repository",
+        "resolved_head_sha",
+        "review_thread_resolved",
+        "status",
     }
 )
 _GITHUB_LIST_TERMINAL_MAX_ROWS = 100
 _GITHUB_LIST_TERMINAL_MAX_ITEM_BYTES = 512
 _GITHUB_LIST_TERMINAL_MAX_OUTPUT_BYTES = 10_240
 _GIT_GREP_TERMINAL_MAX_MATCHES = 200
+_GIT_DIFF_NAME_ONLY_MAX_FILES = 200
+_GIT_REVIEW_SUMMARY_MAX_FILES = 200
 _GITHUB_API_EXTRACT_ARGUMENT_REPLAY = (
     '{"urls":["https://api.github.com/repos/<owner>/<repo>/<list>"]}'
 )
@@ -789,6 +828,63 @@ def _github_list_terminal_call_limits(value: Any) -> dict[str, int]:
 
     visit(value)
     return limits
+
+
+def _github_pr_feedback_terminal_call_ids(value: Any) -> frozenset[str]:
+    """Recognize governed PR-feedback terminal commands with JSON status output."""
+
+    recognized: set[str] = set()
+
+    def is_hermes_launcher_token(token: str) -> bool:
+        return Path(token).name == "hermes" or token == "<private-path>"
+
+    def command_is_pr_feedback(arguments: Any) -> bool:
+        try:
+            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+            command = parsed.get("command") if isinstance(parsed, Mapping) else None
+            tokens = shlex.split(command) if isinstance(command, str) else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        for index, token in enumerate(tokens):
+            if (
+                token == "github-pr-feedback"
+                and index > 0
+                and (
+                    tokens[max(0, index - 2):index] == ["-m", "hermes_cli.main"]
+                    or is_hermes_launcher_token(tokens[index - 1])
+                )
+            ):
+                return (
+                    index + 1 < len(tokens)
+                    and tokens[index + 1] in _GITHUB_PR_FEEDBACK_TERMINAL_SUBCOMMANDS
+                )
+        return False
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            direct_function = item.get("function")
+            direct_name = (
+                direct_function.get("name")
+                if isinstance(direct_function, Mapping)
+                else item.get("name")
+            )
+            if item.get("type") in {"function", "function_call"} and direct_name == "terminal":
+                arguments = (
+                    direct_function.get("arguments")
+                    if isinstance(direct_function, Mapping)
+                    else item.get("arguments")
+                )
+                call_id = item.get("call_id") or item.get("id")
+                if command_is_pr_feedback(arguments) and isinstance(call_id, str):
+                    recognized.update(tool_result_id_variants(call_id))
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return frozenset(recognized)
 
 
 def _github_api_extract_call_limits(value: Any) -> dict[str, int]:
@@ -1486,6 +1582,154 @@ def _rg_terminal_call_ids(value: Any) -> frozenset[str]:
     return frozenset(recognized)
 
 
+def _git_diff_name_only_terminal_call_ids(value: Any) -> frozenset[str]:
+    """Recognize read-only ``git diff --name-only`` calls for path projection."""
+
+    recognized: set[str] = set()
+
+    def is_git_diff_name_only(arguments: Any) -> bool:
+        try:
+            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+            command = parsed.get("command") if isinstance(parsed, Mapping) else None
+            tokens = shlex.split(command) if isinstance(command, str) else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if len(tokens) < 3 or tokens[:2] != ["git", "diff"]:
+            return False
+        allowed_options = {
+            "--name-only",
+            "--",
+            "--cached",
+            "--staged",
+            "--no-renames",
+        }
+        if "--name-only" not in tokens[2:]:
+            return False
+        if any(token in {"--patch", "-p", "--name-status", "--stat"} for token in tokens[2:]):
+            return False
+        return all(
+            token in allowed_options
+            or re.fullmatch(r"[0-9a-fA-F]{7,64}(?:\.\.\.?[0-9a-fA-F]{7,64})?", token)
+            or re.fullmatch(r"[A-Za-z0-9_./:@+-]{1,256}", token)
+            for token in tokens[2:]
+        )
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            direct_function = item.get("function")
+            direct_name = (
+                direct_function.get("name")
+                if isinstance(direct_function, Mapping)
+                else item.get("name")
+            )
+            arguments = (
+                direct_function.get("arguments")
+                if isinstance(direct_function, Mapping)
+                else item.get("arguments")
+            )
+            call_id = item.get("call_id") or item.get("id")
+            if (
+                item.get("type") in {"function", "function_call"}
+                and direct_name == "terminal"
+                and is_git_diff_name_only(arguments)
+                and isinstance(call_id, str)
+            ):
+                recognized.update(tool_result_id_variants(call_id))
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return frozenset(recognized)
+
+
+def _git_review_summary_terminal_call_ids(value: Any) -> frozenset[str]:
+    """Recognize safe read-only Git review diagnostics for bounded projection."""
+
+    recognized: set[str] = set()
+
+    def is_git_review_summary(arguments: Any) -> bool:
+        try:
+            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+            command = parsed.get("command") if isinstance(parsed, Mapping) else None
+            tokens = shlex.split(command) if isinstance(command, str) else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if "&&" in tokens:
+            segments: list[list[str]] = []
+            current: list[str] = []
+            for token in tokens:
+                if token == "&&":
+                    if not current:
+                        return False
+                    segments.append(current)
+                    current = []
+                    continue
+                current.append(token)
+            if not current:
+                return False
+            segments.append(current)
+            return all(is_git_review_summary({"command": shlex.join(segment)}) for segment in segments)
+        if len(tokens) < 2 or tokens[0] != "git":
+            return False
+        if tokens[1] == "status":
+            allowed = {"--short", "-s", "--branch", "-b", "--porcelain", "--porcelain=v1"}
+            return bool(tokens[2:]) and all(token in allowed for token in tokens[2:])
+        if len(tokens) >= 3 and tokens[1] == "diff":
+            summary_options = {
+                "--check",
+                "--compact-summary",
+                "--name-status",
+                "--stat",
+                "--summary",
+            }
+            if not any(token in summary_options for token in tokens[2:]):
+                return False
+            rejected = {"--patch", "-p", "--name-only", "--raw", "--binary"}
+            if any(token in rejected for token in tokens[2:]):
+                return False
+            return all(
+                token in summary_options
+                or token in {"--", "--cached", "--staged", "--no-renames", "--exit-code", "--quiet"}
+                or re.fullmatch(r"[0-9a-fA-F]{7,64}(?:\.\.\.?[0-9a-fA-F]{7,64})?", token)
+                or re.fullmatch(r"[A-Za-z0-9_./:@+-]{1,256}", token)
+                for token in tokens[2:]
+            )
+        return False
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            direct_function = item.get("function")
+            direct_name = (
+                direct_function.get("name")
+                if isinstance(direct_function, Mapping)
+                else item.get("name")
+            )
+            arguments = (
+                direct_function.get("arguments")
+                if isinstance(direct_function, Mapping)
+                else item.get("arguments")
+            )
+            call_id = item.get("call_id") or item.get("id")
+            if (
+                item.get("type") in {"function", "function_call"}
+                and direct_name == "terminal"
+                and is_git_review_summary(arguments)
+                and isinstance(call_id, str)
+            ):
+                recognized.update(tool_result_id_variants(call_id))
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return frozenset(recognized)
+
+
 def _kanban_assignees_terminal_call_ids(value: Any) -> frozenset[str]:
     """Recognize the exact JSON roster command used by protected workers."""
 
@@ -1637,6 +1881,175 @@ def _project_line_numbered_search_terminal_result(text: str) -> str | None:
     line_count = sum(1 for line in raw_output.splitlines() if line)
     if line_count > len(matches):
         projection["omitted_matches"] = line_count - len(matches)
+    exit_code = wrapper.get("exit_code") if isinstance(wrapper.get("exit_code"), int) else None
+    return json.dumps(
+        {"exit_code": exit_code, "output": json.dumps(projection, separators=(",", ":"))},
+        separators=(",", ":"),
+    )
+
+
+def _project_git_diff_name_only_terminal_result(text: str) -> str | None:
+    """Replay only bounded relative paths from ``git diff --name-only``."""
+
+    try:
+        wrapper = json.loads(text)
+        raw_output = wrapper.get("output") if isinstance(wrapper, Mapping) else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw_output, str):
+        return None
+    files: list[str] = []
+    omitted = 0
+    for raw_line in raw_output.splitlines():
+        candidate = raw_line.strip()
+        if not candidate:
+            continue
+        normalized = candidate[2:] if candidate.startswith("./") else candidate
+        path = PurePosixPath(normalized)
+        if (
+            path.is_absolute()
+            or "\\" in normalized
+            or any(
+                part in {"", ".", ".."} or (part.startswith(".") and part != ".github")
+                for part in path.parts
+            )
+        ):
+            omitted += 1
+            continue
+        safe_path = redact_remote_unsafe_text(
+            redact_sensitive_text(path.as_posix(), force=True)
+        )
+        if safe_path != path.as_posix() or len(safe_path.encode("utf-8")) > 512:
+            omitted += 1
+            continue
+        if len(files) < _GIT_DIFF_NAME_ONLY_MAX_FILES:
+            files.append(safe_path)
+        else:
+            omitted += 1
+    projection: dict[str, Any] = {
+        "git_diff_name_only": "paths-v1",
+        "files": files,
+    }
+    if omitted:
+        projection["omitted_files"] = omitted
+    exit_code = wrapper.get("exit_code") if isinstance(wrapper.get("exit_code"), int) else None
+    return json.dumps(
+        {"exit_code": exit_code, "output": json.dumps(projection, separators=(",", ":"))},
+        separators=(",", ":"),
+    )
+
+
+def _safe_repo_relative_path(value: str) -> str | None:
+    normalized = value[2:] if value.startswith("./") else value
+    path = PurePosixPath(normalized)
+    if (
+        not normalized
+        or path.is_absolute()
+        or "\\" in normalized
+        or any(
+            part in {"", ".", ".."} or (part.startswith(".") and part != ".github")
+            for part in path.parts
+        )
+    ):
+        return None
+    safe_path = redact_remote_unsafe_text(
+        redact_sensitive_text(path.as_posix(), force=True)
+    )
+    if safe_path != path.as_posix() or len(safe_path.encode("utf-8")) > 512:
+        return None
+    return safe_path
+
+
+def _project_git_review_summary_terminal_result(text: str) -> str | None:
+    """Project safe Git review diagnostics without replaying source content."""
+
+    try:
+        wrapper = json.loads(text)
+        raw_output = wrapper.get("output") if isinstance(wrapper, Mapping) else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw_output, str):
+        return None
+    files: list[str] = []
+    omitted = 0
+    insertion_count = 0
+    deletion_count = 0
+    warning_count = 0
+    error_count = 0
+    status_count = 0
+    has_branch_header = False
+    for raw_line in raw_output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("## "):
+            has_branch_header = True
+            continue
+        check_match = re.match(r"^(?P<path>[^:\n]+):[1-9][0-9]*:", line)
+        if check_match is not None:
+            safe_path = _safe_repo_relative_path(check_match.group("path").strip())
+            if safe_path is not None and len(files) < _GIT_REVIEW_SUMMARY_MAX_FILES:
+                files.append(safe_path)
+            else:
+                omitted += 1
+            error_count += 1
+            continue
+        stat_match = re.match(r"^(?P<path>.+?)\s+\|\s+(?P<count>[0-9]+)(?:\s+(?P<bar>[+\-]+))?$", line)
+        if stat_match is not None:
+            safe_path = _safe_repo_relative_path(stat_match.group("path").strip())
+            if safe_path is not None and len(files) < _GIT_REVIEW_SUMMARY_MAX_FILES:
+                files.append(safe_path)
+                bar = stat_match.group("bar") or ""
+                insertion_count += bar.count("+")
+                deletion_count += bar.count("-")
+            else:
+                omitted += 1
+            continue
+        changed_match = re.search(r"(?P<count>[0-9]+) files? changed", line)
+        insertion_match = re.search(r"(?P<count>[0-9]+) insertions?\(\+\)", line)
+        deletion_match = re.search(r"(?P<count>[0-9]+) deletions?\(-\)", line)
+        if changed_match is not None:
+            status_count += int(changed_match.group("count"))
+            if insertion_match is not None:
+                insertion_count += int(insertion_match.group("count"))
+            if deletion_match is not None:
+                deletion_count += int(deletion_match.group("count"))
+            continue
+        if re.match(r"^(?:[ MADRCU?!]{2}|[MADRCU?!]{1,2})\s+", raw_line):
+            status_count += 1
+            candidate = raw_line[2:].strip()
+            if " -> " in candidate:
+                candidate = candidate.rsplit(" -> ", 1)[1].strip()
+            safe_path = _safe_repo_relative_path(candidate)
+            if safe_path is not None and len(files) < _GIT_REVIEW_SUMMARY_MAX_FILES:
+                files.append(safe_path)
+            else:
+                omitted += 1
+            continue
+        if re.search(r"\bwarning\b", line, re.IGNORECASE):
+            warning_count += 1
+            continue
+        if re.search(r"\berror\b", line, re.IGNORECASE):
+            error_count += 1
+            continue
+        omitted += 1
+    projection: dict[str, Any] = {"git_review_summary": "v1"}
+    if files:
+        projection["files"] = files
+    if omitted:
+        projection["omitted_lines"] = omitted
+    if status_count:
+        projection["status_entries"] = status_count
+    if insertion_count:
+        projection["insertions"] = insertion_count
+    if deletion_count:
+        projection["deletions"] = deletion_count
+    if warning_count:
+        projection["warnings"] = warning_count
+    if error_count:
+        projection["errors"] = error_count
+    if has_branch_header:
+        projection["branch_header_present"] = True
     exit_code = wrapper.get("exit_code") if isinstance(wrapper.get("exit_code"), int) else None
     return json.dumps(
         {"exit_code": exit_code, "output": json.dumps(projection, separators=(",", ":"))},
@@ -2026,6 +2439,9 @@ def _typed_payload(
     git_workspace_diagnostic_call_ids: frozenset[str] = frozenset(),
     git_grep_projection_tool_call_ids: frozenset[str] = frozenset(),
     rg_projection_tool_call_ids: frozenset[str] = frozenset(),
+    git_diff_name_only_projection_tool_call_ids: frozenset[str] = frozenset(),
+    git_review_summary_projection_tool_call_ids: frozenset[str] = frozenset(),
+    github_pr_feedback_terminal_call_ids: frozenset[str] = frozenset(),
     kanban_assignees_terminal_call_ids: frozenset[str] = frozenset(),
     github_list_terminal_call_limits: Mapping[str, int] | None = None,
     github_api_extract_call_limits: Mapping[str, int] | None = None,
@@ -2174,6 +2590,30 @@ def _typed_payload(
                 or value.get("type") == "function_call_output"
             )
         )
+        is_git_diff_name_only_projection_tool_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in git_diff_name_only_projection_tool_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
+        is_git_review_summary_projection_tool_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in git_review_summary_projection_tool_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
+        is_github_pr_feedback_terminal_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in github_pr_feedback_terminal_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
         is_kanban_assignees_result = (
             isinstance(output_call_id, str)
             and output_call_id in kanban_assignees_terminal_call_ids
@@ -2271,6 +2711,9 @@ def _typed_payload(
                 is_git_workspace_diagnostic_result,
                 is_git_grep_projection_tool_result,
                 is_rg_projection_tool_result,
+                is_git_diff_name_only_projection_tool_result,
+                is_git_review_summary_projection_tool_result,
+                is_github_pr_feedback_terminal_result,
                 is_kanban_assignees_result,
                 isinstance(github_list_limit, int),
                 isinstance(github_api_extract_limit, int),
@@ -2325,6 +2768,9 @@ def _typed_payload(
                     is_git_workspace_diagnostic_result,
                     is_git_grep_projection_tool_result,
                     is_rg_projection_tool_result,
+                    is_git_diff_name_only_projection_tool_result,
+                    is_git_review_summary_projection_tool_result,
+                    is_github_pr_feedback_terminal_result,
                     is_kanban_assignees_result,
                     is_plain_github_list_terminal_result,
                     is_terminal_replay_result,
@@ -2428,7 +2874,7 @@ def _typed_payload(
                     and not is_scratch_read_file_tool_result
                     and structured_text is not None
                 ):
-                    typed[key] = _segment_read_file_presentation(
+                    segment = _segment_read_file_presentation(
                         structured_text,
                         source_metadata,
                         grant_texts,
@@ -2439,6 +2885,10 @@ def _typed_payload(
                         request_id=request_identity[2],
                         policy_digest=request_identity[3],
                     )
+                    if isinstance(segment, UntrustedProvenanceSegment) and protected_kanban_context:
+                        typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+                    else:
+                        typed[key] = segment
                     continue
                 typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
                 continue
@@ -2451,6 +2901,28 @@ def _typed_payload(
                     _STRUCTURED_SEARCH_REPLAY_ELISION
                 )
                 continue
+            if (
+                is_structured_result
+                and is_git_diff_name_only_projection_tool_result
+                and structured_text is not None
+            ):
+                projected = _project_git_diff_name_only_terminal_result(structured_text)
+                if projected is not None:
+                    typed[key] = GeneratedContextSegment(
+                        redact_remote_unsafe_text(projected)
+                    )
+                    continue
+            if (
+                is_structured_result
+                and is_git_review_summary_projection_tool_result
+                and structured_text is not None
+            ):
+                projected = _project_git_review_summary_terminal_result(structured_text)
+                if projected is not None:
+                    typed[key] = GeneratedContextSegment(
+                        redact_remote_unsafe_text(projected)
+                    )
+                    continue
             if (
                 is_structured_result
                 and is_web_replay_tool_result
@@ -2470,6 +2942,11 @@ def _typed_payload(
             if is_structured_result and is_plain_github_list_terminal_result:
                 typed[key] = GeneratedContextSegment(
                     _GITHUB_PLAIN_LIST_OUTPUT_REPLAY
+                )
+                continue
+            if is_structured_result and is_github_pr_feedback_terminal_result:
+                typed[key] = GeneratedContextSegment(
+                    _github_pr_feedback_terminal_result(structured_text or "")
                 )
                 continue
             if is_structured_result and is_terminal_replay_result:
@@ -2505,7 +2982,7 @@ def _typed_payload(
                 if is_scratch_read_file_tool_result:
                     typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
                     continue
-                typed[key] = _segment_read_file_presentation(
+                segment = _segment_read_file_presentation(
                     item,
                     source_metadata,
                     grant_texts,
@@ -2516,6 +2993,14 @@ def _typed_payload(
                     request_id=request_identity[2],
                     policy_digest=request_identity[3],
                 )
+                if (
+                    isinstance(segment, UntrustedProvenanceSegment)
+                    and protected_kanban_context
+                    and value.get("type") == "function_call_output"
+                ):
+                    typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+                else:
+                    typed[key] = segment
                 continue
             if (
                 is_search_projection_tool_result
@@ -2583,6 +3068,37 @@ def _typed_payload(
                         redact_remote_unsafe_text(projected)
                     )
                     continue
+            if (
+                is_git_diff_name_only_projection_tool_result
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                projected = _project_git_diff_name_only_terminal_result(item)
+                if projected is not None:
+                    typed[key] = GeneratedContextSegment(
+                        redact_remote_unsafe_text(projected)
+                    )
+                    continue
+            if (
+                is_git_review_summary_projection_tool_result
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                projected = _project_git_review_summary_terminal_result(item)
+                if projected is not None:
+                    typed[key] = GeneratedContextSegment(
+                        redact_remote_unsafe_text(projected)
+                    )
+                    continue
+            if (
+                is_github_pr_feedback_terminal_result
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                typed[key] = GeneratedContextSegment(
+                    _github_pr_feedback_terminal_result(item)
+                )
+                continue
             if (
                 isinstance(github_list_limit, int)
                 and key in {"content", "output"}
@@ -2758,6 +3274,19 @@ def _typed_payload(
             if is_codex_reasoning_replay and key == "encrypted_content":
                 typed[typed_key] = CodexReasoningReplaySegment(item)
                 continue
+            if is_codex_reasoning_replay and key == "summary":
+                typed[typed_key] = _typed_payload(
+                    item,
+                    grant_texts,
+                    used_grants,
+                    sanitized_cap=sanitized_cap,
+                    field_name=key,
+                    generated_context=True,
+                    redact_generated_context=True,
+                    registry=registry,
+                    request_identity=request_identity,
+                )
+                continue
             typed[typed_key] = _typed_payload(
                 item,
                 grant_texts,
@@ -2775,6 +3304,9 @@ def _typed_payload(
                 git_workspace_diagnostic_call_ids=git_workspace_diagnostic_call_ids,
                 git_grep_projection_tool_call_ids=git_grep_projection_tool_call_ids,
                 rg_projection_tool_call_ids=rg_projection_tool_call_ids,
+                git_diff_name_only_projection_tool_call_ids=git_diff_name_only_projection_tool_call_ids,
+                git_review_summary_projection_tool_call_ids=git_review_summary_projection_tool_call_ids,
+                github_pr_feedback_terminal_call_ids=github_pr_feedback_terminal_call_ids,
                 kanban_assignees_terminal_call_ids=kanban_assignees_terminal_call_ids,
                 github_list_terminal_call_limits=github_list_terminal_call_limits,
                 github_api_extract_call_limits=github_api_extract_call_limits,
@@ -2831,6 +3363,9 @@ def _typed_payload(
                 git_workspace_diagnostic_call_ids=git_workspace_diagnostic_call_ids,
                 git_grep_projection_tool_call_ids=git_grep_projection_tool_call_ids,
                 rg_projection_tool_call_ids=rg_projection_tool_call_ids,
+                git_diff_name_only_projection_tool_call_ids=git_diff_name_only_projection_tool_call_ids,
+                git_review_summary_projection_tool_call_ids=git_review_summary_projection_tool_call_ids,
+                github_pr_feedback_terminal_call_ids=github_pr_feedback_terminal_call_ids,
                 kanban_assignees_terminal_call_ids=kanban_assignees_terminal_call_ids,
                 github_list_terminal_call_limits=github_list_terminal_call_limits,
                 github_api_extract_call_limits=github_api_extract_call_limits,
@@ -2899,6 +3434,58 @@ def _terminal_replay_result(output: str) -> str:
         },
         separators=(",", ":"),
     )
+
+
+def _github_pr_feedback_terminal_result(output: str) -> str:
+    """Replay bounded JSON status from governed PR-feedback commands."""
+
+    exit_code = None
+    text = output
+    try:
+        parsed = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = None
+    if isinstance(parsed, Mapping):
+        maybe_exit = parsed.get("exit_code")
+        if isinstance(maybe_exit, int):
+            exit_code = maybe_exit
+        for key in ("stdout", "output", "content"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                text = value
+                break
+    payload: dict[str, object] | None = None
+    decoder = json.JSONDecoder()
+    for line in reversed(str(text or "").splitlines() or [str(text or "")]):
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            candidate, _end = decoder.raw_decode(stripped)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(candidate, Mapping):
+            payload = {}
+            for key, value in candidate.items():
+                if key not in _GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS:
+                    continue
+                if value is None or isinstance(value, (bool, int)):
+                    payload[str(key)] = value
+                    continue
+                if not isinstance(value, str):
+                    continue
+                limit = 1800 if key == "feedback_body_excerpt" else 200
+                if len(value) <= limit:
+                    payload[str(key)] = value
+            break
+    replay: dict[str, object] = {
+        "terminal_result": "github_pr_feedback",
+        "exit_code": exit_code,
+        "raw_output": "omitted_from_remote_replay",
+    }
+    if payload is not None:
+        replay["json"] = payload
+    return json.dumps(replay, sort_keys=True, separators=(",", ":"))
 
 
 def _structural_literal_hashes(value: Any) -> frozenset[str]:
@@ -3133,6 +3720,35 @@ def _restore_source_provenance_sidecar(
     return restored
 
 
+def _is_codex_responses_replay_body(body: Any) -> bool:
+    """Return whether *body* carries Codex Responses reasoning replay items."""
+
+    messages = body.get("input") if isinstance(body, Mapping) else None
+    if not isinstance(messages, list):
+        messages = body.get("messages") if isinstance(body, Mapping) else None
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        items: list[Any]
+        if isinstance(message, Mapping) and message.get("type") == "reasoning":
+            items = [message]
+        elif isinstance(message, Mapping) and isinstance(message.get("content"), list):
+            items = list(message["content"])
+        elif isinstance(message, list):
+            items = message
+        else:
+            continue
+        for item in items:
+            if (
+                isinstance(item, Mapping)
+                and item.get("type") == "reasoning"
+                and isinstance(item.get("encrypted_content"), str)
+                and isinstance(item.get("summary", []), list)
+            ):
+                return True
+    return False
+
+
 def authorize_agent_sdk_kwargs(
     agent: Any,
     kwargs: Mapping[str, Any],
@@ -3269,6 +3885,21 @@ def authorize_agent_sdk_kwargs(
             if protected_kanban_remote and protected_provider_route
             else frozenset()
         ),
+        git_diff_name_only_projection_tool_call_ids=(
+            _git_diff_name_only_terminal_call_ids(body)
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
+        git_review_summary_projection_tool_call_ids=(
+            _git_review_summary_terminal_call_ids(body)
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
+        github_pr_feedback_terminal_call_ids=(
+            _github_pr_feedback_terminal_call_ids(body)
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
         kanban_assignees_terminal_call_ids=(
             _kanban_assignees_terminal_call_ids(body)
             if protected_kanban_remote and protected_provider_route
@@ -3329,7 +3960,10 @@ def authorize_agent_sdk_kwargs(
         redact_generated_context=redact_protected_generated_context,
         allow_codex_reasoning_replay=(
             str(route_provider or "").strip().lower() == "openai-codex"
-            and str(getattr(agent, "api_mode", "") or "") == "codex_responses"
+            and (
+                str(getattr(agent, "api_mode", "") or "") == "codex_responses"
+                or _is_codex_responses_replay_body(body)
+            )
         ),
         registry=registry if isinstance(registry, SourceProvenanceRegistry) else None,
         request_identity=(session_id, turn_id, request_id, policy_digest),

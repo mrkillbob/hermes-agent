@@ -12,6 +12,9 @@ import agent.skill_utils as su
 @pytest.fixture
 def project_env(tmp_path, monkeypatch):
     """A temp HERMES_HOME + a git-marked project with skills in all supported subdirs."""
+    user_home = tmp_path / "home"
+    user_home.mkdir()
+    monkeypatch.setenv("HOME", str(user_home))
     home = tmp_path / ".hermes"
     (home / "skills").mkdir(parents=True)
     config = home / "config.yaml"

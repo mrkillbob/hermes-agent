@@ -615,8 +615,10 @@ def _repair_task(
         _worker_capability_preflight(identity_command)
         + "Use this single literal identity command for the preflight before any fetch, checkout, "
         "edit, test, commit, push, or reply. Require all five "
-        "returned identity fields to match the canonical identity in this task's evidence; stop "
-        "fail-closed on any mismatch. "
+        "returned identity fields to match the canonical identity in this task's evidence. If the "
+        "pull request is no longer OPEN or its head SHA differs from expected_head_sha, complete "
+        "the card as superseded by newer PR state instead of blocking for operator intervention. "
+        "Stop fail-closed on other identity mismatches. "
     )
     if configured.report_only:
         authority = (
@@ -675,8 +677,9 @@ def _repair_task(
             )
             + ". Do not merge the pull request, approve it, delete "
             "branches, or change repository settings. Do not force-push or rewrite published history. "
-            "Do not weaken tests, required checks, validation, or safety gates. Stop fail-closed if "
-            "identity changes or the repair is ambiguous or broad. Immediately before every GitHub "
+            "Do not weaken tests, required checks, validation, or safety gates. Complete as "
+            "superseded if the pull request is no longer open or the head changed; stop fail-closed if "
+            "other identity changes occur or the repair is ambiguous or broad. Immediately before every GitHub "
             "write, re-run that exact identity preflight and require both base and head identity to "
             "remain exact. After the verified push and "
             "factual reply both succeed, acknowledge this exact repair with `"

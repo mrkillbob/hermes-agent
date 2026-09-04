@@ -69,6 +69,10 @@ _PRIVATE_PATH_IN_TEXT = re.compile(
     r")",
     re.IGNORECASE,
 )
+_REMOTE_PAYLOAD_SECRET_KEY = re.compile(
+    r"(?:^|[_-])(?:api[_-]?key|auth|credential|password|secret|token)(?:$|[_-])",
+    re.IGNORECASE,
+)
 
 
 def _sanitize_remote_worker_payload(
@@ -93,18 +97,24 @@ def _sanitize_remote_worker_payload(
             text = text.replace(str(control_home), "$HERMES_CONTROL_HOME")
         return _PRIVATE_PATH_IN_TEXT.sub("<private-path>", text)
     if isinstance(value, dict):
-        return {
-            _sanitize_remote_worker_payload(
+        sanitized: dict[Any, Any] = {}
+        for key, item in value.items():
+            safe_key = _sanitize_remote_worker_payload(
                 key,
                 workspace_path=workspace_path,
                 control_home=control_home,
-            ): _sanitize_remote_worker_payload(
-                item,
-                workspace_path=workspace_path,
-                control_home=control_home,
             )
-            for key, item in value.items()
-        }
+            if _REMOTE_PAYLOAD_SECRET_KEY.search(str(key)) or (
+                _REMOTE_PAYLOAD_SECRET_KEY.search(str(safe_key))
+            ):
+                sanitized[safe_key] = "<redacted>"
+            else:
+                sanitized[safe_key] = _sanitize_remote_worker_payload(
+                    item,
+                    workspace_path=workspace_path,
+                    control_home=control_home,
+                )
+        return sanitized
     if isinstance(value, list):
         return [
             _sanitize_remote_worker_payload(

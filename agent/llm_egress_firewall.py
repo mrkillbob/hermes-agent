@@ -286,6 +286,10 @@ _BOUNDED_SOURCE_ISSUE_KEY = re.compile(
 _BOUNDED_SOURCE_DIFF_METADATA = re.compile(
     r"(?m)^\+[A-Za-z0-9+/=_-]{1,128}\s*$"
 )
+_BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT = re.compile(
+    r"\b(?P<name>[a-z][a-z0-9_]*_(?:pass|token|secret|password|auth|key))"
+    r"\s*=\s*(?P<value>_[a-z][a-z0-9_]*(?:\([^\n]*\))?|[a-z][a-z0-9_]*)"
+)
 # Bounded operational tokens are emitted by ordinary CLI/test tooling. They
 # can decode as Base64 by coincidence, but are not opaque encoded payloads.
 _BOUNDED_SHORT_CLI_OPTION = re.compile(r"^-[A-Za-z]{1,8}$")
@@ -450,9 +454,12 @@ _PROTOCOL_GRAMMAR_ATOMS = frozenset(
         "claim/finalize/retry",
         "com/docs",
         "content",
+        "codex_review_request",
+        "current_step_key",
         "developer",
         "doc/",
         "dispatcher_current_directory",
+        "evidence_heading",
         "acceptance-valid",
         "architecture-diagram",
         "autonomous-ai-agents",
@@ -465,6 +472,7 @@ _PROTOCOL_GRAMMAR_ATOMS = frozenset(
         "get_symbols_overview",
         "github-pr-workflow",
         "google-workspace",
+        "hermes_independent_code_review",
         "hermes-agent-skill-authoring",
         "match_message_id",
         "meeting-action-items",
@@ -516,6 +524,7 @@ _PROTOCOL_GRAMMAR_ATOMS = frozenset(
         "repository-owned",
         "runtime-executed",
         "reasoning",
+        "reasoning_effort",
         "role",
         "sed/awk",
         "servers/daemons",
@@ -525,8 +534,10 @@ _PROTOCOL_GRAMMAR_ATOMS = frozenset(
         "logic-regression",
         "system",
         "tool",
+        "untrusted_provenance",
         "user",
         "workspace_access",
+        "workflow_template_id",
     }
 )
 
@@ -953,6 +964,12 @@ def _generated_context_text_for_base64_scan(text: str) -> str:
     """
 
     return _source_text_for_base64_scan(text)
+
+
+def _source_text_for_secret_scan(text: str) -> str:
+    """Mask code identifiers that resemble secret names, not secret values."""
+
+    return _BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT.sub("<code>", text)
 
 
 def _contains_secret(value: Any, *, seen: set[int] | None = None) -> bool:
@@ -1804,7 +1821,7 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(segment.text)
+                scan_values.append(_source_text_for_secret_scan(raw_text))
                 base64_scan_values.append(
                     _source_text_for_base64_scan(raw_text)
                 )

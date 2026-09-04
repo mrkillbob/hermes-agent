@@ -960,6 +960,10 @@ def test_kanban_guidance_uses_governed_pr_inspection_for_remote_intake():
     from agent.prompt_builder import KANBAN_GUIDANCE
 
     assert "github-pr-feedback inspect-pr" in KANBAN_GUIDANCE
+    assert "/Users/mikedemott/.local/bin/hermes" in KANBAN_GUIDANCE
+    assert "Codex, Claude, or Hermes workers" in KANBAN_GUIDANCE
+    assert "github-pr-feedback submit-review" in KANBAN_GUIDANCE
+    assert "--event APPROVE|REQUEST_CHANGES|COMMENT" in KANBAN_GUIDANCE
     assert "do not use raw `gh pr view`" in KANBAN_GUIDANCE
 
 
@@ -968,6 +972,7 @@ def test_kanban_guidance_uses_shared_rate_gated_pr_inspection():
 
     assert "github-pr-feedback inspect-pr" in KANBAN_GUIDANCE
     assert "paginate issue comments, review comments, and reviews" in KANBAN_GUIDANCE
+    assert "On protected routes" in KANBAN_GUIDANCE
     assert "do not use raw `gh pr view`" in KANBAN_GUIDANCE
 
 

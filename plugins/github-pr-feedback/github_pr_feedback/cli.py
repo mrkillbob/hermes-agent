@@ -101,6 +101,23 @@ _MARKER_REQUIRED_FEEDBACK_KINDS = frozenset(
     {"pr_repair", "issue_comment", "review_comment", "review"}
 )
 _REVIEW_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES", "COMMENT"})
+_FEEDBACK_DETAILS = re.compile(r"(?is)<details\b.*?</details>")
+_FEEDBACK_HTML_COMMENT = re.compile(r"(?s)<!--.*?-->")
+_FEEDBACK_HTML_TAG = re.compile(r"(?s)<[^>]{1,200}>")
+_FEEDBACK_MARKDOWN_IMAGE = re.compile(r"!\[[^\]]{0,200}\]\([^)]+\)")
+_FEEDBACK_URL = re.compile(r"https?://[^\s\"')>]+")
+
+
+def _feedback_body_excerpt(body: str, *, limit: int = 1800) -> str:
+    text = str(body or "")
+    text = _FEEDBACK_DETAILS.sub(" ", text)
+    text = _FEEDBACK_HTML_COMMENT.sub(" ", text)
+    text = _FEEDBACK_MARKDOWN_IMAGE.sub(" ", text)
+    text = _FEEDBACK_URL.sub("<url>", text)
+    text = _FEEDBACK_HTML_TAG.sub(" ", text)
+    text = _SECRET_ASSIGNMENT.sub(r"\1=<redacted>", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
 
 
 def _factual_reply_is_missing(
@@ -488,6 +505,7 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     )
     inspect.add_argument("--repository", required=True)
     inspect.add_argument("--pr-number", required=True, type=int)
+    inspect.add_argument("--feedback-id")
     submit_review = subcommands.add_parser(
         "submit-review", help="Submit an exact-head review with an independent identity"
     )
@@ -556,6 +574,7 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     stack_refresh.add_argument("--repository", required=True)
     stack_refresh.add_argument("--stack-id", required=True)
     stack_refresh.add_argument("--repository-path", required=True, type=Path)
+    stack_refresh.add_argument("--accept-rebased-heads", action="store_true")
     stack_merge = subcommands.add_parser(
         "stack-merge", help="Merge a verified stack in dependency order"
     )
@@ -2083,7 +2102,10 @@ def _stack_refresh(ctx: Any, args: argparse.Namespace) -> int:
     try:
         policy = _load_policy_from_context(ctx)
         manifest = StackController(policy, github=_github_client(policy)).refresh(
-            args.repository, args.stack_id, repository_path=args.repository_path
+            args.repository,
+            args.stack_id,
+            repository_path=args.repository_path,
+            accept_rebased_heads=args.accept_rebased_heads,
         )
     except (GitHubClientError, RuntimeError, ValueError) as error:
         print(json.dumps({"status": "blocked", "reason": str(error)}, sort_keys=True))
@@ -2238,9 +2260,26 @@ def _inspect_pr(ctx: Any, args: argparse.Namespace) -> int:
         policy = _load_policy_from_context(ctx)
         if not policy.enabled or args.repository not in policy.targets:
             raise ValueError("repository is not a configured target")
-        pull_request = _github_client(policy).get_pull_request(
-            args.repository, args.pr_number
-        )
+        github = _github_client(policy)
+        pull_request = github.get_pull_request(args.repository, args.pr_number)
+        feedback_projection: dict[str, Any] = {}
+        feedback_id = getattr(args, "feedback_id", None)
+        if feedback_id:
+            matches = [
+                item
+                for item in github.list_feedback(args.repository, args.pr_number)
+                if item.feedback_id == str(feedback_id)
+            ]
+            if len(matches) != 1:
+                raise ValueError("feedback item was not found")
+            feedback = matches[0]
+            feedback_projection = {
+                "feedback_body_excerpt": _feedback_body_excerpt(feedback.body),
+                "feedback_id": feedback.feedback_id,
+                "feedback_is_bot": feedback.is_bot,
+                "feedback_kind": feedback.kind,
+                "feedback_reviewer": feedback.reviewer.login,
+            }
     except (GitHubClientError, ValueError):
         print(json.dumps({"status": "unavailable"}, sort_keys=True))
         return 1
@@ -2249,6 +2288,7 @@ def _inspect_pr(ctx: Any, args: argparse.Namespace) -> int:
             {
                 "base_branch": pull_request.base_branch,
                 "base_sha": pull_request.base_sha,
+                **feedback_projection,
                 "head_ref_name": pull_request.head_ref_name,
                 "head_repository": pull_request.head_repository,
                 "head_sha": pull_request.head_sha,

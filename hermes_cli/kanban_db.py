@@ -86,6 +86,7 @@ import logging
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urlparse
@@ -96,6 +97,11 @@ from toolsets import get_toolset_names
 from utils import atomic_json_write
 
 _log = logging.getLogger(__name__)
+
+
+def utcnow_iso() -> str:
+    """Return a timezone-aware UTC timestamp for durable board events."""
+    return datetime.now(timezone.utc).isoformat()
 
 _GITHUB_PR_FEEDBACK_IDEMPOTENCY_PREFIX = "github-pr-feedback:"
 _GITHUB_PR_INTENT_REVIEW_PREFIX = "github-pr-feedback:intent-review:"
@@ -125,6 +131,24 @@ def is_atomic_pr_automation_task(
         return True
     evidence = (body or "").casefold()
     return all(marker in evidence for marker in _EXACT_HEAD_PR_MARKERS)
+
+
+def _is_machine_recoverable_pr_feedback_triage(
+    *,
+    title: Optional[str],
+    idempotency_key: Optional[str],
+    block_kind: Optional[str],
+) -> bool:
+    """Identify legacy PR-feedback intake loops that should return to workers."""
+
+    key = (idempotency_key or "").strip().casefold()
+    if not key.startswith(_GITHUB_PR_FEEDBACK_IDEMPOTENCY_PREFIX):
+        return False
+    if key.startswith(_GITHUB_PR_INTENT_REVIEW_PREFIX):
+        return False
+    if block_kind != "needs_input":
+        return False
+    return (title or "").startswith("GitHub PR feedback:")
 
 
 def is_governed_research_intake(*, idempotency_key: Optional[str]) -> bool:
@@ -4827,6 +4851,52 @@ def recompute_ready(
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
     with write_txn(conn):
+        # Capability/transient loop escalations must not strand work in the
+        # human-only triage column. Legacy ordinary github-pr-feedback intake
+        # cards also used ``needs_input`` for "start validation", which is now
+        # role-owned work; true intent-review cards remain human-gated.
+        auto_triage = conn.execute(
+            "SELECT id, title, idempotency_key, block_kind FROM tasks "
+            "WHERE status = 'triage' AND ("
+            "COALESCE(block_kind, '') != 'needs_input' OR "
+            "(COALESCE(idempotency_key, '') LIKE 'github-pr-feedback:%' "
+            "AND COALESCE(idempotency_key, '') NOT LIKE 'github-pr-feedback:intent-review:%' "
+            "AND title LIKE 'GitHub PR feedback:%'))"
+        ).fetchall()
+        for row in auto_triage:
+            if (
+                row["block_kind"] == "needs_input"
+                and not _is_machine_recoverable_pr_feedback_triage(
+                    title=row["title"],
+                    idempotency_key=row["idempotency_key"],
+                    block_kind=row["block_kind"],
+                )
+            ):
+                continue
+            task_id = row["id"]
+            parents = conn.execute(
+                "SELECT t.status FROM tasks t "
+                "JOIN task_links l ON l.parent_id = t.id "
+                "WHERE l.child_id = ?",
+                (task_id,),
+            ).fetchall()
+            if all(parent["status"] in ("done", "archived") for parent in parents):
+                if (
+                    conn.execute(
+                        "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                        "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL "
+                        "WHERE id = ? AND status = 'triage'",
+                        (task_id,),
+                    ).rowcount
+                    == 1
+                ):
+                    _append_event(
+                        conn,
+                        task_id,
+                        "triage_auto_resolved",
+                        {"block_kind": row["block_kind"]},
+                    )
+                    promoted += 1
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked')"

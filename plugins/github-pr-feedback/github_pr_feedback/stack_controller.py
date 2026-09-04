@@ -78,7 +78,14 @@ class StackController:
         self.store.save(saved)
         return saved
 
-    def refresh(self, repository: str, stack_id: str, *, repository_path: Path) -> StackManifest:
+    def refresh(
+        self,
+        repository: str,
+        stack_id: str,
+        *,
+        repository_path: Path,
+        accept_rebased_heads: bool = False,
+    ) -> StackManifest:
         manifest = self.store.load(repository, stack_id)
         identity = self.policy.github_identity
         if identity is None:
@@ -94,7 +101,15 @@ class StackController:
         for entry in _ordered(manifest.entries, manifest.base_branch):
             head = runner.branch_head(entry.branch)
             if entry.head_sha and head != entry.head_sha:
-                raise GitHubClientError(f"remote head changed for {entry.branch}")
+                if not accept_rebased_heads:
+                    raise GitHubClientError(f"remote head changed for {entry.branch}")
+                current = self.github.get_pull_request(repository, entry.pr_number or 0)
+                if (
+                    current.head_ref_name != entry.branch
+                    or current.base_branch != entry.base_branch
+                    or current.head_sha != head
+                ):
+                    raise GitHubClientError(f"rebased head identity changed for {entry.branch}")
             if entry.base_branch != manifest.base_branch:
                 parent = next(item for item in manifest.entries if item.branch == entry.base_branch)
                 parent_state = self.github.get_merge_state(repository, parent.pr_number or 0)

@@ -373,6 +373,32 @@ def test_codex_reasoning_replay_encrypted_content_is_not_treated_as_a_credential
     assert authorized["input"][0]["encrypted_content"] == encrypted_replay
 
 
+def test_codex_reasoning_replay_uses_body_shape_when_api_mode_missing(tmp_path):
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = None
+    encrypted_replay = "gAAAAABm3gZrX7xP0Yk3V8nQ2aBcD4eFgH5jKlMnOpQrStUvWxYz0123456789"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": "gpt-5.6-terra",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "encrypted_content": encrypted_replay,
+                    "summary": [{"type": "summary_text", "text": "checked PR"}],
+                }
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    assert authorized["input"][0]["encrypted_content"] == encrypted_replay
+    assert authorized["input"][0]["summary"][0]["text"] == "checked PR"
+
+
 def test_codex_user_supplied_encrypted_token_still_blocks(tmp_path):
     agent = _agent(tmp_path)
     agent.provider = "openai-codex"
@@ -1795,6 +1821,104 @@ def test_protected_codex_redacts_bound_web_search_replay(
     assert "/Users/private/repository/file.py" not in rendered
 
 
+def test_protected_codex_projects_git_diff_name_only_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_git_diff_name_only"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "terminal",
+                    "call_id": call_id,
+                    "arguments": json.dumps({"command": "git diff --name-only"}),
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(
+                        {
+                            "exit_code": 0,
+                            "output": "agent/llm_egress_runtime.py\n../secret.txt\n",
+                        }
+                    ),
+                },
+            ],
+        },
+    )
+
+    rendered = json.loads(authorized["input"][1]["output"])
+    projection = json.loads(rendered["output"])
+    assert receipt.allowed
+    assert projection["files"] == ["agent/llm_egress_runtime.py"]
+    assert projection["omitted_files"] == 1
+
+
+def test_protected_codex_projects_github_pr_feedback_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_pr_feedback"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "terminal",
+                    "call_id": call_id,
+                    "arguments": json.dumps(
+                        {
+                            "command": (
+                                "env HERMES_HOME=/Users/mikedemott/.hermes "
+                                "/Users/mikedemott/.local/bin/hermes "
+                                "github-pr-feedback inspect-pr "
+                                "--repository acme/widgets --pr-number 17 --feedback-id 120"
+                            )
+                        }
+                    ),
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(
+                        {
+                            "exit_code": 0,
+                            "output": json.dumps(
+                                {
+                                    "repository": "acme/widgets",
+                                    "number": 17,
+                                    "head_sha": "a" * 40,
+                                    "feedback_id": "120",
+                                    "feedback_body_excerpt": "bounded review finding",
+                                    "opaque_node_id": "c2VjcmV0LXBheWxvYWQ=",
+                                }
+                            ),
+                        }
+                    ),
+                },
+            ],
+        },
+    )
+
+    rendered = json.loads(authorized["input"][1]["output"])
+    assert receipt.allowed
+    assert rendered["terminal_result"] == "github_pr_feedback"
+    assert rendered["json"]["feedback_body_excerpt"] == "bounded review finding"
+    assert "opaque_node_id" not in rendered["json"]
+
+
 def test_protected_codex_rejects_unbound_web_search_shaped_replay(
     tmp_path, monkeypatch
 ):
@@ -3083,6 +3207,29 @@ def test_real_read_file_wire_result_keeps_exact_source_provenance(
     assert "_source_provenance" not in authorized["messages"][0]
     assert receipt.decision.source_grant_count == 1
     assert receipt.decision.source_segment_count == 1
+
+
+def test_read_alias_can_attach_trusted_source_provenance(tmp_path, monkeypatch):
+    from agent.source_provenance_tools import (
+        attach_trusted_source_provenance_metadata,
+        source_provenance_activation,
+    )
+    from tools.file_tools import read_file_tool
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    source = tmp_path / "source.py"
+    source.write_text("first = 1\n", encoding="utf-8")
+    agent = _agent(tmp_path / "egress")
+    agent._current_api_request_id = "turn-1:api:1"
+
+    with source_provenance_activation(agent, "read"):
+        result = read_file_tool(str(source), task_id="egress-read-alias")
+    metadata = attach_trusted_source_provenance_metadata(
+        agent, "read", content=result
+    )
+
+    assert metadata is not None
+    assert metadata["source_grant_digests"]
 
 
 def test_bound_read_file_error_without_provenance_is_elided(tmp_path, monkeypatch):
