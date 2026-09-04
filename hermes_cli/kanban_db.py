@@ -3946,8 +3946,9 @@ def reconcile_legacy_dispatch_task(
         egress_failure = conn.execute(
             "SELECT 1 FROM task_events "
             "WHERE task_id = ? AND kind = 'blocked' "
-            "AND payload LIKE '%protected terminal route%' "
-            "AND payload LIKE '%omitted_from_remote_replay%' "
+            "AND ((payload LIKE '%protected terminal route%' "
+            "AND payload LIKE '%omitted_from_remote_replay%') "
+            "OR payload LIKE '%provider egress blocked: LLM egress blocked: base64_payload%') "
             "ORDER BY id DESC LIMIT 1",
             (task_id,),
         ).fetchone()

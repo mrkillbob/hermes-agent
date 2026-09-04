@@ -384,7 +384,7 @@ def _is_legacy_intake_task(
 def _is_reopenable_egress_failure(
     details: Mapping[str, object] | None, receipt: FeedbackReceipt
 ) -> bool:
-    """Recognize only the known protected-terminal replay failure on this receipt."""
+    """Recognize only known protected-egress failures on this receipt."""
     if not isinstance(details, Mapping) or details.get("status") != "blocked":
         return False
     body = details.get("body")
@@ -407,10 +407,12 @@ def _is_reopenable_egress_failure(
             continue
         payload = event.get("payload")
         reason = payload.get("reason") if isinstance(payload, Mapping) else None
-        return (
-            isinstance(reason, str)
-            and "protected terminal route" in reason
-            and "omitted_from_remote_replay" in reason
+        return isinstance(reason, str) and (
+            (
+                "protected terminal route" in reason
+                and "omitted_from_remote_replay" in reason
+            )
+            or "provider egress blocked: LLM egress blocked: base64_payload" in reason
         )
     return False
 

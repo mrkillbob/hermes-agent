@@ -102,6 +102,10 @@ def test_reopenable_egress_failure_requires_exact_receipt_and_marker() -> None:
     }
 
     assert _is_reopenable_egress_failure(details, receipt)
+    details["_events"][0]["payload"]["reason"] = (
+        "provider egress blocked: LLM egress blocked: base64_payload"
+    )
+    assert _is_reopenable_egress_failure(details, receipt)
     details["_events"][0]["payload"]["reason"] = "operator decision required"
     assert not _is_reopenable_egress_failure(details, receipt)
 

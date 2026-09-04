@@ -565,10 +565,12 @@ def _is_legacy_intake_task(details: object, task: KanbanTask) -> bool:
             continue
         payload = event.get("payload")
         reason = payload.get("reason") if isinstance(payload, dict) else None
-        return (
-            isinstance(reason, str)
-            and "protected terminal route" in reason
-            and "omitted_from_remote_replay" in reason
+        return isinstance(reason, str) and (
+            (
+                "protected terminal route" in reason
+                and "omitted_from_remote_replay" in reason
+            )
+            or "provider egress blocked: LLM egress blocked: base64_payload" in reason
         )
     return False
 
