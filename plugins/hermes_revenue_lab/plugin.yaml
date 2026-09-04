@@ -1,7 +1,0 @@
-name: hermes_revenue_lab
-version: 0.1.0
-description: "Operator bridge for the external local-first Hermes Revenue Lab checkout."
-author: mrkillbob
-kind: standalone
-platforms:
-  - macos

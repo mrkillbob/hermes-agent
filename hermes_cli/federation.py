@@ -563,6 +563,7 @@ def _write_role_config(profile_dir: Path, role: FederationRole, manifest: Federa
         agent["reasoning_effort"] = primary["reasoning_effort"]
     if agent:
         config["agent"] = agent
+    config["toolsets"] = list(role.toolsets)
     if policy.get("fallback_providers"):
         config["fallback_providers"] = [dict(item) for item in policy["fallback_providers"]]
     auxiliary = dict(config.get("auxiliary")) if isinstance(config.get("auxiliary"), dict) else {}

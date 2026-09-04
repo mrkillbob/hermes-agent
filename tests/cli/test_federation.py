@@ -70,21 +70,17 @@ def test_skill_discovery_honors_packaged_skill_roots(tmp_path: Path, monkeypatch
     assert _find_bundled_skill("packaged-skill") == bundled / "research" / "packaged-skill"
 
 
-def test_skill_discovery_can_sync_bundled_plugin_skill(tmp_path: Path, monkeypatch) -> None:
+def test_skill_discovery_can_sync_optional_revenue_lab_skill(tmp_path: Path, monkeypatch) -> None:
     import hermes_cli.federation as federation
 
-    repo = tmp_path / "repo"
-    plugin_skill = repo / "plugins" / "hermes_revenue_lab" / "skills" / "revenue-lab"
-    plugin_skill.mkdir(parents=True)
-    (plugin_skill / "SKILL.md").write_text("# Revenue Lab\n", encoding="utf-8")
-    monkeypatch.setattr(
-        federation,
-        "_SOURCE_MANIFEST_PATH",
-        repo / "configs" / "federation" / "roles.json",
-    )
+    optional = tmp_path / "optional"
+    revenue_skill = optional / "revenue" / "revenue-lab"
+    revenue_skill.mkdir(parents=True)
+    (revenue_skill / "SKILL.md").write_text("# Revenue Lab\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_OPTIONAL_SKILLS", str(optional))
 
     assert "revenue-lab" in federation._discover_skill_names()
-    assert federation._find_bundled_skill("revenue-lab") == plugin_skill
+    assert federation._find_bundled_skill("revenue-lab") == revenue_skill
 
 
 def test_audit_distinguishes_exact_profiles_from_equivalent_coverage() -> None:
@@ -152,6 +148,10 @@ def test_seed_apply_writes_role_identity_metadata(tmp_path: Path) -> None:
     assert "gpt-5.5" in config
     assert "agent:" in config
     assert "reasoning_effort: low" in config
+    import yaml
+
+    parsed_config = yaml.safe_load(config)
+    assert parsed_config["toolsets"] == ["file"]
     assert "auxiliary:" in config
     assert "qwen3.5:4b" in config
     assert "Your working style:" in (profile_dir / "SOUL.md").read_text()
@@ -193,6 +193,9 @@ def test_seed_refresh_existing_preserves_soul_and_adopts_route(tmp_path: Path) -
     assert "old.example" not in refreshed_config
     assert "stale-key" not in refreshed_config
     assert "old-mode" not in refreshed_config
+    import yaml
+
+    assert yaml.safe_load(refreshed_config)["toolsets"] == ["kanban", "file"]
 
 
 def test_seed_refresh_existing_with_identity_preserves_custom_soul(tmp_path: Path) -> None:
