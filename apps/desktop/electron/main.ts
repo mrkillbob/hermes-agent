@@ -1430,6 +1430,12 @@ const POOL_IDLE_MS = Math.max(60_000, Number(process.env.HERMES_DESKTOP_POOL_IDL
 //     POOL_IDLE_MS above (default 10 min) — this constant only governs the
 //     "is this backend plausibly still alive" question for LRU eviction,
 //     not when the idle reaper definitively tears a backend down.
+//
+// User-facing config is `desktop.pool_keepalive_fresh_seconds` in
+// config.yaml; the `hermes desktop` launcher bridges it to
+// HERMES_DESKTOP_POOL_KEEPALIVE_FRESH_MS below (an explicit env var still
+// wins over config, matching the other desktop.* bridges). The env var is
+// an internal bridge, not the primary user-facing setting.
 const POOL_KEEPALIVE_FRESH_MS = Math.max(
   120_000,
   Number(process.env.HERMES_DESKTOP_POOL_KEEPALIVE_FRESH_MS) || 4 * 60_000

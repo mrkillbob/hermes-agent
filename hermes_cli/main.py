@@ -8322,29 +8322,35 @@ def _detect_linux_password_store() -> str | None:
     return None
 
 
-def _desktop_launch_options() -> tuple[list[str], str, str, str]:
+def _desktop_launch_options() -> tuple[list[str], str, str, str, int | None]:
     """Read `desktop.*` launch options from config.yaml.
 
-    Returns ``(electron_flags, disable_gpu, password_store, ozone_hint)`` where
-    ``electron_flags`` is a list of extra Electron CLI flags, ``disable_gpu``
-    is one of "auto"/"1"/"0" (normalized for the HERMES_DESKTOP_DISABLE_GPU
-    env var the Electron app reads), ``password_store`` is "auto" or one
-    of the Chromium password-store backends (unknown values normalize to
-    "auto"), and ``ozone_hint`` is one of "auto"/"x11"/"wayland" (normalized
-    for ``ELECTRON_OZONE_PLATFORM_HINT``). Best-effort: any config error
-    yields the safe defaults ``([], "auto", "auto", "auto")`` so a malformed
-    config never blocks the launch.
+    Returns ``(electron_flags, disable_gpu, password_store, ozone_hint,
+    pool_keepalive_fresh_ms)`` where ``electron_flags`` is a list of extra
+    Electron CLI flags, ``disable_gpu`` is one of "auto"/"1"/"0" (normalized
+    for the HERMES_DESKTOP_DISABLE_GPU env var the Electron app reads),
+    ``password_store`` is "auto" or one of the Chromium password-store
+    backends (unknown values normalize to "auto"), ``ozone_hint`` is one of
+    "auto"/"x11"/"wayland" (normalized for ``ELECTRON_OZONE_PLATFORM_HINT``),
+    and ``pool_keepalive_fresh_ms`` is the multi-profile backend pool's
+    keepalive-freshness window in milliseconds (None when unset/invalid,
+    normalized from ``desktop.pool_keepalive_fresh_seconds`` for the
+    HERMES_DESKTOP_POOL_KEEPALIVE_FRESH_MS env var the Electron app reads).
+    Best-effort: any config error yields the safe defaults
+    ``([], "auto", "auto", "auto", None)`` so a malformed config never
+    blocks the launch.
     """
     flags: list[str] = []
     disable_gpu = "auto"
     password_store = "auto"
     ozone_hint = "auto"
+    pool_keepalive_fresh_ms: int | None = None
     try:
         from hermes_cli.config import load_config
 
         desktop_cfg = (load_config() or {}).get("desktop") or {}
     except Exception:
-        return flags, disable_gpu, password_store, ozone_hint
+        return flags, disable_gpu, password_store, ozone_hint, pool_keepalive_fresh_ms
 
     raw_flags = desktop_cfg.get("electron_flags")
     if isinstance(raw_flags, str):
@@ -8375,7 +8381,17 @@ def _desktop_launch_options() -> tuple[list[str], str, str, str]:
         low_ozone = raw_ozone.strip().lower()
         if low_ozone in ("auto", "x11", "wayland"):
             ozone_hint = low_ozone
-    return flags, disable_gpu, password_store, ozone_hint
+
+    raw_keepalive_seconds = desktop_cfg.get("pool_keepalive_fresh_seconds")
+    try:
+        if raw_keepalive_seconds is not None:
+            keepalive_seconds = float(raw_keepalive_seconds)
+            if keepalive_seconds > 0:
+                pool_keepalive_fresh_ms = int(keepalive_seconds * 1000)
+    except (TypeError, ValueError):
+        pool_keepalive_fresh_ms = None
+
+    return flags, disable_gpu, password_store, ozone_hint, pool_keepalive_fresh_ms
 
 
 def _register_linux_desktop_entry() -> None:
@@ -8431,13 +8447,24 @@ def cmd_gui(args: argparse.Namespace):
     # already reads; an explicit env var still wins over config so
     # `HERMES_DESKTOP_DISABLE_GPU=... hermes desktop` and
     # `ELECTRON_OZONE_PLATFORM_HINT=... hermes desktop` keep working.
-    config_electron_flags, config_disable_gpu, config_password_store, config_ozone_hint = (
-        _desktop_launch_options()
-    )
+    (
+        config_electron_flags,
+        config_disable_gpu,
+        config_password_store,
+        config_ozone_hint,
+        config_pool_keepalive_fresh_ms,
+    ) = _desktop_launch_options()
     if config_disable_gpu != "auto" and "HERMES_DESKTOP_DISABLE_GPU" not in os.environ:
         env["HERMES_DESKTOP_DISABLE_GPU"] = config_disable_gpu
     if config_ozone_hint != "auto" and "ELECTRON_OZONE_PLATFORM_HINT" not in os.environ:
         env["ELECTRON_OZONE_PLATFORM_HINT"] = config_ozone_hint
+
+    # Multi-profile backend pool keepalive-freshness window
+    # (`desktop.pool_keepalive_fresh_seconds`), bridged to the
+    # HERMES_DESKTOP_POOL_KEEPALIVE_FRESH_MS env var the Electron app reads.
+    # An explicit env var still wins over config.
+    if config_pool_keepalive_fresh_ms is not None and "HERMES_DESKTOP_POOL_KEEPALIVE_FRESH_MS" not in os.environ:
+        env["HERMES_DESKTOP_POOL_KEEPALIVE_FRESH_MS"] = str(config_pool_keepalive_fresh_ms)
 
     # Linux keychain backend for safeStorage (`desktop.password_store`).
     # Chromium needs the --password-store switch to pick the right keychain;

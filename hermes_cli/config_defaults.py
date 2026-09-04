@@ -3991,6 +3991,16 @@ DEFAULT_CONFIG = {
             # Crash-loop breaker: max automatic re-runs of one interrupted turn.
             "max_attempts": 2,
         },
+        # Multi-profile backend pool: how long a pooled backend is treated as
+        # "plausibly still alive" (and spared from LRU cap eviction) since its
+        # last renderer keepalive touch, in seconds. The renderer pings every
+        # 60s for every open profile; this window needs headroom above that
+        # cadence for missed pings and IPC stalls (WSL2's 9p transport can
+        # stretch a ping to ~30s of observed silence) so a live backend isn't
+        # evicted mid-session. Minimum enforced is 120s regardless of this
+        # setting. Bridged to the HERMES_DESKTOP_POOL_KEEPALIVE_FRESH_MS env
+        # var the Electron app reads, so an explicit env var still wins.
+        "pool_keepalive_fresh_seconds": 240,
     },
 
 
