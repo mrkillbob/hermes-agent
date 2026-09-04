@@ -457,6 +457,31 @@ def _compute_tool_definitions(
         for ts_name in get_all_toolsets():
             tools_to_include.update(resolve_toolset(ts_name))
 
+        # ...except browser automation, which must stay explicit opt-in
+        # even with no filter at all (it can launch a local Chromium/Chrome
+        # process — see hermes_cli.tools_config._DEFAULT_OFF_TOOLSETS).
+        # Platform configs go through _get_platform_tools, which already
+        # applies that opt-in list; this branch is the other entry point
+        # (a bare AIAgent(enabled_toolsets=None), or run_agent.py without
+        # --enabled_toolsets) and must not silently re-open it.
+        #
+        # Subtract by tool name (not by skipping the "browser" toolset
+        # name in the loop above) so browser tools bundled directly into
+        # composite/posture toolsets like ``hermes-cli``/``coding`` are
+        # removed too — those list browser_* tools as static members, not
+        # via an "includes" reference to the "browser" toolset.
+        #
+        # Only tools private to browser automation are removed: the
+        # ``browser`` toolset also lists ``web_search`` (for finding URLs
+        # to open), and that must stay available via the ``web``/``search``
+        # toolsets regardless of the browser opt-in, so it is deliberately
+        # excluded here rather than subtracting resolve_toolset("browser")
+        # wholesale.
+        _browser_only_tools = {
+            t for t in resolve_toolset("browser") if t.startswith("browser_")
+        }
+        tools_to_include.difference_update(_browser_only_tools)
+
     # Always apply disabled toolsets as a subtraction step at the end.
     # This ensures that even if a composite toolset (like hermes-cli)
     # is enabled, any tools belonging to a disabled toolset are strictly

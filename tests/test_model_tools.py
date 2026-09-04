@@ -7,6 +7,7 @@ from unittest.mock import ANY, call, patch
 from model_tools import (
     handle_function_call,
     get_all_tool_names,
+    get_tool_definitions,
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
@@ -235,6 +236,57 @@ class TestAgentLoopTools:
     def test_no_regular_tools_in_set(self):
         assert "web_search" not in _AGENT_LOOP_TOOLS
         assert "terminal" not in _AGENT_LOOP_TOOLS
+
+
+# =========================================================================
+# get_tool_definitions default (unfiltered) branch — opt-in-only toolsets
+# =========================================================================
+
+class TestDefaultToolsetOptIn:
+    """``enabled_toolsets=None`` must not silently re-enable opt-in-only
+    toolsets like browser automation, which can launch a local Chromium
+    process. A direct ``AIAgent(enabled_toolsets=None)`` construction or
+    ``run_agent.py`` with no ``--enabled_toolsets`` both hit this branch,
+    bypassing ``hermes_cli.tools_config._get_platform_tools`` entirely."""
+
+    def _requested_tool_names(self, **kwargs):
+        """The tool-name set get_tool_definitions asks the registry for,
+        before check_fn availability filtering (so this is meaningful even
+        in a test environment without browser automation installed)."""
+        from tools.registry import registry
+        from model_tools import _clear_tool_defs_cache
+
+        _clear_tool_defs_cache()
+        captured = {}
+        original = registry.get_definitions
+
+        def spy(tool_names, quiet=False):
+            captured["tool_names"] = set(tool_names)
+            return original(tool_names, quiet=quiet)
+
+        with patch.object(registry, "get_definitions", side_effect=spy):
+            get_tool_definitions(quiet_mode=True, **kwargs)
+        return captured["tool_names"]
+
+    def test_browser_absent_from_unfiltered_default(self):
+        from toolsets import resolve_toolset
+
+        requested = self._requested_tool_names(enabled_toolsets=None)
+        browser_only_tools = {
+            t for t in resolve_toolset("browser") if t.startswith("browser_")
+        }
+        assert browser_only_tools  # sanity: the toolset still has real tools
+        assert not requested & browser_only_tools
+        # web_search is also listed by the "browser" toolset (for finding
+        # URLs), but it must survive via web/search — the fix must not
+        # strip it along with the browser-only tools.
+        assert "web_search" in requested
+
+    def test_browser_present_when_explicitly_enabled(self):
+        from toolsets import resolve_toolset
+
+        requested = self._requested_tool_names(enabled_toolsets=["browser"])
+        assert set(resolve_toolset("browser")) <= requested
 
 
 # =========================================================================
