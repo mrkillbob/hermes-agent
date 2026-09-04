@@ -428,7 +428,20 @@ class KanbanSubprocessClient:
             if isinstance(payload, dict) and isinstance(payload.get("task"), dict)
             else payload
         )
-        if _is_legacy_intake_task(existing, task):
+        needs_reconcile = _is_legacy_intake_task(existing, task)
+        if (
+            not needs_reconcile
+            and isinstance(existing, dict)
+            and existing.get("status") == "blocked"
+        ):
+            # Idempotent create returns only the task row. Fetch the bounded
+            # lifecycle event once so a card blocked by the known protected
+            # terminal replay defect can be reconciled after the defect is
+            # fixed; unrelated blocked cards remain untouched.
+            needs_reconcile = _is_legacy_intake_task(
+                self.task_details(task.board, task_id), task
+            )
+        if needs_reconcile:
             self.reconcile_dispatch_task(task_id, task)
         return task_id
 
