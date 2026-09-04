@@ -767,6 +767,56 @@ def test_source_presentation_allows_long_python_boundary_identifiers(tmp_path):
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_code_context_identifiers_and_fixtures(tmp_path):
+    source = (
+        "MANIFEST = Path(__file__).parents[2]\n"
+        "manifest = load_manifest(MANIFEST)\n"
+        "departments = ()\n"
+        "def test_seed_does_not_refresh_owned_profile_without_explicit_opt_in():\n"
+        '    config = "  api_key: stale-key\\n"\n'
+    )
+    path = tmp_path / "test_federation.py"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=5)
+    presentation = json.dumps(
+        {
+            "content": "\n".join(
+                f"{number}|{line}"
+                for number, line in enumerate(source.split("\n"), start=1)
+            )
+        }
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "secret_detected" not in decision.reason_codes
+    assert "base64_payload" not in decision.reason_codes
+
+
+def test_source_presentation_still_rejects_non_placeholder_secret_fixture(tmp_path):
+    source = 'config = "  api_key: live-key-value\\n"\n'
+    path = tmp_path / "test_federation.py"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path)
+    presentation = json.dumps(
+        {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1))}
+    )
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _source_presentation_request(grant, presentation),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "secret_detected" in exc_info.value.decision.reason_codes
+
+
 def test_source_presentation_scans_raw_source_not_json_line_number_artifacts(tmp_path):
     source_lines = ["PR_CI_RECEIPT_V1 = True", *[f"value_{number} = {number}" for number in range(1, 121)]]
     source = "\n".join(source_lines) + "\n"

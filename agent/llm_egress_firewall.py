@@ -425,6 +425,12 @@ _BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT = re.compile(
     r"\b(?P<name>[a-z][a-z0-9_]*_(?:pass|token|secret|password|auth|key))"
     r"\s*=\s*(?P<value>_[a-z][a-z0-9_]*(?:\([^\n]*\))?|[a-z][a-z0-9_]*)"
 )
+_BOUNDED_SOURCE_SECRET_PLACEHOLDER = re.compile(
+    r"(?i)\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|"
+    r"password|passwd|api[_-]?key|apikey|client[_-]?secret|private[_-]?key)"
+    r"\s*[:=]\s*[\"']?(?:stale-key|legacy-stale-key|test-key|dummy-key|"
+    r"example-key|placeholder-key|redacted-key)[\"']?\b"
+)
 # Bounded operational tokens are emitted by ordinary CLI/test tooling. They
 # can decode as Base64 by coincidence, but are not opaque encoded payloads.
 _BOUNDED_SHORT_CLI_OPTION = re.compile(r"^-[A-Za-z]{1,8}$")
@@ -1038,15 +1044,15 @@ def _source_text_for_base64_scan(
     unchanged and are still rejected by the canonical scanner.
     """
 
-    def is_source_code_atom(match: re.Match[str]) -> bool:
+    def is_source_code_atom(match: re.Match[str], source_text: str) -> bool:
         # ``_BASE64_CANDIDATE`` includes padding characters in the match, so
         # a source keyword such as ``line_ranges=`` arrives here with its
         # trailing assignment marker attached. Strip only that marker; a
         # padded encoded value remains unchanged and fail-closed.
         candidate = match.group(1)
         source_atom = candidate[:-1] if candidate.endswith("=") else candidate
-        source_control_window = text[
-            max(0, match.start() - 256) : min(len(text), match.end() + 32)
+        source_control_window = source_text[
+            max(0, match.start() - 256) : min(len(source_text), match.end() + 32)
         ]
         is_source_control_identity = (
             re.fullmatch(
@@ -1101,7 +1107,39 @@ def _source_text_for_base64_scan(
             # ``PAYLOAD`` remain visible to the fail-closed scanner.
             # SQL snippets in source comments/queries likewise use fixed
             # keywords whose short uppercase spelling can decode by chance.
-            or source_atom in {"PROVIDER", "TOOLSETS", "OPEN", "LIKE"}
+            or source_atom in {"PROVIDER", "TOOLSETS", "OPEN", "LIKE", "YAML"}
+        )
+
+    def is_source_identifier_in_code(
+        match: re.Match[str], source_text: str
+    ) -> bool:
+        candidate = match.group(1)
+        source_atom = candidate[:-1] if candidate.endswith("=") else candidate
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{2,191}", source_atom) is None:
+            return False
+        line_start = source_text.rfind("\n", 0, match.start()) + 1
+        line_end = source_text.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(source_text)
+        line = source_text[line_start:line_end]
+        offset = match.start() - line_start
+        before = line[:offset]
+        after = line[match.end() - line_start :]
+        if before.rstrip().endswith(("'", '"')):
+            return False
+        if re.search(r"\b(?:def|class)\s+$", before):
+            return True
+        at_line_assignment = not before and re.match(r"\s*=", after) is not None
+        return (
+            not before.rstrip().endswith((".", "'", '"'))
+            and (
+                at_line_assignment
+                or (
+                    bool(before)
+                    and before[-1] in " \t([{,:;"
+                )
+            )
+            and re.match(r"\s*(?:[=,.;:)(\]}])", after) is not None
         )
 
     # A source path such as ``execution_submit_boundary.py`` is one lexical
@@ -1113,10 +1151,11 @@ def _source_text_for_base64_scan(
     masked = _BASE64_CANDIDATE.sub(
         lambda match: (
             "<code>"
-            if is_source_code_atom(match)
+            if is_source_code_atom(match, masked)
+            or is_source_identifier_in_code(match, masked)
             else match.group(0)
         ),
-        text,
+        masked,
     )
     # A simple assignment such as ``sources=sources`` can expose the left
     # hand side after the right-hand identifier is replaced above.  Mask the
@@ -1184,6 +1223,7 @@ def _generated_context_text_for_base64_scan(text: str) -> str:
 def _source_text_for_secret_scan(text: str) -> str:
     """Mask code identifiers that resemble secret names, not secret values."""
 
+    text = _BOUNDED_SOURCE_SECRET_PLACEHOLDER.sub("<source-placeholder>", text)
     return _BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT.sub("<code>", text)
 
 
