@@ -2127,6 +2127,35 @@ def _typed_payload(
             structured_text = (
                 _structured_tool_output_text(item) if is_structured_result else None
             )
+            if is_read_file_projection_tool_result and key == "output":
+                if is_scratch_read_file_tool_result:
+                    typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+                    continue
+                if source_metadata is None:
+                    typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+                    continue
+                output_text = _structured_tool_output_text(item)
+                if output_text is None:
+                    typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+                    continue
+                presentation = _segment_read_file_presentation(
+                    output_text,
+                    source_metadata,
+                    grant_texts,
+                    used_grants,
+                    registry=registry,
+                    session_id=request_identity[0],
+                    turn_id=request_identity[1],
+                    request_id=request_identity[2],
+                    policy_digest=request_identity[3],
+                )
+                if isinstance(item, list):
+                    typed[key] = [
+                        {"type": LiteralSegment("input_text"), "text": presentation}
+                    ]
+                else:
+                    typed[key] = presentation
+                continue
             if is_kanban_assignees_result and structured_text is not None:
                 projected = _project_kanban_assignees_terminal_result(structured_text)
                 if projected is not None:
@@ -2547,13 +2576,15 @@ def _typed_payload(
 
 
 def _structured_tool_output_text(value: Any) -> str | None:
-    """Return the sole text item from a Responses function output array.
+    """Return a scalar or the sole strict text item from a Responses output.
 
-    Specialized projectors may inspect this exact transport shape.  Mixed,
-    image-bearing, extended, or multi-item outputs stay on the conservative
-    whole-result elision path.
+    Specialized projectors may inspect the existing one-item array form.
+    Mixed, image-bearing, extended, or multi-item outputs stay on the
+    conservative whole-result elision path.
     """
 
+    if isinstance(value, str):
+        return value
     if not isinstance(value, list) or len(value) != 1:
         return None
     item = value[0]
@@ -2709,10 +2740,15 @@ def _restore_source_provenance_sidecar(
     messages = restored.get("messages")
     if not isinstance(sidecar, list):
         return restored
+    extra_body = restored.get("extra_body")
+    responses_input_present = isinstance(restored.get("input"), list) or (
+        isinstance(extra_body, Mapping) and isinstance(extra_body.get("input"), list)
+    )
+    consumed_entries: set[int] = set()
     if isinstance(messages, list):
         copied_messages = list(messages)
         changed = False
-        for entry in sidecar:
+        for entry_index, entry in enumerate(sidecar):
             if not isinstance(entry, Mapping):
                 continue
             index = entry.get("message_index")
@@ -2732,6 +2768,14 @@ def _restore_source_provenance_sidecar(
                 != sha256(content.encode("utf-8")).hexdigest()
             ):
                 continue
+            if responses_input_present:
+                # A Responses request may still carry the pre-conversion
+                # ``messages`` copy in an SDK-visible kwargs dict. Consume
+                # its sidecar entry for duplicate protection, but leave the
+                # legacy tool result unattached so the Responses projection
+                # path elides it instead of replaying the same source twice.
+                consumed_entries.add(entry_index)
+                continue
             copied = dict(message)
             copied["_source_provenance"] = {
                 key: entry[key]
@@ -2744,6 +2788,7 @@ def _restore_source_provenance_sidecar(
                 if key in entry
             }
             copied_messages[index] = copied
+            consumed_entries.add(entry_index)
             changed = True
         if changed:
             restored["messages"] = copied_messages
@@ -2751,41 +2796,48 @@ def _restore_source_provenance_sidecar(
     def _restore_input_items(input_items: Any) -> tuple[Any, bool]:
         if not isinstance(input_items, list):
             return input_items, False
-        copied_input = list(input_items)
-        changed = False
-        for entry in sidecar:
-            if not isinstance(entry, Mapping):
-                continue
-            expected_sha = entry.get("content_sha256")
-            original_call_id = entry.get("tool_call_id")
-            if not isinstance(expected_sha, str) or not isinstance(original_call_id, str):
-                continue
-            try:
-                from agent.codex_responses_adapter import _clamp_responses_call_id
+        from agent.codex_responses_adapter import _effective_responses_tool_call_id
 
-                expected_call_id = _clamp_responses_call_id(original_call_id)
-            except Exception:
-                expected_call_id = original_call_id
+        copied_input = list(input_items)
+        candidates_by_entry: dict[int, list[int]] = {}
+        entries_by_result: dict[int, list[int]] = {}
+        for entry_index, entry in enumerate(sidecar):
+            if entry_index in consumed_entries or not isinstance(entry, Mapping):
+                continue
+            tool_call_id = _effective_responses_tool_call_id(
+                entry.get("tool_call_id")
+            )
+            content_sha256 = entry.get("content_sha256")
+            if tool_call_id is None or not isinstance(content_sha256, str):
+                continue
             candidates: list[int] = []
-            for index, item in enumerate(copied_input):
+            for index, item in enumerate(input_items):
                 if not isinstance(item, Mapping):
                     continue
-                output = item.get("output")
-                output_text = (
-                    _structured_tool_output_text(output)
-                    if isinstance(output, (list, Mapping))
-                    else output
-                )
                 if (
-                    item.get("type") == "function_call_output"
-                    and item.get("call_id") == expected_call_id
-                    and isinstance(output_text, str)
-                    and sha256(output_text.encode("utf-8")).hexdigest() == expected_sha
+                    item.get("type") != "function_call_output"
+                    or item.get("call_id") != tool_call_id
+                ):
+                    continue
+                output_text = _structured_tool_output_text(item.get("output"))
+                if (
+                    isinstance(output_text, str)
+                    and sha256(output_text.encode("utf-8")).hexdigest()
+                    == content_sha256
                 ):
                     candidates.append(index)
+                    entries_by_result.setdefault(index, []).append(entry_index)
+            candidates_by_entry[entry_index] = candidates
+        changed = False
+        for entry_index, entry in enumerate(sidecar):
+            if entry_index in consumed_entries or not isinstance(entry, Mapping):
+                continue
+            candidates = candidates_by_entry.get(entry_index, [])
             if len(candidates) != 1:
                 continue
             index = candidates[0]
+            if len(entries_by_result.get(index, [])) != 1:
+                continue
             copied = dict(copied_input[index])
             copied["_source_provenance"] = {
                 key: entry[key]
@@ -2798,6 +2850,7 @@ def _restore_source_provenance_sidecar(
                 if key in entry
             }
             copied_input[index] = copied
+            consumed_entries.add(entry_index)
             changed = True
         return copied_input if changed else input_items, changed
 
@@ -2805,11 +2858,9 @@ def _restore_source_provenance_sidecar(
     if input_changed:
         restored["input"] = restored_input
 
-    # The consumer-Codex SDK transform bypass moves the already-normalized
-    # bulk ``input`` under ``extra_body`` immediately before dispatch.  That
-    # remains provider wire data, so bind the same exact call-id/content proof
-    # there as well; no other nested shape is accepted.
-    extra_body = restored.get("extra_body")
+    # The consumer-Codex SDK transform can move the normalized input under
+    # ``extra_body`` immediately before dispatch. Preserve the same exact
+    # source binding there; no other nested shape is accepted.
     if isinstance(extra_body, Mapping):
         restored_extra_input, extra_input_changed = _restore_input_items(
             extra_body.get("input")
@@ -2849,6 +2900,11 @@ def authorize_agent_sdk_kwargs(
         for key, value in kwargs.items()
         if key not in controls and key not in _INTERNAL_EGRESS_KEYS
     }
+    scratch_read_file_tool_call_ids = (
+        _scratch_read_file_tool_call_ids(body)
+        if protected_kanban_remote and protected_provider_route
+        else frozenset()
+    )
     if protected_kanban_remote:
         body = _sanitize_protected_kanban_body(body)
     body = _restore_source_provenance_sidecar(body, sidecar)
@@ -2932,11 +2988,7 @@ def authorize_agent_sdk_kwargs(
             if protected_kanban_remote and protected_provider_route
             else frozenset()
         ),
-        scratch_read_file_tool_call_ids=(
-            _scratch_read_file_tool_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
-            else frozenset()
-        ),
+        scratch_read_file_tool_call_ids=scratch_read_file_tool_call_ids,
         git_workspace_diagnostic_call_ids=(
             _git_workspace_diagnostic_call_ids(body)
             if protected_kanban_remote and protected_provider_route

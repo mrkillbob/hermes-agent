@@ -2024,6 +2024,9 @@ def _reasoning_config_for_wire(agent):
 
 def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = None) -> dict:
     """Build the keyword arguments dict for the active API mode."""
+    # One-shot continuation override — consumed exactly once, on the FIRST
+    # request this call builds (only one api_mode branch runs per invocation).
+    _wire_reasoning_config = _reasoning_config_for_wire(agent)
     # Capture internal provenance before any transport converts or sanitizes
     # messages. Codex Responses removes internal tool-message keys entirely,
     # and some chat transports normalize the list in place.
@@ -2160,7 +2163,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
             context_management=_context_management,
         )
         return _attach_source_provenance_sidecar(
-            agent, _codex_kwargs, sidecar=_source_sidecar
+            agent, _codex_kwargs, api_messages
         )
 
     # ── chat_completions (default) ─────────────────────────────────────
