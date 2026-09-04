@@ -514,11 +514,20 @@ def _is_legacy_intake_task(details: object, task: KanbanTask) -> bool:
     if not isinstance(details, dict):
         return False
     body = details.get("body")
+    try:
+        evidence = json.loads(body.rsplit("\n", 1)[-1]) if isinstance(body, str) else None
+    except (TypeError, json.JSONDecodeError):
+        evidence = None
     return (
         details.get("status") == "blocked"
-        and details.get("idempotency_key") == task.idempotency_key
         and isinstance(body, str)
         and "This card is intake-only and starts blocked; an operator must validate" in body
+        and isinstance(evidence, dict)
+        and evidence.get("repository") == task.evidence.get("repository")
+        and evidence.get("pr_number") == task.evidence.get("pr_number")
+        and evidence.get("feedback_kind") == task.evidence.get("feedback_kind")
+        and evidence.get("feedback_id") == task.evidence.get("feedback_id")
+        and evidence.get("expected_head_sha") == task.evidence.get("expected_head_sha")
     )
 
 

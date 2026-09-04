@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 import subprocess
@@ -364,12 +365,28 @@ def _is_legacy_intake_task(
     if not isinstance(details, Mapping):
         return False
     body = details.get("body")
+    evidence = _legacy_task_evidence(body)
     return (
         details.get("status") == "blocked"
-        and details.get("idempotency_key") == _receipt_idempotency_key(receipt)
         and isinstance(body, str)
         and _LEGACY_INTAKE_ONLY_MARKER in body
+        and evidence is not None
+        and evidence.get("repository") == receipt.repository
+        and evidence.get("pr_number") == receipt.pr_number
+        and evidence.get("feedback_kind") == receipt.feedback_kind
+        and evidence.get("feedback_id") == receipt.feedback_id
+        and evidence.get("expected_head_sha") == receipt.head_sha
     )
+
+
+def _legacy_task_evidence(body: object) -> Mapping[str, object] | None:
+    if not isinstance(body, str):
+        return None
+    try:
+        evidence = json.loads(body.rsplit("\n", 1)[-1])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return evidence if isinstance(evidence, Mapping) else None
 
 
 class LocalGitRepository:
