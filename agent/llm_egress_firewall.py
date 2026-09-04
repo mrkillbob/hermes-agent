@@ -314,7 +314,13 @@ _BOUNDED_COMMAND_PATH = re.compile(r"^/[a-z][a-z0-9_.-]{2,31}$")
 _BOUNDED_RENDER_MARKER = re.compile(r"^[nN]---$")
 _BOUNDED_SOURCE_CONTROL_FRAGMENT = re.compile(r"^[0-9a-f]{13,39}$")
 _SOURCE_CONTROL_CONTEXT = re.compile(
-    r"\b(?:commit|sha(?:1|256)?|head|base|revision|digest|hash)\b",
+    r"\b(?:commit|sha(?:1|256)?|head|base|revision|digest|hash)"
+    r"(?:_sha)?\b",
+    re.IGNORECASE,
+)
+_GITHUB_SOURCE_CONTROL_URL_CONTEXT = re.compile(
+    r"(?:https://github\.com/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}/"
+    r"(?:compare|commit|commits)/|\]\(https://github\.com/)",
     re.IGNORECASE,
 )
 # Any-case letters + optional trailing slash: GitHub-style org/repo slugs
@@ -895,13 +901,31 @@ def _source_text_for_base64_scan(text: str) -> str:
     unchanged and are still rejected by the canonical scanner.
     """
 
-    def is_source_code_atom(candidate: str) -> bool:
+    def is_source_code_atom(match: re.Match[str]) -> bool:
         # ``_BASE64_CANDIDATE`` includes padding characters in the match, so
         # a source keyword such as ``line_ranges=`` arrives here with its
         # trailing assignment marker attached. Strip only that marker; a
         # padded encoded value remains unchanged and fail-closed.
+        candidate = match.group(1)
         source_atom = candidate[:-1] if candidate.endswith("=") else candidate
+        source_control_window = text[
+            max(0, match.start() - 256) : min(len(text), match.end() + 32)
+        ]
+        is_source_control_identity = (
+            re.fullmatch(
+                r"[0-9a-f]{7,12}|[0-9a-f]{40}|[0-9a-f]{64}",
+                candidate.lower(),
+            )
+            is not None
+            and (
+                _SOURCE_CONTROL_CONTEXT.search(source_control_window) is not None
+                or _GITHUB_SOURCE_CONTROL_URL_CONTEXT.search(source_control_window)
+                is not None
+            )
+        )
         return (
+            is_source_control_identity
+            or
             _BOUNDED_SOURCE_CODE_ATOM.fullmatch(source_atom) is not None
             or _PYTHON_DUNDER_IDENTIFIER.fullmatch(source_atom) is not None
             or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(source_atom) is not None
@@ -919,7 +943,7 @@ def _source_text_for_base64_scan(text: str) -> str:
     masked = _BASE64_CANDIDATE.sub(
         lambda match: (
             "<code>"
-            if is_source_code_atom(match.group(1))
+            if is_source_code_atom(match)
             else match.group(0)
         ),
         text,

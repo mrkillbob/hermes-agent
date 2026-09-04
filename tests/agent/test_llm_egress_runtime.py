@@ -563,6 +563,44 @@ def test_protected_codex_elides_bound_kanban_attachments_output(tmp_path, monkey
     assert "super-secret-value" not in rendered
 
 
+def test_protected_codex_allows_benign_bound_kanban_attachments_output(
+    tmp_path, monkeypatch
+):
+    """A benign bound attachment result must not become untrusted provenance."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_kanban_attachments_benign"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": "gpt-5.6-terra",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": "kanban_attachments",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": "No attachments found.",
+                },
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    assert authorized["input"][1]["output"].startswith(
+        "kanban_attachments completed locally;"
+    )
+
+
 def test_protected_nous_elides_bound_kanban_show_result(tmp_path, monkeypatch):
     """The same safe projection covers protected free-provider workers."""
 

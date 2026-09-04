@@ -2760,6 +2760,7 @@ def _typed_payload(
                 (
                     is_recognized_tool_result,
                     is_elided_kanban_tool_result,
+                    is_kanban_attachment_result,
                     is_search_projection_tool_result,
                     is_read_file_projection_tool_result,
                     is_web_replay_tool_result,
