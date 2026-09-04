@@ -380,6 +380,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Provider the --model belongs to (passed as "
                                "--provider <name> to the worker). Requires "
                                "--model.")
+    p_create.add_argument("--reasoning", default=None, dest="reasoning_effort",
+                          help="Pin the worker reasoning effort for this task "
+                               "(none, minimal, low, medium, high, xhigh, "
+                               "max, or ultra). Accepted for forward "
+                               "compatibility with callers that set it; not "
+                               "yet threaded through to worker dispatch.")
     p_create.add_argument("--goal", action="store_true", dest="goal_mode",
                           help="Run the worker in a goal loop: after each "
                                "turn a judge checks the response against the "
