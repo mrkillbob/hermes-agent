@@ -2,9 +2,15 @@ import { translateNow } from '@/i18n'
 import { textPart } from '@/lib/chat-messages'
 import { coerceGatewayText } from '@/lib/chat-runtime'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
-import { type AgentNoticePayload, clearAgentNotice, nativeNoticeInput, showAgentNotice } from '@/store/agent-notices'
+import {
+  type AgentNoticePayload,
+  clearAgentNotice,
+  nativeNoticeInput,
+  publishAgentNotice,
+  showAgentNotice
+} from '@/store/agent-notices'
 import { clearClarifyRequest } from '@/store/clarify'
-import { setSessionCompacting } from '@/store/compaction'
+import { reconcileSessionCompacting, setSessionCompacting } from '@/store/compaction'
 import { refreshBackgroundProcesses } from '@/store/composer-status'
 import { applyGoalStatusText } from '@/store/goals'
 import { dispatchNativeNotification } from '@/store/native-notifications'
@@ -28,7 +34,7 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
       setSessionCompacting(sessionId, true)
       compactedTurnRef.current.add(sessionId)
     } else if (sessionId && payload?.kind === 'compacted') {
-      setSessionCompacting(sessionId, false)
+      reconcileSessionCompacting(sessionId, 'terminal')
       compactedTurnRef.current.delete(sessionId)
     } else if (sessionId && payload?.kind === 'process') {
       // The gateway's notification poller announces background process
@@ -36,6 +42,35 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
       void refreshBackgroundProcesses(sessionId)
     } else if (sessionId && payload?.kind === 'goal') {
       applyGoalStatusText(sessionId, coerceGatewayText(payload?.text))
+    }
+
+    return true
+  }
+
+  if (event.type === 'btw.complete') {
+    // prompt.btw answers a side question and emits this on the originating
+    // session. Persistent transcript line, matching the TUI's `[btw "q"]`
+    // — without it Desktop only ever showed the acknowledgement (#99065).
+    const text = coerceGatewayText(payload?.text).trim()
+
+    if (text && sessionId) {
+      const taskId = String(payload?.task_id ?? '').trim()
+      const question = coerceGatewayText(payload?.question).trim()
+      const header = `[btw${question ? ` "${question}"` : ''}${taskId ? ` (${taskId})` : ''}]`
+
+      flushQueuedDeltas(sessionId)
+      updateSessionState(sessionId, state => ({
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: `btw-complete-${taskId || Date.now()}`,
+            role: 'system',
+            parts: [textPart(`${header}\n${text}`, occurredAt)],
+            timestamp: occurredAt
+          }
+        ]
+      }))
     }
 
     return true
@@ -88,6 +123,7 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
     const notice = event.payload as AgentNoticePayload | undefined
 
     showAgentNotice(notice)
+    publishAgentNotice(notice)
 
     // The urgent pair (access paused / restored) also breaks through as a
     // native OS notification when Hermes is backgrounded; dispatch is gated
@@ -128,7 +164,7 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
       clearAllPrompts(sessionId)
       clearClarifyRequest(undefined, sessionId)
       clearActiveSessionTodos(sessionId)
-      setSessionCompacting(sessionId, false)
+      reconcileSessionCompacting(sessionId, 'terminal')
       compactedTurnRef.current.delete(sessionId)
     }
 

@@ -72,6 +72,7 @@ import {
   toggleSidebarMessagingOpen,
   unpinSession
 } from '@/store/layout'
+import { $worldEnabled } from '@/store/lunar-city'
 import { notifyError } from '@/store/notifications'
 import {
   $newChatProfile,
@@ -137,6 +138,7 @@ import {
   type AppView,
   ARTIFACTS_ROUTE,
   CRON_ROUTE,
+  LUNAR_CITY_ROUTE,
   MESSAGING_ROUTE,
   SIDEBAR_NAV_AREA,
   type SidebarNavContribution,
@@ -161,6 +163,7 @@ import {
   ProjectBackRow,
   ProjectMenu,
   projectTreeCwd,
+  reconcileEnteredProjectSessions,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
   type SidebarSessionGroup,
@@ -221,6 +224,12 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     icon: props => <Codicon name="watch" {...props} />,
     route: CRON_ROUTE,
     keybindActionId: 'nav.cron'
+  },
+  {
+    id: 'lunar-city',
+    label: 'Lunar City',
+    icon: props => <Codicon name="globe" {...props} />,
+    route: LUNAR_CITY_ROUTE
   }
 ]
 
@@ -296,7 +305,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onNavigate: (item: SidebarNavItem) => void
   onLoadMoreSessions: () => Promise<void> | void
   onLoadMoreMessaging?: (platform: string) => Promise<void> | void
-  onResumeSession: (sessionId: string) => void
+  onResumeSession: (sessionId: string, session?: SessionInfo) => void
   onDeleteSession: (sessionId: string) => void
   onArchiveSession: (sessionId: string) => void
   onBranchSession: (sessionId: string) => void
@@ -327,6 +336,7 @@ export function ChatSidebar({
   // Contributed nav rows (plugins pairing a page with a sidebar entry) render
   // below the built-ins with the same chrome; active = at their route.
   const navContributions = useContributions(SIDEBAR_NAV_AREA)
+  const worldEnabled = useStore($worldEnabled)
 
   const contributedNav = useMemo<SidebarNavItem[]>(
     () =>
@@ -1006,14 +1016,22 @@ export function ChatSidebar({
     )
   }, [overviewEnteredProject, enteredProjectTree, orderRepos, isHiddenFromProjects])
 
+  const enteredProjectOverlaySessions = useMemo(
+    () => reconcileEnteredProjectSessions(agentSessions, overviewEnteredProject?.previewSessions),
+    [agentSessions, overviewEnteredProject?.previewSessions]
+  )
+
   // Overlay live `$sessions` onto the entered project so a just-created session
   // (which the backend snapshot hasn't folded in yet) counts as content and
-  // renders immediately — same optimistic layer as the overview previews. The
-  // backend now seeds each project folder as an (empty) repo, so the overlay
-  // always has a lane to place a new in-project session into.
+  // renders immediately. Also carry over the overview's current preview rows:
+  // its project tree and the separately hydrated drill-in can resolve at
+  // different times, but a row visible in the overview must not disappear on
+  // entry. The backend seeds each project folder as an (empty) repo, so the
+  // overlay always has a lane to place a missing in-project session into.
   const enteredProjectContent = useMemo(
-    () => (enteredProject ? overlayLiveLanes(enteredProject, agentSessions, removedSessionIds) : undefined),
-    [enteredProject, agentSessions, removedSessionIds]
+    () =>
+      enteredProject ? overlayLiveLanes(enteredProject, enteredProjectOverlaySessions, removedSessionIds) : undefined,
+    [enteredProject, enteredProjectOverlaySessions, removedSessionIds]
   )
 
   const scopedRepoPaths = useMemo(
@@ -1454,6 +1472,8 @@ export function ChatSidebar({
       })
     )
 
+  const visibleNav = [...SIDEBAR_NAV, ...contributedNav].filter(item => item.id !== 'lunar-city' || worldEnabled)
+
   return (
     <Sidebar
       className={cn(
@@ -1465,12 +1485,14 @@ export function ChatSidebar({
         'border-(--sidebar-edge-border) bg-(--ui-sidebar-surface-background) opacity-100'
       )}
       collapsible="none"
+      data-tip-region=""
+      data-tour="sessions-sidebar"
     >
       <SidebarContent className="gap-0 overflow-hidden bg-transparent px-2.5">
         <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
           <SidebarGroupContent>
             <SidebarMenu className="gap-px">
-              {[...SIDEBAR_NAV, ...contributedNav].map(item => {
+              {visibleNav.map(item => {
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
 
                 const active =
@@ -1500,6 +1522,9 @@ export function ChatSidebar({
                       !isInteractive &&
                         'cursor-default hover:border-transparent hover:bg-transparent hover:text-inherit'
                     )}
+                    // A tip anchored to the label points at the end of the
+                    // word; the row is what it's actually about.
+                    data-tip-region=""
                     onClick={() => {
                       // A plain new session lands in whatever profile the live
                       // gateway is on (= the active switcher context). null →
@@ -1523,7 +1548,18 @@ export function ChatSidebar({
                     type="button"
                   >
                     <item.icon className="size-4 shrink-0 text-[color-mix(in_srgb,currentColor_72%,transparent)]" />
-                    <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
+                    {/* Shrink-to-fit, not flex-1: the label carries the row's
+                        `data-tour` handle, and anything anchored to it should
+                        land at the end of the WORD, not out at the sidebar's
+                        edge. Still truncates — `min-w-0` lets it shrink past
+                        its content when the rail is narrow — and the trailing
+                        chip's `ml-auto` was already doing the pushing that
+                        `flex-1` looked like it was for.
+                        Its own `sidebar-nav-` namespace: the overlay nav owns
+                        `nav-<id>`, and both are on screen with Settings open. */}
+                    <span className="min-w-0 truncate" data-tip-arrow-only="" data-tour={`sidebar-nav-${item.id}`}>
+                      {s.nav[item.id] ?? item.label}
+                    </span>
                     {isNewSession && (
                       <KbdGroup
                         className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
@@ -1788,7 +1824,7 @@ export function ChatSidebar({
                     ) : undefined
                   ) : undefined
                 }
-                liveSessions={inProject ? agentSessions : undefined}
+                liveSessions={inProject ? enteredProjectOverlaySessions : undefined}
                 manualOrderIds={agentOrderManual ? agentOrderIds : sortOrderIds}
                 onArchiveSession={onArchiveSession}
                 onBranchSession={onBranchSession}
