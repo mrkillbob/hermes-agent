@@ -542,35 +542,39 @@ def _write_role_identity(
 
 
 def _write_role_config(profile_dir: Path, role: FederationRole, manifest: FederationManifest) -> None:
-    """Apply the federation's primary and auxiliary route to a role profile."""
-    policy = _role_model_policy(manifest, role)
-    if not policy:
-        return
+    """Apply the role's toolsets and, when declared, the federation's primary/auxiliary route."""
     from utils import atomic_yaml_write
 
     path = profile_dir / "config.yaml"
     config = _read_profile_yaml(path)
-    primary = dict(policy["primary"])
-    model = dict(config.get("model")) if isinstance(config.get("model"), dict) else {}
-    old_provider = model.get("provider")
-    if old_provider and old_provider != primary["provider"]:
-        for key in ("base_url", "api_key", "api_mode"):
-            model.pop(key, None)
-    model.update({"provider": primary["provider"], "default": primary["model"]})
-    config["model"] = model
-    agent = dict(config.get("agent")) if isinstance(config.get("agent"), dict) else {}
-    if primary.get("reasoning_effort"):
-        agent["reasoning_effort"] = primary["reasoning_effort"]
-    if agent:
-        config["agent"] = agent
+    # Always persist the role's declared toolsets, even when the role's
+    # department has no model policy — otherwise the profile silently falls
+    # back to the default toolset instead of the role's declared surface.
     config["toolsets"] = list(role.toolsets)
-    if policy.get("fallback_providers"):
-        config["fallback_providers"] = [dict(item) for item in policy["fallback_providers"]]
-    auxiliary = dict(config.get("auxiliary")) if isinstance(config.get("auxiliary"), dict) else {}
-    for task, route in policy.get("auxiliary", {}).items():
-        auxiliary[task] = dict(route)
-    if auxiliary:
-        config["auxiliary"] = auxiliary
+
+    policy = _role_model_policy(manifest, role)
+    if policy:
+        primary = dict(policy["primary"])
+        model = dict(config.get("model")) if isinstance(config.get("model"), dict) else {}
+        old_provider = model.get("provider")
+        if old_provider and old_provider != primary["provider"]:
+            for key in ("base_url", "api_key", "api_mode"):
+                model.pop(key, None)
+        model.update({"provider": primary["provider"], "default": primary["model"]})
+        config["model"] = model
+        agent = dict(config.get("agent")) if isinstance(config.get("agent"), dict) else {}
+        if primary.get("reasoning_effort"):
+            agent["reasoning_effort"] = primary["reasoning_effort"]
+        if agent:
+            config["agent"] = agent
+        if policy.get("fallback_providers"):
+            config["fallback_providers"] = [dict(item) for item in policy["fallback_providers"]]
+        auxiliary = dict(config.get("auxiliary")) if isinstance(config.get("auxiliary"), dict) else {}
+        for task, route in policy.get("auxiliary", {}).items():
+            auxiliary[task] = dict(route)
+        if auxiliary:
+            config["auxiliary"] = auxiliary
+
     atomic_yaml_write(path, config, sort_keys=False)
 
 
