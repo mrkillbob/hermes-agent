@@ -277,6 +277,24 @@ _BOUNDED_SOURCE_CLI_VALUE = re.compile(
     r"(?P<prefix>--[a-z][a-z0-9]*(?:-[a-z0-9]+)*=)"
     r"(?P<value>[A-Z]{3,8})(?P<suffix>[^A-Za-z0-9_+/=-])"
 )
+_BOUNDED_SOURCE_REVIEW_SYNTAX = re.compile(
+    r"(?:(?<=--event )(?:APPROVE|REQUEST_CHANGES|COMMENT)(?=[|` ])"
+    r"|(?<=\|)(?:APPROVE|REQUEST_CHANGES|COMMENT)(?=[|` ])"
+    r"|(?<=--body )TEXT(?=[`;]|\Z))"
+)
+_BOUNDED_SOURCE_ADVISORY_KEY = re.compile(
+    r"(?:GHSA-[A-Za-z0-9]+(?:-[A-Za-z0-9]+){2,8}|PYSEC-[0-9]{4}-[0-9]{3,})"
+)
+_BOUNDED_SOURCE_GIT_HEAD_OUTPUT = re.compile(
+    r"(?m)^(?P<full>[0-9a-f]{40})\n(?P<prefix>[0-9a-f]{10})[0-9a-f]{0,30} [^\n]*$"
+)
+_BOUNDED_SOURCE_PATH_FRAGMENT = re.compile(
+    r"^[A-Za-z0-9]/[A-Za-z0-9._-]{2,}(?:/[A-Za-z0-9._-]{2,})+$"
+)
+_BOUNDED_SOURCE_DASHED_TITLE = re.compile(
+    r"^[A-Z][A-Za-z0-9]+(?:-[A-Za-z][A-Za-z0-9]+)+$"
+)
+_BOUNDED_SOURCE_LINE_LABEL = re.compile(r"^[nN][0-9]{2,6}$")
 _BOUNDED_SOURCE_CODE_ASSIGNMENT = re.compile(
     r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,7}="
 )
@@ -931,6 +949,11 @@ def _source_text_for_base64_scan(text: str) -> str:
             or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(source_atom) is not None
             or _PYTHON_MIXED_CASE_IDENTIFIER.fullmatch(source_atom) is not None
             or _BOUNDED_PASCAL_CASE_IDENTIFIER.fullmatch(source_atom) is not None
+            or _BOUNDED_SOURCE_ADVISORY_KEY.fullmatch(source_atom) is not None
+            or _BOUNDED_SOURCE_PATH_FRAGMENT.fullmatch(source_atom) is not None
+            or _BOUNDED_SOURCE_DASHED_TITLE.fullmatch(source_atom) is not None
+            or _BOUNDED_SOURCE_LINE_LABEL.fullmatch(source_atom) is not None
+            or source_atom in {"LICENSE", "BM25", "HTML", "PKCS", "IANA", "CONTRIBUTING", "sprmn24"}
             # argparse usage renders a small, fixed set of all-caps
             # metavariables.  They are command syntax, not encoded payloads;
             # keep this exception enumerated so arbitrary values such as
@@ -972,10 +995,15 @@ def _source_text_for_base64_scan(text: str) -> str:
         return "<diff metadata>"
 
     masked = _BOUNDED_SOURCE_DIFF_METADATA.sub(mask_diff_metadata, masked)
-    return _BOUNDED_SOURCE_CLI_VALUE.sub(
+    masked = _BOUNDED_SOURCE_GIT_HEAD_OUTPUT.sub(
+        lambda match: f"<source-control-sha>\n<source-control-sha> {match.group(0).split(' ', 1)[1]}",
+        masked,
+    )
+    masked = _BOUNDED_SOURCE_CLI_VALUE.sub(
         lambda match: f"{match.group('prefix')}<code>{match.group('suffix')}",
         masked,
     )
+    return _BOUNDED_SOURCE_REVIEW_SYNTAX.sub("<code>", masked)
 
 
 def _generated_context_text_for_base64_scan(text: str) -> str:

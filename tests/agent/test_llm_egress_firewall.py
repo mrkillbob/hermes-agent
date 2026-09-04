@@ -895,6 +895,31 @@ def test_generated_context_allows_source_control_sha_with_explicit_context(tmp_p
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_generated_context_allows_bounded_review_command_syntax(tmp_path):
+    request = TypedOutboundRequest(
+        payload={
+            "messages": [
+                {
+                    "role": LiteralSegment("user"),
+                    "content": GeneratedContextSegment(
+                        "github-pr-feedback submit-review --event "
+                        "APPROVE|REQUEST_CHANGES|COMMENT --body TEXT"
+                    ),
+                }
+            ]
+        },
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="req-1",
+        policy_digest="policy-1",
+    )
+
+    decision = firewall(tmp_path).preflight(request, _route())
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
 def test_generated_context_attribution_prefix_does_not_skip_redaction(tmp_path):
     """Required attribution must not bypass sanitization of the rest of a prompt."""
     encoded = base64.b64encode(b"generated context that must not leave the host").decode(
