@@ -80,7 +80,12 @@ logger = logging.getLogger(__name__)
 _VALIDATED_SYNTAX_TOOL_NAMES = frozenset({"terminal"})
 _REMOTE_KANBAN_PROJECTION_TOOL_NAMES = frozenset({"kanban_show"})
 _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES = frozenset({"kanban_attachments"})
-_REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES = frozenset({"terminal"})
+# Local action results are safe to replay only as bounded outcomes, and only
+# when the result is bound to the exact preceding call.  Browser Use runs
+# through ``browser_exec`` rather than ``terminal``; omitting it here makes a
+# protected worker treat its own browser result as untrusted provenance and
+# fail on otherwise harmless page identifiers or encoded-looking text.
+_REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES = frozenset({"terminal", "browser_exec"})
 _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"search_files"})
 _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file"})
 _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES = frozenset({"web_extract", "web_search"})
@@ -2577,7 +2582,8 @@ def _typed_payload(
                 continue
             if (
                 redact_terminal_arguments
-                and direct_name == "terminal"
+                and isinstance(direct_name, str)
+                and direct_name in _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES
                 and key == "arguments"
                 and isinstance(item, str)
             ):

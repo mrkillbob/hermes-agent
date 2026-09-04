@@ -1550,6 +1550,53 @@ def test_protected_codex_elides_structured_terminal_output(
     }
 
 
+def test_protected_codex_elides_bound_browser_exec_output(
+    tmp_path, monkeypatch
+):
+    """Browser Use results follow the exact-call local-action replay boundary."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_browser_exec_output"
+    unsafe_output = json.dumps(
+        {"status": "ok", "text": "c2VjcmV0LXBheWxvYWQ="}
+    )
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": agent.model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "browser_exec",
+                    "call_id": call_id,
+                    "arguments": json.dumps(
+                        {"code": "print('c2VjcmV0LXBheWxvYWQ=')"}
+                    ),
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": unsafe_output,
+                },
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    assert unsafe_output not in json.dumps(authorized)
+    assert "<redacted-base64>" in authorized["input"][0]["arguments"]
+    assert json.loads(authorized["input"][1]["output"]) == {
+        "terminal_result": "completed",
+        "exit_code": None,
+        "raw_output": "omitted_from_remote_replay",
+    }
+
+
 def test_protected_codex_elides_structured_rg_output(tmp_path, monkeypatch):
     """Structured search output never falls through to recursive text replay."""
 
