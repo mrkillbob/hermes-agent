@@ -219,6 +219,40 @@ def test_seed_refresh_existing_with_identity_preserves_custom_soul(tmp_path: Pat
     assert (profile_dir / "SOUL.md").read_text().startswith(original_soul.rstrip())
 
 
+def test_write_role_config_persists_toolsets_without_a_model_policy(tmp_path: Path) -> None:
+    from hermes_cli.federation import FederationManifest, FederationRole, _write_role_config
+
+    role = FederationRole(
+        id="no-policy-role",
+        display_name="No Policy Role",
+        department="unrouted_department",
+        description="A role whose department has no configured model policy.",
+        skills=(),
+        toolsets=("kanban", "file"),
+        authority="advisory",
+        schedule="manual",
+        profile_aliases=(),
+        handoffs=(),
+    )
+    manifest = FederationManifest(
+        schema_name="hermes_federation_manifest_v1",
+        version="test",
+        departments=(),
+        groups=(),
+        model_policies={},
+        model_policy_provenance={},
+    )
+    profile_dir = tmp_path / "profiles" / "no-policy-role"
+    profile_dir.mkdir(parents=True)
+
+    _write_role_config(profile_dir, role, manifest)
+
+    import yaml
+
+    config = yaml.safe_load((profile_dir / "config.yaml").read_text())
+    assert config["toolsets"] == ["kanban", "file"]
+
+
 def test_seed_cleans_up_partial_new_profile_after_failure(tmp_path: Path) -> None:
     manifest = load_manifest(MANIFEST)
     profile_dir = tmp_path / "profiles" / "writer"
