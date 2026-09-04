@@ -321,6 +321,15 @@ class FeedbackLedger:
             )
             """)
         self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS merge_enrollments (
+                repository TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                enrolled_at TEXT NOT NULL,
+                enrolled_by TEXT NOT NULL,
+                PRIMARY KEY (repository, pr_number)
+            )
+            """)
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS deployment_receipts (
                 receipt_id TEXT PRIMARY KEY,
                 repository TEXT NOT NULL,
@@ -1047,6 +1056,68 @@ class FeedbackLedger:
             if result.rowcount != 1:
                 raise LedgerStateError("feedback dispatch is not complete")
 
+    def reconcile_superseded_feedback_action(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        stable_fix_sha: str,
+        actioned_at: datetime,
+    ) -> None:
+        """Record one externally verified, exact review-comment resolution.
+
+        This transition is intentionally narrower than ordinary task completion:
+        the caller must already have verified the marker, exact PR identity, and
+        resolved review thread through the governed superseded-feedback flow.
+        """
+
+        if receipt.feedback_kind != "review_comment":
+            raise ValueError("superseded feedback must be an exact review comment")
+        if (
+            not isinstance(stable_fix_sha, str)
+            or len(stable_fix_sha) != 40
+            or any(
+                character not in "0123456789abcdefABCDEF"
+                for character in stable_fix_sha
+            )
+        ):
+            raise ValueError("stable_fix_sha must be a full hexadecimal SHA")
+        actioned_at = _aware_utc(actioned_at, "actioned_at")
+        normalized_fix = stable_fix_sha.casefold()
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT status, action_status, actioned_head_sha FROM feedback_receipts "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ?",
+                receipt.key,
+            ).fetchone()
+            if row is None:
+                self._connection.execute(
+                    "INSERT INTO feedback_receipts "
+                    "(repository, pr_number, feedback_kind, feedback_id, head_sha, status, "
+                    "attempts, action_status, actioned_head_sha, actioned_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'completed', 0, 'completed', ?, ?)",
+                    (*receipt.key, normalized_fix, actioned_at.isoformat()),
+                )
+                return
+            status, action_status, stored_fix = row
+            if status == "completed" and action_status == "completed":
+                if stored_fix != normalized_fix:
+                    raise LedgerStateError("superseded feedback fix commit changed")
+                return
+            if action_status not in {"pending", "resolving"}:
+                raise LedgerStateError("feedback action status is invalid")
+            if stored_fix is not None and stored_fix != normalized_fix:
+                raise LedgerStateError("superseded feedback fix commit changed")
+            result = self._connection.execute(
+                "UPDATE feedback_receipts SET status = 'completed', action_status = 'completed', "
+                "actioned_head_sha = ?, actioned_at = ?, last_error = NULL "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ?",
+                (normalized_fix, actioned_at.isoformat(), *receipt.key),
+            )
+            if result.rowcount != 1:
+                raise LedgerStateError("superseded feedback receipt changed")
+
     def begin_feedback_action(
         self,
         receipt: FeedbackReceipt,
@@ -1692,6 +1763,70 @@ class FeedbackLedger:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise LedgerStateError("stored merge receipt is invalid") from error
 
+    def enroll_merge_pr(
+        self,
+        repository: str,
+        pr_number: int,
+        *,
+        enrolled_at: datetime,
+        enrolled_by: str,
+    ) -> None:
+        """Persist explicit operator intent for one configured pull request."""
+
+        if (
+            not repository
+            or isinstance(pr_number, bool)
+            or not isinstance(pr_number, int)
+            or pr_number < 1
+            or not enrolled_by.strip()
+        ):
+            raise ValueError("merge enrollment identity is invalid")
+        timestamp = _aware_utc(enrolled_at, "enrolled_at")
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO merge_enrollments (repository, pr_number, enrolled_at, enrolled_by) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(repository, pr_number) DO UPDATE SET "
+                "enrolled_at = excluded.enrolled_at, enrolled_by = excluded.enrolled_by",
+                (repository, pr_number, timestamp.isoformat(), enrolled_by.strip()),
+            )
+
+    def unenroll_merge_pr(self, repository: str, pr_number: int) -> None:
+        """Remove explicit merge intent; deleting a missing enrollment is idempotent."""
+
+        if (
+            not repository
+            or isinstance(pr_number, bool)
+            or not isinstance(pr_number, int)
+            or pr_number < 1
+        ):
+            raise ValueError("merge enrollment identity is invalid")
+        with self._transaction():
+            in_progress = self._connection.execute(
+                "SELECT 1 FROM merge_attempts WHERE repository = ? AND pr_number = ? "
+                "AND status = 'verification_required' LIMIT 1",
+                (repository, pr_number),
+            ).fetchone()
+            if in_progress is not None:
+                raise LedgerStateError("merge_in_progress")
+            self._connection.execute(
+                "DELETE FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
+                (repository, pr_number),
+            )
+
+    def is_merge_enrolled(self, repository: str, pr_number: int) -> bool:
+        row = self._connection.execute(
+            "SELECT 1 FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
+            (repository, pr_number),
+        ).fetchone()
+        return row is not None
+
+    def enrolled_merge_pr_numbers(self, repository: str) -> tuple[int, ...]:
+        rows = self._connection.execute(
+            "SELECT pr_number FROM merge_enrollments WHERE repository = ? ORDER BY pr_number",
+            (repository,),
+        ).fetchall()
+        return tuple(int(row[0]) for row in rows)
+
     def verification_required_merge_lease(
         self, repository: str, pr_number: int
     ) -> MergeLease | None:
@@ -1773,6 +1908,12 @@ class FeedbackLedger:
             raise ValueError("merge lease owner must be a non-empty string")
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         with self._transaction():
+            enrolled = self._connection.execute(
+                "SELECT 1 FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
+                (repository, pr_number),
+            ).fetchone()
+            if enrolled is None:
+                return None
             completed = self._connection.execute(
                 "SELECT 1 FROM merge_attempts WHERE repository = ? AND pr_number = ? "
                 "AND status = 'completed' LIMIT 1",
@@ -1817,6 +1958,32 @@ class FeedbackLedger:
                 return None
         return MergeLease(repository, pr_number, head_sha, owner, claimed_at)
 
+    def authorize_merge_write(
+        self, lease: MergeLease, *, updated_at: datetime
+    ) -> bool:
+        """Commit exact-lease authorization before releasing SQLite for the network write."""
+
+        updated_at = _aware_utc(updated_at, "updated_at")
+        with self._transaction():
+            authorized = self._connection.execute(
+                "UPDATE merge_attempts SET status = 'verification_required', updated_at = ?, "
+                "last_error = 'merge_write_authorized' WHERE repository = ? AND pr_number = ? "
+                "AND head_sha = ? AND status = 'claimed' AND owner = ? AND claimed_at = ? "
+                "AND EXISTS (SELECT 1 FROM merge_enrollments WHERE repository = ? "
+                "AND pr_number = ?)",
+                (
+                    updated_at.isoformat(),
+                    lease.repository,
+                    lease.pr_number,
+                    lease.head_sha,
+                    lease.owner,
+                    lease.claimed_at.isoformat(),
+                    lease.repository,
+                    lease.pr_number,
+                ),
+            )
+            return authorized.rowcount == 1
+
     def finish_merge_lease(
         self,
         lease: MergeLease,
@@ -1825,6 +1992,7 @@ class FeedbackLedger:
         updated_at: datetime,
         receipt: object | None = None,
         error: str | None = None,
+        expected_status: str = "claimed",
     ) -> None:
         from .merge_controller import MergeReceipt
 
@@ -1832,6 +2000,8 @@ class FeedbackLedger:
             raise ValueError("merge terminal status is invalid")
         if status == "completed" and not isinstance(receipt, MergeReceipt):
             raise ValueError("completed merge requires a typed receipt")
+        if expected_status not in {"claimed", "verification_required"}:
+            raise ValueError("merge expected status is invalid")
         updated_at = _aware_utc(updated_at, "updated_at")
         receipt_json = (
             json.dumps(receipt.to_payload(), sort_keys=True, separators=(",", ":"))
@@ -1842,7 +2012,7 @@ class FeedbackLedger:
             result = self._connection.execute(
                 "UPDATE merge_attempts SET status = ?, updated_at = ?, receipt_json = ?, "
                 "last_error = ? WHERE repository = ? AND pr_number = ? AND head_sha = ? "
-                "AND status = 'claimed' AND owner = ? AND claimed_at = ?",
+                "AND status = ? AND owner = ? AND claimed_at = ?",
                 (
                     status,
                     updated_at.isoformat(),
@@ -1851,6 +2021,7 @@ class FeedbackLedger:
                     lease.repository,
                     lease.pr_number,
                     lease.head_sha,
+                    expected_status,
                     lease.owner,
                     lease.claimed_at.isoformat(),
                 ),

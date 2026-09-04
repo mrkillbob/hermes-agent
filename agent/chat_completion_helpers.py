@@ -2058,15 +2058,15 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
 
 
 def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | None = None) -> dict:
-    # One-shot continuation override — consumed exactly once, on the FIRST
-    # request this call builds (only one api_mode branch runs per invocation).
-    _wire_reasoning_config = _reasoning_config_for_wire(agent)
     # Capture internal provenance before any transport converts or sanitizes
     # messages. Codex Responses removes internal tool-message keys entirely,
     # and some chat transports normalize the list in place.
     from agent.source_provenance_tools import build_source_provenance_sidecar
 
     _source_sidecar = build_source_provenance_sidecar(api_messages)
+    # One-shot continuation override — consumed exactly once, on the FIRST
+    # request this call builds (only one api_mode branch runs per invocation).
+    _wire_reasoning_config = _reasoning_config_for_wire(agent)
     if tools_for_api is None:
         tools_for_api = agent.tools
     # The one place request_overrides are consumed: static /fast values are

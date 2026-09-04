@@ -32,6 +32,11 @@ _REQUIRED_SCRIPTS = (
 _COMMAND_TIMEOUT_SECONDS = 3600
 _BOOTSTRAP_TIMEOUT_SECONDS = 900
 _CI_RUN_LEASE = timedelta(hours=2)
+CI_MODE_STANDARD = "standard"
+CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT = "budget-exhausted-local-equivalent"
+_CI_MODES = frozenset(
+    {CI_MODE_STANDARD, CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT}
+)
 
 
 class CIValidationError(RuntimeError):
@@ -92,6 +97,16 @@ class CommandEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionsDisabledLocalCIEvidence:
+    """Manifest-derived proof that a disabled-Actions PR ran the full local lane set."""
+
+    receipt_id: str
+    manifest_digest: str
+    command_count: int
+    required_command_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class CIAuditReceipt:
     receipt_id: str
     identity: CIAuditIdentity
@@ -101,6 +116,7 @@ class CIAuditReceipt:
     completed_at: datetime
     actions_state: CheckState
     commands: tuple[CommandEvidence, ...]
+    ci_mode: str = CI_MODE_STANDARD
     failure_reason: str | None = None
 
     def validate(self) -> None:
@@ -112,6 +128,13 @@ class CIAuditReceipt:
             raise ValueError("CI receipt payload has invalid manifest digest")
         if self.completed_at < self.started_at:
             raise ValueError("CI receipt payload has inverted timestamps")
+        if self.ci_mode not in _CI_MODES:
+            raise ValueError("CI receipt payload has invalid CI mode")
+        if (
+            self.ci_mode == CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT
+            and not self.actions_state.billing_blocked
+        ):
+            raise ValueError("budget-exhausted local CI requires a billing-blocked state")
         for command in self.commands:
             if not re.fullmatch(r"[0-9a-f]{64}", command.stdout_sha256, re.IGNORECASE):
                 raise ValueError("CI receipt payload has invalid stdout digest")
@@ -134,8 +157,19 @@ class CIAuditReceipt:
                 self.status,
                 self.completed_at,
                 self.commands,
+                ci_mode=self.ci_mode,
             )
-            if self.receipt_id.casefold() != expected_id:
+            legacy_standard_id = _receipt_id(
+                self.identity,
+                self.manifest_digest,
+                self.status,
+                self.completed_at,
+                self.commands,
+            )
+            if self.receipt_id.casefold() != expected_id and not (
+                self.ci_mode == CI_MODE_STANDARD
+                and self.receipt_id.casefold() == legacy_standard_id
+            ):
                 raise ValueError("CI receipt payload receipt_id does not match its evidence")
 
     def to_payload(self) -> dict[str, object]:
@@ -149,6 +183,7 @@ class CIAuditReceipt:
             },
             "manifest_digest": self.manifest_digest,
             "status": self.status,
+            "ci_mode": self.ci_mode,
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat(),
             "actions_state": {
@@ -238,6 +273,9 @@ class CIAuditReceipt:
             ),
             manifest_digest=manifest_digest,
             status=status,
+            ci_mode=_required_text(
+                payload.get("ci_mode", CI_MODE_STANDARD), "CI mode", 64
+            ),
             started_at=_required_timestamp(payload.get("started_at"), "started_at"),
             completed_at=_required_timestamp(payload.get("completed_at"), "completed_at"),
             actions_state=CheckState(
@@ -409,6 +447,7 @@ class LocalCIRunner:
         now: Callable[[], datetime] | None = None,
         supervisor_pid: Callable[[], int] | None = None,
         pid_is_alive: Callable[[int], bool] | None = None,
+        actions_enabled_hint: bool | None = None,
     ) -> None:
         self._github = github
         self._ledger = ledger
@@ -418,6 +457,21 @@ class LocalCIRunner:
         self._now = now or (lambda: datetime.now(UTC))
         self._supervisor_pid = supervisor_pid or os.getpid
         self._pid_is_alive = pid_is_alive or _pid_is_alive
+        if actions_enabled_hint is not None and not isinstance(actions_enabled_hint, bool):
+            raise TypeError("actions_enabled_hint must be a boolean or None")
+        self._actions_enabled_hint = actions_enabled_hint
+
+    def _check_state(self, repository: str, head_sha: str) -> CheckState:
+        if self._actions_enabled_hint is None:
+            return self._github.get_check_state(repository, head_sha)
+        actions_enabled = self._github.actions_enabled(repository, refresh=True)
+        if actions_enabled != self._actions_enabled_hint:
+            raise CIValidationError("GitHub Actions permission changed during CI execution")
+        return self._github.get_check_state(
+            repository,
+            head_sha,
+            actions_enabled_hint=actions_enabled,
+        )
 
     def run(self, identity: CIAuditIdentity, worktree: Path) -> CIAuditReceipt:
         """Run exact-head CI under a durable, PID-backed single-owner lease."""
@@ -525,7 +579,7 @@ class LocalCIRunner:
         lanes = _required_lanes(manifest_bytes)
 
         initial_state = self._github.get_merge_state(identity.repository, identity.pr_number)
-        initial_checks = self._github.get_check_state(identity.repository, identity.head_sha)
+        initial_checks = self._check_state(identity.repository, identity.head_sha)
         _require_identity(identity, initial_state)
         if self._inspector.head_sha(worktree) != identity.head_sha:
             raise CIValidationError("CI worktree head does not match the receipt identity")
@@ -595,7 +649,7 @@ class LocalCIRunner:
                 command_evidence=tuple(evidence),
             )
         final_state = self._github.get_merge_state(identity.repository, identity.pr_number)
-        final_checks = self._github.get_check_state(identity.repository, identity.head_sha)
+        final_checks = self._check_state(identity.repository, identity.head_sha)
         _require_identity(identity, final_state)
         if final_checks != initial_checks:
             raise CIValidationError(
@@ -611,8 +665,18 @@ class LocalCIRunner:
         failed_commands = tuple(
             item for item in evidence if item.returncode != 0 or item.timed_out
         )
+        ci_mode = (
+            CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT
+            if initial_checks.billing_blocked
+            else CI_MODE_STANDARD
+        )
         receipt_id = _receipt_id(
-            identity, manifest_digest, status, completed_at, tuple(evidence)
+            identity,
+            manifest_digest,
+            status,
+            completed_at,
+            tuple(evidence),
+            ci_mode=ci_mode,
         )
         receipt = CIAuditReceipt(
             receipt_id=receipt_id,
@@ -623,6 +687,7 @@ class LocalCIRunner:
             completed_at=completed_at,
             actions_state=initial_checks,
             commands=tuple(evidence),
+            ci_mode=ci_mode,
             failure_reason=(
                 None
                 if not failed_commands
@@ -757,6 +822,61 @@ def _required_lanes(manifest_bytes: bytes) -> tuple[str, ...]:
     return required
 
 
+def actions_disabled_local_ci_evidence(
+    receipt: CIAuditReceipt | None, manifest_bytes: bytes
+) -> ActionsDisabledLocalCIEvidence | None:
+    """Bind a standard exact-head receipt to every manifest-required local CI job."""
+
+    if (
+        receipt is None
+        or receipt.status != "passed"
+        or receipt.ci_mode != CI_MODE_STANDARD
+        or receipt.actions_state.actions_enabled
+        or receipt.actions_state.billing_blocked
+    ):
+        return None
+    lanes = _required_lanes(manifest_bytes)
+    required: list[tuple[str, ...]] = [
+        ("scripts/check_ci_governance.py",),
+        ("scripts/run_static_lane.py",),
+        ("scripts/run_hygiene_lane.py",),
+    ]
+    for lane in lanes:
+        if lane == "locked_install_parity":
+            required.append(("scripts/run_local_ci_audit.py", "--job", lane, "--output"))
+        else:
+            required.append(("scripts/run_test_lane.py", "--lane", lane))
+    commands = receipt.commands
+    required_commands = commands
+    if commands and _command_covers_required_job(
+        commands[0].argv,
+        ("scripts/bootstrap_agent_workspace.py", "--venv", "link"),
+    ):
+        required_commands = commands[1:]
+    if len(required_commands) < len(required):
+        return None
+    for command, suffix in zip(required_commands, required, strict=False):
+        if command.cwd != "." or not _command_covers_required_job(command.argv, suffix):
+            return None
+    return ActionsDisabledLocalCIEvidence(
+        receipt_id=receipt.receipt_id,
+        manifest_digest=receipt.manifest_digest,
+        command_count=len(commands),
+        required_command_count=len(required),
+    )
+
+
+def _command_covers_required_job(argv: tuple[str, ...], expected: tuple[str, ...]) -> bool:
+    try:
+        script_index = argv.index(expected[0])
+    except ValueError:
+        return False
+    arguments = argv[script_index:]
+    if expected[-1] == "--output":
+        return len(arguments) == len(expected) + 1 and arguments[:-1] == expected
+    return arguments == expected
+
+
 def _require_identity(identity: CIAuditIdentity, state: PullRequestMergeState) -> None:
     if (
         state.repository != identity.repository
@@ -800,6 +920,8 @@ def _receipt_id(
     status: str,
     completed_at: datetime,
     evidence: tuple[CommandEvidence, ...],
+    *,
+    ci_mode: str | None = None,
 ) -> str:
     payload = {
         "identity": [
@@ -813,6 +935,8 @@ def _receipt_id(
         "completed_at": completed_at.isoformat(),
         "commands": [command.stdout_sha256 + command.stderr_sha256 for command in evidence],
     }
+    if ci_mode is not None:
+        payload["ci_mode"] = ci_mode
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -828,7 +952,14 @@ def _failed_receipt(
     """Persist typed failure evidence when validation aborts before lane output."""
 
     reason = f"{type(error).__name__}: {error}"[:1000]
-    receipt_id = _receipt_id(identity, manifest_digest, "failed", completed_at, commands)
+    receipt_id = _receipt_id(
+        identity,
+        manifest_digest,
+        "failed",
+        completed_at,
+        commands,
+        ci_mode=CI_MODE_STANDARD,
+    )
     return CIAuditReceipt(
         receipt_id=receipt_id,
         identity=identity,

@@ -10,7 +10,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .ci_runner import CIAuditReceipt
+from .ci_runner import (
+    ActionsDisabledLocalCIEvidence,
+    CIAuditReceipt,
+    CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
+    actions_disabled_local_ci_evidence,
+)
 from .github_client import (
     CheckState,
     Feedback,
@@ -39,6 +44,7 @@ class MergeSnapshot:
     base_head_sha: str
     intent_review_pending: bool = False
     codex_review_pending: bool = False
+    actions_disabled_local_ci: ActionsDisabledLocalCIEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +148,19 @@ def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
     return False
 
 
+def _is_governed_approval_receipt(
+    feedback: Feedback, *, expected_login: str, head_sha: str
+) -> bool:
+    """Recognize only the configured automation identity's exact-head approval review."""
+
+    return bool(
+        feedback.kind == "review"
+        and feedback.reviewer.login.casefold() == expected_login.casefold()
+        and feedback.review_state == "APPROVED"
+        and feedback.reviewed_head_sha == head_sha.casefold()
+    )
+
+
 def _allowed_merge_method(
     policy: MergeMaintainerPolicy, repository_policy: RepositoryMergePolicy
 ) -> str | None:
@@ -207,12 +226,33 @@ def evaluate_merge(
         # receipt or repair commit can clear this, only a human approving the
         # gated workflow run (or otherwise resolving it) on GitHub itself.
         blockers.append("action_required")
+    elif snapshot.check_state.actions_enabled and snapshot.check_state.billing_blocked:
+        if (
+            not policy.allow_budget_exhausted_local_ci
+            or receipt is None
+            or receipt.status != "passed"
+            or receipt.ci_mode != CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT
+            or not receipt.actions_state.billing_blocked
+        ):
+            blockers.append("github_actions_budget_exhausted")
     elif (
         snapshot.check_state.actions_enabled
         and not snapshot.check_state.all_green
         and not snapshot.check_state.billing_blocked
     ):
         blockers.append("github_checks_not_green")
+    elif not snapshot.check_state.actions_enabled:
+        local_evidence = snapshot.actions_disabled_local_ci
+        if (
+            not policy.allow_budget_exhausted_local_ci
+            or receipt is None
+            or local_evidence is None
+            or local_evidence.receipt_id != receipt.receipt_id
+            or local_evidence.manifest_digest != snapshot.manifest_digest
+            or local_evidence.command_count != len(receipt.commands)
+            or local_evidence.command_count < local_evidence.required_command_count
+        ):
+            blockers.append("github_actions_disabled")
     if snapshot.review_state.review_decision == "CHANGES_REQUESTED":
         blockers.append("changes_requested")
     if snapshot.review_state.unresolved_thread_count:
@@ -294,8 +334,13 @@ class MergeController:
             claimed_at=self._now(),
         )
         if lease is None:
+            blockers = (
+                ("merge_lease_unavailable",)
+                if self._ledger.is_merge_enrolled(self._policy.repository, number)
+                else ("merge_pr_not_enrolled",)
+            )
             blocked = MergeDecision(
-                False, ("merge_lease_unavailable",), None, first.snapshot_digest
+                False, blockers, None, first.snapshot_digest
             )
             return MergeRunResult(blocked, None)
         second_snapshot = self._source.snapshot(number)
@@ -308,7 +353,23 @@ class MergeController:
             )
             return MergeRunResult(raced, None)
         assert second.method is not None
-        write_error: Exception | None = None
+        authorized = self._ledger.authorize_merge_write(
+            lease, updated_at=self._now()
+        )
+        if not authorized:
+            self._ledger.finish_merge_lease(
+                lease,
+                status="failed",
+                updated_at=self._now(),
+                error="merge_pr_not_enrolled",
+            )
+            blocked = MergeDecision(
+                False,
+                ("merge_pr_not_enrolled",),
+                None,
+                second.snapshot_digest,
+            )
+            return MergeRunResult(blocked, None)
         try:
             self._github.merge_pull_request(
                 self._policy.repository,
@@ -316,8 +377,10 @@ class MergeController:
                 second_snapshot.pull_request.head_sha,
                 method=second.method,
             )
-        except GitHubClientError as error:
-            write_error = error
+        except GitHubClientError:
+            # A transport error cannot prove that GitHub rejected the write.
+            # Canonical readback below remains the only completion authority.
+            pass
         try:
             readback = self._github.get_merge_state(self._policy.repository, number)
         except GitHubClientError as error:
@@ -326,6 +389,7 @@ class MergeController:
                 status="verification_required",
                 updated_at=self._now(),
                 error=type(error).__name__,
+                expected_status="verification_required",
             )
             blocked = MergeDecision(
                 False, ("merge_verification_required",), None, second.snapshot_digest
@@ -340,9 +404,10 @@ class MergeController:
         ):
             self._ledger.finish_merge_lease(
                 lease,
-                status="verification_required" if write_error else "failed",
+                status="verification_required",
                 updated_at=self._now(),
                 error="canonical readback did not confirm the merge",
+                expected_status="verification_required",
             )
             blocked = MergeDecision(
                 False, ("merge_verification_required",), None, second.snapshot_digest
@@ -362,7 +427,11 @@ class MergeController:
             executor=self._owner,
         )
         self._ledger.finish_merge_lease(
-            lease, status="completed", updated_at=self._now(), receipt=receipt
+            lease,
+            status="completed",
+            updated_at=self._now(),
+            receipt=receipt,
+            expected_status="verification_required",
         )
         return MergeRunResult(second, receipt)
 
@@ -420,12 +489,17 @@ class CanonicalMergeEvidenceSource:
     """Build merge evidence only from canonical GitHub reads and typed ledger state."""
 
     def __init__(
-        self, plugin_policy: PluginPolicy, github: GitHubClient, ledger: FeedbackLedger
+        self,
+        plugin_policy: PluginPolicy,
+        github: GitHubClient,
+        ledger: FeedbackLedger,
+        merge_policy: MergeMaintainerPolicy | None = None,
     ) -> None:
-        if plugin_policy.merge_maintainer is None:
+        selected_policy = merge_policy or plugin_policy.merge_maintainer
+        if selected_policy is None:
             raise ValueError("merge maintainer is disabled")
         self._plugin_policy = plugin_policy
-        self._merge_policy = plugin_policy.merge_maintainer
+        self._merge_policy = selected_policy
         self._github = github
         self._ledger = ledger
 
@@ -436,7 +510,8 @@ class CanonicalMergeEvidenceSource:
         manifest_path = target.local_path / "tests/manifests/test_lanes.toml"
         if not manifest_path.is_file():
             raise GitHubClientError("CI manifest was unavailable")
-        manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        manifest_bytes = manifest_path.read_bytes()
+        manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
         receipt = self._ledger.latest_ci_receipt(
             policy.repository,
             number,
@@ -446,10 +521,25 @@ class CanonicalMergeEvidenceSource:
         )
         if receipt is not None and not isinstance(receipt, CIAuditReceipt):
             raise GitHubClientError("CI receipt had an invalid type")
-        feedback_clear = self._feedback_clear(pull)
         feedback = self._github.list_feedback(policy.repository, number)
+        feedback_clear = self._feedback_clear(pull, feedback)
         intent_pending = pending_intent_review(feedback, owner_login=target.owner_login)
         codex_pending = not _codex_reviewed_head(feedback, pull.head_sha)
+        if self._plugin_policy.uses_budget_exhausted_local_ci(policy.repository):
+            actions_enabled = self._github.actions_enabled(policy.repository, refresh=True)
+            check_state = self._github.get_check_state(
+                policy.repository,
+                pull.head_sha,
+                actions_enabled_hint=actions_enabled,
+            )
+        else:
+            check_state = self._github.get_check_state(policy.repository, pull.head_sha)
+        actions_disabled_evidence = (
+            actions_disabled_local_ci_evidence(receipt, manifest_bytes)
+            if not check_state.actions_enabled
+            and self._plugin_policy.uses_budget_exhausted_local_ci(policy.repository)
+            else None
+        )
         return MergeSnapshot(
             repository_private=self._github.repository_is_private(policy.repository),
             pull_request=pull,
@@ -460,7 +550,7 @@ class CanonicalMergeEvidenceSource:
                 policy.repository
             ),
             review_state=self._github.get_review_state(policy.repository, number),
-            check_state=self._github.get_check_state(policy.repository, pull.head_sha),
+            check_state=check_state,
             ci_receipt=receipt,
             manifest_digest=manifest_digest,
             feedback_clear=feedback_clear,
@@ -469,9 +559,12 @@ class CanonicalMergeEvidenceSource:
             ),
             intent_review_pending=intent_pending,
             codex_review_pending=codex_pending,
+            actions_disabled_local_ci=actions_disabled_evidence,
         )
 
-    def _feedback_clear(self, pull: PullRequestMergeState) -> bool:
+    def _feedback_clear(
+        self, pull: PullRequestMergeState, feedback_items: tuple[Feedback, ...]
+    ) -> bool:
         from .controller import (
             _ci_receipt_feedback_reason,
             _is_codex_review_summary_tracker,
@@ -490,13 +583,24 @@ class CanonicalMergeEvidenceSource:
             head_ref_name=pull.head_ref_name,
             head_sha=pull.head_sha,
         )
-        for feedback in self._github.list_feedback(pull.repository, pull.number):
+        automation_login = (
+            policy.github_identity.expected_login if policy.github_identity is not None else None
+        )
+        for feedback in feedback_items:
             if policy.not_before is not None and feedback.created_at < policy.not_before:
                 continue
             if (
                 _is_non_actionable_review_container(feedback)
                 or _is_codex_review_summary_tracker(feedback)
                 or _is_self_resolution_receipt(feedback, owner_login=target.owner_login)
+                or (
+                    automation_login is not None
+                    and _is_governed_approval_receipt(
+                        feedback,
+                        expected_login=automation_login,
+                        head_sha=pull.head_sha,
+                    )
+                )
             ):
                 continue
             receipt = FeedbackReceipt(
@@ -550,10 +654,24 @@ def _snapshot_digest(snapshot: MergeSnapshot, receipt: CIAuditReceipt | None) ->
             "enabled": snapshot.check_state.actions_enabled,
             "green": snapshot.check_state.all_green,
             "count": snapshot.check_state.check_count,
+            "billing_blocked": snapshot.check_state.billing_blocked,
         },
         "ci_receipt": receipt.receipt_id if receipt else None,
+        "ci_mode": receipt.ci_mode if receipt else None,
         "manifest": snapshot.manifest_digest,
         "feedback_clear": snapshot.feedback_clear,
+        "actions_disabled_local_ci": (
+            {
+                "receipt_id": snapshot.actions_disabled_local_ci.receipt_id,
+                "manifest_digest": snapshot.actions_disabled_local_ci.manifest_digest,
+                "command_count": snapshot.actions_disabled_local_ci.command_count,
+                "required_command_count": (
+                    snapshot.actions_disabled_local_ci.required_command_count
+                ),
+            }
+            if snapshot.actions_disabled_local_ci is not None
+            else None
+        ),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

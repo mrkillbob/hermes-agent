@@ -150,7 +150,13 @@ class GitHubReader(Protocol):
 
     def get_branch_head(self, repository: str, branch: str) -> str: ...
 
-    def get_check_state(self, repository: str, head_sha: str) -> CheckState: ...
+    def get_check_state(
+        self,
+        repository: str,
+        head_sha: str,
+        *,
+        actions_enabled_hint: bool | None = None,
+    ) -> CheckState: ...
 
     def add_issue_labels(
         self, repository: str, number: int, labels: tuple[str, ...]
@@ -979,9 +985,12 @@ class ScanController:
             local_ci_dispatched = 0
             actions_enabled: bool | None = None
             actions_state_unavailable = False
+            local_ci_policy = self._policy.local_ci_audit
+            budget_local_ci = self._policy.uses_budget_exhausted_local_ci(repository)
             if (
-                self._policy.local_ci_audit is not None
-                and self._policy.local_ci_audit.applies_to(repository)
+                local_ci_policy is not None
+                and local_ci_policy.applies_to(repository)
+                and not budget_local_ci
             ):
                 try:
                     actions_enabled = self._github.actions_enabled(repository)
@@ -1097,14 +1106,6 @@ class ScanController:
                 if snapshot is None:
                     skipped["github_error"] += 1
                     continue
-                if not was_current and pull_request.updated_at is not None:
-                    self._ledger.record_feedback_scan(
-                        repository,
-                        pull_request.number,
-                        pull_request.head_sha,
-                        pull_request.updated_at,
-                        scanned_at=self._clock(),
-                    )
                 current, feedback_items = snapshot
                 local_ci_receipt_status = None
                 if (
@@ -1221,6 +1222,19 @@ class ScanController:
                         skipped[dispatch_error] += 1
                         continue
                     created += 1
+                if (
+                    not was_current
+                    and pull_request.updated_at is not None
+                    and not feedback_pending
+                    and not base_refresh_pending
+                ):
+                    self._ledger.record_feedback_scan(
+                        repository,
+                        pull_request.number,
+                        pull_request.head_sha,
+                        pull_request.updated_at,
+                        scanned_at=self._clock(),
+                    )
                 if (
                     self._policy.local_ci_audit is not None
                     and self._policy.local_ci_audit.applies_to(repository)
@@ -1409,8 +1423,18 @@ class ScanController:
         if audit_policy is None or not audit_policy.applies_to(current.base_repository):
             return "local_ci_disabled"
         try:
-            checks = self._github.get_check_state(
-                current.base_repository, current.head_sha
+            checks = (
+                self._github.get_check_state(
+                    current.base_repository,
+                    current.head_sha,
+                    actions_enabled_hint=True,
+                )
+                if self._policy.uses_budget_exhausted_local_ci(
+                    current.base_repository
+                )
+                else self._github.get_check_state(
+                    current.base_repository, current.head_sha
+                )
             )
             if checks.actions_enabled and not checks.billing_blocked:
                 return "github_ci_enabled"
@@ -1727,6 +1751,40 @@ class ScanController:
         )
         if lease is None:
             skipped["not_retryable"] += 1
+            return _scan_result(0, skipped)
+        self._ledger.record_expected_head(receipt, lease, receipt.head_sha)
+        dispatch_error = self._dispatch(receipt, target, feedback, lease, labels=labels)
+        if dispatch_error is not None:
+            skipped[dispatch_error] += 1
+            return _scan_result(0, skipped)
+        return _scan_result(1, skipped)
+
+    def dispatch_feedback(self, receipt: FeedbackReceipt) -> ScanResult:
+        """Dispatch one exact feedback item after canonical reread and admission."""
+
+        skipped: Counter[str] = Counter()
+        if not self._policy.enabled or self._policy.not_before is None:
+            return _scan_result(0, skipped)
+        revalidated = self._revalidate(receipt, skipped)
+        if revalidated is None:
+            return _scan_result(0, skipped)
+        if self._ledger.was_actioned_on_any_head(receipt):
+            skipped["already_actioned"] += 1
+            return _scan_result(0, skipped)
+        feedback, target, labels = revalidated
+        claimed_at = self._clock()
+        lease = _claim_with_orphan_recovery(
+            self._ledger,
+            self._kanban,
+            receipt,
+            board=self._policy.board or "",
+            owner=self._claim_owner,
+            claimed_at=claimed_at,
+            stale_before=claimed_at - self._claim_lease,
+            exact_dispatch_only=True,
+        )
+        if lease is None:
+            skipped["duplicate"] += 1
             return _scan_result(0, skipped)
         self._ledger.record_expected_head(receipt, lease, receipt.head_sha)
         dispatch_error = self._dispatch(receipt, target, feedback, lease, labels=labels)

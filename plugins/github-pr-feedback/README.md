@@ -7,8 +7,9 @@ explicitly configured lane can also schedule read-only local CI audits for PR
 heads when repository GitHub Actions are disabled. A separately opt-in,
 deterministic maintainer can merge an exact tested head after all configured
 safety gates pass. Models never own merge authority, construct merge argv, or
-create passing receipts. The plugin never pushes source branches, approves,
-changes GitHub settings, deletes branches, or handles credentials.
+create passing receipts. The plugin never pushes source branches, changes
+GitHub settings, or deletes branches. Exact-head reviews use only the separately
+configured reviewer credential described below.
 An optional release-maintenance steward waits for the merge queue to become
 quiet, pins the exact base SHA, and dispatches specialist end-stage audits.
 
@@ -46,6 +47,18 @@ plugins:
         reviewer_logins:
           - trusted-reviewer
         reviewer_associations: []
+        # Required for every governed Hermes GitHub read and write. Store the
+        # token only in the named secret environment variable; never here.
+        github_identity:
+          expected_login: mrkillbobbot
+          token_env: HERMES_GITHUB_BOT_TOKEN
+        # Optional owner credential for the administrative Actions-permission
+        # read only. All public PR reads and writes still use github_identity.
+        github_actions_permissions_identity:
+          expected_login: example-owner
+          gh_config_dir: /absolute/path/to/human-gh-config
+          repositories:
+            - example-owner/example-repository
         include_self_feedback: false
         include_bot_feedback: false
         auto_dispatch: false
@@ -66,6 +79,10 @@ plugins:
           enabled: false
           max_updates_per_scan: 25
           create_missing: true
+          # Limit writes to repositories where the configured identity can
+          # manage issue labels. Omit for all configured repositories.
+          repositories:
+            - example-owner/example-repository
           mappings:
             - branch_prefix: codex/
               label: codex
@@ -99,6 +116,10 @@ plugins:
           merge_methods: [squash, rebase, merge]
           receipt_max_age_seconds: 21600
           report_only: true
+          # Allows a complete manifest-bound local receipt only when the
+          # canonical repository setting proves Actions is disabled, or when
+          # enabled Actions is canonically billing-blocked.
+          allow_budget_exhausted_local_ci: false
           post_merge:
             enabled: false
         # Optional end-stage repository maintenance. It never runs while any
@@ -168,11 +189,35 @@ plugins:
         board: repairs
 ```
 
+`github_identity` deliberately rejects the shared `GH_TOKEN` and
+`GITHUB_TOKEN` names. Give `HERMES_GITHUB_BOT_TOKEN` a fine-grained token
+owned by `mrkillbobbot`, with access only to the enrolled repositories and
+pull-request write permission. The account must have repository access that
+allows the configured operations. Every governed command verifies that the
+dedicated token authenticates as `mrkillbobbot`; it does not inherit the
+operator's `gh` keyring identity. Before a review write, `submit-review` also
+rereads the PR author, state, and exact head; it exits nonzero without posting
+a comment when the bot is the PR author.
+
+`github_actions_permissions_identity` is an exact repository allowlist for
+`GET repos/{owner}/{repo}/actions/permissions` only. Its `expected_login` must
+own every listed configured target, and `gh_config_dir` must be an existing
+absolute directory. Hermes removes token environment variables before using
+that profile and verifies its viewer login during client construction. Missing,
+partial, mismatched, or out-of-scope configuration fails closed; this setting
+never changes the bot identity used for PR reads or public writes.
+
+Set `HERMES_GITHUB_BOT_LOGIN=mrkillbobbot` alongside the token for Hermes core
+GitHub surfaces such as webhook comment delivery and merged-worktree checks.
+Those surfaces use the same central identity verifier. Agent-controlled raw
+`gh` commands receive neither this token nor the operator's GitHub CLI config;
+authenticated GitHub work must use a governed Hermes surface.
+
 The plugin receives these values only through Hermes's namespaced plugin
 context (`plugins.entries.github-pr-feedback.settings`); it does not parse
-global YAML itself. GitHub authentication remains the existing local `gh`
-authentication. Do not put tokens, private keys, or GitHub secrets in this
-configuration.
+global YAML itself. All plugin GitHub reads and writes use only the dedicated
+token environment variable.
+Do not put tokens, private keys, or GitHub secrets in this configuration.
 
 Run the readiness check before enabling or scanning:
 
@@ -182,6 +227,18 @@ hermes github-pr-feedback status
 hermes github-pr-feedback scan
 hermes github-pr-feedback merge-status
 ```
+
+Enroll one exact configured pull request before it can enter the governed merge lane,
+or remove that durable enrollment without changing GitHub state:
+
+```sh
+hermes github-pr-feedback merge-enable --repository owner/repository --pr-number 123
+hermes github-pr-feedback merge-disable --repository owner/repository --pr-number 123
+```
+
+`merge-scan` considers only enrolled open pull requests. An earlier merge write whose
+outcome is ambiguous remains eligible for verification even if the PR is no longer open
+or its enrollment was later removed; this readback is required to reconcile durable state.
 
 `scan` is safe to repeat. It records durable receipt state and creates one
 Kanban card only for feedback that passes all admission checks. By default the
@@ -276,6 +333,14 @@ PRs carrying a `sweeper:risk-*`, `sweeper:blast-broad`,
 `ci-reviewed` label. This gate is evaluated again on both exact-head snapshots;
 task prose cannot satisfy it.
 
+When `allow_budget_exhausted_local_ci` is enabled together with required,
+audit-only, no-post local CI, the same exact-head receipt may substitute for
+hosted checks in only two canonical repository states: Actions is explicitly
+disabled, or Actions is enabled and its exact-head runs carry GitHub's billing
+lockout annotations. Disabled Actions requires every manifest-required local
+job in the receipt; merely absent checks, a partial receipt, or an enabled
+repository with no green checks remains blocked.
+
 Typed `routing_rules` do not execute model classification. The controller
 matches canonical PR labels and bounded feedback text, then records the chosen
 tags, priority, blast radius, risks, review requirement, and ambiguity verdict
@@ -289,6 +354,55 @@ explain deterministic blocker codes, but it cannot edit, push, reply, approve,
 merge, change policy, waive a gate, or create receipts. Roll out in stages:
 collect CI receipts, use `report_only: true`, enable automatic merging, and only
 then separately configure and enable a post-merge hook.
+
+### Explicit pull-request stacks
+
+For repositories configured with a merge maintainer, Hermes can manage a
+linear stack of existing branch heads:
+
+```sh
+hermes github-pr-feedback stack-create \
+  --repository mrkillbob/luna-bot --stack-id feature-42 \
+  --base-branch stable \
+  --entry codex/feature-1=stable:First change \
+  --entry codex/feature-2=codex/feature-1:Second change
+hermes github-pr-feedback stack-refresh \
+  --repository mrkillbob/luna-bot --stack-id feature-42 \
+  --repository-path /path/to/checkout
+hermes github-pr-feedback stack-merge \
+  --repository mrkillbob/luna-bot --stack-id feature-42 \
+  --repository-path /path/to/checkout
+```
+
+`stack-create` only creates missing PRs for the declared branch/base pairs and
+records exact heads. `stack-refresh` rebases descendants after a merged parent
+and pushes them with `--force-with-lease`; any unexpected remote head stops the
+operation. `stack-merge` processes entries parent-first and reuses every
+existing exact-head merge gate, stopping when fresh CI or review evidence is
+required. These commands are explicit mutations; scheduled feedback scans do
+not create or merge stacks.
+
+When a review comment on an older open PR has been fixed by a later commit
+already on the configured stable branch, resolve only that exact thread with a
+literal identity-bound command:
+
+```sh
+hermes github-pr-feedback resolve-superseded-feedback \
+  --repository mrkillbob/luna-bot --pr-number 123 \
+  --head-sha 0123456789abcdef0123456789abcdef01234567 \
+  --comment-id 456789 \
+  --fix-sha 89abcdef0123456789abcdef0123456789abcdef \
+  --repository-path /path/to/checkout \
+  --test-evidence 'scripts/run_tests.sh tests/test_regression.py -q: passed'
+```
+
+The command uses only the configured automation identity. It fetches the
+configured stable target and proves the exact PR head is an ancestor of the
+fix, and the fix is an ancestor of stable. It rereads the PR immediately before
+posting one bounded, marker-bearing factual reply, resolves only the thread
+containing the literal review-comment ID, and rereads both PR and thread state.
+Any identity, head, base, state, ancestry, comment, or post-state mismatch exits
+nonzero without a success receipt.
 
 When `release_maintenance.enabled: true`, the ordinary reconciliation scan
 first requires a canonical repository-wide open-PR count of zero

@@ -46,6 +46,7 @@ def policy(
     *,
     report_only: bool = False,
     merge_maintainer: bool = False,
+    budget_local_ci: bool = False,
     max_base_refresh_in_flight: int | None = None,
 ):
     repository = tmp_path / "repo"
@@ -87,7 +88,16 @@ def policy(
             "merge_methods": ["squash"],
             "receipt_max_age_seconds": 3600,
             "report_only": False,
+            "allow_budget_exhausted_local_ci": budget_local_ci,
             "post_merge": {"enabled": False},
+        }
+    if budget_local_ci:
+        raw["local_ci_audit"] = {
+            "enabled": True,
+            "assignee": "pr-local-ci-auditor",
+            "post_results": False,
+            "audit_only": True,
+            "required_for_open_prs": True,
         }
     return load_policy(raw)
 
@@ -151,6 +161,42 @@ class GitHub:
 class GitHubWithoutChecks(GitHub):
     def get_check_state(self, repository: str, head_sha: str):
         raise RuntimeError("check state unavailable")
+
+
+def test_repair_snapshot_uses_budget_policy_hint_for_exact_head_check_read(
+    tmp_path: Path,
+) -> None:
+    class HintGitHub(GitHub):
+        def __init__(self) -> None:
+            self.check_hints: list[bool | None] = []
+
+        def get_check_state(
+            self,
+            repository: str,
+            head_sha: str,
+            *,
+            actions_enabled_hint: bool | None = None,
+        ):
+            self.check_hints.append(actions_enabled_hint)
+            return CheckState(False, True, 0)
+
+    github = HintGitHub()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    plugin_policy = policy(tmp_path, merge_maintainer=True, budget_local_ci=True)
+    controller = RepairController(
+        plugin_policy,
+        ledger,
+        github,
+        object(),
+        object(),
+    )
+    listed = github.list_open_pull_requests("acme/widgets", "owner")[0]
+
+    snapshot = controller._read_snapshot("acme/widgets", listed)
+
+    assert snapshot is not None
+    assert github.check_hints == [True]
+    ledger.close()
 
 
 class ActionRequiredGitHub(GitHub):

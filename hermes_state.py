@@ -4561,82 +4561,48 @@ def _stat_db_file_identity(path: Path) -> "Optional[tuple]":
     return (st.st_dev, st.st_ino)
 
 
+
 def _stat_sqlite_sidecar_identity(db_path: Path) -> Dict[str, tuple]:
-    """Snapshot ``(st_dev, st_ino)`` for existing WAL/SHM sidecars."""
-    identities: Dict[str, tuple] = {}
-    base = os.fspath(db_path)
-    for suffix in ("-wal", "-shm"):
-        ident = _stat_db_file_identity(Path(base + suffix))
-        if ident is not None:
-            identities[suffix] = ident
-    return identities
+    """Compatibility delegate to the state-holder authority."""
+    return _state_holders.sqlite_sidecar_identity(db_path)
 
 
-_canonical_sqlite_path = _state_holders.canonical_sqlite_path
-
-
-def _watched_sqlite_sidecar_paths(db_path) -> Set[str]:
-    base = os.path.abspath(os.fspath(db_path))
-    return {
-        _canonical_sqlite_path(base + "-wal"),
-        _canonical_sqlite_path(base + "-shm"),
-    }
-
-
-def iter_deleted_sqlite_sidecar_holders(db_path) -> List[Tuple[int, str]]:
-    """Return processes holding an unlinked ``state.db-wal`` / ``-shm``.
-
-    Linux-only (``/proc/<pid>/fd`` readlink). Windows and other hosts
-    return ``[]`` — Windows cannot unlink a sidecar another process still
-    holds, and macOS does not use the `` (deleted)`` suffix.
-
-    The scan includes this process: on the SessionDB open/write refuse
-    path, the in-process writer that still holds the orphan inode is the
-    one that must not mint a replacement WAL (and must stop committing).
-    ``_foreign_state_db_holders`` keeps skipping this PID for FTS
-    maintenance so a process does not block its own optional repair.
-    """
-    if not sys.platform.startswith("linux"):
-        return []
-
-    holders: List[Tuple[int, str]] = []
-    watched = _watched_sqlite_sidecar_paths(db_path)
-    try:
-        for pid_str in os.listdir("/proc"):
-            if not pid_str.isdigit():
-                continue
-            pid = int(pid_str)
-            fd_dir = f"/proc/{pid}/fd"
-            try:
-                fds = os.listdir(fd_dir)
-            except OSError:
-                continue
-            for fd in fds:
-                try:
-                    target = os.readlink(f"{fd_dir}/{fd}")
-                except OSError:
-                    continue
-                if " (deleted)" not in target:
-                    continue
-                if _canonical_sqlite_path(target) in watched:
-                    holders.append((pid, target))
-    except Exception as exc:
-        logger.debug("deleted-WAL holder scan failed for %s: %s", db_path, exc)
-        return holders
-    return holders
+def iter_deleted_sqlite_sidecar_holders(
+    db_path, include_self: bool = True
+) -> List[Tuple[int, str]]:
+    """Compatibility delegate for deleted WAL/SHM generation checks."""
+    return _state_holders.deleted_sqlite_sidecar_holders(
+        Path(db_path), include_self=include_self
+    )
 
 
 def refuse_deleted_wal_generation(db_path) -> None:
-    """Raise if any process holds a deleted WAL/SHM generation for *db_path*.
-
-    Called *before* ``sqlite3.connect`` so a second opener cannot mint a
-    replacement WAL inode while a live writer still holds the orphan.
-    """
-    holders = iter_deleted_sqlite_sidecar_holders(db_path)
+    """Refuse an open while a process holds a deleted WAL/SHM generation."""
+    holders = iter_deleted_sqlite_sidecar_holders(db_path, include_self=True)
     if not holders:
         return
     logger.error(_DELETED_WAL_GENERATION_MSG)
     raise DeletedWalGenerationError(_DELETED_WAL_GENERATION_MSG)
+
+
+class ConversationWorktreeConflict(RuntimeError):
+    """A root session attempted to change its claimed Git identity."""
+
+
+@dataclass(frozen=True)
+class ConversationWorktreeRecord:
+    """Durable immutable Git identity plus the lifecycle state of one root."""
+
+    root_session_id: str
+    worktree_path: str
+    branch: str
+    base_commit: str
+    repo_common_dir: str
+    state: str
+    failure_phase: Optional[str]
+    failure_message: Optional[str]
+    created_at: float
+    updated_at: float
 
 
 # ── Process-wide shared SessionDB registry (#90837) ──
@@ -4660,8 +4626,6 @@ from hermes_state_registry import (  # noqa: F401  (re-export)
     release_or_close,
     release_shared_session_db,
 )
-
-
 
 def _connect_tracked_db(path, tracking_path=None, **kwargs):
     """``sqlite3.connect`` that registers the open fd for lock-safety.

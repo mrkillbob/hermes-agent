@@ -532,7 +532,15 @@ class RepairController:
         except Exception:
             return None
         try:
-            checks = self._github.get_check_state(repository, pull.head_sha)
+            checks = (
+                self._github.get_check_state(
+                    repository,
+                    pull.head_sha,
+                    actions_enabled_hint=True,
+                )
+                if self._policy.uses_budget_exhausted_local_ci(repository)
+                else self._github.get_check_state(repository, pull.head_sha)
+            )
         except Exception:
             checks = CheckState(False, True, 0)
             checks_unavailable = True

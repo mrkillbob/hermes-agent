@@ -334,8 +334,6 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
 # Desktop `serve` only (start_server(start_mcp_discovery_after_bind=True)):
 # seconds after the READY sentinel before the MCP discovery thread starts.
 _DESKTOP_MCP_DISCOVERY_DELAY_S = 1.0
-
-
 def _desktop_cron_ticker_enabled() -> bool:
     """Return whether this Desktop backend owns the machine-wide cron tick.
 

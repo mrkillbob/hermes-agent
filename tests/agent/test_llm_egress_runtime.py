@@ -500,6 +500,43 @@ def test_protected_codex_elides_responses_kanban_show_output(tmp_path, monkeypat
     assert "super-secret-value" not in rendered
 
 
+def test_protected_codex_elides_bound_kanban_attachments_output(tmp_path, monkeypatch):
+    """Read-only attachment results cannot trigger an egress retry."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_kanban_attachments_123"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": "gpt-5.6-terra",
+            "input": [
+                {
+                    "id": call_id,
+                    "call_id": call_id,
+                    "type": "function_call",
+                    "function": {"name": "kanban_attachments", "arguments": "{}"},
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": "c2VjcmV0LXBheWxvYWQ= token=super-secret-value",
+                },
+            ],
+        },
+    )
+
+    rendered = authorized["input"][1]["output"]
+    assert receipt.allowed
+    assert rendered.startswith("kanban_attachments completed locally;")
+    assert "c2VjcmV0LXBheWxvYWQ=" not in rendered
+    assert "super-secret-value" not in rendered
+
+
 def test_protected_nous_elides_bound_kanban_show_result(tmp_path, monkeypatch):
     """The same safe projection covers protected free-provider workers."""
 

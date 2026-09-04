@@ -299,4 +299,3 @@ def test_check_for_updates_does_not_cache_none(tmp_path, monkeypatch):
     # The cache file must NOT have been written with a None result
     assert not cache_file.exists(), "None result must not be cached"
 
-

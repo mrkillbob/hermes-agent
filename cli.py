@@ -33,6 +33,8 @@ import re
 import concurrent.futures
 import base64
 import atexit
+
+from hermes_cli.github_identity import run_as_github_automation
 import errno
 import tempfile
 import time
@@ -2460,10 +2462,10 @@ def _worktree_branch_pr_merged(
                 if cache.get(cache_key) is True:
                     return True
 
-        result = subprocess.run(
+        result = run_as_github_automation(
             ["gh", "pr", "list", "--head", branch, "--state", "merged",
              "--json", "number", "--limit", "1"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
+            timeout=timeout, cwd=worktree_path,
         )
         if result.returncode != 0:
             return False

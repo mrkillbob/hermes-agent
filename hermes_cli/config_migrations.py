@@ -864,42 +864,63 @@ def _migrate_to_39(results: Dict[str, Any], quiet: bool) -> None:
 
 
 def _migrate_to_40(results: Dict[str, Any], quiet: bool) -> None:
-    # ── Version 39 → 40: model_catalog.ttl_hours → ttl_minutes (default 20) ──
-    # The picker catalogs now refresh every 20 minutes (and the gateway
-    # refreshes them in the background on that cadence). Only the OLD default
-    # (ttl_hours: 1, written by the v25 migration) is dropped so the new
-    # default applies; any other explicit ttl_hours is a deliberate choice
-    # and stays honoured by the loader.
+    # Version 39 → 40 combines the official model-catalog TTL migration with
+    # the integration branch's canonical conversation-worktree policy move.
     _c = _cfg()
     read_raw_config = _c.read_raw_config
     _persist_migration = _c._persist_migration
 
     config = read_raw_config()
+    changed = False
+
+    # The picker catalogs now refresh every 20 minutes. Only the old 1-hour
+    # default written by v25 is dropped; other explicit ttl_hours values remain
+    # deliberate user configuration and are still honored by the loader.
     raw_mc = config.get("model_catalog")
-    if isinstance(raw_mc, dict) and raw_mc.get("ttl_hours") == 1 and "ttl_minutes" not in raw_mc:
+    migrated_catalog_ttl = (
+        isinstance(raw_mc, dict)
+        and raw_mc.get("ttl_hours") == 1
+        and "ttl_minutes" not in raw_mc
+    )
+    if migrated_catalog_ttl:
         del raw_mc["ttl_hours"]
         config["model_catalog"] = raw_mc
-        _persist_migration(config)
-        results["config_added"].append("model_catalog.ttl_hours 1 → ttl_minutes 20 (default)")
-        if not quiet:
-            print("  ✓ Model catalog now refreshes every 20 minutes (model_catalog.ttl_minutes)")
+        changed = True
 
+    # Conversation worktree policy is shared by every root conversation entry
+    # point, so its canonical owner is top-level rather than Desktop. Preserve
+    # an already-explicit canonical block verbatim.
     desktop = config.get("desktop")
-    if isinstance(desktop, dict) and "conversation_worktree" in desktop:
+    migrated_worktree_policy = (
+        isinstance(desktop, dict) and "conversation_worktree" in desktop
+    )
+    if migrated_worktree_policy:
         legacy_policy = desktop.pop("conversation_worktree")
         if "conversation_worktree" not in config:
             config["conversation_worktree"] = copy.deepcopy(legacy_policy)
         config["desktop"] = desktop
+        changed = True
+
+    if changed:
         _persist_migration(config)
+    if migrated_catalog_ttl:
         results["config_added"].append(
-            "conversation_worktree (migrated from desktop.conversation_worktree)"
+            "model_catalog.ttl_hours 1 → ttl_minutes 20 (default)"
         )
         if not quiet:
             print(
-                "  ✓ Moved desktop.conversation_worktree to the canonical "
-                "top-level conversation_worktree policy."
+                "  ✓ Model catalog now refreshes every 20 minutes "
+                "(model_catalog.ttl_minutes)"
             )
-
+    if migrated_worktree_policy:
+        results["config_added"].append(
+            "conversation_worktree (migrated from desktop.conversation_worktree)"
+        )
+    if migrated_worktree_policy and not quiet:
+        print(
+            "  ✓ Moved desktop.conversation_worktree to the canonical "
+            "top-level conversation_worktree policy."
+        )
 
 #: Registry of (target_version, migration_fn), strictly ascending. The driver
 #: applies every entry whose target version is greater than the on-disk
