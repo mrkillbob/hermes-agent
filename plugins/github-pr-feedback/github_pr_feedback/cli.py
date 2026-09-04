@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -649,22 +650,86 @@ def _scan(ctx: Any) -> int:
             # head still lacks its current passing receipt; doing so can spend
             # the API budget before the selected audit starts.
             required_ci_backlog = result.required_local_ci_backlog > 0
-            if policy.repair_steward is not None and not required_ci_backlog:
-                repair = RepairController(
-                    policy,
-                    ledger,
-                    GitHubClient(),
-                    KanbanSubprocessClient(),
-                    control_home=get_default_hermes_root(),
-                ).scan()
-                repair_payload = _scan_payload(repair)
-            if policy.release_maintenance is not None and not required_ci_backlog:
-                maintenance_payload = _run_release_maintenance_scan(policy, ledger)
+            backlog_by_repository = getattr(
+                result, "required_local_ci_backlog_by_repository", None
+            )
+            if policy.repair_steward is not None:
+                if isinstance(backlog_by_repository, Mapping) and hasattr(
+                    policy.repair_steward, "repositories"
+                ):
+                    repair_payload = _run_repair_scan_by_repository(
+                        policy, ledger, backlog_by_repository
+                    )
+                elif not required_ci_backlog:
+                    repair = RepairController(
+                        policy,
+                        ledger,
+                        GitHubClient(),
+                        KanbanSubprocessClient(),
+                        control_home=get_default_hermes_root(),
+                    ).scan()
+                    repair_payload = _scan_payload(repair)
+            if policy.release_maintenance is not None:
+                maintenance_repository = getattr(
+                    policy.release_maintenance, "repository", None
+                )
+                maintenance_backlog = (
+                    isinstance(backlog_by_repository, Mapping)
+                    and maintenance_repository is not None
+                    and backlog_by_repository.get(maintenance_repository, 0) > 0
+                )
+                if maintenance_backlog:
+                    maintenance_payload = {
+                        "status": "deferred",
+                        "head_sha": None,
+                        "tasks_created": 0,
+                        "blockers": ["required_local_ci_backlog"],
+                        "deferred_repository": maintenance_repository,
+                    }
+                elif not required_ci_backlog or isinstance(
+                    backlog_by_repository, Mapping
+                ):
+                    maintenance_payload = _run_release_maintenance_scan(
+                        policy, ledger
+                    )
         finally:
             ledger.close()
     payload = _scan_payload(result)
     if result.required_local_ci_backlog > 0:
-        payload["deferred"] = ["repair", "release_maintenance"]
+        backlog_by_repository = getattr(
+            result, "required_local_ci_backlog_by_repository", None
+        )
+        if isinstance(backlog_by_repository, Mapping):
+            deferred_repositories = {
+                "repair": sorted(
+                    repository
+                    for repository in (
+                        policy.repair_steward.repositories
+                        if policy.repair_steward
+                        and hasattr(policy.repair_steward, "repositories")
+                        else ()
+                    )
+                    if backlog_by_repository.get(repository, 0) > 0
+                ),
+                "release_maintenance": (
+                    [policy.release_maintenance.repository]
+                    if policy.release_maintenance is not None
+                    and backlog_by_repository.get(
+                        policy.release_maintenance.repository, 0
+                    )
+                    > 0
+                    else []
+                ),
+            }
+            payload["deferred_repositories"] = {
+                lane: repositories
+                for lane, repositories in deferred_repositories.items()
+                if repositories
+            }
+            if payload["deferred_repositories"]:
+                payload["deferred"] = list(payload["deferred_repositories"])
+        else:
+            payload["deferred"] = ["repair", "release_maintenance"]
     if repair_payload is not None:
         payload["repair"] = repair_payload
     if maintenance_payload is not None:
@@ -679,6 +744,72 @@ def _scan(ctx: Any) -> int:
         )
         else 0
     )
+
+
+def _run_repair_scan_by_repository(
+    policy: PluginPolicy,
+    ledger: FeedbackLedger,
+    backlog_by_repository: Mapping[str, int],
+) -> dict[str, object]:
+    """Run repair lanes independently when local CI backlog is repository-local."""
+
+    configured = policy.repair_steward
+    assert configured is not None
+    deferred = sorted(
+        repository
+        for repository in configured.repositories
+        if backlog_by_repository.get(repository, 0) > 0
+    )
+    eligible = sorted(set(configured.repositories).difference(deferred))
+    if not deferred:
+        repair = RepairController(
+            policy,
+            ledger,
+            GitHubClient(),
+            KanbanSubprocessClient(),
+            control_home=get_default_hermes_root(),
+        ).scan()
+        return _scan_payload(repair)
+    if not eligible:
+        return {
+            "status": "deferred",
+            "created": 0,
+            "skipped": {},
+            "deferred_repositories": deferred,
+        }
+
+    created = 0
+    skipped: dict[str, int] = {}
+    degraded = False
+    github = GitHubClient()
+    kanban = KanbanSubprocessClient()
+    for repository in eligible:
+        serial_policy = replace(
+            policy,
+            repair_steward=replace(
+                configured,
+                repositories=frozenset({repository}),
+            ),
+        )
+        repair = RepairController(
+            serial_policy,
+            ledger,
+            github,
+            kanban,
+            control_home=get_default_hermes_root(),
+        ).scan()
+        created += repair.created
+        degraded = degraded or repair.degraded
+        for reason, count in repair.skipped.items():
+            skipped[reason] = skipped.get(reason, 0) + count
+    payload: dict[str, object] = {
+        "status": "degraded" if degraded else "ok",
+        "created": created,
+        "skipped": skipped,
+    }
+    if deferred:
+        payload["deferred_repositories"] = deferred
+    return payload
 
 
 def _run_release_maintenance_scan(

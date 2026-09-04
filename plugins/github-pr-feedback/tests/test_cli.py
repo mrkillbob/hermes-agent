@@ -22,6 +22,7 @@ from github_pr_feedback.cli import (
     _ci_audit_comment,
     _factual_reply_is_missing,
     _retrigger_codex_review,
+    _run_repair_scan_by_repository,
 )
 from github_pr_feedback.controller import KanbanTask
 from github_pr_feedback.github_client import CheckState, Feedback
@@ -30,7 +31,9 @@ from github_pr_feedback.merge_controller import MergeDecision
 from github_pr_feedback.policy import (
     CODEX_REVIEW_TRIGGER,
     FeedbackReceipt,
+    PluginPolicy,
     PullRequest,
+    RepairStewardPolicy,
     Reviewer,
     codex_review_trigger_comment,
 )
@@ -330,6 +333,63 @@ def test_scan_payload_reports_catalogue_deferred_separately_from_skips() -> None
 
     assert payload["local_ci_catalogue_deferred"] == 199
     assert "local_ci_open_pr_scan_cap" not in payload["skipped"]
+
+
+def test_repair_scan_keeps_unblocked_repositories_eligible() -> None:
+    from github_pr_feedback import cli
+
+    policy = PluginPolicy(
+        enabled=True,
+        targets={},
+        reviewer_logins=frozenset(),
+        reviewer_associations=frozenset(),
+        include_self_feedback=False,
+        include_bot_feedback=False,
+        auto_dispatch=False,
+        not_before=None,
+        assignee=None,
+        board=None,
+        repair_steward=RepairStewardPolicy(
+            assignee="repair-agent",
+            repositories=frozenset({"acme/blocked", "acme/eligible"}),
+            report_only=True,
+        ),
+    )
+    seen: list[frozenset[str]] = []
+
+    class Repair:
+        def __init__(self, serial_policy, *_args: object, **_kwargs: object) -> None:
+            seen.append(serial_policy.repair_steward.repositories)
+
+        def scan(self):
+            return SimpleNamespace(created=1, skipped={}, degraded=False)
+
+    class Github:
+        pass
+
+    class Kanban:
+        pass
+
+    original_repair = cli.RepairController
+    original_github = cli.GitHubClient
+    original_kanban = cli.KanbanSubprocessClient
+    cli.RepairController = Repair
+    cli.GitHubClient = Github
+    cli.KanbanSubprocessClient = Kanban
+    try:
+        payload = _run_repair_scan_by_repository(
+            policy,
+            object(),
+            {"acme/blocked": 1, "acme/eligible": 0},
+        )
+    finally:
+        cli.RepairController = original_repair
+        cli.GitHubClient = original_github
+        cli.KanbanSubprocessClient = original_kanban
+
+    assert seen == [frozenset({"acme/eligible"})]
+    assert payload["created"] == 1
+    assert payload["deferred_repositories"] == ["acme/blocked"]
 
 
 class RecordingKanbanRunner:
