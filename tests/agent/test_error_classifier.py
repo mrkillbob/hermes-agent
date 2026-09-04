@@ -109,6 +109,61 @@ class TestFailoverReason:
         assert result.retryable is False
         assert result.should_fallback is False
 
+    @staticmethod
+    def _egress_error(*reason_codes):
+        from agent.llm_egress_firewall import (
+            DestinationClass,
+            EgressBlocked,
+            EgressDecision,
+        )
+
+        return EgressBlocked(
+            EgressDecision(
+                allowed=False,
+                destination_class=DestinationClass.REMOTE,
+                provider="nous",
+                model="test-model",
+                payload_sha256="",
+                serialized_bytes=300_000,
+                estimated_tokens=100_000,
+                source_grant_count=0,
+                source_segment_count=0,
+                session_id="session",
+                turn_id="turn",
+                request_id="request",
+                policy_digest="policy",
+                reason_codes=reason_codes,
+            )
+        )
+
+    def test_egress_size_denial_recovers_through_context_compression(self):
+        result = classify_api_error(
+            self._egress_error("serialized_bytes_exceeded", "token_cap_exceeded"),
+            provider="nous",
+            model="test-model",
+        )
+
+        assert result.reason is FailoverReason.payload_too_large
+        assert result.retryable is True
+        assert result.should_compress is True
+        assert result.should_fallback is False
+        assert result.error_context["reason_codes"] == (
+            "serialized_bytes_exceeded",
+            "token_cap_exceeded",
+        )
+
+    def test_egress_security_denial_stays_terminal(self):
+        result = classify_api_error(
+            self._egress_error("serialized_bytes_exceeded", "secret_detected"),
+            provider="nous",
+            model="test-model",
+        )
+
+        assert result.reason is FailoverReason.egress_policy_blocked
+        assert result.retryable is False
+        assert result.should_compress is False
+        assert result.should_fallback is False
+
     def test_unsupported_thinking_is_terminal_and_never_falls_back(self):
         error = MockAPIError(
             'model "devstral-small-2:24b" does not support thinking',

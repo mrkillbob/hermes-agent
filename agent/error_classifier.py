@@ -858,12 +858,34 @@ def classify_api_error(
     from agent.llm_egress_firewall import EgressBlocked
 
     if isinstance(error, EgressBlocked):
+        reason_codes = tuple(error.decision.reason_codes)
+        # The firewall also protects the provider boundary from requests that
+        # have grown beyond the local serialized/token budget.  That is a
+        # recoverable context-size condition: the conversation loop already
+        # knows how to compact the transcript and retry.  Keep every other
+        # egress denial terminal, especially denials involving secrets,
+        # private paths, untrusted provenance, or encoded payloads.
+        egress_size_reasons = {
+            "serialized_bytes_exceeded",
+            "token_cap_exceeded",
+        }
+        if reason_codes and set(reason_codes) <= egress_size_reasons:
+            return ClassifiedError(
+                reason=FailoverReason.payload_too_large,
+                provider=provider or None,
+                model=model or None,
+                message="request exceeded the local egress size budget",
+                error_context={"reason_codes": reason_codes},
+                retryable=True,
+                should_compress=True,
+                should_fallback=False,
+            )
         return ClassifiedError(
             reason=FailoverReason.egress_policy_blocked,
             provider=provider or None,
             model=model or None,
             message="remote request denied by local egress policy",
-            error_context={"reason_codes": error.decision.reason_codes},
+            error_context={"reason_codes": reason_codes},
             retryable=False,
             should_fallback=False,
         )
