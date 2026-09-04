@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 os.environ["HERMES_QUIET"] = "1"  # Our own modules
 
 from hermes_cli.fallback_config import get_fallback_chain
+from hermes_cli.worktree_base import resolve_worktree_base
 from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
 from hermes_cli.cli_commands_mixin import CLICommandsMixin
 from hermes_cli.cli_billing_mixin import CLIBillingMixin
@@ -1956,7 +1957,9 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
     # tip so the worktree starts current with the project, not from the
     # (possibly stale) local HEAD of the standalone clone (#10760 follow-up).
     if sync_base:
-        base_ref, base_label = _resolve_worktree_base(repo_root)
+        base_ref, base_label = resolve_worktree_base(
+            repo_root, prefer_current_upstream=False
+        )
     else:
         base_ref, base_label = "HEAD", "HEAD (local — worktree_sync disabled)"
 

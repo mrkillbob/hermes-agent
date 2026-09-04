@@ -45,8 +45,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
+from hermes_cli.worktree_base import resolve_worktree_base
 from hermes_cli.worktree_environment import bootstrap_worktree_environments
-
 logger = logging.getLogger(__name__)
 
 _GIT_TIMEOUT = 30
@@ -158,10 +158,13 @@ def create_subagent_worktree(
     _ensure_gitignore_entry(repo_root)
 
     try:
-        base = _run_git(["rev-parse", "HEAD"], cwd=repo_root)
+        base_ref, _base_label = resolve_worktree_base(
+            repo_root, prefer_current_upstream=False
+        )
+        base = _run_git(["rev-parse", base_ref], cwd=repo_root)
         base_commit = base.stdout.strip() if base.returncode == 0 else ""
         result = _run_git(
-            ["worktree", "add", str(wt_path), "-b", branch, "HEAD"],
+            ["worktree", "add", "--no-track", str(wt_path), "-b", branch, base_ref],
             cwd=repo_root,
         )
     except Exception as exc:
