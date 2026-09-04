@@ -892,6 +892,11 @@ def _source_text_for_base64_scan(text: str) -> str:
             or _PYTHON_DUNDER_IDENTIFIER.fullmatch(source_atom) is not None
             or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(source_atom) is not None
             or _PYTHON_MIXED_CASE_IDENTIFIER.fullmatch(source_atom) is not None
+            # argparse usage renders a small, fixed set of all-caps
+            # metavariables.  They are command syntax, not encoded payloads;
+            # keep this exception enumerated so arbitrary values such as
+            # ``PAYLOAD`` remain visible to the fail-closed scanner.
+            or source_atom in {"PROVIDER", "TOOLSETS"}
         )
 
     masked = _BASE64_CANDIDATE.sub(

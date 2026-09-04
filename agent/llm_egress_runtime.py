@@ -2086,6 +2086,41 @@ def _typed_payload(
             and isinstance(output_call_id, str)
             and output_call_id in terminal_replay_tool_call_ids
         )
+        is_tool_result_mapping = (
+            isinstance(output_call_id, str)
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
+        # A protected remote worker may only replay a tool result through one
+        # of the exact call-id-bound projections above.  If a provider or
+        # bridge hands us a tool result without the preceding recognized call,
+        # keep it explicitly untrusted so the final firewall fails closed
+        # instead of treating its text as ordinary sanitized context.
+        handled_tool_result = any(
+            (
+                is_recognized_tool_result,
+                is_elided_kanban_tool_result,
+                is_search_projection_tool_result,
+                is_read_file_projection_tool_result,
+                is_web_replay_tool_result,
+                is_file_mutation_replay_result,
+                is_scratch_read_file_tool_result,
+                is_git_workspace_diagnostic_result,
+                is_git_grep_projection_tool_result,
+                is_rg_projection_tool_result,
+                is_kanban_assignees_result,
+                isinstance(github_list_limit, int),
+                isinstance(github_api_extract_limit, int),
+                is_github_api_curl_terminal_call,
+                is_plain_github_list_terminal_result,
+                isinstance(combined_github_list_limit, int),
+                isinstance(combined_github_view_limit, int),
+                is_terminal_replay_result,
+                is_read_file_result,
+            )
+        )
         is_file_mutation_replay_call = (
             value.get("type") in {"function", "function_call"}
             and isinstance(direct_name, str)
@@ -2095,6 +2130,13 @@ def _typed_payload(
         )
         typed: dict[Any, Any] = {}
         context_mapping = value.get("role") in {"system", "developer"}
+        # Assistant turns are provider-generated history.  They can echo a
+        # locally granted source excerpt after a tool call; replaying that
+        # echo as an ordinary sanitized segment would trip the provenance
+        # overlap guard on the next cloud request.  Treat only this generated
+        # role as application context for the remote-safe redaction path;
+        # user/task content remains fail-closed.
+        generated_assistant_mapping = value.get("role") == "assistant"
         is_tool_protocol_mapping = (
             value.get("role") in {"assistant", "tool"}
             or value.get("type") in {"function", "function_call", "function_call_output"}
@@ -2415,6 +2457,31 @@ def _typed_payload(
                 typed[key] = GeneratedContextSegment(_terminal_replay_command(item))
                 continue
             if (
+                protected_kanban_context
+                and is_tool_result_mapping
+                and key in {"content", "output"}
+                and not handled_tool_result
+            ):
+                raw = (
+                    item
+                    if isinstance(item, str)
+                    else json.dumps(item, ensure_ascii=False, sort_keys=True)
+                )
+                # Retain the original text as a separately scanned segment so
+                # diagnostics still report its concrete content class (for
+                # example ``base64_payload``) alongside the provenance denial.
+                # The untrusted marker guarantees this payload can never be
+                # sent, even when it contains no shape-based violation.
+                typed[key] = OutboundText(
+                    (
+                        UntrustedProvenanceSegment(
+                            sha256(raw.encode("utf-8")).hexdigest()
+                        ),
+                        _approved_sanitized(raw, cap=sanitized_cap),
+                    )
+                )
+                continue
+            if (
                 is_file_mutation_replay_call
                 and key == "arguments"
                 and isinstance(item, str)
@@ -2494,6 +2561,7 @@ def _typed_payload(
                     and (
                         generated_context
                         or context_mapping
+                        or generated_assistant_mapping
                         or key in {"instructions", "system_prompt", "tools"}
                     )
                 ),
