@@ -687,6 +687,31 @@ DEFAULT_WORKTREE_POOL_SLOTS = 16
 _WORKTREE_POOL_TERMINAL_TASK_STATUSES = frozenset({"done", "archived"})
 
 
+def _pool_source_namespace(path: Path) -> str:
+    """Return a stable identity for the configured Git source worktree.
+
+    Pool leases are durable and can outlive the short-lived cron process. The
+    same profile may have an old pool registered to a preserved checkout, so
+    the repository name alone is not enough to identify a safe slot namespace.
+    Resolving the configured source path keeps those leases and their
+    potentially dirty worktrees isolated without deleting or reusing them.
+    """
+
+    resolved = str(Path(path).expanduser().resolve())
+    return sha256(resolved.encode("utf-8")).hexdigest()[:16]
+
+
+def _pool_ledger_slot(namespace: str, slot_id: int) -> int:
+    """Map a source namespace to an opaque, collision-resistant ledger slot."""
+
+    # Legacy ledgers use 0..15. Keeping each source in a separate 32-slot
+    # range lets a new canonical checkout coexist with those old leases while
+    # retaining the existing integer-keyed schema and test/API compatibility.
+    # Keep the encoded value inside SQLite's signed 64-bit INTEGER range;
+    # the modulo still leaves a 100-million-slot namespace space.
+    return (int(namespace, 16) % 100_000_000) * 32 + slot_id
+
+
 class PooledLocalGitRepository:
     """Same LocalGit protocol as LocalGitRepository, backed by a fixed-size
 
@@ -726,6 +751,7 @@ class PooledLocalGitRepository:
         self._owner_pid = owner_pid or os.getpid
         self._clock = clock or (lambda: datetime.now(UTC))
         self._lease_timeout = lease_timeout
+        self._active_ledger_slots: dict[tuple[object, ...], int] = {}
 
     def prepare_receipt_worktree(
         self, path: Path, receipt: FeedbackReceipt
@@ -736,10 +762,12 @@ class PooledLocalGitRepository:
 
         now = self._clock()
         owner_pid = self._owner_pid()
+        namespace = _pool_source_namespace(path)
         lease: WorktreeSlotLease | None = None
         for slot_id in range(self._slot_count):
+            ledger_slot_id = _pool_ledger_slot(namespace, slot_id)
             lease = self._ledger.claim_worktree_slot(
-                slot_id,
+                ledger_slot_id,
                 owner_pid=owner_pid,
                 head_sha=receipt.head_sha,
                 claimed_at=now,
@@ -753,7 +781,8 @@ class PooledLocalGitRepository:
             )
 
         try:
-            workspace = self._prepare_slot(path, lease.slot_id, receipt)
+            self._active_ledger_slots[receipt.key] = lease.slot_id
+            workspace = self._prepare_slot(path, slot_id, receipt, namespace=namespace)
         except BaseException:
             # Never strand a slot on a failed prepare -- release it so the
             # next caller (or a retry of this same dispatch) can reclaim it
@@ -777,7 +806,12 @@ class PooledLocalGitRepository:
         full lease timeout.
         """
 
-        self._ledger.bind_worktree_slot_task(receipt.head_sha, task_id, board)
+        self._ledger.bind_worktree_slot_task(
+            receipt.head_sha,
+            task_id,
+            board,
+            slot_id=self._active_ledger_slots.get(receipt.key),
+        )
 
     def reconcile_leases(self, kanban: KanbanClient) -> int:
         """Release any leased slot whose bound Kanban task has gone terminal.
@@ -813,12 +847,24 @@ class PooledLocalGitRepository:
             released += 1
         return released
 
-    def _prepare_slot(self, path: Path, slot_id: int, receipt: FeedbackReceipt) -> Path:
+    def _prepare_slot(
+        self,
+        path: Path,
+        slot_id: int,
+        receipt: FeedbackReceipt,
+        *,
+        namespace: str | None = None,
+    ) -> Path:
         self._worktree_root.mkdir(parents=True, exist_ok=True)
         repository_key = sha256(
             receipt.repository.casefold().encode("utf-8")
         ).hexdigest()[:16]
-        repository_pool = self._worktree_root / f"repo-{repository_key}"
+        source_namespace = namespace or _pool_source_namespace(path)
+        repository_pool = (
+            self._worktree_root
+            / f"repo-{repository_key}"
+            / f"source-{source_namespace}"
+        )
         repository_pool.mkdir(parents=True, exist_ok=True)
         workspace = repository_pool / f"slot-{slot_id}"
         if workspace.is_symlink():

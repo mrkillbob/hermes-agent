@@ -175,6 +175,29 @@ def test_pool_uses_distinct_slot_directories_for_distinct_repositories(
     ledger.close()
 
 
+def test_pool_isolates_leases_for_distinct_source_checkouts(tmp_path: Path) -> None:
+    """A preserved checkout must not block or impersonate the canonical source."""
+
+    repo_a = initialized_repository(tmp_path / "repo-a")
+    sha_a = commit(repo_a, "a.txt", "a")
+    repo_b = initialized_repository(tmp_path / "repo-b")
+    sha_b = commit(repo_b, "b.txt", "b")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    pool = PooledLocalGitRepository(
+        ledger, tmp_path / "pool", slot_count=1, owner_pid=lambda: 4242
+    )
+
+    first = pool.prepare_receipt_worktree(repo_a, receipt(sha_a, pr_number=1))
+    second = pool.prepare_receipt_worktree(
+        repo_b, receipt(sha_b, pr_number=2, repository="acme/widgets")
+    )
+
+    assert second.path != first.path
+    assert first.path.is_dir()
+    assert second.path.is_dir()
+    ledger.close()
+
+
 def test_pool_preserves_legacy_global_slot_directory(tmp_path: Path) -> None:
     repo = initialized_repository(tmp_path / "repo")
     sha = commit(repo, "a.txt", "a")
