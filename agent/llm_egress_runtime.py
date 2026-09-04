@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 
 _VALIDATED_SYNTAX_TOOL_NAMES = frozenset({"terminal"})
 _REMOTE_KANBAN_PROJECTION_TOOL_NAMES = frozenset({"kanban_show"})
+_REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES = frozenset({"kanban_attachments"})
 _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES = frozenset({"terminal"})
 _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"search_files"})
 _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file"})
@@ -87,6 +88,7 @@ _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES = frozenset({"patch", "write_file
 _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES = frozenset(
     {
         "kanban_show",
+        "kanban_attachments",
         "search_files",
         "read_file",
         "web_extract",
@@ -135,6 +137,10 @@ _REMOTE_KANBAN_PROJECTION_ELISION = (
     "present in your worker context; do not request or repeat the raw board "
     "record remotely. Continue with the assigned work or use a lifecycle tool."
 )
+_REMOTE_KANBAN_ATTACHMENT_ELISION = (
+    "kanban_attachments completed locally; attachment metadata and contents "
+    "were omitted from remote replay. Continue with the assigned work or use a lifecycle tool."
+)
 
 
 def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
@@ -168,6 +174,16 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
     return GeneratedContextSegment(
         "kanban_show completed locally. Bounded sanitized task projection:\n" + safe
     )
+
+
+def _project_bound_kanban_attachments(value: str) -> GeneratedContextSegment:
+    """Elide attachment payloads while preserving exact call/result binding."""
+
+    # Attachment records can contain source excerpts, credentials, and opaque
+    # blobs.  The worker already has the bounded task assignment; replaying
+    # attachment content is unnecessary and would make the protected route
+    # pay for a retry when provenance cannot be established.
+    return GeneratedContextSegment(_REMOTE_KANBAN_ATTACHMENT_ELISION)
 
 
 def _project_bound_search_files(value: str) -> GeneratedContextSegment:
@@ -1876,6 +1892,7 @@ def _typed_payload(
     field_name: str | None = None,
     syntax_tool_call_ids: frozenset[str] = frozenset(),
     elided_kanban_tool_call_ids: frozenset[str] = frozenset(),
+    kanban_attachment_tool_call_ids: frozenset[str] = frozenset(),
     search_projection_tool_call_ids: frozenset[str] = frozenset(),
     read_file_projection_tool_call_ids: frozenset[str] = frozenset(),
     web_replay_tool_call_ids: frozenset[str] = frozenset(),
@@ -1897,6 +1914,7 @@ def _typed_payload(
     redact_readonly_tool_arguments: bool = False,
     protected_tool_content: bool = False,
     elide_kanban_tool_content: bool = False,
+    kanban_attachment_tool_content: bool = False,
     protected_kanban_context: bool = False,
     generated_context: bool = False,
     redact_generated_context: bool = False,
@@ -1918,6 +1936,8 @@ def _typed_payload(
             # Return only the bounded, redacted current assignment; omit
             # comments, run history, identifiers, and raw host paths.
             return _project_bound_kanban_show(value)
+        if kanban_attachment_tool_content:
+            return _project_bound_kanban_attachments(value)
         if generated_context and redact_generated_context:
             return GeneratedContextSegment(redact_remote_unsafe_text(value))
         if protected_kanban_context:
@@ -1954,6 +1974,14 @@ def _typed_payload(
         is_elided_kanban_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in elided_kanban_tool_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
+        is_kanban_attachment_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in kanban_attachment_tool_call_ids
             and (
                 value.get("role") == "tool"
                 or value.get("type") == "function_call_output"
@@ -2102,6 +2130,7 @@ def _typed_payload(
             (
                 is_recognized_tool_result,
                 is_elided_kanban_tool_result,
+                is_kanban_attachment_result,
                 is_search_projection_tool_result,
                 is_read_file_projection_tool_result,
                 is_web_replay_tool_result,
@@ -2530,6 +2559,7 @@ def _typed_payload(
                 field_name=key,
                 syntax_tool_call_ids=syntax_tool_call_ids,
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
+                kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
                 search_projection_tool_call_ids=search_projection_tool_call_ids,
                 read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
                 web_replay_tool_call_ids=web_replay_tool_call_ids,
@@ -2554,6 +2584,9 @@ def _typed_payload(
                 ),
                 elide_kanban_tool_content=(
                     is_elided_kanban_tool_result and key in {"content", "output"}
+                ),
+                kanban_attachment_tool_content=(
+                    is_kanban_attachment_result and key in {"content", "output"}
                 ),
                 protected_kanban_context=protected_kanban_context,
                 generated_context=(
@@ -2581,6 +2614,7 @@ def _typed_payload(
                 field_name=field_name,
                 syntax_tool_call_ids=syntax_tool_call_ids,
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
+                kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
                 search_projection_tool_call_ids=search_projection_tool_call_ids,
                 read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
                 web_replay_tool_call_ids=web_replay_tool_call_ids,
@@ -2602,6 +2636,7 @@ def _typed_payload(
                 redact_readonly_tool_arguments=redact_readonly_tool_arguments,
                 protected_tool_content=protected_tool_content,
                 elide_kanban_tool_content=elide_kanban_tool_content,
+                kanban_attachment_tool_content=kanban_attachment_tool_content,
                 protected_kanban_context=protected_kanban_context,
                 generated_context=generated_context,
                 redact_generated_context=redact_generated_context,
@@ -2971,6 +3006,11 @@ def authorize_agent_sdk_kwargs(
         ),
         elided_kanban_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_PROJECTION_TOOL_NAMES)
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
+        kanban_attachment_tool_call_ids=(
+            _recognized_tool_call_ids(body, _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES)
             if protected_kanban_remote and protected_provider_route
             else frozenset()
         ),
