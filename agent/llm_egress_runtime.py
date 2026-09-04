@@ -2781,63 +2781,82 @@ def _restore_source_provenance_sidecar(
         if changed:
             restored["messages"] = copied_messages
 
-    responses_input = restored.get("input")
-    if not isinstance(responses_input, list):
-        return restored
-    from agent.codex_responses_adapter import _effective_responses_tool_call_id
+    def _restore_input_items(input_items: Any) -> tuple[Any, bool]:
+        if not isinstance(input_items, list):
+            return input_items, False
+        from agent.codex_responses_adapter import _effective_responses_tool_call_id
 
-    copied_input = list(responses_input)
-    candidates_by_entry: dict[int, list[int]] = {}
-    entries_by_result: dict[int, list[int]] = {}
-    for entry_index, entry in enumerate(sidecar):
-        if entry_index in consumed_entries or not isinstance(entry, Mapping):
-            continue
-        tool_call_id = _effective_responses_tool_call_id(entry.get("tool_call_id"))
-        content_sha256 = entry.get("content_sha256")
-        if tool_call_id is None or not isinstance(content_sha256, str):
-            continue
-        candidates: list[int] = []
-        for index, item in enumerate(responses_input):
-            if not isinstance(item, Mapping):
+        copied_input = list(input_items)
+        candidates_by_entry: dict[int, list[int]] = {}
+        entries_by_result: dict[int, list[int]] = {}
+        for entry_index, entry in enumerate(sidecar):
+            if entry_index in consumed_entries or not isinstance(entry, Mapping):
                 continue
-            if (
-                item.get("type") != "function_call_output"
-                or item.get("call_id") != tool_call_id
-            ):
-                continue
-            output_text = _structured_tool_output_text(item.get("output"))
-            if (
-                isinstance(output_text, str)
-                and sha256(output_text.encode("utf-8")).hexdigest() == content_sha256
-            ):
-                candidates.append(index)
-                entries_by_result.setdefault(index, []).append(entry_index)
-        candidates_by_entry[entry_index] = candidates
-    changed = False
-    for entry_index, entry in enumerate(sidecar):
-        if entry_index in consumed_entries or not isinstance(entry, Mapping):
-            continue
-        candidates = candidates_by_entry.get(entry_index, [])
-        if len(candidates) != 1:
-            continue
-        index = candidates[0]
-        if len(entries_by_result.get(index, [])) != 1:
-            continue
-        copied = dict(responses_input[index])
-        copied["_source_provenance"] = {
-            key: entry[key]
-            for key in (
-                "request_id",
-                "source_grant_digests",
-                "content_sha256",
-                "presentation_kind",
+            tool_call_id = _effective_responses_tool_call_id(
+                entry.get("tool_call_id")
             )
-            if key in entry
-        }
-        copied_input[index] = copied
-        changed = True
-    if changed:
-        restored["input"] = copied_input
+            content_sha256 = entry.get("content_sha256")
+            if tool_call_id is None or not isinstance(content_sha256, str):
+                continue
+            candidates: list[int] = []
+            for index, item in enumerate(input_items):
+                if not isinstance(item, Mapping):
+                    continue
+                if (
+                    item.get("type") != "function_call_output"
+                    or item.get("call_id") != tool_call_id
+                ):
+                    continue
+                output_text = _structured_tool_output_text(item.get("output"))
+                if (
+                    isinstance(output_text, str)
+                    and sha256(output_text.encode("utf-8")).hexdigest()
+                    == content_sha256
+                ):
+                    candidates.append(index)
+                    entries_by_result.setdefault(index, []).append(entry_index)
+            candidates_by_entry[entry_index] = candidates
+        changed = False
+        for entry_index, entry in enumerate(sidecar):
+            if entry_index in consumed_entries or not isinstance(entry, Mapping):
+                continue
+            candidates = candidates_by_entry.get(entry_index, [])
+            if len(candidates) != 1:
+                continue
+            index = candidates[0]
+            if len(entries_by_result.get(index, [])) != 1:
+                continue
+            copied = dict(copied_input[index])
+            copied["_source_provenance"] = {
+                key: entry[key]
+                for key in (
+                    "request_id",
+                    "source_grant_digests",
+                    "content_sha256",
+                    "presentation_kind",
+                )
+                if key in entry
+            }
+            copied_input[index] = copied
+            changed = True
+        return copied_input if changed else input_items, changed
+
+    restored_input, input_changed = _restore_input_items(restored.get("input"))
+    if input_changed:
+        restored["input"] = restored_input
+
+    # The consumer-Codex SDK transform can move the normalized input under
+    # ``extra_body`` immediately before dispatch. Preserve the same exact
+    # source binding there; no other nested shape is accepted.
+    extra_body = restored.get("extra_body")
+    if isinstance(extra_body, Mapping):
+        restored_extra_input, extra_input_changed = _restore_input_items(
+            extra_body.get("input")
+        )
+        if extra_input_changed:
+            copied_extra_body = dict(extra_body)
+            copied_extra_body["input"] = restored_extra_input
+            restored["extra_body"] = copied_extra_body
     return restored
 
 
