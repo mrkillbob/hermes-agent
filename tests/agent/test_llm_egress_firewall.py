@@ -952,6 +952,46 @@ def test_source_presentation_still_rejects_short_encoded_payload(tmp_path):
     assert "base64_payload" in exc_info.value.decision.reason_codes
 
 
+def test_source_presentation_allows_secret_env_name_but_not_value(tmp_path):
+    source = (
+        "token_env: HERMES_GITHUB_BOT_TOKEN\n"
+        "token_value: ghp_012345678901234567890123456789012345\n"
+    )
+    path = tmp_path / "README.md"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=2)
+    presentation = json.dumps(
+        {
+            "content": "\n".join(
+                f"{index}|{line}"
+                for index, line in enumerate(source.split("\n"), 1)
+            )
+        }
+    )
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _source_presentation_request(grant, presentation),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "secret_detected" in exc_info.value.decision.reason_codes
+
+    safe_source = "token_env: HERMES_GITHUB_BOT_TOKEN\n"
+    path.write_text(safe_source, encoding="utf-8")
+    safe_grant = _source_grant(path)
+    safe_presentation = json.dumps(
+        {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(safe_source.split("\n"), 1))}
+    )
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(safe_grant, safe_presentation),
+        _route(),
+        grants=(safe_grant,),
+    )
+    assert decision.allowed is True
+
+
 def test_source_presentation_allows_code_constants_and_secret_identifiers(tmp_path):
     path = tmp_path / "source.py"
     source = (
