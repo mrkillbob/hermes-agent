@@ -1,0 +1,16 @@
+{
+  "global_prohibited_behaviors": [
+    "account_farming",
+    "captcha_bypass",
+    "counterfeit_or_ip_infringing_goods",
+    "deceptive_identities",
+    "evading_platform_restrictions",
+    "fake_reviews",
+    "fake_social_engagement",
+    "mass_unsolicited_spam",
+    "prohibited_marketplace_bots",
+    "survey_answer_automation"
+  ],
+  "platforms": [],
+  "schema_version": "hrl.compliance_registry.v1"
+}

@@ -1,0 +1,65 @@
+{
+  "schema_version": "hrl.model_routing_policy.v1",
+  "source": {
+    "benchmark_id": "20260821T075107Z-80529d75e16a",
+    "benchmark_sha256": "d8f5747dd95032462e5bc64b3f4316856ccaa38664bec569fd18db4fad2f04d8",
+    "inventory_id": "20260820T112051Z-b1b27c347a23",
+    "selections_sha256": "b40305705b4cb9a7f83538bc0b94563b70f823715bf08f51358910a3ca5af33f"
+  },
+  "tiers": {
+    "coding": {
+      "model": null,
+      "model_digest": null,
+      "permitted_during_luna": false,
+      "reason": "benchmark evidence is incomplete or below threshold",
+      "reasoning": null,
+      "status": "unavailable",
+      "thinking": false
+    },
+    "escalation": {
+      "model": null,
+      "model_digest": null,
+      "permitted_during_luna": false,
+      "reason": "benchmark evidence is incomplete or below threshold",
+      "reasoning": null,
+      "status": "unavailable",
+      "thinking": true
+    },
+    "fast": {
+      "model": "qwen3.5:4b",
+      "model_digest": "2a654d98e6fb",
+      "permitted_during_luna": false,
+      "reason": null,
+      "reasoning": null,
+      "status": "available",
+      "thinking": false
+    },
+    "no_llm": {
+      "model": null,
+      "model_digest": null,
+      "permitted_during_luna": true,
+      "reason": "deterministic execution",
+      "reasoning": null,
+      "status": "available",
+      "thinking": false
+    },
+    "reasoning": {
+      "model": null,
+      "model_digest": null,
+      "permitted_during_luna": false,
+      "reason": "no installed candidate matches the required class",
+      "reasoning": "low",
+      "status": "unavailable",
+      "thinking": true
+    },
+    "standard": {
+      "model": null,
+      "model_digest": null,
+      "permitted_during_luna": false,
+      "reason": "no installed candidate matches the required class",
+      "reasoning": null,
+      "status": "unavailable",
+      "thinking": false
+    }
+  }
+}

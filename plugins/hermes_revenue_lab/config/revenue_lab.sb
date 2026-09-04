@@ -1,0 +1,6 @@
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write* (subpath "/Users/mikedemott/HermesRevenueLab"))
+(deny file-write* (subpath "/Users/mikedemott/TradingBotV18"))
+

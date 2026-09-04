@@ -1,0 +1,25 @@
+{
+  "authorized_approvers": [
+    "owner"
+  ],
+  "initial_approval_required": [
+    "accept_new_terms",
+    "change_price_materially",
+    "create_marketplace_account",
+    "enter_contract",
+    "handle_sensitive_customer_data",
+    "issue_refund",
+    "publish_first_product_in_category",
+    "send_novel_outbound_campaign",
+    "spend_money",
+    "start_paid_advertising",
+    "subscribe_paid_api"
+  ],
+  "local_safe_actions": [
+    "calculate_metrics",
+    "generate_private_draft",
+    "read_public_policy",
+    "run_dry_run"
+  ],
+  "schema_version": "hrl.approval_policy.v1"
+}

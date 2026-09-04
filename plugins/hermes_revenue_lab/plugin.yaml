@@ -1,0 +1,5 @@
+name: hermes_revenue_lab
+version: 0.1.0
+description: "Hermes Revenue Lab: local-first, Luna-yielding revenue experiment infrastructure (capital allocation, provider/model benchmarking, deterministic guard rails, compliance registry, cron fleet). Folded in-tree from the former mrkillbob/HermesRevenueLab repo. Adds the `hermes revenue-lab` CLI bridge (status/preflight/guard) and an opt-in `revenue-lab` skill. No model tools."
+author: "@mrkillbob (Hermes Revenue Lab), NousResearch (in-tree plugin port)"
+kind: standalone

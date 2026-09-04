@@ -1,0 +1,44 @@
+{
+  "benchmark_id": "20260821T075107Z-80529d75e16a",
+  "benchmark_sha256": "d8f5747dd95032462e5bc64b3f4316856ccaa38664bec569fd18db4fad2f04d8",
+  "inventory_id": "20260820T112051Z-b1b27c347a23",
+  "schema_version": "hrl.model_selections.v1",
+  "selection_rule": "lowest measured peak RSS, then median wall time, then parameter count",
+  "tiers": {
+    "coding": {
+      "model": null,
+      "reason": "benchmark evidence is incomplete or below threshold",
+      "status": "unavailable"
+    },
+    "escalation": {
+      "model": null,
+      "reason": "benchmark evidence is incomplete or below threshold",
+      "status": "unavailable"
+    },
+    "fast": {
+      "completed_tasks": 5,
+      "median_wall_time_seconds": 7.173149,
+      "model": "qwen3.5:4b",
+      "model_digest": "2a654d98e6fb",
+      "parameter_billions": 4.7,
+      "peak_ollama_rss_bytes": 14150942720,
+      "quality_score": 1.0,
+      "status": "available"
+    },
+    "no_llm": {
+      "model": null,
+      "reason": "deterministic execution",
+      "status": "available"
+    },
+    "reasoning": {
+      "model": null,
+      "reason": "no installed candidate matches the required class",
+      "status": "unavailable"
+    },
+    "standard": {
+      "model": null,
+      "reason": "no installed candidate matches the required class",
+      "status": "unavailable"
+    }
+  }
+}

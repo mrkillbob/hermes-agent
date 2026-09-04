@@ -1,0 +1,43 @@
+#!/bin/zsh
+# Local dev launcher for the in-tree Hermes Revenue Lab plugin, sandboxed via
+# macOS sandbox-exec. Folded in from the former mrkillbob/HermesRevenueLab
+# repo — LAB_ROOT now resolves to this plugin's own directory
+# (plugins/hermes_revenue_lab/) instead of a separate external checkout.
+#
+# macOS-only (sandbox-exec, lsof -sTCP:LISTEN flags). Review before use on a
+# machine other than the one it was authored on — python3.11/hermes are
+# resolved via PATH below, but $HOME/.local/bin may still need adding to
+# PATH for a "hermes" found this way to be the intended one.
+set -euo pipefail
+
+SCRIPT_DIR="${0:A:h}"
+LAB_ROOT="${SCRIPT_DIR:h}"
+export HERMES_HOME="$LAB_ROOT/.hermes"
+export HERMES_WRITE_SAFE_ROOT="$LAB_ROOT"
+export HOME="$LAB_ROOT/.home"
+export TMPDIR="$LAB_ROOT/tmp"
+export XDG_CACHE_HOME="$LAB_ROOT/.cache"
+export PYTHONDONTWRITEBYTECODE=1
+
+if (( $# != 0 )); then
+  print -u2 "usage: scripts/hermes-revenue-lab"
+  exit 64
+fi
+
+mkdir -p "$HOME" "$TMPDIR" "$XDG_CACHE_HOME"
+chmod 700 "$HOME" "$TMPDIR" "$XDG_CACHE_HOME"
+command -v python3.11 >/dev/null 2>&1 || { print -u2 "python3.11 not found on PATH"; exit 69; }
+python3.11 "$LAB_ROOT/scripts/init_lab_runtime.py" >/dev/null
+
+if /usr/sbin/lsof -nP -iTCP:9120 -sTCP:LISTEN >/dev/null 2>&1; then
+  print -u2 "refusing to start: 127.0.0.1:9120 is already occupied"
+  exit 69
+fi
+
+set -a
+. "$HERMES_HOME/.env"
+set +a
+
+command -v hermes >/dev/null 2>&1 || { print -u2 "hermes not found on PATH"; exit 69; }
+exec /usr/bin/sandbox-exec -f "$LAB_ROOT/config/revenue_lab.sb" \
+  hermes serve --host 127.0.0.1 --port 9120 --skip-build

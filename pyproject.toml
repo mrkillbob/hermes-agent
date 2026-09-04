@@ -455,7 +455,21 @@ gateway = ["assets/**/*"]
 # Bundled plugin discovery reads these manifests at runtime. Keep them in
 # sealed wheels with the plugin Python modules; without this declaration the
 # wheel contains adapters but discovery finds zero bundled plugins.
-plugins = ["**/plugin.yaml", "**/plugin.yml"]
+#
+# hermes_revenue_lab (in-tree HRL plugin, folded in from mrkillbob/HermesRevenueLab)
+# ships non-.py runbooks/config/artifacts/scripts alongside its `src/` package;
+# `hermes_revenue_lab.*` above (via the plugins.* wildcard) covers the .py source,
+# this covers everything else it reads at runtime (docs/runbooks, config, prior
+# benchmark artifacts, its own README/AGENTS/CLAUDE notes, and its scripts/, which
+# are invoked as standalone files rather than imported as a package).
+plugins = [
+  "**/plugin.yaml", "**/plugin.yml",
+  "hermes_revenue_lab/docs/**/*",
+  "hermes_revenue_lab/config/**/*",
+  "hermes_revenue_lab/artifacts/**/*",
+  "hermes_revenue_lab/scripts/**/*",
+  "hermes_revenue_lab/*.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

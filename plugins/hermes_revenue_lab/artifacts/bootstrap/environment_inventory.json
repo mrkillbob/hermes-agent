@@ -1,0 +1,986 @@
+{
+  "browser_automation": {
+    "dedicated_profile": {
+      "status": "not_observed",
+      "value": null
+    },
+    "hermes_computer_use": "cua-driver: installed at $HOME/.local/bin/cua-driver (cua-driver 0.20.0)\n  \u2713 Up to date.",
+    "status": "available"
+  },
+  "classification": "observed_busy",
+  "collected_at": "2026-08-20T11:20:51.571860+00:00",
+  "hermes": {
+    "computer_use": {
+      "reason": null,
+      "status": "available",
+      "value": "cua-driver: installed at $HOME/.local/bin/cua-driver (cua-driver 0.20.0)\n  \u2713 Up to date."
+    },
+    "cron_jobs": {
+      "reason": null,
+      "status": "available",
+      "value": [
+        {
+          "deliver": "local",
+          "id": "b18c6e9c0aea",
+          "last_run": "2026-08-19T13:31:51.026503-07:00  ok",
+          "name": "Luna read-only audit",
+          "next_run": "2026-08-20T13:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 13 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-b18c6e9c0aea"
+        },
+        {
+          "deliver": "local",
+          "id": "b9635b1abd14",
+          "last_run": "2026-08-19T13:46:57.229369-07:00  ok",
+          "name": "Luna engineering supervisor",
+          "next_run": "2026-08-20T13:45:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "45 13 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-b9635b1abd14"
+        },
+        {
+          "deliver": "local",
+          "id": "47d6cd983073",
+          "last_run": "2026-08-19T19:07:30.495093-07:00  ok",
+          "name": "Hermes worktree governance",
+          "next_run": "2026-08-20T19:00:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "0 19 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/TradingBotV18/.worktrees/hermes-cron-47d6cd983073"
+        },
+        {
+          "deliver": "local",
+          "id": "fc7dc9db2955",
+          "name": "Hermes acceptance gate verification",
+          "next_run": "2026-08-24T18:00:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "0 18 * * 1",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-fc7dc9db2955"
+        },
+        {
+          "deliver": "local",
+          "id": "f50c3f2c980b",
+          "last_run": "2026-08-19T18:20:09.803653-07:00  ok",
+          "name": "Hermes market-data authority check",
+          "next_run": "2026-08-20T18:15:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "15 18 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-f50c3f2c980b"
+        },
+        {
+          "deliver": "local",
+          "id": "69f6b8e41a6f",
+          "name": "Hermes route execution boundary check",
+          "next_run": "2026-08-20T18:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 18 * * 4",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-69f6b8e41a6f"
+        },
+        {
+          "deliver": "local",
+          "id": "1d6533dea107",
+          "last_run": "2026-08-19T18:48:42.000542-07:00  ok",
+          "name": "Hermes paper-safety posture check",
+          "next_run": "2026-08-20T18:45:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "45 18 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-1d6533dea107"
+        },
+        {
+          "deliver": "local",
+          "id": "2eb76b17fd17",
+          "name": "Hermes performance and test sentinel",
+          "next_run": "2026-08-20T19:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 19 * * 2,4",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-2eb76b17fd17"
+        },
+        {
+          "deliver": "local",
+          "id": "b469b2421177",
+          "last_run": "2026-08-19T19:36:38.349350-07:00  ok",
+          "name": "Hermes Mission Control UX review",
+          "next_run": "2026-08-26T19:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 19 * * 3",
+          "status": "active",
+          "workdir": "$HOME/TradingBotV18/.worktrees/hermes-cron-b469b2421177"
+        },
+        {
+          "deliver": "local",
+          "id": "0aba45404d29",
+          "name": "Hermes copilot learning governance",
+          "next_run": "2026-08-21T19:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 19 * * 5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-0aba45404d29"
+        },
+        {
+          "deliver": "local",
+          "id": "1ad125352393",
+          "name": "Hermes research scout weekly",
+          "next_run": "2026-08-21T20:00:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "0 20 * * 5",
+          "status": "active",
+          "workdir": "$HOME/TradingBotV18/.worktrees/hermes-cron-1ad125352393"
+        },
+        {
+          "deliver": "local",
+          "id": "e9236ab46359",
+          "name": "Hermes dependency and tooling health",
+          "next_run": "2026-08-24T20:00:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "0 20 * * 1",
+          "status": "active",
+          "workdir": "$HOME/TradingBotV18/.worktrees/hermes-cron-e9236ab46359"
+        }
+      ]
+    },
+    "cron_status": {
+      "reason": null,
+      "status": "available",
+      "value": "\u2713 Gateway is running \u2014 cron jobs will fire automatically\n  PID: 4136, 4132\n  Ticker heartbeat: 44s ago\n\n  12 active job(s)\n  Next run: 2026-08-20T13:30:00-07:00"
+    },
+    "mcp": {
+      "reason": null,
+      "status": "available",
+      "value": "MCP Servers:\n\n  Name             Transport                      Tools        Status    \n  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  serena           $HOME/.local/...   all          \u2713 enabled"
+    },
+    "profiles": {
+      "reason": null,
+      "status": "available",
+      "value": [
+        {
+          "gateway": "running",
+          "model": "qwen3-coder:30b",
+          "name": "default"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "acceptance-gate-verifier"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "copilot-learning-steward"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "dependency-tooling-health-sentinel"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "luna-auditor"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "market-data-authority-auditor"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "mission-control-ux-auditor"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "paper-safety-guardian"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "performance-sentinel"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "research-scout"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "route-execution-boundary-auditor"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "sandbox"
+        },
+        {
+          "gateway": "stopped",
+          "model": "qwen3-coder:30b",
+          "name": "worktree-change-governance-steward"
+        }
+      ]
+    },
+    "tools": {
+      "reason": null,
+      "status": "available",
+      "value": [
+        {
+          "enabled": true,
+          "name": "web"
+        },
+        {
+          "enabled": true,
+          "name": "browser"
+        },
+        {
+          "enabled": true,
+          "name": "terminal"
+        },
+        {
+          "enabled": true,
+          "name": "file"
+        },
+        {
+          "enabled": true,
+          "name": "code_execution"
+        },
+        {
+          "enabled": true,
+          "name": "vision"
+        },
+        {
+          "enabled": false,
+          "name": "video"
+        },
+        {
+          "enabled": true,
+          "name": "image_gen"
+        },
+        {
+          "enabled": false,
+          "name": "video_gen"
+        },
+        {
+          "enabled": true,
+          "name": "bfl"
+        },
+        {
+          "enabled": false,
+          "name": "x_search"
+        },
+        {
+          "enabled": true,
+          "name": "tts"
+        },
+        {
+          "enabled": false,
+          "name": "stt"
+        },
+        {
+          "enabled": true,
+          "name": "skills"
+        },
+        {
+          "enabled": true,
+          "name": "todo"
+        },
+        {
+          "enabled": true,
+          "name": "memory"
+        },
+        {
+          "enabled": false,
+          "name": "context_engine"
+        },
+        {
+          "enabled": true,
+          "name": "session_search"
+        },
+        {
+          "enabled": true,
+          "name": "clarify"
+        },
+        {
+          "enabled": true,
+          "name": "delegation"
+        },
+        {
+          "enabled": true,
+          "name": "cronjob"
+        },
+        {
+          "enabled": false,
+          "name": "homeassistant"
+        },
+        {
+          "enabled": false,
+          "name": "spotify"
+        },
+        {
+          "enabled": false,
+          "name": "yuanbao"
+        },
+        {
+          "enabled": true,
+          "name": "computer_use"
+        },
+        {
+          "enabled": false,
+          "name": "a2a"
+        }
+      ]
+    },
+    "version": {
+      "reason": null,
+      "status": "available",
+      "value": {
+        "install_directory": "$HOME/.hermes/hermes-agent",
+        "install_method": "git",
+        "python_version": "3.11.16",
+        "upstream_revision": "d431f680",
+        "version": "0.20.4"
+      }
+    }
+  },
+  "inventory_id": "20260820T112051Z-b1b27c347a23",
+  "isolation": {
+    "git_status_unchanged": true,
+    "inside_write_allowed": true,
+    "probe_hash_unchanged": true,
+    "status": "available",
+    "tradingbot_write_denied": true
+  },
+  "luna_observation": {
+    "active_process_count": 0,
+    "aggregate": {
+      "count": 0,
+      "cpu_percent": 0.0,
+      "rss_bytes": 0
+    },
+    "status": "available"
+  },
+  "machine": {
+    "reason": null,
+    "status": "available",
+    "value": {
+      "chip": "Apple M4 Pro",
+      "efficiency_cores": 4,
+      "memory": "64 GB",
+      "model_identifier": "Mac16,11",
+      "model_name": "Mac mini",
+      "performance_cores": 8,
+      "total_cores": 12
+    }
+  },
+  "ollama": {
+    "installed_models": {
+      "reason": null,
+      "status": "available",
+      "value": [
+        {
+          "architecture": "qwen3next",
+          "capabilities": [
+            "completion",
+            "tools"
+          ],
+          "context_length": 262144,
+          "digest": "ca06e9e4087c",
+          "embedding_length": 2048,
+          "name": "qwen3-coder-next:q4_K_M",
+          "parameters": "79.7B",
+          "quantization": "Q4_K_M",
+          "requires_ollama": "0.15.5",
+          "size": "51 GB"
+        },
+        {
+          "architecture": "glm4moelite",
+          "capabilities": [
+            "completion",
+            "tools",
+            "thinking"
+          ],
+          "context_length": 202752,
+          "digest": "4475827791a2",
+          "embedding_length": 2048,
+          "name": "glm-4.7-flash:latest",
+          "parameters": "29.9B",
+          "quantization": "Q4_K_M",
+          "requires_ollama": "0.15.0",
+          "size": "19 GB"
+        },
+        {
+          "architecture": "qwen35",
+          "capabilities": [
+            "completion",
+            "vision",
+            "tools",
+            "thinking"
+          ],
+          "context_length": 262144,
+          "digest": "a50eda8ed977",
+          "embedding_length": 5120,
+          "name": "qwen3.6:27b",
+          "parameters": "27.8B",
+          "quantization": "Q4_K_M",
+          "size": "17 GB"
+        },
+        {
+          "architecture": "qwen35moe",
+          "capabilities": [
+            "completion",
+            "vision",
+            "tools",
+            "thinking"
+          ],
+          "context_length": 262144,
+          "digest": "07d35212591f",
+          "embedding_length": 2048,
+          "name": "qwen3.6:35b-a3b",
+          "parameters": "36.0B",
+          "quantization": "Q4_K_M",
+          "size": "23 GB"
+        },
+        {
+          "architecture": "qwen3moe",
+          "capabilities": [
+            "completion",
+            "tools"
+          ],
+          "context_length": 262144,
+          "digest": "06c1097efce0",
+          "embedding_length": 2048,
+          "name": "qwen3-coder:30b",
+          "parameters": "30.5B",
+          "quantization": "Q4_K_M",
+          "size": "18 GB"
+        },
+        {
+          "architecture": "qwen35",
+          "capabilities": [
+            "completion",
+            "vision",
+            "tools",
+            "thinking"
+          ],
+          "context_length": 262144,
+          "digest": "2a654d98e6fb",
+          "embedding_length": 2560,
+          "name": "qwen3.5:4b",
+          "parameters": "4.7B",
+          "quantization": "Q4_K_M",
+          "requires_ollama": "0.17.1",
+          "size": "3.4 GB"
+        },
+        {
+          "architecture": "qwen3",
+          "capabilities": [
+            "tools",
+            "thinking",
+            "completion"
+          ],
+          "context_length": 262144,
+          "digest": "0edcdef34593",
+          "embedding_length": 2560,
+          "name": "qwen3:4b-instruct",
+          "parameters": "4.0B",
+          "quantization": "Q4_K_M",
+          "size": "2.5 GB"
+        }
+      ]
+    },
+    "loaded_models": 0,
+    "version": {
+      "reason": null,
+      "status": "available",
+      "value": "0.32.14"
+    }
+  },
+  "required_sections_blocked": [],
+  "resource_observations": {
+    "idle_baseline": {
+      "status": "unavailable",
+      "value": null
+    },
+    "reasons": [
+      "resource_threshold"
+    ],
+    "samples": [
+      {
+        "load_1m": 4.35,
+        "loaded_models": 0,
+        "luna_count": 0,
+        "memory_free_percent": 91.0,
+        "process_aggregates": {
+          "hermes": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          },
+          "luna": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          },
+          "ollama": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          },
+          "revenue_lab": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          }
+        },
+        "revenue_lab_workers": 0
+      },
+      {
+        "load_1m": 4.35,
+        "loaded_models": 0,
+        "luna_count": 0,
+        "memory_free_percent": 91.0,
+        "process_aggregates": {
+          "hermes": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          },
+          "luna": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          },
+          "ollama": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          },
+          "revenue_lab": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          }
+        },
+        "revenue_lab_workers": 0
+      },
+      {
+        "load_1m": 4.35,
+        "loaded_models": 0,
+        "luna_count": 0,
+        "memory_free_percent": 91.0,
+        "process_aggregates": {
+          "hermes": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          },
+          "luna": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          },
+          "ollama": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          },
+          "revenue_lab": {
+            "count": 0,
+            "cpu_percent": 0.0,
+            "rss_bytes": 0
+          }
+        },
+        "revenue_lab_workers": 0
+      }
+    ],
+    "vm": {
+      "reason": null,
+      "status": "available",
+      "value": {
+        "active_bytes": 15644672000,
+        "compressed_bytes": 1774370816,
+        "free_bytes": 24050221056,
+        "inactive_bytes": 21275246592,
+        "wired_bytes": 3897884672
+      }
+    }
+  },
+  "schedulers": {
+    "hermes_jobs": {
+      "reason": null,
+      "status": "available",
+      "value": [
+        {
+          "deliver": "local",
+          "id": "b18c6e9c0aea",
+          "last_run": "2026-08-19T13:31:51.026503-07:00  ok",
+          "name": "Luna read-only audit",
+          "next_run": "2026-08-20T13:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 13 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-b18c6e9c0aea"
+        },
+        {
+          "deliver": "local",
+          "id": "b9635b1abd14",
+          "last_run": "2026-08-19T13:46:57.229369-07:00  ok",
+          "name": "Luna engineering supervisor",
+          "next_run": "2026-08-20T13:45:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "45 13 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-b9635b1abd14"
+        },
+        {
+          "deliver": "local",
+          "id": "47d6cd983073",
+          "last_run": "2026-08-19T19:07:30.495093-07:00  ok",
+          "name": "Hermes worktree governance",
+          "next_run": "2026-08-20T19:00:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "0 19 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/TradingBotV18/.worktrees/hermes-cron-47d6cd983073"
+        },
+        {
+          "deliver": "local",
+          "id": "fc7dc9db2955",
+          "name": "Hermes acceptance gate verification",
+          "next_run": "2026-08-24T18:00:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "0 18 * * 1",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-fc7dc9db2955"
+        },
+        {
+          "deliver": "local",
+          "id": "f50c3f2c980b",
+          "last_run": "2026-08-19T18:20:09.803653-07:00  ok",
+          "name": "Hermes market-data authority check",
+          "next_run": "2026-08-20T18:15:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "15 18 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-f50c3f2c980b"
+        },
+        {
+          "deliver": "local",
+          "id": "69f6b8e41a6f",
+          "name": "Hermes route execution boundary check",
+          "next_run": "2026-08-20T18:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 18 * * 4",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-69f6b8e41a6f"
+        },
+        {
+          "deliver": "local",
+          "id": "1d6533dea107",
+          "last_run": "2026-08-19T18:48:42.000542-07:00  ok",
+          "name": "Hermes paper-safety posture check",
+          "next_run": "2026-08-20T18:45:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "45 18 * * 1-5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-1d6533dea107"
+        },
+        {
+          "deliver": "local",
+          "id": "2eb76b17fd17",
+          "name": "Hermes performance and test sentinel",
+          "next_run": "2026-08-20T19:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 19 * * 2,4",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-2eb76b17fd17"
+        },
+        {
+          "deliver": "local",
+          "id": "b469b2421177",
+          "last_run": "2026-08-19T19:36:38.349350-07:00  ok",
+          "name": "Hermes Mission Control UX review",
+          "next_run": "2026-08-26T19:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 19 * * 3",
+          "status": "active",
+          "workdir": "$HOME/TradingBotV18/.worktrees/hermes-cron-b469b2421177"
+        },
+        {
+          "deliver": "local",
+          "id": "0aba45404d29",
+          "name": "Hermes copilot learning governance",
+          "next_run": "2026-08-21T19:30:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "30 19 * * 5",
+          "status": "active",
+          "workdir": "$HOME/LunaBot-default/.worktrees/hermes-cron-0aba45404d29"
+        },
+        {
+          "deliver": "local",
+          "id": "1ad125352393",
+          "name": "Hermes research scout weekly",
+          "next_run": "2026-08-21T20:00:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "0 20 * * 5",
+          "status": "active",
+          "workdir": "$HOME/TradingBotV18/.worktrees/hermes-cron-1ad125352393"
+        },
+        {
+          "deliver": "local",
+          "id": "e9236ab46359",
+          "name": "Hermes dependency and tooling health",
+          "next_run": "2026-08-24T20:00:00-07:00",
+          "repeat": "\u221e",
+          "schedule": "0 20 * * 1",
+          "status": "active",
+          "workdir": "$HOME/TradingBotV18/.worktrees/hermes-cron-e9236ab46359"
+        }
+      ]
+    },
+    "launchd": {
+      "reason": null,
+      "status": "available",
+      "value": [
+        "ai.hermes.gateway",
+        "application.com.electron.ollama.245546131.245546137.FC7189FC-29D6-42F8-A93F-A82A46BA5517",
+        "application.com.nousresearch.hermes.255947025.255947980",
+        "com.ollama.ollama",
+        "homebrew.mxcl.ollama"
+      ]
+    },
+    "user_crontab": {
+      "configured": null,
+      "status": "unavailable"
+    }
+  },
+  "schema_version": "hrl.environment_inventory.v1",
+  "source_commands": [
+    {
+      "duration_seconds": 0.108548,
+      "exit_code": 0,
+      "name": "hermes_version",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.238824,
+      "exit_code": 0,
+      "name": "hermes_tools",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.259879,
+      "exit_code": 0,
+      "name": "hermes_profiles",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.183856,
+      "exit_code": 0,
+      "name": "hermes_cron",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.18434,
+      "exit_code": 0,
+      "name": "hermes_cron_status",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.193019,
+      "exit_code": 0,
+      "name": "hermes_computer_use",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.140296,
+      "exit_code": 0,
+      "name": "hermes_mcp",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.010802,
+      "exit_code": 0,
+      "name": "ollama_version",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.012288,
+      "exit_code": 0,
+      "name": "ollama_list",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.075597,
+      "exit_code": 0,
+      "name": "hardware",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.002183,
+      "exit_code": 0,
+      "name": "storage",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.002014,
+      "exit_code": 0,
+      "name": "vm_stat",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.00296,
+      "exit_code": 1,
+      "name": "crontab",
+      "status": "unavailable"
+    },
+    {
+      "duration_seconds": 0.003862,
+      "exit_code": 0,
+      "name": "launchd",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.125575,
+      "exit_code": 0,
+      "name": "ollama_show_0",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.142825,
+      "exit_code": 0,
+      "name": "ollama_show_1",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.1789,
+      "exit_code": 0,
+      "name": "ollama_show_2",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.178157,
+      "exit_code": 0,
+      "name": "ollama_show_3",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.091288,
+      "exit_code": 0,
+      "name": "ollama_show_4",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.169283,
+      "exit_code": 0,
+      "name": "ollama_show_5",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.085215,
+      "exit_code": 0,
+      "name": "ollama_show_6",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.00402,
+      "exit_code": 0,
+      "name": "resource_uptime",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.00174,
+      "exit_code": 0,
+      "name": "resource_memory",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.023682,
+      "exit_code": 0,
+      "name": "resource_processes",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.010874,
+      "exit_code": 0,
+      "name": "resource_ollama_ps",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.013272,
+      "exit_code": 0,
+      "name": "resource_uptime",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.002132,
+      "exit_code": 0,
+      "name": "resource_memory",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.025381,
+      "exit_code": 0,
+      "name": "resource_processes",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.012732,
+      "exit_code": 0,
+      "name": "resource_ollama_ps",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.014984,
+      "exit_code": 0,
+      "name": "resource_uptime",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.004617,
+      "exit_code": 0,
+      "name": "resource_memory",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.036782,
+      "exit_code": 0,
+      "name": "resource_processes",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.012547,
+      "exit_code": 0,
+      "name": "resource_ollama_ps",
+      "status": "available"
+    }
+  ],
+  "storage": {
+    "reason": null,
+    "status": "available",
+    "value": {
+      "available_bytes": 487801290752,
+      "total_bytes": 1995218165760,
+      "used_bytes": 1463155630080
+    }
+  },
+  "unknowns": [
+    "idle resource baseline unavailable"
+  ],
+  "warnings": [
+    "resource_threshold"
+  ],
+  "workspace": {
+    "hermes_home": "$HOME/HermesRevenueLab/.hermes",
+    "path": "$HOME/HermesRevenueLab",
+    "tradingbot_path": "$HOME/TradingBotV18"
+  }
+}

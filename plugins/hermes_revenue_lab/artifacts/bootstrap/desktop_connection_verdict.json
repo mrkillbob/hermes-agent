@@ -1,0 +1,12 @@
+{
+  "auth_required": false,
+  "desktop_app_test_status": "reachable",
+  "desktop_app_tested_at": "2026-08-20T17:10:10.806333+00:00",
+  "endpoint": "http://127.0.0.1:9120",
+  "gateway_name": "Hermes Revenue Lab",
+  "http_status": 200,
+  "inventory_id": "20260820T112051Z-b1b27c347a23",
+  "status": "available",
+  "token_auth_verified": true,
+  "verified_at": "2026-08-20T17:14:02.352753+00:00"
+}

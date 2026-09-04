@@ -1,0 +1,203 @@
+{
+  "commands": [
+    {
+      "duration_seconds": 0.108548,
+      "exit_code": 0,
+      "name": "hermes_version",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.238824,
+      "exit_code": 0,
+      "name": "hermes_tools",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.259879,
+      "exit_code": 0,
+      "name": "hermes_profiles",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.183856,
+      "exit_code": 0,
+      "name": "hermes_cron",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.18434,
+      "exit_code": 0,
+      "name": "hermes_cron_status",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.193019,
+      "exit_code": 0,
+      "name": "hermes_computer_use",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.140296,
+      "exit_code": 0,
+      "name": "hermes_mcp",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.010802,
+      "exit_code": 0,
+      "name": "ollama_version",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.012288,
+      "exit_code": 0,
+      "name": "ollama_list",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.075597,
+      "exit_code": 0,
+      "name": "hardware",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.002183,
+      "exit_code": 0,
+      "name": "storage",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.002014,
+      "exit_code": 0,
+      "name": "vm_stat",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.00296,
+      "exit_code": 1,
+      "name": "crontab",
+      "status": "unavailable"
+    },
+    {
+      "duration_seconds": 0.003862,
+      "exit_code": 0,
+      "name": "launchd",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.125575,
+      "exit_code": 0,
+      "name": "ollama_show_0",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.142825,
+      "exit_code": 0,
+      "name": "ollama_show_1",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.1789,
+      "exit_code": 0,
+      "name": "ollama_show_2",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.178157,
+      "exit_code": 0,
+      "name": "ollama_show_3",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.091288,
+      "exit_code": 0,
+      "name": "ollama_show_4",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.169283,
+      "exit_code": 0,
+      "name": "ollama_show_5",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.085215,
+      "exit_code": 0,
+      "name": "ollama_show_6",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.00402,
+      "exit_code": 0,
+      "name": "resource_uptime",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.00174,
+      "exit_code": 0,
+      "name": "resource_memory",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.023682,
+      "exit_code": 0,
+      "name": "resource_processes",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.010874,
+      "exit_code": 0,
+      "name": "resource_ollama_ps",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.013272,
+      "exit_code": 0,
+      "name": "resource_uptime",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.002132,
+      "exit_code": 0,
+      "name": "resource_memory",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.025381,
+      "exit_code": 0,
+      "name": "resource_processes",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.012732,
+      "exit_code": 0,
+      "name": "resource_ollama_ps",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.014984,
+      "exit_code": 0,
+      "name": "resource_uptime",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.004617,
+      "exit_code": 0,
+      "name": "resource_memory",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.036782,
+      "exit_code": 0,
+      "name": "resource_processes",
+      "status": "available"
+    },
+    {
+      "duration_seconds": 0.012547,
+      "exit_code": 0,
+      "name": "resource_ollama_ps",
+      "status": "available"
+    }
+  ],
+  "inventory_id": "20260820T112051Z-b1b27c347a23"
+}
