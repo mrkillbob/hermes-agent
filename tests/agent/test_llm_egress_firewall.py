@@ -732,6 +732,38 @@ def test_source_presentation_allows_bounded_diagnostic_literals_and_paths(tmp_pa
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_long_python_boundary_identifiers(tmp_path):
+    source = (
+        "from live_runner import (\n"
+        "    install_live_runner_cross_cycle_daily_cache_loader_owner,\n"
+        ")\n"
+        'phase = "EXTENDED"\n'
+        'event = "FIRE"\n'
+        "epsilon = 1e-6\n"
+        "sources = sources\n"
+    )
+    path = tmp_path / "live_runner.py"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=7)
+    presentation = json.dumps(
+        {
+            "content": "\n".join(
+                f"{number}|{line}"
+                for number, line in enumerate(source.split("\n"), start=1)
+            )
+        }
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
 def test_source_presentation_scans_raw_source_not_json_line_number_artifacts(tmp_path):
     source_lines = ["PR_CI_RECEIPT_V1 = True", *[f"value_{number} = {number}" for number in range(1, 121)]]
     source = "\n".join(source_lines) + "\n"

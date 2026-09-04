@@ -269,6 +269,104 @@ _BOUNDED_SOURCE_CODE_ATOM = re.compile(
     r"|[a-z][a-z0-9]{0,63}(?:-[a-z][a-z0-9]{0,63}){1,7}"
     r"|[A-Z][0-9]{3,4})"
 )
+# Large Python repositories routinely use descriptive identifiers with more
+# than eight components.  Keep this separate from the short atom grammar so
+# the bound remains explicit: only lowercase source identifiers with 9-16
+# non-empty components qualify, while opaque mixed-case/URL-safe blobs remain
+# visible to the fail-closed scanner.
+_BOUNDED_LONG_SOURCE_CODE_ATOM = re.compile(
+    r"^[a-z][a-z0-9]{0,63}(?:_[a-z0-9]{1,64}){8,15}$"
+)
+_BOUNDED_LONG_PRIVATE_IDENTIFIER = re.compile(r"^_[a-z][a-z0-9_]{8,191}$")
+_BOUNDED_SOURCE_DOUBLE_UNDERSCORE = re.compile(
+    r"^[a-z][a-z0-9]*__[a-z0-9]+(?:_[a-z0-9]+){1,7}$"
+)
+_BOUNDED_SOURCE_VERSIONED_IDENTIFIER = re.compile(
+    r"^[0-9]{1,3}[a-z]+(?:_[a-z0-9]+){2,8}$"
+)
+_BOUNDED_SOURCE_CAMEL_CASE_IDENTIFIER = re.compile(
+    r"^[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+){1,7}$"
+)
+# These are fixed Python source literals used by the paper-runtime boundary.
+# Keep them source-presentation-only: the same words in generated or
+# untrusted provider context must still go through the ordinary fail-closed
+# Base64 detector.
+_BOUNDED_SOURCE_FIXED_LITERAL_ATOMS = frozenset(
+    {
+        "-128",
+        "-200",
+        "-tf_priority",
+        "1day",
+        "1e-3",
+        "1e-6",
+        "1e-9",
+        "1min",
+        "128_000_000",
+        "250_000",
+        "3min",
+        "40310000",
+        "42210000",
+        "5min",
+        "ACCT",
+        "ANOMALY",
+        "ASSET_CLASS_",
+        "BASE",
+        "BEAR",
+        "BOOT",
+        "BULL",
+        "DATA",
+        "DAYTRADE",
+        "DEFERRED",
+        "DTBP",
+        "ENFORCE",
+        "EXIT",
+        "EXTENDED",
+        "EXTO",
+        "FIRE",
+        "GATE",
+        "INIT",
+        "INTRADAY",
+        "LIVE",
+        "MPLCONFIGDIR",
+        "NONE",
+        "NULL",
+        "PERF",
+        "POST",
+        "PROFILE",
+        "READONLY",
+        "REVERSAL",
+        "RUNTIME",
+        "SEAM",
+        "SELL",
+        "SIM-",
+        "TRUE",
+        "USDC",
+        "USDT",
+        "asset_class_",
+        "columns",
+        "cycle_id-derived",
+        "ema_",
+        "emitted_",
+        "lineage_",
+        "log_",
+        "options",
+        "options_",
+        "position_guard_only_",
+        "reasons",
+        "rsi_",
+        "runtime_",
+        "sha1",
+        "shared-prebuild-",
+        "sma_",
+        "sources",
+        "targets",
+        "three_layer_",
+        "top5",
+        "top_slowest_",
+        "atr_",
+        "adx_",
+    }
+)
 # Source-granted PR diffs contain bounded command filters, issue keys, and
 # unified-diff marker lines. Their URL-safe alphabet can resemble encoded
 # payloads, but the surrounding source grammar proves they are presentation
@@ -914,7 +1012,9 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
     return False
 
 
-def _source_text_for_base64_scan(text: str) -> str:
+def _source_text_for_base64_scan(
+    text: str, *, allow_fixed_source_literals: bool = False
+) -> str:
     """Mask bounded code atoms only after exact source-grant validation.
 
     Snake-case config keys, lowercase kebab-case rule names, and linter codes
@@ -949,14 +1049,23 @@ def _source_text_for_base64_scan(text: str) -> str:
             is_source_control_identity
             or
             _BOUNDED_SOURCE_CODE_ATOM.fullmatch(source_atom) is not None
+            or _BOUNDED_LONG_SOURCE_CODE_ATOM.fullmatch(source_atom) is not None
+            or _BOUNDED_LONG_PRIVATE_IDENTIFIER.fullmatch(source_atom) is not None
+            or _BOUNDED_SOURCE_DOUBLE_UNDERSCORE.fullmatch(source_atom) is not None
+            or _BOUNDED_SOURCE_VERSIONED_IDENTIFIER.fullmatch(source_atom) is not None
             or _PYTHON_DUNDER_IDENTIFIER.fullmatch(source_atom) is not None
             or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(source_atom) is not None
             or _PYTHON_MIXED_CASE_IDENTIFIER.fullmatch(source_atom) is not None
             or _BOUNDED_PASCAL_CASE_IDENTIFIER.fullmatch(source_atom) is not None
+            or _BOUNDED_SOURCE_CAMEL_CASE_IDENTIFIER.fullmatch(source_atom) is not None
             or _BOUNDED_SOURCE_ADVISORY_KEY.fullmatch(source_atom) is not None
             or _BOUNDED_SOURCE_PATH_FRAGMENT.fullmatch(source_atom) is not None
             or _BOUNDED_SOURCE_DASHED_TITLE.fullmatch(source_atom) is not None
             or _BOUNDED_SOURCE_LINE_LABEL.fullmatch(source_atom) is not None
+            or (
+                allow_fixed_source_literals
+                and source_atom in _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS
+            )
             or source_atom in {
                 "LICENSE",
                 "BM25",
@@ -968,6 +1077,8 @@ def _source_text_for_base64_scan(text: str) -> str:
                 "BOUNDARY",
                 "CASH",
                 "FIFO",
+                "FIRE",
+                "MPLCONFIGDIR",
             }
             # argparse usage renders a small, fixed set of all-caps
             # metavariables.  They are command syntax, not encoded payloads;
@@ -992,6 +1103,16 @@ def _source_text_for_base64_scan(text: str) -> str:
         ),
         text,
     )
+    # A simple assignment such as ``sources=sources`` can expose the left
+    # hand side after the right-hand identifier is replaced above.  Mask the
+    # fixed source keys as a whole so the second scan cannot manufacture a
+    # new ``sources=`` Base64 candidate at that boundary.
+    if allow_fixed_source_literals:
+        masked = re.sub(
+            r"\b(?:columns|reasons|sources|targets)=",
+            "<source-key>",
+            masked,
+        )
     # CLI filter values such as ``--diff-filter=ACMR`` are source syntax, not
     # opaque payloads. Keep this grammar tied to a long-option assignment so
     # short quoted Base64 values elsewhere remain rejected.
@@ -1178,6 +1299,14 @@ def redact_remote_unsafe_text(text: str) -> str:
         if candidate in _PROTOCOL_GRAMMAR_ATOMS or _HERMES_TASK_ID.fullmatch(candidate):
             return match.group(0)
         if _BOUNDED_SOURCE_CODE_ATOM.fullmatch(candidate):
+            return match.group(0)
+        if (
+            _BOUNDED_LONG_SOURCE_CODE_ATOM.fullmatch(candidate)
+            or _BOUNDED_LONG_PRIVATE_IDENTIFIER.fullmatch(candidate)
+            or _BOUNDED_SOURCE_DOUBLE_UNDERSCORE.fullmatch(candidate)
+            or _BOUNDED_SOURCE_VERSIONED_IDENTIFIER.fullmatch(candidate)
+            or _BOUNDED_SOURCE_CAMEL_CASE_IDENTIFIER.fullmatch(candidate)
+        ):
             return match.group(0)
         if re.fullmatch(r"(?:call|fc)_[A-Za-z0-9_-]{8,128}", candidate):
             return match.group(0)
@@ -1902,7 +2031,9 @@ class LLMEgressFirewall:
                 source_segment_count += 1
                 scan_values.append(_source_text_for_secret_scan(raw_text))
                 base64_scan_values.append(
-                    _source_text_for_base64_scan(raw_text)
+                    _source_text_for_base64_scan(
+                        raw_text, allow_fixed_source_literals=True
+                    )
                 )
                 return segment.text
             if isinstance(segment, UntrustedProvenanceSegment):
