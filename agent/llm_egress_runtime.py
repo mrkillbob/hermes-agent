@@ -177,13 +177,94 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
 
 
 def _project_bound_kanban_attachments(value: str) -> GeneratedContextSegment:
-    """Elide attachment payloads while preserving exact call/result binding."""
+    """Expose bounded attachment identity/location, never attachment content.
 
-    # Attachment records can contain source excerpts, credentials, and opaque
-    # blobs.  The worker already has the bounded task assignment; replaying
-    # attachment content is unnecessary and would make the protected route
-    # pay for a retry when provenance cannot be established.
-    return GeneratedContextSegment(_REMOTE_KANBAN_ATTACHMENT_ELISION)
+    Attachment *content* (the blob itself, or any inline excerpt of it) can
+    carry source text, credentials, or other opaque bytes and must never be
+    replayed to a protected remote route. But a worker cannot act on an
+    attached task input at all without learning which file to ask for, so
+    fully eliding the listing breaks the feature it exists to secure (see
+    AGENTS.md's "fixes that destroy the feature they secure"). Keep only the
+    minimal identifiers a worker needs to issue a follow-up ``read_file``
+    call -- ``filename`` and ``stored_path`` -- and drop everything else
+    (uploader identity, timestamps, raw content).
+
+    Both fields go through the same ``redact_remote_unsafe_text`` pass used
+    by every other projection in this module, so ``stored_path`` is blanked
+    to ``<private-path>`` exactly when it would otherwise leak a host
+    filesystem layout (e.g. a literal ``/home/<user>/...`` path). By the
+    time this function runs, ``_sanitize_protected_kanban_body`` has
+    already turned a ``stored_path`` under a recognized Hermes root
+    (``HERMES_HOME``, ``HERMES_CONTROL_HOME``, ``HERMES_KANBAN_WORKSPACE``,
+    ...) into the matching symbolic token, so the common case still carries
+    a usable, non-identifying reference; only a path outside every known
+    root falls back to the placeholder. This mirrors ``kanban_show``'s
+    existing "no raw host paths" policy while still telling the worker
+    which attachment exists.
+    """
+
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return GeneratedContextSegment(_REMOTE_KANBAN_ATTACHMENT_ELISION)
+    if not isinstance(payload, Mapping):
+        return GeneratedContextSegment(_REMOTE_KANBAN_ATTACHMENT_ELISION)
+
+    raw_attachments = payload.get("attachments")
+    attachments: list[dict[str, Any]] = []
+    if isinstance(raw_attachments, list):
+        for raw in raw_attachments[:100]:
+            if not isinstance(raw, Mapping):
+                continue
+            filename = raw.get("filename")
+            stored_path = raw.get("stored_path")
+            if not isinstance(filename, str) or not filename or len(filename) > 512:
+                continue
+            if not isinstance(stored_path, str) or not stored_path or len(stored_path) > 2048:
+                continue
+            safe_filename = redact_remote_unsafe_text(
+                redact_sensitive_text(filename, force=True)
+            )
+            safe_stored_path = redact_remote_unsafe_text(
+                redact_sensitive_text(stored_path, force=True)
+            )
+            entry: dict[str, Any] = {
+                "filename": safe_filename,
+                "stored_path": safe_stored_path,
+            }
+            att_id = raw.get("id")
+            if isinstance(att_id, (str, int)) and not isinstance(att_id, bool):
+                entry["id"] = att_id
+            content_type = raw.get("content_type")
+            if isinstance(content_type, str) and content_type and len(content_type) <= 128:
+                entry["content_type"] = redact_remote_unsafe_text(
+                    redact_sensitive_text(content_type, force=True)
+                )
+            size = raw.get("size")
+            if isinstance(size, int) and not isinstance(size, bool):
+                entry["size"] = max(0, min(size, 1_000_000_000))
+            attachments.append(entry)
+
+    if not attachments:
+        return GeneratedContextSegment(_REMOTE_KANBAN_ATTACHMENT_ELISION)
+
+    projection = {
+        "kanban_attachments_projection": "metadata-v1",
+        "attachments": attachments,
+        "worker_instruction": (
+            "Attachment content was omitted. When stored_path is a usable "
+            "path (not <private-path>), use read_file with it to read a "
+            "specific attachment's content."
+        ),
+    }
+    safe = redact_remote_unsafe_text(
+        redact_sensitive_text(json.dumps(projection, sort_keys=True), force=True)
+    )
+    safe = _REMOTE_KANBAN_SECRET_ASSIGNMENT.sub(r"\1=<redacted>", safe)
+    return GeneratedContextSegment(
+        "kanban_attachments completed locally. Bounded sanitized attachment "
+        "metadata (content omitted):\n" + safe
+    )
 
 
 def _project_bound_search_files(value: str) -> GeneratedContextSegment:
@@ -351,6 +432,15 @@ def _sanitize_protected_kanban_body(value: Any) -> Any:
 
     This deliberately does not rewrite secrets or arbitrary encoded content;
     those remain visible to the fail-closed firewall scans and are denied.
+
+    Note for ``kanban_attachments`` results specifically: this pass already
+    turns a ``stored_path`` under a recognized Hermes root (``HERMES_HOME``,
+    ``HERMES_CONTROL_HOME``, ``HERMES_KANBAN_WORKSPACE``, ...) into the
+    matching ``$HERMES_*``/``.`` token before the generic private-path
+    blanket applies, and leaves an already-safe (non-private) path alone
+    entirely. ``_project_bound_kanban_attachments`` relies on exactly that:
+    it must not need its own copy of this substitution to keep a usable
+    ``stored_path`` around for the worker's follow-up ``read_file`` call.
     """
 
     if isinstance(value, str):

@@ -537,6 +537,150 @@ def test_protected_codex_elides_bound_kanban_attachments_output(tmp_path, monkey
     assert "super-secret-value" not in rendered
 
 
+def test_protected_codex_projects_bound_kanban_attachment_metadata(tmp_path, monkeypatch):
+    """A protected worker can still learn filename/stored_path for read_file.
+
+    Fully eliding the listing (the prior behavior) broke attachment-dependent
+    cards: a remote worker had no way to name the file it needed. The fix
+    keeps a bounded, sanitized metadata projection instead of an opaque
+    placeholder. ``stored_path`` under a recognized Hermes root survives as
+    the existing ``$HERMES_*`` symbolic token (the same substitution already
+    applied to other kanban text on this route) rather than the host's raw
+    absolute path, since a bare host path would trip the firewall's
+    independent private-absolute-path scan.
+    """
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    monkeypatch.setenv("HERMES_HOME", "/home/user/.hermes")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_kanban_attachments_456"
+
+    tool_output = json.dumps(
+        {
+            "ok": True,
+            "task_id": "t1",
+            "attachments": [
+                {
+                    "id": 1,
+                    "filename": "spec.md",
+                    "content_type": "text/markdown",
+                    "size": 1234,
+                    "uploaded_by": "alice",
+                    "stored_path": "/home/user/.hermes/kanban/attachments/t1/spec.md",
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "id": 2,
+                    "filename": "leak token=super-secret-value",
+                    "stored_path": "/home/user/.hermes/kanban/attachments/t1/leak",
+                    "content_type": "text/plain",
+                    "size": 10,
+                },
+            ],
+        }
+    )
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": "gpt-5.6-terra",
+            "input": [
+                {
+                    "id": call_id,
+                    "call_id": call_id,
+                    "type": "function_call",
+                    "function": {"name": "kanban_attachments", "arguments": "{}"},
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": tool_output,
+                },
+            ],
+        },
+    )
+
+    rendered = authorized["input"][1]["output"]
+    assert receipt.allowed
+    assert rendered.startswith("kanban_attachments completed locally.")
+    # The identifiers a follow-up read_file call needs must survive.
+    assert "spec.md" in rendered
+    assert "$HERMES_PROFILE_HOME/kanban/attachments/t1/spec.md" in rendered
+    # The raw host path (with the real username) never crosses the boundary.
+    assert "/home/user/" not in rendered
+    # But secrets embedded in attachment fields are still stripped.
+    assert "super-secret-value" not in rendered
+    # And fields not needed for read_file are dropped.
+    assert "alice" not in rendered
+    assert "uploaded_by" not in rendered
+    assert "created_at" not in rendered
+
+
+def test_protected_codex_kanban_attachment_path_outside_known_root_is_blanked(
+    tmp_path, monkeypatch
+):
+    """A stored_path under no recognized Hermes root degrades safely.
+
+    It must never reach the firewall as a raw private-looking absolute path
+    (which would raise EgressBlocked); the projection still surfaces the
+    filename so the worker at least knows the attachment exists.
+    """
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.delenv("HERMES_CONTROL_HOME", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACE", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACES_ROOT", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    call_id = "call_kanban_attachments_789"
+
+    tool_output = json.dumps(
+        {
+            "attachments": [
+                {
+                    "id": 1,
+                    "filename": "spec.md",
+                    "stored_path": "/home/someone/.hermes/kanban/attachments/t1/spec.md",
+                    "size": 10,
+                },
+            ],
+        }
+    )
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": "gpt-5.6-terra",
+            "input": [
+                {
+                    "id": call_id,
+                    "call_id": call_id,
+                    "type": "function_call",
+                    "function": {"name": "kanban_attachments", "arguments": "{}"},
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": tool_output,
+                },
+            ],
+        },
+    )
+
+    rendered = authorized["input"][1]["output"]
+    assert receipt.allowed
+    assert "spec.md" in rendered
+    assert "<private-path>" in rendered
+    assert "/home/someone" not in rendered
+
+
 def test_protected_nous_elides_bound_kanban_show_result(tmp_path, monkeypatch):
     """The same safe projection covers protected free-provider workers."""
 
