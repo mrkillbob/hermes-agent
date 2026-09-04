@@ -1336,6 +1336,21 @@ def test_builtin_tool_schema_atoms_are_not_base64_false_positives(
     assert firewall(tmp_path).preflight(request, _route()).allowed
 
 
+def test_builtin_review_syntax_in_sanitized_guidance_is_not_base64_false_positive(
+    tmp_path,
+):
+    decision = firewall(tmp_path).preflight(
+        _sanitized_request(
+            "github-pr-feedback submit-review --event "
+            "APPROVE|REQUEST_CHANGES|COMMENT --body TEXT"
+        ),
+        _route(),
+    )
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
 def test_fixed_hermes_task_id_is_not_a_base64_false_positive(tmp_path):
     request = TypedOutboundRequest(
         payload={"messages": [SanitizedSegment("work kanban task t_8c0aa909")]},
