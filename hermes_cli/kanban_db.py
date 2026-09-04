@@ -9052,7 +9052,7 @@ def _worker_tree_signal(pid: int, sig: int) -> None:
         try:
             pgid = os.getpgid(pid)
             if pgid == pid and pgid != os.getpgrp():
-                os.killpg(pgid, sig)
+                os.killpg(pgid, sig)  # windows-footgun: ok — POSIX-only guard above
                 return
         except ProcessLookupError:
             # The leader may have already exited while its group members are
@@ -9060,7 +9060,7 @@ def _worker_tree_signal(pid: int, sig: int) -> None:
             # Re-signal by group unless it could collide with our own group.
             if pid != os.getpgrp():
                 try:
-                    os.killpg(pid, sig)
+                    os.killpg(pid, sig)  # windows-footgun: ok — POSIX-only guard above
                     return
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
