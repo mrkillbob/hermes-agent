@@ -43,6 +43,18 @@ router = APIRouter()
 _BOARD_Q = Query(None, description="Kanban board slug (omit for current)")
 
 
+# Keep the desktop's boot gate on the same strict dispatcher contract as the
+# CLI and gateway. This endpoint is intentionally read-only: it reports the
+# live gateway-owned worker state and never starts or mutates anything.
+@router.get("/dispatcher-readiness")
+def get_dispatcher_readiness():
+    """Return strict readiness for the gateway-owned Kanban dispatcher."""
+    from hermes_cli.kanban import _dispatcher_readiness
+    from hermes_constants import get_hermes_home
+
+    return _dispatcher_readiness(hermes_home=get_hermes_home())
+
+
 # --- Connection / board helpers ---------------------------------------------
 
 def _ws_upgrade_authorized(ws: "WebSocket") -> bool:

@@ -14,7 +14,7 @@ import shlex
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -93,6 +93,87 @@ def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     if any(ch.isspace() for ch in branch):
         raise argparse.ArgumentTypeError("--branch must not contain whitespace")
     return branch
+
+
+def _dispatcher_readiness(hermes_home: Optional[Path] = None) -> dict[str, Any]:
+    """Return strict, machine-readable gateway dispatcher readiness.
+
+    The desktop boot gate must distinguish a live embedded dispatcher from an
+    offline or uncertain gateway. Unlike the CLI warning helper below,
+    uncertainty fails closed so a headless backend cannot strand ready work.
+    """
+    try:
+        from gateway.status import resolve_gateway_liveness  # type: ignore
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": None,
+            "message": f"Gateway dispatcher readiness could not be verified: {exc}",
+        }
+    try:
+        liveness = resolve_gateway_liveness(profile_dir=hermes_home, use_cache=False)
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": None,
+            "message": f"Gateway dispatcher readiness probe failed: {exc}",
+        }
+    if liveness.probe_error:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": liveness.pid,
+            "message": "Gateway dispatcher readiness probe returned an unreadable state",
+        }
+
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        cfg = load_config_readonly()
+        dispatch_on = bool(cfg.get("kanban", {}).get("dispatch_in_gateway", True))
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": liveness.pid,
+            "message": f"Kanban dispatcher configuration could not be read: {exc}",
+        }
+
+    pid = liveness.pid
+    if pid and dispatch_on:
+        return {
+            "status": "ready",
+            "ready": True,
+            "gateway_pid": pid,
+            "message": f"gateway pid={pid}, dispatch enabled",
+        }
+    if pid:
+        return {
+            "status": "disabled",
+            "ready": False,
+            "gateway_pid": pid,
+            "message": (
+                "Gateway is running but kanban.dispatch_in_gateway=false in "
+                "config.yaml — the task will sit in 'ready' until you flip it "
+                "back on and restart the gateway, OR run the legacy "
+                "standalone daemon (`hermes kanban daemon --force`)."
+            ),
+        }
+    return {
+        "status": "offline",
+        "ready": False,
+        "gateway_pid": None,
+        "message": (
+            "No gateway is running — the task will sit in 'ready' until you "
+            "start it. Run:\n"
+            "    hermes gateway start\n"
+            "The gateway hosts an embedded dispatcher (tick interval 60s by "
+            "default); your task will be picked up on the next tick after "
+            "the gateway comes up."
+        ),
+    }
 
 
 def _check_dispatcher_presence(hermes_home: Optional[Path] = None) -> tuple[bool, str]:
