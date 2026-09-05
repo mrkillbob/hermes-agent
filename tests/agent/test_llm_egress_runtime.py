@@ -2910,6 +2910,46 @@ def test_protected_kanban_tool_search_result_is_bounded(tmp_path, monkeypatch):
     )
 
 
+def test_protected_kanban_tool_describe_result_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "nous"
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        agent,
+        {
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_tool_describe_projection",
+                        "type": "function",
+                        "function": {
+                            "name": "tool_describe",
+                            "arguments": '{"names":["github_pr_feedback"]}',
+                        },
+                    }],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_tool_describe_projection",
+                    "content": (
+                        '{"tools":{"github_pr_feedback":'
+                        '{"description":"post a governed review",'
+                        '"parameters":{"type":"object"}}}}'
+                    ),
+                },
+            ],
+        },
+    )
+
+    assert receipt.allowed
+    assert authorized["messages"][1]["content"].startswith(
+        "tool_search completed locally."
+    )
+
+
 def test_protected_kanban_search_file_listing_projects_safe_relative_paths(
     tmp_path, monkeypatch
 ):

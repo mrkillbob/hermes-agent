@@ -87,7 +87,13 @@ _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES = frozenset({"kanban_attachments"})
 # fail on otherwise harmless page identifiers or encoded-looking text.
 _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES = frozenset({"terminal", "browser_exec"})
 _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"search_files"})
-_REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"tool_search"})
+# Both catalog bridge calls return model-readable tool schemas/descriptions.
+# Protected workers must replay only the bounded local outcome; otherwise a
+# tool_describe result is treated as untrusted provider content and can trip
+# the egress firewall on harmless schema words.
+_REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES = frozenset(
+    {"tool_search", "tool_describe"}
+)
 _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file"})
 _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES = frozenset({"web_extract", "web_search"})
 _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES = frozenset({"patch", "write_file"})
