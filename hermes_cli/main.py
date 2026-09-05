@@ -2712,6 +2712,8 @@ def _prepare_agent_startup(args) -> None:
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"
     _apply_safe_mode(args)
+    _apply_user_config_bypass(args)
+    _guard_noninteractive_user_config(args)
 
     if not (args.command in _AGENT_COMMANDS or _agent_subcommand_selected(args)):
         return
@@ -2801,6 +2803,43 @@ def _apply_safe_mode(args) -> None:
     os.environ["HERMES_SAFE_MODE"] = "1"
     os.environ["HERMES_IGNORE_USER_CONFIG"] = "1"
     os.environ["HERMES_IGNORE_RULES"] = "1"
+
+
+def _apply_user_config_bypass(args) -> None:
+    """Apply the explicit config bypass before any startup config reads."""
+    if getattr(args, "ignore_user_config", False):
+        os.environ["HERMES_IGNORE_USER_CONFIG"] = "1"
+
+
+def _guard_noninteractive_user_config(args) -> None:
+    """Fail closed before a non-interactive invocation initializes providers."""
+    if getattr(args, "_noninteractive_config_validated", False):
+        return
+
+    is_noninteractive = (
+        bool(getattr(args, "oneshot", None))
+        or bool(getattr(args, "query", None))
+    )
+    if not is_noninteractive:
+        return
+
+    from hermes_cli.config import (
+        InvalidUserConfigError,
+        require_parseable_user_config,
+    )
+
+    try:
+        require_parseable_user_config(
+            ignore_user_config=bool(
+                getattr(args, "ignore_user_config", False)
+                or getattr(args, "safe_mode", False)
+            )
+        )
+    except InvalidUserConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    setattr(args, "_noninteractive_config_validated", True)
 
 
 def _set_chat_arg_defaults(args) -> None:
