@@ -17191,3 +17191,17 @@ class AsyncSessionDB:
             return await asyncio.to_thread(attr, *args, **kwargs)
 
         return _offloaded
+
+
+def get_shared_session_db(db_path: Optional[Path] = None) -> SessionDB:
+    """Return the process-shared SessionDB for the resolved path."""
+    from hermes_state_registry import get_shared_session_db as _get_shared_session_db
+
+    return _get_shared_session_db(db_path)
+
+
+def release_shared_session_db(db: SessionDB) -> None:
+    """Release one reference acquired through get_shared_session_db()."""
+    from hermes_state_registry import release
+
+    release(db)
