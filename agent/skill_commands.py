@@ -158,7 +158,7 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         from tools import skills_tool
         from agent.skill_utils import normalize_skill_lookup_name
         normalized = normalize_skill_lookup_name(raw_identifier)
-        loaded_skill = json.loads(skill_view(normalized, task_id=task_id, preprocess=False))
+        loaded_skill = json.loads(skills_tool.skill_view(normalized, task_id=task_id, preprocess=False))
     except Exception:
         return None
     if not loaded_skill.get("success"):
@@ -171,7 +171,7 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         skill_dir = Path(loaded_skill["skill_dir"])
     elif skill_path:
         try:
-            skill_dir = skills_tool.get_active_skills_dir() / Path(skill_path).parent
+            skill_dir = skills_tool._skills_dir() / Path(skill_path).parent
         except Exception:
             skill_dir = None
     return loaded_skill, skill_dir, str(loaded_skill.get("name") or normalized)
@@ -235,6 +235,7 @@ def _build_skill_message(
 ) -> str:
     """Format a loaded skill into a user/system message payload."""
     from tools.skills_tool import _skills_dir
+    active_skills_dir = _skills_dir()
     # Preprocess first so downstream blocks see the expanded content.
     content = preprocess_skill_content(
         str(loaded_skill.get("content") or ""), skill_dir, session_id, skills_cfg=_load_skills_config(),

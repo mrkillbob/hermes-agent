@@ -645,7 +645,7 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     try:
         # See #67277.
         from tools import skills_tool as _skills_tool
-        primary_root = _skills_tool.get_active_skills_dir()
+        primary_root = _skills_tool._skills_dir()
     except Exception:
         primary_root = get_skills_dir()
     trusted_roots = [primary_root]
