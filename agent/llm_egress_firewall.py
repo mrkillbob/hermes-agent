@@ -8,6 +8,8 @@ an immutable block decision.
 
 from __future__ import annotations
 
+from agent.egress_source_annotations import mask_builtin_annotations
+
 import base64
 import binascii
 import ipaddress
@@ -1804,7 +1806,7 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(text)
+                scan_values.append(mask_builtin_annotations(text))
                 base64_scan_values.append(_source_text_for_base64_scan(text))
                 return text
             if isinstance(segment, SourcePresentationSegment):
@@ -1833,7 +1835,7 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(segment.text)
+                scan_values.append(json.dumps({**parsed, "content": mask_builtin_annotations(raw_text)}))
                 base64_scan_values.append(
                     _source_text_for_base64_scan(raw_text)
                 )
