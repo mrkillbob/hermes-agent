@@ -1052,7 +1052,7 @@ def test_worktree_bootstrap_preserves_preexisting_environment_destination(tmp_pa
         "keep child state\n", encoding="utf-8"
     )
 
-    kb._ensure_git_worktree(repo, target, "wt/existing")
+    kbw._ensure_git_worktree(repo, target, "wt/existing")
 
     assert destination.is_dir()
     assert not destination.is_symlink()

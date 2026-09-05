@@ -107,6 +107,8 @@ class DispatchResult:
     on multi-lane setups, NOT operator-actionable; tracked apart so health
     telemetry can tell "stuck" from "correctly idle"."""
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
+    skipped_per_model_capped: list[tuple[str, str, str, int]] = field(default_factory=list)
+    workspace_collisions: list[tuple[str, str, str]] = field(default_factory=list)
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
     tick; separate bucket so dashboards show "profile busy" vs "stuck"."""
@@ -1434,6 +1436,9 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    max_in_progress_per_model: Optional[int] = None,
+    max_in_progress_by_model: Optional[dict] = None,
+    max_in_progress_by_profile: Optional[dict] = None,
     reconcile_orphans: bool = True,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
@@ -1457,6 +1462,9 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            max_in_progress_per_model=max_in_progress_per_model,
+            max_in_progress_by_model=max_in_progress_by_model,
+            max_in_progress_by_profile=max_in_progress_by_profile,
             reconcile_orphans=reconcile_orphans,
         )
 
@@ -1507,6 +1515,7 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
+    capacity,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
@@ -1520,6 +1529,8 @@ def _dispatch_lane_task(
     profile_exists = _profile_exists_fn()
     if profile_exists is not None and not profile_exists(assignee):
         result.skipped_nonspawnable.append(task_id)
+        return False
+    if not capacity.allows(row, assignee, result):
         return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
@@ -1548,6 +1559,7 @@ def _dispatch_lane_task(
         # ticks re-query from the DB.
         if per_profile_cap is not None and name:
             per_profile_running[name] = per_profile_running.get(name, 0) + 1
+        capacity.record(row, name)
 
     if dry_run:
         result.spawned.append((task_id, assignee, ""))
@@ -1570,6 +1582,16 @@ def _dispatch_lane_task(
         ):
             result.auto_blocked.append(claimed.id)
         return False
+    physical_workspace = str(Path(workspace).resolve())
+    for owner in conn.execute(
+        "SELECT id, workspace_path FROM tasks WHERE status = 'running' AND id != ? "
+        "AND workspace_path IS NOT NULL", (claimed.id,),
+    ):
+        if str(Path(owner["workspace_path"]).resolve()) == physical_workspace:
+            result.workspace_collisions.append((claimed.id, owner["id"], physical_workspace))
+            _kb.block_task(conn, claimed.id, reason=f"workspace_in_use: {owner['id']} owns {physical_workspace}")
+            result.auto_blocked.append(claimed.id)
+            return False
     _kbw.set_workspace_path(conn, claimed.id, str(workspace))
     if claimed.workspace_kind == "worktree":
         _kbw.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
@@ -1717,7 +1739,7 @@ def _tick_spawn_budget(
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, provider_override, model_override FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -1766,6 +1788,9 @@ def _dispatch_once_locked(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    max_in_progress_per_model: Optional[int] = None,
+    max_in_progress_by_model: Optional[dict] = None,
+    max_in_progress_by_profile: Optional[dict] = None,
     reconcile_orphans: bool = True,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
@@ -1813,10 +1838,17 @@ def _dispatch_once_locked(
             "GROUP BY assignee"
         ):
             per_profile_running[prow["assignee"]] = int(prow["n"])
+    from hermes_cli.kanban_worker_capacity import WorkerCapacity
+
+    capacity = WorkerCapacity(
+        conn, model_cap=max_in_progress_per_model,
+        model_caps=max_in_progress_by_model, profile_caps=max_in_progress_by_profile,
+    )
     lane_kwargs: dict[str, Any] = dict(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        capacity=capacity,
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
