@@ -24,8 +24,6 @@ def is_hermes_contract(payload: bytes) -> bool:
 
 
 def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple[str, ...]):
-    if any(p.endswith((".rs", ".ps1", ".nix")) or p.startswith(".github/") or Path(p).name.startswith("Dockerfile") for p in changed):
-        raise ValueError("Hermes local CI requires additional platform or workflow coverage for this diff")
     commands = [
         (('git', 'diff', '--check', f'{base_sha}..{head_sha}'), worktree, {}),
         (('uv', 'lock', '--check'), worktree, {}),
@@ -45,3 +43,10 @@ def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple
             if name in scripts:
                 commands.append((('npm', 'run', name), root, {'CI': 'true'}))
     return commands
+
+
+def hermes_coverage_gap(changed: tuple[str, ...]) -> str | None:
+    if any(p.endswith((".rs", ".ps1", ".nix")) or p.startswith(".github/")
+           or Path(p).name.startswith("Dockerfile") for p in changed):
+        return "additional platform or workflow coverage is required beyond host-native CI"
+    return None

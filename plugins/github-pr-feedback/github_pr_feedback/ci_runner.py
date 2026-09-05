@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands
+from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands, hermes_coverage_gap
 
 import hashlib
 import json
@@ -673,6 +673,9 @@ class LocalCIRunner:
         status = "passed" if len(evidence) == expected_command_count and all(
             item.returncode == 0 and not item.timed_out for item in evidence
         ) else "failed"
+        coverage_gap = hermes_coverage_gap(changed_files) if is_hermes_contract(manifest_bytes) else None
+        if coverage_gap:
+            status = "failed"
         failed_commands = tuple(
             item for item in evidence if item.returncode != 0 or item.timed_out
         )
@@ -700,7 +703,7 @@ class LocalCIRunner:
             commands=tuple(evidence),
             ci_mode=ci_mode,
             failure_reason=(
-                None
+                coverage_gap
                 if not failed_commands
                 else "failed command: "
                 + shlex.join(failed_commands[0].argv)
