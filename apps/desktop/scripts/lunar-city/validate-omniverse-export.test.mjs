@@ -70,3 +70,31 @@ test('rejects contradictory approval flags', () => {
   assert.equal(result.ok, false)
   assert.match(result.errors.join('\n'), /reference-only export/)
 })
+
+test('requires an own quality-budget profile with finite limits', () => {
+  const inheritedProfile = validateOmniverseExport(
+    receipt({
+      status: 'accepted',
+      reference_only: false,
+      production_approved: true,
+      budget_profile: '__proto__',
+      performance: { draw_calls: 999_999_999, visible_triangles: 999_999_999, gpu_mib: 999_999_999 }
+    }),
+    manifest,
+    { mode: 'production' }
+  )
+  assert.equal(inheritedProfile.ok, false)
+  assert.match(inheritedProfile.errors.join('\n'), /budget_profile is not in world manifest qualityBudgets/)
+
+  const malformedBudget = validateOmniverseExport(
+    receipt({ budget_profile: 'malformed' }),
+    {
+      ...manifest,
+      qualityBudgets: {
+        malformed: { drawCalls: Number.POSITIVE_INFINITY, visibleTriangles: 2_000_000, gpuMiB: 256 }
+      }
+    }
+  )
+  assert.equal(malformedBudget.ok, false)
+  assert.match(malformedBudget.errors.join('\n'), /quality budget limits must be finite and non-negative/)
+})

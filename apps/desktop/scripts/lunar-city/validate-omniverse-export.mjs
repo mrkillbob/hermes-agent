@@ -50,8 +50,18 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
   }
 
   const budgetProfile = receipt?.budget_profile
-  const budget = manifest?.qualityBudgets?.[budgetProfile]
-  if (!isRecord(budget)) errors.push('budget_profile is not in world manifest qualityBudgets')
+  const qualityBudgets = manifest?.qualityBudgets
+  const hasOwnBudgetProfile = isRecord(qualityBudgets) && Object.hasOwn(qualityBudgets, budgetProfile)
+  const budget = hasOwnBudgetProfile ? qualityBudgets[budgetProfile] : undefined
+  const budgetHasValidLimits =
+    hasOwnBudgetProfile &&
+    isRecord(budget) &&
+    ['drawCalls', 'visibleTriangles', 'gpuMiB'].every((field) => finiteNonNegative(budget[field]))
+  if (!hasOwnBudgetProfile || !isRecord(budget)) {
+    errors.push('budget_profile is not in world manifest qualityBudgets')
+  } else if (!budgetHasValidLimits) {
+    errors.push('quality budget limits must be finite and non-negative')
+  }
   const performance = receipt?.performance
   if (!isRecord(performance)) {
     errors.push('performance metrics are required')
@@ -59,13 +69,13 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
     for (const field of ['draw_calls', 'visible_triangles', 'gpu_mib']) {
       if (!finiteNonNegative(performance[field])) errors.push(`performance.${field} must be finite and non-negative`)
     }
-    if (isRecord(budget) && finiteNonNegative(performance.draw_calls) && performance.draw_calls > budget.drawCalls) {
+    if (budgetHasValidLimits && finiteNonNegative(performance.draw_calls) && performance.draw_calls > budget.drawCalls) {
       errors.push('draw-call budget exceeded')
     }
-    if (isRecord(budget) && finiteNonNegative(performance.visible_triangles) && performance.visible_triangles > budget.visibleTriangles) {
+    if (budgetHasValidLimits && finiteNonNegative(performance.visible_triangles) && performance.visible_triangles > budget.visibleTriangles) {
       errors.push('visible-triangle budget exceeded')
     }
-    if (isRecord(budget) && finiteNonNegative(performance.gpu_mib) && performance.gpu_mib > budget.gpuMiB) {
+    if (budgetHasValidLimits && finiteNonNegative(performance.gpu_mib) && performance.gpu_mib > budget.gpuMiB) {
       errors.push('GPU memory budget exceeded')
     }
   }
