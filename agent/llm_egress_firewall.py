@@ -398,6 +398,8 @@ _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS = frozenset(
         "DISABLE",
         "LOOPBACK",
         "compression-SUMMARY",
+        "WITH",
+        "READ",
     }
 )
 # Source-granted PR diffs contain bounded command filters, issue keys, and

@@ -950,10 +950,12 @@ def test_source_presentation_allows_exact_repair_source_atoms_but_not_payloads(t
         "DISABLE\n"
         "262_144\n"
         "LOOPBACK\n"
+        "WITH\n"
+        "READ\n"
     )
     path = tmp_path / "repair-source.py"
     path.write_text(source, encoding="utf-8")
-    grant = _source_grant(path, end=7)
+    grant = _source_grant(path, end=9)
     presentation = json.dumps(
         {"content": "\n".join(f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1))}
     )
