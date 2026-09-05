@@ -4264,3 +4264,28 @@ def receipt_expected_sha(ledger: FeedbackLedger, receipt: FeedbackReceipt) -> st
     ).fetchone()
     assert row is not None
     return row[0]
+
+
+@pytest.mark.parametrize("handoff", [False, True])
+def test_required_local_ci_does_not_depend_on_actions_admin_settings(tmp_path, handoff):
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z",
+                               auto_dispatch=True, local_ci_audit=True)
+    policy = replace(policy, local_ci_audit=replace(policy.local_ci_audit, required_for_open_prs=True))
+
+    class PublicReadGitHub(FakeGitHub):
+        def actions_enabled(self, repository):
+            raise AssertionError("local audit must not need administrator settings")
+        def get_check_state(self, *args, **kwargs):
+            raise AssertionError("dispatch does not need hosted check results")
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = RecordingKanban()
+    controller = ScanController(policy, ledger, PublicReadGitHub(admitted_pull_request(sha), ()),
+                                kanban, RecordingLocalGit())
+    if handoff:
+        assert controller.dispatch_local_ci_after_feedback(admitted_pull_request(sha)) == "scheduled"
+    else:
+        assert controller.scan().created == 1
+    assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
+    ledger.close()

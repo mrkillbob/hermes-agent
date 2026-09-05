@@ -1484,6 +1484,7 @@ def _run_grouped_exact_head_audit(
     *,
     force_fresh: bool = False,
     actions_enabled_hint: bool | None = None,
+    required_local_ci: bool = False,
 ) -> CIAuditReceipt:
     """Run one immutable audit through the bounded grouped-coordination boundary."""
 
@@ -1507,6 +1508,8 @@ def _run_grouped_exact_head_audit(
         # sqlite3.ProgrammingError and lose a typed failed receipt.
         worker_ledger = FeedbackLedger.for_current_profile()
         runner = (
+            LocalCIRunner(github, worker_ledger, required_local_ci=True)
+            if required_local_ci else
             LocalCIRunner(github, worker_ledger)
             if actions_enabled_hint is None
             else LocalCIRunner(
@@ -1579,6 +1582,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
         actions_enabled_hint = (
             github.actions_enabled(args.repository, refresh=True)
             if policy.uses_budget_exhausted_local_ci(args.repository)
+            and not policy.local_ci_audit.required_for_open_prs
             else None
         )
     except (ValueError, CIValidationError, GitHubClientError):
@@ -1593,6 +1597,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
             worktree,
             force_fresh=bool(getattr(args, "fresh", False)),
             actions_enabled_hint=actions_enabled_hint,
+            required_local_ci=policy.local_ci_audit.required_for_open_prs,
         )
     except (CIValidationError, GitHubClientError, LedgerStateError) as error:
         print(

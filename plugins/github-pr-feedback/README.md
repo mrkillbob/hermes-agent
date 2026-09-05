@@ -333,6 +333,8 @@ PRs carrying a `sweeper:risk-*`, `sweeper:blast-broad`,
 `ci-reviewed` label. This gate is evaluated again on both exact-head snapshots;
 task prose cannot satisfy it.
 
+Required local audits (`local_ci_audit.required_for_open_prs`) are scheduled independently of administrator-only Actions-settings access. During execution, a settings-only permission denial conservatively treats Actions as enabled and still reads the actual checks and statuses. Authentication failures remain failures. This does not substitute a local receipt for hosted checks or change merge gates.
+
 When `allow_budget_exhausted_local_ci` is enabled together with required,
 audit-only, no-post local CI, the same exact-head receipt may substitute for
 hosted checks in only two canonical repository states: Actions is explicitly

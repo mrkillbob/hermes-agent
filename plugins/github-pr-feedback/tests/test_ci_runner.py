@@ -16,7 +16,7 @@ from github_pr_feedback.ci_runner import (
     LocalCIRunner,
 )
 from github_pr_feedback.ci_coordinator import CIAuditJob, GroupedCICoordinator
-from github_pr_feedback.github_client import CheckState, PullRequestMergeState
+from github_pr_feedback.github_client import CheckState, GitHubClientError, PullRequestMergeState
 from github_pr_feedback.ledger import FeedbackLedger
 
 
@@ -819,3 +819,31 @@ def test_hermes_native_ci_uses_shared_workspace_lock_once(tmp_path):
         (('npm', 'ci', '--ignore-scripts'), tmp_path)]
     assert {cwd for argv, cwd, _ in commands if argv == ('npm', 'run', 'test')} == {
         tmp_path / package for package in packages}
+
+
+@pytest.mark.parametrize("error_code", ["permission_denied", "authentication"])
+def test_required_local_audit_reads_real_checks_without_admin_settings(tmp_path, error_code):
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+
+    class PublicReadGitHub(FakeGitHub):
+        def actions_enabled(self, *args, **kwargs):
+            raise GitHubClientError("settings unavailable", code=error_code)
+        def get_check_state(self, repository, head_sha, *, actions_enabled_hint=None):
+            assert actions_enabled_hint is True
+            return CheckState(True, False, 2)
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    commands = RecordingRunner()
+    receipt = LocalCIRunner(PublicReadGitHub(merge_state()), ledger, command_runner=commands,
+                           inspector=FakeInspector(), python_argv=("python3",), now=lambda: NOW,
+                           required_local_ci=True).run(
+        CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), worktree)
+    if error_code == "permission_denied":
+        assert receipt.status == "passed"
+        assert commands.calls
+        assert receipt.actions_state == CheckState(True, False, 2)
+    else:
+        assert receipt.status == "failed"
+        assert not commands.calls
+    ledger.close()

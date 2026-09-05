@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .github_client import CheckState, GitHubClient, PullRequestMergeState
+from .github_client import CheckState, GitHubClient, GitHubClientError, PullRequestMergeState
 from .ledger import CIRunLease, FeedbackLedger
 
 
@@ -456,6 +456,7 @@ class LocalCIRunner:
         supervisor_pid: Callable[[], int] | None = None,
         pid_is_alive: Callable[[int], bool] | None = None,
         actions_enabled_hint: bool | None = None,
+        required_local_ci: bool = False,
     ) -> None:
         self._github = github
         self._ledger = ledger
@@ -468,8 +469,20 @@ class LocalCIRunner:
         if actions_enabled_hint is not None and not isinstance(actions_enabled_hint, bool):
             raise TypeError("actions_enabled_hint must be a boolean or None")
         self._actions_enabled_hint = actions_enabled_hint
+        self._required_local_ci = required_local_ci
 
     def _check_state(self, repository: str, head_sha: str) -> CheckState:
+        if self._required_local_ci:
+            # Required local evidence is independent of administrator-only
+            # settings access. Preserve verified disabled settings when available;
+            # a settings-only denial must never imply disabled/green Actions.
+            try:
+                enabled = self._github.actions_enabled(repository, refresh=True)
+            except GitHubClientError as error:
+                if error.code != "permission_denied":
+                    raise
+                enabled = True
+            return self._github.get_check_state(repository, head_sha, actions_enabled_hint=enabled)
         if self._actions_enabled_hint is None:
             return self._github.get_check_state(repository, head_sha)
         actions_enabled = self._github.actions_enabled(repository, refresh=True)
