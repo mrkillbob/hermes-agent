@@ -1825,6 +1825,11 @@ class ScanController:
             return admission.reason or "not_admitted"
         if current.head_sha != listed.head_sha:
             return "head_changed"
+        from .ci_admission import local_ci_admission_blocker
+
+        blocker = local_ci_admission_blocker(self._github, self._ledger, current)
+        if blocker is not None:
+            return blocker
         existing_audit = self._ledger.latest_ci_receipt_for_head(
             current.base_repository,
             current.number,
@@ -2083,6 +2088,21 @@ class ScanController:
             # the comment from the shared GitHub account.
             return "self_ci_receipt"
         if _is_self_resolution_receipt(feedback, owner_login=owner_login):
+            return "self_resolution_receipt"
+        identity = self._policy.github_identity
+        if (
+            identity is not None
+            and feedback.reviewer.login.casefold() == identity.expected_login.casefold()
+            and feedback.kind in {"issue_comment", "review_comment"}
+            and len(feedback.body) < MAX_FEEDBACK_BODY_CHARS
+            and re.search(
+                r"<!--\s*pr-maintenance-receipt:v1\s+status=completed\s+"
+                r"kind=\w+\s+head=[0-9a-f]{40,64}\s*-->",
+                feedback.body,
+            ) is not None
+        ):
+            # Governed automation has a separate identity from the PR owner.
+            # Its completion receipts must not become new repair requests.
             return "self_resolution_receipt"
         return None
 

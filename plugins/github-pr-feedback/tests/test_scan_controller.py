@@ -154,6 +154,12 @@ class FakeGitHub:
             return self.current
         return self.current_by_number[number]
 
+    def get_merge_state(self, repository: str, number: int):
+        pull = self.current if number == self.current.number else self.current_by_number[number]
+        return SimpleNamespace(repository=repository, number=number, state=pull.state,
+                               merged=False, head_sha=pull.head_sha, base_sha=pull.base_sha,
+                               mergeable=True, merge_state_status="CLEAN")
+
     def actions_enabled(self, repository: str) -> bool:
         assert repository == self.pull_request.base_repository
         return self.actions_are_enabled
@@ -2683,7 +2689,7 @@ def test_duplicate_local_ci_receipts_do_not_starve_a_new_head_after_comment_fixe
         def list_feedback(self, repository: str, number: int):
             return ()
 
-    github = ManyPullsGitHub(stale_pulls[0], ())
+    github = ManyPullsGitHub(stale_pulls[0], (), pull_requests=(*stale_pulls, repaired))
     github.actions_are_enabled = False
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     claimed_at = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
@@ -2787,6 +2793,31 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
     assert result.skipped["self_resolution_receipt"] == 3
     assert result.skipped["duplicate"] == 1
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["superseded"]
+    ledger.close()
+
+
+def test_scan_suppresses_only_configured_bot_completion_receipts(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from github_pr_feedback.policy import GitHubIdentityPolicy
+
+    local_path, sha = initialized_repository(tmp_path)
+    policy = replace(
+        configured_policy(local_path, not_before="2026-08-24T00:00:00Z"),
+        github_identity=GitHubIdentityPolicy(expected_login="reviewer", token_env="BOT_TOKEN"),
+    )
+    completed = feedback(
+        "bot-completion", reviewer="reviewer",
+        body=f"Hermes automated repair\\nVerified repair. <!-- pr-maintenance-receipt:v1 status=completed kind=review_comment head={sha} -->",
+    )
+    actionable = feedback("bot-finding", reviewer="reviewer", body="Fix the missing error handling.")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = RecordingKanban()
+    result = ScanController(
+        policy, ledger, FakeGitHub(admitted_pull_request(sha), (completed, actionable)),
+        kanban, RecordingLocalGit(),
+    ).scan()
+    assert result.skipped.get("self_resolution_receipt") == 1
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["bot-finding"]
     ledger.close()
 
 
@@ -4289,3 +4320,69 @@ def test_required_local_ci_does_not_depend_on_actions_admin_settings(tmp_path, h
         assert controller.scan().created == 1
     assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
     ledger.close()
+
+
+@pytest.mark.parametrize("mergeable,status,expected", [(False, "DIRTY", "merge_conflict"), (True, "CLEAN", "scheduled")])
+def test_local_ci_waits_for_canonical_conflict_resolution(tmp_path, mergeable, status, expected):
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z",
+                               auto_dispatch=True, local_ci_audit=True)
+    policy = replace(policy, local_ci_audit=replace(policy.local_ci_audit, required_for_open_prs=True))
+
+    class ConflictGitHub(FakeGitHub):
+        def get_merge_state(self, repository, number):
+            state = super().get_merge_state(repository, number)
+            state.mergeable, state.merge_state_status = mergeable, status
+            return state
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = RecordingKanban()
+    try:
+        controller = ScanController(policy, ledger, ConflictGitHub(admitted_pull_request(sha), ()),
+                                    kanban, RecordingLocalGit())
+        assert controller.dispatch_local_ci_after_feedback(admitted_pull_request(sha)) == expected
+        assert len(kanban.tasks) == (1 if expected == "scheduled" else 0)
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("phase", ["pending", "resolving", "completed"])
+def test_local_ci_waits_for_mutation_acknowledgement_across_heads_without_blocking_other_prs(tmp_path, phase):
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z",
+                               auto_dispatch=True, local_ci_audit=True)
+    policy = replace(policy, local_ci_audit=replace(policy.local_ci_audit, required_for_open_prs=True))
+    pull = admitted_pull_request(sha)
+    other = replace(pull, number=18)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = RecordingKanban()
+    mutation = FeedbackReceipt("acme/widgets", 17, "pr_repair", "repair:merge_conflict", "f" * 40)
+    now = datetime.now(UTC)
+    try:
+        archived_audit = FeedbackReceipt("acme/widgets", 17, "pr_local_ci", "old-contract", sha)
+        audit_lease = ledger.claim(archived_audit, owner="auditor", claimed_at=now,
+                                  stale_before=now-timedelta(minutes=5))
+        ledger.finalize(archived_audit, "old-audit", audit_lease)
+        binding = ledger.exact_pending_task_binding(archived_audit)
+        lease = ledger.claim(mutation, owner="repair", claimed_at=now, stale_before=now-timedelta(minutes=5))
+        ledger.finalize(mutation, "repair-task", lease)
+        if phase != "pending":
+            ledger.begin_feedback_action(mutation, resolved_head_sha=sha, actioned_at=now)
+        if phase == "completed":
+            ledger.mark_feedback_actioned(mutation, resolved_head_sha=sha, actioned_at=now)
+        controller = ScanController(policy, ledger, FakeGitHub(pull, (), pull_requests=(pull, other)),
+                                    kanban, RecordingLocalGit())
+        if phase != "completed":
+            audit = FeedbackReceipt("acme/widgets", 17, "pr_local_ci", LOCAL_CI_FEEDBACK_ID, sha)
+            assert ledger.claim(audit, owner="auditor", claimed_at=now,
+                                stale_before=now-timedelta(minutes=5)) is None
+            assert ledger.reopen_archived_exact_dispatch(
+                archived_audit, archived=binding, owner="auditor", claimed_at=now) is None
+            assert ledger.reopen_legacy_exact_dispatch(
+                archived_audit, blocked=binding, owner="auditor", claimed_at=now) is None
+        expected = "scheduled" if phase == "completed" else "mutation_pending"
+        assert controller.dispatch_local_ci_after_feedback(pull) == expected
+        assert controller.dispatch_local_ci_after_feedback(other) == "scheduled"
+        assert len(kanban.tasks) == (2 if phase == "completed" else 1)
+    finally:
+        ledger.close()
