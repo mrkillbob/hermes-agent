@@ -19,6 +19,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from agent.file_safety import get_read_block_error
+from agent.source_provenance_tools import issue_active_read_provenance
 from tools.binary_extensions import has_binary_extension
 from tools.file_operations import (
     ShellFileOperations, normalize_read_pagination, normalize_search_pagination)
@@ -37,6 +38,44 @@ from tools.file_tools_read_tracking import (
     _task_data, _update_read_timestamp)
 
 logger = logging.getLogger(__name__)
+
+
+_CONTAINER_PATH_BACKENDS_FALLBACK = frozenset(
+    {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}
+)
+
+
+def _uses_container_paths(task_id: str = "default") -> bool:
+    """Return whether *task_id* resolves paths inside a terminal backend."""
+    try:
+        from tools.terminal_tool import (
+            _active_environments,
+            _env_lock,
+            _get_env_config,
+            _is_container_backend,
+            _resolve_container_task_id,
+        )
+
+        try:
+            container_key = _resolve_container_task_id(task_id)
+        except Exception:
+            container_key = task_id
+        with _env_lock:
+            env = _active_environments.get(container_key) or _active_environments.get(
+                task_id
+            )
+        if env is not None:
+            backend = getattr(env, "_hermes_backend_name", None)
+            if not isinstance(backend, str) or not backend:
+                backend = env.__class__.__name__.lower()
+            return _is_container_backend(backend) or backend in _CONTAINER_PATH_BACKENDS_FALLBACK
+        config = _get_env_config()
+        backend = str(
+            config.get("env_type") or os.getenv("TERMINAL_ENV") or "local"
+        ).lower()
+        return _is_container_backend(backend) or backend in _CONTAINER_PATH_BACKENDS_FALLBACK
+    except Exception:
+        return str(os.getenv("TERMINAL_ENV") or "local").lower() in _CONTAINER_PATH_BACKENDS_FALLBACK
 
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
@@ -610,7 +649,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             except OSError:
                 pass  # stat failed — fall through to full read
 
-        result = _get_file_ops(task_id).read_file(path, offset, limit)
+        file_ops = _get_file_ops(task_id)
+        result = file_ops.read_file(path, offset, limit)
         result_dict = result.to_dict()
 
         # Cache a not-found result for retries. Deliberately NO early return:
@@ -628,6 +668,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             result.content = _apply_char_budget(
                 result_dict, result.content or "", offset,
                 result_dict.get("total_lines", "unknown"), max_chars)
+        content_before_redaction = result.content or ""
         if result.content:
             result.content = redact_sensitive_text(result.content, file_read=True)
             result_dict["content"] = result.content
@@ -653,6 +694,16 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 f"You have read this exact file region {count} times consecutively. "
                 "The content has not changed since your last read. Use the information you already have. "
                 "If you are stuck in a loop, stop reading and proceed with writing or responding.")
+        if result.content == content_before_redaction:
+            issue_active_read_provenance(
+                resolved=_resolved,
+                source_path=_source_path,
+                offset=offset,
+                limit=limit,
+                returned_content=result.content,
+                result_dict=result_dict,
+                file_ops=file_ops,
+            )
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         return tool_error(str(e))
