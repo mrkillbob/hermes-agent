@@ -992,6 +992,34 @@ def test_source_presentation_allows_numbered_diff_hunks_and_boolean_secret_setti
     assert decision.allowed is True
 
 
+def test_source_presentation_allows_numbered_git_log_and_diff_stat_receipts(tmp_path):
+    source = (
+        "85cc6d01a2b3 fix(egress): classify source diff presentations\n"
+        "agent/llm_egress_firewall.py | 14 ++++++++++++++\n"
+        "Binary fixture.bin | Bin 1024 -> 2048 bytes\n"
+    )
+    path = tmp_path / "receipt.txt"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=3)
+    presentation = json.dumps(
+        {
+            "content": "\n".join(
+                f"{number}|{line}"
+                for number, line in enumerate(source.split("\n"), start=1)
+            )
+        }
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+    assert "base64_payload" not in decision.reason_codes
+
+
 def test_source_presentation_allows_exact_repair_source_atoms_but_not_payloads(tmp_path):
     source = (
         "SAME\n"

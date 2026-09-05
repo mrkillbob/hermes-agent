@@ -427,12 +427,17 @@ _BOUNDED_SOURCE_GIT_LOG_ENTRY = re.compile(
     r"(?:fix|feat|test|docs|chore|refactor|perf|build|ci|style|revert|Merge)"
     r"(?:\(|:|\s))"
 )
+_BOUNDED_NUMBERED_SOURCE_GIT_LOG_ENTRY = re.compile(
+    r"(?m)^\d+\|[0-9a-f]{7,12}\s+"
+    r"(?=(?:fix|feat|test|docs|chore|refactor|perf|build|ci|style|revert|Merge)"
+    r"(?:\(|:|\s))[^\n]*$"
+)
 _BOUNDED_SOURCE_DIFF_STAT_BINARY = re.compile(
-    r"(?m)^(?P<prefix>[^\n|]*\|\s+Bin\s+\d+\s*->\s+)"
+    r"(?m)^(?:\d+\|\s*)?(?P<prefix>[^\n|]*\|\s+Bin\s+\d+\s*->\s+)"
     r"(?P<size>\d+)(?P<suffix>\s+bytes\s*)$"
 )
 _BOUNDED_SOURCE_DIFF_STAT_COUNT = re.compile(
-    r"(?m)^(?P<prefix>[^\n|]*\|\s+)(?P<count>\d{1,8})"
+    r"(?m)^(?:\d+\|\s*)?(?P<prefix>[^\n|]*\|\s+)(?P<count>\d{1,8})"
     r"(?P<suffix>\s+[+]+\s*)$"
 )
 _BOUNDED_SOURCE_NUMSTAT_PATH = re.compile(
@@ -1265,6 +1270,15 @@ def _source_text_for_base64_scan(
     masked = _BOUNDED_ISO_DURATION.sub("<source-duration>", masked)
     masked = _BOUNDED_SOURCE_NUMERIC_CONSTANT_ASSIGNMENT.sub(
         "<source-constant>", masked
+    )
+    masked = _BOUNDED_NUMBERED_SOURCE_GIT_LOG_ENTRY.sub(
+        "<source-control-log>", masked
+    )
+    masked = _BOUNDED_SOURCE_DIFF_STAT_BINARY.sub(
+        "<source stat bytes>", masked
+    )
+    masked = _BOUNDED_SOURCE_DIFF_STAT_COUNT.sub(
+        "<source stat count>", masked
     )
     masked = _BASE64_CANDIDATE.sub(
         lambda match: (
