@@ -1,6 +1,7 @@
 """Tests for the Kanban DB layer (hermes_cli.kanban_db)."""
 
 from __future__ import annotations
+from hermes_cli import kanban_db_dispatch as dispatch_impl
 
 import concurrent.futures
 import os
@@ -235,7 +236,7 @@ def test_schedule_running_task_terminates_worker_before_releasing_claim(
         host = kb._claimer_id().split(":", 1)[0]
         lock = f"{host}:worker"
         kb.claim_task(conn, task_id, claimer=lock)
-        kb._set_worker_pid(conn, task_id, 4242)
+        dispatch_impl._set_worker_pid(conn, task_id, 4242)
 
         calls = []
 

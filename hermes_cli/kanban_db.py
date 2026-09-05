@@ -3036,6 +3036,8 @@ def complete_task(
         if not _parents_satisfied(conn, task_id):
             return False
         prior_status = _task_status(conn, task_id)
+        from hermes_cli.kanban_review_recognition import recipient_before_completion, record_approval
+        recognition_recipient = recipient_before_completion(conn, task_id, prior_status)
         sql = """
                 UPDATE tasks
                    SET status       = 'done',
@@ -3078,6 +3080,7 @@ def complete_task(
             _completed_event_payload(result, event_summary, verified_cards, metadata),
             run_id=run_id,
         )
+        record_approval(conn, task_id, recognition_recipient, run_id)
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
     # Success wipes the breaker counter (history stays on the event log).
     _clear_failure_counter(conn, task_id)
@@ -3385,6 +3388,14 @@ def block_task(
     so a forever-flaky task escalates. True on any transition."""
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
+    if expected_run_id is None:
+        row = conn.execute("SELECT status, worker_pid, claim_lock FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is not None and row["status"] == "running":
+            termination = _terminate_reclaimed_worker(row["worker_pid"], row["claim_lock"], task_id=task_id)
+            if not termination.get("terminated"):
+                _defer_reclaim_for_live_worker(conn, task_id, row["claim_lock"], int(time.time()),
+                                              termination, reason="block_termination_unverified")
+                return False
     with write_txn(conn):
         cur_row = conn.execute(
             "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
@@ -4241,9 +4252,18 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    lines.extend([
+        "## Completion contract",
+        "Before your worker exits, call kanban_complete with a factual result, or call "
+        "kanban_block only for a concrete unresolved prerequisite. A no-op or unavailable-evidence "
+        "outcome is still a completion when the task permits it; never exit with only conversational text.",
+        "",
+    ])
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)
+    from hermes_cli.kanban_review_recognition import append_private_context
+    append_private_context(lines, conn, task.assignee)
     _ctx_role_history(lines, conn, task, now)
     _ctx_comments(lines, list_comments(conn, task_id), now)
     return "\n".join(lines).rstrip() + "\n"

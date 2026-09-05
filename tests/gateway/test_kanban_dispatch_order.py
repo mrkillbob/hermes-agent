@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hermes_cli import kanban_db_dispatch as dispatcher
+from hermes_cli import kanban_db_connect as connections
 
 
 def test_ready_dispatch_precedes_auto_decompose(monkeypatch, tmp_path):
@@ -36,10 +38,10 @@ def test_ready_dispatch_precedes_auto_decompose(monkeypatch, tmp_path):
         },
     )
     monkeypatch.setattr(kb, "list_boards", lambda include_archived=False: [{"slug": "default"}])
-    monkeypatch.setattr(kb, "reap_worker_zombies", lambda: [])
-    monkeypatch.setattr(kb, "dispatch_once", lambda *args, **kwargs: calls.append("dispatch"))
-    monkeypatch.setattr(kb, "has_spawnable_ready", lambda conn: False)
-    monkeypatch.setattr(kb, "review_dispatch_enabled", lambda: False)
+    monkeypatch.setattr(dispatcher, "reap_worker_zombies", lambda: [])
+    monkeypatch.setattr(dispatcher, "dispatch_once", lambda *args, **kwargs: calls.append("dispatch"))
+    monkeypatch.setattr(dispatcher, "has_spawnable_ready", lambda conn: False)
+    monkeypatch.setattr(dispatcher, "review_dispatch_enabled", lambda: False)
     monkeypatch.setattr(decomp, "list_triage_ids", lambda: ["t_atomic"])
 
     def _decompose(*args, **kwargs):
@@ -64,7 +66,7 @@ def test_ready_dispatch_precedes_auto_decompose(monkeypatch, tmp_path):
 
 def test_external_drain_stops_new_kanban_dispatch():
     """A Desktop/gateway drain must let workers finish without spawning more."""
-    from gateway.kanban_watchers import _kanban_dispatch_allowed
+    from gateway.kanban_watchers_common import _kanban_dispatch_allowed
 
     runner = SimpleNamespace(_draining=False, _external_drain_active=True)
 
@@ -90,10 +92,10 @@ def decomposition_tick(monkeypatch, tmp_path):
                    "auto_decompose": True, "auto_decompose_per_tick": 1},
     })
     monkeypatch.setattr(kb, "list_boards", lambda **kw: [{"slug": "default"}])
-    monkeypatch.setattr(kb, "reap_worker_zombies", lambda: [])
-    monkeypatch.setattr(kb, "dispatch_once", lambda *a, **kw: None)
-    monkeypatch.setattr(kb, "has_spawnable_ready", lambda conn: False)
-    monkeypatch.setattr(kb, "review_dispatch_enabled", lambda: False)
+    monkeypatch.setattr(dispatcher, "reap_worker_zombies", lambda: [])
+    monkeypatch.setattr(dispatcher, "dispatch_once", lambda *a, **kw: None)
+    monkeypatch.setattr(dispatcher, "has_spawnable_ready", lambda conn: False)
+    monkeypatch.setattr(dispatcher, "review_dispatch_enabled", lambda: False)
 
     requests = []
 
@@ -222,7 +224,7 @@ def test_auto_decompose_fails_closed_when_history_cannot_be_read(decomposition_t
 
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="history unavailable", triage=True)
-    real_connect = kb.connect
+    real_connect = connections.connect
 
     def connect_without_event_reads(*args, **kwargs):
         conn = real_connect(*args, **kwargs)
@@ -235,7 +237,7 @@ def test_auto_decompose_fails_closed_when_history_cannot_be_read(decomposition_t
 
     run_tick, requests = decomposition_tick
     with monkeypatch.context() as scoped:
-        scoped.setattr(kb, "connect", connect_without_event_reads)
+        scoped.setattr(connections, "connect", connect_without_event_reads)
         run_tick()
     with kb.connect() as conn:
         assert kb.get_task(conn, tid).status == "triage"

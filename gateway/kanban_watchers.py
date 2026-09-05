@@ -27,6 +27,8 @@ from gateway.kanban_watchers_common import (
 from gateway.kanban_watchers_notifier import _KanbanNotification, _notifier_collect
 from gateway.kanban_watchers_dispatcher import (
     _KanbanDispatcher,
+    _dispatcher_tick_is_unhealthy,
+    _dispatcher_capacity_saturated,
     _log_spawn_results,
     _resolve_dispatcher_settings,
 )
@@ -279,19 +281,22 @@ class GatewayKanbanWatchersMixin:
             try:
                 # Emergency stop (`hermes pause`): no auto-decompose or
                 # dispatch while paused; running workers finish naturally.
-                if not _kanban_dispatch_allowed():
+                if not _kanban_dispatch_allowed(self):
                     bad_ticks = 0
                 else:
+                    results = await _to_thread_process_service(dispatcher.tick_once)
                     # Re-read the auto-decompose toggle live so disabling it
                     # takes effect on the next tick, not on restart.
                     _ad_enabled, _ad_per_tick = _resolve_auto_decompose_settings(_load_config)
                     # See #49638.
                     if _ad_enabled:
                         await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
-                    results = await _to_thread_process_service(dispatcher.tick_once)
                     any_spawned = _log_spawn_results(results)
                     ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
-                    bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
+                    bad_ticks = bad_ticks + 1 if _dispatcher_tick_is_unhealthy(
+                        ready_pending=ready_pending, any_spawned=any_spawned,
+                        all_capacity_saturated=_dispatcher_capacity_saturated(results),
+                    ) else 0
                 now = int(time.time())
                 if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
                     logger.warning(

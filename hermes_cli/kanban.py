@@ -300,7 +300,7 @@ def _unblock_author() -> str:
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
-    "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
+    "init", "create", "swarm", "assign", "set-reasoning", "reclaim", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
@@ -475,7 +475,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
 
 
 def _cmd_reconcile_dispatch(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         updated = kb.reconcile_legacy_dispatch_task(
             conn,
             args.task_id,
@@ -716,7 +716,7 @@ def _cmd_set_reasoning(args: argparse.Namespace) -> int:
         else raw_effort
     )
     try:
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             ok = kb.set_reasoning_effort(conn, args.task_id, effort)
     except (ValueError, RuntimeError) as exc:
         print(f"kanban: {exc}", file=sys.stderr)
@@ -1075,7 +1075,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     if rc:
         return rc
     reason = _stripped_or_none(getattr(args, "reason", None))
-    author = _profile_author() if reason else None
+    author = _unblock_author() if reason else None
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
         op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
@@ -1363,6 +1363,7 @@ _HANDLERS = {
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
+    "set-reasoning": _cmd_set_reasoning,
     "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,

@@ -1,6 +1,8 @@
 """Tests for the kanban CLI surface (hermes_cli.kanban)."""
 
 from __future__ import annotations
+from hermes_cli import kanban_worker_process as worker_process
+from hermes_cli import kanban_db_dispatch as dispatch_impl
 
 import argparse
 import json
@@ -112,7 +114,7 @@ def test_operator_block_terminates_running_worker_before_releasing_claim(
         task_id = kb.create_task(conn, title="unsafe worker", assignee="alice")
         claimed = kb.claim_task(conn, task_id)
         assert claimed is not None
-        kb._set_worker_pid(conn, task_id, 12345)
+        dispatch_impl._set_worker_pid(conn, task_id, 12345)
 
     rc = kc._cmd_block(
         argparse.Namespace(
@@ -152,7 +154,7 @@ def test_archive_terminates_running_worker_before_hiding_card(
         task_id = kb.create_task(conn, title="archive worker", assignee="alice")
         claimed = kb.claim_task(conn, task_id)
         assert claimed is not None
-        kb._set_worker_pid(conn, task_id, 23456)
+        dispatch_impl._set_worker_pid(conn, task_id, 23456)
 
         assert kb.archive_task(conn, task_id)
 
@@ -184,7 +186,7 @@ def test_operator_stop_fails_closed_when_worker_survives(
         task_id = kb.create_task(conn, title="surviving worker", assignee="alice")
         claimed = kb.claim_task(conn, task_id)
         assert claimed is not None
-        kb._set_worker_pid(conn, task_id, 34567)
+        dispatch_impl._set_worker_pid(conn, task_id, 34567)
 
     if operation == "block":
         rc = kc._cmd_block(
@@ -213,17 +215,17 @@ def test_operator_stop_fails_closed_when_worker_survives(
 def test_local_worker_pid_survives_hostname_alias_drift(monkeypatch):
     monkeypatch.setattr(kb, "_claimer_id", lambda: "Mac:999")
     monkeypatch.setattr(
-        kb,
-        "_pid_matches_task_worker",
+        worker_process,
+        "pid_matches_task_worker",
         lambda pid, task_id: (pid, task_id) == (92905, "t_exact"),
     )
 
-    assert kb._claim_is_host_local(
+    assert worker_process.claim_is_host_local(
         "Mikes-Mac-mini.local:85622",
         pid=92905,
         task_id="t_exact",
     )
-    assert not kb._claim_is_host_local(
+    assert not worker_process.claim_is_host_local(
         "remote-host:85622",
         pid=92905,
         task_id="t_other",
@@ -233,8 +235,8 @@ def test_local_worker_pid_survives_hostname_alias_drift(monkeypatch):
 def test_dead_worker_is_releasable_despite_hostname_alias_drift(monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
     monkeypatch.setattr(
-        kb,
-        "_claim_is_host_local",
+        worker_process,
+        "claim_is_host_local",
         lambda *_args, **_kwargs: pytest.fail("dead PID must be checked first"),
     )
 

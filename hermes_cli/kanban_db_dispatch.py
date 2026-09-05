@@ -132,6 +132,9 @@ class DispatchResult:
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; the lock holder is making progress on the same board."""
+    watchdog_blocked: list[str] = field(default_factory=list)
+    watchdog_restarted: list[str] = field(default_factory=list)
+    watchdog_needs_operator: list[str] = field(default_factory=list)
     host_capacity_saturated: bool = False
     memory_pressure: Optional[str] = None
     """Memory pressure that restricted this tick: ``"critical"`` (no new
@@ -424,7 +427,7 @@ def heartbeat_worker(
     return True
 
 
-def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:
+def enforce_max_runtime(conn: sqlite3.Connection, *, default_max_runtime_seconds: Optional[int] = None, signal_fn=None) -> list[str]:
     """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
 
     SIGTERM, short grace, then SIGKILL. Emits ``timed_out`` and restores the
@@ -442,7 +445,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         "       t.max_runtime_seconds, t.claim_lock "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
+        "WHERE t.status = 'running' "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
@@ -453,7 +456,10 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         # Runtime is per attempt: ``tasks.started_at`` records the FIRST start,
         # so retries must be measured from the active task_runs row.
         elapsed = now - int(row["active_started_at"])
-        limit = int(row["max_runtime_seconds"])
+        limit = row["max_runtime_seconds"] if row["max_runtime_seconds"] is not None else default_max_runtime_seconds
+        if limit is None or int(limit) <= 0:
+            continue
+        limit = int(limit)
         if elapsed < limit:
             continue
 
@@ -1154,7 +1160,7 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def check_respawn_guard(
-    conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
+    conn: sqlite3.Connection, task_id: str, *, lane: Optional[str] = None,
 ) -> Optional[str]:
     """Return a guard reason if ``task_id`` should NOT be re-spawned, else None.
 
@@ -1171,11 +1177,13 @@ def check_respawn_guard(
     dead claim locks are NOT a guard reason — the reclaim passes own those.
     """
     row = conn.execute(
-        "SELECT last_failure_error FROM tasks WHERE id = ?",
+        "SELECT last_failure_error, status FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
         return None
+
+    lane = lane or (_kb._retry_status_for_run(conn, task_id) if row["status"] == "running" else row["status"])
 
     now = int(time.time())
 
@@ -1237,11 +1245,17 @@ def check_respawn_guard(
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
     for c in conn.execute(
-        "SELECT body FROM task_comments WHERE task_id = ? AND created_at >= ?",
+        "SELECT body, created_at FROM task_comments WHERE task_id = ? AND created_at >= ?",
         (task_id, pr_cutoff),
     ).fetchall():
         if c["body"] and _RESPAWN_GUARD_PR_URL_RE.search(c["body"]):
-            return "active_pr"
+            requeued = conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id = ? AND kind IN "
+                "('unblocked', 'reclaimed', 'promoted', 'review_reopened') AND created_at > ? LIMIT 1",
+                (task_id, c["created_at"]),
+            ).fetchone()
+            if not requeued:
+                return "active_pr"
 
     return None
 
@@ -1613,7 +1627,9 @@ def _dispatch_lane_task(
         # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
         if not dry_run:
             with _kb.write_txn(conn):
-                _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+                previous = _kb._latest_event(conn, task_id, "respawn_guarded")
+                if not previous or _kb._json_dict(previous["payload"]).get("reason") != guard_reason:
+                    _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
         return False
 
     def _count_spawn(name: str) -> None:
@@ -1723,6 +1739,11 @@ def _run_reclaim_phase(
     reconcile_orphans: bool,
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
+    from hermes_cli.kanban_worker_watchdog import load_watchdog_config, run_watchdog_tick
+    watchdog = run_watchdog_tick(conn, board=_kb._lifecycle_board(conn), config=load_watchdog_config())
+    result.watchdog_blocked = watchdog.blocked
+    result.watchdog_restarted = watchdog.restarted
+    result.watchdog_needs_operator = watchdog.needs_operator
     reap_worker_zombies()
     result.reclaimed = _kb.release_stale_claims(conn)
     if reconcile_orphans:
@@ -1733,7 +1754,9 @@ def _run_reclaim_phase(
     # went back to ``ready`` and the respawn guard defers them until quota clears.
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
-    result.timed_out = enforce_max_runtime(conn)
+    from hermes_cli.config import load_config_readonly
+    default_runtime = (load_config_readonly() or {}).get("kanban", {}).get("default_max_runtime_seconds")
+    result.timed_out = enforce_max_runtime(conn, default_max_runtime_seconds=_positive_int(default_runtime, None))
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
@@ -2144,7 +2167,7 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
         token = set_hermes_home_override(hermes_home)
         try:
             cfg = load_config()
-            toolsets = sorted(_get_platform_tools(cfg, "cli"))
+            toolsets = sorted(set(_get_platform_tools(cfg, "cli")) - {"all", "*"})
         finally:
             reset_hermes_home_override(token)
         return toolsets or None

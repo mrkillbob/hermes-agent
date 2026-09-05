@@ -9,6 +9,8 @@ parity across every registered verb.
 """
 
 from __future__ import annotations
+from hermes_cli import kanban_worker_process as worker_process
+from hermes_cli import kanban_db_dispatch as dispatch_impl
 
 import argparse
 import json
@@ -341,7 +343,7 @@ def test_worker_tree_signal_uses_owned_process_group(monkeypatch):
     monkeypatch.setattr(kb.os, "killpg", lambda pgid, sig: calls.append(("group", pgid, sig)))
     monkeypatch.setattr(kb.os, "kill", lambda pid, sig: calls.append(("pid", pid, sig)))
 
-    kb._worker_tree_signal(222, 15)
+    worker_process.signal_worker_tree(222, 15)
 
     assert calls == [("group", 222, 15)]
 
@@ -358,7 +360,7 @@ def test_worker_tree_signal_signals_orphaned_group_when_leader_dead(monkeypatch)
     monkeypatch.setattr(kb.os, "killpg", lambda pgid, sig: calls.append(("group", pgid, sig)))
     monkeypatch.setattr(kb.os, "kill", lambda pid, sig: calls.append(("pid", pid, sig)))
 
-    kb._worker_tree_signal(222, 15)
+    worker_process.signal_worker_tree(222, 15)
 
     assert calls == [("group", 222, 15)]
 
@@ -371,7 +373,7 @@ def test_worker_tree_signal_never_targets_own_process_group(monkeypatch):
     monkeypatch.setattr(kb.os, "killpg", lambda pgid, sig: calls.append(("group", pgid, sig)))
     monkeypatch.setattr(kb.os, "kill", lambda pid, sig: calls.append(("pid", pid, sig)))
 
-    kb._worker_tree_signal(222, 15)
+    worker_process.signal_worker_tree(222, 15)
 
     assert calls == [("pid", 222, 15)]
 
@@ -447,7 +449,7 @@ def test_max_runtime_uses_dispatch_default_when_task_has_no_override(kanban_home
         try:
             tid = kb.create_task(conn, title="uncapped job", assignee="worker")
             kb.claim_task(conn, tid)
-            kb._set_worker_pid(conn, tid, os.getpid())
+            dispatch_impl._set_worker_pid(conn, tid, os.getpid())
             old_started = int(time.time()) - 30
             with kb.write_txn(conn):
                 conn.execute(

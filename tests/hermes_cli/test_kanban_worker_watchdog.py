@@ -1,6 +1,7 @@
 """Behavior tests for deterministic Kanban worker-health supervision."""
 
 from __future__ import annotations
+from hermes_cli import kanban_db_dispatch as dispatch_impl
 
 from pathlib import Path
 
@@ -49,7 +50,7 @@ def _running_task(conn, workspace: Path, *, body: str = "bounded work"):
     )
     claimed = kb.claim_task(conn, task_id)
     assert claimed is not None
-    kb._set_worker_pid(conn, task_id, 424242)
+    dispatch_impl._set_worker_pid(conn, task_id, 424242)
     return kb.get_task(conn, task_id)
 
 
@@ -252,7 +253,7 @@ def test_repair_borrows_original_workspace_without_owning_cleanup(
         )
         original = kb.claim_task(conn, task_id)
         assert original is not None
-        kb._set_worker_pid(conn, task_id, 424242)
+        dispatch_impl._set_worker_pid(conn, task_id, 424242)
 
         run_watchdog_tick(
             conn,
@@ -335,7 +336,7 @@ def test_provider_stall_repair_borrows_project_workspace_for_route_diagnosis(
         )
         original = kb.claim_task(conn, task_id)
         assert original is not None
-        kb._set_worker_pid(conn, task_id, 424242)
+        dispatch_impl._set_worker_pid(conn, task_id, 424242)
 
         run_watchdog_tick(
             conn,
