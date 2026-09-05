@@ -231,10 +231,10 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
         _log.debug("kanban lifecycle hook %s failed: %s", event, exc)
 
 
-def _fire_task_hook(event: str, task: Optional["Task"], task_id: str, run_id: Optional[int], **fields: Any) -> None:
+def _fire_task_hook(event: str, task: Optional["Task"], task_id: str, run_id: Optional[int], *, conn: sqlite3.Connection, board: Optional[str] = None, **fields: Any) -> None:
     """Lifecycle hook for a task transition; ``assignee`` from the (possibly missing) row."""
     _fire_kanban_lifecycle_hook(
-        event, task_id, board=get_current_board(),
+        event, task_id, board=_lifecycle_board(conn, board),
         assignee=task.assignee if task else None, run_id=run_id, **fields,
     )
 
@@ -269,7 +269,7 @@ def _fire_worker_spawned_hook(
         return
     try:
         _fire_kanban_lifecycle_hook(
-            "on_kanban_worker_spawned", task.id, board=board or get_current_board(),
+            "on_kanban_worker_spawned", task.id, board=_lifecycle_board(conn, board),
             assignee=task.assignee, run_id=_current_run_id(conn, task.id),
             worker_pid=int(pid) if pid else None, workspace_path=str(workspace_path),
         )
@@ -291,7 +291,7 @@ def notify_task_updated(
             "SELECT assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         _fire_kanban_lifecycle_hook(
-            "on_kanban_task_updated", task_id, board=board or get_current_board(),
+            "on_kanban_task_updated", task_id, board=_lifecycle_board(conn, board),
             assignee=row["assignee"] if row else None,
             run_id=row["current_run_id"] if row else None, changed_fields=list(changed_fields),
         )
@@ -2529,7 +2529,7 @@ def claim_task(
         if run_id is None:
             return None
         claimed = get_task(conn, task_id)
-    _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id)
+    _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id, conn=conn, board=board)
     return claimed
 
 
@@ -2725,7 +2725,7 @@ def release_stale_claims(conn: sqlite3.Connection, *, signal_fn=None) -> int:
         # Post-commit observer; every non-reclaim branch ``continue``d above.
         if _kanban_observer_consumed("on_kanban_worker_stale_claim"):
             _fire_kanban_lifecycle_hook(
-                "on_kanban_worker_stale_claim", row["id"], board=get_current_board(),
+                "on_kanban_worker_stale_claim", row["id"], board=_lifecycle_board(conn),
                 assignee=row["assignee"], run_id=run_id, worker_pid=_opt_int(row["worker_pid"]),
                 heartbeat_stale=bool(heartbeat_stale), retry_status=retry_status,
             )
@@ -3078,7 +3078,7 @@ def complete_task(
     _cleanup_workspace(conn, task_id)
     _done_task = get_task(conn, task_id)
     if fire_lifecycle_hook:
-        _fire_task_hook("kanban_task_completed", _done_task, task_id, run_id, summary=handoff_summary)
+        _fire_task_hook("kanban_task_completed", _done_task, task_id, run_id, conn=conn, board=board, summary=handoff_summary)
     return True
 
 
@@ -3412,9 +3412,9 @@ def block_task(
         blocked_task = get_task(conn, task_id)
         if kind == "dependency":
             # Historical ordering: the dependency lane fires inside the txn.
-            _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
+            _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, conn=conn, reason=reason)
             return True
-    _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
+    _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, conn=conn, reason=reason)
     return True
 
 

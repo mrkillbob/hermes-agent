@@ -286,6 +286,7 @@ def _terminate_reclaimed_worker(
     pid: Optional[int],
     claim_lock: Optional[str],
     *,
+    task_id: Optional[str] = None,
     signal_fn=None,
 ) -> dict[str, Any]:
     """Best-effort host-local worker termination for reclaim paths."""
@@ -298,11 +299,16 @@ def _terminate_reclaimed_worker(
     }
     if not pid or pid <= 0 or not claim_lock:
         return info
-    if not str(claim_lock).startswith(_kb._host_prefix()):
+    from hermes_cli.kanban_worker_process import claim_is_host_local, signal_worker_tree
+
+    if not _kb._pid_alive(pid):
+        info["terminated"] = True
+        return info
+    if not claim_is_host_local(claim_lock, pid=pid, task_id=task_id):
         return info
     info["host_local"] = True
 
-    kill = _kill_fn(signal_fn)
+    kill = signal_fn if signal_fn is not None else signal_worker_tree
     if kill is None:
         return info
 
@@ -955,7 +961,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # Fired only now, after the reclaim txn AND breaker accounting have
     # committed, so subscribers always observe fully durable board state.
     if sweep.exited_hook_payloads and _kb._kanban_observer_consumed("on_kanban_worker_exited"):
-        _board = _kb.get_current_board()
+        _board = _kb._lifecycle_board(conn)
         for hook_fields in sweep.exited_hook_payloads:
             hook_fields = dict(hook_fields)
             _kb._fire_kanban_lifecycle_hook(
