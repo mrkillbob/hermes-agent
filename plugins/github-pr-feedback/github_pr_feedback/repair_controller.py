@@ -265,7 +265,11 @@ class RepairController:
                     checks,
                     base_refresh_required=base_refresh_required,
                 )
-                if retry_receipt is None and checks.actions_enabled and checks.action_required:
+                if scoped_target is not None and checks.actions_enabled and checks.action_required:
+                    # Exact conflict dispatch must not create a separate human
+                    # escalation. The broad scan owns that independent lane.
+                    skipped["action_required"] += 1
+                elif retry_receipt is None and checks.actions_enabled and checks.action_required:
                     # Independent of every other trigger above: no repair
                     # commit or merge can clear GitHub's own action_required
                     # conclusion, so this always gets its own escalation card
