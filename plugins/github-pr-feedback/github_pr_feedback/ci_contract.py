@@ -3,6 +3,11 @@ from pathlib import Path
 import json
 import tomllib
 
+HERMES_ENV_CHECK = ('uv', 'sync', '--locked', '--check', '--no-install-project',
+                    '--extra', 'all', '--extra', 'dev', '--extra', 'anthropic',
+                    '--extra', 'mistral', '--extra', 'fal', '--extra', 'modal',
+                    '--extra', 'daytona', '--extra', 'hindsight', '--extra', 'parallel-web')
+
 _HERMES_MANIFEST = Path(__file__).with_name('hermes_native_ci.toml')
 
 
@@ -27,6 +32,7 @@ def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple
     commands = [
         (('git', 'diff', '--check', f'{base_sha}..{head_sha}'), worktree, {}),
         (('uv', 'lock', '--check'), worktree, {}),
+        (HERMES_ENV_CHECK, worktree, {}),
         (('bash', 'scripts/run_tests.sh'), worktree, {}),
     ]
     root_lock = worktree / 'package-lock.json'

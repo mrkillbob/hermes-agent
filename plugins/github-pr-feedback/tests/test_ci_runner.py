@@ -774,7 +774,7 @@ def test_ci_receipt_round_trip_rejects_coerced_or_dropped_evidence(
 
 @pytest.mark.parametrize("changed,expected", [("agent/worker.py", "passed"), ("installer/windows.ps1", "failed")])
 def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp_path, changed, expected):
-    from github_pr_feedback.ci_contract import manifest_path
+    from github_pr_feedback.ci_contract import manifest_path, HERMES_ENV_CHECK
     from github_pr_feedback.ci_runner import actions_disabled_local_ci_evidence
     root = tmp_path / "hermes"
     (root / "scripts").mkdir(parents=True)
@@ -788,10 +788,13 @@ def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp
     assert receipt.status == expected
     assert [call[0] for call in commands.calls] == [
         ("git", "diff", "--check", f"{BASE_SHA}..{HEAD_SHA}"),
-        ("uv", "lock", "--check"), ("bash", "scripts/run_tests.sh")]
+        ("uv", "lock", "--check"), HERMES_ENV_CHECK, ("bash", "scripts/run_tests.sh")]
     assert (actions_disabled_local_ci_evidence(receipt, manifest_path(root).read_bytes()) is not None) == (expected == "passed")
     assert actions_disabled_local_ci_evidence(replace(receipt, commands=receipt.commands[:-1]),
                                              manifest_path(root).read_bytes()) is None
+    assert actions_disabled_local_ci_evidence(
+        replace(receipt, commands=receipt.commands[:2] + receipt.commands[3:]),
+        manifest_path(root).read_bytes()) is None
     ledger.close()
 
 

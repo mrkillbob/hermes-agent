@@ -150,7 +150,7 @@ class RepairController:
         self._owner = f"repair-scanner-{uuid4().hex}"
         self._base_refresher = base_refresher or DeterministicBaseRefresher(github)
 
-    def scan(self, *, conflicts_only: bool = False) -> RepairScanResult:
+    def scan(self, *, conflicts_only: bool = False, retry_receipt: FeedbackReceipt | None = None) -> RepairScanResult:
         configured = self._policy.repair_steward
         if configured is None:
             return RepairScanResult(0, {}, False)
@@ -158,6 +158,8 @@ class RepairController:
         skipped: Counter[str] = Counter()
         degraded = False
         for repository in sorted(configured.repositories):
+            if retry_receipt is not None and repository != retry_receipt.repository:
+                continue
             base_refresh_slots_used = 0
             target = self._policy.targets[repository]
             merge_policy = self._policy.merge_policy_for(repository)
@@ -179,6 +181,8 @@ class RepairController:
                 skipped["github_state_unavailable"] += 1
                 degraded = True
                 continue
+            if retry_receipt is not None:
+                pulls = tuple(pull for pull in pulls if pull.number == retry_receipt.pr_number)
             pulls = tuple(
                 sorted(
                     pulls,
@@ -250,7 +254,7 @@ class RepairController:
                     checks,
                     base_refresh_required=base_refresh_required,
                 )
-                if checks.actions_enabled and checks.action_required:
+                if retry_receipt is None and checks.actions_enabled and checks.action_required:
                     # Independent of every other trigger above: no repair
                     # commit or merge can clear GitHub's own action_required
                     # conclusion, so this always gets its own escalation card
@@ -301,8 +305,11 @@ class RepairController:
                 receipt = FeedbackReceipt(
                     repository, pull.number, "pr_repair", trigger_id, pull.head_sha
                 )
+                if retry_receipt is not None and receipt != retry_receipt:
+                    skipped["retry_identity_changed"] += 1
+                    continue
                 claimed_at = self._clock()
-                lease = _claim_with_orphan_recovery(
+                lease = self._ledger.retry(receipt, owner=self._owner, claimed_at=claimed_at) if retry_receipt else _claim_with_orphan_recovery(
                     self._ledger,
                     self._kanban,
                     receipt,

@@ -773,3 +773,25 @@ def test_conflict_repair_pins_current_branch_tip_without_merge_policy(tmp_path):
     assert kanban.tasks[0].evidence["target_base_sha"] == "c" * 40
     assert "c" * 40 in kanban.tasks[0].instructions
     ledger.close()
+
+
+def test_explicit_repair_retry_revalidates_receipt_and_recovers_failed_environment(tmp_path):
+    class RecoveringGit(LocalGit):
+        broken = True
+        def prepare_receipt_worktree(self, path, receipt):
+            if self.broken:
+                raise RuntimeError('missing pinned environment')
+            return super().prepare_receipt_worktree(path, receipt)
+    ledger = FeedbackLedger(tmp_path / 'ledger.sqlite3')
+    kanban, local_git = Kanban(), RecoveringGit()
+    controller = RepairController(policy(tmp_path), ledger, GitHub(), kanban, local_git)
+    receipt = FeedbackReceipt('acme/widgets', 17, 'pr_repair',
+                              'repair:merge_conflict:target-base:' + 'b' * 40, SHA)
+    assert controller.scan().skipped['dispatch_failed'] == 1
+    local_git.broken = False
+    assert controller.scan().created == 0
+    assert controller.scan(retry_receipt=replace(receipt, head_sha='c' * 40)).created == 0
+    assert controller.scan(retry_receipt=receipt).created == 1
+    assert controller.scan(retry_receipt=receipt).created == 0
+    assert len(kanban.tasks) == 1
+    ledger.close()

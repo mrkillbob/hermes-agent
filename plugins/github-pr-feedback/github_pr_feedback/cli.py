@@ -1242,7 +1242,13 @@ def _retry(ctx: Any, args: argparse.Namespace) -> int:
         return 1
     ledger = FeedbackLedger.for_current_profile()
     try:
-        result = _controller(policy, ledger).retry_failed(receipt)
+        if receipt.feedback_kind == "pr_repair":
+            result = RepairController(
+                policy, ledger, _github_client(policy), KanbanSubprocessClient(),
+                control_home=get_default_hermes_root(),
+            ).scan(retry_receipt=receipt)
+        else:
+            result = _controller(policy, ledger).retry_failed(receipt)
     finally:
         ledger.close()
     print(json.dumps(_scan_payload(result), sort_keys=True))

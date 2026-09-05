@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands, hermes_coverage_gap
+from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands, hermes_coverage_gap, HERMES_ENV_CHECK
 
 import hashlib
 import json
@@ -859,6 +859,7 @@ def actions_disabled_local_ci_evidence(
         expected = (
             ("git", "diff", "--check", f"{receipt.identity.base_sha}..{receipt.identity.head_sha}"),
             ("uv", "lock", "--check"),
+            HERMES_ENV_CHECK,
             ("bash", "scripts/run_tests.sh"),
         )
         if len(receipt.commands) < len(expected) or any(
