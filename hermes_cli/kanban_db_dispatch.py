@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
+    from hermes_cli.kanban_runtime_priority import ProcessScan
 
 
 # After this many consecutive non-success attempts on a task/profile the
@@ -131,6 +132,7 @@ class DispatchResult:
     skipped_locked: bool = False
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; the lock holder is making progress on the same board."""
+    host_capacity_saturated: bool = False
     memory_pressure: Optional[str] = None
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
@@ -1341,14 +1343,53 @@ def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -
     return max(DERIVED_MAX_IN_PROGRESS_FLOOR, min(workers, DERIVED_MAX_IN_PROGRESS_CEILING))
 
 
-def resolve_max_in_progress(configured: Optional[int]) -> Optional[int]:
-    """Effective global concurrency cap: explicit config wins, else the
-    memory-derived default. All config-parsing callers route through this so
-    both paths agree.
+def resolve_max_in_progress(
+    configured: Optional[int],
+    *,
+    priority_runtime_guard: Optional[Mapping[str, Any]] = None,
+    process_scan: Optional[ProcessScan] = None,
+) -> Optional[int]:
+    """Return the effective global concurrency cap for a dispatch tick.
+
+    The explicit operator-configured value is the normal performance cap.
+    When unset, fall back to the memory-derived default (see
+    :func:`derive_default_max_in_progress`). A configured priority runtime may
+    temporarily lower either value, but never raises it. Callers that parse
+    config (gateway dispatcher, ``hermes kanban dispatch``) should route
+    through this so both paths agree.
     """
-    if configured is not None:
-        return configured
-    return derive_default_max_in_progress()
+    from hermes_cli.kanban_runtime_priority import priority_runtime_state, configured_priority_runtime_guard
+    if priority_runtime_guard is None:
+        priority_runtime_guard = configured_priority_runtime_guard()
+    resolved = configured if configured is not None else derive_default_max_in_progress()
+    # A guard-enabled workstation can declare its measured normal lane without
+    # weakening the existing memory-derived safety cap on hosts where memory is
+    # observable. This matters on macOS, where the portable memory sample is
+    # intentionally unavailable and the historical fallback was unbounded.
+    if resolved is None and isinstance(priority_runtime_guard, Mapping):
+        try:
+            normal = int(priority_runtime_guard.get("normal_max_in_progress", 0))
+        except (TypeError, ValueError):
+            normal = 0
+        if (
+            bool(priority_runtime_guard.get("enabled", False))
+            and priority_runtime_guard.get("project_roots")
+            and normal > 0
+        ):
+            resolved = normal
+    state = priority_runtime_state(
+        priority_runtime_guard,
+        process_scan=process_scan,
+    )
+    if state not in {"active", "unknown"}:
+        return resolved
+    try:
+        protected = int((priority_runtime_guard or {}).get("max_in_progress", 3))
+    except (TypeError, ValueError):
+        protected = 3
+    if protected < 1:
+        protected = 3
+    return protected if resolved is None else min(resolved, protected)
 
 
 def configured_max_in_progress() -> Optional[int]:
@@ -1720,19 +1761,19 @@ def _tick_spawn_budget(
     if max_spawn is not None or max_in_progress is not None:
         running_count = count_running_tasks(conn)
 
-    # Both ready and review loops consume from the same budget.
-    if max_spawn is not None:
-        if running_count >= max_spawn:
-            return False, None
-        spawn_budget = max_spawn - running_count
-
+    # Report host saturation even when the board also exhausts its own budget.
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
         if total_running >= max_in_progress:
+            result.host_capacity_saturated = True
             return False, None
-        remaining = max_in_progress - total_running
-        if spawn_budget is None or spawn_budget > remaining:
-            spawn_budget = remaining
+        spawn_budget = max_in_progress - total_running
+
+    if max_spawn is not None:
+        if running_count >= max_spawn:
+            return False, None
+        remaining = max_spawn - running_count
+        spawn_budget = remaining if spawn_budget is None else min(spawn_budget, remaining)
 
     # Memory-pressure guard: a static cap can't see the host's actual state.
     # critical -> spawn nothing this tick; elevated -> at most one new worker.
