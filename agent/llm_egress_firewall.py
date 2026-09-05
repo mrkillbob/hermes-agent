@@ -901,6 +901,10 @@ def validate_tool_syntax(text: str, syntax_kind: str) -> str:
 def _canonical_base64_candidate(candidate: str) -> bool:
     """Recognize bounded canonical encodings without flagging ordinary IDs."""
 
+    # Source-diff callers supply whole lines, including Unicode comments.
+    # Neither standard nor URL-safe Base64 has non-ASCII alphabet members.
+    if not candidate.isascii():
+        return False
     if candidate in _PROTOCOL_GRAMMAR_ATOMS:
         return False
     if candidate in _SAFE_DIAGNOSTIC_STATUS_WORDS:
