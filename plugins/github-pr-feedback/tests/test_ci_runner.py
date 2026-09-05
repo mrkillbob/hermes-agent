@@ -770,3 +770,31 @@ def test_ci_receipt_round_trip_rejects_coerced_or_dropped_evidence(
     with pytest.raises(ValueError, match="billing-blocked"):
         CIAuditReceipt.from_payload(payload)
     ledger.close()
+
+
+def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp_path):
+    from github_pr_feedback.ci_contract import manifest_path
+    from github_pr_feedback.ci_runner import actions_disabled_local_ci_evidence
+    root = tmp_path / "hermes"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts/run_tests.sh").write_text("exit 0\n")
+    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n')
+    ledger = FeedbackLedger(tmp_path / "ci.sqlite3")
+    commands = RecordingRunner()
+    runner = LocalCIRunner(FakeGitHub(merge_state()), ledger, command_runner=commands,
+                          inspector=FakeInspector(), python_argv=("python3",), now=lambda: NOW)
+    receipt = runner.run(CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), root)
+    assert receipt.status == "passed"
+    assert [call[0] for call in commands.calls] == [
+        ("git", "diff", "--check", f"{BASE_SHA}..{HEAD_SHA}"),
+        ("uv", "lock", "--check"), ("bash", "scripts/run_tests.sh")]
+    assert actions_disabled_local_ci_evidence(receipt, manifest_path(root).read_bytes()) is not None
+    assert actions_disabled_local_ci_evidence(replace(receipt, commands=receipt.commands[:-1]),
+                                             manifest_path(root).read_bytes()) is None
+    ledger.close()
+
+
+def test_hermes_native_contract_does_not_claim_uncovered_platform_changes(tmp_path):
+    from github_pr_feedback.ci_contract import hermes_commands
+    with pytest.raises(ValueError, match="additional platform"):
+        hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ("installer/windows.ps1",))

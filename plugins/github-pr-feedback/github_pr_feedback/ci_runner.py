@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands
+
 import hashlib
 import json
 import os
@@ -477,7 +479,7 @@ class LocalCIRunner:
         """Run exact-head CI under a durable, PID-backed single-owner lease."""
 
         resolved = Path(worktree).resolve()
-        manifest_path = resolved / "tests/manifests/test_lanes.toml"
+        manifest_path = ci_manifest_path(resolved)
         if not resolved.is_dir() or not manifest_path.is_file():
             raise CIValidationError("required CI owner files are missing")
         manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
@@ -569,14 +571,17 @@ class LocalCIRunner:
         worktree = Path(worktree).resolve()
         if not worktree.is_dir():
             raise CIValidationError("CI worktree does not exist")
-        manifest_path = worktree / "tests/manifests/test_lanes.toml"
+        manifest_path = ci_manifest_path(worktree)
         scripts = tuple(worktree / relative for relative in _REQUIRED_SCRIPTS)
-        if not manifest_path.is_file() or any(not script.is_file() for script in scripts):
+        if not manifest_path.is_file() or (
+            not is_hermes_contract(manifest_path.read_bytes())
+            and any(not script.is_file() for script in scripts)
+        ):
             raise CIValidationError("required CI owner files are missing")
         bootstrap_evidence = self._ensure_python_environment(worktree)
         manifest_bytes = manifest_path.read_bytes()
         manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
-        lanes = _required_lanes(manifest_bytes)
+        lanes = () if is_hermes_contract(manifest_bytes) else _required_lanes(manifest_bytes)
 
         initial_state = self._github.get_merge_state(identity.repository, identity.pr_number)
         initial_checks = self._check_state(identity.repository, identity.head_sha)
@@ -624,6 +629,12 @@ class LocalCIRunner:
                     )
                 )
             )
+
+        if is_hermes_contract(manifest_bytes):
+            try:
+                command_specs = hermes_commands(worktree, identity.base_sha, identity.head_sha, changed_files)
+            except ValueError as error:
+                raise CIValidationError(str(error)) from error
 
         evidence: list[CommandEvidence] = []
         if bootstrap_evidence is not None:
@@ -835,6 +846,19 @@ def actions_disabled_local_ci_evidence(
         or receipt.actions_state.billing_blocked
     ):
         return None
+    if is_hermes_contract(manifest_bytes):
+        expected = (
+            ("git", "diff", "--check", f"{receipt.identity.base_sha}..{receipt.identity.head_sha}"),
+            ("uv", "lock", "--check"),
+            ("bash", "scripts/run_tests.sh"),
+        )
+        if len(receipt.commands) < len(expected) or any(
+            command.cwd != "." or command.argv != argv
+            for command, argv in zip(receipt.commands, expected)
+        ):
+            return None
+        return ActionsDisabledLocalCIEvidence(receipt.receipt_id, receipt.manifest_digest,
+                                             len(receipt.commands), len(expected))
     lanes = _required_lanes(manifest_bytes)
     required: list[tuple[str, ...]] = [
         ("scripts/check_ci_governance.py",),

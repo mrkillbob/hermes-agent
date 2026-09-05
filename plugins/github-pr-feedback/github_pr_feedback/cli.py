@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .ci_contract import manifest_path as ci_manifest_path
+
 import argparse
 import fcntl
 import hashlib
@@ -1431,7 +1433,7 @@ def _reusable_ci_receipt(
         # makes the old receipt non-reusable, not corrupt; rerun all
         # base-relative lanes against the new exact base.
         return None
-    manifest_path = worktree / "tests/manifests/test_lanes.toml"
+    manifest_path = ci_manifest_path(worktree)
     if not manifest_path.is_file():
         return None
     manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
@@ -1468,7 +1470,7 @@ def _run_grouped_exact_head_audit(
     )
     if receipt is not None:
         return receipt
-    manifest_path = worktree / "tests/manifests/test_lanes.toml"
+    manifest_path = ci_manifest_path(worktree)
     if not manifest_path.is_file():
         raise CIValidationError("CI lane manifest is unavailable")
     job = CIAuditJob(
@@ -1898,12 +1900,7 @@ def _run_merge_scan_for_policy(
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
     source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
-    manifest_path = (
-        policy.targets[merge_policy.repository].local_path
-        / "tests"
-        / "manifests"
-        / "test_lanes.toml"
-    )
+    manifest_path = ci_manifest_path(policy.targets[merge_policy.repository].local_path)
     if not manifest_path.is_file():
         return {
             "status": "degraded",

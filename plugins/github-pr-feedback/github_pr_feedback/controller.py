@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .ci_contract import manifest_path as ci_manifest_path
+
 import json
 import re
 import shlex
@@ -2663,7 +2665,7 @@ def _required_local_ci_backlog_count(
     )
     if not admitted:
         return 0
-    manifest_path = target.local_path / "tests" / "manifests" / "test_lanes.toml"
+    manifest_path = ci_manifest_path(target.local_path)
     try:
         manifest_digest = sha256(manifest_path.read_bytes()).hexdigest()
     except OSError:
@@ -2786,7 +2788,7 @@ def _has_current_passed_ci_receipt(
 
     if pull.base_sha is None:
         return False
-    manifest_path = target.local_path / "tests" / "manifests" / "test_lanes.toml"
+    manifest_path = ci_manifest_path(target.local_path)
     try:
         manifest_digest = sha256(manifest_path.read_bytes()).hexdigest()
         receipt = ledger.latest_ci_receipt(

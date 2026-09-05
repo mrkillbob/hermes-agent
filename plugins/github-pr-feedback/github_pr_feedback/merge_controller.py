@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .ci_contract import manifest_path as ci_manifest_path
+
 import hashlib
 import json
 import re
@@ -509,7 +511,7 @@ class CanonicalMergeEvidenceSource:
         policy = self._merge_policy
         pull = self._github.get_merge_state(policy.repository, number)
         target = self._plugin_policy.targets[policy.repository]
-        manifest_path = target.local_path / "tests/manifests/test_lanes.toml"
+        manifest_path = ci_manifest_path(target.local_path)
         if not manifest_path.is_file():
             raise GitHubClientError("CI manifest was unavailable")
         manifest_bytes = manifest_path.read_bytes()
