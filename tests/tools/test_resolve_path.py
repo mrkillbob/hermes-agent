@@ -46,7 +46,7 @@ class TestResolvePath:
         stable.mkdir()
         workspace.mkdir()
 
-        from tools import file_tools, terminal_tool
+        from tools import file_tools_paths, terminal_tool
 
         task_id = "kanban-worker-session"
         monkeypatch.setenv("HERMES_KANBAN_TASK", "t_workspace")
@@ -54,7 +54,7 @@ class TestResolvePath:
         monkeypatch.setenv("TERMINAL_CWD", str(workspace))
         terminal_tool.record_session_cwd(task_id, str(stable))
         try:
-            result = file_tools._resolve_path("README.md", task_id=task_id)
+            result = file_tools_paths._resolve_path_for_task("README.md", task_id=task_id)
         finally:
             terminal_tool.clear_session_cwd(task_id)
 
@@ -70,14 +70,14 @@ class TestResolvePath:
         monkeypatch.delenv("TERMINAL_CWD", raising=False)
 
         from gateway.session_context import clear_session_vars, set_session_vars
-        from tools import file_tools, terminal_tool
+        from tools import file_tools_paths, terminal_tool
 
         session_key = "desktop-session"
         child_task_id = "delegated-child"
         terminal_tool.record_session_cwd(session_key, str(workspace))
         tokens = set_session_vars(session_key=session_key, cwd=str(workspace))
         try:
-            result = file_tools._resolve_path("dir/README.md", task_id=child_task_id)
+            result = file_tools_paths._resolve_path_for_task("dir/README.md", task_id=child_task_id)
         finally:
             clear_session_vars(tokens)
             terminal_tool.clear_session_cwd(session_key)
@@ -90,14 +90,14 @@ class TestResolvePath:
         """A failed inherited-session lookup is diagnosable without breaking fallback."""
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
 
-        from tools import file_tools, terminal_tool
+        from tools import file_tools_paths, terminal_tool
 
         def fail_session_lookup():
             raise RuntimeError("session registry unavailable")
 
         monkeypatch.setattr(terminal_tool, "_current_session_key", fail_session_lookup)
         with caplog.at_level(logging.DEBUG, logger="tools.file_tools"):
-            result = file_tools._resolve_path("README.md", task_id="delegated-child")
+            result = file_tools_paths._resolve_path_for_task("README.md", task_id="delegated-child")
 
         assert result == tmp_path / "README.md"
         assert "session cwd inheritance unavailable" in caplog.text

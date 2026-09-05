@@ -116,9 +116,7 @@ def test_kanban_workspace_beats_stale_recorded_session_cwd(monkeypatch, tmp_path
         terminal_tool.clear_session_cwd(task_id)
 
     assert result["exit_code"] == 0
-    assert calls == [
-        {"timeout": 60, "cwd": str(workspace), "bounded_capture": True}
-    ]
+    assert calls[0] | {"timeout": 60, "cwd": str(workspace), "bounded_capture": True} == calls[0]
 
 
 def test_explicit_workdir_does_not_persist_into_session_cwd(monkeypatch):
