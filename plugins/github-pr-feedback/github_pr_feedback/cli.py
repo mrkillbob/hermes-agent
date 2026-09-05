@@ -470,6 +470,8 @@ class KanbanSubprocessClient:
         events = payload.get("events") if isinstance(payload, dict) else None
         if isinstance(events, list):
             enriched["_events"] = events
+        if "children" in payload:
+            enriched["_children"] = payload["children"]
         return enriched
 
     def task_status(self, board: str, task_id: str) -> str | None:

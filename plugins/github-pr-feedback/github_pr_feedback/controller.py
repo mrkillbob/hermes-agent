@@ -935,6 +935,18 @@ class PooledLocalGitRepository:
             # early, never overrides it.
             if status is not None and status not in _WORKTREE_POOL_TERMINAL_TASK_STATUSES:
                 continue
+            task_details = getattr(kanban, "task_details", None)
+            if callable(task_details):
+                from .worktree_ownership import descendants_finished
+
+                try:
+                    if not descendants_finished(
+                        task_details, slot["board"], slot["task_id"],
+                        _WORKTREE_POOL_TERMINAL_TASK_STATUSES,
+                    ):
+                        continue
+                except RuntimeError:
+                    continue
             self._ledger.finish_worktree_slot(
                 WorktreeSlotLease(slot["slot_id"], slot["lease_version"], slot["owner_pid"])
             )

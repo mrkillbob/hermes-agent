@@ -414,6 +414,42 @@ def test_reconcile_releases_a_slot_whose_task_is_done(tmp_path: Path) -> None:
     ledger.close()
 
 
+def test_reconcile_preserves_parent_checkout_until_review_child_finishes(tmp_path):
+    from github_pr_feedback.cli import KanbanSubprocessClient, KanbanCommandResult
+
+    repo = initialized_repository(tmp_path)
+    first = commit(repo, "source.txt", "reviewed source")
+    second = commit(repo, "source.txt", "unrelated PR")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    pool = PooledLocalGitRepository(ledger, tmp_path / "pool", slot_count=1, owner_pid=lambda: 4242)
+    prepared = pool.prepare_receipt_worktree(repo, receipt(first))
+    pool.bind_task(receipt(first), "parent", "repairs")
+
+    class Runner:
+        child_status = "blocked"
+
+        def run(self, argv):
+            import json
+
+            task_id = argv[-2]
+            payload = {
+                "task": {"id": task_id, "status": "done" if task_id == "parent" else self.child_status},
+                "children": ["child"] if task_id == "parent" else [],
+            }
+            return KanbanCommandResult(0, json.dumps(payload), "")
+
+    runner = Runner()
+    client = KanbanSubprocessClient(runner)
+    assert pool.reconcile_leases(client) == 0
+    with pytest.raises(WorktreePoolExhausted):
+        pool.prepare_receipt_worktree(repo, receipt(second))
+    assert (prepared.path / "source.txt").read_text() == "reviewed source"
+    runner.child_status = "done"
+    assert pool.reconcile_leases(client) == 1
+    assert pool.prepare_receipt_worktree(repo, receipt(second)).expected_sha == second
+    ledger.close()
+
+
 @pytest.mark.parametrize("status", ["blocked", "triage"])
 def test_reconcile_keeps_a_slot_for_a_retryable_task(
     tmp_path: Path, status: str
