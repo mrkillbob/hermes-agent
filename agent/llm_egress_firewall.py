@@ -279,7 +279,7 @@ _BOUNDED_SOURCE_CLI_VALUE = re.compile(
     r"(?P<prefix>--(?:"
     + "|".join(re.escape(option) for option in _BOUNDED_SOURCE_CLI_KNOWN_OPTIONS)
     + r")=)"
-    r"(?P<value>[A-Z]{3,8})(?P<suffix>[^A-Za-z0-9_+/=-])"
+    r"(?P<value>[A-Z]{3,8})(?P<suffix>[^A-Za-z0-9_+/=-]|$)"
 )
 _BOUNDED_SOURCE_CODE_ASSIGNMENT = re.compile(
     r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,7}="

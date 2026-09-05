@@ -260,6 +260,23 @@ def test_source_grant_allows_pr_metadata_without_disabling_base64_detection(tmp_
     assert decision.allowed is True
 
 
+def test_source_grant_allows_pr_metadata_diff_filter_at_end_of_text(tmp_path):
+    """Bounded PR diff-filter metadata may appear at EOF."""
+
+    path = tmp_path / "pr.diff"
+    source = "--diff-filter=ACMR"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=1)
+
+    decision = firewall(tmp_path).preflight(
+        _typed_request(_request(source), source_grant=grant),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+
+
 def test_source_grant_still_rejects_encoded_payload_next_to_pr_metadata(tmp_path):
     path = tmp_path / "pr.diff"
     encoded = base64.b64encode(b"private source that must not leave the host").decode()
