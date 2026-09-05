@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 
 
 @pytest.fixture
@@ -33,7 +34,7 @@ def _create_triage(conn, title="rough idea", body=None, assignee=None, tenant=No
 
 
 def test_decompose_creates_children_and_promotes_root(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = _create_triage(conn, title="ship a feature")
         assert kb.get_task(conn, tid).status == "triage"
 
@@ -41,7 +42,7 @@ def test_decompose_creates_children_and_promotes_root(kanban_home):
         {"title": "research", "body": "look at prior art", "assignee": "researcher", "parents": []},
         {"title": "build it", "body": "write code", "assignee": "engineer", "parents": [0]},
     ]
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         child_ids = kb.decompose_triage_task(
             conn,
             tid,
@@ -52,7 +53,7 @@ def test_decompose_creates_children_and_promotes_root(kanban_home):
     assert child_ids is not None
     assert len(child_ids) == 2
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         root = kb.get_task(conn, tid)
         c0 = kb.get_task(conn, child_ids[0])
         c1 = kb.get_task(conn, child_ids[1])
@@ -69,7 +70,7 @@ def test_decompose_creates_children_and_promotes_root(kanban_home):
 
 
 def test_decompose_records_audit_comment_and_event(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = _create_triage(conn)
         child_ids = kb.decompose_triage_task(
             conn,
@@ -80,7 +81,7 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
         )
     assert child_ids is not None
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         comments = kb.list_comments(conn, tid)
         events = kb.list_events(conn, tid)
 
@@ -88,5 +89,87 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
     assert any(ev.kind == "decomposed" for ev in events)
 
 
+def test_decompose_inherits_goal_lifecycle_to_children(kanban_home):
+    """A routed goal must not fan out into one-shot child workers."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="durable orchestration root",
+            triage=True,
+            goal_mode=True,
+            goal_max_turns=12,
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "first slice", "assignee": "researcher"},
+                {"title": "second slice", "assignee": "engineer"},
+            ],
+            author="decomposer",
+        )
+    assert child_ids is not None
 
+    with kb.connect() as conn:
+        children = [kb.get_task(conn, child_id) for child_id in child_ids]
+
+    assert all(child is not None and child.goal_mode for child in children)
+    assert [child.goal_max_turns for child in children] == [12, 12]
+
+
+def test_decompose_inherits_forced_skills_to_children(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="navigation-bound root",
+            triage=True,
+            skills=["exampleproject-worktree-navigation"],
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[{"title": "first slice", "assignee": "researcher"}],
+        )
+    assert child_ids is not None
+
+    with kb.connect() as conn:
+        child = kb.get_task(conn, child_ids[0])
+
+    assert child is not None
+    assert child.skills == ["exampleproject-worktree-navigation"]
+
+
+def test_decompose_preserves_project_scope_and_branch_convention(kanban_home):
+    """Atomic fan-out must not drop the root's project anchor."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="project-scoped root",
+            triage=True,
+            workspace_kind="worktree",
+            workspace_path="/repo/.worktrees/root",
+            branch_name="project/root",
+        )
+        conn.execute(
+            "UPDATE tasks SET project_id = 'project-1' WHERE id = ?", (tid,)
+        )
+        conn.commit()
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[{"title": "scoped child", "assignee": "engineer"}],
+        )
+
+    assert child_ids is not None
+    with kb.connect() as conn:
+        child = kb.get_task(conn, child_ids[0])
+
+    assert child is not None
+    assert child.project_id == "project-1"
+    assert child.workspace_kind == "worktree"
+    assert child.workspace_path is None
+    assert child.branch_name == f"project/{child.id}"
 

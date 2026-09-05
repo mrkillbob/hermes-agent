@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 
 
 @pytest.fixture
@@ -58,7 +59,7 @@ def test_worker_block_is_not_auto_promoted_by_recompute_ready(kanban_home: Path)
     must stay blocked across an arbitrary number of dispatcher ticks.
     Before #28712's fix, ``recompute_ready`` would silently flip it
     back to ``ready`` on the very next tick."""
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="needs human review")
         kb.claim_task(conn, tid)
         assert kb.block_task(
@@ -74,6 +75,22 @@ def test_worker_block_is_not_auto_promoted_by_recompute_ready(kanban_home: Path)
             promoted = kb.recompute_ready(conn)
             assert promoted == 0, "worker-blocked task must not auto-promote"
             assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_initially_blocked_operator_task_is_sticky(kanban_home: Path) -> None:
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="operator intent required",
+            initial_status="blocked",
+        )
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        events = kb.list_events(conn, task_id=tid)
+        assert any(event.kind == "blocked" for event in events)
 
 
 
@@ -115,7 +132,7 @@ def test_protocol_violation_loop_is_broken(kanban_home: Path) -> None:
     that *would* have been written and asserts the *next* tick still
     leaves the task blocked.
     """
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="loop reproducer")
         kb.claim_task(conn, tid)
         kb.block_task(

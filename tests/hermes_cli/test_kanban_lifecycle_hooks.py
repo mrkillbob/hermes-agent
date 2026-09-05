@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.plugins import VALID_HOOKS, get_plugin_manager
 
 
@@ -49,7 +50,7 @@ def captured_hooks(monkeypatch):
 
 
 def test_claim_fires_hook(kanban_home, captured_hooks):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="t", assignee="worker")
         claimed = kb.claim_task(conn, tid)
@@ -65,6 +66,23 @@ def test_claim_fires_hook(kanban_home, captured_hooks):
     assert kw["run_id"] is not None
 
 
+def test_claim_hook_uses_explicit_connection_board(
+    kanban_home, captured_hooks, monkeypatch
+):
+    kb.create_board("alpha")
+    kb.create_board("beta")
+    conn = kb.connect(board="alpha")
+    try:
+        tid = kb.create_task(conn, title="t", assignee="worker")
+        monkeypatch.setattr(kb, "get_current_board", lambda: "beta")
+        assert kb.claim_task(conn, tid) is not None
+    finally:
+        conn.close()
+    fired = [e for e in captured_hooks if e[0] == "kanban_task_claimed"]
+    assert len(fired) == 1
+    assert fired[0][1]["board"] == "alpha"
+
+
 
 
 def test_misbehaving_hook_does_not_break_transition(kanban_home, monkeypatch):
@@ -77,7 +95,7 @@ def test_misbehaving_hook_does_not_break_transition(kanban_home, monkeypatch):
 
     mgr._hooks.setdefault("kanban_task_completed", []).append(_boom)
     try:
-        conn = kb.connect()
+        conn = kbc.connect()
         try:
             tid = kb.create_task(conn, title="t", assignee="worker")
             kb.claim_task(conn, tid)
