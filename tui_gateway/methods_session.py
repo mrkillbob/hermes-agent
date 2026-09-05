@@ -308,6 +308,21 @@ def _(rid, params: dict) -> dict:
     # ``profile`` (app-global remote mode): stored so the build and every turn re-bind HERMES_HOME.
     profile_home = _profile_home(profile := (params.get("profile") or "").strip() or None)
     session_model_override, create_reasoning_override, create_service_tier_override = _create_overrides(params)
+    conversation_worktree = {}
+    conversation_root_lease = None
+    if source in {"desktop", "tui"}:
+        try:
+            binding = _bind_conversation_worktree_for_new_root(key, profile_home=profile_home)
+            if binding is not None:
+                conversation_worktree = _conversation_worktree_metadata(binding)
+                conversation_root_lease = _acquire_conversation_root_lease(binding, surface=source)
+                raw_cwd = conversation_worktree["path"]
+                explicit_cwd = True
+        except Exception as exc:
+            if conversation_root_lease is not None:
+                with contextlib.suppress(Exception):
+                    conversation_root_lease.release()
+            return _err(rid, 5000, f"conversation worktree setup failed: {exc}")
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
@@ -315,9 +330,11 @@ def _(rid, params: dict) -> dict:
             "close_on_disconnect": _flag(params, "close_on_disconnect"),
             "active_session_lease": None,  # claimed lazily on the first turn (_ensure_active_session_slot)
             "cols": int(params.get("cols", 80)), "created_at": now, "edit_snapshots": {},
+            "conversation_worktree": conversation_worktree,
+            "conversation_root_lease": conversation_root_lease,
             "explicit_cwd": explicit_cwd,
             "history": history, "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
-            "cwd": _completion_cwd(params), "inflight_turn": None, "last_active": now,
+            "cwd": raw_cwd if conversation_worktree else _completion_cwd(params), "inflight_turn": None, "last_active": now,
             "model_override": session_model_override,
             "create_reasoning_override": create_reasoning_override,
             "create_service_tier_override": create_service_tier_override,
@@ -357,7 +374,8 @@ def _(rid, params: dict) -> dict:
                  **({"provider": override["provider"]} if override.get("provider") else {}),
                  "tools": {}, "skills": {}, "cwd": cwd, "branch": git_probe.branch(cwd),
                  "project": _project_info_for_cwd(cwd), "lazy": True, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
-                 "profile_name": _response_profile_name(profile)}})
+                 "profile_name": _response_profile_name(profile),
+                 **({"conversation_worktree": conversation_worktree} if conversation_worktree else {})}})
 
 
 def _session_list_by_title(rid, db, title_lookup: str) -> dict:
@@ -936,6 +954,32 @@ def _title_read(session: dict, db, key: str) -> str:
     return resolved_title
 
 
+def _conversation_cleanup_status(
+    verdict,
+    record,
+    *,
+    removed: bool,
+    failure_phase: str | None = None,
+    failure_message: str | None = None,
+) -> dict:
+    """Project a cleanup decision into the stable JSON-RPC response shape."""
+    result = {
+        "allowed": bool(verdict.allowed),
+        "reasons": list(verdict.reasons),
+        "removed": bool(removed),
+        "root_session_id": str(record.root_session_id),
+        "path": str(record.worktree_path),
+        "branch": str(record.branch),
+        "base_commit": str(record.base_commit),
+        "state": str(record.state),
+    }
+    if failure_phase is not None:
+        result["failure_phase"] = str(failure_phase)
+    if failure_message is not None:
+        result["failure_message"] = str(failure_message)
+    return result
+
+
 @method("session.worktree_cleanup")
 def _(rid, params: dict) -> dict:
     """Inspect or explicitly remove one exact managed conversation worktree."""
@@ -1009,11 +1053,9 @@ def _(rid, params: dict) -> dict:
             record = db.get_conversation_worktree(root_session_id)
             if record is None:
                 return _err(rid, 5036, "conversation worktree binding disappeared")
-            from hermes_cli.worktree_cmd import conversation_cleanup_status
-
             return _ok(
                 rid,
-                conversation_cleanup_status(
+                _conversation_cleanup_status(
                     verdict,
                     record,
                     removed=removed,

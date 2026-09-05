@@ -36,6 +36,10 @@ from tui_gateway._env import env_float, env_int
 from tui_gateway.turn_marker import clear_turn_marker, read_turn_marker, record_turn_start  # noqa: F401
 from tui_gateway.transport import (StdioTransport, Transport, bind_transport, current_transport, reset_transport)
 
+# Compatibility seam for split session handlers and their tests.  Keep the
+# legacy helper name while the implementation lives in the shared git probe.
+_git_branch_for_cwd = git_probe.branch
+
 logger = logging.getLogger(__name__)
 
 _hermes_home = get_hermes_home()
@@ -415,6 +419,102 @@ def _open_profile_session_db(profile_home):
         return acquire(db_path)
     except Exception as exc:
         raise RuntimeError(f"profile session store unavailable: {db_path}: {exc}") from exc
+
+
+def _conversation_worktree_metadata(binding) -> dict:
+    """Return the UI/prompt-safe projection of a certified binding."""
+    return {"root_session_id": str(binding.root_session_id), "path": str(binding.path),
+            "branch": str(binding.branch), "base_commit": str(binding.base_commit)}
+
+
+def _acquire_conversation_root_lease(binding, *, surface: str):
+    from agent.conversation_worktree import acquire_conversation_root_lease
+    return acquire_conversation_root_lease(root_session_id=str(binding.root_session_id),
+                                           worktree_path=Path(binding.path),
+                                           repo_common_dir=Path(binding.repo_common_dir), surface=surface)
+
+
+def _conversation_worktree_manager(*, profile_home=None, db=None):
+    """Construct the policy-governed manager against the owning profile DB."""
+    owns_db = False
+    home_token = set_hermes_home_override(str(profile_home)) if profile_home else None
+    try:
+        from agent.conversation_worktree import ConversationWorktreeError, ConversationWorktreeManager
+        from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+        policy = resolve_conversation_worktree_policy(_load_cfg())
+        if not policy.enabled:
+            return None, db, owns_db
+        if db is None:
+            if profile_home:
+                db = _open_profile_session_db(profile_home)
+                owns_db = True
+            else:
+                db = _get_db()
+        if db is None:
+            raise ConversationWorktreeError("state.db is unavailable", phase="state")
+        return ConversationWorktreeManager(policy, db), db, owns_db
+    except Exception:
+        if owns_db and db is not None:
+            with contextlib.suppress(Exception):
+                db.close()
+        raise
+    finally:
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
+def _bind_new_interactive_conversation_worktree(root_session_id: str, *, profile_home=None, db=None):
+    """Create/recover one worktree for a brand-new interactive root only."""
+    manager = owned_db = None
+    owns_db = False
+    try:
+        manager, owned_db, owns_db = _conversation_worktree_manager(profile_home=profile_home, db=db)
+        return None if manager is None else manager.bind_new_root_session(
+            root_session_id, conversation_kind="interactive")
+    finally:
+        if owns_db and owned_db is not None:
+            with contextlib.suppress(Exception):
+                owned_db.close()
+
+
+def _resolve_existing_conversation_worktree(root_session_id: str, *, profile_home=None, db=None):
+    """Resolve a ready binding without ever creating a worktree on resume."""
+    manager = owned_db = None
+    owns_db = False
+    try:
+        manager, owned_db, owns_db = _conversation_worktree_manager(profile_home=profile_home, db=db)
+        return None if manager is None else manager.resolve_existing_session(root_session_id)
+    finally:
+        if owns_db and owned_db is not None:
+            with contextlib.suppress(Exception):
+                owned_db.close()
+
+
+def _bind_conversation_worktree_for_new_root(root_session_id: str, *, profile_home=None, db=None):
+    """Named seam for root boundaries; distinct from continuation lookup."""
+    return _bind_new_interactive_conversation_worktree(root_session_id, profile_home=profile_home, db=db)
+
+
+def _resolve_conversation_worktree_for_resume(session_id: str, *, profile_home=None, db=None):
+    """Find the existing root binding for a compression continuation only."""
+    current, seen = str(session_id or "").strip(), set()
+    while current and current not in seen:
+        seen.add(current)
+        binding = _resolve_existing_conversation_worktree(current, profile_home=profile_home, db=db)
+        if binding is not None:
+            return binding
+        if db is None or not hasattr(db, "get_session"):
+            return None
+        current = str((db.get_session(current) or {}).get("parent_session_id") or "").strip()
+    return None
+
+
+def _conversation_worktree_prompt_fragment(metadata: dict | None) -> str:
+    if not isinstance(metadata, dict) or not metadata.get("path"):
+        return ""
+    return ("This interactive conversation is isolated in a certified Git worktree. "
+            f"Use {metadata['path']} as its workspace (branch {metadata.get('branch') or 'unknown'}, "
+            f"base {metadata.get('base_commit') or 'unknown'}). Do not switch to the stable source checkout.")
 
 
 @contextlib.contextmanager
