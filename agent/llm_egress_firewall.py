@@ -228,6 +228,9 @@ class AuthorizedEgress:
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:@/-]{0,256}$")
+_EGRESS_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?:token|secret|password|api[_-]?key)\s*=\s*\S+"
+)
 _LOCAL_PROCESS_MODES = frozenset({"local_process", "in_process"})
 _BASE64_CANDIDATE = re.compile(
     r"(?<![A-Za-z0-9_+/\-])([A-Za-z0-9_+/\-]{4,}={0,2})(?![A-Za-z0-9_+/=\-])"
@@ -892,7 +895,7 @@ def _contains_secret(value: Any, *, seen: set[int] | None = None) -> bool:
             value,
             force=True,
             redact_url_credentials=True,
-        ) != value
+        ) != value or _EGRESS_SECRET_ASSIGNMENT.search(value) is not None
     if isinstance(value, (bytes, bytearray, memoryview)):
         # Binary request material is not safely inspectable as text.
         return True
