@@ -2202,3 +2202,16 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+def test_schedule_rejects_stale_owner_before_touching_worker(kanban_home, monkeypatch):
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="owned schedule", assignee="worker")
+        current = kb.claim_task(conn, task_id)
+        kbd._set_worker_pid(conn, task_id, 12345)
+        monkeypatch.setattr(kb, "_terminate_reclaimed_worker",
+                            lambda *args, **kwargs: pytest.fail("worker ownership must be checked before termination"))
+        assert not kb.schedule_task(conn, task_id, expected_run_id=current.current_run_id + 1)
+        assert kb.get_task(conn, task_id).status == "running"
+        assert kb.schedule_task(conn, task_id, expected_run_id=current.current_run_id)
+        assert kb.get_task(conn, task_id).status == "scheduled"

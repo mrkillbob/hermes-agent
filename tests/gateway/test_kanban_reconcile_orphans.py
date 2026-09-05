@@ -151,7 +151,8 @@ class TestReconcileOrphanedRunning:
         """
         tid = kb.create_task(conn, title="remote-claim", assignee="w")
         _orphan_running(conn, tid, claim_lock="remote-host:123", worker_pid=123)
-        monkeypatch.setattr(kb, "_claim_is_host_local", lambda *args, **kwargs: False)
+        from hermes_cli import kanban_worker_process as worker_process
+        monkeypatch.setattr(worker_process, "claim_is_host_local", lambda *args, **kwargs: False)
         monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
 
         assert kb.reconcile_orphaned_running(conn) == []

@@ -98,6 +98,7 @@ class DispatchResult:
     skipped_unassigned: list[str] = field(default_factory=list)
     """Ready task ids with no assignee at all — operator-actionable (usually a
     misfiled task waiting for routing)."""
+    auto_reassigned_invalid: list[str] = field(default_factory=list)
     auto_assigned_default: list[str] = field(default_factory=list)
     """Unassigned task ids that had ``kanban.default_assignee`` applied this
     tick before spawning, so telemetry/CLI/dashboard can show the dispatcher
@@ -299,7 +300,7 @@ def _terminate_reclaimed_worker(
     """Best-effort host-local worker termination for reclaim paths."""
     info: dict[str, Any] = {
         "prev_pid": int(pid) if pid else None,
-        "host_local": False,
+        "host_local": bool(claim_lock and str(claim_lock).startswith(_kb._host_prefix())),
         "termination_attempted": False,
         "terminated": False,
         "sigkill": False,
@@ -638,6 +639,10 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
     for row in rows:
         tid = row["id"]
         pid = row["worker_pid"]
+        from hermes_cli.kanban_worker_process import claim_is_host_local
+        if row["claim_lock"] and not claim_is_host_local(row["claim_lock"], pid=pid, task_id=tid):
+            continue
+
         if pid and _kb._pid_alive(pid):
             # Never requeue beside a live process. Retry next tick.
             _kb._log.debug(
@@ -1824,7 +1829,7 @@ def _tick_spawn_budget(
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
-        "SELECT id, assignee, provider_override, model_override FROM tasks "
+        "SELECT id, assignee, created_by, provider_override, model_override FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -1940,7 +1945,8 @@ def _dispatch_once_locked(
     for row in ready_rows:
         if ready_budget is not None and spawned >= ready_budget:
             break
-        row_assignee = row["assignee"]
+        from hermes_cli.kanban_worker_routing import recover_generated_assignee
+        row_assignee = recover_generated_assignee(conn, row, default_assignee, dry_run=dry_run, result=result)
         if not row_assignee:
             # Honour kanban.default_assignee so an unassigned task doesn't
             # park in 'ready' forever.
@@ -2306,6 +2312,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         scrub_secrets=is_multiplex_active(),
         inherit_profile_home=True,
     )
+    # Keep the assigned repository cwd from shadowing Hermes runtime imports.
+    env["PYTHONSAFEPATH"] = "1"
     # The dispatcher is detached from every conversation; its worker must never
     # inherit routing mirrored by a previous gateway turn.
     from gateway.session_context import _VAR_MAP

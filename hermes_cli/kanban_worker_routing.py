@@ -155,3 +155,29 @@ def _resolve_process_local_provider_endpoint(provider: str) -> Optional[str]:
         return endpoint.rstrip("/") or None
     except (OSError, TypeError, ValueError):
         return None
+
+
+def recover_generated_assignee(conn, row, default_assignee, *, dry_run, result):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.profiles import profile_exists
+    assignee = row["assignee"]
+    if not assignee or profile_exists(assignee) or not default_assignee:
+        return assignee
+    if (row["created_by"] or "").strip().lower() not in {
+        "auto-decomposer", "decomposer", "specialist-routing",
+    } or not profile_exists(default_assignee):
+        return assignee
+    if not dry_run:
+        with kb.write_txn(conn):
+            changed = conn.execute(
+                "UPDATE tasks SET assignee = ?, consecutive_failures = 0, last_failure_error = NULL "
+                "WHERE id = ? AND assignee = ? AND status = 'ready' AND claim_lock IS NULL",
+                (default_assignee, row["id"], assignee))
+            if changed.rowcount != 1:
+                return assignee
+            kb._append_event(conn, row["id"], "assigned", {
+                "assignee": default_assignee, "previous_assignee": assignee,
+                "source": "kanban.invalid_assignee_fallback",
+            })
+    result.auto_reassigned_invalid.append(row["id"])
+    return default_assignee

@@ -3390,7 +3390,7 @@ def block_task(
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
     if expected_run_id is None:
         row = conn.execute("SELECT status, worker_pid, claim_lock FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        if row is not None and row["status"] == "running":
+        if row is not None and row["status"] == "running" and row["worker_pid"] is not None:
             termination = _terminate_reclaimed_worker(row["worker_pid"], row["claim_lock"], task_id=task_id)
             if not termination.get("terminated"):
                 _defer_reclaim_for_live_worker(conn, task_id, row["claim_lock"], int(time.time()),
@@ -4199,6 +4199,47 @@ def schedule_task(
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable)
     until ``unblock_task`` re-gates it."""
+    row = conn.execute(
+        "SELECT status, current_run_id, claim_lock, worker_pid "
+        "FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    if expected_run_id is not None and row["current_run_id"] != int(expected_run_id):
+        return False
+
+    # Scheduling is also an operator stop operation for running tasks. Do not
+    # clear the claim before terminating its worker: that would leave the
+    # worker alive without a durable owner and allow a duplicate dispatch.
+    has_active_claim = (
+        row["status"] == "running"
+        or row["claim_lock"] is not None
+        or row["worker_pid"] is not None
+    )
+    termination: dict[str, Any] = {}
+    if has_active_claim and row["worker_pid"] is not None and expected_run_id is None:
+        termination = _terminate_reclaimed_worker(
+            row["worker_pid"], row["claim_lock"], task_id=task_id,
+        )
+        if not termination.get("terminated"):
+            if row["status"] == "running" and row["claim_lock"] is not None:
+                _defer_reclaim_for_live_worker(
+                    conn, task_id, row["claim_lock"], int(time.time()), termination,
+                    reason="schedule_termination_unverified",
+                )
+            else:
+                with write_txn(conn):
+                    _append_event(
+                        conn, task_id, "schedule_deferred",
+                        {
+                            "reason": "worker_termination_unverified",
+                            "termination": termination,
+                        },
+                    )
+            return False
+
     with write_txn(conn):
         params: list[Any] = [task_id]
         sql = """
@@ -4234,7 +4275,10 @@ def schedule_task(
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
         )
-        _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
+        event_payload: dict[str, Any] = {"reason": reason}
+        if termination:
+            event_payload["termination"] = termination
+        _append_event(conn, task_id, "scheduled", event_payload, run_id=run_id)
         return True
 
 
