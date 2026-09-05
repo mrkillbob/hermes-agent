@@ -442,6 +442,13 @@ _BOUNDED_SOURCE_NUMSTAT_PATH = re.compile(
 _BOUNDED_SOURCE_PATH_FRAGMENT = re.compile(
     r"^[A-Za-z0-9]/[A-Za-z0-9._-]{2,}(?:/[A-Za-z0-9._-]{2,})+$"
 )
+# Protected repair workers persist a bare full Git SHA in ``current_head.txt``
+# and prefix porcelain paths in ``changed_names.txt``.  These are bounded
+# source-presentation receipts, not encoded payloads.
+_BOUNDED_SOURCE_RECEIPT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_BOUNDED_SOURCE_CHANGED_NAME = re.compile(
+    r"^zz_changed__[A-Za-z0-9][A-Za-z0-9._-]{2,191}$"
+)
 _BOUNDED_SOURCE_DASHED_TITLE = re.compile(
     r"^[A-Z][A-Za-z0-9]+(?:-[A-Za-z][A-Za-z0-9]+)+$"
 )
@@ -1130,6 +1137,16 @@ def _source_text_for_base64_scan(
         source_control_window = source_text[
             max(0, match.start() - 256) : min(len(source_text), match.end() + 32)
         ]
+        line_start = source_text.rfind("\n", 0, match.start()) + 1
+        line_end = source_text.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(source_text)
+        source_line = source_text[line_start:line_end]
+        is_numbered_receipt_sha = (
+            allow_fixed_source_literals
+            and _BOUNDED_SOURCE_RECEIPT_SHA.fullmatch(source_atom) is not None
+            and re.fullmatch(r"\s*\d+\|[0-9a-f]{40}\s*", source_line) is not None
+        )
         is_source_control_identity = (
             re.fullmatch(
                 r"[0-9a-f]{7,12}|[0-9a-f]{40}|[0-9a-f]{64}",
@@ -1157,6 +1174,11 @@ def _source_text_for_base64_scan(
             or _BOUNDED_SOURCE_CAMEL_CASE_IDENTIFIER.fullmatch(source_atom) is not None
             or _BOUNDED_SOURCE_ADVISORY_KEY.fullmatch(source_atom) is not None
             or _BOUNDED_SOURCE_PATH_FRAGMENT.fullmatch(source_atom) is not None
+            or is_numbered_receipt_sha
+            or (
+                allow_fixed_source_literals
+                and _BOUNDED_SOURCE_CHANGED_NAME.fullmatch(source_atom) is not None
+            )
             or _BOUNDED_SOURCE_DASHED_TITLE.fullmatch(source_atom) is not None
             or _BOUNDED_SOURCE_LINE_LABEL.fullmatch(source_atom) is not None
             or (

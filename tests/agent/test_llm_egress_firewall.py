@@ -941,6 +941,32 @@ def test_source_presentation_allows_fixed_github_actions_literals(tmp_path):
     assert "base64_payload" not in decision.reason_codes
 
 
+def test_source_presentation_allows_worker_receipt_sha_and_changed_name(tmp_path):
+    source = (
+        "85cc6d01d9556f759d0e2e812f6a504ec13199b3\n"
+        "?? zz_changed__github_workflows_ci_yaml"
+    )
+    path = tmp_path / "current_head.txt"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=2)
+    presentation = json.dumps(
+        {
+            "content": (
+                "1|85cc6d01d9556f759d0e2e812f6a504ec13199b3\n"
+                "2|?? zz_changed__github_workflows_ci_yaml"
+            )
+        }
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+
+
 def test_source_presentation_allows_exact_repair_source_atoms_but_not_payloads(tmp_path):
     source = (
         "SAME\n"
