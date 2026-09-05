@@ -900,4 +900,3 @@ def test_repair_card_acquires_pinned_base_after_mutable_branch_advances(
         check=True,
     )
     ledger.close()
-
