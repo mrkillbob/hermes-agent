@@ -14,7 +14,8 @@ def select_environment(repository: Path, workspace: Path, allowed_roots: tuple[P
     pin = pin_path.read_text(encoding='utf-8').strip()
     if not re.fullmatch(r'[0-9]+\.[0-9]+(?:\.[0-9]+)?', pin):
         raise RuntimeError('worktree Python version pin is invalid')
-    candidates = [default, repository / 'venv', *sorted(repository.glob('venv-*'))]
+    candidates = [*sorted(repository.glob('venv-ci-*')), default, repository / 'venv',
+                  *sorted(repository.glob('venv-*'))]
     visited: set[Path] = set()
     for candidate in candidates:
         if not candidate.exists():
