@@ -150,7 +150,7 @@ class RepairController:
         self._owner = f"repair-scanner-{uuid4().hex}"
         self._base_refresher = base_refresher or DeterministicBaseRefresher(github)
 
-    def scan(self) -> RepairScanResult:
+    def scan(self, *, conflicts_only: bool = False) -> RepairScanResult:
         configured = self._policy.repair_steward
         if configured is None:
             return RepairScanResult(0, {}, False)
@@ -274,6 +274,15 @@ class RepairController:
                 if not triggers:
                     skipped["no_repair_trigger"] += 1
                     continue
+                if conflicts_only:
+                    if "merge_conflict" not in triggers:
+                        skipped["non_conflict_deferred"] += 1
+                        continue
+                    if not base_refresh_required:
+                        if base_refresh_slots_used >= configured.max_base_refresh_in_flight:
+                            skipped["base_refresh_serialized"] += 1
+                            continue
+                        base_refresh_slots_used += 1
                 mode = "report" if configured.report_only else "repair"
                 trigger_id = f"{mode}:{'+'.join(triggers)}"
                 target_base_sha = base_head if base_refresh_required else None

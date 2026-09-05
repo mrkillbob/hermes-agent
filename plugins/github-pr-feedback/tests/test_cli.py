@@ -183,7 +183,7 @@ def test_scan_prioritizes_feedback_before_degraded_repair_maintenance(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-        def scan(self) -> ScanResult:
+        def scan(self, *, conflicts_only=False) -> ScanResult:
             order.append("repair")
             return ScanResult(0, {"github_state_unavailable": 1}, degraded=True)
 
@@ -255,8 +255,8 @@ def _run_scan_with_primary_result(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-        def scan(self):
-            order.append("repair")
+        def scan(self, *, conflicts_only=False):
+            order.append("conflicts" if conflicts_only else "repair")
             return SimpleNamespace(
                 created=0,
                 skipped={},
@@ -308,9 +308,9 @@ def test_scan_keeps_merge_maintainer_moving_during_required_ci_backlog(
     )
 
     assert returncode == 0
-    assert order == ["primary", "merge"]
+    assert order == ["primary", "conflicts", "merge"]
     assert payload["required_local_ci_backlog"] == 2
-    assert payload["deferred"] == ["repair", "release_maintenance"]
+    assert payload["deferred"] == ["non_conflict_repair", "release_maintenance"]
     assert payload["merge"]["status"] == "ok"
 
 
@@ -2379,6 +2379,10 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
     rendered = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert rendered == [
         {
+            "base_sha": base_sha,
+            "failure_reason": "",
+            "failed_commands": [{"argv": [".venv/bin/python", "scripts/run_static_lane.py"],
+                                 "returncode": 1, "timed_out": False, "classification": "logic-regression"}],
             "command_count": 1,
             "ci_mode": "standard",
             "head_sha": head_sha,

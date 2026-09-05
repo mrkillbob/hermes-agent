@@ -1088,20 +1088,18 @@ def _scan(ctx: Any) -> int:
                 pass
             controller = _controller(policy, ledger)
             result = controller.scan(apply_labels=False)
-            # Required exact-head CI still gates repair and release fan-out, but
-            # it must not hold already-authoritative-ready PRs hostage. The
-            # merge maintainer independently checks each exact-head receipt and
-            # may advance any eligible PR in the catalogue, regardless of
-            # where it falls relative to the local-CI admission window.
+            # Conflicts must be repairable while CI is pending; otherwise the
+            # backlog can never clear. Keep this pass bounded and conflict-only.
+            # Merge/release retain their own independent exact-head gates.
             required_ci_backlog = result.required_local_ci_backlog > 0
-            if policy.repair_steward is not None and not required_ci_backlog:
+            if policy.repair_steward is not None:
                 repair = RepairController(
                     policy,
                     ledger,
                     _github_client(policy),
                     KanbanSubprocessClient(),
                     control_home=get_default_hermes_root(),
-                ).scan()
+                ).scan(conflicts_only=required_ci_backlog)
                 repair_payload = _scan_payload(repair)
             if policy.merge_policies():
                 merge_payload = _run_merge_scan(policy, ledger)
@@ -1136,7 +1134,7 @@ def _scan(ctx: Any) -> int:
             ledger.close()
     payload = _scan_payload(result)
     if result.required_local_ci_backlog > 0:
-        payload["deferred"] = ["repair", "release_maintenance"]
+        payload["deferred"] = ["non_conflict_repair", "release_maintenance"]
     if merge_payload is not None:
         payload["merge"] = merge_payload
     if repair_payload is not None:
@@ -1511,12 +1509,21 @@ def _run_grouped_exact_head_audit(
 def _ci_receipt_payload(receipt: CIAuditReceipt) -> dict[str, object]:
     """Return the durable receipt fields rendered before any handoff work."""
 
+    from agent.redact import redact_sensitive_text
+
     return {
         "status": receipt.status,
         "receipt_id": receipt.receipt_id,
         "repository": receipt.identity.repository,
         "pr_number": receipt.identity.pr_number,
         "head_sha": receipt.identity.head_sha,
+        "base_sha": receipt.identity.base_sha,
+        "failure_reason": redact_sensitive_text(receipt.failure_reason or "", force=True)[:1500],
+        "failed_commands": [
+            {"argv": list(c.argv), "returncode": c.returncode, "timed_out": c.timed_out,
+             "classification": c.classification}
+            for c in receipt.commands if c.returncode != 0 or c.timed_out or c.classification != "passed"
+        ],
         "manifest_digest": receipt.manifest_digest,
         "command_count": len(receipt.commands),
         "ci_mode": receipt.ci_mode,
