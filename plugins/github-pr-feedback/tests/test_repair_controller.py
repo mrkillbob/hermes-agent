@@ -795,3 +795,109 @@ def test_explicit_repair_retry_revalidates_receipt_and_recovers_failed_environme
     assert controller.scan(retry_receipt=receipt).created == 0
     assert len(kanban.tasks) == 1
     ledger.close()
+
+
+def test_repair_card_acquires_pinned_base_after_mutable_branch_advances(
+    tmp_path: Path,
+) -> None:
+    configured = policy(tmp_path, merge_maintainer=True)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+
+    remote = tmp_path / "remote.git"
+    source = tmp_path / "source"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(remote)], check=True)
+    subprocess.run(["git", "init", "--quiet", str(source)], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.name", "test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    (source / "state").write_text("base A\n")
+    subprocess.run(["git", "-C", str(source), "add", "state"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "commit", "--quiet", "-m", "A"], check=True
+    )
+    target_base_sha = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(source), "branch", "-M", "stable"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "push", "--quiet", str(remote), "stable"],
+        check=True,
+    )
+    (source / "state").write_text("base B\n")
+    subprocess.run(
+        ["git", "-C", str(source), "commit", "--quiet", "-am", "B"], check=True
+    )
+    advanced_base_sha = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(source), "push", "--quiet", str(remote), "stable"],
+        check=True,
+    )
+
+    class MovingBaseGitHub(BehindBaseGitHub):
+        def get_branch_head(self, repository: str, branch: str):
+            return target_base_sha
+
+    result = RepairController(
+        configured,
+        ledger,
+        MovingBaseGitHub(),
+        kanban,
+        LocalGit(),
+    ).scan()
+
+    assert result.created == 1
+    instructions = kanban.tasks[0].instructions
+    assert (
+        "git fetch --quiet --no-tags --no-recurse-submodules "
+        f"https://github.com/acme/widgets.git {target_base_sha}"
+    ) in instructions
+    assert f"git cat-file -e {target_base_sha}^{{commit}}" in instructions
+    assert "refs/heads/stable" not in instructions
+    assert "`FETCH_HEAD`" not in instructions
+
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "--quiet", str(remote), str(clone)], check=True)
+    assert (
+        subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "refs/remotes/origin/stable"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == advanced_base_sha
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(clone),
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            str(remote),
+            target_base_sha,
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(clone), "cat-file", "-e", f"{target_base_sha}^{{commit}}"],
+        check=True,
+    )
+    ledger.close()
+
