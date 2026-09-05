@@ -750,6 +750,7 @@ class _DeadWorker:
     event_payload: dict
     protocol_violation: bool = False
     rate_limited: bool = False
+    terminal_failure: Optional[str] = None
 
     @property
     def run_outcome(self) -> str:
@@ -758,9 +759,20 @@ class _DeadWorker:
         return "rate_limited" if self.rate_limited else "crashed"
 
 
-def _classify_dead_worker(pid: int, claimer: Optional[str]) -> _DeadWorker:
+def _classify_dead_worker(pid: int, claimer: Optional[str], task_id: str) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping."""
     kind, code = _classify_worker_exit(pid)
+    from hermes_cli.kanban_provider_errors import _provider_terminal_error_text
+
+    terminal = _provider_terminal_error_text(task_id)
+    if terminal is not None:
+        error, failure_class = terminal
+        return _DeadWorker(
+            kind, code, error, "needs_attention",
+            {"pid": pid, "claimer": claimer, "exit_code": code,
+             "failure_class": failure_class, "terminal": True},
+            terminal_failure=failure_class,
+        )
     if kind == "clean_exit":
         # rc=0 while still ``running``: usually the work succeeded and only the
         # paperwork was skipped; the corrective sentence reaches the retry
@@ -804,7 +816,7 @@ class _CrashSweep:
     rate_limited: list[str] = field(default_factory=list)
     # ``(task_id, pid, claimer, protocol_violation, error_text)``: accounted
     # after the txn via ``_record_task_failure`` (needs its own write_txn).
-    crash_details: list[tuple[str, int, str, bool, str]] = field(default_factory=list)
+    crash_details: list[tuple[str, int, str, bool, str, Optional[str]]] = field(default_factory=list)
     # Worker-exit observer payloads, fired only after every reclaim/accounting
     # txn has committed.
     exited_hook_payloads: list[dict] = field(default_factory=list)
@@ -833,7 +845,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection) -> _CrashSweep:
                 continue
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(pid, row["claim_lock"])
+            dead = _classify_dead_worker(pid, row["claim_lock"], row["id"])
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -877,7 +889,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection) -> _CrashSweep:
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append(
-                    (row["id"], pid, row["claim_lock"], dead.protocol_violation, dead.error_text)
+                    (row["id"], pid, row["claim_lock"], dead.protocol_violation, dead.error_text, dead.terminal_failure)
                 )
     return sweep
 
@@ -892,17 +904,26 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
     """
     auto_blocked: list[str] = []
     fp_counts: dict[str, int] = {}
-    for _, _, _, _, err_text in crash_details:
+    for _, _, _, _, err_text, _ in crash_details:
         fp = _error_fingerprint(err_text)
         fp_counts[fp] = fp_counts.get(fp, 0) + 1
-    for tid, pid, claimer, protocol_violation, error_text in crash_details:
+    for tid, pid, claimer, protocol_violation, error_text, terminal_failure in crash_details:
+        if terminal_failure:
+            if _record_task_failure(conn, tid, error_text, outcome="needs_attention", force_trip=True):
+                with _kb.write_txn(conn):
+                    _kb._append_event(conn, tid, "blocked", {
+                        "reason": error_text, "failure_class": terminal_failure,
+                        "source": "provider_terminal", "requires_operator": True,
+                    })
+                auto_blocked.append(tid)
+            continue
         if protocol_violation:
             streak = _protocol_violation_streak(conn, tid)
             trow = conn.execute("SELECT max_retries FROM tasks WHERE id = ?", (tid,)).fetchone()
             if trow is None:
                 continue  # task deleted mid-loop
             task_override = _kb._row_get(trow, "max_retries")
-            violation_limit = (
+            violation_limit = max(2,
                 int(task_override) if task_override is not None else _PROTOCOL_VIOLATION_FAILURE_LIMIT
             )
             if streak < violation_limit:

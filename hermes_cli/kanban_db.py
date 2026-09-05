@@ -1543,6 +1543,11 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                if task_status == "blocked":
+                    _append_event(conn, task_id, "blocked", {
+                        "reason": "initial_status", "kind": "needs_input",
+                        "source_status": "created",
+                    })
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
@@ -2357,6 +2362,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
             "AND title LIKE 'GitHub PR feedback:%'))"
         ).fetchall()
         for row in auto_triage:
+            from hermes_cli.kanban_db_recovery import _is_machine_recoverable_pr_feedback_triage
+
             if (
                 row["block_kind"] == "needs_input"
                 and not _is_machine_recoverable_pr_feedback_triage(
@@ -4519,12 +4526,15 @@ def task_age(task: Task) -> dict:
 # --- Retention + garbage collection ---
 
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Delete events older than the cutoff on done/archived tasks only; returns the count."""
+    """Retain unacknowledged notifications even after terminal-task retention expires."""
     cutoff = int(time.time()) - int(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND task_id IN "
-            "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
+            "DELETE FROM task_events AS e WHERE e.created_at < ? AND e.task_id IN "
+            "(SELECT id FROM tasks WHERE status IN ('done', 'archived')) "
+            "AND NOT EXISTS (SELECT 1 FROM kanban_notify_subs AS s "
+            "WHERE s.task_id = e.task_id AND COALESCE(s.last_event_id, 0) < e.id)",
+            (cutoff,),
         )
     return int(cur.rowcount or 0)
 

@@ -17,6 +17,7 @@ import pytest
 import hermes_state
 import hermes_state_wal
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_provider_errors as provider_errors
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
@@ -400,18 +401,18 @@ def test_provider_egress_error_parser_requires_known_signature(
     monkeypatch.setattr(_kb, "worker_log_path", lambda _task_id: log_path)
 
     log_path.write_text("LLM egress blocked: base64_payload\n", encoding="utf-8")
-    assert _kb._provider_egress_error_text("task") == (
+    assert provider_errors._provider_egress_error_text("task") == (
         "provider egress blocked: LLM egress blocked: base64_payload"
     )
 
     log_path.write_text("LLM egress blocked: another_payload\n", encoding="utf-8")
-    assert _kb._provider_egress_error_text("task") is None
+    assert provider_errors._provider_egress_error_text("task") is None
 
     log_path.write_text(
         "LLM egress blocked: private_absolute_path,secret_detected\n",
         encoding="utf-8",
     )
-    assert _kb._provider_egress_error_text("task") == (
+    assert provider_errors._provider_egress_error_text("task") == (
         "provider egress blocked: LLM egress blocked: "
         "private_absolute_path,secret_detected"
     )
@@ -429,7 +430,7 @@ def test_provider_unsupported_thinking_parser_is_terminal(
         encoding="utf-8",
     )
 
-    assert _kb._provider_terminal_error_text("task") == (
+    assert provider_errors._provider_terminal_error_text("task") == (
         "provider rejected reasoning: selected model does not support thinking",
         "unsupported_thinking",
     )
@@ -451,8 +452,8 @@ def test_provider_terminal_parser_ignores_stale_prior_worker_session(
         encoding="utf-8",
     )
 
-    assert _kb._provider_egress_error_text("task") is None
-    assert _kb._provider_terminal_error_text("task") == (
+    assert provider_errors._provider_egress_error_text("task") is None
+    assert provider_errors._provider_terminal_error_text("task") == (
         "provider unresponsive: aborted after repeated stale attempts",
         "provider_unresponsive",
     )
@@ -471,7 +472,7 @@ def test_provider_terminal_parser_keeps_current_session_egress_denial(
         encoding="utf-8",
     )
 
-    assert _kb._provider_terminal_error_text("task") == (
+    assert provider_errors._provider_terminal_error_text("task") == (
         "provider egress blocked: LLM egress blocked: base64_payload",
         "provider_egress_blocked",
     )

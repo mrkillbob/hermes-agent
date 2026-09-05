@@ -100,11 +100,12 @@ def pause_current_kanban_run(*, reason: str = "dispatcher shutdown") -> bool:
         return False
     try:
         run_id = int(raw_run_id)
-        from hermes_cli import kanban_db
+        from hermes_cli.kanban_db_connect import connect
+        from hermes_cli.kanban_db_recovery import pause_task
 
-        conn = kanban_db.connect()
+        conn = connect()
         try:
-            return kanban_db.pause_task(
+            return pause_task(
                 conn,
                 task_id,
                 expected_run_id=run_id,
