@@ -85,3 +85,5 @@ role-specific source indexes and never establish runtime truth.
 ### Project worktree source
 
 For a carried integration whose capabilities are absent from upstream main, set `kanban.worktree_base_refs` in the shared Kanban home's `config.yaml` to a mapping from the absolute primary repository path to its verified integration branch or commit. New task branches resolve that ref to a commit before creation, even when created from a worker profile. Missing configured refs fail closed; existing worktrees are preserved. Repositories absent from the mapping still use their remote default branch. Only committed source is included; unrelated working-tree edits are never copied.
+
+Goal completion checks preserve the full goal, structured contract and additional criteria up to a combined 32,768-character input budget. Larger contracts remain incomplete and must be split into bounded tasks, rather than judged from truncated requirements. Egress-policy denials defer judging without being counted as provider outages.
