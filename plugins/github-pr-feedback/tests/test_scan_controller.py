@@ -45,6 +45,7 @@ from github_pr_feedback.policy import (
     PullRequest,
     Reviewer,
     load_policy,
+    codex_review_trigger_comment,
 )
 
 
@@ -3330,6 +3331,28 @@ def test_scan_suppresses_non_actionable_review_containers_but_keeps_inline_findi
     assert result.skipped["non_actionable_review_container"] == 2
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["inline-finding"]
     ledger.close()
+
+
+def test_scan_keeps_findings_but_does_not_dispatch_review_requests(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    trigger = codex_review_trigger_comment(sha)
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (
+            feedback("request", body=trigger, is_bot=True),
+            feedback("old-request", body=codex_review_trigger_comment("b" * 40)),
+            replace(feedback("bare-request", body="@codex review"), kind="review"),
+            feedback("finding", body=trigger + "\n[P1] Preserve the missing fallback."),
+        ),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+    ledger.close()
+    assert result.created == 1
+    assert result.skipped["codex_review_request"] == 3
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["finding"]
 
 
 def test_scan_suppresses_codexs_own_review_summary_tracker_comment(tmp_path: Path) -> None:

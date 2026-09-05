@@ -72,6 +72,16 @@ def codex_review_trigger_requested(body: str, head_sha: str) -> bool:
     return f"<!-- {_CODEX_REVIEW_TRIGGER_MARKER} head={resolved} -->" in body
 
 
+def is_codex_review_request(body: str) -> bool:
+    """Recognize a pure review request, without swallowing appended findings."""
+
+    return re.fullmatch(
+        rf"{re.escape(CODEX_REVIEW_TRIGGER)}"
+        rf"(?:\s+<!-- {re.escape(_CODEX_REVIEW_TRIGGER_MARKER)} head=[0-9a-f]{{40}} -->)?",
+        body.strip(),
+    ) is not None
+
+
 MAX_ASSIGNEE_RULES = 32
 MAX_MATCH_TERMS_PER_RULE = 32
 MAX_COMMAND_ARGUMENTS = 32

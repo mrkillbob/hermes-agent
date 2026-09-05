@@ -32,6 +32,7 @@ from .policy import (
     PullRequest,
     RepositoryTarget,
     RoutingDecision,
+    is_codex_review_request,
     pr_repair_attribution_line,
     pr_repair_attribution_required,
 )
@@ -2083,6 +2084,8 @@ class ScanController:
             return "non_actionable_review_container"
         if _is_codex_review_summary_tracker(feedback):
             return "codex_review_summary_tracker"
+        if is_codex_review_request(feedback.body):
+            return "codex_review_request"
         if (
             feedback.reviewer.login.casefold() == owner_login.casefold()
             and _CI_RECEIPT_MARKER.search(feedback.body) is not None
