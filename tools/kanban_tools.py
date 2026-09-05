@@ -1193,11 +1193,12 @@ def _handle_create(args: dict, **kw) -> str:
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
-        if project_id is None and workspace_kind is None and workspace_path is None:
-            self_tid = os.environ.get("HERMES_KANBAN_TASK")
-            self_task = kb.get_task(conn, self_tid) if self_tid else None
-            if self_task is not None and self_task.project_id:
-                project_id, project_source_task_id = self_task.project_id, self_task.id
+        self_tid = os.environ.get("HERMES_KANBAN_TASK")
+        self_task = kb.get_task(conn, self_tid) if self_tid else None
+        if self_task is not None:
+            project_source_task_id = self_task.id
+            if project_id is None and workspace_kind is None and workspace_path is None:
+                project_id = self_task.project_id
         new_tid = kb.create_task(
             conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
             parents=tuple(parents), tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),

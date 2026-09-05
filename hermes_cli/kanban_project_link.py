@@ -34,8 +34,14 @@ def resolve_project_link(
         project_obj, project_repo = _project_from_source_task(
             conn, _pdb, project_id, str(project_source_task_id),
         )
-        if project_obj is not None and workspace_kind == "scratch":
-            workspace_kind = "worktree"
+        if project_obj is not None:
+            project_id = project_obj.id
+            if workspace_kind == "scratch":
+                workspace_kind = "worktree"
+            if workspace_kind != "worktree":
+                project_repo = None
+    if project_obj is None and project_source_task_id:
+        raise ValueError("worker project cannot be resolved from its profile or parent task")
     if project_obj is None:
         # Unresolvable id/slug: drop the link (never a dangling reference,
         # never a crash) and create an ordinary scratch task.
@@ -58,11 +64,22 @@ def _project_from_source_task(
     worktree task on this board. Worker profiles have their own projects.db
     while the Kanban DB is shared, so this carries the repo + branch
     convention forward without opening the creator's store and without
-    reusing the source task's literal worktree path. ``(None, None)`` when
-    the source task is not a ``<repo>/.worktrees/<id>`` project worktree."""
+    reusing the source task's literal workspace. The shared board registry
+    may resolve only the parent's already-bound project; other profiles' projects
+    are not inherited. Legacy project worktrees can recover their stored anchor."""
     from hermes_cli.kanban_db import get_task
 
     source_task = get_task(conn, source_task_id)
+    if source_task is not None and source_task.project_id:
+        from hermes_cli.kanban_db import kanban_home
+
+        registry_path = kanban_home() / "projects.db"
+        if registry_path.is_file():
+            with contextlib.closing(sqlite3.connect(registry_path.as_uri() + "?mode=ro", uri=True)) as registry:
+                registry.row_factory = sqlite3.Row
+                project = _pdb.get_project(registry, source_task.project_id)
+            if project is not None and project_id in {project.id, project.slug}:
+                return project, project.primary_path
     if not (
         source_task is not None
         and source_task.project_id == project_id
