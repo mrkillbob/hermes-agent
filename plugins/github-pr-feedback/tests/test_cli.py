@@ -2245,10 +2245,13 @@ def test_ci_audit_handoff_classifies_missing_hermes_runtime(
         _complete_current_ci_task(receipt)
 
 
+@pytest.mark.parametrize("dispatch_status,owns_task", [("rejected", False), ("scheduled", False), ("scheduled", True)])
 def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    dispatch_status: str,
+    owns_task: bool,
 ) -> None:
     from github_pr_feedback.ci_runner import (
         CIAuditIdentity,
@@ -2351,7 +2354,7 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
     class Controller:
         def dispatch_ci_failure(self, audit: CIAuditReceipt) -> str:
             dispatched.append(audit)
-            return "rejected"
+            return dispatch_status
 
     monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", GitHub)
     monkeypatch.setattr("github_pr_feedback.cli.LocalCIRunner", Runner)
@@ -2361,8 +2364,10 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
     monkeypatch.setattr(
         "github_pr_feedback.cli._controller", lambda _policy, _ledger: Controller()
     )
-    monkeypatch.setattr("github_pr_feedback.cli._complete_current_ci_task", lambda _receipt: None)
-    monkeypatch.setattr("github_pr_feedback.cli._terminate_current_ci_worker", lambda: None)
+    completed = []
+    monkeypatch.setattr("github_pr_feedback.cli._complete_current_ci_task", completed.append)
+    monkeypatch.setattr("github_pr_feedback.cli.owns_current_audit_task", lambda *_args: owns_task)
+    monkeypatch.setattr("github_pr_feedback.cli.os.kill", lambda *_args: pytest.fail("audit must not signal its terminal parent"))
 
     result = _audit_pr(
         RecordingContext(settings),
@@ -2377,7 +2382,8 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
     assert result == 1
     assert dispatched == [receipt]
     rendered = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert rendered == [
+    assert completed == ([receipt] if owns_task and dispatch_status == "scheduled" else [])
+    expected = [
         {
             "base_sha": base_sha,
             "failure_reason": "",
@@ -2401,6 +2407,7 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
             "status": "audit_handoff_retryable",
         }
     ]
+    assert rendered == (expected if dispatch_status == "rejected" else expected[:1])
 
 
 def test_audit_handoff_exception_renders_retryable_reason(
@@ -2478,7 +2485,6 @@ def test_audit_handoff_exception_renders_retryable_reason(
         lambda *_args, **_kwargs: receipt,
     )
     monkeypatch.setattr("github_pr_feedback.cli._block_current_ci_task", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("github_pr_feedback.cli._terminate_current_ci_worker", lambda: None)
 
     result = _audit_pr(
         RecordingContext(settings),
@@ -2677,26 +2683,6 @@ def test_audit_reruns_when_canonical_base_advances_with_same_head(
             return stale
 
     assert _reusable_ci_receipt(Ledger(), current, worktree) is None
-
-
-def test_ci_audit_handoff_terminates_only_a_task_scoped_parent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from github_pr_feedback.cli import _terminate_current_ci_worker
-
-    signals: list[tuple[int, object]] = []
-    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    monkeypatch.setattr("github_pr_feedback.cli.os.getppid", lambda: 4321)
-    monkeypatch.setattr(
-        "github_pr_feedback.cli.os.kill", lambda pid, sig: signals.append((pid, sig))
-    )
-
-    _terminate_current_ci_worker()
-    assert signals == []
-
-    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_exact")
-    _terminate_current_ci_worker()
-    assert signals == [(4321, signal.SIGTERM)]
 
 
 def _feedback_comment(body: str) -> Feedback:

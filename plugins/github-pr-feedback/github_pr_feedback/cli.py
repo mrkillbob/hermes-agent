@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import re
-import signal
 import shutil
 import subprocess
 import sys
@@ -1560,7 +1559,6 @@ def _ci_receipt_payload(receipt: CIAuditReceipt) -> dict[str, object]:
 
 
 def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
-    handoff_completed = False
     handoff_blocked = False
     handoff_blockers: list[str] = []
     merge_handoff: dict[str, object] | None = None
@@ -1672,7 +1670,6 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     )
             if not handoff_blocked and owns_task:
                 _complete_current_ci_task(receipt)
-                handoff_completed = True
         except (CIValidationError, GitHubClientError, RuntimeError) as error:
             if not handoff_blocked and owns_task:
                 try:
@@ -1725,8 +1722,6 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                 ),
                 flush=True,
             )
-        if handoff_completed:
-            _terminate_current_ci_worker()
     finally:
         ledger.close()
     return return_code
@@ -1827,16 +1822,6 @@ def _block_current_ci_task(
         raise RuntimeError("Hermes runtime unavailable for Kanban audit block") from exc
     if completed.returncode != 0:
         raise RuntimeError("Kanban audit block failed")
-
-
-def _terminate_current_ci_worker() -> None:
-    """End only the task-scoped parent after the durable handoff is complete."""
-
-    if not os.environ.get("HERMES_KANBAN_TASK", "").strip():
-        return
-    parent_pid = os.getppid()
-    if parent_pid > 1:
-        os.kill(parent_pid, signal.SIGTERM)
 
 
 def _merge_scan(ctx: Any) -> int:

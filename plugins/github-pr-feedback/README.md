@@ -333,7 +333,7 @@ PRs carrying a `sweeper:risk-*`, `sweeper:blast-broad`,
 `ci-reviewed` label. This gate is evaluated again on both exact-head snapshots;
 task prose cannot satisfy it.
 
-An audit may complete, block, or stop its calling worker only when the ledger binds that worker task to the exact `pr_local_ci` dispatch (repository, PR, head, and base). A feedback worker may run the same audit and receive its typed result without losing its repair/acknowledgement lifecycle.
+An audit may complete or block its calling worker only when the ledger binds that worker task to the exact `pr_local_ci` dispatch (repository, PR, head, and base). A feedback worker may run the same audit and receive its typed result without losing its repair/acknowledgement lifecycle. The audit never signals its terminal parent; normal dispatcher lease handling owns worker shutdown after the result has returned.
 
 Required local audits (`local_ci_audit.required_for_open_prs`) are scheduled independently of administrator-only Actions-settings access. During execution, a settings-only permission denial conservatively treats Actions as enabled and still reads the actual checks and statuses. Authentication failures remain failures. This does not substitute a local receipt for hosted checks or change merge gates.
 
