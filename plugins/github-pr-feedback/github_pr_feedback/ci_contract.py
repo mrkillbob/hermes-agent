@@ -29,16 +29,27 @@ def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple
         (('uv', 'lock', '--check'), worktree, {}),
         (('bash', 'scripts/run_tests.sh'), worktree, {}),
     ]
+    root_lock = worktree / 'package-lock.json'
+    locked_packages = json.loads(root_lock.read_text()).get('packages', {}) if root_lock.is_file() else {}
+    root_installed = False
+    shared_changed = any(p.startswith('apps/shared/') or p in {'package.json', 'package-lock.json'} for p in changed)
     for package in ('apps/desktop', 'apps/shared', 'ui-tui', 'web', 'website'):
-        if not any(p == package or p.startswith(package + '/') for p in changed):
+        if not shared_changed and not any(p == package or p.startswith(package + '/') for p in changed):
             continue
         root = worktree / package
         if not (root / 'package.json').is_file():
             continue
-        if not (root / 'package-lock.json').is_file():
+        if package in locked_packages:
+            if not root_installed:
+                commands.append((('npm', 'ci', '--ignore-scripts'), worktree, {}))
+                root_installed = True
+        elif (root / 'package-lock.json').is_file():
+            commands.append((('npm', 'ci', '--ignore-scripts'), root, {}))
+        else:
             raise ValueError(f'Hermes CI package lock missing: {package}')
         scripts = json.loads((root / 'package.json').read_text()).get('scripts', {})
-        commands.append((('npm', 'ci', '--ignore-scripts'), root, {}))
+        if 'build:ink' in scripts:
+            commands.append((('npm', 'run', 'build:ink'), root, {'CI': 'true'}))
         for name in ('lint', 'typecheck', 'test', 'build'):
             if name in scripts:
                 commands.append((('npm', 'run', name), root, {'CI': 'true'}))

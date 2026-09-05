@@ -282,7 +282,6 @@ class RepairController:
                         if base_refresh_slots_used >= configured.max_base_refresh_in_flight:
                             skipped["base_refresh_serialized"] += 1
                             continue
-                        base_refresh_slots_used += 1
                 mode = "report" if configured.report_only else "repair"
                 trigger_id = f"{mode}:{'+'.join(triggers)}"
                 target_base_sha = base_head if base_refresh_required else None
@@ -314,7 +313,7 @@ class RepairController:
                 )
                 if lease is None:
                     if (
-                        base_refresh_required
+                        (base_refresh_required or conflicts_only)
                         and _has_active_base_refresh_binding(
                             self._ledger,
                             self._kanban,
@@ -325,7 +324,7 @@ class RepairController:
                         base_refresh_slots_used += 1
                     skipped["duplicate"] += 1
                     continue
-                if base_refresh_required:
+                if base_refresh_required or conflicts_only:
                     base_refresh_slots_used += 1
                 try:
                     prepared = _prepare_receipt_worktree_with_overflow(

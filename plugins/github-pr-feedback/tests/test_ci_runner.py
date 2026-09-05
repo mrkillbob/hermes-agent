@@ -800,3 +800,19 @@ def test_hermes_native_contract_does_not_claim_uncovered_platform_changes(tmp_pa
     assert hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ("installer/windows.ps1",))
     assert hermes_coverage_gap(("installer/windows.ps1",)) is not None
     assert hermes_coverage_gap(("agent/worker.py",)) is None
+
+
+def test_hermes_native_ci_uses_shared_workspace_lock_once(tmp_path):
+    import json
+    from github_pr_feedback.ci_contract import hermes_commands
+    packages = ('apps/shared', 'apps/desktop', 'web')
+    (tmp_path / 'package-lock.json').write_text(json.dumps({'packages': {p: {} for p in packages}}))
+    for package in packages:
+        root = tmp_path / package
+        root.mkdir(parents=True)
+        (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}))
+    commands = hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ('apps/shared/src/client.ts',))
+    assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ('npm', 'ci')] == [
+        (('npm', 'ci', '--ignore-scripts'), tmp_path)]
+    assert {cwd for argv, cwd, _ in commands if argv == ('npm', 'run', 'test')} == {
+        tmp_path / package for package in packages}
