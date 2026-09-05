@@ -11,6 +11,8 @@ import functools
 import json
 import logging
 import os
+import re
+import sys
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
@@ -648,6 +650,46 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
     raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid))
 
 
+_PYTEST_NON_EVIDENCE_EXIT_RE = re.compile(
+    r"\bpytest\b.{0,160}?\b(?:exit(?:ed)?(?:\s+code)?|rc)\s*[:=]?\s*([2-5])\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_VERIFICATION_UNAVAILABLE_RE = re.compile(
+    r"\b(?:behavioral|focused|regression|test)\s+(?:verification|evidence|result)"
+    r"\s+(?:is\s+)?(?:unavailable|absent|missing)\b"
+    r"|\bno\s+(?:behavioral|focused|regression)\s+(?:test\s+)?"
+    r"(?:verification|evidence|result)\b",
+    re.IGNORECASE,
+)
+
+
+def _verifier_handoff_rejection(task: Any, evidence: str, metadata: Optional[dict]) -> Optional[str]:
+    """Reject verifier completion when pytest did not produce test evidence."""
+    if task is None:
+        return None
+    title = str(getattr(task, "title", "") or "")
+    assignee = str(getattr(task, "assignee", "") or "")
+    body = str(getattr(task, "body", "") or "")
+    verification_shaped = (
+        title.strip().lower().startswith(("verify ", "verification "))
+        or "test-contract" in assignee.lower()
+        or "review-verification" in assignee.lower()
+    )
+    if not verification_shaped or "test" not in f"{title}\n{body}".lower():
+        return None
+    try:
+        metadata_text = json.dumps(metadata, sort_keys=True, default=str) if isinstance(metadata, dict) else ""
+    except (TypeError, ValueError):
+        metadata_text = str(metadata)
+    handoff = f"{evidence}\n{metadata_text}"
+    pytest_exit = _PYTEST_NON_EVIDENCE_EXIT_RE.search(handoff)
+    if pytest_exit:
+        return f"pytest exit {pytest_exit.group(1)} did not produce valid test evidence"
+    if _VERIFICATION_UNAVAILABLE_RE.search(handoff):
+        return "required behavioral test evidence is unavailable"
+    return None
+
+
 # --- Runtime-activity → board bridges (auto-heartbeat, live comment injection) ---
 # The dispatcher watchdog reads ``tasks.last_heartbeat_at``, not the agent's in-process
 # activity timestamp, so normal work is mirrored onto the board here (``kanban_heartbeat``
@@ -753,16 +795,50 @@ def _handle_show(args: dict, **kw) -> str:
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
-        return json.dumps({
+        parents = kb.parent_ids(conn, tid)
+        payload = {
             "task": _fields(task, _TASK_FIELDS),
-            "parents": kb.parent_ids(conn, tid),
+            "parents": parents,
             "children": kb.child_ids(conn, tid),
+            "parent_handoffs": [],
             "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
             # Capped; full log via CLI.
             "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
             "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
             # Same string build_worker_context hands the dispatcher at spawn time.
-            "worker_context": kb.build_worker_context(conn, tid)})
+            "worker_context": kb.build_worker_context(conn, tid),
+        }
+        for parent_id in parents:
+            parent = kb.get_task(conn, parent_id)
+            if parent is None or parent.status != "done":
+                continue
+            parent_runs = kb.list_runs(conn, parent_id)
+            terminal_run = next(
+                (run for run in reversed(parent_runs)
+                 if str(run.outcome or run.status or "").strip()
+                 not in {"", "running", "claimed", "spawned"}),
+                None,
+            )
+            payload["parent_handoffs"].append({
+                "id": parent.id,
+                "title": parent.title,
+                "status": parent.status,
+                "completed_at": parent.completed_at,
+                "summary": (terminal_run.summary if terminal_run and terminal_run.summary else parent.result),
+                "metadata": (terminal_run.metadata if terminal_run and terminal_run.metadata else {}),
+            })
+        if os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1":
+            from hermes_constants import get_default_hermes_root
+
+            payload = _project_remote_worker_state(payload, current_run_id=task.current_run_id)
+            payload = _sanitize_remote_worker_payload(
+                payload,
+                workspace_path=task.workspace_path,
+                control_home=str(get_default_hermes_root()),
+                worker_python=os.environ.get("HERMES_KANBAN_WORKTREE_PYTHON"),
+                dispatcher_python=sys.executable,
+            )
+        return json.dumps(payload)
 
 
 @_kanban_handler("kanban_list")
@@ -818,6 +894,16 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        verifier_rejection = _verifier_handoff_rejection(
+            task, (summary or result or "").strip(), metadata,
+        )
+        if verifier_rejection is not None:
+            return tool_error(
+                f"Verifier completion rejected: {verifier_rejection}. The task is still running. "
+                "Repair the workspace or test invocation and rerun verification; if that cannot be "
+                "done in this attempt, call kanban_block with the exact evidence blocker instead "
+                "of kanban_complete."
+            )
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             ok = kb.complete_task(
@@ -870,6 +956,21 @@ def _handle_block(args: dict, **kw) -> str:
         # worker cannot resolve itself; `capability` and `transient` (or an unset kind) route back through
         # kanban_complete, which the judge now gates.
         task = kb.get_task(conn, tid)
+        if kind == "needs_input" and task and task.created_by not in _NEEDS_INPUT_ROOT_CREATORS:
+            return tool_error(
+                "worker- and cron-created tasks already have a fixed scope; do not ask a human "
+                "to choose the analysis or approach. Make the role-owned decision and continue."
+            )
+        if kind == "capability" and not str(args.get("command") or "").strip():
+            return tool_error(
+                "capability blocks require command and stderr from a current failed command; "
+                "a predicted failure is not capability evidence."
+            )
+        if kind == "capability" and not str(args.get("stderr") or "").strip():
+            return tool_error(
+                "capability blocks require command and stderr from a current failed command; "
+                "a predicted failure is not capability evidence."
+            )
         _check(not (task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS),
                f"goal_mode tasks can only block with kind in "
                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "
@@ -1076,6 +1177,8 @@ def _handle_create(args: dict, **kw) -> str:
     # mutate review evidence or race its checkout). Project identity is the one safe thing
     # to inherit implicitly (the DB turns it into a fresh per-task worktree).
     workspace_kind, workspace_path = args.get("workspace_kind"), args.get("workspace_path")
+    if workspace_kind == "scratch":
+        workspace_path = None
     # See #67567.
     project_id = args.get("project") or args.get("project_id")
     project_source_task_id = None

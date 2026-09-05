@@ -85,6 +85,89 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
     return (result.stdout or "").strip() or None
 
 
+# Typed PR intake identity and authority boundary. These helpers must live in
+# the DB layer because CLI, dashboard, tools, and the gateway all create tasks.
+_GITHUB_PR_FEEDBACK_IDEMPOTENCY_PREFIX = "github-pr-feedback:"
+_GITHUB_PR_INTENT_REVIEW_PREFIX = "github-pr-feedback:intent-review:"
+_RESEARCH_LAB_INTAKE_IDEMPOTENCY_RE = re.compile(
+    r"^research-lab-intake-[0-9]{8}-[1-9][0-9]*$"
+)
+_EXACT_HEAD_PR_MARKERS = ("expected_head_sha", "pr_number", "repository")
+_PR_WRITE_ACTION_RE = re.compile(
+    r"\b(?:repair|fix|push|reply|respond|base[-_ ]?refresh|"
+    r"refresh(?:ing)?\s+(?:the\s+)?base|resolve(?:d|s|ing)?\s+(?:a\s+)?merge\s+conflict)\b",
+    re.IGNORECASE,
+)
+
+
+def is_atomic_pr_automation_task(*, body: Optional[str], idempotency_key: Optional[str]) -> bool:
+    """Return whether a task carries indivisible PR-automation identity."""
+    key = (idempotency_key or "").strip().casefold()
+    if key.startswith(_GITHUB_PR_FEEDBACK_IDEMPOTENCY_PREFIX):
+        return True
+    evidence = (body or "").casefold()
+    return all(marker in evidence for marker in _EXACT_HEAD_PR_MARKERS)
+
+
+def is_governed_research_intake(*, idempotency_key: Optional[str]) -> bool:
+    """Return whether a typed Research Lab intake must retain its specialist owner."""
+    key = (idempotency_key or "").strip().casefold()
+    return bool(_RESEARCH_LAB_INTAKE_IDEMPOTENCY_RE.fullmatch(key))
+
+
+def _task_requires_pr_write_authority(
+    *, title: str, body: Optional[str], idempotency_key: Optional[str]
+) -> bool:
+    if not is_atomic_pr_automation_task(body=body, idempotency_key=idempotency_key):
+        return False
+    return _PR_WRITE_ACTION_RE.search(f"{title}\n{body or ''}") is not None
+
+
+def _profile_is_explicitly_read_only(profile: Optional[str]) -> bool:
+    """Read operator-authored profile authority metadata, failing open."""
+    if not profile:
+        return False
+    try:
+        import yaml
+
+        from hermes_cli.profiles import get_profile_dir
+
+        profile_path = get_profile_dir(profile) / "profile.yaml"
+        with profile_path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    authority = str(data.get("execution_authority") or data.get("authority") or "").strip().casefold()
+    if authority in {"read-only", "read_only", "readonly", "review-only"}:
+        return True
+    description = str(data.get("description") or "").casefold()
+    return "read-only" in description or "read only" in description
+
+
+def _validate_pr_task_assignee_authority(
+    *, title: str, body: Optional[str], idempotency_key: Optional[str],
+    assignee: Optional[str], initial_status: Optional[str] = None,
+) -> None:
+    key = (idempotency_key or "").strip().casefold()
+    evidence = (body or "").casefold()
+    blocked_read_only_intent = (
+        initial_status == "blocked"
+        and key.startswith(_GITHUB_PR_INTENT_REVIEW_PREFIX)
+        and "do not edit, push, reply, approve, or merge" in evidence
+        and "operator intent decision" in evidence
+    )
+    if blocked_read_only_intent:
+        return
+    if _task_requires_pr_write_authority(
+        title=title, body=body, idempotency_key=idempotency_key
+    ) and _profile_is_explicitly_read_only(assignee):
+        raise ValueError(
+            f"read-only profile {assignee!r} cannot own PR repair, push, reply, or base-refresh work"
+        )
+
+
 # --- Constants ---
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
