@@ -2262,7 +2262,13 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # older hermes builds on PATH that predate the flag's precedence.
     env.pop("HERMES_TUI", None)
 
-    cmd = _worker_argv(task, profile_arg, env.get("HERMES_HOME"))
+    from hermes_cli.kanban_worker_routing import prepare_worker_route
+
+    routed_task = prepare_worker_route(task, env.get("HERMES_HOME"), env)
+    cmd = _worker_argv(routed_task, profile_arg, env.get("HERMES_HOME"))
+    if env.get("HERMES_KANBAN_LOCAL_ONLY") == "1" and "--toolsets" in cmd:
+        index = cmd.index("--toolsets") + 1
+        cmd[index] = ",".join(name for name in cmd[index].split(",") if name != "code_execution")
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
