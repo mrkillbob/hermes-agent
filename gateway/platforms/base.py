@@ -804,7 +804,7 @@ def _profile_cache_roots() -> List[Path]:
     when HERMES_HOME is symlinked under a denied prefix and $HOME is not that prefix). See issue #31733.
     """
     try:
-        profile_dirs = [p for p in (_HERMES_ROOT / "profiles").iterdir() if p.is_dir()]
+        profile_dirs = [p for p in (get_hermes_home() / "profiles").iterdir() if p.is_dir()]
     except OSError:
         return []
     return [p / "cache" / subdir for p in profile_dirs for subdir in _MEDIA_DELIVERY_CACHE_SUBDIRS]
