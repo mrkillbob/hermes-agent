@@ -81,3 +81,7 @@ role-specific source indexes and never establish runtime truth.
 ### Bounded Vault navigation
 
 `scripts/federation_vault_navigation.py --registry configs/federation/roles.json --output /path/to/vault/Reference/Federation` derives a department index and one small note per role. Links and role descriptions come from the registry, and every note records its source hash. Unchanged notes are not rewritten. Authored notes and symlink destinations are refused. This is narrative navigation; the existing library policy and bounded recall still control retrieval. Old generated notes are retained when roles are removed, with their original source hash; review them during catalogue maintenance.
+
+### Project worktree source
+
+For a carried integration whose capabilities are absent from upstream main, set `kanban.worktree_base_refs` in the shared Kanban home's `config.yaml` to a mapping from the absolute primary repository path to its verified integration branch or commit. New task branches resolve that ref to a commit before creation, even when created from a worker profile. Missing configured refs fail closed; existing worktrees are preserved. Repositories absent from the mapping still use their remote default branch. Only committed source is included; unrelated working-tree edits are never copied.
