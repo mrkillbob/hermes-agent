@@ -52,9 +52,27 @@ def _cli_conversation_worktree_prompt_fragment(binding) -> str:
 
 
 class CLIConversationWorktreeMixin:
-    def _apply_conversation_worktree_binding(self, binding) -> None:
+    def _conversation_worktree_root(self, session_id=None):
+        """Compression inherits a workspace; explicit forks start their own root."""
+        current = session_id or self.session_id
+        seen = set()
+        while current not in seen:
+            seen.add(current)
+            row = self._session_db.get_session(current)
+            if not row or self._session_db.is_explicit_fork_child(current):
+                return current
+            parent = row.get("parent_session_id")
+            if not parent:
+                return current
+            current = parent
+        from agent.conversation_worktree import ConversationWorktreeError
+
+        raise ConversationWorktreeError("cyclic CLI conversation lineage", phase="state")
+
+    def _apply_conversation_worktree_binding(self, binding, *, before_commit=None) -> None:
         """Retarget CLI-owned tools and prompt context to a certified binding."""
         managed_path = str(binding.path)
+        prior_cwd = os.getcwd() if before_commit is not None else None
         try:
             os.chdir(managed_path)
         except OSError as exc:
@@ -64,6 +82,13 @@ class CLIConversationWorktreeMixin:
                 f"could not enter managed conversation worktree {managed_path}: {exc}",
                 phase="cwd",
             ) from exc
+
+        if before_commit is not None:
+            try:
+                before_commit()
+            except Exception:
+                os.chdir(prior_cwd)
+                raise
 
         prior_note = getattr(self, "_conversation_worktree_prompt_note", "")
         if prior_note:
@@ -76,6 +101,8 @@ class CLIConversationWorktreeMixin:
         self.working_directory = managed_path
         os.environ["TERMINAL_CWD"] = self.working_directory
         self.system_prompt = (self.system_prompt or "") + f"\n\n[System note: {note}]"
+        if self.agent is not None:
+            self.agent.ephemeral_system_prompt = self.system_prompt
 
     @staticmethod
     def _acquire_conversation_root_lease(binding, *, surface: str):
@@ -100,7 +127,7 @@ class CLIConversationWorktreeMixin:
         if self._conversation_worktree_manager is not None:
             if resume:
                 try:
-                    root_session_id = self._session_db.get_conversation_root(self.session_id)
+                    root_session_id = self._conversation_worktree_root()
                 except Exception as exc:
                     from agent.conversation_worktree import ConversationWorktreeError
 
@@ -135,7 +162,7 @@ class CLIConversationWorktreeMixin:
             )
             atexit.register(self._release_active_session)
 
-    def _restore_managed_conversation_cwd(self):
+    def _restore_managed_conversation_cwd(self, *, session_id=None):
         managed_binding = getattr(self, "_conversation_worktree_binding", None)
         if managed_binding is not None:
             # Persisted cwd from an older session row is subordinate to the
@@ -143,7 +170,7 @@ class CLIConversationWorktreeMixin:
             # an in-process /resume targets the selected conversation's root,
             # not the binding from the session that was just left.
             try:
-                root_session_id = self._session_db.get_conversation_root(self.session_id)
+                root_session_id = self._conversation_worktree_root(session_id)
                 managed_binding = (
                     self._conversation_worktree_manager.resolve_existing_session(
                         root_session_id
@@ -182,7 +209,7 @@ class CLIConversationWorktreeMixin:
 
         return False
 
-    def _prepare_conversation_root(self, new_session_id):
+    def _prepare_conversation_root(self, new_session_id, *, before_commit=None):
         from cli import _cprint
         new_worktree_binding = None
 
@@ -206,7 +233,9 @@ class CLIConversationWorktreeMixin:
                     new_worktree_binding, surface="cli"
                 )
                 try:
-                    self._apply_conversation_worktree_binding(new_worktree_binding)
+                    self._apply_conversation_worktree_binding(
+                        new_worktree_binding, before_commit=before_commit
+                    )
                 except Exception:
                     new_root_lease.release()
                     raise
