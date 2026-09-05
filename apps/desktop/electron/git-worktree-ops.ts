@@ -135,6 +135,12 @@ async function gitOk(gitBin, args, cwd) {
   }
 }
 
+// Bounded fetch + freshness window for base resolution, mirroring the Python
+// resolver (hermes_cli/worktree_base.py): an offline/slow remote must not
+// stall "Start work" for `runGit`'s full 30s default timeout.
+const BASE_FETCH_TIMEOUT_MS = 5_000
+const BASE_FRESHNESS_WINDOW_MS = 300_000
+
 // The remote that a ref belongs to ("origin" for "origin/main"), or "" when the
 // name is not a remote-tracking ref in this repo. This function asks git. It
 // does not assume that the remote has the name "origin", because a repo can
@@ -151,10 +157,8 @@ async function remoteOfRef(gitBin, cwd, name) {
   return name.slice(0, name.indexOf('/'))
 }
 
-async function defaultBranch(gitBin, cwd) {
-  const remote = (
-    await gitLine(gitBin, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], cwd)
-  ).replace(/^origin\//, '')
+async function defaultBranch(gitBin, cwd, remoteRef = '') {
+  const remote = (remoteRef || (await remoteDefaultRef(gitBin, cwd))).replace(/^origin\//, '')
 
   if (remote) {
     return remote
@@ -174,12 +178,6 @@ async function defaultBranch(gitBin, cwd) {
 
   return ''
 }
-
-// Bounded fetch + freshness window for base resolution, mirroring the Python
-// resolver (hermes_cli/worktree_base.py): an offline/slow remote must not
-// stall "Start work" for `runGit`'s full 30s default timeout.
-const BASE_FETCH_TIMEOUT_MS = 5_000
-const BASE_FRESHNESS_WINDOW_MS = 300_000
 
 // Age of `ref`'s own remote-tracking ref file, or null when it can't be
 // determined (packed refs, missing ref, ...). Tied to the specific ref being
@@ -203,8 +201,46 @@ async function refAgeMs(gitBin, cwd, ref) {
   }
 }
 
+// Resolve the remote default even when the local origin/HEAD symbolic ref is
+// absent. `remote show` is the source-bound fallback for clones that have not
+// fetched the remote HEAD metadata yet; its timeout keeps a disconnected
+// remote from blocking the worktree flow.
+async function remoteDefaultRef(gitBin, cwd) {
+  const symbolic = await gitLine(
+    gitBin,
+    ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
+    cwd
+  )
+
+  if (symbolic && symbolic.startsWith('origin/')) {
+    return symbolic
+  }
+
+  try {
+    const output = await runGit(gitBin, ['remote', 'show', 'origin'], cwd, BASE_FETCH_TIMEOUT_MS)
+
+    for (const rawLine of output.split('\n')) {
+      const line = rawLine.trim()
+
+      if (!line.startsWith('HEAD branch:')) {
+        continue
+      }
+
+      const branch = line.slice('HEAD branch:'.length).trim()
+
+      if (branch && branch !== '(unknown)') {
+        return `origin/${branch}`
+      }
+    }
+  } catch {
+    // Offline/slow remotes are handled by the cached-ref/HEAD fallback below.
+  }
+
+  return ''
+}
+
 async function newWorktreeBase(gitBin, cwd) {
-  const defaultRef = await gitLine(gitBin, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], cwd)
+  const defaultRef = await remoteDefaultRef(gitBin, cwd)
 
   if (defaultRef && defaultRef.startsWith('origin/')) {
     const branch = defaultRef.slice('origin/'.length)
@@ -546,13 +582,9 @@ async function listBaseBranches(repoPath, gitBin) {
       resolved
     )
 
-    const remoteDefault = await gitLine(
-      gitBin,
-      ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
-      resolved
-    )
+    const remoteDefault = await remoteDefaultRef(gitBin, resolved)
 
-    const localDefault = await defaultBranch(gitBin, resolved)
+    const localDefault = await defaultBranch(gitBin, resolved, remoteDefault)
 
     return out
       .split('\n')
