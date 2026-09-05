@@ -1,4 +1,6 @@
+import { resolve } from 'node:path'
 import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 
 export const OMNIVERSE_RECEIPT_SCHEMA = 'nvidia_omniverse_asset_receipt_v1'
 
@@ -105,7 +107,7 @@ function option(args, name, fallback = undefined) {
   return index >= 0 ? args[index + 1] ?? fallback : fallback
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2)
   const receiptPath = option(args, '--receipt')
   const manifestPath = option(args, '--manifest', 'public/lunar-city/v2/world-manifest.v2.json')
