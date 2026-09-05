@@ -2346,6 +2346,9 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
             return receipt
 
     class Ledger:
+        def has_pending_mutation(self, repository: str, pr_number: int) -> bool:
+            return False
+
         def close(self) -> None:
             pass
 
@@ -2466,6 +2469,9 @@ def test_audit_handoff_exception_renders_retryable_reason(
             return None
 
     class Ledger:
+        def has_pending_mutation(self, repository: str, pr_number: int) -> bool:
+            return False
+
         def close(self) -> None:
             pass
 
@@ -2561,6 +2567,9 @@ def test_blocked_merge_handoff_blocks_task_with_exact_blockers(
             )
 
     class Ledger:
+        def has_pending_mutation(self, repository: str, pr_number: int) -> bool:
+            return False
+
         def close(self) -> None:
             pass
 
@@ -2987,3 +2996,47 @@ def test_codex_auth_failure_must_be_current_and_from_connector():
         github = _FakeGitHubCodex((request, ignored))
         assert _retrigger_codex_review(github, "acme/widgets", 17, "a" * 40) == "already_requested"
         assert github.posted == []
+
+
+@pytest.mark.parametrize("reason", ["mutation_pending", "merge_conflict"])
+def test_queued_audit_defers_before_execution_without_transitioning_task(monkeypatch, tmp_path, capsys, reason):
+    from github_pr_feedback import cli
+    from github_pr_feedback.controller import _local_ci_feedback_id
+    from github_pr_feedback.github_client import PullRequestMergeState
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "audit-task")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    head, base = "a" * 40, "b" * 40
+    settings = enabled_settings(Path(__file__).resolve().parents[3])
+    settings["local_ci_audit"] = {"enabled": True, "assignee": "pr-local-ci-auditor",
+                                  "required_for_open_prs": True, "audit_only": True, "post_results": False}
+    state = PullRequestMergeState("acme/widgets", 17, "OPEN", False,
+                                  reason != "merge_conflict", "DIRTY" if reason == "merge_conflict" else "CLEAN",
+                                  "main", base, "acme/widgets", "owner", "codex/fix", head, False, None)
+    identity = CIAuditIdentity("acme/widgets", 17, base, head)
+    audit = FeedbackReceipt("acme/widgets", 17, "pr_local_ci", _local_ci_feedback_id(identity), head)
+    now = datetime.now(UTC)
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        lease = ledger.claim(audit, owner="scanner", claimed_at=now, stale_before=now-timedelta(minutes=5))
+        ledger.finalize(audit, "audit-task", lease)
+        if reason == "mutation_pending":
+            repair = FeedbackReceipt("acme/widgets", 17, "pr_repair", "repair:merge_conflict", "c" * 40)
+            lease = ledger.claim(repair, owner="scanner", claimed_at=now, stale_before=now-timedelta(minutes=5))
+            ledger.finalize(repair, "repair-task", lease)
+        monkeypatch.setattr(cli, "_github_client", lambda policy: SimpleNamespace(get_merge_state=lambda *args: state))
+        monkeypatch.setattr(cli, "_run_grouped_exact_head_audit", lambda *args, **kwargs: pytest.fail("deferred audit must not run CI"))
+        monkeypatch.setattr(cli, "_complete_current_ci_task", lambda *args, **kwargs: pytest.fail("deferred audit must not complete"))
+        monkeypatch.setattr(cli, "_block_current_ci_task", lambda *args, **kwargs: pytest.fail("deferred audit must not change task state"))
+        assert cli._audit_pr(RecordingContext(settings), argparse.Namespace(
+            repository="acme/widgets", pr_number=17, head_sha=head, worktree=str(worktree))) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "audit_deferred"
+        assert payload["reason"] == reason
+        assert payload["retryable"] is True
+        assert ledger.exact_pending_task_binding(audit).task_id == "audit-task"
+        assert ledger.latest_ci_receipt_for_head("acme/widgets", 17, head) is None
+    finally:
+        ledger.close()

@@ -1,6 +1,6 @@
 """Keep exact-head audits behind unresolved work on their own PR."""
 
-from .github_client import GitHubClient, GitHubClientError, MergeStateStillComputingError
+from .github_client import GitHubClient, GitHubClientError, MergeStateStillComputingError, PullRequestMergeState
 from .ledger import FeedbackLedger
 from .policy import PullRequest
 
@@ -25,6 +25,13 @@ def local_ci_admission_blocker(
         or state.merged
     ):
         return "head_changed"
+    return audit_execution_blocker(ledger, state)
+
+
+def audit_execution_blocker(ledger: FeedbackLedger, state: PullRequestMergeState) -> str | None:
+    """Queued cards must recheck prerequisites before starting expensive CI."""
+    if ledger.has_pending_mutation(state.repository, state.number):
+        return "mutation_pending"
     if not state.mergeable or state.merge_state_status == "DIRTY":
         return "merge_conflict"
     return None

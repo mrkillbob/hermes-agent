@@ -1589,6 +1589,18 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
         return 1
     ledger = FeedbackLedger.for_current_profile()
     try:
+        from .ci_admission import audit_execution_blocker
+
+        blocker = audit_execution_blocker(ledger, state)
+        if blocker is not None:
+            print(json.dumps({
+                "status": "audit_deferred", "reason": blocker, "retryable": True,
+                "retry_after_seconds": 60,
+                "repository": identity.repository, "pr_number": identity.pr_number,
+                "head_sha": identity.head_sha, "base_sha": identity.base_sha,
+                "next_action": "Wait for conflict repair and its acknowledgement, then retry the exact-head audit. Do not complete the task from this result.",
+            }, sort_keys=True), flush=True)
+            return 1
         receipt = _run_grouped_exact_head_audit(
             github,
             ledger,
