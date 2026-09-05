@@ -59,8 +59,10 @@ from agent.message_sanitization import (
     _sanitize_structure_surrogates,
     _sanitize_surrogates,
     _sanitize_tools_non_ascii,
+    _looks_like_image_content_rejection,
     _strip_images_from_messages,
     _strip_non_ascii,
+    serialized_messages_bytes,
 )
 # Must mirror _STALE_TOOL_CALL_MARKER_RE in hermes_state.py — kept local
 # to avoid importing hermes_state at module load time (its module-level
@@ -70,6 +72,8 @@ _STALE_MARKER_RE = re.compile(r"^\[[A-Za-z_][A-Za-z0-9_.-]*\]$")
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
     _estimate_tools_tokens_rough,
+    anchored_context_tokens,
+    capture_usage_anchor,
     estimate_messages_tokens_rough,
     estimate_request_tokens_rough,
     get_context_length_from_provider_error,
@@ -84,6 +88,7 @@ from agent.prompt_caching import (
     strip_anthropic_cache_control,
     strip_anthropic_tool_cache_control,
 )
+from agent.provider_projection import splice_provider_projection
 from agent.retry_utils import (
     adaptive_rate_limit_backoff,
     is_zai_coding_overload_error,
@@ -119,6 +124,51 @@ RUN_BUDGET_WRAPUP_NOTICE = (
     "now. Produce the required final deliverable (answer/JSON/summary) from "
     "the state you already have, completing only mandatory writes."
 )
+
+
+def _midturn_request_pressure_tokens(
+    agent: Any,
+    api_messages: List[Dict[str, Any]],
+    effective_system: str,
+    approx_tokens: int,
+) -> int:
+    """Token figure the mid-turn pre-API compression guard compares.
+
+    When the upcoming request is eligible for native Responses compaction the
+    transport will checkpoint-prune the payload before sending, so the generic
+    durable-history estimate overstates the wire by orders of magnitude on a
+    compacted session and fires a 600s local compression the main request
+    never needed (#96995). Mirror the turn-prologue preflight (#96644 /
+    #96155): use the pruned estimate when native eligibility is proven, the
+    generic message+tools figure otherwise.
+
+    The native estimator adds the system prompt and tool schemas itself and
+    its converter skips system-role rows, so passing the assembled
+    ``api_messages`` (which carries the system row) alongside
+    ``effective_system`` counts the system prompt exactly once.
+    """
+    try:
+        from agent.codex_responses_adapter import (
+            estimate_native_responses_preflight_tokens,
+        )
+
+        native = estimate_native_responses_preflight_tokens(
+            agent,
+            api_messages,
+            system_prompt=effective_system or "",
+            tools=getattr(agent, "tools", None) or None,
+        )
+        if isinstance(native, int) and not isinstance(native, bool) and native >= 0:
+            return native
+    except Exception:
+        logger.debug(
+            "native Responses mid-turn estimate unavailable; "
+            "using generic transcript estimate",
+            exc_info=True,
+        )
+    return approx_tokens + (
+        _estimate_tools_tokens_rough(agent.tools) if agent.tools else 0
+    )
 
 
 def _review_input_budget_exhausted(agent: Any) -> bool:
@@ -1661,6 +1711,8 @@ def _redecorate_prompt_cache_for_provider(
             "_direct_native_anthropic_tool_cache_capability",
             lambda: False,
         )()
+        from agent.prompt_caching import envelope_tool_part_cache_markers_supported
+
         plan = build_prompt_cache_plan(
             messages,
             planned_tools,
@@ -1674,6 +1726,11 @@ def _redecorate_prompt_cache_for_provider(
             native_anthropic=agent._use_native_cache_layout,
             static_system_prefix=static if isinstance(static, str) else None,
             direct_native_tool_cache=direct_tool_cache,
+            # LiteLLM-style envelope routes forward part-level markers into
+            # tool_result.content[] → non-retryable 400 (#89886).
+            tool_part_markers=envelope_tool_part_cache_markers_supported(
+                getattr(agent, "provider", ""), getattr(agent, "base_url", "")
+            ),
         )
         messages = plan.messages
         planned_tools = plan.tools
@@ -2536,6 +2593,10 @@ def run_conversation(
         # the thinking-only drop is about to remove or merge away.
         tools_for_api = agent.tools
         if agent._use_prompt_caching and agent.provider != "moa":
+            from agent.prompt_caching import (
+                envelope_tool_part_cache_markers_supported,
+            )
+
             _static_system_prefix = getattr(agent, "_cached_system_prompt_static", None)
             _initial_cache_plan = build_prompt_cache_plan(
                 api_messages,
@@ -2554,6 +2615,11 @@ def run_conversation(
                     else None
                 ),
                 direct_native_tool_cache=agent._direct_native_anthropic_tool_cache_capability(),
+                # LiteLLM-style envelope routes forward part-level markers into
+                # tool_result.content[] → non-retryable 400 (#89886).
+                tool_part_markers=envelope_tool_part_cache_markers_supported(
+                    getattr(agent, "provider", ""), getattr(agent, "base_url", "")
+                ),
             )
             api_messages = _initial_cache_plan.messages
             tools_for_api = _initial_cache_plan.tools
@@ -2587,9 +2653,27 @@ def run_conversation(
         # separately (compression needs them: 50+ tools = 20-30K tokens).
         # total_chars is a rough (~) proxy — verbose log + hook metric only.
         approx_tokens = estimate_messages_tokens_rough(api_messages)
-        request_pressure_tokens = approx_tokens + (
-            _estimate_tools_tokens_rough(agent.tools) if agent.tools else 0
+        # Route-aware pressure: when the upcoming request is eligible for
+        # native Responses compaction the transport will checkpoint-prune
+        # the payload before sending — the generic durable-history figure
+        # overstates the wire by orders of magnitude on a compacted session
+        # and fires a 600s local compression the main request never needed
+        # (#96995, mirroring the turn-prologue preflight #96644/#96155).
+        request_pressure_tokens = _midturn_request_pressure_tokens(
+            agent, api_messages, effective_system or "", approx_tokens
         )
+        # Usage-anchored override: when the last provider response's exact
+        # usage is still valid for the durable transcript, replace the
+        # whole-history heuristic with anchor + delta-estimate. The anchor's
+        # prompt_tokens already includes system prompt AND tool schemas as
+        # the provider counted them, so no tools add-on is needed. Falls
+        # back to the rough figures above when the anchor is stale/missing
+        # (first request, post-compaction, usage-less providers).
+        _anchored_pressure = anchored_context_tokens(
+            messages, getattr(agent, "_usage_anchor", None)
+        )
+        if _anchored_pressure is not None:
+            request_pressure_tokens = _anchored_pressure
         total_chars = approx_tokens * 4
         # Stash this request's rough estimate so update_from_response() can
         # pair it with the provider's real prompt count — the (rough, real)
@@ -3142,13 +3226,14 @@ def run_conversation(
                 # session instead of re-failing every retry.
                 if getattr(agent, "_disable_streaming", False):
                     _use_streaming = False
-                # CopilotACPClient communicates via subprocess stdio and
-                # returns a plain SimpleNamespace — not an iterable
-                # stream.  Mirror the ACP exclusion used for Responses
-                # API upgrade (lines ~1083-1085).
+                # An ACP client communicates via subprocess stdio and returns a
+                # plain SimpleNamespace — not an iterable stream.  Keyed on the
+                # `acp://` scheme rather than one vendor, so any ACP client is
+                # excluded.  Mirror the ACP exclusion used for Responses API
+                # upgrade (lines ~1083-1085).
                 elif (
                     agent.provider in {"copilot-acp"}
-                    or str(agent.base_url or "").lower().startswith("acp://copilot")
+                    or str(agent.base_url or "").lower().startswith("acp://")
                     or str(agent.base_url or "").lower().startswith("acp+tcp://")
                 ):
                     _use_streaming = False
@@ -4181,6 +4266,25 @@ def run_conversation(
                         )
                     )
                     agent.context_compressor.update_from_response(usage_dict)
+                    # Usage-anchored context accounting: snapshot this
+                    # response's exact provider-reported usage against the
+                    # durable transcript. Later context-size checks anchor on
+                    # this and estimate only the messages appended since,
+                    # instead of re-estimating the whole history with
+                    # heuristics. Main-loop responses ONLY — MoA advisor and
+                    # auxiliary calls never reach this site, so they cannot
+                    # pollute the anchor. A usage-less response leaves the
+                    # previous anchor in place (still valid for its base).
+                    # MoA note: use the pre-fold aggregator usage — the folded
+                    # canonical figure adds advisor fan-out tokens that were
+                    # never part of THIS conversation's prompt.
+                    _new_anchor = capture_usage_anchor(
+                        aggregator_usage.prompt_tokens,
+                        aggregator_usage.output_tokens,
+                        messages,
+                    )
+                    if _new_anchor is not None:
+                        agent._usage_anchor = _new_anchor
                     _compression_threshold = int(
                         getattr(agent.context_compressor, "threshold_tokens", 0)
                         or 0
@@ -4254,6 +4358,16 @@ def run_conversation(
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+                    # Rolling history for status-bar averages (last 10).
+                    try:
+                        hist = getattr(agent, "_api_latency_history", None)
+                        if hist is not None:
+                            hist.append(float(api_duration))
+                        ohist = getattr(agent, "_api_output_history", None)
+                        if ohist is not None:
+                            ohist.append(int(canonical_usage.output_tokens or 0))
+                    except Exception:
+                        pass
 
                     # Log API call details for debugging/observability
                     _cache_pct = ""
@@ -4640,55 +4754,7 @@ def run_conversation(
                 except Exception:
                     pass
                 _err_status = getattr(api_error, "status_code", None)
-                _IMAGE_REJECTION_PHRASES = (
-                    "only 'text' content type is supported",
-                    "only text content type is supported",
-                    "image_url is not supported",
-                    "image content is not supported",
-                    "multimodal is not supported",
-                    "multimodal content is not supported",
-                    "multimodal input is not supported",
-                    "vision is not supported",
-                    "vision input is not supported",
-                    "does not support images",
-                    "does not support image input",
-                    "does not support multimodal",
-                    "does not support vision",
-                    "model does not support image",
-                    # ChatGPT-account Codex backend
-                    # (https://chatgpt.com/backend-api/codex) rejects
-                    # data:image/...base64 URLs in input_image fields
-                    # with HTTP 400 "Invalid 'input[N].content[K].image_url'.
-                    # Expected a valid URL, but got a value with an
-                    # invalid format." The OpenAI Responses API on the
-                    # public endpoint accepts data URLs, but the
-                    # ChatGPT-account variant does not. Without this
-                    # phrase the agent cascaded into compression /
-                    # context-too-large recovery instead of just
-                    # stripping the images. Match is narrow on
-                    # purpose — keyed on the field-path apostrophe so
-                    # we don't false-trip on other URL validation
-                    # errors. (issue #23570)
-                    "image_url'. expected",
-                    # DeepSeek's OpenAI-compatible API reports text-only
-                    # request-body variants as:
-                    # "unknown variant `image_url`, expected `text`".
-                    "unknown variant `image_url`, expected `text`",
-                    "unknown variant image_url, expected text",
-                    # OpenRouter routes a request to upstream endpoints and,
-                    # when none of the candidate endpoints for the model accept
-                    # image input, returns HTTP 404 "No endpoints found that
-                    # support image input". Without this phrase the agent never
-                    # strips the images, the retry loop re-sends the same
-                    # rejected request until exhaustion, and the gateway leaves
-                    # every subsequent message queued behind the stuck turn —
-                    # the P1 in issue #21160. The 404 passes the 4xx gate below.
-                    "no endpoints found that support image input",
-                )
-                _err_lower = _err_body.lower()
-                _looks_like_image_rejection = any(
-                    p in _err_lower for p in _IMAGE_REJECTION_PHRASES
-                )
+                _looks_like_image_rejection = _looks_like_image_content_rejection(_err_body)
                 # 4xx-only gate: never interpret 5xx/timeout as "server
                 # said no to images" — those are transient and must
                 # route to the normal retry path.
@@ -4882,6 +4948,36 @@ def run_conversation(
                         logger.info(
                             "multimodal-tool-content recovery: no list-type tool "
                             "messages with image parts found; surfacing original error."
+                        )
+
+                # Image-corrupt recovery: the provider decoded the request but
+                # rejected the image bytes themselves (e.g. xAI's "Invalid PNG
+                # image." on a re-serialized image part from replayed
+                # history). Shrinking corrupt bytes doesn't help, so strip the
+                # image parts and retry once instead of routing through the
+                # shrink path above. See issue #69078.
+                if classified.reason == FailoverReason.image_corrupt:
+                    # Strip ONLY the per-call payload copy. api_messages rows
+                    # are shallow copies of canonical history, and the strip
+                    # replaces msg["content"] rather than mutating the shared
+                    # parts list — so canonical messages keep their images.
+                    # A transient provider rejection must not permanently
+                    # erase history (#69104 sweeper review; the copy-on-write
+                    # contract from e762a5a473).
+                    _imgs_removed = False
+                    if isinstance(api_messages, list):
+                        _imgs_removed = _strip_images_from_messages(api_messages)
+                    if _imgs_removed:
+                        agent._vprint(
+                            f"{agent.log_prefix}⚠️  Provider rejected a corrupted image — "
+                            f"stripped images from the retry payload and retrying...",
+                            force=True,
+                        )
+                        continue
+                    else:
+                        logger.info(
+                            "image-corrupt recovery: no image parts found to "
+                            "strip; surfacing original error."
                         )
 
                 # Anthropic OAuth subscription rejected the 1M-context beta
@@ -5674,7 +5770,19 @@ def run_conversation(
                     agent._buffer_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                     original_len = len(messages)
-                    original_tokens = estimate_messages_tokens_rough(messages)
+                    # A 413 is a BYTE-size error, so this branch scores
+                    # progress in BYTES of the serialized messages payload —
+                    # exact and free — never the token estimate.  The
+                    # estimator prices every image at a flat per-image token
+                    # cost (see estimate_messages_tokens_rough) so screenshots
+                    # don't trigger premature compaction; that deliberate
+                    # byte-blindness means compaction can free megabytes of
+                    # base64 (real case: two vision results = 96.6% of the
+                    # request body but ~3.7% of the estimate) while the token
+                    # delta stays under any threshold.  Token-scored progress
+                    # here burned all attempts on "no progress" and wedged
+                    # the session permanently. (#88960 / #47339)
+                    original_bytes = serialized_messages_bytes(messages)
                     _overflow_input = messages
                     # Option A (LCM issue 441): overhead-aware request size so recovery arms on the
                     # true request (msgs + tools + system), not the tool-blind message count.
@@ -5699,18 +5807,30 @@ def run_conversation(
                         agent, messages, conversation_history
                     )
 
-                    # Re-estimate tokens after compression.  Same-message-count
+                    # Re-measure after compression.  Same-message-count
                     # compression (tool-result pruning, in-place summarization)
                     # can materially reduce request size without reducing the
-                    # message array.  (#39550)
+                    # message array (#39550), and — the image-dominated case —
+                    # compaction's historical-media aging (#97160) can free
+                    # megabytes of base64 that the token estimate never
+                    # counted.  Bytes are the yardstick for a 413; tokens are
+                    # kept only for status display.
                     new_tokens = estimate_messages_tokens_rough(messages)
                     approx_tokens = new_tokens  # update for downstream logging
+                    new_bytes = serialized_messages_bytes(messages)
 
-                    if len(messages) < original_len or (new_tokens > 0 and new_tokens < original_tokens * 0.95):
+                    made_progress = (
+                        len(messages) < original_len
+                        or (new_bytes > 0 and new_bytes < original_bytes * 0.95)
+                    )
+                    if made_progress:
                         if len(messages) < original_len:
                             agent._buffer_status(COMPRESSION_RETRY_MESSAGES_STATUS_TEMPLATE.format(before=original_len, after=len(messages)))
                         else:
-                            agent._buffer_status(COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE.format(before=original_tokens, after=new_tokens))
+                            agent._buffer_status(
+                                f"🗜️ Compressed {original_bytes:,} → {new_bytes:,} "
+                                f"payload bytes, retrying..."
+                            )
                         time.sleep(2)  # Brief pause between compression retries
                         _retry.restart_with_compressed_messages = True
                         break
@@ -6150,7 +6270,7 @@ def run_conversation(
                             agent._buffer_status("⚠️ TLS certificate verification failed — trying fallback...")
                         else:
                             agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
-                    if agent._try_activate_fallback():
+                    if agent._try_activate_fallback(reason=classified.reason):
                         active_system_prompt = _sync_failover_system_message(
                             agent, api_messages, active_system_prompt)
                         retry_count = 0
@@ -6781,6 +6901,15 @@ def run_conversation(
                 else:
                     assistant_message.content = str(raw)
 
+            # ── Agent-as-provider projection ──────────────────────────────
+            # A provider that IS an agent ran its own tools inside its own
+            # session before we got here: splice that work into the transcript
+            # as completed call/result rows and tick the skill-review nudge
+            # with the iterations Hermes never saw. Appended before this turn's
+            # assistant message, so the order reads call → result → answer.
+            # No-op for ordinary providers; see agent/provider_projection.py.
+            splice_provider_projection(agent, response, messages)
+
             try:
                 from hermes_cli.lifecycle import (
                     has_hook,
@@ -6976,7 +7105,29 @@ def run_conversation(
                         or interim_has_codex_reasoning
                         or interim_has_codex_message_items
                     )
-                    if not interim_replayable:
+                    # A replayable interim is not the same thing as a retry
+                    # that DIFFERS.  When the interim replays but carries no
+                    # new instruction, the continuation is byte-identical to
+                    # the request that just failed and returns the same empty
+                    # response until the budget is gone.  Live case (gpt-5.6
+                    # on the Codex backend, Aug 2026): the model answers with
+                    # a server-side ``compaction`` checkpoint and no message.
+                    # The checkpoint lands in ``codex_reasoning_items``, so
+                    # ``interim_replayable`` is True and no nudge is added —
+                    # meanwhile the checkpoint makes the wire converter prune
+                    # every pre-checkpoint item, so all three attempts send
+                    # the same checkpoint + retained user messages and end on
+                    # an empty assistant turn with nothing to answer.  The
+                    # provider's own prefix cache reports 99-100% on the
+                    # repeats, and the turn dies with "Codex response
+                    # remained incomplete after 3 continuation attempts",
+                    # losing the whole turn's work.
+                    #
+                    # One bare retry is still worth trying (the model often
+                    # just needs another turn).  Once THAT has also come back
+                    # incomplete, a bare retry is proven not to work for this
+                    # turn, so every remaining attempt carries the nudge.
+                    if not interim_replayable or agent._codex_incomplete_retries >= 2:
                         _last_msg = messages[-1] if messages else None
                         _already_nudged = (
                             isinstance(_last_msg, dict)
@@ -7479,6 +7630,33 @@ def run_conversation(
                                 pass
                     break
 
+                # A successful terminal Kanban tool has already committed the
+                # task/run transition and the executor has durably flushed its
+                # tool-result row.  Do not ask the model for another step: the
+                # worker no longer owns work, and continuing here can create an
+                # unbounded post-completion command loop.  This cooperative
+                # exit affects only the current dispatcher-owned worker; it
+                # never signals a PID or touches an unrelated process.
+                try:
+                    from agent.kanban_stop import (
+                        successful_kanban_terminal_transition,
+                    )
+
+                    _kanban_transitioned = successful_kanban_terminal_transition(
+                        messages=messages,
+                        tool_calls=assistant_message.tool_calls,
+                    )
+                except Exception:
+                    logger.debug(
+                        "kanban terminal transition check failed",
+                        exc_info=True,
+                    )
+                    _kanban_transitioned = False
+                if _kanban_transitioned:
+                    _turn_exit_reason = "kanban_terminal_transition"
+                    final_response = "Kanban task lifecycle transition recorded."
+                    break
+
                 # Reset per-turn retry counters after successful tool
                 # execution so a single truncation doesn't poison the
                 # entire conversation.
@@ -7531,8 +7709,20 @@ def run_conversation(
                     # these add 20-30K tokens the messages-only
                     # estimate misses, which can skip compression
                     # past the configured threshold (#14695).
-                    _real_tokens = estimate_request_tokens_rough(
-                        messages, tools=agent.tools or None
+                    # Route-aware (#96995/#97602 class): on a compacted
+                    # native-Codex session the generic durable-history
+                    # figure overstates the wire and would false-trigger
+                    # compression here exactly like the pre-API guard —
+                    # this fallback runs precisely when no provider usage
+                    # is available (post-disconnect / gateway restart),
+                    # the unanchored case from #97602's repro.
+                    _real_tokens = _midturn_request_pressure_tokens(
+                        agent,
+                        messages,
+                        active_system_prompt or "",
+                        estimate_request_tokens_rough(
+                            messages, tools=agent.tools or None
+                        ),
                     )
 
                 if (
@@ -8339,13 +8529,17 @@ def run_conversation(
                     continue
 
                 # ── Kanban worker terminal-tool stop guard ─────────────
-                # Workers must end with kanban_complete / kanban_block.
+                # Workers must end with a terminal board transition (complete,
+                # block, request review, or request changes).
                 # Models sometimes narrate the next step ("Let me write the
                 # report") and stop with finish_reason=stop — a clean exit
                 # that the dispatcher records as protocol_violation. Nudge
                 # once or twice before allowing that exit.
                 try:
-                    from agent.kanban_stop import build_kanban_stop_nudge
+                    from agent.kanban_stop import (
+                        build_kanban_stop_nudge,
+                        reconcile_kanban_stop_to_review,
+                    )
 
                     _kanban_nudge = build_kanban_stop_nudge(
                         messages=messages,
@@ -8375,7 +8569,7 @@ def run_conversation(
                     )
                     agent._emit_status(
                         "⚠️ Kanban worker tried to exit without "
-                        "kanban_complete/kanban_block — nudging to finish"
+                        "a terminal Kanban transition — nudging to finish"
                     )
                     # Same finalizer contract as verify-on-stop: clear
                     # final_response while continuing so a later budget
@@ -8387,6 +8581,34 @@ def run_conversation(
                     )
                     final_response = None
                     continue
+
+                # The bounded nudge budget was spent and the worker still
+                # returned prose. Preserve that output as review evidence via
+                # the normal ownership/redaction/goal-judge tool path. Review
+                # is terminal for this worker but does NOT infer completion.
+                # If the handoff is rejected, leave lifecycle ownership to the
+                # dispatcher exactly as before.
+                try:
+                    _kanban_review_handoff = reconcile_kanban_stop_to_review(
+                        messages=messages,
+                        final_response=final_response,
+                        attempts=getattr(agent, "_kanban_stop_nudges", 0),
+                    )
+                except Exception:
+                    logger.debug(
+                        "kanban stop-loop review handoff failed", exc_info=True
+                    )
+                    _kanban_review_handoff = False
+                if _kanban_review_handoff:
+                    logger.info(
+                        "kanban stop-loop handed task=%s to review after %d nudge(s)",
+                        os.environ.get("HERMES_KANBAN_TASK", ""),
+                        getattr(agent, "_kanban_stop_nudges", 0),
+                    )
+                    agent._emit_status(
+                        "✅ Kanban worker output handed to review after the "
+                        "terminal-transition nudge budget"
+                    )
 
                 append_message(messages, final_msg)
                 # Make the completed answer durable before leaving the loop —

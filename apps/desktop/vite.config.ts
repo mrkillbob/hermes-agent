@@ -150,6 +150,13 @@ export default defineConfig(({ command }) => ({
               name: 'vendor-util',
               test: /node_modules[\\/](lodash-es|es-toolkit|uuid|dayjs|d3-array|d3-color|d3-force|d3-interpolate|d3-time[^\\/]*|dompurify|stylis)[\\/]/
             },
+            // Lunar City loads a selective Babylon graph only when its route
+            // mounts. Keep that graph in one lazy family instead of emitting
+            // hundreds of tiny engine chunks for the packager to scan.
+            {
+              name: 'babylon',
+              test: /node_modules[\\/](@babylonjs|babylonjs-gltf2interface)[\\/]/
+            },
             // One chunk per heavyweight, lazy-only library family.
             // @streamdown/code lives WITH shiki because it statically imports
             // the full shiki bundle.

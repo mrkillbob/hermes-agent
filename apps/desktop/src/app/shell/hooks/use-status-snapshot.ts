@@ -36,6 +36,16 @@ export function useStatusSnapshot(
       setInferenceStatus(null)
     }
 
+    // A direct Vite/Safari preview has no Electron preload bridge.  Status is
+    // ambient gateway data, so there is nothing authoritative to poll in that
+    // topology; most importantly, do not call hermesApi() and turn a read-only
+    // Lunar City preview into an unhandled `window.hermesDesktop.api` error.
+    if (!window.hermesDesktop?.api) {
+      return () => {
+        cancelled = true
+      }
+    }
+
     const scheduleRefresh = () => {
       if (!cancelled) {
         timer = window.setTimeout(() => void refresh(), REFRESH_MS)

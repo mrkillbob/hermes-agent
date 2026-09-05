@@ -36,6 +36,7 @@ from agent.prompt_builder import (
     EXECUTION_GUIDANCE_MODELS,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
+    HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS,
     KANBAN_GUIDANCE,
     MEMORY_GUIDANCE,
     USER_PROFILE_GUIDANCE,
@@ -64,11 +65,26 @@ _PLUGIN_SECTION_FRAME_RE = re.compile(
 )
 
 
+GUARDED_EXECUTION_CONTRACT = (
+    "# Guarded coding execution contract\n"
+    "- Work only in the current session worktree. Inspect git status before edits "
+    "and preserve unrelated user changes.\n"
+    "- Ground claims in tools: read/search before changing code; use tools for "
+    "files, git, system state, calculations, and current facts.\n"
+    "- Make the requested change through tools, then verify it with the relevant "
+    "command and report its real result. Do not claim completion from a plan or guess.\n"
+    "- Batch independent read-only calls. Serialize dependent edits. Respect tool "
+    "permissions and confirmations for side effects.\n"
+    "- All listed skills remain available. Load a relevant skill with skill_view; "
+    "use tool discovery when a needed capability is not visible."
+)
+
+
 def _ra():
     """Lazy reference to the ``run_agent`` module.
 
     Helpers like ``load_soul_md``, ``build_environment_hints``,
-    ``build_context_files_prompt``, ``build_nous_subscription_prompt``,
+    ``build_context_files_prompt``,
     ``build_skills_system_prompt`` and ``get_toolset_for_tool`` are
     imported into ``run_agent``'s namespace.  Many tests
     ``patch("run_agent.load_soul_md", ...)``; if we imported them
@@ -208,8 +224,19 @@ def _frozen_plugin_prompt_sections(agent: Any) -> tuple:
 
         rendered = tuple(render_system_prompt_sections(_plugin_session_info(agent)))
     except Exception as exc:
-        logger.warning("Plugin system prompt sections could not be rendered: %s", exc)
-        rendered = ()
+        # Fail-open: a plugin whose render raises at a rebuild boundary
+        # keeps its last good bytes (stashed by invalidate_system_prompt)
+        # instead of silently vanishing from the prompt.
+        previous = getattr(agent, "_plugin_system_prompt_sections_previous", None)
+        if previous:
+            logger.warning(
+                "Plugin system prompt sections failed to re-render (%s); "
+                "keeping the previous frozen sections", exc,
+            )
+            rendered = previous
+        else:
+            logger.warning("Plugin system prompt sections could not be rendered: %s", exc)
+            rendered = ()
     setattr(agent, attr, rendered)
     return rendered
 
@@ -270,6 +297,89 @@ def _plugin_section_blocks(sections: tuple, position: str) -> List[str]:
     selected = [section for section in sections if section.position == position]
     block = format_system_prompt_sections(selected)
     return [block] if block else []
+
+
+def _session_start_like(agent: Any, now: Any) -> Any:
+    """Best-known conversation start time, or ``now`` as a fallback.
+
+    ``Conversation started:`` must reference when the conversation actually
+    began, not when the system prompt was last (re)built.  The prompt is
+    rebuilt on compression, fresh-agent gateway turns, and resume paths, and
+    stamping build time made the date drift forward across midnight (a chat
+    that started on Wednesday read as "Conversation started: Thursday" after
+    a Thursday-morning resume), contradicting the fresh per-turn time hint.
+    Prefer, in order:
+
+    0. the LINEAGE-ROOT session id's embedded timestamp — compaction can
+       rotate the session id, and each rotated id embeds its OWN mint time,
+       so after months of compactions rung 1 alone would quietly re-birth
+       the conversation at its latest rotation. Walking to the lineage root
+       (same walk as ``_conversation_root_id``) recovers the ORIGINAL
+       birth stamp — a Bot Mode forever-chat keeps knowing when it was
+       first born, across every compaction (maintainer-directed, #98426);
+    1. the timestamp embedded in ``session_id`` (``YYYYMMDD_HHMMSS_...``) —
+       immutable for the life of the session, so the line is byte-stable
+       across every rebuild boundary (preserving prefix-cache KV);
+    2. ``agent.session_start`` (session-creation stamp);
+    3. ``now`` (initial/legacy build without either).
+
+    Session-id and ``session_start`` stamps are recorded in the box's local
+    wall-clock; attach that zone first, then convert to the configured /
+    rendered zone (``now``'s tzinfo) so the displayed date is consistent with
+    the per-turn clock even when the box's TZ differs from the configured one.
+    """
+    from datetime import datetime
+
+    try:
+        machine_local_tz = datetime.now().astimezone().tzinfo
+    except (ValueError, OSError):
+        machine_local_tz = None
+
+    def _to_display_tz(dt: Any) -> Any:
+        if machine_local_tz is not None and dt.tzinfo is None:
+            try:
+                dt = dt.replace(tzinfo=machine_local_tz)
+            except ValueError:
+                pass
+        if getattr(now, "tzinfo", None) is not None and dt.tzinfo is not None:
+            try:
+                dt = dt.astimezone(now.tzinfo)
+            except (ValueError, OSError):
+                pass
+        return dt
+
+    # 0. Lineage root: compaction rotation mints NEW ids with NEW embedded
+    # stamps. Walk to the root id (cached on the agent — the lineage only
+    # grows at compaction, and this function runs at that exact boundary,
+    # so one walk per rebuild is fresh enough) and prefer ITS embedded
+    # timestamp: the conversation's true birth. Fail-open to rung 1.
+    session_id = getattr(agent, "session_id", None)
+    root_id = None
+    try:
+        db = getattr(agent, "_session_db", None)
+        if db is not None and isinstance(session_id, str) and session_id:
+            root_id = db.get_conversation_root(session_id)
+    except Exception:
+        root_id = None
+    for candidate in (root_id, session_id):
+        if isinstance(candidate, str) and candidate:
+            m = re.match(r"^(\d{8})_(\d{6})", candidate)
+            if m:
+                try:
+                    embedded = datetime.strptime(
+                        f"{m.group(1)}_{m.group(2)}", "%Y%m%d_%H%M%S"
+                    )
+                    return _to_display_tz(embedded)
+                except ValueError:
+                    pass
+
+    # 2. Session-creation stamp set by the runner.
+    session_start = getattr(agent, "session_start", None)
+    if hasattr(session_start, "astimezone"):
+        return _to_display_tz(session_start)
+
+    # 3. Fallback: build time.
+    return now
 
 
 def _agent_home(agent: Any) -> Optional[Path]:
@@ -391,8 +501,42 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
-    # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
-    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+    # Pointer to the docs (and, when it exists, the hermes-agent skill) for
+    # user questions about Hermes itself. The skill_view() pointer is a
+    # dangling reference in two cases — no skill tools in the toolset
+    # (Blank Slate) OR the hermes-agent skill not installed — so the
+    # variant is chosen AFTER the skills index is built (see below) and
+    # this slot holds its position. Toolset and skill set are fixed
+    # per-session, so cache-safe either way.
+    _has_skill_view = "skill_view" in (agent.valid_tool_names or set())
+    _help_guidance_slot = len(stable_parts)
+    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS)
+
+    # Guarded mode replaces duplicated coaching with a compact contract.
+    # The resolver is fail-closed: focus posture, a coding workspace, and exact
+    # provider/model allowlists in user config are all required.
+    from agent.llm_egress_runtime import provider_uses_egress_firewall
+
+    _remote_kanban_prompt = bool(
+        str(os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+        and provider_uses_egress_firewall(agent.provider)
+    )
+    _guarded_prompt = _remote_kanban_prompt
+    if agent.valid_tool_names:
+        try:
+            from agent.coding_context import guarded_prompt_enabled
+
+            if not _guarded_prompt:
+                _guarded_prompt = guarded_prompt_enabled(
+                    platform=agent.platform,
+                    cwd=resolve_context_cwd(),
+                    provider=agent.provider,
+                    model=agent.model,
+                )
+        except Exception:
+            _guarded_prompt = False
+    if _guarded_prompt:
+        stable_parts.append(GUARDED_EXECUTION_CONTRACT)
 
     # Universal task-completion / no-fabrication guidance.  Applied to ALL
     # models regardless of tool_use_enforcement gating — the failure modes
@@ -400,7 +544,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # path is blocked) are not model-family specific.  Gated only by
     # config.yaml ``agent.task_completion_guidance`` (default True) so
     # users who want a leaner prompt can turn it off.
-    if getattr(agent, "_task_completion_guidance", True) and agent.valid_tool_names:
+    if (getattr(agent, "_task_completion_guidance", True)
+            and agent.valid_tool_names):
         stable_parts.append(TASK_COMPLETION_GUIDANCE)
 
     # Universal parallel-tool-call guidance.  Tells the model to batch
@@ -411,7 +556,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # round-trips and the resent-context cost that compounds over a long
     # conversation.  Gated by config.yaml ``agent.parallel_tool_call_guidance``
     # (default True) and only injected when tools are actually loaded.
-    if getattr(agent, "_parallel_tool_call_guidance", True) and agent.valid_tool_names:
+    if (not _guarded_prompt and getattr(agent, "_parallel_tool_call_guidance", True)
+            and agent.valid_tool_names):
         stable_parts.append(PARALLEL_TOOL_CALL_GUIDANCE)
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
@@ -424,21 +570,21 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # When only the user profile store is enabled, the narrower
     # USER_PROFILE_GUIDANCE is injected instead — the full block instructs the
     # model to write notes to a MEMORY.md store that does not exist.
-    _mem_enabled = getattr(agent, "_memory_enabled", True)
-    _profile_enabled = getattr(agent, "_user_profile_enabled", True)
-    if "memory" in agent.valid_tool_names:
-        if _mem_enabled:
-            tool_guidance.append(MEMORY_GUIDANCE)
-        elif _profile_enabled:
-            tool_guidance.append(USER_PROFILE_GUIDANCE)
-    if "session_search" in agent.valid_tool_names:
-        tool_guidance.append(SESSION_SEARCH_GUIDANCE)
-    if "skill_manage" in agent.valid_tool_names:
-        tool_guidance.append(SKILLS_GUIDANCE)
-    # Kanban worker/orchestrator lifecycle — only present when the
-    # dispatcher spawned this process (kanban_show check_fn gates on
-    # HERMES_KANBAN_TASK env var). Normal chat sessions never see
-    # this block. Resolved once at __init__ (see _kanban_worker_guidance).
+    if not _guarded_prompt:
+        _mem_enabled = getattr(agent, "_memory_enabled", True)
+        _profile_enabled = getattr(agent, "_user_profile_enabled", True)
+        if "memory" in agent.valid_tool_names:
+            if _mem_enabled:
+                tool_guidance.append(MEMORY_GUIDANCE)
+            elif _profile_enabled:
+                tool_guidance.append(USER_PROFILE_GUIDANCE)
+        if "session_search" in agent.valid_tool_names:
+            tool_guidance.append(SESSION_SEARCH_GUIDANCE)
+        if "skill_manage" in agent.valid_tool_names:
+            tool_guidance.append(SKILLS_GUIDANCE)
+    # Kanban worker/orchestrator lifecycle is load-bearing whenever the
+    # dispatcher spawned this process. Guarded local workers keep this compact,
+    # env-gated protocol even though ordinary tool coaching is suppressed.
     _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
     if _kanban_guidance:
         tool_guidance.append(_kanban_guidance)
@@ -450,20 +596,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
 
     # Steering only lands inside tool results, so it's only reachable when the
     # agent has tools. Static text → byte-stable prompt (no cache hit).
-    if agent.valid_tool_names:
+    if not _guarded_prompt and agent.valid_tool_names:
         stable_parts.append(STEER_CHANNEL_NOTE)
 
-    # Computer-use — goes in as its own block rather than being merged into
-    # tool_guidance because the content is multi-paragraph. The guidance is
-    # rendered for the host platform so Windows/Linux hosts don't see
-    # macOS-only wording (Mac, Space, cmd+s).
-    if "computer_use" in agent.valid_tool_names:
-        from agent.prompt_builder import computer_use_guidance
-        stable_parts.append(computer_use_guidance())
-
-    nous_subscription_prompt = _r.build_nous_subscription_prompt(agent.valid_tool_names)
-    if nous_subscription_prompt:
-        stable_parts.append(nous_subscription_prompt)
     # Tool-use enforcement: tells the model to actually call tools instead
     # of describing intended actions.  Controlled by config.yaml
     # agent.tool_use_enforcement:
@@ -506,7 +641,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     #   list  — custom model-name substrings to match
     # Resolved once at session start keyed on the (fixed) model name, so
     # the system prompt stays byte-stable for the life of the conversation.
-    if agent.valid_tool_names:
+    if not _guarded_prompt and agent.valid_tool_names:
         _exec_guidance = getattr(agent, "_execution_guidance", "auto")
         _exec_inject = False
         if _exec_guidance is True or (isinstance(_exec_guidance, str) and _exec_guidance.lower() in {"true", "always", "yes", "on"}):
@@ -521,7 +656,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             model_lower = (agent.model or "").lower()
             _exec_inject = any(p in model_lower for p in EXECUTION_GUIDANCE_MODELS)
         if _exec_inject:
-            stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+            from agent.prompt_builder import execution_guidance_text
+            stable_parts.append(execution_guidance_text(agent.valid_tool_names))
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:
@@ -549,10 +685,19 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             available_tools=agent.valid_tool_names,
             available_toolsets=avail_toolsets,
             compact_categories=_compact_cats or None,
+            compact_all_categories=_guarded_prompt,
             skills_dir_override=_agent_skills_dir(agent),
         )
     else:
         skills_prompt = ""
+
+    # Resolve the help-guidance variant now that the skills index exists:
+    # the skill-pointer variant requires BOTH skill_view in the toolset AND
+    # the hermes-agent skill actually present in the index (gating on the
+    # rendered index line keeps this a pure string check — no second
+    # filesystem scan, and it inherits the index cache's stability).
+    if _has_skill_view and "- hermes-agent:" in skills_prompt:
+        stable_parts[_help_guidance_slot] = HERMES_AGENT_HELP_GUIDANCE
 
     # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
     # of the requested model. Inject explicit model identity into the system prompt
@@ -571,7 +716,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # Environment hints (WSL, Termux, etc.) — tell the agent about the
     # execution environment so it can translate paths and adapt behavior.
     # Stable for the lifetime of the process.
-    _env_hints = _r.build_environment_hints()
+    _env_hints = "" if _remote_kanban_prompt else _r.build_environment_hints()
     if _env_hints:
         stable_parts.append(_env_hints)
 
@@ -582,7 +727,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # stay in their historical position after the workspace snapshot.
     coding_workspace_parts: List[str] = []
     coding_trailing_parts: List[str] = []
-    if agent.valid_tool_names:
+    if agent.valid_tool_names and not _remote_kanban_prompt:
         try:
             from agent.coding_context import coding_system_prompt_parts
 
@@ -590,6 +735,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
                 platform=agent.platform,
                 cwd=resolve_context_cwd(),
                 model=agent.model,
+                valid_tool_names=agent.valid_tool_names,
             )
             stable_parts.extend(coding_prefix_parts)
         except Exception:
@@ -693,7 +839,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         _root_str = str(get_default_hermes_root())
     else:
         _home_str = _root_str = str(get_hermes_home())
-    if active_profile == "default":
+    if _remote_kanban_prompt:
+        post_workspace_parts.append(
+            f"Active Hermes profile: {active_profile}. Work only in the current "
+            "task workspace and use relative paths."
+        )
+    elif active_profile == "default":
         post_workspace_parts.append(
             "Active Hermes profile: default. Other profiles (if any) live "
             "under " + _root_str + "/profiles/<name>/. Each profile has its own "
@@ -719,9 +870,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             f"{default_root}/cron/, {default_root}/memories/ — those belong to a "
             f"different session run from a different shell. Do NOT modify "
             f"another profile's skills/plugins/cron/memories unless the user "
-            f"explicitly directs you to. The cross-profile write guard will "
-            f"refuse such writes by default; pass cross_profile=True only "
-            f"after explicit direction."
+            f"explicitly directs you to."
         )
 
     platform_key = (agent.platform or "").lower().strip()
@@ -828,21 +977,30 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             if user_block:
                 volatile_parts.append(user_block)
 
-    # External memory provider system prompt block (additive to built-in)
+    # External memory provider system prompt block (additive to built-in).
+    # Gated on the same check ``inject_memory_provider_tools`` uses so we
+    # never advertise provider tools that the agent's toolset configuration
+    # has already gated off (#81014).
     if agent._memory_manager:
         try:
-            _ext_mem_block = agent._memory_manager.build_system_prompt()
-            if _ext_mem_block:
-                volatile_parts.append(_ext_mem_block)
+            from agent.memory_manager import memory_provider_tools_exposed as _mem_exposed
         except Exception:
-            pass
+            _mem_exposed = None
+        if _mem_exposed is None or _mem_exposed(agent):
+            try:
+                _ext_mem_block = agent._memory_manager.build_system_prompt()
+                if _ext_mem_block:
+                    volatile_parts.append(_ext_mem_block)
+            except Exception:
+                pass
 
     # Plugin sections are intentionally confined to one coarse anchor in the
     # volatile tail. This preserves deterministic ordering and lets a resumed
     # process reconstruct the stable cache prefix without re-running plugins.
-    volatile_parts.extend(
-        _plugin_section_blocks(_frozen_plugin_prompt_sections(agent), "after_memory")
-    )
+    if not _remote_kanban_prompt:
+        volatile_parts.extend(
+            _plugin_section_blocks(_frozen_plugin_prompt_sections(agent), "after_memory")
+        )
 
     from hermes_time import get_timezone as _hermes_tz, now as _hermes_now
     now = _hermes_now()
@@ -874,9 +1032,26 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if _offset:  # '-0400' -> 'UTC-04:00'
         _zone_bits.append(f"UTC{_offset[:3]}:{_offset[3:]}")
     _zone_suffix = f" ({', '.join(_zone_bits)})" if _zone_bits else ""
+    _start = _session_start_like(agent, now)
     timestamp_line = (
-        f"Conversation started: {now.strftime('%A, %B %d, %Y')}{_zone_suffix}"
+        f"Conversation started: {_start.strftime('%A, %B %d, %Y')}{_zone_suffix}"
     )
+    # Second line (maintainer design, salvaging #96224's anchor): long-lived
+    # sessions — Bot Mode forever-chats, messenger channels people never
+    # close — span many days and many compactions. A lone birth date leads
+    # the model to believe it is still living in that old day. The prompt is
+    # rebuilt at every compaction boundary, so stamp the rebuild day too:
+    # 'started' stays anchored and byte-stable, 'as of' refreshes exactly
+    # when the cache prefix is already being invalidated (compaction), so
+    # the added line costs no extra cache churn. Same-day sessions skip the
+    # second line entirely — nothing to correct, and the single-line shape
+    # stays byte-identical for the day (prefix-cache safe).
+    if now.strftime("%Y%m%d") != _start.strftime("%Y%m%d"):
+        timestamp_line += (
+            f"\nToday's date (as of the last context rebuild): "
+            f"{now.strftime('%A, %B %d, %Y')} — trust this over the start "
+            f"date for what day it is now; query tools for exact time."
+        )
     # Bot Chat sessions are effectively eternal — a birth date frozen in the
     # prompt becomes confidently-wrong misinformation within days. Timeless
     # prompts keep the identity lines but drop the date (the timezone still
@@ -933,10 +1108,21 @@ def invalidate_system_prompt(agent: Any) -> None:
     """Invalidate the cached system prompt, forcing a rebuild on the next turn.
 
     Called after context compression events. Also reloads memory from disk
-    so the rebuilt prompt captures any writes from this session.
+    so the rebuilt prompt captures any writes from this session, and clears
+    the frozen plugin-section snapshot so plugins re-render at the same
+    boundary (maintainer-directed, #95681 arc): a plugin section is just
+    another prompt block carrying state — freezing it while memory, skills,
+    and guidance refresh would recreate the stale-block disease inside
+    plugin-land. The previous bytes are stashed so a plugin whose render
+    RAISES falls back to its last good section instead of vanishing
+    (fail-open guard, not a freeze).
     """
     agent._cached_system_prompt = None
     agent._cached_system_prompt_static = None
+    _snapshot_attr = "_plugin_system_prompt_sections_snapshot"
+    if hasattr(agent, _snapshot_attr):
+        agent._plugin_system_prompt_sections_previous = getattr(agent, _snapshot_attr)
+        delattr(agent, _snapshot_attr)
     if agent._memory_store:
         agent._memory_store.load_from_disk()
 

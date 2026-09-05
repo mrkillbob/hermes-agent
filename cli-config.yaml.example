@@ -17,6 +17,15 @@ database:
   # Optional WAL sizing pragmas (integers). Unset = SQLite defaults.
   # wal_autocheckpoint: 1000     # pages between automatic checkpoints
   # journal_size_limit: 67108864 # cap the WAL/journal file size in bytes
+  #
+  # Durability level for every state.db connection: OFF, NORMAL, FULL, EXTRA
+  # (or 0-3). Unset leaves SQLite's default, which is baked in at compile time
+  # (SQLITE_DEFAULT_WAL_SYNCHRONOUS) and therefore differs between the bundled
+  # interpreter, a distro python3 and a Homebrew one. Set it if you need to
+  # know which one you are running rather than infer it. On macOS this is a
+  # floor, not a pin: values below FULL are refused because Darwin's fsync()
+  # does not guarantee write ordering, while EXTRA is honored normally.
+  # synchronous: FULL
 
 # =============================================================================
 # Runtime Limits
@@ -31,10 +40,13 @@ runtime:
 # =============================================================================
 # Model Configuration
 # =============================================================================
+# The GPT-5.4 family was removed from active routing ahead of retirement. Do not
+# silently follow mutable model aliases: evaluate any replacement mini or newly
+# released model with representative per-profile benchmarks before adoption.
 model:
   # Default model to use (can be overridden with --model flag)
   # Both "default" and "model" work as the key name here.
-  default: "anthropic/claude-opus-4.6"
+  default: "openai-codex/gpt-5.5"
   
   # Inference provider selection:
   #   "auto"         - Auto-detect from credentials (default)
@@ -139,6 +151,15 @@ model:
 #     # api_mode auto-detected as codex_responses for api.meta.ai; no need to set
 #     # (the bundled meta-ai provider covers this — a named custom provider is
 #     # only needed for a non-default Meta-compatible endpoint)
+# providers:
+#   router:
+#     base_url: https://api.router.com/v1
+#     api_key: ${RAMP_ROUTER_API_KEY}
+#     # api_mode auto-detected as codex_responses for api.router.com — the
+#     # Responses API is Router's native wire (chat/completions is only a
+#     # compatibility shim). The bundled router provider covers this; a named
+#     # custom provider is only needed for a non-default Router-compatible
+#     # endpoint.
 
 
 # Command-minted credentials (optional): key_cmd
@@ -224,7 +245,7 @@ model:
 #         timeout_seconds: 600       # Longer timeout for extended-thinking Opus calls
 #   openai-codex:
 #     models:
-#       gpt-5.4:
+#       gpt-5.6-luna:
 #         stale_timeout_seconds: 1800  # Longer non-stream stale timeout for slow large-context turns
 
 # =============================================================================
@@ -288,9 +309,31 @@ model:
 # =============================================================================
 # Git Worktree Isolation
 # =============================================================================
-# When enabled, each CLI session creates an isolated git worktree so multiple
-# agents can work on the same repo concurrently without file collisions.
-# Equivalent to always passing --worktree / -w on the command line.
+# Durable per-conversation isolation shared by interactive CLI, Desktop/TUI,
+# and messaging gateways. New root conversations branch from the exact local
+# HEAD of source_worktree; resume/continue reuses the persisted binding, and
+# /new gets a new binding. Worktrees are retained when the process exits and
+# can be removed only by the guarded explicit-cleanup flow after Hermes proves
+# they are inactive, clean, pushed, and integrated.
+#
+# conversation_worktree:
+#   enabled: false
+#   source_worktree: "/absolute/path/to/stable-checkout"
+#   worktree_root: "/absolute/path/to/conversation-worktrees"
+#   branch_prefix: "hermes/session"
+#   bootstrap: false
+#   bootstrap_command: []       # argv list; required and non-empty when bootstrap is true
+#   bootstrap_timeout: 300      # finite positive seconds
+#   create_timeout: 60          # finite positive seconds
+#   retain_until_explicit_cleanup: true  # required when enabled
+#
+# Invalid or unavailable managed policy fails closed: Hermes does not silently
+# continue in source_worktree. Kanban, cron, subagent, and explicit/manual
+# worktrees keep their existing task-owned lifecycle and are not rebound.
+#
+# Legacy CLI-only isolation remains available independently. When enabled,
+# each CLI invocation creates the historical temporary worktree; this is
+# equivalent to always passing --worktree / -w on the command line.
 #
 # worktree: true    # Always create a worktree when in a git repo
 # worktree: false   # Default — only create when -w flag is passed
@@ -340,6 +383,7 @@ terminal:
   #   profile - force HERMES_HOME/home for strict per-profile CLI config isolation
   home_mode: "auto"
   docker_mount_cwd_to_workspace: false  # SECURITY: off by default. Opt in to mount the launch cwd into Docker /workspace.
+  docker_isolate_host_data: false  # Suppress automatic credential, skill, cache, and egress-proxy mounts.
   lifetime_seconds: 300
   # sudo_password: "hunter2"  # Optional: pipe a sudo password via sudo -S. SECURITY WARNING: plaintext.
   # sudo_password: ""         # Explicit empty password: try empty and never open the interactive sudo prompt.
@@ -494,6 +538,12 @@ browser:
   extension_control:
     enabled: false
 
+  # Maximum characters of snapshot content before truncate-and-store.
+  # Increase for long pages (for example, documentation or financial reports),
+  # or decrease to reduce context usage. Minimum: 1000; default: 15000
+  # (same per-page budget as web_extract).
+  # snapshot_threshold: 15000
+
 # =============================================================================
 # Tool Loop Guardrails
 # =============================================================================
@@ -535,6 +585,21 @@ compression:
   # Enable automatic context compression (default: true)
   # Set to false if you prefer to manage context manually or want errors on overflow
   enabled: true
+
+  # Fail closed before lossy compaction unless an active memory provider that
+  # implements the pre-compress checkpoint contract (API v2) confirms its
+  # durable checkpoint (default: false). With this on and no checkpoint, the
+  # compaction attempt errors with BLOCKED_MISSING_PREREQUISITE and the
+  # uncompressed transcript is preserved for a later retry. The gate binds to
+  # every compaction authority: server-side native compaction
+  # (codex_responses_native) is suppressed while armed, post-turn
+  # micro-compaction is forced off (no checkpoint hook in its path), and the
+  # codex_app_server API mode is refused at agent init (the codex agent
+  # compacts its own thread — no checkpoint can be guaranteed there). Only
+  # enable it with a checkpoint-capable provider configured — see
+  # website/docs/developer-guide/memory-provider-plugin.md
+  # ("Pre-Compress Checkpoints").
+  checkpoint_required: false
 
   # Opt-in compression progress notices on chat platforms (default: false).
   # By design, routine automatic compression is SILENT on human-facing chat
@@ -619,9 +684,13 @@ compression:
   # fallback and still handles every non-eligible session.
   codex_responses_native: false
 
-  # Server-side compaction trigger in input tokens. Clamped below the local
-  # compression threshold at request time so the server compacts first.
-  codex_responses_compact_threshold: 200000
+  # Optional absolute server compaction trigger in input tokens. The default
+  # null value follows the resolved local compression trigger with an 8192 token
+  # safety margin. For example, a local trigger of 765000 selects 756808.
+  # A positive integer stays absolute and only clamps downward when needed so
+  # the server compacts first. Invalid values use this automatic behavior. If
+  # the local trigger is unavailable, automatic mode uses 200000.
+  codex_responses_compact_threshold: null
 
   # Number of non-system messages to protect at the head of the transcript, in
   # ADDITION to the system prompt (which is always implicitly protected).
@@ -756,6 +825,16 @@ prompt_caching:
 #     provider: "auto"
 #     model: ""
 #     reasoning_effort: "low"
+#
+#   # Guarded compression fast lane. The output cap is honored only when both
+#   # provider and model are explicit and reasoning_effort is exactly "none".
+#   # If the effective route drifts, Hermes drops the cap and reasoning
+#   # override instead of applying them to an uncertified model.
+#   compression:
+#     provider: "main"
+#     model: "qwen3:8b"
+#     reasoning_effort: "none"
+#     max_output_tokens: 1400  # positive integer; 0 = historic uncapped behavior
 #
 #   # Gemini 3.1 TTS hidden audio-tag insertion
 #   tts_audio_tags:
@@ -1186,13 +1265,20 @@ platform_toolsets:
 #         # append  = Hermes defaults first, then user priority
 #         # replace = only the list below defines priority
 #         priority_mode: prepend
+#         # Priority is applied across core + plugin + skill commands before
+#         # the cap, so a listed skill command always keeps a menu slot.
 #         priority:
 #           - my_plugin_command
+#           - my-important-skill
 #   slack:
 #     extra:
 #       # Render live tool calls as Slack-native plan/task cards. This explicit
 #       # opt-in works even though Slack text tool_progress defaults to off.
 #       native_task_cards: false
+#       # Suppress automatic link-preview cards without removing clickable links.
+#       # Omit either key to preserve Slack's default for that preview type.
+#       unfurl_links: false
+#       unfurl_media: false
 #   webhook:
 #     extra:
 #       # Route scripts default to a 30 second timeout. Scripts must live under
@@ -1482,7 +1568,19 @@ stt:
 # Intermediate tool results stay out of the LLM's context window.
 code_execution:
   timeout: 300         # Max seconds per script before kill (default: 300 = 5 min)
-  max_tool_calls: 50   # Max RPC tool calls per execution (default: 50)
+  max_tool_calls: 50   # Max RPC tool calls per execution (default: 50; <= 0 = unlimited)
+  # kernel_mode: per-call | session (default: per-call for remote backends, session for local)
+  #   per-call — fresh child process per execute_code call; no state carries over.
+  #   session  — one persistent kernel per (task, mode, interpreter, cwd, tool-set):
+  #              variables, imports, and loaded data survive across calls, so
+  #              multi-step data work stops re-loading its inputs. A timed-out/
+  #              interrupted cell kills the kernel; pass reset=true to discard
+  #              state deliberately. Remote terminal backends currently run per-call.
+  #              Security scrubbing, tool whitelist, and output redaction are
+  #              identical in both modes.
+  # kernel_mode: per-call
+  # kernel_idle_timeout: 1800   # Reap kernels idle longer than this (seconds)
+  # max_session_kernels: 4      # Process-wide LRU cap on live kernels
 
 # =============================================================================
 # Subagent Delegation
@@ -1834,6 +1932,16 @@ updates:
 #   # default — works on Fly.io out of the box).
 #   #
 #   #   public_url: "https://example.com/hermes"
+#   #
+#   # Reverse proxies connecting from another container or host are not
+#   # trusted by default. Add only the proxy's exact IP address, or a bounded
+#   # CIDR for a dedicated proxy network, so X-Forwarded-Proto and
+#   # X-Forwarded-For can be honored. Loopback is always trusted. Wildcards
+#   # and /0 networks are rejected.
+#   #
+#   #   trusted_proxies:
+#   #     - "172.20.0.5"
+#   #     # - "172.20.0.0/24"  # dedicated network, if the IP is dynamic
 #
 # -----------------------------------------------------------------------------
 # Self-hosted OIDC dashboard auth (generic OpenID Connect — Authentik,

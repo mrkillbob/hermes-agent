@@ -21,6 +21,8 @@ interface OverlayViewProps {
   onClose: () => void
   closeLabel?: string
   contentClassName?: string
+  /** Let immersive surfaces (for example, a game-like world map) own the full overlay. */
+  fullBleed?: boolean
   /** Chrome pinned to the card's top edge, horizontally centered and riding
    *  the border half-in half-out (e.g. the Settings search pill). Rendered
    *  beside the card, not inside it — the card clips its own overflow. */
@@ -37,6 +39,7 @@ export function OverlayView({
   onClose,
   closeLabel = translateNow('common.close'),
   contentClassName,
+  fullBleed = false,
   edgeBadge,
   headerContent,
   rootClassName,
@@ -79,8 +82,8 @@ export function OverlayView({
         // titlebar height so the card clears the OS traffic-lights vertically;
         // since the card top already sits below them, the left needs no extra
         // inset — keeping all sides equal so the card is ~full-width at any size.
-        'p-[calc(var(--titlebar-height)+0.625rem)]',
-        'sm:p-[calc(var(--titlebar-height)+0.875rem)]'
+        fullBleed ? 'p-0' : 'p-[calc(var(--titlebar-height)+0.625rem)]',
+        fullBleed ? 'sm:p-0' : 'sm:p-[calc(var(--titlebar-height)+0.875rem)]'
       )}
       // Every OverlayView-based overlay (settings, command-center, agents, cron,
       // profiles, star map, …) covers the chat while the composer stays mounted
@@ -106,7 +109,7 @@ export function OverlayView({
         <div
           className={cn(
             'relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-chat-surface-background) shadow-md',
-            rootClassName
+            cn(fullBleed && 'rounded-none border-0', rootClassName)
           )}
           // Marks the card as a RAISED surface for window glass: while the field
           // behind it thins to show the desktop, this card stays near-opaque
