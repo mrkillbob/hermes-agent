@@ -2195,6 +2195,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # hermes_constants is imported.
     try:
         env["HERMES_HOME"] = resolve_profile_env(profile_arg)
+        from hermes_cli.kanban_worker_environment import validate_profile_config
+
+        validate_profile_config(env["HERMES_HOME"])
     except FileNotFoundError:
         # No profile dir (isolated test fixtures) — the CLI resolves it from
         # HERMES_PROFILE (set below) instead.
@@ -2203,6 +2206,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_WORKSPACE"] = workspace
+    from hermes_cli.kanban_worker_environment import bind_worker_environment
+
+    bind_worker_environment(env, workspace)
     # Tag the session `kanban` so session-browsing surfaces filter it out by
     # source instead of rendering one sidebar row per attempt.
     env["HERMES_SESSION_SOURCE"] = "kanban"

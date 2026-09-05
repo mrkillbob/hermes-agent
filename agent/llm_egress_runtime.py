@@ -155,6 +155,13 @@ _GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS = frozenset(
         "review_thread_resolved",
         "status",
         "error_excerpt",
+        "receipt_id",
+        "manifest_digest",
+        "handoff_reason",
+        "handoff_status",
+        "repair_status",
+        "retryable",
+        "command_count",
     }
 )
 _GITHUB_LIST_TERMINAL_MAX_ROWS = 100
@@ -3793,6 +3800,10 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
             for key, value in candidate.items():
                 if key not in _GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS:
                     continue
+                if key in {"receipt_id", "manifest_digest"} and (
+                    not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                ):
+                    continue
                 if value is None or isinstance(value, (bool, int)):
                     payload[str(key)] = value
                     continue
@@ -3802,6 +3813,14 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
                 if len(value) <= limit:
                     payload[str(key)] = value
             break
+    if failure_excerpt is None and exit_code not in (None, 0) and payload is None:
+        # Terminal backends merge stderr into output. Retain only recognizable
+        # launch diagnostics, never arbitrary failed-command stdout/source.
+        diagnostics = [line for line in str(text or "").splitlines() if re.search(
+            r"(?:ModuleNotFoundError:|ImportError:|command not found|No such file or directory)",
+            line,
+        )]
+        failure_excerpt = safe_failure_excerpt("\n".join(diagnostics[:4]))
     replay: dict[str, object] = {
         "terminal_result": "github_pr_feedback",
         "exit_code": exit_code,
@@ -3809,6 +3828,13 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
     }
     if payload is not None:
         replay["json"] = payload
+    if isinstance(parsed, Mapping):
+        session_id = parsed.get("session_id")
+        if isinstance(session_id, str) and re.fullmatch(r"proc_[0-9a-f]{12}", session_id):
+            replay["session_id"] = session_id
+            pid = parsed.get("pid")
+            if type(pid) is int and 0 < pid < 2**31:
+                replay["pid"] = pid
     if failure_excerpt:
         replay["error_excerpt"] = failure_excerpt
     return json.dumps(replay, sort_keys=True, separators=(",", ":"))
