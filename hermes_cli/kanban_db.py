@@ -95,6 +95,20 @@ from toolsets import get_toolset_names
 
 _log = logging.getLogger(__name__)
 
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    """Return a valid integer environment override or ``default``."""
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            return default
+        if parsed >= minimum:
+            return parsed
+    return default
+
+
 _GITHUB_PR_FEEDBACK_IDEMPOTENCY_PREFIX = "github-pr-feedback:"
 _GITHUB_PR_INTENT_REVIEW_PREFIX = "github-pr-feedback:intent-review:"
 _RESEARCH_LAB_INTAKE_IDEMPOTENCY_PREFIX = "research-lab-intake-"
