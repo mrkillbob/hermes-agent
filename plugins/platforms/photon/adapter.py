@@ -754,6 +754,19 @@ class PhotonAdapter(BasePlatformAdapter):
             os.getenv("PHOTON_SIDECAR_AUTOSTART", "true")
         ).lower() not in ("0", "false", "no")
         self._node_bin = os.getenv("PHOTON_NODE_BIN") or shutil.which("node") or "node"
+        # Behavioral settings belong in PlatformConfig.extra (config.yaml),
+        # with the environment retained as an operator override.  The
+        # sidecar consumes this value through its process environment.
+        _read_receipts = _first_set(
+            extra.get("read_receipts"),
+            os.getenv("PHOTON_READ_RECEIPTS"),
+        )
+        self._read_receipts = (
+            str(_read_receipts if _read_receipts is not None else "true")
+            .strip()
+            .lower()
+            not in {"false", "0", "no", "off"}
+        )
 
         # Presence watchdog. spectrum-ts only reconnects when its inbound
         # iterator throws or ends; a half-open ("zombie") gRPC socket makes the
@@ -968,6 +981,8 @@ class PhotonAdapter(BasePlatformAdapter):
             "[photon] connected — sidecar on %s:%d, streaming inbound over gRPC",
             self._sidecar_bind, self._sidecar_port,
         )
+        # Plugin-registered native handlers (ctx.register_platform_handler).
+        self._wire_plugin_handlers(None)
         return True
 
     async def disconnect(self) -> None:
@@ -1290,6 +1305,15 @@ class PhotonAdapter(BasePlatformAdapter):
             )
 
         ctype = content.get("type")
+        if ctype in {"read", "read_receipt"}:
+            # Read receipts are presence signals, not a user turn. The sidecar
+            # only forwards receipts for messages we sent, so logging the
+            # target is enough for observability without waking the agent.
+            logger.debug(
+                "[photon] outbound message read: %s",
+                content.get("targetMessageId") or "unknown",
+            )
+            return
         if ctype == "reaction":
             # Route only tapbacks on messages WE sent — those are implicitly
             # addressed to the bot (feishu precedent: synthetic text event).
@@ -1635,6 +1659,7 @@ class PhotonAdapter(BasePlatformAdapter):
         env["PHOTON_SIDECAR_PORT"] = str(self._sidecar_port)
         env["PHOTON_SIDECAR_BIND"] = self._sidecar_bind
         env["PHOTON_SIDECAR_TOKEN"] = self._sidecar_token
+        env["PHOTON_READ_RECEIPTS"] = "true" if self._read_receipts else "false"
         # The sidecar exits when its stdin (the pipe below) hits EOF, so a
         # gateway death of ANY kind — including SIGKILL, where disconnect()
         # never runs — can't leave it orphaned on the port.
