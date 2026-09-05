@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 
 
 def plan_discovery(spec, tasks, day):
@@ -46,15 +47,19 @@ def main():
         return
     receipts = []
     for department in plan:
-        body = (f'Authoritative discovery source: {root}. Read {root}/configs/federation/roles.json. '
+        body = (f'Authoritative discovery source: {root}. Read {root}/AGENTS.md and {root}/configs/federation/roles.json. '
+                'LunaBot source: /Users/mikedemott/LunaBot; its library spec is '
+                '/Users/mikedemott/LunaBot/docs/superpowers/specs/2026-08-26-governed-library-librarian-design.md. '
+                'Active catalogue implementation: /Users/mikedemott/.codex/lunabot-support/worktrees/codex-library-vault-catalog-20260905. '
                 f'Lunar City sources are at {root}/apps/desktop/src/app/lunar-city and '
                 f'{root}/apps/desktop/public/lunar-city. This is a read-only discovery workspace; '
                 'put findings in the task result/comment and assign implementation to an isolated child.\n\n'
                 + spec['instructions'] + '\n\nDepartment assignment: ' + department['brief'])
+        workspace = tempfile.mkdtemp(prefix='hermes-discovery-' + department['id'] + '-')
         result = run(args.hermes, 'kanban', '--board', spec['board'], 'create',
                      department['task_title'],
                      '--body', body, '--assignee', department['assignee'],
-                     '--project', department['project'], '--workspace', 'dir:' + str(root),
+                     '--project', department['project'], '--workspace', 'dir:' + workspace,
                      '--idempotency-key', department['key'], '--max-runtime', '15m',
                      '--max-retries', '2', '--created-by', department['creator'], '--json')
         receipts.append({'department': department['id'], 'task': result})
