@@ -1285,9 +1285,18 @@ def _dispatch_feedback(ctx: Any, args: argparse.Namespace) -> int:
     ledger = FeedbackLedger.for_current_profile()
     try:
         result = _controller(policy, ledger).dispatch_feedback(receipt)
+        payload = _scan_payload(result)
+        if result.skipped.get("duplicate"):
+            payload["pending_dispatches"] = [
+                {"task_id": binding.task_id,
+                 "feedback_kind": binding.receipt.feedback_kind,
+                 "feedback_id": binding.receipt.feedback_id,
+                 "head_sha": binding.receipt.head_sha}
+                for binding in ledger.pending_task_bindings_for_head(receipt)
+            ]
     finally:
         ledger.close()
-    print(json.dumps(_scan_payload(result), sort_keys=True))
+    print(json.dumps(payload, sort_keys=True))
     return 1 if result.degraded else 0
 
 
