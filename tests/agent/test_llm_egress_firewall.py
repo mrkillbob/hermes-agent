@@ -296,6 +296,25 @@ def test_source_grant_allows_secret_shaped_github_expressions_only(tmp_path):
     assert decision.allowed is True
 
 
+def test_source_grant_allows_documented_credential_placeholders_only(tmp_path):
+    source = (
+        "GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx\n"
+        "SLACK_BOT_TOKEN=xoxb-...\n"
+        "GOOGLE_API_KEY=your_google_ai_studio_key_here\n"
+    )
+    path = tmp_path / ".env.example"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=3)
+
+    decision = firewall(tmp_path).preflight(
+        _typed_request(_request(source), source_grant=grant),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+
+
 def test_source_bytes_cannot_be_smuggled_as_a_sanitized_literal(tmp_path):
     path = tmp_path / "private.py"
     path.write_text("private source\n", encoding="utf-8")

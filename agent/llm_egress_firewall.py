@@ -479,6 +479,13 @@ _BOUNDED_SOURCE_SECRET_PLACEHOLDER = re.compile(
     r"\s*[:=]\s*[\"']?(?:stale-key|legacy-stale-key|test-key|dummy-key|"
     r"example-key|placeholder-key|redacted-key)[\"']?\b"
 )
+_BOUNDED_SOURCE_SECRET_PLACEHOLDER_VALUE = re.compile(
+    r"(?P<prefix>[:=]\s*)(?:"
+    r"ghp_x{4,}|xox[bap]-\.\.\.|your_[a-z0-9_]+|"
+    r"x{4,}(?:\s+x{4,})*|\*{3,}"
+    r")(?=$|[\s#])",
+    re.IGNORECASE,
+)
 _BOUNDED_SOURCE_SECRET_ENV_NAME = re.compile(
     r"\b[A-Z][A-Z0-9_]{2,63}_(?:TOKEN|SECRET|PASSWORD|PASSWD|"
     r"API_KEY|PRIVATE_KEY|CREDENTIALS)\b"
@@ -1209,11 +1216,18 @@ def _source_text_for_base64_scan(
             and re.match(r"\s*(?:[=,.;:)(\]}])", after) is not None
         )
 
+    # Explicit credential placeholders in checked-in examples are source
+    # grammar, not credential material. Keep the exception exact and scoped
+    # to validated source grants; arbitrary credential-shaped values remain
+    # visible to the fail-closed scan.
+    masked = _BOUNDED_SOURCE_SECRET_PLACEHOLDER_VALUE.sub(
+        r"\g<prefix><source-placeholder>", text
+    )
     # A source path such as ``execution_submit_boundary.py`` is one lexical
     # token, but the Base64 candidate regex sees its uppercase suffix after
     # the underscore as a standalone candidate. Mask the whole path-shaped
     # token before that scan; an opaque payload cannot contain a dot.
-    masked = _BOUNDED_SOURCE_FILE_TOKEN.sub("<source-file>", text)
+    masked = _BOUNDED_SOURCE_FILE_TOKEN.sub("<source-file>", masked)
     masked = _BOUNDED_ISO_DURATION.sub("<source-duration>", masked)
     masked = _BOUNDED_SOURCE_NUMERIC_CONSTANT_ASSIGNMENT.sub(
         "<source-constant>", masked
@@ -1307,6 +1321,9 @@ def _generated_context_text_for_base64_scan(text: str) -> str:
 def _source_text_for_secret_scan(text: str) -> str:
     """Mask code identifiers that resemble secret names, not secret values."""
 
+    text = _BOUNDED_SOURCE_SECRET_PLACEHOLDER_VALUE.sub(
+        r"\g<prefix><source-placeholder>", text
+    )
     text = _BOUNDED_SOURCE_SECRET_EXPRESSION_ASSIGNMENT.sub(
         "<source-secret-expression>", text
     )
