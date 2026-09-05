@@ -709,7 +709,7 @@ def test_github_client_updates_existing_label_after_exact_read() -> None:
         "api",
         "repos/acme/widgets/labels/codex",
         "--method",
-        "PUT",
+        "PATCH",
         "--field",
         "new_name=codex",
         "--field",

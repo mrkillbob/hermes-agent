@@ -85,6 +85,23 @@ class TestResolveWorktreeBase:
         assert resolved == remote_head
         assert resolved != stale_local_head
 
+    def test_unrelated_fetch_does_not_make_selected_ref_fresh(self, remote_and_clone):
+        """FETCH_HEAD for another branch must not suppress the main refresh."""
+        clone, remote_head, stale_local_head = remote_and_clone
+        _run(["git", "switch", "-c", "unrelated"], clone)
+        _commit(clone, "unrelated.txt", "unrelated branch")
+        _run(["git", "push", "origin", "unrelated"], clone)
+        _run(["git", "switch", "main"], clone)
+        _run(["git", "fetch", "origin", "unrelated"], clone)
+
+        base_ref, label = cli._resolve_worktree_base(str(clone))
+
+        assert base_ref == "origin/main"
+        assert "fetched" in label
+        resolved = _run(["git", "rev-parse", base_ref], clone).stdout.strip()
+        assert resolved == remote_head
+        assert resolved != stale_local_head
+
     def test_falls_back_to_head_without_remote(self, tmp_path):
         repo = tmp_path / "no-remote"
         repo.mkdir()
@@ -128,12 +145,19 @@ class TestResolveWorktreeBaseStartupCost:
         assert resolved == remote_head
 
     def test_stale_fetch_head_refetches(self, remote_and_clone):
-        """FETCH_HEAD older than the window -> a real fetch happens."""
+        """A stale selected ref -> a real fetch happens."""
         clone, remote_head, _ = remote_and_clone
         _run(["git", "fetch", "origin", "main"], clone)
-        fetch_head = Path(clone) / ".git" / "FETCH_HEAD"
+        ref_path = Path(
+            _run(
+                ["git", "rev-parse", "--git-path", "refs/remotes/origin/main"],
+                clone,
+            ).stdout.strip()
+        )
+        if not ref_path.is_absolute():
+            ref_path = Path(clone) / ref_path
         old = time.time() - 3600
-        os.utime(fetch_head, (old, old))
+        os.utime(ref_path, (old, old))
         base_ref, label = cli._resolve_worktree_base(str(clone))
         assert base_ref == "origin/main"
         assert label == "origin/main (fetched)"
@@ -217,3 +241,15 @@ class TestSetupWorktreeSyncBase:
         info = cli._setup_worktree(str(clone))
         assert info is not None
         assert _head(info["path"]) == remote_head
+
+    def test_new_work_ignores_parked_feature_upstream(self, remote_and_clone):
+        clone, remote_head, _ = remote_and_clone
+        _run(["git", "switch", "-c", "feature"], clone)
+        _commit(clone, "feature-local.txt", "feature local")
+        _run(["git", "push", "-u", "origin", "feature"], clone)
+
+        info = cli._setup_worktree(str(clone))
+
+        assert info is not None
+        assert _head(info["path"]) == remote_head
+        assert not (Path(info["path"]) / "feature-local.txt").exists()

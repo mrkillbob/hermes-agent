@@ -8,6 +8,8 @@ an immutable block decision.
 
 from __future__ import annotations
 
+from agent.egress_source_annotations import mask_builtin_annotations
+
 import base64
 import binascii
 import ipaddress
@@ -266,6 +268,30 @@ _BOUNDED_SOURCE_CODE_ATOM = re.compile(
     r"|[a-z][a-z0-9]{0,63}(?:-[a-z][a-z0-9]{0,63}){1,7}"
     r"|[A-Z][0-9]{3,4})"
 )
+# Source-granted PR diffs contain bounded command filters, issue keys, and
+# unified-diff marker lines. Their URL-safe alphabet can resemble encoded
+# payloads, but the surrounding source grammar proves they are presentation
+# metadata. These masks apply only after an exact source grant is validated.
+# The option name is deliberately an enumerated allowlist (not any long
+# option) so an attacker cannot smuggle an encoded payload through an
+# arbitrary ``--payload=<base64>``-shaped grant; only known metadata options
+# that take short uppercase-letter filter values are eligible.
+_BOUNDED_SOURCE_CLI_KNOWN_OPTIONS = ("diff-filter",)
+_BOUNDED_SOURCE_CLI_VALUE = re.compile(
+    r"(?P<prefix>--(?:"
+    + "|".join(re.escape(option) for option in _BOUNDED_SOURCE_CLI_KNOWN_OPTIONS)
+    + r")=)"
+    r"(?P<value>[A-Z]{3,8})(?P<suffix>[^A-Za-z0-9_+/=-]|$)"
+)
+_BOUNDED_SOURCE_CODE_ASSIGNMENT = re.compile(
+    r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,7}="
+)
+_BOUNDED_SOURCE_ISSUE_KEY = re.compile(
+    r"\b[A-Z]{1,8}\d{2,}-[A-Z0-9]+(?:-[A-Z0-9]+){1,8}\b"
+)
+_BOUNDED_SOURCE_DIFF_METADATA = re.compile(
+    r"(?m)^\+[A-Za-z0-9+/=_-]{1,128}\s*$"
+)
 # Bounded operational tokens are emitted by ordinary CLI/test tooling. They
 # can decode as Base64 by coincidence, but are not opaque encoded payloads.
 _BOUNDED_SHORT_CLI_OPTION = re.compile(r"^-[A-Za-z]{1,8}$")
@@ -349,6 +375,49 @@ _PRIVATE_ABSOLUTE_PATH = re.compile(
     r")",
     re.IGNORECASE,
 )
+# Remote egress needs a stricter assignment scan than ordinary log redaction.
+# ``redact_sensitive_text`` intentionally leaves bare ``token=...`` in prose
+# alone to avoid false positives, but a provider-bound request must fail closed
+# when it contains an explicit credential-shaped assignment.
+#
+# ``:`` is also Python's type-annotation delimiter (``token: str``,
+# ``api_key: str | None = None``), so unlike ``=`` it carries no assignment
+# semantics on its own. The value side is captured separately so a ``:``
+# match can be required to look credential-shaped before it counts as a
+# secret; a bare type name (``str``, ``None``, ``Optional[str]``, ...) does
+# not.
+_EGRESS_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])"
+    r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|"
+    r"password|passwd|api[_-]?key|apikey|client[_-]?secret|private[_-]?key)"
+    r"\s*(?P<delim>[:=])\s*(?!<redacted>)(?P<value>[^\s,}\"']+)"
+)
+# A plausible token/key value: only "word" characters plus common token
+# punctuation, long enough to be a credential rather than a short type
+# keyword, and containing at least one digit -- real secrets are almost
+# always drawn from an alphabet that includes digits, while Python type
+# annotations (``str``, ``int``, ``bool``, ``Optional[str]``, a class name,
+# ...) are not.
+_CREDENTIAL_SHAPED_VALUE = re.compile(
+    r"^(?=[A-Za-z0-9_.+/-]{12,}$)(?=[^0-9]*[0-9])[A-Za-z0-9_.+/-]+$"
+)
+
+
+def _is_egress_secret_assignment(text: str) -> bool:
+    """Return True if ``text`` contains a credential-shaped secret assignment.
+
+    ``=`` is always treated as an assignment. ``:`` is additionally required
+    to have a credential-shaped value, so ordinary type annotations like
+    ``def request(token: str)`` are not mistaken for a leaked secret.
+    """
+
+    for match in _EGRESS_SECRET_ASSIGNMENT.finditer(text):
+        if match.group("delim") == ":" and not _CREDENTIAL_SHAPED_VALUE.match(
+            match.group("value")
+        ):
+            continue
+        return True
+    return False
 # These are fixed provider-protocol grammar atoms, not a caller-configurable
 # egress allowlist. Several happen to round-trip as unpadded Base64 even though
 # they are required JSON schema words. They still go through the final secret
@@ -855,20 +924,53 @@ def _source_text_for_base64_scan(text: str) -> str:
     """
 
     def is_source_code_atom(candidate: str) -> bool:
+        # ``_BASE64_CANDIDATE`` includes padding characters in the match, so
+        # a source keyword such as ``line_ranges=`` arrives here with its
+        # trailing assignment marker attached. Strip only that marker; a
+        # padded encoded value remains unchanged and fail-closed.
+        source_atom = candidate[:-1] if candidate.endswith("=") else candidate
         return (
-            _BOUNDED_SOURCE_CODE_ATOM.fullmatch(candidate) is not None
-            or _PYTHON_DUNDER_IDENTIFIER.fullmatch(candidate) is not None
-            or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(candidate) is not None
-            or _PYTHON_MIXED_CASE_IDENTIFIER.fullmatch(candidate) is not None
+            _BOUNDED_SOURCE_CODE_ATOM.fullmatch(source_atom) is not None
+            or _PYTHON_DUNDER_IDENTIFIER.fullmatch(source_atom) is not None
+            or _PYTHON_PRIVATE_IDENTIFIER.fullmatch(source_atom) is not None
+            or _PYTHON_MIXED_CASE_IDENTIFIER.fullmatch(source_atom) is not None
         )
 
-    return _BASE64_CANDIDATE.sub(
+    masked = _BASE64_CANDIDATE.sub(
         lambda match: (
             "<code>"
             if is_source_code_atom(match.group(1))
             else match.group(0)
         ),
         text,
+    )
+    # CLI filter values such as ``--diff-filter=ACMR`` are source syntax, not
+    # opaque payloads. Keep this grammar tied to a long-option assignment so
+    # short quoted Base64 values elsewhere remain rejected.
+    masked = _BOUNDED_SOURCE_CODE_ASSIGNMENT.sub("<code>", masked)
+    masked = _BOUNDED_SOURCE_ISSUE_KEY.sub("<source issue key>", masked)
+
+    def mask_diff_metadata(match: re.Match[str]) -> str:
+        line = match.group(0)
+        candidate = line[1:].strip()
+        # A unified-diff marker is metadata only when the added line itself
+        # is not an encoded payload. Keep canonical Base64 (including wrapped
+        # form) visible to the fail-closed scanner.
+        if _canonical_base64_candidate(candidate) or _canonical_chunked_base64_candidate(
+            candidate
+        ):
+            # Separate the marker from the candidate. The candidate regex
+            # includes ``+`` in its URL-safe alphabet, so returning ``+blob``
+            # would change the bytes being tested and accidentally hide a
+            # real encoded payload behind the diff marker.
+            suffix = "\n" if line.endswith("\n") else ""
+            return "+ " + candidate + suffix
+        return "<diff metadata>"
+
+    masked = _BOUNDED_SOURCE_DIFF_METADATA.sub(mask_diff_metadata, masked)
+    return _BOUNDED_SOURCE_CLI_VALUE.sub(
+        lambda match: f"{match.group('prefix')}<code>{match.group('suffix')}",
+        masked,
     )
 
 
@@ -892,7 +994,7 @@ def _contains_secret(value: Any, *, seen: set[int] | None = None) -> bool:
             value,
             force=True,
             redact_url_credentials=True,
-        ) != value
+        ) != value or _is_egress_secret_assignment(value)
     if isinstance(value, (bytes, bytearray, memoryview)):
         # Binary request material is not safely inspectable as text.
         return True
@@ -1704,7 +1806,7 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(text)
+                scan_values.append(mask_builtin_annotations(text))
                 base64_scan_values.append(_source_text_for_base64_scan(text))
                 return text
             if isinstance(segment, SourcePresentationSegment):
@@ -1733,7 +1835,7 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(segment.text)
+                scan_values.append(json.dumps({**parsed, "content": mask_builtin_annotations(raw_text)}))
                 base64_scan_values.append(
                     _source_text_for_base64_scan(raw_text)
                 )
