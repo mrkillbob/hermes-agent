@@ -46,11 +46,15 @@ def main():
         return
     receipts = []
     for department in plan:
-        body = spec['instructions'] + '\n\nDepartment assignment: ' + department['brief']
+        body = (f'Authoritative discovery source: {root}. Read {root}/configs/federation/roles.json. '
+                f'Lunar City sources are at {root}/apps/desktop/src/app/lunar-city and '
+                f'{root}/apps/desktop/public/lunar-city. This is a read-only discovery workspace; '
+                'put findings in the task result/comment and assign implementation to an isolated child.\n\n'
+                + spec['instructions'] + '\n\nDepartment assignment: ' + department['brief'])
         result = run(args.hermes, 'kanban', '--board', spec['board'], 'create',
                      department['task_title'],
                      '--body', body, '--assignee', department['assignee'],
-                     '--project', department['project'], '--workspace', 'scratch',
+                     '--project', department['project'], '--workspace', 'dir:' + str(root),
                      '--idempotency-key', department['key'], '--max-runtime', '15m',
                      '--max-retries', '2', '--created-by', department['creator'], '--json')
         receipts.append({'department': department['id'], 'task': result})
