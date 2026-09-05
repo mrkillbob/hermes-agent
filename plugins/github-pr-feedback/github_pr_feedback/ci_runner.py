@@ -377,7 +377,7 @@ class SubprocessCICommandRunner:
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as error:
-            return CompletedCommand(
+            result = CompletedCommand(
                 returncode=124,
                 stdout=str(error.stdout or ""),
                 stderr=str(error.stderr or ""),
@@ -385,20 +385,26 @@ class SubprocessCICommandRunner:
                 timed_out=True,
             )
         except OSError as error:
-            return CompletedCommand(
+            result = CompletedCommand(
                 returncode=127,
                 stdout="",
                 stderr=type(error).__name__,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 timed_out=False,
             )
-        return CompletedCommand(
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            timed_out=False,
-        )
+        else:
+            result = CompletedCommand(
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                timed_out=False,
+            )
+        from .ci_output import retain_output
+
+        retain_output(result.stdout)
+        retain_output(result.stderr)
+        return result
 
 
 class GitRepositoryInspector:
