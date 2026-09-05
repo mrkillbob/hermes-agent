@@ -277,6 +277,25 @@ def test_source_grant_still_rejects_encoded_payload_next_to_pr_metadata(tmp_path
     assert "base64_payload" in exc_info.value.decision.reason_codes
 
 
+def test_source_grant_allows_secret_shaped_github_expressions_only(tmp_path):
+    source = (
+        "private-key: ${{ inputs.private-key }}\n"
+        "token: ${{ steps.app-token.outputs.token }}\n"
+        "password: ${{ secrets.DOCKERHUB_TOKEN }}\n"
+    )
+    path = tmp_path / "action.yml"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=3)
+
+    decision = firewall(tmp_path).preflight(
+        _typed_request(_request(source), source_grant=grant),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+
+
 def test_source_bytes_cannot_be_smuggled_as_a_sanitized_literal(tmp_path):
     path = tmp_path / "private.py"
     path.write_text("private source\n", encoding="utf-8")

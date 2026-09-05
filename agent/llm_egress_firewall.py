@@ -2145,7 +2145,7 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(text)
+                scan_values.append(_source_text_for_secret_scan(text))
                 base64_scan_values.append(_source_text_for_base64_scan(text))
                 return text
             if isinstance(segment, SourcePresentationSegment):
