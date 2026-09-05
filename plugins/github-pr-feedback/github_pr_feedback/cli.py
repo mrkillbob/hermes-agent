@@ -1381,8 +1381,9 @@ def _scan_payload(result) -> dict[str, object]:
         "created": result.created,
         "skipped": result.skipped,
     }
-    if result.required_local_ci_backlog > 0:
-        payload["required_local_ci_backlog"] = result.required_local_ci_backlog
+    backlog = getattr(result, "required_local_ci_backlog", 0)
+    if backlog > 0:
+        payload["required_local_ci_backlog"] = backlog
     catalogue_deferred = getattr(result, "local_ci_catalogue_deferred", 0)
     if catalogue_deferred > 0:
         payload["local_ci_catalogue_deferred"] = catalogue_deferred

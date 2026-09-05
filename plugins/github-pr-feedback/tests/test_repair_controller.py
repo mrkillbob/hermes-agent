@@ -141,6 +141,9 @@ def test_repair_triggers_does_not_treat_action_required_as_a_repair_trigger() ->
 
 
 class GitHub:
+    def get_branch_head(self, repository: str, branch: str):
+        return "b" * 40
+
     def list_open_pull_requests(self, repository: str, owner: str):
         from github_pr_feedback.policy import PullRequest
 
@@ -756,4 +759,17 @@ def test_report_only_receipt_does_not_block_later_active_repair(tmp_path: Path) 
     assert report.created == 1
     assert active.created == 1
     assert [task.initial_status for task in kanban.tasks] == ["blocked", "running"]
+    ledger.close()
+
+
+def test_conflict_repair_pins_current_branch_tip_without_merge_policy(tmp_path):
+    class MovedBase(GitHub):
+        def get_branch_head(self, repository, branch):
+            return "c" * 40
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+    result = RepairController(policy(tmp_path), ledger, MovedBase(), kanban, LocalGit()).scan()
+    assert result.created == 1
+    assert kanban.tasks[0].evidence["target_base_sha"] == "c" * 40
+    assert "c" * 40 in kanban.tasks[0].instructions
     ledger.close()

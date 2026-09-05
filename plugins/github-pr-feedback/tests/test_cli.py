@@ -2967,3 +2967,10 @@ def test_retrigger_codex_review_reports_unavailable_without_raising() -> None:
 
     assert status == "unavailable"
     assert github.posted == []
+
+
+def test_scan_payload_accepts_repair_results_without_ci_backlog():
+    from github_pr_feedback.cli import _scan_payload
+    from github_pr_feedback.repair_controller import RepairScanResult
+    result = RepairScanResult(created=2, skipped={"duplicate": 1}, degraded=False)
+    assert _scan_payload(result) == {"status": "ok", "created": 2, "skipped": {"duplicate": 1}}

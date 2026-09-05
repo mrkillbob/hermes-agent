@@ -161,6 +161,7 @@ class RepairController:
             base_refresh_slots_used = 0
             target = self._policy.targets[repository]
             merge_policy = self._policy.merge_policy_for(repository)
+            branch_heads: dict[str, str] = {}
             base_head: str | None = None
             if merge_policy is not None and merge_policy.repository == repository:
                 try:
@@ -276,6 +277,17 @@ class RepairController:
                 mode = "report" if configured.report_only else "repair"
                 trigger_id = f"{mode}:{'+'.join(triggers)}"
                 target_base_sha = base_head if base_refresh_required else None
+                if "merge_conflict" in triggers and target_base_sha is None:
+                    try:
+                        if pull.base_branch not in branch_heads:
+                            branch_heads[pull.base_branch] = self._github.get_branch_head(
+                                repository, pull.base_branch
+                            )
+                        target_base_sha = branch_heads[pull.base_branch]
+                    except Exception:
+                        skipped["base_state_unavailable"] += 1
+                        degraded = True
+                        continue
                 if target_base_sha is not None:
                     trigger_id = f"{trigger_id}:target-base:{target_base_sha}"
                 receipt = FeedbackReceipt(
