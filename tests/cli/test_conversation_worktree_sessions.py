@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import cli as cli_module
+import hermes_cli.cli_conversation_worktree_mixin as worktree_module
 import hermes_state
 
 
@@ -125,7 +126,7 @@ def _build_cli(monkeypatch, manager: _Manager, db: _SessionDB | None = None, **k
     monkeypatch.setattr(cli_module, "_run_state_db_auto_maintenance", lambda _db: None)
     monkeypatch.setattr(cli_module, "_run_checkpoint_auto_maintenance", lambda: None)
     monkeypatch.setattr(
-        cli_module,
+        worktree_module,
         "_build_cli_conversation_worktree_manager",
         lambda _config, _db: manager,
     )
@@ -274,7 +275,7 @@ def test_cmd_chat_resume_replaces_persisted_stable_cwd_end_to_end(
     monkeypatch.setattr(cli_module, "_run_state_db_auto_maintenance", lambda _db: None)
     monkeypatch.setattr(cli_module, "_run_checkpoint_auto_maintenance", lambda: None)
     monkeypatch.setattr(
-        cli_module,
+        worktree_module,
         "_build_cli_conversation_worktree_manager",
         lambda _config, _db: manager,
     )
@@ -446,7 +447,7 @@ def test_legacy_worktree_is_mutually_exclusive_only_for_interactive_roots(
     else:
         monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
 
-    assert cli_module._should_use_legacy_worktree(
+    assert worktree_module._should_use_legacy_worktree(
         worktree=True,
         shorthand=False,
         config=_enabled_config(),
@@ -458,7 +459,7 @@ def test_disabled_policy_preserves_legacy_worktree_flag(monkeypatch):
     config["conversation_worktree"]["enabled"] = False
     monkeypatch.setenv("HERMES_SESSION_SOURCE", "cli")
 
-    assert cli_module._should_use_legacy_worktree(
+    assert worktree_module._should_use_legacy_worktree(
         worktree=True,
         shorthand=False,
         config=config,

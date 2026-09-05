@@ -1372,6 +1372,9 @@ class CLICommandsMixin:
         branch_title = branch_name or self._session_db.get_next_title_in_lineage(
             self._session_db.get_session_title(self.session_id) or "branch")
         parent_session_id = self.session_id
+        if getattr(self, "_conversation_worktree_manager", None) is not None:
+            if not self._prepare_conversation_root(new_session_id):
+                return
         _end_current_session(self, "branched")
         # The stable ``_branched_from`` marker keeps the branch visible in /resume + /sessions
         # even after the parent is re-ended with a different end_reason.
