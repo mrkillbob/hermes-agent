@@ -649,6 +649,12 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     retry.add_argument("--feedback-kind", required=True)
     retry.add_argument("--feedback-id", required=True)
     retry.add_argument("--head-sha", required=True)
+    dispatch_repair = subcommands.add_parser(
+        "dispatch-repair", help="Revalidate and dispatch one exact-head conflict repair"
+    )
+    dispatch_repair.add_argument("--repository", required=True)
+    dispatch_repair.add_argument("--pr-number", required=True, type=int)
+    dispatch_repair.add_argument("--head-sha", required=True)
     dispatch_feedback = subcommands.add_parser(
         "dispatch-feedback",
         help="Dispatch one exact, canonically revalidated feedback item",
@@ -771,6 +777,9 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _post_comment(ctx, args)
     if action == "retry":
         return _retry(ctx, args)
+    if action == "dispatch-repair":
+        from .cli_repair import dispatch_repair
+        return dispatch_repair(ctx, args)
     if action == "dispatch-feedback":
         return _dispatch_feedback(ctx, args)
     if action == "audit-pr":

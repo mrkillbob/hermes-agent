@@ -900,3 +900,44 @@ def test_repair_card_acquires_pinned_base_after_mutable_branch_advances(
         check=True,
     )
     ledger.close()
+
+
+def test_scoped_repair_dispatch_does_not_read_or_dispatch_other_prs(tmp_path, monkeypatch, capsys):
+    class ScopedGitHub(GitHub):
+        def list_open_pull_requests(self, repository, owner):
+            listed = super().list_open_pull_requests(repository, owner)[0]
+            return (replace(listed, number=18), listed)
+
+        def get_merge_state(self, repository, number):
+            assert number == 17
+            return super().get_merge_state(repository, number)
+
+    import argparse
+    import json
+    from github_pr_feedback import cli, repair_controller
+
+    configured = policy(tmp_path)
+    kanban = Kanban()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(cli, "_load_policy_from_context", lambda ctx: configured)
+    monkeypatch.setattr(cli, "_github_client", lambda policy: ScopedGitHub())
+    monkeypatch.setattr(cli, "KanbanSubprocessClient", lambda: kanban)
+    monkeypatch.setattr(repair_controller, "PooledLocalGitRepository", lambda *args: LocalGit())
+    parser = argparse.ArgumentParser()
+    cli.setup_cli(None, parser)
+    args = parser.parse_args(["dispatch-repair", "--repository", "acme/widgets",
+                              "--pr-number", "17", "--head-sha", SHA])
+    assert cli.handle_cli_with_context(None, args) == 0
+    assert json.loads(capsys.readouterr().out)["created"] == 1
+    assert len(kanban.tasks) == 1
+
+
+def test_scoped_repair_rejects_changed_expected_head(tmp_path):
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+    controller = RepairController(policy(tmp_path), ledger, GitHub(), kanban, LocalGit())
+    result = controller.scan(conflicts_only=True, scoped_target=("acme/widgets", 17, "f" * 40))
+    assert result.created == 0
+    assert result.skipped["head_changed"] == 1
+    assert not kanban.tasks
+    ledger.close()

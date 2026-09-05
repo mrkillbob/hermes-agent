@@ -150,14 +150,18 @@ class RepairController:
         self._owner = f"repair-scanner-{uuid4().hex}"
         self._base_refresher = base_refresher or DeterministicBaseRefresher(github)
 
-    def scan(self, *, conflicts_only: bool = False, retry_receipt: FeedbackReceipt | None = None) -> RepairScanResult:
+    def scan(self, *, conflicts_only: bool = False, retry_receipt: FeedbackReceipt | None = None, scoped_target: tuple[str, int, str] | None = None) -> RepairScanResult:
         configured = self._policy.repair_steward
         if configured is None:
             return RepairScanResult(0, {}, False)
+        if scoped_target is not None and (scoped_target[0] not in configured.repositories or retry_receipt is not None):
+            raise ValueError("scoped repair requires a configured repository and cannot retry a receipt")
         created = 0
         skipped: Counter[str] = Counter()
         degraded = False
         for repository in sorted(configured.repositories):
+            if scoped_target is not None and repository != scoped_target[0]:
+                continue
             if retry_receipt is not None and repository != retry_receipt.repository:
                 continue
             base_refresh_slots_used = 0
@@ -181,6 +185,13 @@ class RepairController:
                 skipped["github_state_unavailable"] += 1
                 degraded = True
                 continue
+            if scoped_target is not None:
+                pulls = tuple(pull for pull in pulls if pull.number == scoped_target[1])
+                if not pulls:
+                    skipped["target_not_open"] += 1
+                elif pulls[0].head_sha != scoped_target[2]:
+                    skipped["head_changed"] += 1
+                    continue
             if retry_receipt is not None:
                 pulls = tuple(pull for pull in pulls if pull.number == retry_receipt.pr_number)
             pulls = tuple(

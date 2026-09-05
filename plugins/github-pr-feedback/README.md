@@ -495,3 +495,8 @@ The wrapper refuses an unset, relative, missing, or non-executable
 `github-pr-feedback scan`. It does not accept arguments, start a model, or
 create webhooks. GitHub remains read-only unless the strict merge maintainer is
 explicitly enabled and not in report-only mode.
+
+### Scoped conflict dispatch
+
+`hermes github-pr-feedback dispatch-repair --repository OWNER/REPO --pr-number N --head-sha FULL_SHA`
+revalidates one open PR and dispatches only its confirmed merge conflict through the existing repair controller. The expected head must still match. Repository/branch admission, immutable current-base acquisition, worktree preparation, receipt deduplication and scan locking are preserved. It does not audit CI, approve or merge, and does not resolve existing blocked cards. Archive an obsolete receipt card only with verified supersession evidence; a passing focused repair is not a full CI receipt.
