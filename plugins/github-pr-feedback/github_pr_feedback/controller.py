@@ -493,13 +493,15 @@ class LocalGitRepository:
 
         repository_root = repository.resolve(strict=True)
         workspace_root = workspace.resolve(strict=True)
-        source = repository / ".venv"
+        from .worktree_venv import select_environment
+
         destination = workspace / ".venv"
+        managed_venv_root = (repository_root.parent / "venvs").resolve(strict=False)
+        governed_roots = (_LUNABOT_ROOT / ".venv", managed_venv_root)
+        source = select_environment(repository, workspace, (repository_root, *governed_roots))
         if not source.exists():
             return
         resolved_source = source.resolve(strict=True)
-        managed_venv_root = (repository_root.parent / "venvs").resolve(strict=False)
-        governed_roots = (_LUNABOT_ROOT / ".venv", managed_venv_root)
         is_governed_root = resolved_source.is_relative_to(repository_root) or any(
             resolved_source == root or resolved_source.is_relative_to(root)
             for root in governed_roots
@@ -514,53 +516,31 @@ class LocalGitRepository:
             try:
                 resolved_destination = destination.resolve(strict=True)
             except FileNotFoundError:
-                original_target = os.readlink(destination)
-                try:
-                    tracked = subprocess.run(
-                        (
-                            "git",
-                            "-C",
-                            str(workspace_root),
-                            "ls-files",
-                            "--stage",
-                            "--",
-                            ".venv",
-                        ),
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                except (OSError, subprocess.TimeoutExpired) as error:
-                    raise RuntimeError(
-                        "receipt worktree virtualenv ownership is unavailable"
-                    ) from error
-                if tracked.returncode != 0 or tracked.stdout.strip():
-                    raise RuntimeError(
-                        "receipt worktree virtualenv target is inconsistent"
-                    )
-                replacement = workspace / ".venv.hermes-repair"
-                if replacement.exists() or replacement.is_symlink():
-                    raise RuntimeError(
-                        "receipt worktree virtualenv repair path is occupied"
-                    )
-                os.symlink(resolved_source, replacement, target_is_directory=True)
-                try:
-                    if (
-                        not destination.is_symlink()
-                        or os.readlink(destination) != original_target
-                    ):
-                        raise RuntimeError(
-                            "receipt worktree virtualenv target changed during repair"
-                        )
-                    os.replace(replacement, destination)
-                finally:
-                    if replacement.is_symlink():
-                        replacement.unlink()
+                resolved_destination = None
+            if resolved_destination == resolved_source:
                 return
-            if resolved_destination != resolved_source:
+            if resolved_destination is not None:
+                owned_candidates = [repository / ".venv", repository / "venv", *repository.glob("venv-*")]
+                if not any(candidate.resolve() == resolved_destination for candidate in owned_candidates):
+                    raise RuntimeError("receipt worktree virtualenv target is inconsistent")
+            original_target = os.readlink(destination)
+            tracked = subprocess.run(
+                ["git", "-C", str(workspace_root), "ls-files", "--stage", "--", ".venv"],
+                check=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+            )
+            if tracked.returncode != 0 or tracked.stdout.strip():
                 raise RuntimeError("receipt worktree virtualenv target is inconsistent")
+            replacement = workspace / ".venv.hermes-repair"
+            if replacement.exists() or replacement.is_symlink():
+                raise RuntimeError("receipt worktree virtualenv repair path is occupied")
+            os.symlink(resolved_source, replacement, target_is_directory=True)
+            try:
+                if not destination.is_symlink() or os.readlink(destination) != original_target:
+                    raise RuntimeError("receipt worktree virtualenv target changed during repair")
+                os.replace(replacement, destination)
+            finally:
+                if replacement.is_symlink():
+                    replacement.unlink()
             return
         if destination.exists():
             raise RuntimeError("receipt worktree virtualenv target is inconsistent")
@@ -995,7 +975,10 @@ class PooledLocalGitRepository:
                 "--untracked-files=all",
             ])
             venv = workspace / ".venv"
-            governed_link = venv.is_symlink() and venv.resolve() == (path / ".venv").resolve()
+            governed_link = venv.is_symlink() and any(
+                venv.resolve() == candidate.resolve()
+                for candidate in [path / ".venv", path / "venv", *path.glob("venv-*")]
+            )
             dirty = [
                 line for line in status.splitlines()
                 if not (governed_link and line == "?? .venv")
