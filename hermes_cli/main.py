@@ -1696,6 +1696,10 @@ def cmd_chat(args):
             **passthrough,
         )
 
+    # Import and run the CLI only after startup guards and the TUI fast path;
+    # this keeps CLI module-level config reads behind --ignore-user-config.
+    from cli import main as cli_main
+
     _read_query_file(args)
 
     safe_mode = getattr(args, "safe_mode", False)
