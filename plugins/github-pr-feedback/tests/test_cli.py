@@ -1797,6 +1797,7 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
         "merge_maintainers",
         "repair_steward",
         "release_maintenance",
+        "release_maintenances",
         "github_identity",
         "github_actions_permissions_identity",
         "not_before",

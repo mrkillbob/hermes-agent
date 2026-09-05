@@ -43,6 +43,7 @@ from .merge_controller import (
 from .policy import (
     FeedbackReceipt,
     PluginPolicy,
+    ReleaseMaintenancePolicy,
     codex_review_trigger_comment,
     codex_review_trigger_requested,
     hermes_attribution_line,
@@ -278,14 +279,13 @@ class DoctorProbe:
                     ),
                     *(
                         [
-                            policy.release_maintenance.assignee,
-                            *(
-                                lane.assignee
-                                for lane in policy.release_maintenance.lanes
-                            ),
+                            assignee
+                            for maintenance in policy.release_policies()
+                            for assignee in (
+                                maintenance.assignee,
+                                *(lane.assignee for lane in maintenance.lanes),
+                            )
                         ]
-                        if policy.release_maintenance is not None
-                        else []
                     ),
                 }
             ),
@@ -632,6 +632,13 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     submit_review.add_argument("--head-sha", required=True)
     submit_review.add_argument("--event", required=True)
     submit_review.add_argument("--body", required=True)
+    post_comment = subcommands.add_parser(
+        "post-comment", help="Publish one literal exact-head factual PR comment"
+    )
+    post_comment.add_argument("--repository", required=True)
+    post_comment.add_argument("--pr-number", required=True, type=int)
+    post_comment.add_argument("--head-sha", required=True)
+    post_comment.add_argument("--body", required=True)
     retry = subcommands.add_parser(
         "retry", help="Retry one failed, immutable feedback receipt"
     )
@@ -758,6 +765,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _inspect_pr(ctx, args)
     if action == "submit-review":
         return _submit_review(ctx, args)
+    if action == "post-comment":
+        return _post_comment(ctx, args)
     if action == "retry":
         return _retry(ctx, args)
     if action == "dispatch-feedback":
@@ -792,7 +801,7 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
 def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
     try:
         policy = _load_policy_from_context(ctx)
-        maintenance = policy.release_maintenance
+        maintenance = policy.release_policy_for(args.repository)
         if maintenance is None:
             raise ValueError("release maintenance is disabled")
         allowed_lanes = {lane.name for lane in maintenance.lanes} | {FINAL_LANE}
@@ -985,6 +994,69 @@ def _submit_review(ctx: Any, args: argparse.Namespace) -> int:
     return 0
 
 
+def _post_comment(ctx: Any, args: argparse.Namespace) -> int:
+    """Publish one exact-head factual reply through the governed bot client."""
+
+    try:
+        policy = _load_policy_from_context(ctx)
+        if not policy.enabled or args.repository not in policy.targets:
+            raise ValueError("repository is not a configured target")
+        if not isinstance(args.head_sha, str) or not _FULL_SHA.fullmatch(args.head_sha):
+            raise ValueError("head_sha must be a full hexadecimal SHA")
+        settings = policy.github_identity
+        if settings is None:
+            raise GitHubClientError(
+                "Hermes GitHub automation identity is not configured",
+                code="automation_identity_not_configured",
+            )
+        github = _github_client(policy)
+        viewer_login = github.viewer_login()
+        if viewer_login.casefold() != settings.expected_login.casefold():
+            raise GitHubClientError(
+                "GitHub automation identity does not match policy",
+                code="automation_identity_mismatch",
+            )
+        pull_request = github.get_pull_request(args.repository, args.pr_number)
+        if pull_request.head_sha != args.head_sha.casefold():
+            print(
+                json.dumps(
+                    {
+                        "status": "stale_head",
+                        "repository": args.repository,
+                        "pr_number": args.pr_number,
+                        "expected_head_sha": args.head_sha.casefold(),
+                        "observed_head_sha": pull_request.head_sha,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        if str(pull_request.state or "").strip().upper() != "OPEN":
+            raise ValueError("pull request is not open")
+        github.post_issue_comment(args.repository, args.pr_number, args.body)
+    except (GitHubClientError, TypeError, ValueError) as error:
+        print(
+            json.dumps(
+                {"status": "comment_unavailable", "reason": str(error)},
+                sort_keys=True,
+            )
+        )
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "posted",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+                "head_sha": pull_request.head_sha,
+                "poster": viewer_login,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _scan(ctx: Any) -> int:
     try:
         policy = _load_policy_from_context(ctx)
@@ -1001,7 +1073,7 @@ def _scan(ctx: Any) -> int:
         ledger = FeedbackLedger.for_current_profile()
         merge_payload: dict[str, object] | None = None
         repair_payload: dict[str, object] | None = None
-        maintenance_payload: dict[str, object] | None = None
+        maintenance_payload: object | None = None
         label_payload: dict[str, object] | None = None
         try:
             try:
@@ -1031,8 +1103,32 @@ def _scan(ctx: Any) -> int:
                 repair_payload = _scan_payload(repair)
             if policy.merge_policies():
                 merge_payload = _run_merge_scan(policy, ledger)
-            if policy.release_maintenance is not None and not required_ci_backlog:
-                maintenance_payload = _run_release_maintenance_scan(policy, ledger)
+            release_policies = (
+                policy.release_policies()
+                if hasattr(policy, "release_policies")
+                else (
+                    (policy.release_maintenance,)
+                    if getattr(policy, "release_maintenance", None) is not None
+                    else ()
+                )
+            )
+            if release_policies and not required_ci_backlog:
+                maintenance_results = [
+                    _run_release_maintenance_scan(
+                        policy, ledger, maintenance=maintenance
+                    )
+                    for maintenance in release_policies
+                ]
+                maintenance_payload = (
+                    maintenance_results[0]
+                    if len(maintenance_results) == 1
+                    else {
+                        maintenance.repository: result
+                        for maintenance, result in zip(
+                            release_policies, maintenance_results
+                        )
+                    }
+                )
             label_payload = controller.apply_agent_labels()
         finally:
             ledger.close()
@@ -1056,7 +1152,16 @@ def _scan(ctx: Any) -> int:
             result.degraded
             or (repair_payload or {}).get("status") == "degraded"
             or (merge_payload or {}).get("status") == "degraded"
-            or (maintenance_payload or {}).get("status") == "degraded"
+            or (
+                isinstance(maintenance_payload, dict)
+                and (
+                    maintenance_payload.get("status") == "degraded"
+                    or any(
+                        isinstance(item, dict) and item.get("status") == "degraded"
+                        for item in maintenance_payload.values()
+                    )
+                )
+            )
         )
         else 0
     )
@@ -1066,13 +1171,14 @@ def _run_release_maintenance_scan(
     policy: PluginPolicy,
     ledger: FeedbackLedger,
     *,
+    maintenance: ReleaseMaintenancePolicy | None = None,
     github: MaintenanceGitHub | None = None,
     kanban: KanbanSubprocessClient | None = None,
     workspaces: MaintenanceWorkspaces | None = None,
     now: Callable[[], datetime] | None = None,
     control_home: Path | None = None,
 ) -> dict[str, object]:
-    maintenance = policy.release_maintenance
+    maintenance = maintenance or policy.release_maintenance
     if maintenance is None:
         return {
             "status": "disabled",
@@ -1737,31 +1843,35 @@ def _run_merge_scan(
     ]
     blocked: dict[str, list[str]] = {}
     for merge_policy, result in zip(merge_policies, results, strict=True):
-        for number, blockers in result["blocked"].items():
+        for number, blockers in result.get("blocked", {}).items():
             blocked[f"{merge_policy.repository}#{number}"] = blockers
     return {
-        "status": "degraded" if any(result["status"] == "degraded" for result in results) else "ok",
-        "processed": sum(int(result["processed"]) for result in results),
-        "merged": [item for result in results for item in result["merged"]],
+        "status": "degraded"
+        if any(result.get("status") == "degraded" for result in results)
+        else "ok",
+        "processed": sum(int(result.get("processed", 0)) for result in results),
+        "merged": [item for result in results for item in result.get("merged", [])],
         "handed_off": [
             item for result in results for item in result.get("handed_off", [])
         ],
         "blocked": blocked,
         "maintainer_tasks_created": sum(
-            int(result["maintainer_tasks_created"]) for result in results
+            int(result.get("maintainer_tasks_created", 0)) for result in results
         ),
         "maintainer_task_dispatch_failed": [
             f"{merge_policy.repository}#{number}"
             for merge_policy, result in zip(merge_policies, results, strict=True)
-            for number in result["maintainer_task_dispatch_failed"]
+            for number in result.get("maintainer_task_dispatch_failed", [])
         ],
-        "deployments": [item for result in results for item in result["deployments"]],
+        "deployments": [
+            item for result in results for item in result.get("deployments", [])
+        ],
         "deployment_failures": [
             f"{merge_policy.repository}#{number}"
             for merge_policy, result in zip(merge_policies, results, strict=True)
-            for number in result["deployment_failures"]
+            for number in result.get("deployment_failures", [])
         ],
-        "report_only": all(bool(result["report_only"]) for result in results),
+        "report_only": all(bool(result.get("report_only", False)) for result in results),
     }
 
 
@@ -2471,6 +2581,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "merge_maintainers",
         "repair_steward",
         "release_maintenance",
+        "release_maintenances",
         "github_identity",
         "github_actions_permissions_identity",
         "not_before",

@@ -1692,7 +1692,8 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     assert "do not retry a tool-blocked command" in task.instructions.casefold()
     assert "Do not keep re-evaluating equivalent approaches" in task.instructions
     assert "commit and push" in task.instructions
-    assert "post a factual PR reply" in task.instructions
+    assert "publish one factual PR reply" in task.instructions
+    assert "post-comment" in task.instructions
     assert "Do not merge" in task.instructions
     assert "still equals the expected receipt SHA" in task.instructions
     assert "complete-feedback" in task.instructions

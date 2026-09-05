@@ -228,9 +228,12 @@ class RepairController:
                 if pull.head_sha != listed.head_sha:
                     skipped["head_changed"] += 1
                     continue
-                if pull.head_repository != target.head_repository or not any(
-                    pull.head_ref_name.startswith(prefix)
-                    for prefix in target.branch_prefixes
+                if pull.head_repository != target.head_repository or (
+                    target.branch_prefixes
+                    and not any(
+                        pull.head_ref_name.startswith(prefix)
+                        for prefix in target.branch_prefixes
+                    )
                 ):
                     skipped["branch_not_allowed"] += 1
                     continue

@@ -545,8 +545,12 @@ class CanonicalMergeEvidenceSource:
         return MergeSnapshot(
             repository_private=self._github.repository_is_private(policy.repository),
             pull_request=pull,
-            branch_allowed=any(
-                pull.head_ref_name.startswith(prefix) for prefix in target.branch_prefixes
+            branch_allowed=(
+                not target.branch_prefixes
+                or any(
+                    pull.head_ref_name.startswith(prefix)
+                    for prefix in target.branch_prefixes
+                )
             ),
             repository_merge_policy=self._github.get_repository_merge_policy(
                 policy.repository
