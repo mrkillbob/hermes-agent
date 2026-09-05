@@ -190,7 +190,7 @@ async def test_stream_events_reuses_connection_and_closes_after_disconnect(
         connect_threads.append(threading.get_ident())
         return conn
 
-    monkeypatch.setattr(mod.kanban_db, "connect", _connect)
+    monkeypatch.setattr(mod.kbc, "connect", _connect)
 
     wait_calls = 0
 
@@ -279,7 +279,7 @@ async def test_stream_events_closes_connection_when_cancelled(monkeypatch):
         connect_threads.append(threading.get_ident())
         return conn
 
-    monkeypatch.setattr(mod.kanban_db, "connect", _connect)
+    monkeypatch.setattr(mod.kbc, "connect", _connect)
 
     real_wait_for = asyncio.wait_for
     wait_calls = 0
