@@ -762,7 +762,11 @@ class LocalGitRepository:
 
 
 class WorktreePoolExhausted(RuntimeError):
-    """Every worktree-pool slot is currently leased and not yet stale."""
+    """Every worktree-pool slot is leased or contains work to preserve."""
+
+
+class WorktreePoolSlotDirty(RuntimeError):
+    """A released slot still contains owned work and cannot be recycled."""
 
 
 # Longer than the longest observed dispatched-task max_runtime_seconds (local
@@ -867,23 +871,21 @@ class PooledLocalGitRepository:
                 claimed_at=now,
                 stale_before=now - self._lease_timeout,
             )
-            if lease is not None:
-                break
-        if lease is None:
-            raise WorktreePoolExhausted(
-                f"all {self._slot_count} worktree-pool slots are leased and not yet stale"
-            )
-
-        try:
+            if lease is None:
+                continue
+            try:
+                workspace = self._prepare_slot(path, slot_id, receipt, namespace=namespace)
+            except WorktreePoolSlotDirty:
+                self._ledger.finish_worktree_slot(lease)
+                continue
+            except BaseException:
+                self._ledger.finish_worktree_slot(lease)
+                raise
             self._active_ledger_slots[receipt.key] = lease.slot_id
-            workspace = self._prepare_slot(path, slot_id, receipt, namespace=namespace)
-        except BaseException:
-            # Never strand a slot on a failed prepare -- release it so the
-            # next caller (or a retry of this same dispatch) can reclaim it
-            # immediately instead of waiting out the full lease timeout.
-            self._ledger.finish_worktree_slot(lease)
-            raise
-        return PreparedWorktree(workspace, _receipt_branch(receipt), receipt.head_sha)
+            return PreparedWorktree(workspace, _receipt_branch(receipt), receipt.head_sha)
+        raise WorktreePoolExhausted(
+            f"all {self._slot_count} worktree-pool slots are leased or contain preserved work"
+        )
 
     def release(self, lease: WorktreeSlotLease) -> None:
         """Return a previously acquired slot to the free pool."""
@@ -984,7 +986,20 @@ class PooledLocalGitRepository:
                 "worktree pool slot belongs to a different repository: "
                 f"{workspace}"
             )
-        if not workspace.exists():
+        if workspace.exists():
+            status = self._run([
+                "git", "-C", str(workspace), "status", "--porcelain",
+                "--untracked-files=all",
+            ])
+            venv = workspace / ".venv"
+            governed_link = venv.is_symlink() and venv.resolve() == (path / ".venv").resolve()
+            dirty = [
+                line for line in status.splitlines()
+                if not (governed_link and line == "?? .venv")
+            ]
+            if dirty:
+                raise WorktreePoolSlotDirty(f"preserving dirty worktree pool slot: {workspace}")
+        else:
             self._run(
                 [
                     "git", "-C", str(path), "worktree", "add", "--quiet",
@@ -994,16 +1009,10 @@ class PooledLocalGitRepository:
         self._configure_case_collision_sparse_checkout(workspace, receipt.head_sha)
         self._run(
             [
-                "git", "-C", str(workspace), "checkout", "--quiet", "--force",
+                "git", "-C", str(workspace), "checkout", "--quiet", "--no-overwrite-ignore",
                 "--detach", receipt.head_sha,
             ]
         )
-        # -f twice (not once): a single -f leaves any untracked directory that
-        # contains its own .git alone (git's nested-repo safety guard). A prior
-        # occupant's leftover nested clone would otherwise wedge this slot's
-        # dirty check forever -- every future receipt keeps re-claiming the
-        # same permanently-dirty slot ID first and failing, starving the pool.
-        self._run(["git", "-C", str(workspace), "clean", "-ffdx", "-e", ".venv"])
         self._verify_worktree(workspace, receipt.head_sha)
         LocalGitRepository._link_governed_venv(path, workspace)
         return workspace.resolve()

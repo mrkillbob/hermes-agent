@@ -145,6 +145,31 @@ def test_pool_reuses_the_same_slot_directory_after_release(tmp_path: Path) -> No
     ledger.close()
 
 
+@pytest.mark.parametrize("filename", ["source.txt", "untracked-work.txt"])
+def test_dirty_released_slot_is_preserved_and_uses_overflow(tmp_path, filename):
+    from github_pr_feedback.ledger import WorktreeSlotLease
+
+    repo = initialized_repository(tmp_path)
+    first = commit(repo, "source.txt", "first PR")
+    second = commit(repo, "source.txt", "second PR")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    pool = PooledLocalGitRepository(ledger, tmp_path / "pool", slot_count=1, owner_pid=lambda: 4242)
+    original = pool.prepare_receipt_worktree(repo, receipt(first))
+    lease = ledger._connection.execute(
+        "SELECT slot_id, lease_version, owner_pid FROM worktree_pool_slots"
+    ).fetchone()
+    pool.release(WorktreeSlotLease(*lease))
+    (original.path / filename).write_text("preserved work")
+
+    prepared = _prepare_receipt_worktree_with_overflow(
+        pool, repo, receipt(second), tmp_path / "overflow"
+    )
+    assert prepared.path != original.path
+    assert (original.path / filename).read_text() == "preserved work"
+    assert (prepared.path / "source.txt").read_text() == "second PR"
+    ledger.close()
+
+
 def test_pool_uses_distinct_slot_directories_for_distinct_repositories(
     tmp_path: Path,
 ) -> None:
@@ -309,12 +334,16 @@ def test_pool_never_removes_the_linked_venv_between_reuses(tmp_path: Path) -> No
     from github_pr_feedback.ledger import WorktreeSlotLease
 
     pool.release(WorktreeSlotLease(lease[0], lease[1], lease[2]))
-    prepared_b = pool.prepare_receipt_worktree(repo, receipt(sha_b, pr_number=2))
+    prepared_b = _prepare_receipt_worktree_with_overflow(
+        pool, repo, receipt(sha_b, pr_number=2), tmp_path / "overflow"
+    )
 
     assert venv_link.is_symlink()
     assert (venv_link / "bin" / "python").is_file()
-    assert not (prepared_b.path / "__pycache__").exists()
-    assert not (prepared_b.path / "stray_untracked.txt").exists()
+    assert (prepared_a.path / "__pycache__" / "junk.pyc").read_text() == "x"
+    assert (prepared_a.path / "stray_untracked.txt").read_text() == "x"
+    assert prepared_b.path != prepared_a.path
+    assert (prepared_b.path / ".venv" / "bin" / "python").is_file()
     ledger.close()
 
 
