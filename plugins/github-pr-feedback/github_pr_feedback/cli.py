@@ -21,6 +21,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
+from .cli_audit_task import owns_current_audit_task
 from .controller import KanbanTask, LocalGitRepository, PooledLocalGitRepository, ScanController
 from .ci_coordinator import CIAuditJob, GroupedCICoordinator
 from .ci_runner import (
@@ -1612,6 +1613,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
         # GitHub comment, repair dispatch, merge handoff, or task completion;
         # those are separate integrations and may fail independently.
         print(json.dumps(_ci_receipt_payload(receipt), sort_keys=True), flush=True)
+        owns_task = owns_current_audit_task(ledger, receipt.identity)
         try:
             final_state = github.get_merge_state(args.repository, args.pr_number)
             if final_state.head_sha != receipt.identity.head_sha:
@@ -1660,18 +1662,19 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     raw_blockers = merge_handoff.get("blockers", [])
                     if isinstance(raw_blockers, list):
                         handoff_blockers = [str(blocker) for blocker in raw_blockers]
-                    _block_current_ci_task(receipt, handoff_blockers)
+                    if owns_task:
+                        _block_current_ci_task(receipt, handoff_blockers)
                     handoff_blocked = True
                 elif handoff_status != "merged":
                     raise RuntimeError(
                         "merge handoff did not produce a durable successor: "
                         f"{handoff_status}"
                     )
-            if not handoff_blocked:
+            if not handoff_blocked and owns_task:
                 _complete_current_ci_task(receipt)
                 handoff_completed = True
         except (CIValidationError, GitHubClientError, RuntimeError) as error:
-            if not handoff_blocked:
+            if not handoff_blocked and owns_task:
                 try:
                     _block_current_ci_task(
                         receipt, ["transient_handoff_failure"], kind="transient"

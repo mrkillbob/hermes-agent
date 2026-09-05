@@ -2509,6 +2509,7 @@ def test_blocked_merge_handoff_blocks_task_with_exact_blockers(
     from github_pr_feedback.cli import _audit_pr
     from github_pr_feedback.github_client import CheckState, PullRequestMergeState
 
+    monkeypatch.setattr("github_pr_feedback.cli.owns_current_audit_task", lambda *_args: True)
     head_sha = "a" * 40
     base_sha = "b" * 40
     repository = tmp_path / "repository"
