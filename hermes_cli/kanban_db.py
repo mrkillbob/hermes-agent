@@ -2356,7 +2356,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
         auto_triage = conn.execute(
             "SELECT id, title, idempotency_key, block_kind FROM tasks "
             "WHERE status = 'triage' AND ("
-            "COALESCE(block_kind, '') != 'needs_input' OR "
+            "block_kind IN ('capability', 'transient') OR "
             "(COALESCE(idempotency_key, '') LIKE 'github-pr-feedback:%' "
             "AND COALESCE(idempotency_key, '') NOT LIKE 'github-pr-feedback:intent-review:%' "
             "AND title LIKE 'GitHub PR feedback:%'))"

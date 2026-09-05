@@ -805,6 +805,9 @@ _LATER_TASK_COLUMNS = (
 )
 
 _NOTIFY_SUB_COLUMNS = (
+    ("notify_claim_owner", "notify_claim_owner TEXT"),
+    ("notify_claimed_at", "notify_claimed_at INTEGER"),
+    ("notify_claimed_cursor", "notify_claimed_cursor INTEGER"),
     ("notifier_profile", "notifier_profile TEXT"),
     ("delivery_mode", "delivery_mode TEXT NOT NULL DEFAULT 'notify'"),
     ("chat_type", "chat_type TEXT"),

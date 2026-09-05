@@ -177,7 +177,7 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
         assert old_cursor == initial_cursor
         assert claimed_cursor > old_cursor
         assert [ev.kind for ev in events] == ["completed"]
-        assert int(kb.list_notify_subs(conn1, tid)[0]["last_event_id"]) == initial_cursor
+        assert int(kbn.list_notify_subs(conn1, tid)[0]["last_event_id"]) == initial_cursor
 
         # A concurrent notifier instance sees the advanced cursor and cannot
         # claim/send the same event range.
@@ -215,17 +215,17 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
 
 def test_notify_claim_lease_reclaims_events_after_watcher_crash(kanban_home, monkeypatch):
     """A dead watcher cannot permanently consume a terminal notification."""
-    conn1 = kb.connect()
-    conn2 = kb.connect()
+    conn1 = kbc.connect()
+    conn2 = kbc.connect()
     try:
         tid = kb.create_task(conn1, title="x", assignee="w")
-        kb.add_notify_sub(conn1, task_id=tid, platform="telegram", chat_id="123")
-        initial_cursor = int(kb.list_notify_subs(conn1, tid)[0]["last_event_id"])
+        kbn.add_notify_sub(conn1, task_id=tid, platform="telegram", chat_id="123")
+        initial_cursor = int(kbn.list_notify_subs(conn1, tid)[0]["last_event_id"])
         kb.complete_task(conn1, tid, result="ok")
 
         now = [10_000]
         monkeypatch.setattr(kb.time, "time", lambda: now[0])
-        old, claimed, events = kb.claim_unseen_events_for_sub(
+        old, claimed, events = kbn.claim_unseen_events_for_sub(
             conn1,
             task_id=tid,
             platform="telegram",
@@ -237,7 +237,7 @@ def test_notify_claim_lease_reclaims_events_after_watcher_crash(kanban_home, mon
         assert old == initial_cursor
         assert claimed > old
         assert [event.kind for event in events] == ["completed"]
-        assert kb.claim_unseen_events_for_sub(
+        assert kbn.claim_unseen_events_for_sub(
             conn2,
             task_id=tid,
             platform="telegram",
@@ -248,7 +248,7 @@ def test_notify_claim_lease_reclaims_events_after_watcher_crash(kanban_home, mon
         )[2] == []
 
         now[0] += 11
-        _, reclaimed, retry_events = kb.claim_unseen_events_for_sub(
+        _, reclaimed, retry_events = kbn.claim_unseen_events_for_sub(
             conn2,
             task_id=tid,
             platform="telegram",
@@ -259,7 +259,7 @@ def test_notify_claim_lease_reclaims_events_after_watcher_crash(kanban_home, mon
         )
         assert reclaimed == claimed
         assert [event.kind for event in retry_events] == ["completed"]
-        kb.advance_notify_cursor(
+        kbn.advance_notify_cursor(
             conn2,
             task_id=tid,
             platform="telegram",
@@ -443,7 +443,7 @@ def test_max_runtime_uses_dispatch_default_when_task_has_no_override(kanban_home
     _kb._pid_alive = lambda pid: False
 
     try:
-        conn = kb.connect()
+        conn = kbc.connect()
         try:
             tid = kb.create_task(conn, title="uncapped job", assignee="worker")
             kb.claim_task(conn, tid)
@@ -1541,7 +1541,7 @@ def test_protocol_violation_gets_one_finalize_retry_despite_retry_limit_one(kanb
     missed only the required terminal receipt.  Blocking it on that first
     exit suppresses the corrective context that lets the next run finalize.
     """
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn,
@@ -1562,7 +1562,7 @@ def test_protocol_violation_gets_one_finalize_retry_despite_retry_limit_one(kanb
 
 def test_worker_context_requires_terminal_kanban_receipt(kanban_home):
     """Detached workers receive a profile-independent terminal-call contract."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="bounded no-op", assignee="worker")
 

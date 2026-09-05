@@ -178,9 +178,12 @@ class _Collector:
             logger.debug("kanban notifier: subscription for %s on %s skipped; adapter not connected",
                          sub.get("task_id"), platform or "<missing>")
             return None
+        from uuid import uuid4
+        sub = {**sub, "notify_claim_owner": uuid4().hex}
         old_cursor, cursor, events = _kbn().claim_unseen_events_for_sub(
             conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
             thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
+            claim_owner=sub["notify_claim_owner"],
         )
         if not events:
             return None
