@@ -343,6 +343,7 @@ _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS = frozenset(
         "NULL",
         "PERF",
         "POST",
+        "PIPE",
         "PROFILE",
         "READONLY",
         "REVERSAL",
@@ -467,7 +468,10 @@ _BOUNDED_SOURCE_DIFF_METADATA = re.compile(
     r"(?m)^\+[A-Za-z0-9+/=_-]{1,128}\s*$"
 )
 _BOUNDED_SOURCE_DIFF_HUNK = re.compile(
-    r"(?m)^@@ -\d{1,8}(?:,\d{1,8})? \+\d{1,8}(?:,\d{1,8})? @@[^\n]*$"
+    r"(?m)^(?:\d+\|)?@@ -\d{1,8}(?:,\d{1,8})? \+\d{1,8}(?:,\d{1,8})? @@[^\n]*$"
+)
+_BOUNDED_NUMBERED_SOURCE_DIFF_LINE = re.compile(
+    r"(?m)^(?:(?P<number>\d+)\|)?(?P<marker>[+-])(?P<body>[^\n]*)$"
 )
 _BOUNDED_SOURCE_SECRET_NAMED_CODE_ASSIGNMENT = re.compile(
     r"\b(?P<name>[a-z][a-z0-9_]*_(?:pass|token|secret|password|auth|key))"
@@ -514,6 +518,12 @@ _BOUNDED_SOURCE_SECRET_EXPRESSION_ASSIGNMENT = re.compile(
     r"PASSWD|API_KEY|PRIVATE_KEY|CREDENTIALS|KEYS)[A-Z0-9_]*\b"
     r"\s*:\s*\$\{\{[^}\n]+\}\}"
  )
+_BOUNDED_SOURCE_BOOLEAN_SECRET_SETTING = re.compile(
+    r"(?im)\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|"
+    r"secret|password|passwd|api[_-]?key|apikey|client[_-]?secret|"
+    r"private[_-]?key|credential|credentials)\b"
+    r"\s*:\s*(?:true|false|null)\b"
+)
 # Bounded operational tokens are emitted by ordinary CLI/test tooling. They
 # can decode as Base64 by coincidence, but are not opaque encoded payloads.
 _BOUNDED_SHORT_CLI_OPTION = re.compile(r"^-[A-Za-z]{1,8}$")
@@ -1258,7 +1268,7 @@ def _source_text_for_base64_scan(
     )
     masked = _BASE64_CANDIDATE.sub(
         lambda match: (
-            "<code>"
+            "<src>"
             if is_source_code_atom(match, masked)
             or is_source_identifier_in_code(match, masked)
             else match.group(0)
@@ -1278,7 +1288,7 @@ def _source_text_for_base64_scan(
     # CLI filter values such as ``--diff-filter=ACMR`` are source syntax, not
     # opaque payloads. Keep this grammar tied to a long-option assignment so
     # short quoted Base64 values elsewhere remain rejected.
-    masked = _BOUNDED_SOURCE_CODE_ASSIGNMENT.sub("<code>", masked)
+    masked = _BOUNDED_SOURCE_CODE_ASSIGNMENT.sub("<src>", masked)
     masked = _BOUNDED_SOURCE_ISSUE_KEY.sub("<source issue key>", masked)
 
     def mask_diff_metadata(match: re.Match[str]) -> str:
@@ -1300,6 +1310,24 @@ def _source_text_for_base64_scan(
 
     masked = _BOUNDED_SOURCE_DIFF_METADATA.sub(mask_diff_metadata, masked)
     masked = _BOUNDED_SOURCE_DIFF_HUNK.sub("<source diff hunk>", masked)
+
+    def mask_numbered_diff_line(match: re.Match[str]) -> str:
+        body = match.group("body").strip()
+        candidate = f"{match.group('marker')}{body}"
+        # Keep an entire added/removed line visible when it is itself an
+        # encoded payload. Ordinary source syntax (``+def ...``, imports,
+        # assertions, and so on) is presentation metadata for this scan; the
+        # independent secret scan still sees the original source bytes.
+        if (
+            _canonical_base64_candidate(candidate)
+            or _canonical_chunked_base64_candidate(candidate)
+            or _canonical_base64_candidate(body)
+            or _canonical_chunked_base64_candidate(body)
+        ):
+            return match.group(0)
+        return "<source diff line>"
+
+    masked = _BOUNDED_NUMBERED_SOURCE_DIFF_LINE.sub(mask_numbered_diff_line, masked)
     masked = _BOUNDED_SOURCE_GIT_LOG_ENTRY.sub("<source-control-sha>", masked)
     masked = _BOUNDED_SOURCE_GIT_HEAD_OUTPUT.sub(
         lambda match: f"<source-control-sha>\n<source-control-sha> {match.group(0).split(' ', 1)[1]}",
@@ -1318,10 +1346,10 @@ def _source_text_for_base64_scan(
         masked,
     )
     masked = _BOUNDED_SOURCE_CLI_VALUE.sub(
-        lambda match: f"{match.group('prefix')}<code>{match.group('suffix')}",
+        lambda match: f"{match.group('prefix')}<src>{match.group('suffix')}",
         masked,
     )
-    return _BOUNDED_SOURCE_REVIEW_SYNTAX.sub("<code>", masked)
+    return _BOUNDED_SOURCE_REVIEW_SYNTAX.sub("<src>", masked)
 
 
 def _generated_context_text_for_base64_scan(text: str) -> str:
@@ -1345,6 +1373,9 @@ def _generated_context_text_for_base64_scan(text: str) -> str:
 def _source_text_for_secret_scan(text: str) -> str:
     """Mask code identifiers that resemble secret names, not secret values."""
 
+    text = _BOUNDED_SOURCE_BOOLEAN_SECRET_SETTING.sub(
+        "<source-secret-setting>", text
+    )
     text = _BOUNDED_SOURCE_SECRET_PLACEHOLDER_VALUE.sub(
         r"\g<prefix><source-placeholder>", text
     )

@@ -967,6 +967,31 @@ def test_source_presentation_allows_worker_receipt_sha_and_changed_name(tmp_path
     assert decision.allowed is True
 
 
+def test_source_presentation_allows_numbered_diff_hunks_and_boolean_secret_settings(tmp_path):
+    source = "@@ -1,1 +1,2 @@\n-    password: false\n+def example():\n+    password: false"
+    path = tmp_path / "pr.diff"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=4)
+    presentation = json.dumps(
+        {
+            "content": (
+                "1|@@ -1,1 +1,2 @@\n"
+                "2|-    password: false\n"
+                "3|+def example():\n"
+                "4|+    password: false"
+            )
+        }
+    )
+
+    decision = firewall(tmp_path).preflight(
+        _source_presentation_request(grant, presentation),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+
+
 def test_source_presentation_allows_exact_repair_source_atoms_but_not_payloads(tmp_path):
     source = (
         "SAME\n"
