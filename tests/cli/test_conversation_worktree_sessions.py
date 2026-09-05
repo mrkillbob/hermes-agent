@@ -464,3 +464,18 @@ def test_disabled_policy_preserves_legacy_worktree_flag(monkeypatch):
         shorthand=False,
         config=config,
     ) is True
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_cli_argument_builder_passes_explicit_conversation_ownership(monkeypatch, managed):
+    captured = {}
+    def construct(**kwargs):
+        captured.update(kwargs)
+        return object()
+    monkeypatch.setattr(cli_module, "HermesCLI", construct)
+    cli_module._build_cli_from_args(
+        None, "terminal", None, None, None, None, None, None,
+        False, True, None, None, False, False, None,
+        manage_conversation_worktree=managed,
+    )
+    assert captured["manage_conversation_worktree"] is managed
