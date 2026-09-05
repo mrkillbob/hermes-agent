@@ -82,6 +82,14 @@ def scope_terminal_cwd() -> str:
     return _terminal_cwd_env()
 
 
+def _existing_dir(raw: str, label: str) -> Path | None:
+    p = Path(raw).expanduser()
+    if p.is_dir():
+        return p
+    logger.warning("%s does not exist: %s", label, raw)
+    return None
+
+
 def resolve_kanban_worker_cwd(
     candidate: str | None = None,
     *,
@@ -116,23 +124,22 @@ def resolve_kanban_worker_cwd(
     return workspace
 
 
-def resolve_agent_cwd() -> Path:
+def _resolve_configured_cwd(*, override_is_final: bool) -> Path | None:
+    """Resolve session/worker cwd before the scoped TERMINAL_CWD fallback."""
     override = _session_cwd_override()
     worker_cwd = resolve_kanban_worker_cwd(override)
     if worker_cwd:
         return Path(worker_cwd)
     if override:
-        p = Path(override).expanduser()
-        if p.is_dir():
+        p = _existing_dir(override, "configured working directory")
+        if p is not None or override_is_final:
             return p
-        logger.warning("configured working directory does not exist: %s", override)
     raw = _terminal_cwd_env().strip()
-    if raw:
-        p = Path(raw).expanduser()
-        if p.is_dir():
-            return p
-        logger.warning("TERMINAL_CWD does not exist: %s", raw)
-    return Path(os.getcwd())
+    return _existing_dir(raw, "TERMINAL_CWD") if raw else None
+
+
+def resolve_agent_cwd() -> Path:
+    return _resolve_configured_cwd(override_is_final=False) or Path(os.getcwd())
 
 
 def resolve_context_cwd() -> Path | None:
@@ -144,22 +151,4 @@ def resolve_context_cwd() -> Path | None:
     # source tree itself, which is a legitimate workspace when the user is
     # developing Hermes (per-surface policy for fallback-picked directories
     # lives in build_context_files_prompt; see #64590).
-    override = _session_cwd_override()
-    worker_cwd = resolve_kanban_worker_cwd(override)
-    if worker_cwd:
-        return Path(worker_cwd)
-    if override:
-        p = Path(override).expanduser()
-        if not p.is_dir():
-            logger.warning("configured working directory does not exist: %s", override)
-        else:
-            return p
-        return None
-    raw = _terminal_cwd_env().strip()
-    if raw:
-        p = Path(raw).expanduser()
-        if not p.is_dir():
-            logger.warning("TERMINAL_CWD does not exist: %s", raw)
-        else:
-            return p
-    return None
+    return _resolve_configured_cwd(override_is_final=True)
