@@ -157,16 +157,7 @@ def _factual_reply_is_missing(
 def _retrigger_codex_review(
     github: GitHubClient, repository: str, pr_number: int, resolved_head_sha: str
 ) -> str:
-    """Mention @codex review after a verified repair push, once, if needed.
-
-    Codex's GitHub App never re-reviews on an ordinary push -- only on PR
-    opened, marked ready, or this exact mention (see merge_controller's
-    codex_review_pending). Without this, a repaired PR would carry a
-    permanently stale Codex review and sit blocked on that gate forever.
-    Rereads canonical comments first so a PR whose new head Codex has
-    already reviewed (e.g. two repairs landing back to back) does not get a
-    redundant mention.
-    """
+    """Request an exact-head review once and expose connector authorization failures."""
 
     try:
         feedback = github.list_feedback(repository, pr_number)
@@ -174,10 +165,19 @@ def _retrigger_codex_review(
         return "unavailable"
     if _codex_reviewed_head(feedback, resolved_head_sha):
         return "already_current"
-    if any(
-        codex_review_trigger_requested(item.body, resolved_head_sha)
-        for item in feedback
-    ):
+    requests = [
+        item for item in feedback
+        if codex_review_trigger_requested(item.body, resolved_head_sha)
+    ]
+    if requests:
+        latest_request = max(item.created_at for item in requests)
+        if any(
+            item.reviewer.login.casefold() == "chatgpt-codex-connector[bot]"
+            and item.created_at >= latest_request
+            and "create a codex account and connect to github" in item.body.casefold()
+            for item in feedback
+        ):
+            return "authorization_required"
         return "already_requested"
     try:
         github.post_issue_comment(

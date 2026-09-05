@@ -2978,3 +2978,25 @@ def test_scan_payload_accepts_repair_results_without_ci_backlog():
     from github_pr_feedback.repair_controller import RepairScanResult
     result = RepairScanResult(created=2, skipped={"duplicate": 1}, degraded=False)
     assert _scan_payload(result) == {"status": "ok", "created": 2, "skipped": {"duplicate": 1}}
+
+
+def test_codex_request_reports_connector_auth_failure_without_reposting():
+    from dataclasses import replace
+    request = _codex_feedback(codex_review_trigger_comment("a" * 40))
+    denied = replace(request, body="To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors).")
+    github = _FakeGitHubCodex((request, denied))
+    assert _retrigger_codex_review(github, "acme/widgets", 17, "a" * 40) == "authorization_required"
+    assert github.posted == []
+
+
+def test_codex_auth_failure_must_be_current_and_from_connector():
+    from dataclasses import replace
+    request = _codex_feedback(codex_review_trigger_comment("a" * 40))
+    denied = replace(request, body="create a Codex account and connect to github")
+    for ignored in (
+        replace(denied, reviewer=Reviewer("untrusted-user", None)),
+        replace(denied, created_at=denied.created_at.replace(year=2025)),
+    ):
+        github = _FakeGitHubCodex((request, ignored))
+        assert _retrigger_codex_review(github, "acme/widgets", 17, "a" * 40) == "already_requested"
+        assert github.posted == []
