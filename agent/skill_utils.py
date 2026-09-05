@@ -31,6 +31,7 @@ EXCLUDED_SKILL_DIRS = frozenset(
         ".github",
         ".hub",
         ".archive",
+        ".curator_backups",
         ".venv",
         "venv",
         "node_modules",
@@ -49,6 +50,20 @@ EXCLUDED_SKILL_DIRS = frozenset(
 # be scanned for active SKILL.md/DESCRIPTION.md entries, even if a Curator or
 # archive workflow preserves a complete old skill package under references/.
 SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
+
+# ── User-shared skills ───────────────────────────────────────────
+#
+# ``~/.agents/skills`` is the cross-agent user skill root shared by Codex,
+# Claude, and Hermes. Hermes profile-local skills keep higher precedence for
+# compatibility and intentional overrides, while this default root prevents
+# launcher-specific copies from drifting when the same operator skill should be
+# available everywhere.
+
+
+def get_shared_user_skills_dir() -> Path:
+    """Return the cross-agent user skill root."""
+    return Path.home() / ".agents" / "skills"
+
 
 # ── Org-shared skills (sync contract) ───────────────────────────
 # Org mirrors live under ~/.hermes/skills/_org/<org_id>/. Resolution is
@@ -583,6 +598,7 @@ def get_external_skills_dirs() -> List[Path]:
 
     hermes_home = get_hermes_home()
     local_skills = get_skills_dir().resolve()
+    shared_skills = get_shared_user_skills_dir().resolve()
     seen: Set[Path] = set()
     result = []
 
@@ -598,7 +614,7 @@ def get_external_skills_dirs() -> List[Path]:
             p = (hermes_home / p).resolve()
         else:
             p = p.resolve()
-        if p == local_skills:
+        if p == local_skills or p == shared_skills:
             continue
         if p in seen:
             continue
@@ -676,13 +692,31 @@ def display_skill_create_dir() -> str:
         return create_dir.as_posix() + "/"
 
 
+def _append_unique_dir(dirs: List[Path], path: Path) -> None:
+    """Append *path* once, comparing resolved paths when possible."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    for existing in dirs:
+        try:
+            if existing.resolve() == resolved:
+                return
+        except OSError:
+            if existing == path:
+                return
+    dirs.append(path)
+
+
 def get_all_skills_dirs() -> List[Path]:
-    """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
+    """Return all skill directories in user-scope precedence order.
 
     The local dir is always first (and always included even if it doesn't exist
     yet — callers handle that).  When ``skills.create_dir`` is configured, it
     follows immediately after the local dir (so agent-created skills are
-    discovered, trusted, and modifiable).  External dirs follow in config order.
+    discovered, trusted, and modifiable).  The cross-agent shared root
+    ``~/.agents/skills`` follows when it exists.  Explicit external dirs follow
+    in config order.
 
     NOTE: trusted project-local dirs (``./.hermes/skills`` at the git root) are
     NOT part of this list — they have *higher* precedence than the local dir,
@@ -693,10 +727,12 @@ def get_all_skills_dirs() -> List[Path]:
     dirs = [get_skills_dir()]
     create_dir = get_skill_create_dir()
     if create_dir is not None and create_dir.is_dir():
-        dirs.append(create_dir)
+        _append_unique_dir(dirs, create_dir)
+    shared_dir = get_shared_user_skills_dir()
+    if shared_dir.is_dir():
+        _append_unique_dir(dirs, shared_dir)
     for d in get_external_skills_dirs():
-        if d not in dirs:
-            dirs.append(d)
+        _append_unique_dir(dirs, d)
     return dirs
 
 
@@ -706,10 +742,12 @@ def get_all_skills_dirs() -> List[Path]:
 # and Codex (.codex/skills/, .agents/skills/) do: a project checkout can carry
 # its own skills, active only for sessions started inside that project.
 #
-# Two candidate roots at the project root (found by walking up from cwd to the
+# Candidate roots at the project root (found by walking up from cwd to the
 # first directory containing ``.git``):
 #   <root>/.hermes/skills/   — Hermes-native location
 #   <root>/.agents/skills/   — cross-tool convention shared with other harnesses
+#   <root>/.codex/skills/    — Codex project-local location
+#   <root>/.claude/skills/   — Claude project-local location
 #
 # TRUST GATE: unlike AGENTS.md (plain instruction text), skills are load-on-
 # demand procedure documents an agent will follow — auto-sourcing them from any
@@ -733,6 +771,8 @@ def get_all_skills_dirs() -> List[Path]:
 PROJECT_SKILLS_SUBDIRS = (
     os.path.join(".hermes", "skills"),
     os.path.join(".agents", "skills"),
+    os.path.join(".codex", "skills"),
+    os.path.join(".claude", "skills"),
 )
 
 # Walk-up bound: don't scan the whole filesystem on pathological cwds.
@@ -755,7 +795,9 @@ def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
     """
     try:
         if start is None:
-            env_cwd = os.environ.get("TERMINAL_CWD")
+            from agent.runtime_cwd import scope_terminal_cwd
+
+            env_cwd = scope_terminal_cwd()
             start = Path(env_cwd) if env_cwd else Path.cwd()
         cur = Path(start).resolve()
     except OSError:
@@ -802,10 +844,65 @@ def _project_trusted_dirs_from_config() -> Set[Path]:
     return result
 
 
-def is_project_root_trusted(root: Path) -> bool:
-    """True when *root* is listed in ``skills.trusted_project_dirs``."""
+def _git_common_dir(root: Path) -> Optional[Path]:
+    """Resolve the common Git directory shared by a checkout and its worktrees."""
+    marker = Path(root) / ".git"
     try:
-        return Path(root).resolve() in _project_trusted_dirs_from_config()
+        if marker.is_dir():
+            return marker.resolve()
+        if not marker.is_file():
+            return None
+        prefix = "gitdir:"
+        line = marker.read_text(encoding="utf-8").strip()
+        if not line.casefold().startswith(prefix):
+            return None
+        git_dir = Path(line[len(prefix) :].strip())
+        if not git_dir.is_absolute():
+            git_dir = marker.parent / git_dir
+        git_dir = git_dir.resolve()
+        common_marker = git_dir / "commondir"
+        if not common_marker.is_file():
+            return git_dir
+        common = Path(common_marker.read_text(encoding="utf-8").strip())
+        return (common if common.is_absolute() else git_dir / common).resolve()
+    except (OSError, UnicodeError):
+        return None
+
+
+def is_project_root_trusted(root: Path) -> bool:
+    """True for an explicit root, its linked worktree, or an owned worker root."""
+    try:
+        resolved_root = Path(root).resolve()
+        trusted_roots = _project_trusted_dirs_from_config()
+        if resolved_root in trusted_roots:
+            return True
+
+        common_dir = _git_common_dir(resolved_root)
+        if common_dir is not None and any(
+            _git_common_dir(candidate) == common_dir for candidate in trusted_roots
+        ):
+            return True
+
+        task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+        workspace = os.environ.get("HERMES_KANBAN_WORKSPACE", "").strip()
+        workspaces_root = os.environ.get(
+            "HERMES_KANBAN_WORKSPACES_ROOT", ""
+        ).strip()
+        if not task_id or task_id != resolved_root.name or not workspace or not workspaces_root:
+            return False
+        resolved_workspace = Path(workspace).resolve()
+        resolved_workspaces_root = Path(workspaces_root).resolve()
+        board_owned_workspace = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent == resolved_workspaces_root
+            and resolved_workspaces_root.parent in trusted_roots
+        )
+        migrated_trusted_worktree = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent.name == ".worktrees"
+            and resolved_root.parent.parent in trusted_roots
+        )
+        return board_owned_workspace or migrated_trusted_worktree
     except OSError:
         return False
 
@@ -994,12 +1091,15 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     # Look the primary skills root up on tools.skills_tool at CALL time
     # (not via get_skills_dir()): callers and tests patch
     # ``tools.skills_tool.SKILLS_DIR`` and skill_view() itself resolves
-    # against that module attribute, so normalization must agree with the
-    # exact root skill_view() will enforce.  Import deferred to avoid a
-    # module cycle (tools.skills_tool imports agent.skill_utils).
+    # against ``_skills_dir()`` — which honors that patch and otherwise
+    # follows the live profile-scoped HERMES_HOME (the import-time
+    # SKILLS_DIR is frozen to the launch home, #67277) — so normalization
+    # must agree with the exact root skill_view() will enforce.  Import
+    # deferred to avoid a module cycle (tools.skills_tool imports
+    # agent.skill_utils).
     try:
         from tools import skills_tool as _skills_tool
-        primary_root = Path(_skills_tool.SKILLS_DIR)
+        primary_root = _skills_tool.get_active_skills_dir()
     except Exception:
         primary_root = get_skills_dir()
 

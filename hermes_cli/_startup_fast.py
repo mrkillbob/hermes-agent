@@ -73,11 +73,11 @@ def is_termux_env() -> bool:
 
 
 def is_termux_fast_version_argv(argv: list[str]) -> bool:
-    return argv in (["--version"], ["-V"])
+    return argv in (["--version"], ["-V"], ["--version-local"])
 
 
 def is_global_fast_version_argv(argv: list[str]) -> bool:
-    return argv in (["--version"], ["-V"])
+    return argv in (["--version"], ["-V"], ["--version-local"])
 
 
 def is_container_startup_environment() -> bool:
@@ -253,13 +253,15 @@ def print_fast_version_info(*, check_updates: bool = True) -> None:
 def try_fast_version(argv: list[str] | None = None) -> bool:
     """Handle ``hermes --version`` before the heavy import wall.
 
-    Only ``--version``/``-V`` (the ``version`` subcommand was removed —
-    ``--version`` now carries the full output incl. update status), and
+    ``--version``/``-V`` carry user-facing update status. The internal
+    ``--version-local`` readiness probe emits the same local identity without
+    an upstream update check, and
     never when container mode may need to route the command into the
     container. Termux keeps the HERMES_TERMUX_DISABLE_FAST_CLI escape hatch.
     """
     if argv is None:
         argv = sys.argv[1:]
+    local_only = argv == ["--version-local"]
     is_termux = is_termux_env()
     if is_termux and os.environ.get("HERMES_TERMUX_DISABLE_FAST_CLI") == "1":
         return False
@@ -271,5 +273,5 @@ def try_fast_version(argv: list[str] | None = None) -> bool:
     elif container_mode_may_be_active():
         return False
 
-    print_fast_version_info()
+    print_fast_version_info(check_updates=not local_only)
     return True

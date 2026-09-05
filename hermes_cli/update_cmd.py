@@ -55,6 +55,22 @@ def _m():
     return main
 
 
+def _no_prompt_git_kwargs() -> dict:
+    """``subprocess.run`` kwargs for the updater's network git calls.
+
+    GitHub answers anonymous fetches with HTTP 401 during outages (and for
+    unreachable repos); git then prompts ``Username for 'https://github.com':``
+    on the inherited terminal and the update sits there forever. Disable the
+    prompt so the fetch fails fast into ``_classify_fetch_failure``. Only the
+    *prompt* is disabled — a configured credential helper / askpass still
+    runs, so a private-fork origin keeps authenticating non-interactively.
+    """
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "Never"
+    return {"stdin": subprocess.DEVNULL, "env": env}
+
+
 _UPDATE_RUNTIME_RELOAD_MODULES = (
     "hermes_constants",
     "tools.environments.local",
@@ -211,7 +227,7 @@ def _run_config_check_fresh() -> tuple:
     _reload_config_modules()
     from hermes_cli.config import check_config_version
 
-    return check_config_version()
+    return check_config_version(raise_on_parse_error=True)
 
 
 def _run_migrate_config_fresh(*, interactive: bool = False, quiet: bool = False) -> dict:
@@ -1034,9 +1050,9 @@ def _print_curator_first_run_notice() -> None:
 def _print_fts_optimize_available_notice() -> None:
     """Advertise the opt-in v23 search-index optimization after `hermes update`.
 
-    Only fires when the current profile's state.db is still on the legacy
-    (pre-v23) inline FTS layout. Leads with the reclaimable-space figure and
-    points at the exact command. Honors ``sessions.fts_optimize_notice``:
+    Only fires when the current profile's state.db still needs an FTS storage
+    rebuild. Leads with the reclaimable-space figure and points at the exact
+    command. Honors ``sessions.fts_optimize_notice``:
     ``advise`` (default) prints an advisory notice, ``require`` prints a
     firmer required-upgrade notice, ``off`` suppresses it. Silent for
     fresh/already-optimized installs.
@@ -1072,13 +1088,17 @@ def _print_fts_optimize_available_notice() -> None:
         return
     db = None
     interrupted = False
+    needs_upgrade = False
     try:
         db = SessionDB(db_path=db_path, read_only=True)
-        # read_only opens skip schema init, so probe the layout directly.
+        # read_only opens skip schema init, so probe the stored layout directly.
         row = db._conn.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'messages_fts'"
         ).fetchone()
+        needs_upgrade = bool(row) and getattr(
+            db, "_db_needs_fts_storage_upgrade"
+        )(db._conn)
         # An interrupted `optimize-storage` run: the table is already the
         # v23 shape, but backfill markers / demoted trash tables remain.
         # Offer the command again — re-running resumes and finishes it.
@@ -1104,9 +1124,8 @@ def _print_fts_optimize_available_notice() -> None:
                 db.close()
             except Exception:
                 pass
-    sql = (row[0] if row else "") or ""
-    if not sql or ("tool_name" in sql and not interrupted):
-        # v23 layout already present (fresh/optimized) — nothing to offer.
+    if not needs_upgrade and not interrupted:
+        # Current layout already present (fresh/optimized) — nothing to offer.
         return
 
     if interrupted:
@@ -3263,6 +3282,7 @@ def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
             cwd=cwd,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
+            **_no_prompt_git_kwargs(),
         )
         return result.returncode == 0
     except Exception:
@@ -3358,6 +3378,7 @@ def _sync_with_upstream_if_needed(
             cwd=cwd,
             capture_output=True,
             check=True,
+            **_no_prompt_git_kwargs(),
         )
     except subprocess.CalledProcessError:
         print("  ✗ Failed to fetch upstream. Skipping upstream sync.")
@@ -3397,6 +3418,7 @@ def _sync_with_upstream_if_needed(
             git_cmd + ["pull", "--ff-only", "upstream", "main"],
             cwd=cwd,
             check=True,
+            **_no_prompt_git_kwargs(),
         )
     except subprocess.CalledProcessError:
         print(
@@ -4539,7 +4561,17 @@ def _classify_fetch_failure(stderr: str) -> str:
         )
     if "Could not resolve host" in stderr or "unable to access" in stderr:
         return "✗ Network error — cannot reach the remote repository."
-    if "Authentication failed" in stderr or "could not read Username" in stderr:
+    if "could not read Username" in stderr or "terminal prompts disabled" in stderr:
+        # Anonymous fetch of a public repo got HTTP 401. GitHub does this
+        # during outages (and for renamed/private repos) — it is not a
+        # credentials problem on the user's side.
+        return (
+            "✗ GitHub rejected the anonymous fetch (asked for a login) — this"
+            " usually means a GitHub outage; try again in a few minutes"
+            " (https://www.githubstatus.com). If it persists, check"
+            " `git remote -v` points at a public repo."
+        )
+    if "Authentication failed" in stderr:
         return "✗ Authentication failed — check your git credentials or SSH key."
     return "✗ Failed to fetch updates from origin."
 
@@ -4646,6 +4678,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
                 cwd=_m().PROJECT_ROOT,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
+                **_no_prompt_git_kwargs(),
             )
         if fetch_result is not None and fetch_result.returncode == 0:
             upstream_exists = True
@@ -4658,6 +4691,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
                 cwd=_m().PROJECT_ROOT,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
+                **_no_prompt_git_kwargs(),
             )
             upstream_exists = False
             compare_branch = f"origin/{branch}"
@@ -4669,6 +4703,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
+            **_no_prompt_git_kwargs(),
         )
         upstream_exists = False
         compare_branch = f"origin/{branch}"
@@ -6941,8 +6976,6 @@ def _service_unit_supports_graceful_sigusr1_restart(svc_name: str) -> bool:
 
 def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
     """Print an explicit incomplete-update warning for unrestarted units."""
-    from hermes_cli.gateway import is_macos
-
     if not failed_units:
         return
     # Preserve discovery order while de-duplicating.
@@ -6957,7 +6990,7 @@ def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
     print("⚠ Update incomplete — some units were not restarted:")
     for name in ordered:
         print(f"    - {name}")
-    if is_macos():
+    if all(name.startswith("ai.hermes.") for name in ordered):
         # A launchd label reaches this list when launchd was not supervising a
         # live process after the restart (#88848), so the unit is not merely
         # stale — it is very likely deregistered, and `launchctl kickstart`
@@ -6968,6 +7001,7 @@ def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
         print("    launchctl list | grep <label>")
         print("    launchctl bootstrap gui/$(id -u) "
               "~/Library/LaunchAgents/<label>.plist")
+        print("    launchctl kickstart -k gui/$UID/<label>   # verify restart")
         return
     print("  Skipped units may still be running pre-update code (mixed")
     print("  sys.modules). Restart them manually, then verify:")
@@ -8591,6 +8625,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
+            **_no_prompt_git_kwargs(),
         )
         if fetch_result.returncode != 0:
             _print_fetch_failure(fetch_result.stderr)
@@ -10814,6 +10849,26 @@ def _cmd_update_impl(args, gateway_mode: bool):
             node_failures, already_restarted_units=set(restarted_services)
         )
 
+        # Check if any pre-update serve/dashboard runtimes survived on
+        # pre-update code generations (#100479). This is the SUCCESS-path
+        # twin of the abort-recovery probe above: the restart phase only
+        # restarts units, so an sshd-spawned `serve --isolated` or a manual
+        # `hermes serve` (no unit) is left running its pre-update
+        # sys.modules graph — and its cron ticker keeps firing agent jobs
+        # that ImportError on every symbol added in the pulled range. Runs
+        # AFTER the dashboard cleanup so a manual dashboard that cleanup
+        # killed and respawned is (correctly) not a survivor. The rows also
+        # feed the plan-vs-execution reconciliation below, so a survivor is
+        # escalated (exit 1) instead of merely printed. ``None`` means the
+        # probe itself failed; the reconciliation then stays fail-closed.
+        _stale_serve_rows: "list | None" = None
+        try:
+            _stale_serve_rows = _surviving_pre_update_serve_runtimes(_pre_update_plan)
+            if _stale_serve_rows:
+                _warn_stale_serve_runtimes(_stale_serve_rows)
+        except Exception as _serve_warn_exc:
+            logger.debug("Failed to check for surviving serve runtimes: %s", _serve_warn_exc)
+
         print()
         print("Tip: You can now select a provider and model:")
         print("  hermes model              # Select provider and model")
@@ -10923,6 +10978,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     externally_supervised_profiles=externally_supervised_profiles,
                     killed_pids=killed_pids,
                     failed_units=failed_or_stale_units,
+                    # Serve/dashboard runtimes reconcile by incarnation
+                    # liveness, not by the gateway's unit names (#100479).
+                    stale_serve_pids=(
+                        {row.get("pid") for row in _stale_serve_rows}
+                        if _stale_serve_rows is not None
+                        else None
+                    ),
                 )
                 if report_unaccounted_runtimes(_runtime_outcomes):
                     gateway_fleet_restart_incomplete = True

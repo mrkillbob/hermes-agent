@@ -78,6 +78,59 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
         assert payload.get("kind") == "capability"
 
 
+def test_legacy_pr_feedback_needs_input_triage_auto_recovers(kanban_home: Path) -> None:
+    """Ordinary PR feedback intake loops are role-owned validation work."""
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="GitHub PR feedback: acme/widgets#17",
+            assignee="pr-repair-steward",
+            idempotency_key="github-pr-feedback:abc123",
+            initial_status="running",
+        )
+        assert kb.claim_task(conn, tid, claimer="pr-repair-steward") is not None
+        kb.block_task(conn, tid, reason="start validation", kind="needs_input")
+        kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid, claimer="pr-repair-steward") is not None
+        kb.block_task(conn, tid, reason="start validation", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+
+        promoted = kb.recompute_ready(conn)
+
+        assert promoted == 1
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
+        events = [event.kind for event in kb.list_events(conn, tid)]
+        assert "triage_auto_resolved" in events
+
+
+def test_intent_review_needs_input_triage_stays_human_gated(kanban_home: Path) -> None:
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Operator intent required: PR #17",
+            body="Record only the operator intent decision.",
+            assignee="task-orchestrator",
+            idempotency_key="github-pr-feedback:intent-review:repo:17:abc",
+            initial_status="running",
+        )
+        assert kb.claim_task(conn, tid, claimer="task-orchestrator") is not None
+        kb.block_task(conn, tid, reason="operator intent", kind="needs_input")
+        kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid, claimer="task-orchestrator") is not None
+        kb.block_task(conn, tid, reason="operator intent", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+
+        promoted = kb.recompute_ready(conn)
+
+        assert promoted == 0
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "triage"
+
+
 # ---------------------------------------------------------------------------
 # Dependency routing
 # ---------------------------------------------------------------------------
@@ -108,5 +161,4 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
 # ---------------------------------------------------------------------------
 # Validation + back-compat
 # ---------------------------------------------------------------------------
-
 

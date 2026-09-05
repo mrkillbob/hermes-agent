@@ -44,6 +44,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
+from hermes_cli.worktree_base import resolve_worktree_base
+from hermes_cli.worktree_environment import bootstrap_worktree_environments
 logger = logging.getLogger(__name__)
 
 _GIT_TIMEOUT = 30
@@ -52,15 +55,24 @@ _BRANCH_NAMESPACE = "hermes-subagent"
 
 
 def _run_git(args, cwd: str, timeout: int = _GIT_TIMEOUT):
-    """Run a git command, capturing output. Never raises on non-zero exit."""
+    """Run a git command, capturing output. Never raises on non-zero exit.
+
+    Runs under :func:`noninteractive_git_env` (GHSA-7x36-8jrh-v4pw): worktree
+    isolation runs automatically for delegated subagents against whatever repo
+    the parent sits in, and ``worktree add`` runs checkout hooks. Disabling the
+    fsmonitor/hooks/pager/credential config sinks keeps a malicious ``.git/config``
+    from executing on the host.
+    """
     return subprocess.run(
-        ["git", *args],
+        ["git", *harden_git_argv(args)],
         cwd=cwd,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
+        stdin=subprocess.DEVNULL,
+        env=noninteractive_git_env(),
     )
 
 
@@ -146,10 +158,13 @@ def create_subagent_worktree(
     _ensure_gitignore_entry(repo_root)
 
     try:
-        base = _run_git(["rev-parse", "HEAD"], cwd=repo_root)
+        base_ref, _base_label = resolve_worktree_base(
+            repo_root, prefer_current_upstream=False
+        )
+        base = _run_git(["rev-parse", base_ref], cwd=repo_root)
         base_commit = base.stdout.strip() if base.returncode == 0 else ""
         result = _run_git(
-            ["worktree", "add", str(wt_path), "-b", branch, "HEAD"],
+            ["worktree", "add", "--no-track", str(wt_path), "-b", branch, base_ref],
             cwd=repo_root,
         )
     except Exception as exc:
@@ -162,6 +177,12 @@ def create_subagent_worktree(
             result.stderr.strip(),
         )
         return None
+
+    # Git worktrees intentionally omit ignored directories.  Provision the
+    # repo-selected environment before the child is released to the agent so
+    # ``./.venv/bin/python`` resolves to this repository's runtime rather than
+    # the parent's or the host's ambient interpreter.
+    bootstrap_worktree_environments(Path(repo_root), wt_path, environment_names=(".venv",))
 
     logger.info("subagent worktree created: %s (branch %s)", wt_path, branch)
     return {

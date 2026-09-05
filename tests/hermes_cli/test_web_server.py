@@ -319,6 +319,29 @@ class TestWebServerEndpoints:
                 monitor.close()
             writer.close()
 
+    def test_get_sessions_transient_ioerr_is_503(self, monkeypatch):
+        """Busy store, not a gone store: the desktop keeps the list it has."""
+        import sqlite3
+
+        from hermes_cli import web_server
+
+        def boom(*_args, **_kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(web_server, "_open_session_db_for_profile", boom)
+        assert self.client.get("/api/sessions?limit=1&offset=0").status_code == 503
+
+    def test_get_sessions_non_transient_operational_error_is_500(self, monkeypatch):
+        import sqlite3
+
+        from hermes_cli import web_server
+
+        def boom(*_args, **_kwargs):
+            raise sqlite3.OperationalError("no such table: sessions")
+
+        monkeypatch.setattr(web_server, "_open_session_db_for_profile", boom)
+        assert self.client.get("/api/sessions?limit=1&offset=0").status_code == 500
+
     def test_get_status_loads_gateway_config_off_event_loop(self, monkeypatch):
         """Cold gateway config loading must not block the WebSocket loop.
 
@@ -417,6 +440,9 @@ class TestWebServerEndpoints:
 
         legacy = sqlite3.connect(str(db_path))
         try:
+            # SQLite refuses DROP COLUMN while an index references the
+            # column; a pre-column legacy store has neither.
+            legacy.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
             legacy.execute(f"ALTER TABLE sessions DROP COLUMN {missing_column}")
             legacy.commit()
         finally:
@@ -463,6 +489,7 @@ class TestWebServerEndpoints:
 
         legacy = sqlite3.connect(str(db_path))
         try:
+            legacy.execute("DROP INDEX IF EXISTS idx_sessions_effective_activity")
             legacy.execute("ALTER TABLE sessions DROP COLUMN last_activity_at")
             legacy.commit()
         finally:
@@ -4974,6 +5001,26 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert called.wait(3.0), "expected cron tick under HERMES_DESKTOP=1"
+
+    def test_ticker_does_not_run_in_desktop_pool_backend(
+        self, monkeypatch, _isolate_hermes_home
+    ):
+        import threading
+        import hermes_cli.web_server as web_server
+
+        called = threading.Event()
+        monkeypatch.setenv("HERMES_DESKTOP", "1")
+        monkeypatch.setenv("HERMES_DESKTOP_POOL", "1")
+        monkeypatch.setattr(
+            web_server,
+            "_start_desktop_cron_ticker",
+            lambda *_args, **_kwargs: called.set(),
+        )
+
+        with self._client():
+            assert not called.wait(0.25), (
+                "pooled profile backends must not become duplicate cron authorities"
+            )
 
 
 class TestServeIndexMissingIndex:

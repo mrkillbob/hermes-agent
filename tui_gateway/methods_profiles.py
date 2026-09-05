@@ -82,6 +82,36 @@ def _(rid, params: dict) -> dict:
         except Exception:
             return None
 
+    def _federation_role(profile_path):
+        """Read optional role identity metadata for Bot Mode roster clients."""
+        try:
+            from pathlib import Path
+            import json
+
+            path = Path(profile_path) / "federation_role.json"
+            if not path.is_file():
+                return None
+            with path.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict) or raw.get("schema_name") != "hermes_federation_role_v1":
+                return None
+            return {
+                key: raw[key]
+                for key in (
+                    "role_id",
+                    "display_name",
+                    "department",
+                    "authority",
+                    "schedule",
+                    "skills",
+                    "toolsets",
+                    "handoffs",
+                )
+                if key in raw
+            }
+        except Exception:
+            return None
+
     def _canonical_session_row(db, profile_path):
         """Summary of the profile's canonical "Bot Chat" registry row, or None.
 
@@ -95,13 +125,10 @@ def _(rid, params: dict) -> dict:
 
         Exact-lookup semantics, deliberately different from the listing:
         hidden rows still resolve (canonical chats are always hidden),
-        compression lineages resolve to the live tip via
-        ``get_compression_tip`` (not the generic resume walker, whose
-        unmarked-child fallback can select an ordinary child).
-        ``session.resume`` uses that same tip resolver when the target is
-        titled ``Bot Chat``. Denied internal sources (tool/kanban) count as
-        absent. The reported ``id`` stays the durable registry row while
-        ``resolved_id`` names the live tip. Best-effort: any failure
+        compression lineages resolve to the live tip with the same resolver
+        ``session.resume`` uses, and denied internal sources (tool/kanban)
+        count as absent. The reported ``id`` stays the durable registry row
+        while ``resolved_id`` names the live tip. Best-effort: any failure
         degrades to None rather than failing the whole profiles.list call.
         """
         if db is None:
@@ -128,11 +155,7 @@ def _(rid, params: dict) -> dict:
                 if not _resurrect_recoverable_canonical(db, profile_path, session_id):
                     return None
             try:
-                # Canonical Bot Chat identity may advance only across a proven
-                # compression edge.  The generic resume resolver also carries
-                # a legacy unmarked-child fallback, which is intentionally too
-                # broad for this exact-title registry lookup.
-                tip = db.get_compression_tip(session_id) or session_id
+                tip = db.resolve_resume_session_id(session_id) or session_id
             except Exception:
                 tip = session_id
             tip_row = db.get_session(tip) or row
@@ -175,7 +198,7 @@ def _(rid, params: dict) -> dict:
                 return False
             tip = row
             try:
-                tip_id = db.get_compression_tip(session_id) or session_id
+                tip_id = db.resolve_resume_session_id(session_id) or session_id
                 if tip_id != session_id:
                     tip = db.get_session(tip_id) or row
             except Exception:
@@ -187,14 +210,12 @@ def _(rid, params: dict) -> dict:
 
             from pathlib import Path
 
-            from hermes_state import get_shared_session_db
-            wdb = get_shared_session_db(Path(profile_path) / "state.db")
+            wdb = SessionDB(db_path=Path(profile_path) / "state.db")
             try:
                 return bool(wdb.unarchive_recoverable_session(session_id))
             finally:
                 try:
-                    from hermes_state import release_or_close
-                    release_or_close(wdb)
+                    wdb.close()
                 except Exception:
                     pass
         except Exception:
@@ -276,6 +297,12 @@ def _(rid, params: dict) -> dict:
                 "display_name": getattr(p, "display_name", "") or "",
                 "skill_count": getattr(p, "skill_count", 0) or 0,
             }
+            federation_role = _federation_role(p.path)
+            if federation_role:
+                # Optional and additive: older clients ignore it, while Bot
+                # Mode and future federation surfaces can group/filter the
+                # roster without parsing profile files themselves.
+                row["federation_role"] = federation_role
             if include_sessions:
                 db = _open_profile_session_db(p.path)
                 try:
@@ -466,6 +493,15 @@ def _(rid, params: dict) -> dict:
                 try:
                     os.chmod(str(dst_auth), 0o600)
                 except OSError:
+                    pass
+                # Mirroring must not fork single-use OAuth grants (Anthropic /
+                # Codex / xAI): the first profile to refresh strands every
+                # sibling (#100339). API keys stay; OAuth rows are dropped
+                # and read from the root grant via the pool fallback.
+                try:
+                    from hermes_cli.auth import strip_cloned_single_use_oauth_grants
+                    strip_cloned_single_use_oauth_grants(path)
+                except Exception:
                     pass
                 mirrored["auth"] = True
         except Exception:

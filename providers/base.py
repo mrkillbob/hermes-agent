@@ -78,6 +78,17 @@ class ProviderProfile:
     # top-level fields rather than ignoring them.
     supports_prompt_cache_key: bool = False
 
+    # ── External-process providers (auth_type="external_process") ──
+    # An agent CLI driven over stdio (ACP) rather than an HTTP endpoint. These
+    # describe how to launch it; hermes_cli/auth.py's
+    # resolve_external_process_provider_credentials() reads them instead of
+    # hardcoding one vendor's binary. Env vars are checked in order and win
+    # over the static defaults, so an operator can point at a custom build.
+    process_command: str = ""            # default binary, e.g. "copilot"
+    process_args: tuple = ()             # default argv tail, e.g. ("--acp", "--stdio")
+    process_command_env_vars: tuple = ()  # env overrides for the binary, in priority order
+    process_args_env_var: str = ""       # env override for argv (shlex-split)
+
     # ── Model catalog ─────────────────────────────────────────
     # fallback_models: curated list shown in /model picker when live fetch fails.
     # Only agentic models that support tool calling should appear here.
@@ -167,6 +178,27 @@ class ProviderProfile:
         """
         return {}, {}
 
+    def owns_reasoning_policy(self, **context: Any) -> bool:
+        """Return True when this profile owns whether reasoning is emitted.
+
+        This is an explicit contract for profiles whose policy may intentionally
+        omit a reasoning field (for example, when a route rejects a disable).
+        Overriding an unrelated API-kwargs hook must not implicitly claim
+        ownership of generic reasoning configuration.
+        """
+        return False
+
+    def sanitize_request_kwargs(self, api_kwargs: dict[str, Any], **context: Any) -> dict[str, Any]:
+        """Apply provider-owned safety cleanup after request overrides merge.
+
+        ``request_overrides`` are intentionally applied late so users can
+        customize provider requests.  A provider may nevertheless have a
+        capability boundary that those overrides must not cross.  Profiles
+        can override this hook to remove only fields that are invalid for the
+        verified route/model.  The default preserves the request unchanged.
+        """
+        return api_kwargs
+
     def default_vision_model(self) -> str | None:
         """Return a default vision model id for this provider, or None.
 
@@ -220,6 +252,31 @@ class ProviderProfile:
         Implementations are called on the per-request hot path and must not
         block on network I/O — answer from a cache and return None while
         cold.
+        """
+        return None
+
+    def create_client(self, **client_kwargs: Any) -> Any | None:
+        """Return a provider-specific client, or ``None`` for the standard one.
+
+        Most providers speak OpenAI-compatible HTTP and want the shared
+        ``openai.OpenAI`` client the core builds — they inherit this and return
+        ``None``. A provider whose wire protocol is not HTTP at all (the ACP
+        subprocess shims) or which needs a native SDK overrides this and
+        returns its own client object.
+
+        ``client_kwargs`` is the same mapping the core would have passed to
+        ``openai.OpenAI`` (``api_key``, ``base_url``, ``command``, ``args``,
+        timeouts, headers…). Unknown keys must be tolerated: the core adds to
+        this mapping over time, so an override should accept ``**kwargs`` and
+        pick what it needs rather than enumerate.
+
+        Returning ``None`` (the default) is always safe — the caller falls
+        through to its existing construction path.
+
+        This is the hook that lets a provider ship *outside* this tree: with it,
+        a profile registered from ``~/.hermes/plugins/model-providers/`` or a
+        pip entry point can supply its own transport without any core edit. See
+        ``plugins/model-providers/copilot-acp/`` for the in-tree example.
         """
         return None
 

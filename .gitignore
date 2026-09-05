@@ -1,5 +1,6 @@
 .DS_Store
 /venv/
+/venv
 /venv.old/
 /venv.stale.runtime-*/
 /bin/
@@ -109,6 +110,9 @@ apps/shared/src/**/*.js
 apps/shared/src/**/*.js.map
 apps/shared/src/**/*.d.ts
 apps/desktop/release/
+# stage-and-swap Desktop rebuild output (#86443); removed after the swap, but
+# a killed build must not leave the checkout dirty
+apps/desktop/.staging-*/
 *.tsbuildinfo
 
 # Web UI assets — synced from @nous-research/ui at build time via
@@ -140,6 +144,7 @@ models-dev-upstream/
 .codex/
 .cursor/
 .gemini/
+.serena/
 .zed/
 .mcp.json
 opencode.json

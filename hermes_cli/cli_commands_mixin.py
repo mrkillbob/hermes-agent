@@ -1512,6 +1512,34 @@ class CLICommandsMixin:
 
         # Save the current session's state before branching
         parent_session_id = self.session_id
+        new_worktree_binding = None
+        new_root_lease = None
+
+        # A copied /branch transcript is a distinct interactive conversation,
+        # not a compression continuation. Allocate its own certified root
+        # before ending the parent, then enter it only after the child session
+        # has been durably created. Resume keeps using root resolution instead.
+        conversation_worktree_manager = getattr(
+            self, "_conversation_worktree_manager", None
+        )
+        if conversation_worktree_manager is not None:
+            try:
+                new_worktree_binding = (
+                    conversation_worktree_manager.bind_new_root_session(
+                        new_session_id, conversation_kind="interactive"
+                    )
+                )
+                if new_worktree_binding is None:
+                    raise RuntimeError("manager returned no conversation worktree binding")
+                new_root_lease = self._acquire_conversation_root_lease(
+                    new_worktree_binding, surface="cli"
+                )
+            except Exception as exc:
+                _cprint(
+                    f"  Cannot branch session {new_session_id}: "
+                    f"conversation worktree setup failed: {exc}"
+                )
+                return
 
         # Flush un-persisted messages before ending the old session (#47202).
         if self.agent:
@@ -1547,8 +1575,35 @@ class CLICommandsMixin:
                 parent_session_id=parent_session_id,
             )
         except Exception as e:
+            if new_root_lease is not None:
+                try:
+                    new_root_lease.release()
+                except Exception:
+                    pass
             _cprint(f"  Failed to create branch session: {e}")
             return
+
+        if new_worktree_binding is not None:
+            try:
+                self._apply_conversation_worktree_binding(new_worktree_binding)
+            except Exception as exc:
+                if new_root_lease is not None:
+                    try:
+                        new_root_lease.release()
+                    except Exception:
+                        pass
+                _cprint(
+                    f"  Cannot branch session {new_session_id}: "
+                    f"conversation worktree setup failed: {exc}"
+                )
+                return
+            prior_root_lease = getattr(self, "_conversation_root_lease", None)
+            self._conversation_root_lease = new_root_lease
+            if prior_root_lease is not None:
+                try:
+                    prior_root_lease.release()
+                except Exception:
+                    pass
 
         # Copy conversation history to the new session in bounded-chunk
         # transactions (see #23254) instead of one txn per row. Best-effort
@@ -1986,7 +2041,13 @@ class CLICommandsMixin:
                     print(f"  Skills: {', '.join(job['skills'])}")
                 print(f"  Prompt: {job.get('prompt_preview', '')}")
                 if job.get("last_run_at"):
-                    print(f"  Last run: {job['last_run_at']} ({job.get('last_status', '?')})")
+                    status = job.get("last_status") or "?"
+                    # delivery_failed: the agent ran fine but the output never
+                    # reached the target — name the delivery reason, which
+                    # lives in last_delivery_error (last_error is None).
+                    if status == "delivery_failed" and job.get("last_delivery_error"):
+                        status = f"delivery_failed: {job['last_delivery_error']}"
+                    print(f"  Last run: {job['last_run_at']} ({status})")
                 print()
             return
 
@@ -3013,6 +3074,7 @@ class CLICommandsMixin:
                 review_memory=True,
                 review_skills=review_skills,
                 focus=focus or None,
+                explicit=True,
             )
         except Exception as exc:
             _cprint(f"  /refine failed to start: {exc}")
@@ -3982,9 +4044,9 @@ class CLICommandsMixin:
 
         parts = cmd.strip().split(maxsplit=1)
         if len(parts) < 2 or parts[1].strip().lower() == "status":
-            status = "fast" if self.service_tier == "priority" else "normal"
+            status = {"priority": "fast", None: "normal"}.get(self.service_tier, self.service_tier)
             _cprint(f"  {_ACCENT}{feature_name}: {status}{_RST}")
-            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status] [--global]{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|auto|cold|status] [--global]{_RST}")
             return
 
         arg_tokens = parts[1].strip().lower().split()
@@ -4002,9 +4064,13 @@ class CLICommandsMixin:
             self.service_tier = None
             saved_value = "normal"
             label = "NORMAL"
+        elif arg in {"auto", "cold"}:
+            self.service_tier = arg
+            saved_value = arg
+            label = arg.upper()
         else:
             _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
-            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status] [--global]{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|auto|cold|status] [--global]{_RST}")
             return
 
         self.agent = None  # Force agent re-init with new service-tier config

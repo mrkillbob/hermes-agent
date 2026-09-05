@@ -77,6 +77,21 @@ MAX_STDOUT_BYTES = 50_000    # 50 KB
 MAX_STDERR_BYTES = 10_000    # 10 KB
 
 
+def _tool_call_limit_reached(current: int, maximum: int) -> bool:
+    """Return whether the RPC budget is exhausted (``maximum == 0`` is unlimited)."""
+    return maximum > 0 and current >= maximum
+
+
+def _configured_max_tool_calls(config: Dict[str, Any]) -> int:
+    """Return a valid RPC call budget; zero is the only unlimited sentinel."""
+    maximum = config.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
+    if not isinstance(maximum, int) or isinstance(maximum, bool):
+        raise ValueError("code_execution.max_tool_calls must be an integer")
+    if maximum < 0:
+        raise ValueError("code_execution.max_tool_calls cannot be negative")
+    return maximum
+
+
 def _assemble_stdout_result(
     head: bytes,
     tail: bytes = b"",
@@ -408,9 +423,9 @@ _TOOL_STUBS = {
     ),
     "search_files": (
         "search_files",
-        'pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0',
+        'pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0, order: str = "discovery"',
         '"""Search file contents (target="content") or find files by name (target="files"). Returns dict with "matches"."""',
-        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context}',
+        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context, "order": order}',
     ),
     "patch": (
         "patch",
@@ -810,7 +825,7 @@ def _rpc_server_loop(
                     continue
 
                 # Enforce tool call limit
-                if tool_call_counter[0] >= max_tool_calls:
+                if _tool_call_limit_reached(tool_call_counter[0], max_tool_calls):
                     resp = tool_error(
                         f"Tool call limit reached ({max_tool_calls}). "
                         "No more tool calls allowed in this execution."
@@ -926,6 +941,7 @@ def _get_or_create_env(task_id: str):
                 "docker_volumes": config.get("docker_volumes", []),
                 "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
                 "docker_network": config.get("docker_network", True),
+                "docker_isolate_host_data": config.get("docker_isolate_host_data", False),
             }
 
         ssh_config = None
@@ -1089,7 +1105,7 @@ def _rpc_poll_loop(
                         f"Available: {available}"
                     )
                 # Enforce tool call limit
-                elif tool_call_counter[0] >= max_tool_calls:
+                elif _tool_call_limit_reached(tool_call_counter[0], max_tool_calls):
                     tool_result = tool_error(
                         f"Tool call limit reached ({max_tool_calls}). "
                         "No more tool calls allowed in this execution."
@@ -1225,7 +1241,7 @@ def _execute_remote(
 
     _cfg = _load_config()
     timeout = _cfg.get("timeout", DEFAULT_TIMEOUT)
-    max_tool_calls = _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
+    max_tool_calls = _configured_max_tool_calls(_cfg)
 
     session_tools = set(enabled_tools) if enabled_tools else set()
     sandbox_tools = frozenset(SANDBOX_ALLOWED_TOOLS & session_tools)
@@ -1553,6 +1569,21 @@ def execute_code(
             "Use normal tool calls (terminal, read_file, write_file, ...) instead."
         )
 
+    # Fail closed under a terminal-policy refusal scope (#68559): the routed
+    # profile's terminal policy could not be resolved and execute_code runs on
+    # the configured terminal backend — refuse rather than inheriting the
+    # launch process's ambient policy.
+    try:
+        from tools.terminal_scope import enforce_no_refusal
+
+        enforce_no_refusal()
+    except Exception as refusal:
+        return tool_error(
+            f"execute_code refused: {refusal} "
+            "(profile terminal policy unresolved; fix the profile's "
+            "config.yaml / .env and retry)"
+        )
+
     if not code or not code.strip():
         return tool_error(
             "No code provided. execute_code requires a non-empty 'code' "
@@ -1622,7 +1653,7 @@ def execute_code(
     # Resolve config
     _cfg = _load_config()
     timeout = _cfg.get("timeout", DEFAULT_TIMEOUT)
-    max_tool_calls = _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
+    max_tool_calls = _configured_max_tool_calls(_cfg)
 
     # Determine which tools the sandbox can call
     session_tools = set(enabled_tools) if enabled_tools else set()
@@ -2282,7 +2313,9 @@ def _resolve_child_cwd(mode: str, staging_dir: str, task_id: str = "") -> str:
             session_cwd = None
         if session_cwd and os.path.isdir(session_cwd):
             return session_cwd
-    raw = os.environ.get("TERMINAL_CWD", "").strip()
+    from agent.runtime_cwd import scope_terminal_cwd
+
+    raw = scope_terminal_cwd().strip()
     if raw:
         expanded = os.path.expanduser(raw)
         if os.path.isdir(expanded):
@@ -2314,7 +2347,7 @@ _TOOL_DOC_LINES = [
      "  write_file(path: str, content: str) -> dict\n"
      "    Always overwrites the entire file."),
     ("search_files",
-     "  search_files(pattern: str, target=\"content\", path=\".\", file_glob=None, limit=50) -> dict\n"
+     "  search_files(pattern: str, target=\"content\", path=\".\", file_glob=None, limit=50, order=\"discovery\") -> dict\n"
      "    target: \"content\" (search inside files) or \"files\" (find files by name). Returns {\"matches\": [...]}"),
     ("patch",
      "  patch(path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict\n"

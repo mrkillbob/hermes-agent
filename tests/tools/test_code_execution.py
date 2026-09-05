@@ -242,6 +242,25 @@ class TestExecuteCodeRemoteTempDir(unittest.TestCase):
                       "TZ value must be wrapped in single quotes by shlex.quote()")
 
 
+class TestToolCallLimit(unittest.TestCase):
+    def test_zero_disables_tool_call_limit(self):
+        from tools.code_execution_tool import _tool_call_limit_reached
+
+        self.assertFalse(_tool_call_limit_reached(100_000, 0))
+
+    def test_positive_limit_is_enforced(self):
+        from tools.code_execution_tool import _tool_call_limit_reached
+
+        self.assertFalse(_tool_call_limit_reached(4, 5))
+        self.assertTrue(_tool_call_limit_reached(5, 5))
+
+    def test_negative_limit_is_rejected(self):
+        from tools.code_execution_tool import _configured_max_tool_calls
+
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            _configured_max_tool_calls({"max_tool_calls": -1})
+
+
 @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestExecuteCode(unittest.TestCase):
     """Integration tests using the mock dispatcher."""
@@ -294,6 +313,24 @@ print(result.get("output", ""))
         self.assertEqual(result["status"], "success")
         self.assertIn("mock output for: echo hello", result["output"])
         self.assertEqual(result["tool_calls_made"], 1)
+
+    def test_zero_limit_allows_more_than_legacy_default_through_rpc(self):
+        """The real sandbox/RPC path honors zero as unlimited past 50 calls."""
+        code = """
+from hermes_tools import terminal
+for i in range(51):
+    terminal(f"echo {i}")
+print("completed-51")
+"""
+        with patch(
+            "tools.code_execution_tool._load_config",
+            return_value={"timeout": 30, "max_tool_calls": 0},
+        ):
+            result = self._run(code)
+
+        self.assertEqual(result["status"], "success", msg=result)
+        self.assertIn("completed-51", result["output"])
+        self.assertEqual(result["tool_calls_made"], 51)
 
 
     def test_concurrent_tool_calls_match_responses(self):
@@ -475,10 +512,11 @@ class TestStubSchemaDrift(unittest.TestCase):
         compile(src, "hermes_tools.py", "exec")
 
         # Verify specific parameter signatures are in the source
-        # search_files must accept context, offset, output_mode
+        # search_files must accept its pagination, output, and ordering controls
         self.assertIn("context", src)
         self.assertIn("offset", src)
         self.assertIn("output_mode", src)
+        self.assertIn("order", src)
 
         # patch must accept mode and patch params
         self.assertIn("mode", src)
@@ -637,6 +675,20 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
         self.assertIn("'code' parameter", result["error"])
         self.assertIn("execute_code(code=...)", result["error"])
         self.assertIn("terminal(command=...)", result["error"])
+        self.assertNotIn("NoneType", result["error"])
+
+    def test_terminal_command_class_argument_names_schema_error(self):
+        """Do not execute an unrecognized command list; explain the schema."""
+        from tools.terminal_tool import _handle_terminal
+
+        result = json.loads(
+            _handle_terminal({"command_class": ["pytest"]}, task_id="test")
+        )
+
+        self.assertIn("error", result)
+        self.assertIn("'command_class' parameter", result["error"])
+        self.assertIn("terminal(command=\"...\")", result["error"])
+        self.assertIn("string", result["error"])
         self.assertNotIn("NoneType", result["error"])
 
     def test_empty_code_explains_required_parameter(self):

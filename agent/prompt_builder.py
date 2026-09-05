@@ -7,6 +7,7 @@ assemble pieces, then combines them with memory and ephemeral prompts.
 import json
 import logging
 import os
+import queue
 import sys
 import threading
 import contextvars
@@ -56,6 +57,56 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
+
+
+# Default read deadline for context files (SOUL.md, AGENTS.md, .cursorrules,
+# ...); overridable via ``context_file_read_timeout`` in config.yaml.
+# Intentionally short: network-backed filesystems (iCloud Drive, OneDrive,
+# NFS) can fault-in an evicted file and block a cold read indefinitely, which
+# stalls system-prompt assembly before the first turn.
+_CONTEXT_FILE_READ_TIMEOUT_SECS = 5.0
+
+
+def _get_context_file_read_timeout() -> float:
+    """``context_file_read_timeout`` from config.yaml, else the 5s default."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        val = load_config_readonly().get("context_file_read_timeout")
+        if isinstance(val, (int, float)) and val > 0:
+            return float(val)
+    except Exception as e:
+        logger.debug("Could not read context_file_read_timeout from config: %s", e)
+    return _CONTEXT_FILE_READ_TIMEOUT_SECS
+
+
+def _read_text_with_timeout(path: Path, timeout: Optional[float] = None) -> Optional[str]:
+    """``path.read_text()`` on a daemon thread so a slow file can't stall startup.
+
+    Returns the text, or ``None`` after *timeout* seconds (logged at WARNING;
+    the orphaned reader thread finishes on its own). Read errors propagate to
+    the caller exactly as a direct ``read_text`` would, so existing
+    ``try/except`` handling at each site is unchanged.
+    """
+    if timeout is None:
+        timeout = _get_context_file_read_timeout()
+    result: "queue.Queue[tuple[bool, object]]" = queue.Queue(maxsize=1)
+
+    def _reader() -> None:
+        try:
+            result.put((True, path.read_text(encoding="utf-8")))
+        except Exception as exc:  # re-raised on the caller thread
+            result.put((False, exc))
+
+    threading.Thread(target=_reader, daemon=True, name=f"context-read:{path.name}").start()
+    try:
+        ok, value = result.get(timeout=timeout)
+    except queue.Empty:
+        logger.warning("Context file %s read timed out after %.1fs; skipping", path, timeout)
+        return None
+    if ok:
+        return value  # type: ignore[return-value]
+    raise value  # type: ignore[misc]
 
 
 def _scan_context_content(content: str, filename: str) -> str:
@@ -230,14 +281,20 @@ def build_memory_guidance(memory_enabled: bool = True, profile_enabled: bool = T
             "disabled, so never target='memory'. "
         )
     return frame + (
-        "Save proactively — storage has a hard character budget, and when "
-        "it fills, replace or consolidate stale entries in the same batch "
+        "Skills come first: when you learn something while doing a task — a "
+        "procedure, a pitfall, and the user's preferences and corrections "
+        "for that kind of work — record it in the skill you used or built "
+        "for the task (skill_manage), where it loads only when relevant. "
+        "Memory is the narrow exception for facts that apply to EVERY "
+        "session regardless of task (who the user is, environment facts, "
+        "standing conventions with no task home); it has a hard character "
+        "budget, so when it fills, replace or consolidate stale entries "
         "rather than skipping the save. Write entries as declarative facts, "
         "not instructions to yourself: 'User prefers concise responses' ✓ — "
         "'Always respond concisely' ✗ (imperative phrasing gets re-read as "
         "a directive in later sessions and can override the user's current "
-        "request). Route by longevity: a fact stale within a week belongs "
-        "in session history; procedures and workflows belong in skills."
+        "request). A fact stale within a week belongs in session history; "
+        "procedures and workflows belong in skills."
     )
 
 
@@ -286,7 +343,7 @@ SKILLS_GUIDANCE = (
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
     "You have been assigned ONE task from "
-    "the shared board at `~/.hermes/kanban.db`. Your task id is in "
+    "the shared board database. Your task id is in "
     "`$HERMES_KANBAN_TASK`; your workspace is `$HERMES_KANBAN_WORKSPACE`. "
     "The `kanban_*` tools in your schema are your primary coordination surface — "
     "they write directly to the shared SQLite DB and work regardless of terminal "
@@ -294,47 +351,74 @@ KANBAN_GUIDANCE = (
     "\n"
     "## Lifecycle\n"
     "\n"
-    "1. **Orient.** Call `kanban_show()` first (no args — it defaults to your "
-    "task). The response includes title, body, parent-task handoffs (summary + "
-    "metadata), any prior attempts on this task if you're a retry, the full "
-    "comment thread, and a pre-formatted `worker_context` you can treat as "
-    "ground truth.\n"
-    "2. **Work inside the workspace.** `cd $HERMES_KANBAN_WORKSPACE` before "
-    "any file operations. The workspace is yours for this run. Don't modify "
-    "files outside it unless the task explicitly asks.\n"
-    "3. **Heartbeat on long operations.** Call `kanban_heartbeat(note=...)` "
-    "every few minutes during long subprocesses (training, encoding, crawling). "
-    "Skip heartbeats for short tasks. **If your task may run longer than 1 hour, "
-    "you MUST call `kanban_heartbeat` at least once an hour** — the dispatcher "
-    "reclaims tasks running past `kanban.dispatch_stale_timeout_seconds` "
-    "(default 4 hours) when no heartbeat has arrived in the last hour. A "
-    "reclaim re-queues the task as `ready` without penalty (no failure counter "
-    "tick), but you lose your current run's progress.\n"
+    "1. **Orient.** Call `kanban_show()` first. Treat its title, body, parent "
+    "handoffs, and `worker_context` as ground truth; reuse it until a lifecycle "
+    "transition requires a refresh.\n"
+    "2. **Work inside the workspace.** Terminal and file tools already start "
+    "there. Do not pass the literal environment-variable token "
+    "`$HERMES_KANBAN_WORKSPACE` as a workdir "
+    "or argument, and do not modify outside it unless assigned. Use narrow "
+    "`rg --files`/`git ls-files`. Never run a recursive `find` from a broad root.\n"
+    "For GitHub PR intake, including PRs by Codex, Claude, or Hermes workers, "
+    "use host Hermes: `env HERMES_HOME=/Users/mikedemott/.hermes "
+    "/Users/mikedemott/.local/bin/hermes github-pr-feedback inspect-pr "
+    "--repository OWNER/REPO --pr-number N`; it rate-gates and can paginate "
+    "issue comments, review comments, and reviews. For governed exact-head "
+    "review use the same host command with `github-pr-feedback submit-review "
+    "--repository OWNER/REPO --pr-number N --head-sha FULL_SHA --event "
+    "APPROVE|REQUEST_CHANGES|COMMENT --body TEXT`; never publish on "
+    "`stale_head`. If card text suggests raw `gh pr view`, this rule wins: "
+    "do not use raw `gh pr view`, `gh api`, `curl`, API URLs, or inline "
+    "Python/JQ fetch scripts. On protected routes, use governed JSON "
+    "projection, `git diff --name-only`, and direct source-file reads.\n"
+    "3. **Heartbeat only long operations.** Call `kanban_heartbeat(note=...)` "
+    "during a long subprocess and at least hourly for work over one hour; a stale "
+    "claim is re-queued and loses the current run.\n"
     "4. **Block on genuine ambiguity.** If you need a human decision you cannot "
     "infer (missing credentials, UX choice, paywalled source, peer output you "
     "need first), call `kanban_block(reason=\"...\")` and stop. Don't guess. "
     "The user will unblock with context and the dispatcher will respawn you.\n"
-    "5. **Finish with the review model encoded by the task graph.** Always "
-    "include the structured handoff (`summary`, `metadata`) on the lifecycle "
-    "transition itself; never put secrets, tokens, or raw PII in these durable "
-    "fields. If `kanban_show()` lists child IDs, inspect those cards with "
-    "`kanban_show(task_id=...)` before choosing the terminal action. When any "
-    "pre-created review, QA, or release child depends on your task, call "
-    "`kanban_complete`: your implementation phase is done, and completion is "
-    "what releases those children. Never sticky-block that parent for "
-    "`review-required` and never request same-card review as well — either "
-    "choice would strand or duplicate the downstream lane. Otherwise, when "
-    "this same task needs review before it is final, call "
-    "`kanban_request_review(summary=..., metadata=..., "
-    "reviewer=<optional-profile>)`. The reviewer approves with "
-    "`kanban_complete`, returns actionable rework with "
-    "`kanban_request_changes`, or uses `kanban_block` only for a genuine "
-    "external escalation. Review is not a block, so repeated review cycles do "
-    "not trip unblock-loop detection.\n"
+    "A missing local file, missing task output, missing profile roster, or "
+    "unstated hypothesis is not by itself a human blocker. First call "
+    "`kanban_show(task_id=...)` for every referenced card, inspect linked "
+    "parent handoffs, attachments, and the assigned workspace, and use the "
+    "actual assigned profile rather than asking for the profile roster. Only "
+    "then block, with the exact absent id/path and the concrete external "
+    "decision or capability that is still required.\n"
+    "For worker-, decomposer-, or cron-created tasks, the producer has already "
+    "fixed the scope and decision owner: do not ask a human to choose analysis, "
+    "metrics, component, or approach. Make that role-owned decision and complete "
+    "with factual evidence. Only a newly reproduced external access or credential "
+    "failure may block such work, using `kind=capability`.\n"
+    "A `kind=capability` block is valid only after a current command or tool "
+    "has failed: include its literal argv and redacted stderr. A prior timeout "
+    "or a claim that a command would fail is not capability evidence.\n"
+    "`board-record-only`/`no-op` metadata tasks use Kanban as source of truth. "
+    "Call `kanban_show` for each named ID before filesystem tools. Never search "
+    "the checkout for board records or treat a missing local file as a missing "
+    "record. If no work is found, complete with a no-op receipt; report exact "
+    "unavailable IDs.\n"
+    "Prior `manual_reclaim`, `crashed`, `protocol_violation`, timeout, fallback, "
+    "and retry records are attempt-management evidence, not task blockers. Never "
+    "block because an earlier worker crashed or was reclaimed, and never infer that "
+    "the assigned work is outside your capacity from those records. Re-read the "
+    "current task and canonical external state, then work it. A block reason must "
+    "name a current concrete external blocker you directly reproduced.\n"
+    "5. **Finish through the task graph.** A completion must include a non-empty "
+    "factual `summary` and metadata=...; never put secrets there. If "
+    "`kanban_show()` lists child IDs, inspect those cards before choosing the "
+    "transition. When a pre-created review, QA, or release child depends on you, "
+    "call `kanban_complete`; Never sticky-block that parent for "
+    "`review-required`. Otherwise request same-card review or use "
+    "`kanban_request_changes` for actionable rework. Review is not a block.\n"
     "6. **If follow-up work appears, create it; don't do it.** Use "
     "`kanban_create(title=..., assignee=<right-profile>, parents=[your-task-id])` "
     "to spawn a child task for the appropriate specialist profile instead of "
     "scope-creeping into the next thing.\n"
+    "A `kanban_complete` call must include a non-empty factual `summary` "
+    "(for example `summary=\"WHITE_KNIGHT_IDLE: upstream list unavailable\"`). "
+    "A no-op is still a completion when the card allows it; do not merely "
+    "describe the intended receipt in prose and then exit.\n"
     "7. **Flag collision hotspots; don't pile on.** If your change keeps "
     "colliding with sibling branches in one file, or a file your diff touches "
     "shows up in other cards' recent comments, do not silently add more to it: "
@@ -360,13 +444,8 @@ KANBAN_GUIDANCE = (
     "\n"
     "## Reference details that change outcomes\n"
     "\n"
-    "- **Workspace.** `cd $HERMES_KANBAN_WORKSPACE` first. For a `worktree` kind "
-    "with no `.git`, `git worktree add <path> "
-    "${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_TASK}` from the main repo, then "
-    "cd there. For a project-linked task the workspace is a fresh "
-    "`<repo>/.worktrees/<task-id>` and `$HERMES_KANBAN_BRANCH` a deterministic "
-    "`<project-slug>/<task-id>` — the main repo is two levels up, so run "
-    "`git worktree add` from there.\n"
+    "- **Workspace.** Use the dispatcher-selected directory. If an assigned "
+    "worktree is not initialized, create only its task-id branch from its main repo.\n"
     "- **Deliverables.** Files a human wants go in "
     "`kanban_complete(artifacts=[<absolute paths>])` (top-level param; paths in "
     "`metadata` are NOT uploaded). Files must exist at completion.\n"
@@ -387,11 +466,8 @@ KANBAN_GUIDANCE = (
     "- Do not shell out to `hermes kanban <verb>` for board operations. Use "
     "the `kanban_*` tools — they work across all terminal backends.\n"
     "- Do not complete a task you didn't actually finish. Block it.\n"
-    "- Do not call `clarify` to ask questions. You are running headless — "
-    "there is no live user to answer. The call will time out and the task "
-    "will sit silently in `running` with no signal to the operator. Instead: "
-    "`kanban_comment` the context, then `kanban_block(reason=...)` so the "
-    "task surfaces on the board as needing input.\n"
+    "- Do not call `clarify`: workers are headless. Use a factual board block "
+    "only for a genuine external escalation.\n"
     "- Do not assign follow-up work to yourself. Assign it to the right "
     "specialist profile.\n"
     "- Do not call `delegate_task` as a board substitute. `delegate_task` is "
@@ -416,7 +492,9 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
+# "muse" = Meta Muse Spark: on defaults it answers in prose with 0 tool calls
+# and the turn closes on finish_reason=stop (#96550).
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek", "muse")
 
 # Model name substrings whose sessions receive OPENAI_MODEL_EXECUTION_GUIDANCE
 # (execution discipline: tool persistence, mandatory tool use for arithmetic,
@@ -428,13 +506,14 @@ TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm",
 # failure modes on those families (financial math in prose, no read-back after
 # external writes, identifier "repair", completeness claims despite count
 # mismatches). GLM's tool-calls-as-plain-text stall (#53847) and MiMo (#41874)
-# are covered here too. Gemini/Gemma are excluded — they get the more specific
+# are covered here too. Muse Spark (#96550) stops after a chat-only turn on
+# defaults. Gemini/Gemma are excluded — they get the more specific
 # GOOGLE_MODEL_OPERATIONAL_GUIDANCE block instead. Claude is excluded because
 # it does not exhibit these failure modes; users can opt any model in via
 # config.yaml `agent.execution_guidance: true` or a substring list.
 EXECUTION_GUIDANCE_MODELS = (
     "gpt", "codex", "grok",
-    "deepseek", "kimi", "qwen", "glm", "minimax", "mimo", "mistral",
+    "deepseek", "kimi", "qwen", "glm", "minimax", "mimo", "mistral", "muse",
 )
 
 # Universal "finish the job" guidance — applied to ALL models, not gated
@@ -1173,6 +1252,24 @@ _WINDOWS_BASH_SHELL_HINT = (
 )
 
 
+def _tenv_read(name: str, default: str = "") -> str:
+    """Scope-aware TERMINAL_* read (tools.terminal_scope.terminal_env).
+
+    The per-turn terminal scope installed by the multiplexing gateway carries
+    the active profile's terminal settings; a raw os.getenv would read a value
+    a previous profile's turn pinned into the process env.
+
+    Only an import failure falls back: an active refusal scope must raise —
+    swapping it for the ambient process value would defeat the fail-closed
+    boundary.
+    """
+    try:
+        from tools.terminal_scope import terminal_env
+    except ImportError:
+        return os.getenv(name, default)
+    return terminal_env(name, default)
+
+
 def _probe_remote_backend(env_type: str) -> str | None:
     """Run a tiny introspection command inside the active terminal backend.
 
@@ -1181,7 +1278,7 @@ def _probe_remote_backend(env_type: str) -> str | None:
     per process. Used only for non-local backends where the agent's tools
     operate on a different machine than the host Hermes runs on.
     """
-    cwd_hint = os.getenv("TERMINAL_CWD", "")
+    cwd_hint = _tenv_read("TERMINAL_CWD", "")
     cache_key = (env_type, cwd_hint)
     cached = _BACKEND_PROBE_CACHE.get(cache_key)
     if cached is not None:
@@ -1196,6 +1293,7 @@ def _probe_remote_backend(env_type: str) -> str | None:
         _BACKEND_PROBE_CACHE[cache_key] = ""
         return None
 
+    env = None
     try:
         config = _get_env_config()
         # Build the environment the same way tools/terminal_tool.py does for a
@@ -1276,6 +1374,20 @@ def _probe_remote_backend(env_type: str) -> str | None:
         logger.debug("Backend probe failed: %s", e)
         _BACKEND_PROBE_CACHE[cache_key] = ""
         return None
+    finally:
+        # The probe only needs a one-shot `uname`; without teardown the
+        # backend leaves a second idle sandbox (task_id="prompt-backend-probe")
+        # running for the whole process lifetime next to the agent's own one.
+        # ssh is left alone: it has no task-scoped sandbox and its cleanup()
+        # closes a ControlMaster socket (keyed by user@host:port) shared with
+        # the agent's real environment; ControlPersist expires it anyway.
+        if env is not None and env_type != "ssh":
+            try:
+                from tools.terminal_tool import _cleanup_env
+
+                _cleanup_env(env, force_remove=True)
+            except Exception:
+                logger.debug("Backend probe cleanup failed", exc_info=True)
 
     # Parse key=value lines back into a tidy summary.
     parsed: dict[str, str] = {}
@@ -1330,7 +1442,7 @@ def build_environment_hints() -> str:
 
     hints: list[str] = []
 
-    backend = (os.getenv("TERMINAL_ENV") or "local").strip().lower()
+    backend = (_tenv_read("TERMINAL_ENV") or "local").strip().lower()
     is_remote_backend = backend in _REMOTE_TERMINAL_BACKENDS or _plugin_backend_is_remote(backend)
 
     if not is_remote_backend:
@@ -1764,6 +1876,7 @@ def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
     compact_categories: "frozenset[str] | None" = None,
+    compact_all_categories: bool = False,
     skills_dir_override: "Path | None" = None,
 ) -> str:
     """Build a compact skill index for the system prompt.
@@ -1784,8 +1897,8 @@ def build_skills_system_prompt(
     ``compact_categories`` (e.g. from the coding posture — see
     agent/coding_context.py) demotes whole categories to a names-only line in
     the rendered index. Nothing is ever hidden: every skill name stays
-    visible and loadable via ``skill_view`` / ``skills_list``; only the
-    descriptions are dropped, and a footer note explains the demotion.
+    visible and loadable via ``skill_view`` / ``skills_list``. The guarded
+    profile may set ``compact_all_categories`` to demote every category.
     """
     # Home resolution is EXPLICIT when a caller passes skills_dir_override
     # (the agent knows its own profile home from its session_db path). This
@@ -1818,6 +1931,7 @@ def build_skills_system_prompt(
             available_tools,
             available_toolsets,
             compact_categories,
+            compact_all_categories,
             project_dirs=project_dirs,
         )
     finally:
@@ -1831,6 +1945,7 @@ def _build_skills_system_prompt_inner(
     available_tools: "set[str] | None",
     available_toolsets: "set[str] | None",
     compact_categories: "frozenset[str] | None",
+    compact_all_categories: bool = False,
     project_dirs: "list[Path] | None" = None,
 ) -> str:
     # Include the resolved platform so per-platform disabled-skill lists
@@ -1847,6 +1962,7 @@ def _build_skills_system_prompt_inner(
         _platform_hint,
         tuple(sorted(disabled)),
         tuple(sorted(compact_categories or ())),
+        bool(compact_all_categories),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -2068,7 +2184,7 @@ def _build_skills_system_prompt_inner(
     # what the index stops showing them. Match on the top-level category
     # segment so nested categories ("social-media/twitter") are demoted with
     # their parent.
-    demoted = frozenset(
+    demoted = frozenset(skills_by_category) if compact_all_categories else frozenset(
         cat for cat in skills_by_category
         if cat.split("/", 1)[0] in (compact_categories or frozenset())
     )
@@ -2076,8 +2192,8 @@ def _build_skills_system_prompt_inner(
     hidden_note = ""
     if demoted:
         hidden_note = (
-            "\n(Categories marked [names only] are outside the current coding "
-            "context, so their descriptions are omitted — the skills work "
+            "\n(Categories marked [names only] omit descriptions to keep the "
+            "current prompt compact — the skills work "
             "normally and load with skill_view(name) as usual.)"
         )
 
@@ -2217,7 +2333,7 @@ def load_soul_md(
     if not soul_path.exists():
         return None
     try:
-        content = soul_path.read_text(encoding="utf-8").strip()
+        content = (_read_text_with_timeout(soul_path) or "").strip()
         if not content:
             return None
         content = _scan_context_content(content, "SOUL.md")
@@ -2237,7 +2353,7 @@ def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str
     if not hermes_md_path:
         return ""
     try:
-        content = hermes_md_path.read_text(encoding="utf-8").strip()
+        content = (_read_text_with_timeout(hermes_md_path) or "").strip()
         if not content:
             return ""
         content = _strip_yaml_frontmatter(content)
@@ -2307,7 +2423,7 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
             if not candidate.exists():
                 continue
             try:
-                content = candidate.read_text(encoding="utf-8").strip()
+                content = (_read_text_with_timeout(candidate) or "").strip()
             except Exception as e:
                 logger.debug("Could not read %s: %s", candidate, e)
                 continue
@@ -2348,7 +2464,7 @@ def _load_claude_md(cwd_path: Path, context_length: Optional[int] = None) -> str
         candidate = cwd_path / name
         if candidate.exists():
             try:
-                content = candidate.read_text(encoding="utf-8").strip()
+                content = (_read_text_with_timeout(candidate) or "").strip()
                 if content:
                     content = _scan_context_content(content, name)
                     result = f"## {name}\n\n{content}"
@@ -2367,7 +2483,7 @@ def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> s
     cursorrules_file = cwd_path / ".cursorrules"
     if cursorrules_file.exists():
         try:
-            content = cursorrules_file.read_text(encoding="utf-8").strip()
+            content = (_read_text_with_timeout(cursorrules_file) or "").strip()
             if content:
                 content = _scan_context_content(content, ".cursorrules")
                 cursorrules_content += f"## .cursorrules\n\n{content}\n\n"
@@ -2379,7 +2495,7 @@ def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> s
         mdc_files = sorted(cursor_rules_dir.glob("*.mdc"))
         for mdc_file in mdc_files:
             try:
-                content = mdc_file.read_text(encoding="utf-8").strip()
+                content = (_read_text_with_timeout(mdc_file) or "").strip()
                 if content:
                     content = _scan_context_content(content, f".cursor/rules/{mdc_file.name}")
                     cursorrules_content += f"## .cursor/rules/{mdc_file.name}\n\n{content}\n\n"

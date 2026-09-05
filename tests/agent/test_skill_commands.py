@@ -58,6 +58,33 @@ class TestScanSkillCommands:
 
 
 
+    def test_scan_uses_live_profile_skills_dir_after_module_import(self, tmp_path):
+        """A profile switch must not leave slash-command discovery on the old root."""
+        import agent.skill_commands as sc_mod
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        profile = tmp_path / "profile"
+        profile_skills = profile / "skills"
+        profile.mkdir()
+        _make_skill(profile_skills, "profile-only")
+
+        with (
+            patch.object(sc_mod, "_skill_commands", {}),
+            patch.object(sc_mod, "_skill_commands_platform", None),
+            patch.object(sc_mod, "_skill_commands_home", None),
+            patch.object(skills_tool_module, "_get_disabled_skill_names", return_value=set()),
+            patch("agent.skill_utils.get_external_skills_dirs", return_value=[]),
+            patch("agent.skill_utils.get_project_skills_dirs", return_value=[]),
+        ):
+            token = set_hermes_home_override(profile)
+            try:
+                commands = scan_skill_commands()
+            finally:
+                reset_hermes_home_override(token)
+
+        assert "/profile-only" in commands
+
+
     def test_loads_skill_invocation_from_symlinked_skill_dir(self, tmp_path):
         """Slash commands should load skills symlinked under the local skills dir."""
         external_root = tmp_path / "external"
@@ -254,6 +281,41 @@ class TestScanSkillCommands:
 
             assert "/b-only" in profile_b_commands
             assert "/a-only" not in profile_b_commands
+
+    def test_get_skill_commands_scans_profile_skills_dir_not_frozen_import_dir(self, tmp_path):
+        """Under a profile home override the scan must read <profile>/skills/,
+        not the launch home's import-time ``SKILLS_DIR`` (#67277): a
+        multiplexed webhook routed to profile B otherwise sees default's skills.
+        Deliberately does NOT patch ``tools.skills_tool.SKILLS_DIR``.
+        """
+        import agent.skill_commands as sc_mod
+        from agent.skill_commands import build_skill_invocation_message, get_skill_commands
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        profile_b = tmp_path / "profiles" / "b"
+        _make_skill(profile_b / "skills", "b-only", body="Body of b-only.")
+        (profile_b / "config.yaml").write_text("{}\n")
+
+        with (
+            patch.object(sc_mod, "_skill_commands", {}),
+            patch.object(sc_mod, "_skill_commands_platform", None),
+            patch.object(sc_mod, "_skill_commands_home", None),
+        ):
+            token = set_hermes_home_override(profile_b)
+            try:
+                commands = dict(get_skill_commands())
+                assert "/b-only" in commands
+                # Frozen SKILLS_DIR (the launch home) must not leak in.
+                launch_dir = str(skills_tool_module._SKILLS_DIR_AT_IMPORT)
+                assert not any(
+                    info["skill_dir"].startswith(launch_dir) for info in commands.values()
+                )
+                # And the absolute skill_dir round-trips through skill_view
+                # (normalize_skill_lookup_name must use the same live root).
+                msg = build_skill_invocation_message("/b-only", user_instruction="go")
+            finally:
+                reset_hermes_home_override(token)
+        assert msg is not None and "Body of b-only." in msg
 
     def test_get_skill_commands_rescans_when_leaving_platform_scope(self, tmp_path, monkeypatch):
         """Returning to no-platform-scope (CLI / cron / RL) after a gateway

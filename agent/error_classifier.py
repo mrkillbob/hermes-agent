@@ -63,14 +63,17 @@ class FailoverReason(enum.Enum):
     model_not_found = "model_not_found"  # 404 or invalid model — fallback to different model
     provider_policy_blocked = "provider_policy_blocked"  # Aggregator (e.g. OpenRouter) blocked the only endpoint due to account data/privacy policy
     content_policy_blocked = "content_policy_blocked"  # Provider safety filter rejected this prompt — deterministic per-request, don't retry unchanged
+    egress_policy_blocked = "egress_policy_blocked"  # Local privacy firewall denied remote transport — fall back locally without retry
 
     # Request format
     format_error = "format_error"        # 400 bad request — abort or strip + retry
     invalid_encrypted_content = "invalid_encrypted_content"  # Responses replay blob rejected — strip replay state and retry
     multimodal_tool_content_unsupported = "multimodal_tool_content_unsupported"  # Provider rejected list-type content in tool messages (e.g. Xiaomi MiMo) — downgrade to text and retry
+    reasoning_mandatory = "reasoning_mandatory"  # Route rejects reasoning: {enabled: false} — send the disable no more this session and retry
 
     # Provider-specific
     thinking_signature = "thinking_signature"  # Anthropic thinking block sig invalid
+    unsupported_thinking = "unsupported_thinking"  # Selected model has no thinking capability
     long_context_tier = "long_context_tier"    # Anthropic "extra usage" tier gate
     oauth_long_context_beta_forbidden = "oauth_long_context_beta_forbidden"  # Anthropic OAuth subscription rejects 1M context beta — disable beta and retry
     llama_cpp_grammar_pattern = "llama_cpp_grammar_pattern"  # llama.cpp json-schema-to-grammar rejects regex escapes in `pattern` / `format` — strip from tools and retry
@@ -504,6 +507,10 @@ _REQUEST_VALIDATION_PATTERNS = [
     "unsupported_parameter",
 ]
 
+# A reasoning-mandatory route answering ``reasoning: {enabled: false}``
+# (Nous Portal + OpenRouter wording; ``error_msg`` is lowercased upstream).
+_REASONING_MANDATORY_PATTERN = "reasoning is mandatory"
+
 # Request parameters that Hermes sends on SOME routes only, paired with the
 # providers/hosts where sending them is deliberate.
 #
@@ -644,6 +651,15 @@ _AUTH_PATTERNS = [
 # Anthropic thinking block signature patterns
 _THINKING_SIG_PATTERNS = [
     "signature",  # Combined with "thinking" check
+]
+
+# Local inference servers can reject a request that still carries reasoning
+# controls when the model has no thinking capability. This is deterministic
+# model/configuration drift and must not trigger a remote fallback.
+_UNSUPPORTED_THINKING_PATTERNS = [
+    "does not support thinking",
+    "thinking is not supported",
+    "unsupported thinking",
 ]
 
 # Message-string patterns that indicate a provider-side timeout even when
@@ -839,6 +855,19 @@ def classify_api_error(
     Returns:
         ClassifiedError with reason and recovery action hints.
     """
+    from agent.llm_egress_firewall import EgressBlocked
+
+    if isinstance(error, EgressBlocked):
+        return ClassifiedError(
+            reason=FailoverReason.egress_policy_blocked,
+            provider=provider or None,
+            model=model or None,
+            message="remote request denied by local egress policy",
+            error_context={"reason_codes": error.decision.reason_codes},
+            retryable=False,
+            should_fallback=False,
+        )
+
     status_code = _extract_status_code(error)
     error_type = type(error).__name__
     # Copilot/GitHub Models RateLimitError may not set .status_code; force 429
@@ -940,6 +969,17 @@ def classify_api_error(
         return _result(reason, **plugin_classification)
 
     # ── 1. Provider-specific patterns (highest priority) ────────────
+
+    # A model that explicitly rejects thinking cannot be repaired by a retry,
+    # and this signal must never activate a remote fallback. The local
+    # capability probe normally prevents the request, so reaching this branch
+    # is actionable deployment/configuration drift.
+    if any(p in error_msg for p in _UNSUPPORTED_THINKING_PATTERNS):
+        return _result(
+            FailoverReason.unsupported_thinking,
+            retryable=False,
+            should_fallback=False,
+        )
 
     # Provider content-policy / safety-filter block. The provider has made a
     # deterministic refusal decision about THIS prompt — retrying unchanged
@@ -1663,6 +1703,20 @@ def _classify_400(
         return result_fn(
             FailoverReason.invalid_encrypted_content,
             retryable=True,
+            should_fallback=False,
+        )
+
+    # Reasoning-mandatory route rejecting a disable (Nous Portal / OpenRouter
+    # for GLM-5.3 etc.: "Reasoning is mandatory for this endpoint and cannot
+    # be disabled").  Deterministic for the request shape, but the only bad
+    # field is ``reasoning: {enabled: false}`` — the conversation_loop drops
+    # the disable and retries once.  Must precede the request-validation
+    # branch, which would abort the turn as a format_error.
+    if _REASONING_MANDATORY_PATTERN in error_msg:
+        return result_fn(
+            FailoverReason.reasoning_mandatory,
+            retryable=True,
+            should_compress=False,
             should_fallback=False,
         )
 

@@ -767,9 +767,18 @@ class ChatCompletionsTransport(ProviderTransport):
                     extra_body["reasoning"] = gh_reasoning
             else:
                 _effort = "medium"
+                _enabled = True
                 if reasoning_config and isinstance(reasoning_config, dict):
                     _effort = reasoning_config.get("effort", "medium") or "medium"
-                extra_body["reasoning"] = {"enabled": True, "effort": _effort}
+                    # Honor an explicit "thinking off" (agent.reasoning_effort:
+                    # none / the one-shot length-continuation override) the same
+                    # way the provider-profile path does — never re-enable it.
+                    if reasoning_config.get("enabled") is False or _effort == "none":
+                        _enabled = False
+                if _enabled:
+                    extra_body["reasoning"] = {"enabled": True, "effort": _effort}
+                else:
+                    extra_body["reasoning"] = {"enabled": False, "effort": "none"}
 
         if provider_name == "gemini":
             raw_thinking_config = _build_gemini_thinking_config(model, reasoning_config)
@@ -960,6 +969,19 @@ class ChatCompletionsTransport(ProviderTransport):
                 }
             if extra_body:
                 api_kwargs["extra_body"] = extra_body
+
+        # Provider capability boundaries must run after request overrides:
+        # overrides are intentionally late, but cannot re-enable a feature
+        # the verified model route does not support (e.g. Ollama thinking on
+        # devstral-small-2:24b).  Profiles that do not need this hook return
+        # the request unchanged.
+        api_kwargs = profile.sanitize_request_kwargs(
+            api_kwargs,
+            reasoning_config=reasoning_config,
+            supports_reasoning=params.get("supports_reasoning", False),
+            model=model,
+            base_url=params.get("base_url"),
+        )
 
         _add_prompt_cache_key(
             api_kwargs,

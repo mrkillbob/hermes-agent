@@ -72,8 +72,10 @@ def _builtin_gateway_liveness() -> Optional[bool]:
     inside the gateway process, so a scheduled job with no live gateway can
     never fire. Non-builtin providers (e.g. Chronos) fire through their own
     machinery and are deliberately exempt — a missing gateway process means
-    nothing for them, so they report active. ``None`` = probe failed; callers
-    must not claim either way.
+    nothing for them, so they report active. Desktop ``serve`` backends also
+    own the builtin ticker without registering as gateways, so a fresh ticker
+    heartbeat is authoritative scheduler-liveness evidence. ``None`` = probe
+    failed; callers must not claim either way.
     """
     try:
         if _active_cron_provider_name() != "builtin":
@@ -102,7 +104,19 @@ def _builtin_gateway_liveness() -> Optional[bool]:
             return True
         # Satellite profile: no local gateway.pid, but the default multiplexer
         # ticks this profile's cron store (#97120).
-        return named_profile_served_by_running_multiplexer()
+        if named_profile_served_by_running_multiplexer():
+            return True
+
+        # The Desktop app starts the same builtin ticker from its headless
+        # ``serve`` backend, which intentionally has neither a gateway PID
+        # registration nor a gateway runtime lock. The heartbeat is written by
+        # the ticker loop itself, so freshness proves the scheduler trigger is
+        # alive without broad process-name scanning.
+        from cron.jobs import get_ticker_heartbeat_age, TICKER_INTERVAL_SECONDS
+
+        heartbeat_age = get_ticker_heartbeat_age()
+        stale_after = TICKER_INTERVAL_SECONDS * 3 + 20
+        return heartbeat_age is not None and heartbeat_age <= stale_after
     except Exception:
         return None
 
@@ -264,6 +278,12 @@ def cron_list(show_all: bool = False):
             last_run = job.get("last_run_at", "?")
             if last_status == "ok":
                 status_display = color("ok", Colors.GREEN)
+            elif last_status == "delivery_failed":
+                # The agent succeeded but the result never reached the user —
+                # not green, and the detail lives in last_delivery_error
+                # (last_error is None for these runs).
+                detail = job.get("last_delivery_error") or "?"
+                status_display = color(f"delivery_failed: {detail}", Colors.YELLOW)
             else:
                 status_display = color(f"{last_status}: {job.get('last_error', '?')}", Colors.RED)
                 streak = int(job.get("failure_streak") or 0)
@@ -285,6 +305,17 @@ def cron_list(show_all: bool = False):
         delivery_err = job.get("last_delivery_error")
         if delivery_err:
             print(f"    {color('⚠ Delivery failed:', Colors.YELLOW)} {delivery_err}")
+
+        # A live adapter acked the last send but returned no message_id /
+        # raw_response (Slack/Matrix/Mattermost shape): accepted as delivered,
+        # but say so here rather than only in a WARNING log line.
+        unverified = job.get("last_delivery_unverified")
+        if unverified:
+            targets = ", ".join(str(t) for t in unverified) if isinstance(unverified, list) else str(unverified)
+            print(
+                f"    {color('⚠ Delivery UNVERIFIED:', Colors.YELLOW)} "
+                f"adapter acked {targets} without message_id/raw_response"
+            )
 
         fire_err = job.get("last_fire_error")
         if isinstance(fire_err, dict) and fire_err.get("detail"):
@@ -489,7 +520,13 @@ def cron_status():
                     pids = [lock_pid]
         except Exception:
             pass
-    if pids or gateway_alive_via_lock:
+    scheduler_alive_without_gateway = (
+        not pids
+        and not gateway_alive_via_lock
+        and _builtin_gateway_liveness() is True
+    )
+
+    if pids or gateway_alive_via_lock or scheduler_alive_without_gateway:
         # The gateway PROCESS is alive — but the cron ticker THREAD inside it
         # can die silently, or stay alive while every tick fails. Check both
         # the liveness heartbeat and the last-successful-tick marker so we
@@ -535,6 +572,18 @@ def cron_status():
             if pids:
                 print(f"  PID: {', '.join(map(str, pids))}")
             print("  Cron jobs may NOT be firing. Restart: hermes gateway restart")
+        elif ok_age is None:
+            # The scheduler loop is alive, but it has not completed a
+            # successful tick yet. This is common for a just-started Desktop
+            # backend and must not be promoted to the green "will fire"
+            # claim solely from its liveness heartbeat.
+            print(color(
+                "⚠ Cron ticker is running, but no tick has succeeded yet.",
+                Colors.YELLOW,
+            ))
+            if pids:
+                print(f"  PID: {', '.join(map(str, pids))}")
+            print("  Wait for the first tick, then re-run `hermes cron status`.")
         elif ok_age is not None and ok_age > STALE_AFTER:
             # Loop is alive (fresh heartbeat) but no tick has SUCCEEDED in a
             # long time → ticks are failing every iteration.
@@ -688,13 +737,21 @@ def _cron_doctor_issues_for_job(job: Dict[str, Any]) -> List[str]:
     issues: List[str] = []
 
     last_status = str(job.get("last_status") or "").strip().lower()
-    if last_status and last_status != "ok":
+    # "delivery_failed" means the agent run itself succeeded, so it is not a
+    # failed last run — the dedicated delivery issue below reports it (and
+    # last_error is None, which would render as "unknown error" here).
+    if last_status and last_status not in {"ok", "delivery_failed"}:
         err = str(job.get("last_error") or "unknown error").strip()
         issues.append(f"last run failed: {err}")
 
     delivery_err = str(job.get("last_delivery_error") or "").strip()
     if delivery_err:
         issues.append(f"last delivery failed: {delivery_err}")
+
+    unverified = job.get("last_delivery_unverified")
+    if unverified:
+        targets = ", ".join(str(t) for t in unverified) if isinstance(unverified, list) else str(unverified)
+        issues.append(f"last delivery unverified (adapter acked without evidence): {targets}")
 
     if job.get("enabled", True) and job.get("state") not in {"paused", "completed"}:
         next_run = str(job.get("next_run_at") or "").strip()
@@ -766,6 +823,7 @@ def cron_create(args):
         prompt=args.prompt,
         name=getattr(args, "name", None),
         deliver=getattr(args, "deliver", None),
+        failure_deliver=getattr(args, "failure_deliver", None),
         repeat=getattr(args, "repeat", None),
         skill=getattr(args, "skill", None),
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
@@ -842,6 +900,7 @@ def cron_edit(args):
         prompt=getattr(args, "prompt", None),
         name=getattr(args, "name", None),
         deliver=getattr(args, "deliver", None),
+        failure_deliver=getattr(args, "failure_deliver", None),
         repeat=getattr(args, "repeat", None),
         skills=final_skills,
         script=getattr(args, "script", None),

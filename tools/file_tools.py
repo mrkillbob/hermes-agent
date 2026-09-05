@@ -24,6 +24,7 @@ from tools.file_operations import (
 )
 from tools import file_state
 from agent.redact import redact_sensitive_text
+from agent.source_provenance_tools import issue_active_read_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +257,11 @@ def _configured_terminal_cwd() -> str | None:
     relative to, which is exactly the ambiguity that misroutes worktree edits.
     Only an absolute, sentinel-free value is honored.
     """
-    return _sentinel_free_abs_cwd(os.environ.get("TERMINAL_CWD"))
+    # Scope-aware: under gateway multiplexing the routed profile's cwd lives in
+    # the per-turn terminal scope, not the process env (#68559).
+    from agent.runtime_cwd import scope_terminal_cwd
+
+    return _sentinel_free_abs_cwd(scope_terminal_cwd() or None)
 
 
 def _registered_task_cwd_override(task_id: str = "default") -> str | None:
@@ -292,11 +297,17 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
          register a raw-keyed cwd before any tool runs). Normally already
          mirrored into the record at registration; kept as a direct fallback
          so a cleared/never-written record still resolves the workspace.
-      3. A sentinel-free absolute ``$TERMINAL_CWD`` (the worktree path set by
+      3. The active parent session's cwd when a delegated/background task has
+         its own task id but inherits that session's context. This session
+         anchor intentionally precedes ``$TERMINAL_CWD``: the environment
+         value is the session's launch directory, while the recorded cwd may
+         reflect a later ``cd`` in the active conversation.
+      4. A sentinel-free absolute ``$TERMINAL_CWD`` (the worktree path set by
          ``cli.py``/``main.py`` for ``-w`` sessions).
 
-    Returns ``None`` only when there is genuinely no reliable anchor, in which
-    case callers fall back to the process cwd.
+    Returns ``None`` only when there is genuinely no recorded task, inherited
+    session, or environment anchor, in which case callers fall back to the
+    process cwd.
     """
     try:
         from tools.terminal_tool import get_session_cwd
@@ -304,11 +315,39 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
         recorded = get_session_cwd(task_id)
     except Exception:
         recorded = None
+    registered = _registered_task_cwd_override(task_id)
+    try:
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        candidate = recorded or registered
+        worker_cwd = resolve_kanban_worker_cwd(candidate)
+    except Exception:
+        worker_cwd = None
+    if worker_cwd and not _uses_container_paths(task_id):
+        return worker_cwd
     if recorded:
         return recorded
-    registered = _registered_task_cwd_override(task_id)
     if registered:
         return registered
+
+    # Delegated/background agents keep a distinct task id for observability
+    # while inheriting the desktop/gateway session ContextVar so they share the
+    # parent's environment.  The cwd registry is deliberately keyed by the raw
+    # session id, not by the child task id.  Without this bridge, a child's
+    # first relative file read falls through to the process cwd until it runs a
+    # terminal command of its own, producing false "File not found" results in
+    # a worktree that already contains the file.
+    try:
+        from tools.terminal_tool import _current_session_key, get_session_cwd
+
+        current_session_key = _current_session_key()
+        if current_session_key and current_session_key != task_id:
+            inherited = get_session_cwd(current_session_key)
+            if inherited:
+                return inherited
+    except Exception:
+        logger.debug("session cwd inheritance unavailable", exc_info=True)
+
     return _configured_terminal_cwd()
 
 
@@ -1128,9 +1167,13 @@ _file_ops_cache: dict = {}
 #   "consecutive":  how many times that exact call has been repeated in a row
 #   "read_history": set of (path, offset, limit) tuples for get_read_files_summary
 #   "dedup":        dict mapping (resolved_path, offset, limit) → mtime float
-#                   Used to skip re-reads of unchanged files.  Reset on
-#                   context compression (the original content is summarised
-#                   away so the model needs the full content again).
+#                   Used to skip re-reads of unchanged files.  Survives
+#                   context compression so unchanged files can resume
+#                   returning lightweight stubs after one recovery read.
+#   "dedup_generation_reads": set of dedup keys whose full content has been
+#                   served since the latest compaction boundary. Cleared on
+#                   compression so the first post-compaction read can recover
+#                   exact bytes that the summary may have omitted.
 #   "read_timestamps": dict mapping resolved_path → modification-time float
 #                      recorded when the file was last read (or written) by
 #                      this task.  Used by write_file and patch to detect
@@ -1234,6 +1277,15 @@ def _cap_read_tracker_data(task_data: dict) -> None:
             try:
                 dedup_hits.pop(next(iter(dedup_hits)))
             except (StopIteration, KeyError):
+                break
+
+    generation_reads = task_data.get("dedup_generation_reads")
+    if generation_reads is not None and len(generation_reads) > _DEDUP_CAP:
+        excess = len(generation_reads) - _DEDUP_CAP
+        for _ in range(excess):
+            try:
+                generation_reads.pop()
+            except KeyError:
                 break
 
     ts = task_data.get("read_timestamps")
@@ -1535,6 +1587,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                     "docker_forward_env": config.get("docker_forward_env", []),
                     "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
                     "docker_network": config.get("docker_network", True),
+                    "docker_isolate_host_data": config.get("docker_isolate_host_data", False),
                 }
 
             ssh_config = None
@@ -1580,12 +1633,29 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
 
 
 def clear_file_ops_cache(task_id: str = None):
-    """Clear the file operations cache."""
+    """Clear file-operation state for a finished task, or all tasks."""
     with _file_ops_lock:
         if task_id:
             _file_ops_cache.pop(task_id, None)
         else:
             _file_ops_cache.clear()
+
+    with _read_tracker_lock:
+        if task_id:
+            _read_tracker.pop(task_id, None)
+        else:
+            _read_tracker.clear()
+
+    with _patch_failure_lock:
+        if task_id:
+            _patch_failure_tracker.pop(task_id, None)
+        else:
+            _patch_failure_tracker.clear()
+
+    if task_id:
+        file_state.get_registry().forget_task(task_id)
+    else:
+        file_state.get_registry().clear()
 
 
 def _special_file_kind(path) -> str | None:
@@ -1635,6 +1705,11 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 "block or produce infinite output."
             )
 
+        _source_path = None
+        if not _uses_container_paths(task_id):
+            _source_path = Path(_expand_tilde(path))
+            if not _source_path.is_absolute():
+                _source_path = Path(_resolve_base_dir(task_id)) / _source_path
         _resolved = _resolve_path_for_task(path, task_id)
 
         # ── Special-file type guard (stat-based) ──────────────────────
@@ -1795,7 +1870,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             task_data = _read_tracker.setdefault(task_id, {
                 "last_key": None, "consecutive": 0,
                 "read_history": set(), "dedup": {},
-                "dedup_hits": {}, "read_timestamps": {},
+                "dedup_hits": {}, "dedup_generation_reads": set(),
+                "read_timestamps": {},
             })
             # Backward-compat for pre-existing tracker entries that predate
             # dedup_hits/read_timestamps (long-lived task or crossed an
@@ -1804,12 +1880,14 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 task_data["dedup_hits"] = {}
             if "read_timestamps" not in task_data:
                 task_data["read_timestamps"] = {}
+            generation_reads = task_data.setdefault("dedup_generation_reads", set())
             cached_mtime = task_data.get("dedup", {}).get(dedup_key)
+            content_served_in_generation = dedup_key in generation_reads
 
         if cached_mtime is not None:
             try:
                 current_mtime = os.path.getmtime(resolved_str)
-                if current_mtime == cached_mtime:
+                if current_mtime == cached_mtime and content_served_in_generation:
                     # Count repeated stub returns so weak tool-followers that
                     # ignore the "refer to earlier result" hint don't burn
                     # their iteration budget in an infinite read loop.  After
@@ -1845,7 +1923,14 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
 
         # ── Perform the read ──────────────────────────────────────────
         file_ops = _get_file_ops(task_id)
-        result = file_ops.read_file(path, offset, limit)
+        # Host-backed environments can be shared by several sessions whose
+        # authoritative cwd records differ.  Resolve relative paths once at
+        # the tool boundary and pass that exact absolute target downstream;
+        # otherwise ShellFileOperations re-resolves against the shared
+        # backend's stale cwd and can read a different checkout than the path
+        # used for guards, tracking, and source-provenance verification.
+        read_path = str(_resolved) if _file_ops_uses_host_paths(file_ops) else path
+        result = file_ops.read_file(read_path, offset, limit)
         result_dict = result.to_dict()
 
         # ── Populate negative-result cache on not-found ───────────────
@@ -1905,6 +1990,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             content_len = len(trimmed)
 
         # ── Redact secrets (after guard check to skip oversized content) ──
+        content_before_redaction = result.content or ""
         if result.content:
             result.content = redact_sensitive_text(result.content, file_read=True)
             result_dict["content"] = result.content
@@ -1933,6 +2019,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             # reset its hit counter.  (File either changed or stat failed
             # earlier and we fell through.)
             task_data["dedup_hits"].pop(dedup_key, None)
+            task_data.setdefault("dedup_generation_reads", set()).add(dedup_key)
             task_data["read_history"].add((path, offset, limit))
             if task_data["last_key"] == read_key:
                 task_data["consecutive"] += 1
@@ -2003,6 +2090,17 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 "If you are stuck in a loop, stop reading and proceed with writing or responding."
             )
 
+        if result.content == content_before_redaction:
+            issue_active_read_provenance(
+                resolved=_resolved,
+                source_path=_source_path,
+                offset=offset,
+                limit=limit,
+                returned_content=result.content,
+                result_dict=result_dict,
+                file_ops=file_ops,
+            )
+
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         return tool_error(str(e))
@@ -2011,30 +2109,29 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
 
 
 def reset_file_dedup(task_id: str = None):
-    """Clear the deduplication cache for file reads.
+    """Advance the read-dedup generation after context compression.
 
-    Called after context compression — the original read content has been
-    summarised away, so the model needs the full content if it reads the
-    same file again.  Without this, reads after compression would return
-    a "file unchanged" stub pointing at content that no longer exists in
-    context.
+    Called after context compression.  The per-key ``dedup`` mtime map is
+    preserved, but the generation-read set is cleared. The first unchanged
+    read of each key after compaction therefore returns full content that may
+    have been summarized away; later reads in the same generation return the
+    lightweight stub. Stub-hit counters are also cleared so the hard block
+    restarts fresh (issue #84857).
 
-    Call with a task_id to clear just that task, or without to clear all.
+    Call with a task_id to reset just that task, or without to reset all.
     """
     with _read_tracker_lock:
         if task_id:
             task_data = _read_tracker.get(task_id)
             if task_data:
-                if "dedup" in task_data:
-                    task_data["dedup"].clear()
                 if "dedup_hits" in task_data:
                     task_data["dedup_hits"].clear()
+                task_data.setdefault("dedup_generation_reads", set()).clear()
         else:
             for task_data in _read_tracker.values():
-                if "dedup" in task_data:
-                    task_data["dedup"].clear()
                 if "dedup_hits" in task_data:
                     task_data["dedup_hits"].clear()
+                task_data.setdefault("dedup_generation_reads", set()).clear()
 
 
 def notify_other_tool_call(task_id: str = "default"):
@@ -2550,6 +2647,7 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
 def search_tool(pattern: str, target: str = "content", path: str = ".",
                 file_glob: str = None, limit: int = 50, offset: int = 0,
                 output_mode: str = "content", context: int = 0,
+                order: str = "discovery",
                 task_id: str = "default") -> str:
     """Search for content or files."""
     try:
@@ -2566,6 +2664,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
             file_glob or "",
             limit,
             offset,
+            order,
         )
         with _read_tracker_lock:
             task_data = _read_tracker.setdefault(task_id, {
@@ -2611,7 +2710,8 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         file_ops = _get_file_ops(task_id)
         result = file_ops.search(
             pattern=pattern, path=path, target=target, file_glob=file_glob,
-            limit=limit, offset=offset, output_mode=output_mode, context=context
+            limit=limit, offset=offset, output_mode=output_mode, context=context,
+            order=order,
         )
         omitted = _filter_read_blocked_search_results(result, task_id)
         if hasattr(result, 'matches'):
@@ -2678,7 +2778,7 @@ READ_FILE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
+            "path": {"type": "string", "description": "Path to the file to read (absolute or relative)"},
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
             "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 2000, max: 2000). Reads are additionally capped at a ~100K-character budget with a next_offset continuation.", "default": 2000, "maximum": 2000}
         },
@@ -2803,7 +2903,7 @@ def _is_openai_family_main() -> bool:
 
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. On macOS, broad searches above the user home automatically skip TCC-protected folders (Desktop, Documents, Downloads, Library, Movies, Music, Pictures); target one directly when access is intentional.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
+    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. On macOS, broad searches above the user home automatically skip TCC-protected folders (Desktop, Documents, Downloads, Library, Movies, Music, Pictures); target one directly when access is intentional.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls. Discovery order is the fast bounded default; exact global newest-first order is an explicit opt-in and may scan the full tree.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -2813,6 +2913,7 @@ SEARCH_FILES_SCHEMA = {
             "file_glob": {"type": "string", "description": "Filter files by pattern in grep mode (e.g., '*.py' to only search Python files)"},
             "limit": {"type": "integer", "description": "Maximum number of results to return (default: 50)", "default": 50},
             "offset": {"type": "integer", "description": "Skip first N results for pagination (default: 0)", "default": 0},
+            "order": {"type": "string", "enum": ["discovery", "modified"], "description": "File-search order: 'discovery' is fast bounded traversal order; 'modified' is exact global newest-first and may scan the full tree; ignored for content", "default": "discovery"},
             "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "Output format for grep mode: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file", "default": "content"},
             "context": {"type": "integer", "description": "Number of context lines before and after each match (grep mode only)", "default": 0}
         },
@@ -2872,7 +2973,8 @@ def _handle_search_files(args, **kw):
     return search_tool(
         pattern=args.get("pattern", ""), target=target, path=args.get("path", "."),
         file_glob=args.get("file_glob"), limit=args.get("limit", 50), offset=args.get("offset", 0),
-        output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
+        output_mode=args.get("output_mode", "content"), context=args.get("context", 0),
+        order=args.get("order", "discovery"), task_id=tid)
 
 
 def _read_file_schema_overrides():

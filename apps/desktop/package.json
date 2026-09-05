@@ -27,7 +27,7 @@
     "profile:main": "tsc --build tsconfig.electron.json && wait-on http://127.0.0.1:5174 && node scripts/bundle-electron-main.mjs --dev && cross-env XCURSOR_SIZE=24 HERMES_DESKTOP_DEV_SERVER=http://127.0.0.1:5174 electron --inspect=9229 .",
     "profile:main:cpu": "tsc --build tsconfig.electron.json && wait-on http://127.0.0.1:5174 && node scripts/bundle-electron-main.mjs --dev && cross-env XCURSOR_SIZE=24 NODE_OPTIONS=--cpu-prof HERMES_DESKTOP_DEV_SERVER=http://127.0.0.1:5174 electron .",
     "start": "npm run build && electron .",
-    "prebuild": "npm run clean",
+    "prebuild": "node scripts/assert-root-install.mjs && npm run clean",
     "build": "node scripts/assert-root-install.mjs && node scripts/write-build-stamp.mjs && vite build && node scripts/bundle-electron-main.mjs && node scripts/stage-native-deps.mjs",
     "postbuild": "node scripts/assert-dist-built.mjs",
     "prebuilder": "node scripts/patch-electron-builder-mac-binary.mjs",
@@ -173,7 +173,7 @@
     "bippy": "0.5.43",
     "concurrently": "10.0.4",
     "cross-env": "10.1.0",
-    "electron": "40.10.2",
+    "electron": "41.10.3",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.1",
     "jsdom": "29.1.1",
@@ -186,7 +186,7 @@
     "wait-on": "9.0.10"
   },
   "build": {
-    "electronVersion": "40.10.2",
+    "electronVersion": "41.10.3",
     "appId": "com.nousresearch.hermes",
     "productName": "Hermes",
     "executableName": "Hermes",

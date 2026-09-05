@@ -51,8 +51,25 @@ export interface SessionPreview {
   preview?: string
 }
 
+export interface FederationRole {
+  authority?: string
+  department?: string
+  display_name?: string
+  handoffs?: string[]
+  role_id?: string
+  schedule?: string
+  skills?: string[]
+  toolsets?: string[]
+}
+
 /** Per-bot presentation state, persisted in the profile's `ui_meta`. */
 export interface BotMeta {
+  /** Which user-made section this bot is filed under (`user-sections.ts`).
+   *  Membership lives on the BOT, not as a member list on the section: a bot
+   *  can only be in one place, deleting a section cannot orphan anybody, and
+   *  the assignment rides the same profile.yaml sync every other bot setting
+   *  already uses — so sections follow the profile to another machine. */
+  sectionId?: null | string
   color?: string
   /** Set when the user has customized the avatar, so defaults stop applying. */
   custom?: boolean
@@ -79,6 +96,7 @@ export interface RosterRow {
   connectionLabel?: string
   description?: string
   display_name?: string
+  federation_role?: FederationRole
   /** An offline twin of a selected bot, kept visible so the row doesn't vanish. */
   ghost?: boolean
   handle?: string

@@ -624,7 +624,7 @@ def init_agent(
         provider (str): Provider identifier (optional; used for telemetry/routing hints)
         requested_provider (str): Original provider identity before runtime canonicalization
         api_mode (str): API mode override: "chat_completions" or "codex_responses"
-        model (str): Model name to use (default: "anthropic/claude-opus-4.6")
+        model (str): Model name to use (default: "openai-codex/gpt-5.5")
         max_iterations (int): Maximum number of tool calling iterations (default: 90)
         enabled_toolsets (List[str]): Only enable tools from these toolsets (optional)
         disabled_toolsets (List[str]): Disable tools from these toolsets (optional)
@@ -1401,12 +1401,20 @@ def init_agent(
                 _explicit = (agent.provider or "").strip().lower()
                 # --- Init-time fallback (#17929) ---
                 _fb_entries = []
-                if isinstance(fallback_model, list):
+                if (
+                    os.environ.get("HERMES_KANBAN_LOCAL_ONLY") != "1"
+                    and isinstance(fallback_model, list)
+                ):
                     _fb_entries = [
                         f for f in fallback_model
                         if isinstance(f, dict) and f.get("provider") and f.get("model")
                     ]
-                elif isinstance(fallback_model, dict) and fallback_model.get("provider") and fallback_model.get("model"):
+                elif (
+                    os.environ.get("HERMES_KANBAN_LOCAL_ONLY") != "1"
+                    and isinstance(fallback_model, dict)
+                    and fallback_model.get("provider")
+                    and fallback_model.get("model")
+                ):
                     _fb_entries = [fallback_model]
                 _fb_resolved = False
                 for _fb in _fb_entries:
@@ -1583,7 +1591,9 @@ def init_agent(
     # when the primary is exhausted (rate-limit, overload, connection
     # failure).  Supports both legacy single-dict ``fallback_model`` and
     # new list ``fallback_providers`` format.
-    if isinstance(fallback_model, list):
+    if os.environ.get("HERMES_KANBAN_LOCAL_ONLY") == "1":
+        agent._fallback_chain = []
+    elif isinstance(fallback_model, list):
         agent._fallback_chain = [
             f for f in fallback_model
             if isinstance(f, dict) and f.get("provider") and f.get("model")
@@ -1831,6 +1841,9 @@ def init_agent(
     except Exception:
         agent.show_commentary = True
 
+    # Window (seconds) for the bounded /fast auto|cold modes (agent.fast_mode).
+    agent.fast_auto_seconds = (_agent_cfg.get("agent") or {}).get("fast_auto_seconds", 60)
+
     # LM Studio can either be explicitly preloaded through LM Studio's
     # management API (the historical Hermes behavior) or left to LM Studio's
     # just-in-time / Auto-Evict chat-completions path.  Keep the default
@@ -1851,10 +1864,39 @@ def init_agent(
     except Exception:
         agent.lmstudio_load_mode = "explicit"
 
+    # API-transport streaming (``model.streaming``, default true).  The
+    # conversation loop prefers ``stream=True`` for every turn — including
+    # subagent turns — to get fine-grained liveness health-checking (#3120),
+    # but self-hosted OpenAI-compatible backends with broken streaming
+    # tool-call paths (e.g. vLLM ``--tool-call-parser qwen3_xml`` + a
+    # reasoning parser can leak tool-call markup into plain text and return
+    # zero ``tool_calls``, #72901) silently no-op instead of executing.
+    # ``model.streaming: false`` seeds ``_disable_streaming`` so the session
+    # uses the non-streaming path, which the loop already falls back to at
+    # runtime when a provider rejects streaming.  The setting is
+    # session-scoped: it persists across mid-session model switches, mirroring
+    # the runtime fallback's semantics.  Orthogonal to ``display.streaming``
+    # (token rendering) — display-only settings are untouched.
+    agent._disable_streaming = False
+    try:
+        _model_section = _agent_cfg.get("model", {})
+        if isinstance(_model_section, dict):
+            _streaming = str(_model_section.get("streaming", "true")).strip().lower()
+            if _streaming in {"false", "0", "no", "off"}:
+                agent._disable_streaming = True
+            elif _streaming not in {"true", "1", "yes", "on"}:
+                logger.warning(
+                    "Invalid model.streaming=%r; expected a boolean. Using streaming (default).",
+                    _model_section.get("streaming"),
+                )
+    except Exception:
+        agent._disable_streaming = False
+
     try:
         agent._tool_guardrails = ToolCallGuardrailController(
             ToolCallGuardrailConfig.from_mapping(
-                _agent_cfg.get("tool_loop_guardrails", {})
+                _agent_cfg.get("tool_loop_guardrails", {}),
+                platform=platform,
             )
         )
     except Exception as _tlg_err:
@@ -2999,8 +3041,10 @@ def init_agent(
         except Exception as _ce_err:
             _ra().logger.debug("Context engine on_session_start: %s", _ce_err)
 
+    from agent.runtime_cwd import scope_terminal_cwd as _scope_terminal_cwd
+
     agent._subdirectory_hints = SubdirectoryHintTracker(
-        working_dir=os.getenv("TERMINAL_CWD") or None,
+        working_dir=_scope_terminal_cwd() or None,
     )
     agent._user_turn_count = 0
     # Copilot x-initiator flag: first API call of a user turn sends "user" (#3040).
@@ -3011,6 +3055,7 @@ def init_agent(
     # until the first response with usage; invalidated on compaction and
     # session switches so stale anchors can never suppress compression.
     agent._usage_anchor = None
+    agent._turn_base_usage_anchor = None
 
     # Cumulative token usage for the session
     agent.session_prompt_tokens = 0
