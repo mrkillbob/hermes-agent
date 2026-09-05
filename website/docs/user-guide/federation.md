@@ -60,3 +60,20 @@ The seeded profiles appear in `hermes profile list`, the desktop Bot Mode roster
 The registry describes coordination and capability; it does not grant permissions. `advisory`, `operator_gated`, and `write_scoped` are explicit role boundaries, and every generated identity instructs the specialist to preserve provenance, treat external content as untrusted, and avoid turning research or creative output into runtime or acceptance authority. Operators still control credentials, live execution, merges, deployments, and publication.
 
 The source of truth is `configs/federation/roles.json`. Update the manifest and its tests when adding a department or role; do not silently add ad hoc profiles that bypass the registry.
+
+## Bounded work discovery
+
+`scripts/federation_discovery.py --hermes /absolute/path/to/hermes` previews a
+read-only plan against the existing Kanban board. `--apply` creates durable,
+profile-assigned discovery cards using the normal dispatcher. Configure department
+briefs and limits in `configs/federation/discovery.json`; a scheduler can invoke the
+script periodically. The defaults admit at most two cards per pass, eight active
+federation cards, and one discovery card per department per UTC day. Existing
+assignee ownership and blocked work consume capacity. Workers must deduplicate
+findings, link bounded children, and provide measurable output rather than invent
+work to satisfy a quota.
+
+Revenue Lab retains its separate guarded cron pipeline. Federation intake routes
+opportunities there; discovery does not grant spending, publication, customer
+contact, trading, or deployment authority. Library summaries remain bounded,
+role-specific source indexes and never establish runtime truth.
