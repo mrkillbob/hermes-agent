@@ -473,6 +473,7 @@ hermes_cli = ["observability/schemas/*.json", "data/*.json", "local_runtime/*.js
 # code. Install it beside the environment so the CLI remains functional from
 # a wheel as well as from a source checkout.
 "configs/federation" = ["configs/federation/roles.json"]
+"share/hermes-agent/optional-skills/revenue/revenue-lab" = ["optional-skills/revenue/revenue-lab/SKILL.md"]
 # gateway/assets/ ships status_phrases.yaml and the Telegram BotFather
 # screenshot. Without this, sealed venvs (uv2nix) silently lose both —
 # status phrases fall back to the tiny hardcoded set and the Telegram
