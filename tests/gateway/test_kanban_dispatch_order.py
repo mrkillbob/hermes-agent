@@ -126,9 +126,10 @@ def decomposition_tick(monkeypatch, tmp_path):
 
 def test_auto_decompose_allows_undecomposed_task_with_downstream_dependents(decomposition_tick):
     """Dependency children are consumers, not evidence of prior fan-out."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from hermes_cli import kanban_db as kb
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         tid = kb.create_task(conn, title="structural extraction", triage=True)
         consumer = kb.create_task(conn, title="verify extraction", parents=[tid])
         assert kb.child_ids(conn, tid) == [consumer]
@@ -137,7 +138,7 @@ def test_auto_decompose_allows_undecomposed_task_with_downstream_dependents(deco
     run_tick, _ = decomposition_tick
     run_tick()
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         events = [ev for ev in kb.list_events(conn, tid) if ev.kind == "decomposed"]
         assert len(events) == 1
         assert kb.get_task(conn, tid).status == "todo"
@@ -151,10 +152,11 @@ def test_auto_decompose_skips_actual_decomposition_without_spending_budget(
     decomposition_tick, monkeypatch, has_downstream,
 ):
     """A real re-triaged root cannot duplicate its plan or starve fresh ideas."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_decompose as decomp
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         tid = kb.create_task(conn, title="old root", triage=True)
         if has_downstream:
             kb.create_task(conn, title="downstream consumer", parents=[tid])
@@ -173,7 +175,7 @@ def test_auto_decompose_skips_actual_decomposition_without_spending_budget(
     run_tick, requests = decomposition_tick
     run_tick()
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         assert kb.get_task(conn, tid).status == "triage"
         assert kb.parent_ids(conn, tid) == plan
         assert len([ev for ev in kb.list_events(conn, tid) if ev.kind == "decomposed"]) == 1
@@ -187,10 +189,11 @@ def test_auto_decompose_repromotes_existing_spec_without_auxiliary_model(
     decomposition_tick, monkeypatch,
 ):
     """A re-triaged concrete spec must not re-enter model-dependent triage."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_decompose as decomp
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         tid = kb.create_task(
             conn,
             title="board-record receipt",
@@ -210,7 +213,7 @@ def test_auto_decompose_repromotes_existing_spec_without_auxiliary_model(
     run_tick, requests = decomposition_tick
     run_tick()
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         assert kb.get_task(conn, tid).status == "ready"
         assert len([ev for ev in kb.list_events(conn, tid) if ev.kind == "specified"]) == 2
         assert not any(ev.kind == "decomposed" for ev in kb.list_events(conn, tid))
@@ -219,10 +222,11 @@ def test_auto_decompose_repromotes_existing_spec_without_auxiliary_model(
 
 def test_auto_decompose_fails_closed_when_history_cannot_be_read(decomposition_tick, monkeypatch):
     """An unreadable guard must never authorize a new auxiliary request."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     import sqlite3
     from hermes_cli import kanban_db as kb
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         tid = kb.create_task(conn, title="history unavailable", triage=True)
     real_connect = connections.connect
 
@@ -239,7 +243,7 @@ def test_auto_decompose_fails_closed_when_history_cannot_be_read(decomposition_t
     with monkeypatch.context() as scoped:
         scoped.setattr(connections, "connect", connect_without_event_reads)
         run_tick()
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         assert kb.get_task(conn, tid).status == "triage"
         assert len(kb.list_tasks(conn)) == 1
     assert requests == []

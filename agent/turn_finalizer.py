@@ -42,33 +42,20 @@ def _assistant_row_missing_visible_text(msg: dict) -> bool:
 def _record_kanban_budget_exhausted(
     kanban_task: str, api_call_count: int, max_iterations: int, logger: logging.Logger
 ) -> None:
-    """Record a terminal ``timed_out`` outcome for a kanban worker out of budget.
-
-    Routed via ``_record_task_failure`` (not ``kanban_block``) so it counts toward the
-    consecutive-failure circuit breaker. Idempotent via the ``_end_run`` CAS
-    (``WHERE ended_at IS NULL``), so safe from multiple exit paths.
-
-    This is a bounded fallback (#87096): the CAS invariant in ``_end_run`` (``WHERE ended_at IS NULL``)
-    guarantees idempotence — if another path already closed the run this is a no-op — so it is safe to call
-    from multiple exit paths.
-    """
+    """Park exhausted work for narrower scope instead of restarting the same exploration."""
     try:
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
-        from hermes_cli import kanban_db_dispatch as _kbd
         _conn = _kbc.connect()
         try:
-            _kbd._record_task_failure(
-                _conn,
-                kanban_task,
-                error=(
-                    f"Iteration budget exhausted ({api_call_count}/{max_iterations}) — "
-                    "task could not complete within the allowed iterations"
-                ),
-                outcome="timed_out",
-                release_claim=True,
-                end_run=True,
-                event_payload_extra={"budget_used": api_call_count, "budget_max": max_iterations},
+            task = _kb.get_task(_conn, kanban_task)
+            if task is None:
+                return
+            expected = os.environ.get("HERMES_KANBAN_RUN_ID") or task.current_run_id
+            _kb.block_task(
+                _conn, kanban_task,
+                reason=f"Iteration budget exhausted ({api_call_count}/{max_iterations}) — provide narrower evidence or scope before resuming",
+                kind="needs_input", expected_run_id=int(expected) if expected is not None else None,
             )
         finally:
             with suppress(Exception):
@@ -92,15 +79,17 @@ def _record_kanban_guardrail_halt(
     and retries it as a protocol violation.  Route the halt through the normal
     failure circuit instead, preserving bounded retries and the task override.
     """
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     tool_name = str(getattr(decision, "tool_name", "") or "unknown")
     code = str(getattr(decision, "code", "") or "tool_guardrail_halt")
     error = f"Tool guardrail halted {tool_name}: {code}"
     try:
         from hermes_cli import kanban_db as _kb
 
-        _conn = _kb.connect()
+        from hermes_cli import kanban_db_dispatch as _kbd
+        _conn = _hermes_cli_kanban_db_connect.connect()
         try:
-            _kb._record_task_failure(
+            _kbd._record_task_failure(
                 _conn,
                 kanban_task,
                 error,
@@ -202,17 +191,8 @@ def _resolve_budget_fallback(
     # A kanban worker must record a terminal outcome whether or not a fallback path
     # was eligible, so the dispatcher learns the worker could not complete.
     _kanban_task = os.environ.get("HERMES_KANBAN_TASK") if budget_exhausted else None
-    # If running as a kanban worker, signal the dispatcher that the worker could not complete (rather than
-    # treating it as a protocol violation). This applies whether the user-facing fallback came from the
-    # summary call or an explicitly pending continuation; both exhausted the task budget and must advance
-    # the failure circuit. We route through ``_record_task_failure(outcome="timed_out")`` rather than
-    # ``kanban_block`` so this counts toward the dispatcher's consecutive-failure circuit breaker (#29747
-    # gap 2).
-    # Bounded fallback (#87096): budget was exhausted but none of the normal fallback paths were eligible
-    # (interrupted / failed / anomalous exit_reason). If running as a kanban worker we must still record a
-    # terminal outcome so the task does not remain in an ambiguous lifecycle state. The worker's run is
-    # closed via ``_record_task_failure`` (compare-and-swap receipt path) which is a no-op if another path
-    # closed it — the CAS invariant in ``_end_run`` (``WHERE ended_at IS NULL``) guarantees idempotence.
+    # A budget stop requires narrower scope; pin the block to this worker's run
+    # so an old process cannot park work that another worker has already reclaimed.
     if _kanban_task:
         _record_kanban_budget_exhausted(_kanban_task, api_call_count, agent.max_iterations, logger)
     return final_response, _turn_exit_reason, preserved_verification_fallback

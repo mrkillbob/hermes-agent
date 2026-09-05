@@ -18,7 +18,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
@@ -182,7 +182,9 @@ BOARD_COLUMNS: list[str] = ["triage", "todo", "scheduled", "ready", "running", "
 _CARD_SUMMARY_PREVIEW_CHARS = 200
 
 
-def _task_dict(task: kanban_db.Task, *, latest_summary: Optional[str] = None) -> dict[str, Any]:
+def _task_dict(task: kanban_db.Task, *, latest_summary: Optional[str] = None, active_started_at: Optional[int] = None) -> dict[str, Any]:
+    if task.status == "running" and active_started_at is not None:
+        task = replace(task, started_at=active_started_at)
     d = asdict(task)
     # Derived age metrics so the UI can colour stale cards without client deltas.
     try:
@@ -309,9 +311,12 @@ def get_board(
         # One window-function query for latest summaries (avoids N+1); cards get a
         # truncated preview, the full text comes from /tasks/:id.
         summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
+        active_starts = {row["task_id"]: row["started_at"] for row in conn.execute(
+            "SELECT t.id AS task_id, r.started_at FROM tasks t JOIN task_runs r "
+            "ON r.id = t.current_run_id WHERE t.status = 'running'")}
         for t in tasks:
             full = summary_map.get(t.id)
-            d = _task_dict(t, latest_summary=(full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None))
+            d = _task_dict(t, latest_summary=(full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None), active_started_at=active_starts.get(t.id))
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
@@ -342,7 +347,14 @@ def get_task(
             raise HTTPException(status_code=400, detail="run_state_type must be 'status' or 'outcome'")
         task = _require_task(conn, task_id)
         # Drawer returns the FULL summary (cards on /board carry a 200-char preview).
-        task_d = _task_dict(task, latest_summary=kanban_db.latest_summary(conn, task_id))
+        active_run = conn.execute(
+            "SELECT started_at FROM task_runs WHERE id = ? AND task_id = ?",
+            (task.current_run_id, task.id),
+        ).fetchone()
+        task_d = _task_dict(
+            task, latest_summary=kanban_db.latest_summary(conn, task_id),
+            active_started_at=active_run["started_at"] if active_run else None,
+        )
         links = _links_for(conn, task_id)
         child_summaries = kanban_db.latest_summaries(conn, links["children"])
         children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))

@@ -281,17 +281,19 @@ def test_profile_cap_map_only_limits_selected_profile(
     isolated_kanban_home,
     all_assignees_spawnable,
 ):
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    import hermes_cli.kanban_db_dispatch as _hermes_cli_kanban_db_dispatch
     spawns: list[tuple[str, str]] = []
 
     def fake_spawn(task, workspace, board=None):
         spawns.append((task.id, task.assignee))
         return 100 + len(spawns)
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         for i in range(3):
             kb.create_task(conn, title=f"local-{i}", assignee="local-heavy")
             kb.create_task(conn, title=f"cloud-{i}", assignee="cloud-fast")
-        result = kb.dispatch_once(
+        result = _hermes_cli_kanban_db_dispatch.dispatch_once(
             conn,
             spawn_fn=fake_spawn,
             max_in_progress=8,

@@ -82,10 +82,11 @@ def test_show_defaults_to_env_task_id(worker_env):
 
 
 def test_protected_show_surfaces_completed_parent_handoff(monkeypatch, worker_env):
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         parent_id = kb.create_task(conn, title="Upstream verifier", assignee="verifier")
         assert kb.claim_task(conn, parent_id) is not None
@@ -405,10 +406,11 @@ def test_verifier_cannot_complete_with_pytest_usage_failure(
     said behavioral evidence was unavailable, yet ``kanban_complete`` moved
     the task to done and released its downstream writer.
     """
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         with kb.write_txn(conn):
             conn.execute(
@@ -436,7 +438,7 @@ def test_verifier_cannot_complete_with_pytest_usage_failure(
     }))
 
     assert "Verifier completion rejected" in out["error"]
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         assert kb.get_task(conn, worker_env).status == "running"
     finally:
@@ -549,10 +551,11 @@ def test_worker_created_task_rejects_invented_needs_input(monkeypatch, worker_en
     requests for a human to choose analysis metrics were previously accepted as
     real blocks and escalated the card to triage.
     """
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         tid = kb.create_task(
             conn,
@@ -573,7 +576,7 @@ def test_worker_created_task_rejects_invented_needs_input(monkeypatch, worker_en
     assert "error" in json.loads(out)
     assert "worker- and cron-created" in out
 
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         assert kb.get_task(conn, tid).status == "running"
     finally:
@@ -582,10 +585,11 @@ def test_worker_created_task_rejects_invented_needs_input(monkeypatch, worker_en
 
 def test_auto_decomposed_leaf_allows_real_capability_block(monkeypatch, worker_env):
     """The guard must not suppress a factual external access escalation."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         tid = kb.create_task(
             conn,
@@ -606,7 +610,7 @@ def test_auto_decomposed_leaf_allows_real_capability_block(monkeypatch, worker_e
     })
     assert json.loads(out)["ok"] is True
 
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         assert kb.get_task(conn, tid).status == "blocked"
     finally:
@@ -615,6 +619,7 @@ def test_auto_decomposed_leaf_allows_real_capability_block(monkeypatch, worker_e
 
 def test_capability_block_requires_current_command_evidence(worker_env):
     """Workers may not turn an unexecuted predicted failure into a block."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
@@ -625,7 +630,7 @@ def test_capability_block_requires_current_command_evidence(worker_env):
     assert "error" in json.loads(out)
     assert "require command and stderr" in out
 
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         assert kb.get_task(conn, worker_env).status == "running"
     finally:
@@ -829,6 +834,8 @@ def test_create_happy_path(worker_env):
 
 def test_create_normalizes_worker_supplied_scratch_path(worker_env):
     """Model-generated scratch paths must stay under Hermes-managed storage."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    import hermes_cli.kanban_db_workspace as _hermes_cli_kanban_db_workspace
     from tools import kanban_tools as kt
 
     out = kt._handle_create({
@@ -844,11 +851,11 @@ def test_create_normalizes_worker_supplied_scratch_path(worker_env):
 
     from hermes_cli import kanban_db as kb
 
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         child = kb.get_task(conn, result["task_id"])
         assert child.workspace_path is None
-        resolved = kb.resolve_workspace(child)
+        resolved = _hermes_cli_kanban_db_workspace.resolve_workspace(child)
         assert kb._is_managed_scratch_path(resolved)
     finally:
         conn.close()

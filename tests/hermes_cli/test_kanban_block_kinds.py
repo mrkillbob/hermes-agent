@@ -82,7 +82,8 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
 def test_legacy_pr_feedback_needs_input_triage_auto_recovers(kanban_home: Path) -> None:
     """Ordinary PR feedback intake loops are role-owned validation work."""
 
-    with kb.connect_closing() as conn:
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    with _hermes_cli_kanban_db_connect.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="GitHub PR feedback: acme/widgets#17",
@@ -108,7 +109,8 @@ def test_legacy_pr_feedback_needs_input_triage_auto_recovers(kanban_home: Path) 
 
 
 def test_intent_review_needs_input_triage_stays_human_gated(kanban_home: Path) -> None:
-    with kb.connect_closing() as conn:
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    with _hermes_cli_kanban_db_connect.connect_closing() as conn:
         tid = kb.create_task(
             conn,
             title="Operator intent required: PR #17",

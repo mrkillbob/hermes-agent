@@ -229,4 +229,31 @@ def build_kanban_stop_nudge(
     )
 
 
+def reconcile_kanban_stop_to_review(
+    *, messages: Iterable[dict] | None, final_response: Any,
+    attempts: int, max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+) -> bool:
+    """Preserve bounded final evidence through the configured independent review gate."""
+    if (not kanban_stop_nudge_enabled() or not _auto_review_on_stop_enabled()
+            or attempts < max_attempts or session_called_kanban_terminal(messages)):
+        return False
+    response = str(final_response or "").strip()
+    reviewer = _configured_review_profile()
+    if not response or reviewer is None:
+        return False
+    try:
+        from tools.kanban_tools import _handle_request_review
+        raw = _handle_request_review({
+            "summary": f"Automatic terminal handoff after {attempts} unanswered Kanban stop "
+                       f"nudges. Worker final output:\n\n{response[:4000]}",
+            "reviewer": reviewer,
+            "metadata": {"source": "kanban_stop_guard", "terminal_nudges": attempts,
+                         "completion_inferred": False},
+        })
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        return isinstance(payload, dict) and payload.get("ok") is True
+    except Exception:
+        return False
+
+
 __all__ = ["build_kanban_stop_nudge", "kanban_stop_nudge_enabled", "session_called_kanban_terminal"]

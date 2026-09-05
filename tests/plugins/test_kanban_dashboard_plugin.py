@@ -118,11 +118,12 @@ def test_create_task_appears_on_board(client):
 
 
 def test_running_card_clock_uses_current_attempt_start_after_reclaim(client):
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     created = client.post(
         "/api/plugins/kanban/tasks",
         json={"title": "Retry exact work", "assignee": "worker"},
     ).json()["task"]
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         kb.claim_task(conn, created["id"])
         run = kb.latest_run(conn, created["id"])
@@ -143,11 +144,12 @@ def test_running_card_clock_uses_current_attempt_start_after_reclaim(client):
 
 
 def test_task_drawer_clock_agrees_with_card_after_reclaim(client):
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     created = client.post(
         "/api/plugins/kanban/tasks",
         json={"title": "Retry drawer work", "assignee": "worker"},
     ).json()["task"]
-    conn = kb.connect()
+    conn = _hermes_cli_kanban_db_connect.connect()
     try:
         kb.claim_task(conn, created["id"])
         run = kb.latest_run(conn, created["id"])

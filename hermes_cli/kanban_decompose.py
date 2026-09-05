@@ -338,8 +338,9 @@ def _root_handoff_context(task_id: str) -> str:
     task creation. Preserve only a bounded suffix and label it untrusted so
     comments cannot silently become policy or bypass worker gates.
     """
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     try:
-        with kb.connect_closing() as conn:
+        with _hermes_cli_kanban_db_connect.connect_closing() as conn:
             comments = kb.list_comments(conn, task_id)
     except Exception as exc:
         logger.debug("decompose: root comments unavailable for %s: %s", task_id, exc)

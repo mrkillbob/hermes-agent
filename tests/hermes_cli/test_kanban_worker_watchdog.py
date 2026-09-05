@@ -151,6 +151,7 @@ def test_watchdog_ignores_failure_loop_from_a_previous_task_run(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """An append-only task log must not make a repaired run inherit old failures."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -158,7 +159,7 @@ def test_watchdog_ignores_failure_loop_from_a_previous_task_run(
         repair_profiles={"tool_failure_loop": "tooling-repair"},
     )
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         current = _running_task(conn, tmp_path)
         stale_failures = "\n".join(
             ["┊ 💻 $ python /tmp/probe.py 0.1s [exit 1]"] * 3
@@ -189,6 +190,7 @@ def test_watchdog_blocks_worker_and_creates_one_linked_repair(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """Removing idempotent repair linkage would fan out duplicate repairs."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -197,7 +199,7 @@ def test_watchdog_blocks_worker_and_creates_one_linked_repair(
     )
     unhealthy_log = "\n".join(["┊ 💻 $ rg missing 0.1s [exit 2]"] * 3)
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         original = _running_task(conn, tmp_path)
         first = run_watchdog_tick(
             conn,
@@ -232,6 +234,7 @@ def test_repair_borrows_original_workspace_without_owning_cleanup(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """Completing a repair must never delete the original task's workspace."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -242,7 +245,7 @@ def test_repair_borrows_original_workspace_without_owning_cleanup(
     scratch = tmp_path / "original-scratch"
     scratch.mkdir()
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         task_id = kb.create_task(
             conn,
             title="Original scratch task",
@@ -276,6 +279,7 @@ def test_compaction_repair_uses_clean_scratch_not_conflicted_original_workspace(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """Infrastructure repair must not confuse source conflicts with its own failure."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -284,7 +288,7 @@ def test_compaction_repair_uses_clean_scratch_not_conflicted_original_workspace(
     )
     unhealthy_log = "\n".join(["Compacting context — summarizing"] * 3)
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         original = _running_task(conn, tmp_path)
         run_watchdog_tick(
             conn,
@@ -306,6 +310,7 @@ def test_provider_stall_repair_borrows_project_workspace_for_route_diagnosis(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """Provider recovery needs the target checkout, but must never own it."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -324,7 +329,7 @@ def test_provider_stall_repair_borrows_project_workspace_for_route_diagnosis(
             primary_path=str(workspace),
         )
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         task_id = kb.create_task(
             conn,
             title="Original project task",
@@ -360,6 +365,7 @@ def test_watchdog_waits_for_repair_then_restarts_original(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """Restarting before a done repair receipt would reproduce the same loop."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -368,7 +374,7 @@ def test_watchdog_waits_for_repair_then_restarts_original(
     )
     unhealthy_log = "\n".join(["┊ 💻 $ rg missing 0.1s [exit 2]"] * 3)
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         original = _running_task(conn, tmp_path)
         run_watchdog_tick(
             conn,
@@ -403,6 +409,7 @@ def test_watchdog_does_not_restart_a_newer_non_watchdog_block(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """A historical repair must not override a later operator safety block."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -411,7 +418,7 @@ def test_watchdog_does_not_restart_a_newer_non_watchdog_block(
     )
     unhealthy_log = "\n".join(["┊ 💻 $ rg missing 0.1s [exit 2]"] * 3)
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         original = _running_task(conn, tmp_path)
         run_watchdog_tick(
             conn,
@@ -454,6 +461,7 @@ def test_watchdog_keeps_original_blocked_when_repair_fails(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """Treating a blocked repair as success would restart broken work."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -462,7 +470,7 @@ def test_watchdog_keeps_original_blocked_when_repair_fails(
     )
     unhealthy_log = "\n".join(["┊ 💻 $ rg missing 0.1s [exit 2]"] * 3)
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         original = _running_task(conn, tmp_path)
         run_watchdog_tick(
             conn,
@@ -493,6 +501,7 @@ def test_watchdog_refuses_to_release_unterminated_worker(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """Releasing a surviving worker would spawn a duplicate beside it."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -508,7 +517,7 @@ def test_watchdog_refuses_to_release_unterminated_worker(
         "sigkill": True,
     }
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         original = _running_task(conn, tmp_path)
         result = run_watchdog_tick(
             conn,
@@ -530,6 +539,7 @@ def test_watchdog_stops_after_recovery_attempt_limit(
     kanban_home: Path, tmp_path: Path
 ) -> None:
     """Ignoring the recovery limit would move the loop into repair tasks."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     config = WatchdogConfig(
         enabled=True,
         grace_seconds=0,
@@ -539,7 +549,7 @@ def test_watchdog_stops_after_recovery_attempt_limit(
     )
     unhealthy_log = "\n".join(["┊ 💻 $ rg missing 0.1s [exit 2]"] * 3)
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         original = _running_task(conn, tmp_path)
         with kb.write_txn(conn):
             kb._append_event(
@@ -571,9 +581,10 @@ def test_watchdog_stops_after_recovery_attempt_limit(
 
 def test_disabled_watchdog_does_not_read_worker_logs(kanban_home: Path) -> None:
     """Ignoring the feature gate would mutate existing boards on upgrade."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     reads = []
 
-    with kb.connect() as conn:
+    with _hermes_cli_kanban_db_connect.connect() as conn:
         result = run_watchdog_tick(
             conn,
             config=WatchdogConfig(enabled=False),
@@ -654,6 +665,8 @@ def test_dispatch_result_surfaces_watchdog_progress(
     kanban_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Dropping tick results would make automatic recovery invisible."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    import hermes_cli.kanban_db_dispatch as _hermes_cli_kanban_db_dispatch
     import hermes_cli.kanban_worker_watchdog as watchdog
 
     monkeypatch.setattr(
@@ -671,8 +684,8 @@ def test_dispatch_result_surfaces_watchdog_progress(
         ),
     )
 
-    with kb.connect() as conn:
-        result = kb.dispatch_once(conn, max_spawn=0)
+    with _hermes_cli_kanban_db_connect.connect() as conn:
+        result = _hermes_cli_kanban_db_dispatch.dispatch_once(conn, max_spawn=0)
 
     assert result.watchdog_blocked == ["t_blocked"]
     assert result.watchdog_restarted == ["t_restarted"]

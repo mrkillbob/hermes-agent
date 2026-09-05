@@ -714,7 +714,7 @@ _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0
 
 
-def heartbeat_current_worker_from_env() -> bool:
+def heartbeat_current_worker_from_env(*, on_lease_lost: Callable[[str], None] | None = None) -> bool:
     """Claim extension + board heartbeat for the current worker; True iff a write was
     attempted. ``HERMES_KANBAN_RUN_ID`` pins the run row so a reclaimed stale run is not
     heartbeated; ``HERMES_KANBAN_CLAIM_LOCK`` absent -> default claimer (local workers)."""
@@ -726,15 +726,19 @@ def heartbeat_current_worker_from_env() -> bool:
     _auto_heartbeat_last_attempt = now
     try:
         from hermes_cli import kanban_db_dispatch as kbd
+        lease_lost = False
         with _board(None, quiet_close=True) as (kb, conn):
             ops = ((kb.heartbeat_claim, {"claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK")}),
                    (kbd.heartbeat_worker, {"note": None, "expected_run_id": _worker_run_id(tid)}))
             for fn, kwargs in ops:
                 op = fn.__name__
                 try:
-                    fn(conn, tid, **kwargs)
+                    owned = fn(conn, tid, **kwargs)
+                    lease_lost = lease_lost or owned is False
                 except Exception:
                     logger.debug("auto-heartbeat: %s failed", op, exc_info=True)
+        if lease_lost and on_lease_lost is not None:
+            on_lease_lost(tid)
         return True
     except Exception:
         logger.debug("auto-heartbeat: bridge failed", exc_info=True)

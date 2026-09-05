@@ -217,6 +217,7 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
 
 def test_notify_claim_lease_reclaims_events_after_watcher_crash(kanban_home, monkeypatch):
     """A dead watcher cannot permanently consume a terminal notification."""
+    import hermes_cli.kanban_db_notify as _hermes_cli_kanban_db_notify
     conn1 = kbc.connect()
     conn2 = kbc.connect()
     try:
@@ -268,7 +269,7 @@ def test_notify_claim_lease_reclaims_events_after_watcher_crash(kanban_home, mon
             chat_id="123",
             new_cursor=reclaimed,
         )
-        assert kb.unseen_events_for_sub(
+        assert _hermes_cli_kanban_db_notify.unseen_events_for_sub(
             conn1,
             task_id=tid,
             platform="telegram",
@@ -435,6 +436,7 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
 
 def test_max_runtime_uses_dispatch_default_when_task_has_no_override(kanban_home):
     """A running task without an explicit cap still receives the dispatch cap."""
+    import hermes_cli.kanban_db_dispatch as _hermes_cli_kanban_db_dispatch
     killed = []
 
     def _signal_fn(pid, sig):
@@ -462,7 +464,7 @@ def test_max_runtime_uses_dispatch_default_when_task_has_no_override(kanban_home
                     (old_started, tid),
                 )
 
-            timed_out = kb.enforce_max_runtime(
+            timed_out = _hermes_cli_kanban_db_dispatch.enforce_max_runtime(
                 conn, default_max_runtime_seconds=1, signal_fn=_signal_fn
             )
 
