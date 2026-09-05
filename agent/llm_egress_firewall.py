@@ -25,6 +25,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from agent.file_safety import get_read_block_error
+from agent.egress_source_annotations import mask_builtin_annotations
 from agent.cross_process_file_lock import (
     exclusive_file_lock,
     secure_file_descriptor_permissions,
@@ -1391,6 +1392,8 @@ def _generated_context_text_for_base64_scan(text: str) -> str:
 def _source_text_for_secret_scan(text: str) -> str:
     """Mask code identifiers that resemble secret names, not secret values."""
 
+    if _EGRESS_SECRET_ASSIGNMENT.search(text) is not None:
+        text = mask_builtin_annotations(text)
     text = _BOUNDED_SOURCE_BOOLEAN_SECRET_SETTING.sub(
         "<source-secret-setting>", text
     )

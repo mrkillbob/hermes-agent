@@ -1171,6 +1171,45 @@ def test_source_presentation_allows_secret_env_name_but_not_value(tmp_path):
     assert decision.allowed is True
 
 
+@pytest.mark.parametrize("presentation", [False, True])
+def test_source_annotations_preserve_credential_default_scanning(tmp_path, presentation):
+    path = tmp_path / "source.py"
+    for default in ("None", '"live-key-value"'):
+        source = (
+            f"def request(token: str, api_key: str | None = {default}):\n    pass\n"
+            f"api_key: str | None = {default}\n"
+        )
+        path.write_text(source, encoding="utf-8")
+        grant = _source_grant(path, end=3)
+        request = _typed_request(_request(), source_grant=grant)
+        if presentation:
+            rendered = json.dumps({"content": "\n".join(
+                f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1)
+            )})
+            request = _source_presentation_request(grant, rendered)
+        if default == "None":
+            assert firewall(tmp_path).preflight(request, _route(), grants=(grant,)).allowed
+        else:
+            with pytest.raises(EgressBlocked) as exc_info:
+                firewall(tmp_path).preflight(request, _route(), grants=(grant,))
+            assert "secret_detected" in exc_info.value.decision.reason_codes
+
+
+def test_annotation_recognition_does_not_exempt_unbound_or_quoted_text(tmp_path):
+    source = "def request(token: str):\n    pass\n"
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(_sanitized_request(source), _route())
+    assert "secret_detected" in exc_info.value.decision.reason_codes
+    path = tmp_path / "source.py"
+    path.write_text('message = "token: str"\n', encoding="utf-8")
+    grant = _source_grant(path)
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _typed_request(_request(), source_grant=grant), _route(), grants=(grant,)
+        )
+    assert "secret_detected" in exc_info.value.decision.reason_codes
+
+
 def test_source_presentation_allows_code_constants_and_secret_identifiers(tmp_path):
     path = tmp_path / "source.py"
     source = (
