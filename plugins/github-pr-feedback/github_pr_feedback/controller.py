@@ -3281,7 +3281,7 @@ def _local_ci_task(
         branch=prepared.branch,
         # Version the runner contract so an archived foreground-timeout card
         # can be recreated with supervised background execution.
-        idempotency_key=f"{_receipt_idempotency_key(receipt)}:supervised-v4",
+        idempotency_key=f"{_receipt_idempotency_key(receipt)}:supervised-v5",
         evidence=evidence,
         evidence_heading="Canonical PR audit receipt (JSON)",
         initial_status="running",
