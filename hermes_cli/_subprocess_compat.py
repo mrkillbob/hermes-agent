@@ -462,9 +462,9 @@ def noninteractive_git_env(
     env["GIT_EDITOR"] = "true"
 
     # Preserve helpers explicitly configured by the user while keeping
-    # repository-controlled config from selecting an arbitrary helper.  Git's
-    # command-line config entries are the highest-precedence scope, so replay
-    # the trusted global values into the isolated child environment.
+    # repository-controlled config from selecting an arbitrary helper. The
+    # empty entry resets lower-precedence repository values before Git applies
+    # the trusted global values replayed below.
     trusted_helpers: list[str] = []
     try:
         helper_probe = subprocess.run(
@@ -482,6 +482,7 @@ def noninteractive_git_env(
         pass
 
     config_overrides = {
+        "credential.helper": "",
         "core.askPass": "",
         "core.fsmonitor": "false",
         "core.untrackedCache": "false",
@@ -491,8 +492,6 @@ def noninteractive_git_env(
         "sequence.editor": "true",
         "diff.external": "",
     }
-    if not trusted_helpers:
-        config_overrides["credential.helper"] = ""
     env["GIT_CONFIG_COUNT"] = str(len(config_overrides))
     for idx, (key, value) in enumerate(config_overrides.items()):
         env[f"GIT_CONFIG_KEY_{idx}"] = key
