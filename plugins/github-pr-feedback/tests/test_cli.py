@@ -2168,8 +2168,9 @@ def profile_snapshot(root: Path) -> dict[str, tuple[int, int]]:
     }
 
 
+@pytest.mark.parametrize("report_only", [False, True])
 def test_merge_handoff_auto_enrolls_before_enrollment_gate(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, report_only: bool
 ) -> None:
     from github_pr_feedback.cli import _load_policy_from_context, _run_single_pr_merge_handoff
 
@@ -2184,7 +2185,7 @@ def test_merge_handoff_auto_enrolls_before_enrollment_gate(
         "base_branch": "stable",
         "merge_methods": ["squash"],
         "receipt_max_age_seconds": 3600,
-        "report_only": False,
+        "report_only": report_only,
         "post_merge": {"enabled": False},
         "auto_enroll_owned_prs": True,
     }

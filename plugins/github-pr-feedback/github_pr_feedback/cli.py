@@ -2117,7 +2117,7 @@ def _run_single_pr_merge_handoff(
         return {"status": "disabled", "blockers": ["merge_maintainer_disabled"]}
     github = github or _github_client(policy)
     kanban = kanban or KanbanSubprocessClient()
-    if merge_policy.auto_enroll_owned_prs and not merge_policy.report_only:
+    if merge_policy.auto_enroll_owned_prs:
         pull_request = github.get_pull_request(merge_policy.repository, pr_number)
         enroll_owned_pulls(policy, merge_policy, ledger, (pull_request,))
     if not ledger.is_merge_enrolled(merge_policy.repository, pr_number):
