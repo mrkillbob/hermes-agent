@@ -671,9 +671,8 @@ class FeedbackLedger:
             head_clause = " AND head_sha = ?"
             params += (head_sha,)
         return self._connection.execute(
-            "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
-            "AND feedback_kind = 'pr_local_ci' AND status IN ('claimed', 'completed') "
-            "AND action_status IN ('pending', 'resolving')" + head_clause + " LIMIT 1",
+            "SELECT 1 FROM ci_audit_runs WHERE repository = ? AND pr_number = ? "
+            "AND status = 'running'" + head_clause + " LIMIT 1",
             params,
         ).fetchone() is not None
 
@@ -709,7 +708,13 @@ class FeedbackLedger:
             if serialized_repair:
                 active_repair = self._connection.execute(
                     "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
-                    "AND head_sha = ? AND feedback_kind != 'pr_local_ci' "
+                    "AND head_sha = ? "
+                    "AND (feedback_kind != 'pr_local_ci' OR EXISTS ("
+                    "SELECT 1 FROM ci_audit_runs WHERE "
+                    "ci_audit_runs.repository = feedback_receipts.repository "
+                    "AND ci_audit_runs.pr_number = feedback_receipts.pr_number "
+                    "AND ci_audit_runs.head_sha = feedback_receipts.head_sha "
+                    "AND ci_audit_runs.status = 'running')) "
                     "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%') "
                     "AND NOT (feedback_kind = ? AND feedback_id = ?) "
                     "AND status IN ('claimed', 'completed') AND action_status = 'pending' LIMIT 1",
