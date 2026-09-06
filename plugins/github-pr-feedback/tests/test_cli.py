@@ -894,6 +894,37 @@ def test_inspect_pr_emits_canonical_identity_from_the_shared_github_client(
     }
 
 
+def test_inspect_pr_marks_generic_github_errors_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _inspect_pr
+    from github_pr_feedback.github_client import GitHubClientError
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+
+    class FakeGitHub:
+        def get_pull_request(self, _repository: str, _number: int) -> PullRequest:
+            raise GitHubClientError("temporary provider failure", code="github_error")
+
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", FakeGitHub)
+
+    exit_code = _inspect_pr(
+        RecordingContext(settings),
+        argparse.Namespace(repository="acme/widgets", pr_number=17),
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "github_error",
+        "retryable": True,
+        "status": "unavailable",
+    }
+
+
 def test_push_head_reconciles_after_post_push_read_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

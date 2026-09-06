@@ -2706,7 +2706,7 @@ def _inspect_pr(ctx: Any, args: argparse.Namespace) -> int:
     except (GitHubClientError, ValueError) as error:
         code = getattr(error, "code", "invalid_request")
         print(json.dumps({"status": "unavailable", "reason": code,
-                          "retryable": code in {"rate_limited", "transient", "timeout"}}, sort_keys=True))
+                          "retryable": code in {"github_error", "rate_limited", "transient", "timeout"}}, sort_keys=True))
         return 1
     print(
         json.dumps(
