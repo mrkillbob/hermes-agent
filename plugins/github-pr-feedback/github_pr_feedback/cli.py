@@ -1949,6 +1949,9 @@ def _run_merge_scan_for_policy(
             "merged": [],
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
+    from .merge_admission import enroll_owned_pulls
+
+    enroll_owned_pulls(policy, merge_policy, ledger, pull_requests)
     source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     manifest_path = ci_manifest_path(policy.targets[merge_policy.repository].local_path)
     if not manifest_path.is_file():

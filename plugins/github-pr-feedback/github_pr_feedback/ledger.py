@@ -357,6 +357,13 @@ class FeedbackLedger:
             )
             """)
         self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS merge_opt_outs (
+                repository TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                PRIMARY KEY (repository, pr_number)
+            )
+            """)
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS merge_enrollments (
                 repository TEXT NOT NULL,
                 pr_number INTEGER NOT NULL,
@@ -1898,8 +1905,9 @@ class FeedbackLedger:
         *,
         enrolled_at: datetime,
         enrolled_by: str,
-    ) -> None:
-        """Persist explicit operator intent for one configured pull request."""
+        automatic: bool = False,
+    ) -> bool:
+        """Enroll a configured PR; automatic admission must respect durable opt-outs."""
 
         if (
             not repository
@@ -1911,12 +1919,25 @@ class FeedbackLedger:
             raise ValueError("merge enrollment identity is invalid")
         timestamp = _aware_utc(enrolled_at, "enrolled_at")
         with self._transaction():
+            opted_out = self._connection.execute(
+                "SELECT 1 FROM merge_opt_outs WHERE repository = ? AND pr_number = ?",
+                (repository, pr_number),
+            ).fetchone()
+            if automatic and opted_out is not None:
+                return False
+            if not automatic:
+                self._connection.execute(
+                    "DELETE FROM merge_opt_outs WHERE repository = ? AND pr_number = ?",
+                    (repository, pr_number),
+                )
             self._connection.execute(
                 "INSERT INTO merge_enrollments (repository, pr_number, enrolled_at, enrolled_by) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT(repository, pr_number) DO UPDATE SET "
                 "enrolled_at = excluded.enrolled_at, enrolled_by = excluded.enrolled_by",
                 (repository, pr_number, timestamp.isoformat(), enrolled_by.strip()),
             )
+
+        return True
 
     def unenroll_merge_pr(self, repository: str, pr_number: int) -> None:
         """Remove explicit merge intent; deleting a missing enrollment is idempotent."""
@@ -1936,6 +1957,10 @@ class FeedbackLedger:
             ).fetchone()
             if in_progress is not None:
                 raise LedgerStateError("merge_in_progress")
+            self._connection.execute(
+                "INSERT OR IGNORE INTO merge_opt_outs(repository, pr_number) VALUES (?, ?)",
+                (repository, pr_number),
+            )
             self._connection.execute(
                 "DELETE FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
                 (repository, pr_number),

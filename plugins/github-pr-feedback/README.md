@@ -534,3 +534,9 @@ focused verification, push, reply, and acknowledge before requesting full CI; ot
 CI correctly waits for their own pending repair. Run acknowledgement commands as managed
 background processes and poll them to completion so shared GitHub waits are not cut off
 by a short foreground timeout.
+
+Automatic enrollment is opt-in per merge lane with `auto_enroll_owned_prs: true`.
+It admits only open PRs matching that lane's owner, same-repository head, base branch,
+and configured branch prefixes. Enrollment is permission to evaluate, not permission to
+skip any merge gate. `merge-disable` stores a durable opt-out that automatic scans honor;
+an explicit `merge-enable` clears it. The default remains explicit per-PR enrollment.
