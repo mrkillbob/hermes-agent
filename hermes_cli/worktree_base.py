@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -77,6 +78,21 @@ def resolve_worktree_base(
         try:
             fetched = _git(["fetch", remote, branch], timeout=fetch_timeout)
             if fetched.returncode == 0:
+                # A successful no-op fetch leaves a loose tracking ref's mtime
+                # unchanged.  Touch the selected ref so the freshness window
+                # records the fetch event rather than whether its SHA moved.
+                try:
+                    ref_path_result = _git(
+                        ["rev-parse", "--git-path", f"refs/remotes/{ref}"]
+                    )
+                    if ref_path_result.returncode == 0:
+                        ref_path = Path(ref_path_result.stdout.strip())
+                        if not ref_path.is_absolute():
+                            ref_path = Path(repo_root) / ref_path
+                        if ref_path.exists():
+                            os.utime(ref_path, None)
+                except OSError:
+                    logger.debug("worktree base: could not record fetch freshness", exc_info=True)
                 return ref, f"{ref} (fetched)"
             reason = "fetch failed"
         except subprocess.TimeoutExpired:

@@ -35,6 +35,7 @@ from agent.llm_egress_firewall import (
     redact_remote_unsafe_text,
     source_grant_digest,
     static_literal_sha256,
+    _is_egress_secret_assignment,
 )
 
 
@@ -138,6 +139,12 @@ def test_lan_and_unknown_are_remote_while_numeric_loopback_is_loopback():
     assert classify_destination("ollama", "http://127.0.0.1:11434", None).value == "loopback"
     assert classify_destination("custom", "http://192.168.1.9:8000", None).value == "remote"
     assert classify_destination("custom", None, None).value == "unknown"
+
+
+def test_egress_assignment_scan_ignores_code_defaults_but_catches_literals():
+    assert not _is_egress_secret_assignment("token = os.getenv(\"TOKEN\")")
+    assert not _is_egress_secret_assignment("def request(token: str): pass")
+    assert _is_egress_secret_assignment("token=sk_live_1234567890")
 
 
 def test_destination_classification_does_not_trust_dns_or_provider_name():

@@ -461,8 +461,27 @@ def noninteractive_git_env(
     env["PAGER"] = "cat"
     env["GIT_EDITOR"] = "true"
 
+    # Preserve helpers explicitly configured by the user while keeping
+    # repository-controlled config from selecting an arbitrary helper.  Git's
+    # command-line config entries are the highest-precedence scope, so replay
+    # the trusted global values into the isolated child environment.
+    trusted_helpers: list[str] = []
+    try:
+        helper_probe = subprocess.run(
+            ["git", "config", "--global", "--get-all", "credential.helper"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=2,
+            env={k: v for k, v in env.items() if not k.startswith("GIT_CONFIG_")},
+            check=False,
+        )
+        if helper_probe.returncode == 0:
+            trusted_helpers = [line for line in helper_probe.stdout.splitlines() if line]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
     config_overrides = {
-        "credential.helper": "",
         "core.askPass": "",
         "core.fsmonitor": "false",
         "core.untrackedCache": "false",
@@ -472,10 +491,18 @@ def noninteractive_git_env(
         "sequence.editor": "true",
         "diff.external": "",
     }
+    if not trusted_helpers:
+        config_overrides["credential.helper"] = ""
     env["GIT_CONFIG_COUNT"] = str(len(config_overrides))
     for idx, (key, value) in enumerate(config_overrides.items()):
         env[f"GIT_CONFIG_KEY_{idx}"] = key
         env[f"GIT_CONFIG_VALUE_{idx}"] = value
+    if trusted_helpers:
+        offset = len(config_overrides)
+        env["GIT_CONFIG_COUNT"] = str(offset + len(trusted_helpers))
+        for idx, helper in enumerate(trusted_helpers, offset):
+            env[f"GIT_CONFIG_KEY_{idx}"] = "credential.helper"
+            env[f"GIT_CONFIG_VALUE_{idx}"] = helper
 
     return env
 
