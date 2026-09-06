@@ -1,7 +1,6 @@
 """Configured advisory metadata derived from canonical PR titles and file paths."""
 from dataclasses import dataclass
 import re
-from pathlib import PurePosixPath
 
 
 def _title_term_matches(term: str, title: str) -> bool:

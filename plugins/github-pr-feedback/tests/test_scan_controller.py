@@ -4574,3 +4574,11 @@ def test_incomplete_metadata_skips_only_affected_pr(tmp_path):
     ]
     assert github.removed_label_calls == []
     ledger.close()
+
+
+def test_metadata_path_patterns_preserve_separator_boundaries():
+    from github_pr_feedback.metadata_labels import _pathname_glob_matches
+
+    assert _pathname_glob_matches("docs/guide.md", "docs/*.md")
+    assert not _pathname_glob_matches("docs/private/secret.md", "docs/*.md")
+    assert _pathname_glob_matches("frontend/private/app.ts", "frontend/**")
