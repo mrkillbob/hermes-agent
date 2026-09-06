@@ -14,6 +14,7 @@ def test_safe_path_ci_imports_only_its_explicit_worktree_helpers(tmp_path, monke
     foreign.mkdir()
     (foreign / 'ci_summary.py').write_text('identity = "foreign"\n')
     (scripts / 'ci_summary.py').write_text('identity = "verified-worktree"\n')
+    (repo / 'ci_summary.py').write_text('identity = "verified-root"\n')
     (repo / 'owner.py').write_text('identity = "verified-root"\n')
     script = scripts / 'check.py'
     script.write_text('import ci_summary, owner, json, sys\nprint(json.dumps([ci_summary.identity, owner.identity, sys.flags.safe_path]))\n')
