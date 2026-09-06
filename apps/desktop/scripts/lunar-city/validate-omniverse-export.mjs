@@ -23,6 +23,9 @@ function finiteNonNegative(value) {
  */
 export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } = {}) {
   const errors = []
+  if (!['preview', 'production'].includes(mode)) {
+    errors.push('mode must be preview or production')
+  }
   if (!isRecord(receipt) || receipt.schema_name !== OMNIVERSE_RECEIPT_SCHEMA) {
     errors.push('receipt schema_name is invalid')
   }
@@ -87,11 +90,12 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
     if (receipt.production_approved !== true) errors.push('production mode requires production_approved')
     if (receipt.status !== 'accepted') errors.push('production mode requires accepted status')
   }
-  if (receipt.production_approved === true && receipt.reference_only === true) {
+  if (receipt?.production_approved === true && receipt?.reference_only === true) {
     errors.push('reference-only export cannot be production-approved')
   }
 
-  const classification = receipt.production_approved === true ? 'production_candidate' : 'reference_only'
+  const productionApproved = receipt?.production_approved === true
+  const classification = productionApproved ? 'production_candidate' : 'reference_only'
   return {
     ok: errors.length === 0,
     errors: Object.freeze(errors),

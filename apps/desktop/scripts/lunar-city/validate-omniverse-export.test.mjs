@@ -65,6 +65,16 @@ test('production mode requires a non-reference accepted receipt', () => {
   assert.equal(result.classification, 'production_candidate')
 })
 
+test('invalid mode is rejected and malformed receipts return structured errors', () => {
+  const invalidMode = validateOmniverseExport(receipt(), manifest, { mode: 'prodction' })
+  assert.equal(invalidMode.ok, false)
+  assert.match(invalidMode.errors.join('\n'), /mode must be preview or production/)
+
+  const malformed = validateOmniverseExport(null, manifest)
+  assert.equal(malformed.ok, false)
+  assert.ok(Array.isArray(malformed.errors))
+})
+
 test('rejects contradictory approval flags', () => {
   const result = validateOmniverseExport(receipt({ production_approved: true }), manifest)
   assert.equal(result.ok, false)
