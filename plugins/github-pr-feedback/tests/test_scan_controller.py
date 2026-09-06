@@ -354,6 +354,35 @@ def test_scan_applies_one_exact_branch_label_and_confirms_readback(
     assert github.current.labels == ("codex",)
 
 
+def test_scan_does_not_apply_labels_to_unadmitted_pull_requests(tmp_path: Path) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        agent_labels=True,
+    )
+    admitted = admitted_pull_request(head_sha)
+    out_of_scope = replace(
+        admitted,
+        number=18,
+        head_ref_name="feature/fix",
+    )
+    github = FakeGitHub(admitted, (), pull_requests=(admitted, out_of_scope))
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy,
+        ledger,
+        github,
+        RecordingKanban(),
+        RecordingLocalGit(),
+    ).scan()
+
+    assert result.skipped["branch_not_allowed"] == 1
+    assert github.label_calls == [("acme/widgets", 17, ("codex",))]
+    assert github.current_by_number[18].labels == ()
+
+
 def test_scan_rotates_label_catalogue_across_bounded_scans(tmp_path: Path) -> None:
     local_path, head_sha = initialized_repository(tmp_path)
     policy = configured_policy(
