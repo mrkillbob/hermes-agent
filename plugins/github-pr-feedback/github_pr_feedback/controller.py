@@ -2250,6 +2250,10 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
     body = " ".join(feedback.body.casefold().split())
     if not body:
         return False
+    # Explicit unresolved language must veto every completion-shaped branch,
+    # including publisher receipts evaluated by the merge gate.
+    if _has_unresolved_action(body):
+        return False
     exact_fixed_commit = re.match(r"fixed in [0-9a-f]{40,64}\b", body) is not None
     if (
         exact_fixed_commit

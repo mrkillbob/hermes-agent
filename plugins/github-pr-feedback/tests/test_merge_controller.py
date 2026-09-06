@@ -649,6 +649,45 @@ def test_feedback_clear_exempts_configured_publisher_completion_receipt(
     ledger.close()
 
 
+def test_feedback_clear_keeps_publisher_receipt_with_unresolved_finding(
+    tmp_path: Path,
+) -> None:
+    repository = "acme/widgets"
+    plugin_policy = PluginPolicy(
+        enabled=True,
+        targets={
+            repository: RepositoryTarget(
+                repository, repository, tmp_path, "owner", ("codex/",)
+            )
+        },
+        reviewer_logins=frozenset(),
+        reviewer_associations=frozenset(),
+        include_self_feedback=False,
+        include_bot_feedback=True,
+        auto_dispatch=False,
+        not_before=None,
+        assignee="fallback",
+        board="Pull Request Maintenance",
+        merge_maintainer=policy(),
+        github_identity=GitHubIdentityPolicy("publisher", "BOT_TOKEN"),
+    )
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    source = CanonicalMergeEvidenceSource(
+        plugin_policy, cast("GitHubClient", object()), ledger
+    )
+    unresolved_publisher_receipt = Feedback(
+        "issue_comment",
+        "publisher-unresolved-receipt",
+        Reviewer("publisher", "OWNER"),
+        "Addressed the first finding, but the second still reproduces.",
+        NOW,
+        True,
+    )
+
+    assert source._feedback_clear(pr_state(), (unresolved_publisher_receipt,)) is False
+    ledger.close()
+
+
 def test_merge_controller_rereads_under_lease_and_stops_on_a_race(tmp_path: Path) -> None:
     first = eligible_snapshot()
     raced = replace(first, review_state=ReviewState("CHANGES_REQUESTED", 0))
