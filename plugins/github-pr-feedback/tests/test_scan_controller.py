@@ -3087,6 +3087,7 @@ def test_scan_keeps_owner_ci_repair_requests_and_non_owner_bot_comments(
         "Two remaining failures require action.",
         "The current static lane fails.",
         "The current static lane still fails.",
+        "The second finding still reproduces.",
     ],
 )
 def test_self_resolution_fail_opens_for_bounded_unresolved_action_language(

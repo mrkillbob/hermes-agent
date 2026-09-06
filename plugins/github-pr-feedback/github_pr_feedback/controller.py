@@ -80,7 +80,7 @@ _ACTION_REMAINS_MARKERS = (
     "unresolved",
 )
 _BOUNDED_ACTION_REMAINS = re.compile(
-    r"\b(?:still failing|still fails|needs fixing|needs repair|remaining failures?)\b"
+    r"\b(?:still failing|still fails|still reproduces?|needs fixing|needs repair|remaining failures?)\b"
 )
 _BARE_FAILS = re.compile(r"\bfails\b")
 _FAILURE_LANES = (
