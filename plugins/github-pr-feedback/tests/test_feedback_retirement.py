@@ -48,6 +48,24 @@ def test_closed_retirement_clears_pending_gate_without_claiming_repair_success(d
     assert ledger.claim(later, owner="reopened", claimed_at=now, stale_before=now-timedelta(minutes=5))
 
 
+@pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
+def test_retired_exact_dispatch_can_be_reclaimed_after_reopen(dispatched, state):
+    policy, ledger, receipt, pull = dispatched
+    closed = replace(pull, state=state)
+    github = SimpleNamespace(get_pull_request=lambda *_: closed)
+    retire_closed_feedback(policy, github, ledger, receipt)
+
+    now = datetime.now(UTC)
+    reopened = ledger.reopen_superseded_exact_dispatch(
+        receipt, owner="reopened", claimed_at=now
+    )
+
+    assert reopened is not None
+    assert ledger.exact_receipt_status(receipt) == "claimed"
+    assert not ledger.was_actioned_on_any_head(receipt)
+    ledger.finalize(receipt, "task-2", reopened)
+
+
 @pytest.mark.parametrize("change", ["open", "raced_open", "head", "repository", "number"])
 def test_unverified_closure_leaves_pending_receipt_intact(dispatched, change):
     policy, ledger, receipt, pull = dispatched

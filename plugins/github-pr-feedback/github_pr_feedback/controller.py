@@ -294,6 +294,13 @@ def _claim_with_orphan_recovery(
 ):
     """Claim normally, or reclaim an exact dispatch whose card is gone/archived."""
 
+    superseded = ledger.reopen_superseded_exact_dispatch(
+        receipt,
+        owner=owner,
+        claimed_at=claimed_at,
+    )
+    if superseded is not None:
+        return superseded
     lease = ledger.claim(
         receipt,
         owner=owner,
