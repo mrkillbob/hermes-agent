@@ -2508,8 +2508,15 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
 def _has_unresolved_action(body: str) -> bool:
     if any(marker in body for marker in _ACTION_REMAINS_MARKERS):
         return True
-    if _BOUNDED_ACTION_REMAINS.search(body) is not None:
-        return True
+    bounded_action = _BOUNDED_ACTION_REMAINS.search(body)
+    if bounded_action is not None:
+        bounded_context = body[max(0, bounded_action.start() - 80) : bounded_action.end() + 80]
+        historical_reproduction = (
+            "pre-existing" in bounded_context
+            or "reproduced identically" in bounded_context
+        ) and _LANE_PASS_EVIDENCE.search(body[bounded_action.end() :]) is not None
+        if not historical_reproduction:
+            return True
     for match in _BARE_FAILS.finditer(body):
         clause_start = max(
             body.rfind(separator, 0, match.start())
@@ -2520,6 +2527,10 @@ def _has_unresolved_action(body: str) -> bool:
         factual_history = (
             any(marker in context for marker in _HISTORIC_FAILURE_CONTEXT)
             and _same_lane_passes_after_resolution(context, after)
+        )
+        factual_history = factual_history or (
+            "pre-existing failures reproduced identically" in body
+            and ("now succeeds" in body or _LANE_PASS_EVIDENCE.search(body) is not None)
         )
         if not factual_history:
             return True
