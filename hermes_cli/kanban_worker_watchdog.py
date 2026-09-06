@@ -21,9 +21,16 @@ _DURATION_RE = re.compile(r"\b\d+(?:\.\d+)?s\b", re.IGNORECASE)
 _TOKEN_COUNT_RE = re.compile(r"~?[\d,]+\s+tokens?", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"\s+")
 _FAILED_EXIT_RE = re.compile(r"\[exit\s+(-?\d+)\]", re.IGNORECASE)
-_TOOL_PREFIX_RE = re.compile(r"(?:^|\s)[┊|]\s*[^$\n]*\$\s*(.+)")
-_EDIT_SUCCESS_RE = re.compile(r"^┊\s+(?:🔧\s+patch|✍️?\s+write)\s+.*\d+(?:\.\d+)?s$")
-_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
+_TOOL_PREFIX_RE = re.compile(r"(?:^|\s)[┊|╎│]\s*[^$\n]*\$\s*(.+)")
+# The display skin owns the leading glyph.  Keep the detector independent of
+# the active skin so a worker using ``╎`` or ``│`` is treated the same as the
+# default ``┊`` skin.
+_EDIT_SUCCESS_RE = re.compile(
+    r"^[┊|╎│]\s+(?:🔧\s+patch|✍️?\s+write)\s+.*\d+(?:\.\d+)?s$"
+)
+_DIFF_MARKER_RE = re.compile(r"^[┊|╎│]\s+review diff$")
+_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @")
+_DIFF_CONTENT_RE = re.compile(r"^(?:@@\s|---\s|\+\+\+\s|[+-]|#\s+Moved:)")
 _PROVIDER_STALL_RE = re.compile(
     r"(?:waiting on .+no output yet|provider has been unresponsive|"
     r"consecutive stale attempts|auto-reconnect|"
@@ -180,12 +187,14 @@ def _failed_tool_finding(lines: list[str], threshold: int) -> Optional[WatchdogF
     edit_pending = False
     diff_pending = False
     for line in lines:
-        if line.startswith("┊") and line != "┊ review diff":
+        if _EDIT_SUCCESS_RE.fullmatch(line):
             edit_pending = bool(_EDIT_SUCCESS_RE.fullmatch(line))
             diff_pending = False
-        elif edit_pending and line == "┊ review diff":
+        elif edit_pending and _DIFF_MARKER_RE.fullmatch(line):
             diff_pending = True
-        elif diff_pending and _DIFF_HUNK_RE.match(line):
+        elif diff_pending and (
+            _DIFF_HUNK_RE.match(line) or _DIFF_CONTENT_RE.match(line)
+        ):
             # Test-edit-test is progress. Require the renderer's actual diff,
             # not a patch attempt, no-op result, or the worker's prose claim.
             signatures.clear()
