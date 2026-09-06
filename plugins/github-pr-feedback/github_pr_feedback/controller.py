@@ -1148,6 +1148,16 @@ class ScanController:
         self._claim_lease = claim_lease
         self._label_batches: list[tuple[str, RepositoryTarget, tuple[PullRequest, ...]]] = []
 
+    def _admitted_label_pull_requests(
+        self, pull_requests: tuple[PullRequest, ...]
+    ) -> tuple[PullRequest, ...]:
+        """Keep label maintenance on the same admission boundary as scanning."""
+        return tuple(
+            pull_request
+            for pull_request in pull_requests
+            if self._policy.admit_pull_request(pull_request).admitted
+        )
+
     def scan(self, *, apply_labels: bool = True) -> ScanResult:
         skipped: Counter[str] = Counter()
         created = 0
@@ -1190,12 +1200,9 @@ class ScanController:
             pull_requests = order_pull_requests(pull_requests)
             label_policy = self._policy.agent_labels
             if label_policy is not None and label_policy.applies_to(repository):
-                self._label_batches.append((
-                    repository,
-                    target,
-                    tuple(pull for pull in pull_requests
-                          if self._policy.admit_pull_request(pull).admitted),
-                ))
+                self._label_batches.append(
+                    (repository, target, self._admitted_label_pull_requests(pull_requests))
+                )
             required_local_ci_backlog += _required_local_ci_backlog_count(
                 self._policy,
                 self._ledger,
@@ -1466,9 +1473,9 @@ class ScanController:
             raise ValueError("repository is not configured for labels")
         target = self._policy.targets[repository]
         pulls = self._github.list_open_pull_requests(repository, target.owner_login)
-        self._label_batches = [(repository, target, tuple(
-            pull for pull in pulls if self._policy.admit_pull_request(pull).admitted
-        ))]
+        self._label_batches = [
+            (repository, target, self._admitted_label_pull_requests(pulls))
+        ]
         return self.apply_agent_labels()
 
     def apply_agent_labels(self) -> dict[str, object]:
