@@ -766,55 +766,56 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _inspect_ci(ctx: Any, args: argparse.Namespace) -> int:
+    from .cli_ci_receipt import inspect_ci
+
+    return inspect_ci(ctx, args)
+
+
+def _dispatch_repair(ctx: Any, args: argparse.Namespace) -> int:
+    from .cli_repair import dispatch_repair
+
+    return dispatch_repair(ctx, args)
+
+
+_CLI_ACTION_DISPATCH: dict[str, Callable[[Any, argparse.Namespace], int]] = {
+    "scan": lambda ctx, _args: _scan(ctx),
+    "status": lambda _ctx, _args: _status(),
+    "doctor": lambda ctx, _args: _doctor(ctx),
+    "inspect-pr": lambda ctx, args: _inspect_pr(ctx, args),
+    "inspect-ci": lambda ctx, args: _inspect_ci(ctx, args),
+    "submit-review": lambda ctx, args: _submit_review(ctx, args),
+    "post-comment": lambda ctx, args: _post_comment(ctx, args),
+    "retry": lambda ctx, args: _retry(ctx, args),
+    "dispatch-repair": lambda ctx, args: _dispatch_repair(ctx, args),
+    "dispatch-feedback": lambda ctx, args: _dispatch_feedback(ctx, args),
+    "audit-pr": lambda ctx, args: _audit_pr(ctx, args),
+    "merge-scan": lambda ctx, _args: _merge_scan(ctx),
+    "merge-status": lambda _ctx, args: _merge_status(
+        details=bool(getattr(args, "details", False))
+    ),
+    "merge-enable": lambda ctx, args: _merge_enable(ctx, args),
+    "merge-disable": lambda ctx, args: _merge_disable(ctx, args),
+    "stack-create": lambda ctx, args: _stack_create(ctx, args),
+    "stack-refresh": lambda ctx, args: _stack_refresh(ctx, args),
+    "stack-merge": lambda ctx, args: _stack_merge(ctx, args),
+    "close-superseded": lambda ctx, args: _close_superseded(ctx, args),
+    "resolve-superseded-feedback": lambda ctx, args: _resolve_superseded_feedback(
+        ctx, args
+    ),
+    "complete-feedback": lambda ctx, args: _complete_feedback(ctx, args),
+    "complete-maintenance": lambda ctx, args: _complete_maintenance(ctx, args),
+}
+
+
 def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     action = getattr(args, "github_pr_feedback_action", None)
-    if action == "scan":
-        return _scan(ctx)
-    if action == "status":
-        return _status()
-    if action == "doctor":
-        return _doctor(ctx)
-    if action == "inspect-pr":
-        return _inspect_pr(ctx, args)
-    if action == "inspect-ci":
-        from .cli_ci_receipt import inspect_ci
-        return inspect_ci(ctx, args)
-    if action == "submit-review":
-        return _submit_review(ctx, args)
-    if action == "post-comment":
-        return _post_comment(ctx, args)
-    if action == "retry":
-        return _retry(ctx, args)
-    if action == "dispatch-repair":
-        from .cli_repair import dispatch_repair
-        return dispatch_repair(ctx, args)
-    if action == "dispatch-feedback":
-        return _dispatch_feedback(ctx, args)
-    if action == "audit-pr":
-        return _audit_pr(ctx, args)
-    if action == "merge-scan":
-        return _merge_scan(ctx)
-    if action == "merge-status":
-        return _merge_status(details=bool(getattr(args, "details", False)))
-    if action == "merge-enable":
-        return _merge_enable(ctx, args)
-    if action == "merge-disable":
-        return _merge_disable(ctx, args)
-    if action == "stack-create":
-        return _stack_create(ctx, args)
-    if action == "stack-refresh":
-        return _stack_refresh(ctx, args)
-    if action == "stack-merge":
-        return _stack_merge(ctx, args)
-    if action == "close-superseded":
-        return _close_superseded(ctx, args)
-    if action == "resolve-superseded-feedback":
-        return _resolve_superseded_feedback(ctx, args)
-    if action == "complete-feedback":
-        return _complete_feedback(ctx, args)
-    if action == "complete-maintenance":
-        return _complete_maintenance(ctx, args)
-    return 2
+    if not isinstance(action, str):
+        return 2
+    handler = _CLI_ACTION_DISPATCH.get(action)
+    if handler is None:
+        return 2
+    return handler(ctx, args)
 
 
 def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:

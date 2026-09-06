@@ -37,6 +37,29 @@ from github_pr_feedback.policy import (
 from github_pr_feedback.repair_controller import pr_repair_attribution_line
 
 
+def test_cli_action_dispatch_table_routes_inspect_ci_and_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import github_pr_feedback.cli as cli
+
+    calls: list[tuple[object, argparse.Namespace]] = []
+
+    def inspect_ci(context: object, args: argparse.Namespace) -> int:
+        calls.append((context, args))
+        return 17
+
+    monkeypatch.setattr(cli, "_inspect_ci", inspect_ci)
+    context = object()
+    args = argparse.Namespace(github_pr_feedback_action="inspect-ci")
+
+    assert cli.handle_cli_with_context(context, args) == 17
+    assert calls == [(context, args)]
+    assert cli.handle_cli_with_context(
+        context,
+        argparse.Namespace(github_pr_feedback_action="unknown"),
+    ) == 2
+
+
 def test_grouped_audit_opens_sqlite_ledger_in_worker_thread(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
