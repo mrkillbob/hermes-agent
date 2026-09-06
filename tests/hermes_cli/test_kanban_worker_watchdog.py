@@ -102,7 +102,7 @@ def test_edit_and_retest_is_progress_but_unchanged_retries_still_block(edit) -> 
     assert finding is not None and finding.category == "tool_failure_loop"
 
 
-@pytest.mark.parametrize("prefix", ["╎", "│", "»"])
+@pytest.mark.parametrize("prefix", ["╎", "│", "»", "CUSTOM PREFIX"])
 @pytest.mark.parametrize(
     "diff",
     [
