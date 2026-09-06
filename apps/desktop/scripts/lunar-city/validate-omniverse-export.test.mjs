@@ -81,6 +81,17 @@ test('rejects contradictory approval flags', () => {
   assert.match(result.errors.join('\n'), /reference-only export/)
 })
 
+test('rejects production receipts when manifest bindings are missing', () => {
+  for (const manifestOverride of [{ assetVersion: undefined }, { source: {} }]) {
+    const result = validateOmniverseExport(
+      receipt({ reference_only: false, production_approved: true, status: 'accepted' }),
+      { ...manifest, ...manifestOverride },
+      { mode: 'production' }
+    )
+    assert.equal(result.ok, false)
+  }
+})
+
 test('requires an own quality-budget profile with finite limits', () => {
   const inheritedProfile = validateOmniverseExport(
     receipt({

@@ -31,8 +31,14 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
   }
   if (receipt?.schema_version !== 1) errors.push('receipt schema_version must equal 1')
   if (!isRecord(manifest) || manifest.version !== 2) errors.push('world manifest version must equal 2')
-  if (receipt?.asset_version !== manifest?.assetVersion) errors.push('asset_version does not match world manifest')
-  if (receipt?.manifest_source_sha256 !== manifest?.source?.sha256) {
+  if (!nonEmpty(manifest?.assetVersion)) {
+    errors.push('world manifest assetVersion is required')
+  } else if (receipt?.asset_version !== manifest.assetVersion) {
+    errors.push('asset_version does not match world manifest')
+  }
+  if (!nonEmpty(manifest?.source?.sha256)) {
+    errors.push('world manifest source digest is required')
+  } else if (receipt?.manifest_source_sha256 !== manifest.source.sha256) {
     errors.push('manifest source digest does not match world manifest')
   }
 
