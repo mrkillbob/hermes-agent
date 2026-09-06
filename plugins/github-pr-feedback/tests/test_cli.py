@@ -37,6 +37,38 @@ from github_pr_feedback.policy import (
 from github_pr_feedback.repair_controller import pr_repair_attribution_line
 
 
+@pytest.mark.parametrize(
+    ("action", "handler_name", "passes_args"),
+    [
+        ("merge-scan", "_merge_scan", False),
+        ("stack-create", "_stack_create", True),
+        ("stack-refresh", "_stack_refresh", True),
+        ("stack-merge", "_stack_merge", True),
+        ("close-superseded", "_close_superseded", True),
+    ],
+)
+def test_dispatcher_passes_context_and_args_to_argument_handlers(
+    action: str,
+    handler_name: str,
+    passes_args: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from github_pr_feedback import cli
+
+    context = object()
+    args = argparse.Namespace(github_pr_feedback_action=action)
+    seen: list[tuple[object, tuple[object, ...]]] = []
+
+    def handler(ctx: object, *received_args: object) -> int:
+        seen.append((ctx, received_args))
+        return 17
+
+    monkeypatch.setattr(cli, handler_name, handler)
+
+    assert cli.handle_cli_with_context(context, args) == 17
+    assert seen == [(context, (args,))] if passes_args else [(context, ())]
+
+
 def test_grouped_audit_opens_sqlite_ledger_in_worker_thread(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

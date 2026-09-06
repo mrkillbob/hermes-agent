@@ -766,6 +766,18 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _inspect_ci(ctx: Any, args: argparse.Namespace) -> int:
+    from .cli_ci_receipt import inspect_ci
+
+    return inspect_ci(ctx, args)
+
+
+def _dispatch_repair(ctx: Any, args: argparse.Namespace) -> int:
+    from .cli_repair import dispatch_repair
+
+    return dispatch_repair(ctx, args)
+
+
 def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     action = getattr(args, "github_pr_feedback_action", None)
     if not isinstance(action, str):
@@ -776,21 +788,21 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         "status": _status,
         "doctor": lambda: _doctor(ctx),
         "inspect-pr": lambda: _inspect_pr(ctx, args),
-        "inspect-ci": lambda: __import__(".cli_ci_receipt", fromlist=["inspect_ci"]).inspect_ci(ctx, args),
+        "inspect-ci": lambda: _inspect_ci(ctx, args),
         "submit-review": lambda: _submit_review(ctx, args),
         "post-comment": lambda: _post_comment(ctx, args),
         "retry": lambda: _retry(ctx, args),
-        "dispatch-repair": lambda: __import__(".cli_repair", fromlist=["dispatch_repair"]).dispatch_repair(ctx, args),
+        "dispatch-repair": lambda: _dispatch_repair(ctx, args),
         "dispatch-feedback": lambda: _dispatch_feedback(ctx, args),
         "audit-pr": lambda: _audit_pr(ctx, args),
-        "merge-scan": _merge_scan,
+        "merge-scan": lambda: _merge_scan(ctx),
         "merge-status": lambda: _merge_status(details=bool(getattr(args, "details", False))),
         "merge-enable": lambda: _merge_enable(ctx, args),
         "merge-disable": lambda: _merge_disable(ctx, args),
-        "stack-create": _stack_create,
-        "stack-refresh": _stack_refresh,
-        "stack-merge": _stack_merge,
-        "close-superseded": _close_superseded,
+        "stack-create": lambda: _stack_create(ctx, args),
+        "stack-refresh": lambda: _stack_refresh(ctx, args),
+        "stack-merge": lambda: _stack_merge(ctx, args),
+        "close-superseded": lambda: _close_superseded(ctx, args),
         "resolve-superseded-feedback": lambda: _resolve_superseded_feedback(ctx, args),
         "complete-feedback": lambda: _complete_feedback(ctx, args),
         "complete-maintenance": lambda: _complete_maintenance(ctx, args),
