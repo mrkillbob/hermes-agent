@@ -35,6 +35,8 @@ def dispatch_repair(ctx, args) -> int:
             ledger.close()
     print(json.dumps(_scan_payload(result), sort_keys=True))
     scoped_skips = {
+        "branch_not_allowed",
+        "non_conflict_deferred",
         "target_not_open",
         "head_changed",
         "no_repair_trigger",
