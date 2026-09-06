@@ -3170,6 +3170,14 @@ def _ci_failure_task(
                 control_home, receipt.repository, receipt.pr_number
             )
         )
+        + "If the inspected canonical PR state is CLOSED or MERGED, first run `"
+        + f"{_governed_command_prefix(control_home)} retire-feedback --repository {shlex.quote(receipt.repository)} "
+        f"--pr-number {receipt.pr_number} --feedback-kind pr_repair "
+        f"--feedback-id {shlex.quote(receipt.feedback_id)} --receipt-head-sha {receipt.head_sha}`. "
+        "Only after status=retired, call kanban_complete as superseded "
+        "with the repository, PR number, state, and observed head. Do not reopen the PR, post a "
+        "completion comment, run complete-feedback, or claim CI success for this retirement. "
+        "Unknown or unavailable state is not proof of closure. For an OPEN PR, continue below. "
         + "Then inspect this task's prior runs, the worktree HEAD, the "
         "canonical PR head, and the latest owner reply. If a verified push and factual reply "
         "already exist, do not repeat completed work: run only the affected failed lane when "
