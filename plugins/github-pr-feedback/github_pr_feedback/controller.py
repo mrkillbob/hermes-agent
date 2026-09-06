@@ -1600,7 +1600,7 @@ class ScanController:
                                     if repository in rule.repositories)
             stale = tuple(existing_by_fold[fold] for fold in owned_labels
                           if fold in existing_by_fold and fold not in {label.casefold() for label in desired})
-            if not missing:
+            if not missing and not stale:
                 return "agent_labels_unchanged"
             if label_policy.create_missing:
                 for mapping in missing.values():

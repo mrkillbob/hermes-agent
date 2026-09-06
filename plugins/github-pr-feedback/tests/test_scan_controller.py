@@ -4463,6 +4463,36 @@ def test_metadata_labels_add_all_matching_areas_without_claiming_readiness(tmp_p
     ledger.close()
 
 
+def test_metadata_labels_remove_stale_owned_labels(tmp_path):
+    from dataclasses import replace
+    from github_pr_feedback.metadata_labels import parse_metadata_rules
+
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z", agent_labels=True)
+    rules = parse_metadata_rules([{
+        "label": "area/gui", "repositories": ["acme/widgets"], "title_terms": [],
+        "path_patterns": ["frontend/**"], "color": "123456", "description": "GUI files",
+    }])
+    policy = replace(policy, agent_labels=replace(policy.agent_labels, metadata_rules=rules))
+    pull = replace(admitted_pull_request(sha), labels=("codex", "area/gui"))
+
+    class MetadataGitHub(FakeGitHub):
+        def get_pull_request_metadata(self, repository, number):
+            return self.current, "backend: fix", ("server/app.py",)
+
+    github = MetadataGitHub(pull, ())
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    try:
+        result = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit()).reconcile_labels(
+            "acme/widgets"
+        )
+        assert result["updated"] == 1
+        assert github.removed_label_calls == [("acme/widgets", pull.number, "area/gui")]
+        assert set(github.current.labels) == {"codex"}
+    finally:
+        ledger.close()
+
+
 @pytest.mark.parametrize("label", ["STATUS/security", "Priority/high", "CI-REVIEWED"])
 def test_metadata_rules_reject_case_insensitive_authority_labels(label):
     from github_pr_feedback.metadata_labels import parse_metadata_rules
