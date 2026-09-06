@@ -68,9 +68,7 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
                 "FROM feedback_receipts WHERE task_id = ? AND feedback_kind = 'pr_local_ci'",
                 (target,),
             ).fetchall()
-            if not bindings:
-                return None
-            if all(_has_receipt(connection, binding) for binding in bindings):
+            if bindings and all(_has_receipt(connection, binding) for binding in bindings):
                 return None
         reason = "no typed passing durable CI receipt matches this task's exact PR head/base and dispatch"
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
