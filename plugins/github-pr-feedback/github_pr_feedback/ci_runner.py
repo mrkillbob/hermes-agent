@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .ci_environment import ci_environment
+
 from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands, hermes_coverage_gap, HERMES_ENV_CHECK
 
 import hashlib
@@ -659,8 +661,7 @@ class LocalCIRunner:
         if bootstrap_evidence is not None:
             evidence.append(bootstrap_evidence)
         for argv, cwd, additions in command_specs:
-            environment = dict(os.environ)
-            environment.update(additions)
+            environment = ci_environment(worktree, additions)
             result = self._commands.run(
                 argv, cwd=cwd, env=environment, timeout=_COMMAND_TIMEOUT_SECONDS
             )
@@ -750,7 +751,7 @@ class LocalCIRunner:
                 result = self._commands.run(
                     probe,
                     cwd=worktree,
-                    env=dict(os.environ),
+                    env=ci_environment(worktree),
                     timeout=30,
                 )
                 actual = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
@@ -781,7 +782,7 @@ class LocalCIRunner:
         result = self._commands.run(
             argv,
             cwd=worktree,
-            env=dict(os.environ),
+            env=ci_environment(worktree),
             timeout=_BOOTSTRAP_TIMEOUT_SECONDS,
         )
         evidence = _command_evidence(argv, worktree, worktree, result)
