@@ -1746,3 +1746,26 @@ def test_source_annotations_preserve_credential_default_scanning(tmp_path, prese
             with pytest.raises(EgressBlocked) as exc_info:
                 firewall(tmp_path).preflight(request, _route(), grants=(grant,))
             assert "secret_detected" in exc_info.value.decision.reason_codes
+
+
+@pytest.mark.parametrize("presentation", [False, True])
+def test_source_annotation_comments_remain_scan_visible(tmp_path, presentation):
+    path = tmp_path / "source.py"
+    source = (
+        "def request(api_key: (\n"
+        "    str  # token=super-secret-value\n"
+        ") = None):\n"
+        "    pass\n"
+    )
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=4)
+    request = _typed_request(_request(), source_grant=grant)
+    if presentation:
+        rendered = json.dumps({"content": "\n".join(
+            f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1)
+        )})
+        request = _source_presentation_request(grant, rendered)
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(request, _route(), grants=(grant,))
+    assert "secret_detected" in exc_info.value.decision.reason_codes
