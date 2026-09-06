@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 import time
+from hashlib import sha256
 from pathlib import Path
 
 from hermes_cli._subprocess_compat import noninteractive_git_env
@@ -51,14 +51,32 @@ def resolve_worktree_base(
         except Exception:
             return False
 
+    def _fetch_freshness_marker(ref: str) -> Path | None:
+        digest = sha256(ref.encode("utf-8")).hexdigest()
+        try:
+            result = _git(
+                ["rev-parse", "--git-path", f"hermes/worktree-base-freshness/{digest}"]
+            )
+            if result.returncode != 0:
+                return None
+            marker = Path(result.stdout.strip())
+            if not marker.is_absolute():
+                marker = Path(repo_root) / marker
+            return marker
+        except Exception:
+            return None
+
     def _ref_age(ref: str) -> float | None:
         # ``FETCH_HEAD`` records the most recent fetch of *any* remote/branch,
-        # not necessarily ``ref``. Freshness must be tied to the tracking ref
-        # actually being used, so use the mtime of its own loose ref file
-        # (``.git/refs/remotes/<remote>/<branch>``) instead. If the ref has
-        # been packed (no loose file) its per-ref freshness can't be verified
-        # this way, so return ``None`` and let the caller re-fetch.
+        # not necessarily ``ref``. Freshness must be tied to a successful fetch
+        # of the tracking ref actually being used, so prefer the per-ref marker
+        # written by ``_refresh``. Fall back to a loose ref's mtime for clones
+        # created before markers existed; packed refs have no such fallback and
+        # will be fetched once to establish their marker.
         try:
+            marker = _fetch_freshness_marker(ref)
+            if marker is not None and marker.exists():
+                return max(0.0, time.time() - marker.stat().st_mtime)
             result = _git(["rev-parse", "--git-path", f"refs/remotes/{ref}"])
             if result.returncode != 0:
                 return None
@@ -78,19 +96,15 @@ def resolve_worktree_base(
         try:
             fetched = _git(["fetch", remote, branch], timeout=fetch_timeout)
             if fetched.returncode == 0:
-                # A successful no-op fetch leaves a loose tracking ref's mtime
-                # unchanged.  Touch the selected ref so the freshness window
-                # records the fetch event rather than whether its SHA moved.
+                # A successful no-op fetch leaves the tracking ref's mtime
+                # unchanged, and packed refs have no per-ref loose file at all.
+                # Record the fetch event separately from Git's ref storage so
+                # freshness reflects a successful fetch rather than a SHA move.
                 try:
-                    ref_path_result = _git(
-                        ["rev-parse", "--git-path", f"refs/remotes/{ref}"]
-                    )
-                    if ref_path_result.returncode == 0:
-                        ref_path = Path(ref_path_result.stdout.strip())
-                        if not ref_path.is_absolute():
-                            ref_path = Path(repo_root) / ref_path
-                        if ref_path.exists():
-                            os.utime(ref_path, None)
+                    marker = _fetch_freshness_marker(ref)
+                    if marker is not None:
+                        marker.parent.mkdir(parents=True, exist_ok=True)
+                        marker.touch(exist_ok=True)
                 except OSError:
                     logger.debug("worktree base: could not record fetch freshness", exc_info=True)
                 return ref, f"{ref} (fetched)"

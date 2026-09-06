@@ -162,6 +162,41 @@ class TestResolveWorktreeBaseStartupCost:
         assert base_ref == "origin/main"
         assert label == "origin/main (fetched)"
 
+    def test_successful_fetch_is_fresh_when_tracking_ref_is_packed(
+        self, remote_and_clone, monkeypatch
+    ):
+        """A no-op fetch must be remembered even without a loose ref file."""
+        clone, _remote_head, _stale_local_head = remote_and_clone
+        _run(["git", "fetch", "origin", "main"], clone)
+        _run(["git", "pack-refs", "--all", "--prune"], clone)
+        ref_path = Path(
+            _run(
+                ["git", "rev-parse", "--git-path", "refs/remotes/origin/main"],
+                clone,
+            ).stdout.strip()
+        )
+        if not ref_path.is_absolute():
+            ref_path = Path(clone) / ref_path
+        assert not ref_path.exists()
+
+        # The first resolver call records its successful fetch event. A second
+        # call must use that event even though Git stores the ref in packed-refs.
+        cli._resolve_worktree_base(str(clone))
+        real_run = subprocess.run
+        fetches = []
+
+        def spy(args, **kw):
+            if isinstance(args, (list, tuple)) and "fetch" in args:
+                fetches.append(list(args))
+            return real_run(args, **kw)
+
+        monkeypatch.setattr(subprocess, "run", spy)
+        base_ref, label = cli._resolve_worktree_base(str(clone))
+
+        assert base_ref == "origin/main"
+        assert "ago" in label
+        assert fetches == []
+
     def test_fetch_timeout_falls_back_to_cached_ref(self, remote_and_clone, monkeypatch):
         """A stalled fetch must yield the locally-cached tracking ref, fast —
         not cascade into a second fetch or blow up."""
