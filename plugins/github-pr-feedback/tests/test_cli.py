@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from github_pr_feedback import cli
 from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt
 from github_pr_feedback.cli import (
     _ci_audit_comment,
@@ -24,7 +25,7 @@ from github_pr_feedback.cli import (
     _retrigger_codex_review,
 )
 from github_pr_feedback.controller import KanbanTask
-from github_pr_feedback.github_client import CheckState, Feedback
+from github_pr_feedback.github_client import CheckState, Feedback, GitHubClientError
 from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.merge_controller import MergeDecision
 from github_pr_feedback.policy import (
@@ -868,6 +869,78 @@ def test_inspect_pr_emits_canonical_identity_from_the_shared_github_client(
         "number": 17,
         "repository": "acme/widgets",
     }
+
+
+def test_push_head_reconciles_after_post_push_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    receipt_head = "a" * 40
+    pushed_head = "b" * 40
+    initial = PullRequest(
+        number=17,
+        state="OPEN",
+        base_repository="acme/widgets",
+        head_repository="acme/widgets",
+        author_login="owner",
+        head_ref_name="codex/repair",
+        head_sha=receipt_head,
+    )
+    reconciled = replace(initial, head_sha=pushed_head)
+    responses: list[PullRequest | Exception] = [
+        initial,
+        GitHubClientError("transient read failure"),
+        reconciled,
+    ]
+    pushes: list[tuple[str, str, str]] = []
+
+    class Github:
+        def get_pull_request(self, *_args: object) -> PullRequest:
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    class Runner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def head_sha(self) -> str:
+            return pushed_head
+
+        def push_verified_head(self, repository: str, branch: str, expected: str) -> None:
+            pushes.append((repository, branch, expected))
+
+    policy = SimpleNamespace(
+        enabled=True,
+        targets={"acme/widgets": object()},
+        github_identity=SimpleNamespace(
+            expected_login="hermes-bot", token_env="HERMES_TEST_GITHUB_TOKEN"
+        ),
+    )
+    monkeypatch.setattr(cli, "_load_policy_from_context", lambda _ctx: policy)
+    monkeypatch.setattr(cli, "_github_client", lambda _policy: Github())
+    monkeypatch.setattr(cli, "GitStackRunner", Runner)
+    monkeypatch.setenv("HERMES_TEST_GITHUB_TOKEN", "test-token")
+    args = argparse.Namespace(
+        repository="acme/widgets",
+        pr_number=17,
+        head_sha=receipt_head,
+        worktree=tmp_path,
+    )
+
+    assert cli._push_head(object(), args) == 1
+    pending = json.loads(capsys.readouterr().out)
+    assert pending["status"] == "reconciliation_pending"
+    assert pending["head_sha"] == pushed_head
+    assert pushes == [("acme/widgets", "codex/repair", receipt_head)]
+
+    assert cli._push_head(object(), args) == 0
+    confirmed = json.loads(capsys.readouterr().out)
+    assert confirmed["status"] == "pushed"
+    assert confirmed["head_sha"] == pushed_head
+    assert pushes == [("acme/widgets", "codex/repair", receipt_head)]
 
 
 def test_inspect_pr_projects_requested_feedback_excerpt(

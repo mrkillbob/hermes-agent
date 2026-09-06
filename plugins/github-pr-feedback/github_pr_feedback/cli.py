@@ -1098,35 +1098,74 @@ def _push_head(ctx: Any, args: argparse.Namespace) -> int:
         github = _github_client(policy)
         pull_request = github.get_pull_request(args.repository, args.pr_number)
         expected_head_sha = args.head_sha.casefold()
+        runner = GitStackRunner(args.worktree)
         if pull_request.head_sha != expected_head_sha:
-            print(
-                json.dumps(
-                    {
-                        "status": "stale_head",
-                        "repository": args.repository,
-                        "pr_number": args.pr_number,
-                        "expected_head_sha": expected_head_sha,
-                        "observed_head_sha": pull_request.head_sha,
-                    },
-                    sort_keys=True,
+            local_head_sha = runner.head_sha()
+            if pull_request.head_sha == local_head_sha.casefold():
+                observed = pull_request
+            else:
+                print(
+                    json.dumps(
+                        {
+                            "status": "stale_head",
+                            "repository": args.repository,
+                            "pr_number": args.pr_number,
+                            "expected_head_sha": expected_head_sha,
+                            "observed_head_sha": pull_request.head_sha,
+                        },
+                        sort_keys=True,
+                    )
                 )
+                return 1
+        else:
+            if str(pull_request.state or "").strip().upper() != "OPEN":
+                raise ValueError("pull request is not open")
+            git_environment = GitHubAutomationIdentity(
+                settings.expected_login, settings.token_env
+            ).git_command_environment()
+            runner = GitStackRunner(args.worktree, environment=git_environment)
+            pushed_head_sha = runner.head_sha()
+            runner.push_verified_head(
+                pull_request.head_repository,
+                pull_request.head_ref_name,
+                args.head_sha,
             )
-            return 1
-        if str(pull_request.state or "").strip().upper() != "OPEN":
+            try:
+                observed = github.get_pull_request(args.repository, args.pr_number)
+            except (GitHubClientError, TypeError, ValueError) as error:
+                print(
+                    json.dumps(
+                        {
+                            "status": "reconciliation_pending",
+                            "repository": args.repository,
+                            "pr_number": args.pr_number,
+                            "head_sha": pushed_head_sha,
+                            "head_repository": pull_request.head_repository,
+                            "head_ref_name": pull_request.head_ref_name,
+                            "reason": str(error),
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 1
+            if observed.head_sha != pushed_head_sha.casefold():
+                print(
+                    json.dumps(
+                        {
+                            "status": "reconciliation_pending",
+                            "repository": args.repository,
+                            "pr_number": args.pr_number,
+                            "head_sha": pushed_head_sha,
+                            "head_repository": pull_request.head_repository,
+                            "head_ref_name": pull_request.head_ref_name,
+                            "reason": "pushed head was not confirmed on the pull request",
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 1
+        if str(observed.state or "").strip().upper() != "OPEN":
             raise ValueError("pull request is not open")
-        git_environment = GitHubAutomationIdentity(
-            settings.expected_login, settings.token_env
-        ).git_command_environment()
-        runner = GitStackRunner(args.worktree, environment=git_environment)
-        pushed_head_sha = runner.head_sha()
-        runner.push_verified_head(
-            pull_request.head_repository,
-            pull_request.head_ref_name,
-            args.head_sha,
-        )
-        observed = github.get_pull_request(args.repository, args.pr_number)
-        if observed.head_sha != pushed_head_sha.casefold():
-            raise GitHubClientError("pushed head was not confirmed on the pull request")
     except (
         GitHubClientError,
         GitHubIdentityError,
