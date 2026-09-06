@@ -4401,8 +4401,8 @@ def test_metadata_labels_add_all_matching_areas_without_claiming_readiness(tmp_p
         return dict(label=label, repositories=["acme/widgets"], title_terms=terms,
                     path_patterns=paths, color="123456", description="Advisory metadata")
     rules = parse_metadata_rules([
-        rule("type/bug", ["fix"], []), rule("area/ci", [], [".github/*"]),
-        rule("area/gui", [], ["frontend/*"]), rule("area/research", [], ["research/*"]),
+        rule("type/bug", ["fix"], []), rule("area/ci", [], [".github/**"]),
+        rule("area/gui", [], ["frontend/**"]), rule("area/research", [], ["research/**"]),
     ])
     policy = replace(policy, agent_labels=replace(policy.agent_labels, metadata_rules=rules))
     pull = replace(admitted_pull_request(sha), labels=("codex", "human-label"))
@@ -4460,7 +4460,7 @@ def test_incomplete_metadata_skips_only_affected_pr(tmp_path):
     from github_pr_feedback.metadata_labels import MetadataLabelRule
     local_path, sha = initialized_repository(tmp_path)
     policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z", agent_labels=True)
-    rule = MetadataLabelRule("area/ci", ("acme/widgets",), (), (".github/*",), "123456", "CI files")
+    rule = MetadataLabelRule("area/ci", ("acme/widgets",), (), (".github/**",), "123456", "CI files")
     policy = replace(policy, agent_labels=replace(policy.agent_labels, metadata_rules=(rule,)))
     pulls = tuple(replace(admitted_pull_request(sha), number=n) for n in (1,2))
     class MetadataGitHub(FakeGitHub):
@@ -4472,5 +4472,7 @@ def test_incomplete_metadata_skips_only_affected_pr(tmp_path):
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     result = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit()).reconcile_labels("acme/widgets")
     assert result["skipped"]["agent_label_metadata_incomplete"] == 1
-    assert [(number, set(labels)) for _,number,labels in github.label_calls] == [(2,{"codex","area/ci"})]
+    assert [(number, set(labels)) for _,number,labels in github.label_calls] == [
+        (1, {"codex"}), (2, {"codex", "area/ci"})
+    ]
     ledger.close()
