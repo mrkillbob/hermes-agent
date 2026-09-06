@@ -4463,6 +4463,31 @@ def test_metadata_labels_add_all_matching_areas_without_claiming_readiness(tmp_p
     ledger.close()
 
 
+@pytest.mark.parametrize(
+    ("term", "title"),
+    [
+        ("C++", "feat: add C++ support"),
+        (".NET", "feat: move to .NET"),
+        ("[bug]", "[bug] fix parser"),
+    ],
+)
+def test_metadata_title_terms_match_punctuation_edges(term, title):
+    from github_pr_feedback.metadata_labels import parse_metadata_rules
+
+    rule = parse_metadata_rules([
+        {
+            "label": "type/bug",
+            "repositories": ["acme/widgets"],
+            "title_terms": [term],
+            "path_patterns": [],
+            "color": "123456",
+            "description": "Advisory metadata",
+        }
+    ])[0]
+
+    assert rule.matches("acme/widgets", title, ())
+
+
 def test_metadata_labels_remove_stale_owned_labels(tmp_path):
     from dataclasses import replace
     from github_pr_feedback.metadata_labels import parse_metadata_rules
