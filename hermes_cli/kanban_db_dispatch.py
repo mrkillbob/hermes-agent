@@ -1648,6 +1648,23 @@ def _dispatch_lane_task(
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
+    # Explicit directory workspaces can be checked before claiming.  Avoid
+    # opening a run for a contender that will only be requeued because its
+    # shared checkout is busy; the post-claim check below remains the race-safe
+    # fallback for contenders that arrive concurrently.
+    if row["workspace_kind"] in {"dir", "scratch"} and row["workspace_path"]:
+        try:
+            candidate_workspace = str(Path(row["workspace_path"]).expanduser().resolve())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            candidate_workspace = None
+        if candidate_workspace is not None:
+            for owner in conn.execute(
+                "SELECT id, workspace_path FROM tasks WHERE status = 'running' AND id != ? "
+                "AND workspace_path IS NOT NULL", (task_id,),
+            ):
+                if str(Path(owner["workspace_path"]).resolve()) == candidate_workspace:
+                    result.workspace_collisions.append((task_id, owner["id"], candidate_workspace))
+                    return False
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
     claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
     if claimed is None:
@@ -1840,7 +1857,8 @@ def _tick_spawn_budget(
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
-        "SELECT id, assignee, created_by, provider_override, model_override FROM tasks "
+        "SELECT id, assignee, created_by, provider_override, model_override, "
+        "workspace_kind, workspace_path FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
