@@ -56,6 +56,10 @@ class CIValidationError(RuntimeError):
         self.command_evidence = command_evidence
 
 
+class CIAuditDeferred(MergeStateStillComputingError):
+    """GitHub is still computing mergeability; retry without a test receipt."""
+
+
 @dataclass(frozen=True, slots=True)
 class CIAuditIdentity:
     repository: str
@@ -522,10 +526,10 @@ class LocalCIRunner:
             receipt = self._run_claimed(identity, resolved)
         except MergeStateStillComputingError:
             self._ledger.finish_ci_run(
-                lease, status="failed", completed_at=_aware_now(self._now()),
+                lease, status="completed", completed_at=_aware_now(self._now()),
                 error="mergeability_still_computing",
             )
-            raise
+            raise CIAuditDeferred("mergeability_still_computing")
         except Exception as error:
             completed_at = _aware_now(self._now())
             receipt = _failed_receipt(

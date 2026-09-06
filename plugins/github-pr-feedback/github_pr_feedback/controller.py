@@ -2890,6 +2890,22 @@ def _governed_pr_identity_command(
     )
 
 
+def _governed_pr_push_command(
+    control_home: Path,
+    repository: str,
+    pr_number: int,
+    expected_head_sha: str,
+    worktree: Path,
+) -> str:
+    """Build the shared-gated, exact-head push command for workers."""
+
+    return (
+        f"{_governed_command_prefix(control_home)} push-head "
+        f"--repository {shlex.quote(repository)} --pr-number {pr_number} "
+        f"--head-sha {shlex.quote(expected_head_sha)} --worktree {shlex.quote(str(worktree))}"
+    )
+
+
 def _task(
     policy: PluginPolicy,
     receipt: FeedbackReceipt,
