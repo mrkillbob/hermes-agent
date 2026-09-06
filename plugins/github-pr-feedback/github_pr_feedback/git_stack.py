@@ -79,8 +79,10 @@ class GitStackRunner:
         local_head = self.head_sha()
         if local_head.casefold() == expected_head_sha.casefold():
             raise GitStackError("local HEAD does not contain a repair commit")
+        self._run("merge-base", "--is-ancestor", expected_head_sha, "HEAD")
         return self._run(
             "push",
             f"https://github.com/{repository}.git",
+            f"--force-with-lease=refs/heads/{branch}:{expected_head_sha}",
             f"HEAD:refs/heads/{branch}",
         )

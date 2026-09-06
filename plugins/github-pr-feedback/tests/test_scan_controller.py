@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -42,6 +43,7 @@ from github_pr_feedback.github_client import MAX_FEEDBACK_BODY_CHARS, CheckState
 from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.policy import (
     FeedbackReceipt,
+    PluginPolicy,
     PullRequest,
     Reviewer,
     load_policy,
@@ -51,6 +53,37 @@ from github_pr_feedback.policy import (
 
 def test_scan_admission_budget_covers_a_large_pr_repair_queue() -> None:
     assert MAX_ADMISSIONS_PER_SCAN >= 128
+
+
+def test_feedback_task_contains_the_governed_push_command(tmp_path: Path) -> None:
+    policy = cast(
+        PluginPolicy,
+        SimpleNamespace(
+            route=lambda _body, *, labels: SimpleNamespace(
+                assignee="repair-agent",
+                tags=(),
+                priority=0,
+                blast_radius="low",
+                risks=(),
+                requires_review=False,
+                ambiguous=False,
+            ),
+            routing_rules=(),
+            auto_dispatch=True,
+            board="repairs",
+        ),
+    )
+    receipt = FeedbackReceipt("acme/widgets", 17, "review_comment", "comment-1", "a" * 40)
+    prepared = PreparedWorktree(tmp_path / "exact", "hermes/repair", receipt.head_sha)
+
+    task = _task(policy, receipt, prepared, "Fix this path.", control_home=tmp_path / "hermes")
+
+    assert (
+        "push-head --repository acme/widgets --pr-number 17 --head-sha "
+        + "a" * 40
+        + " --worktree "
+        + str(prepared.path)
+    ) in task.instructions
 
 
 def test_intent_review_card_uses_valid_zero_retry_encoding(tmp_path: Path) -> None:

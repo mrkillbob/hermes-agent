@@ -65,7 +65,31 @@ def test_push_verified_head_uses_canonical_repository_and_exact_local_head(
     assert calls == [
         ("git", "-C", str(tmp_path), "rev-parse", "HEAD"),
         (
+            "git", "-C", str(tmp_path), "merge-base", "--is-ancestor",
+            "a" * 40, "HEAD",
+        ),
+        (
             "git", "-C", str(tmp_path), "push",
-            "https://github.com/acme/widgets.git", "HEAD:refs/heads/codex/child",
+            "https://github.com/acme/widgets.git",
+            "--force-with-lease=refs/heads/codex/child:" + "a" * 40,
+            "HEAD:refs/heads/codex/child",
         ),
     ]
+
+
+def test_push_verified_head_rejects_a_non_descendant_without_pushing(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        if argv[-4:-2] == ("merge-base", "--is-ancestor"):
+            return subprocess.CompletedProcess(argv, 1, "", "not an ancestor")
+        stdout = "b" * 40 if argv[-2:] == ("rev-parse", "HEAD") else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr("github_pr_feedback.git_stack.subprocess.run", fake_run)
+    with pytest.raises(GitStackError, match="not an ancestor"):
+        GitStackRunner(tmp_path).push_verified_head("acme/widgets", "codex/child", "a" * 40)
+    assert not any(call[3] == "push" for call in calls)
