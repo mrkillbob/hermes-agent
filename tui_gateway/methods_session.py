@@ -349,10 +349,9 @@ def _(rid, params: dict) -> dict:
     if parent_session_id and history:
         _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
-    # Plain desktop/TUI drafts are only composer shells.  Delay both the build and
-    # managed worktree claim until the first prompt makes the session durable.
-    if source not in {"desktop", "tui"} or (parent_session_id and history):
-        _schedule_agent_build(sid)
+    # Worktree creation remains lazy, but preserve the existing agent pre-warm so
+    # ordinary session.create latency and the ready-event contract are unchanged.
+    _schedule_agent_build(sid)
     _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
     cwd = _sessions[sid]["cwd"]
     override = session_model_override or {}

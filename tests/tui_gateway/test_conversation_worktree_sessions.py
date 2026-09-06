@@ -76,7 +76,7 @@ def test_session_create_defers_worktree_until_first_prompt(monkeypatch):
     root = result["stored_session_id"]
     assert calls == []
     assert result["info"]["cwd"] == server._completion_cwd({"cwd": "/stable"})
-    assert scheduled == []
+    assert scheduled == [(result["session_id"], server._completion_cwd({"cwd": "/stable"}))]
     record = server._sessions[result["session_id"]]
     assert record["cwd"] == server._completion_cwd({"cwd": "/stable"})
     assert record["explicit_cwd"] is False
@@ -111,7 +111,7 @@ def test_desktop_draft_has_no_root_lease(monkeypatch):
     lease.release.assert_not_called()
 
 
-def test_session_create_does_not_bootstrap_a_draft(monkeypatch):
+def test_session_create_does_not_bind_worktree_for_a_draft(monkeypatch):
     scheduled: list[str] = []
 
     def fail(_root_session_id: str, *, profile_home=None, db=None):
@@ -123,7 +123,7 @@ def test_session_create_does_not_bootstrap_a_draft(monkeypatch):
     response = server._methods["session.create"]("create", {"source": "desktop"})
 
     assert "error" not in response
-    assert scheduled == []
+    assert scheduled == [response["result"]["session_id"]]
     assert server._sessions
 
 
