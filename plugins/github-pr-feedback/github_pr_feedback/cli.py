@@ -1097,6 +1097,11 @@ def _push_head(ctx: Any, args: argparse.Namespace) -> int:
             )
         github = _github_client(policy)
         pull_request = github.get_pull_request(args.repository, args.pr_number)
+        admission = policy.admit_pull_request(pull_request)
+        if not admission.admitted or admission.target is None:
+            raise ValueError(
+                f"pull request is not admitted: {admission.reason or 'unknown reason'}"
+            )
         expected_head_sha = args.head_sha.casefold()
         runner = GitStackRunner(args.worktree)
         if pull_request.head_sha != expected_head_sha:

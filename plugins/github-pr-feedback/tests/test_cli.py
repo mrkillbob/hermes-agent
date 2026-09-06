@@ -915,6 +915,9 @@ def test_push_head_reconciles_after_post_push_read_failure(
     policy = SimpleNamespace(
         enabled=True,
         targets={"acme/widgets": object()},
+        admit_pull_request=lambda _pull_request: SimpleNamespace(
+            admitted=True, target=object(), reason=None
+        ),
         github_identity=SimpleNamespace(
             expected_login="hermes-bot", token_env="HERMES_TEST_GITHUB_TOKEN"
         ),
@@ -941,6 +944,63 @@ def test_push_head_reconciles_after_post_push_read_failure(
     assert confirmed["status"] == "pushed"
     assert confirmed["head_sha"] == pushed_head
     assert pushes == [("acme/widgets", "codex/repair", receipt_head)]
+
+
+def test_push_head_rejects_an_unadmitted_pull_request_before_push(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    pull_request = PullRequest(
+        number=17,
+        state="OPEN",
+        base_repository="acme/widgets",
+        head_repository="fork/widgets",
+        author_login="untrusted",
+        head_ref_name="main",
+        head_sha="a" * 40,
+    )
+    pushes: list[tuple[str, str, str]] = []
+
+    class Github:
+        def get_pull_request(self, *_args: object) -> PullRequest:
+            return pull_request
+
+    class Runner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def push_verified_head(self, repository: str, branch: str, expected: str) -> None:
+            pushes.append((repository, branch, expected))
+
+    policy = SimpleNamespace(
+        enabled=True,
+        targets={"acme/widgets": object()},
+        admit_pull_request=lambda _pull_request: SimpleNamespace(
+            admitted=False, target=None, reason="head_repository_not_allowed"
+        ),
+        github_identity=SimpleNamespace(
+            expected_login="hermes-bot", token_env="HERMES_TEST_GITHUB_TOKEN"
+        ),
+    )
+    monkeypatch.setattr(cli, "_load_policy_from_context", lambda _ctx: policy)
+    monkeypatch.setattr(cli, "_github_client", lambda _policy: Github())
+    monkeypatch.setattr(cli, "GitStackRunner", Runner)
+    monkeypatch.setenv("HERMES_TEST_GITHUB_TOKEN", "test-token")
+
+    args = argparse.Namespace(
+        repository="acme/widgets",
+        pr_number=17,
+        head_sha=pull_request.head_sha,
+        worktree=tmp_path,
+    )
+
+    assert cli._push_head(object(), args) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "pull request is not admitted: head_repository_not_allowed",
+        "status": "push_unavailable",
+    }
+    assert pushes == []
 
 
 def test_inspect_pr_projects_requested_feedback_excerpt(
