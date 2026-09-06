@@ -649,8 +649,16 @@ def test_feedback_clear_exempts_configured_publisher_completion_receipt(
     ledger.close()
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Addressed the first finding, but the second still reproduces.",
+        "Addressed the first finding; the second finding remains.",
+    ],
+)
 def test_feedback_clear_keeps_publisher_receipt_with_unresolved_finding(
     tmp_path: Path,
+    body: str,
 ) -> None:
     repository = "acme/widgets"
     plugin_policy = PluginPolicy(
@@ -679,7 +687,7 @@ def test_feedback_clear_keeps_publisher_receipt_with_unresolved_finding(
         "issue_comment",
         "publisher-unresolved-receipt",
         Reviewer("publisher", "OWNER"),
-        "Addressed the first finding, but the second still reproduces.",
+        body,
         NOW,
         True,
     )

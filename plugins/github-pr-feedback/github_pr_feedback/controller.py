@@ -82,6 +82,12 @@ _ACTION_REMAINS_MARKERS = (
 _BOUNDED_ACTION_REMAINS = re.compile(
     r"\b(?:still failing|still fails|still reproduces?|needs fixing|needs repair|remaining failures?)\b"
 )
+_UNRESOLVED_FINDING_LANGUAGE = re.compile(
+    r"\b(?:findings?|issues?|problems?|defects?|failures?)\s+"
+    r"(?:(?:are|is)\s+)?(?:still\s+)?(?:remain(?:s|ed)?|open|unresolved)\b"
+    r"|\b(?:remaining|open|unresolved)\s+"
+    r"(?:findings?|issues?|problems?|defects?|failures?)\b"
+)
 _BARE_FAILS = re.compile(r"\bfails\b")
 _FAILURE_LANES = (
     "run_static_lane.py",
@@ -2507,6 +2513,8 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
 
 def _has_unresolved_action(body: str) -> bool:
     if any(marker in body for marker in _ACTION_REMAINS_MARKERS):
+        return True
+    if _UNRESOLVED_FINDING_LANGUAGE.search(body) is not None:
         return True
     bounded_action = _BOUNDED_ACTION_REMAINS.search(body)
     if bounded_action is not None:

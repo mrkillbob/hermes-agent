@@ -3107,6 +3107,16 @@ def test_self_resolution_fail_opens_for_bounded_unresolved_action_language(
     assert _is_self_resolution_receipt(item, owner_login="owner") is False
 
 
+def test_self_resolution_rejects_a_partial_finding_receipt() -> None:
+    item = feedback(
+        "partial-finding-completion",
+        reviewer="owner",
+        body="Addressed the first finding; the second finding remains.",
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is False
+
+
 def test_self_resolution_fail_opens_when_the_github_body_reaches_the_intake_cap() -> None:
     prefix = (
         "Local-CI static-lane repair for this PR is in place at commit "
