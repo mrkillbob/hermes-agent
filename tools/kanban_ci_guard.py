@@ -38,7 +38,7 @@ def completion_block(task_id: str | None = None) -> str | None:
         root = Path(os.environ.get("HERMES_CONTROL_HOME", "").strip() or _default_hermes_root())
         path = root / "github-pr-feedback" / "ledger.sqlite3"
         if not path.exists():
-            return None
+            return _UNAVAILABLE_MESSAGE
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
             connection.execute("BEGIN")
             bindings = connection.execute(

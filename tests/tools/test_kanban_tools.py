@@ -420,6 +420,15 @@ def test_complete_runs_governed_ci_gate_at_kanban_boundary(monkeypatch, worker_e
         conn.close()
 
 
+def test_missing_control_ledger_blocks_completion(monkeypatch, tmp_path):
+    from tools.kanban_ci_guard import _UNAVAILABLE_MESSAGE, completion_block
+
+    monkeypatch.setenv("HERMES_CONTROL_HOME", str(tmp_path / "missing-control"))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "audit-task")
+
+    assert completion_block() == _UNAVAILABLE_MESSAGE
+
+
 def test_verifier_cannot_complete_with_pytest_usage_failure(
     monkeypatch, worker_env,
 ):
