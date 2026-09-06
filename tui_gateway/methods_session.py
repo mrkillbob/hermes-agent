@@ -872,6 +872,8 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict, session: dict) -> dict:
     if session.get("running"):
         return _err(rid, 4009, "session busy")
+    if session.get("conversation_worktree"):
+        return _err(rid, 4018, "workspace is managed by conversation worktree")
     if not (raw := _str_param(params, "cwd")):
         return _err(rid, 4016, "cwd required")
     try:
@@ -900,6 +902,8 @@ def _(rid, params: dict) -> dict:
     with _sessions_lock:
         live_sid, live = next(
             ((sid, sess) for sid, sess in list(_sessions.items()) if sess.get("session_key") == target), ("", None))
+    if live is not None and live.get("conversation_worktree"):
+        return _err(rid, 4018, "workspace is managed by conversation worktree")
     branch, root = git_probe.branch(resolved), git_probe.common_repo_root(resolved)
     with _profile_db(params) as db:
         if db is None:

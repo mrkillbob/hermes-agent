@@ -22328,3 +22328,23 @@ def test_workspace_move_rehomes_running_session(monkeypatch, tmp_path):
     assert captured["row_update"] == (target, str(new_cwd))
     assert live["cwd"] == str(new_cwd)
     assert live.get("explicit_cwd") is True
+
+
+def test_workspace_move_rejects_managed_running_session(monkeypatch, tmp_path):
+    target = "managed-session"
+    new_cwd = tmp_path / "dest-project"
+    new_cwd.mkdir()
+    live = {
+        "session_key": target,
+        "running": False,
+        "cwd": str(tmp_path / "old-project"),
+        "conversation_worktree": {"path": str(tmp_path / "certified")},
+    }
+    server._sessions["managed-sid"] = live
+
+    res = server._methods["session.workspace.move"](
+        "rid", {"session_key": target, "cwd": str(new_cwd)}
+    )
+
+    assert res["error"]["code"] == 4018
+    assert live["cwd"] != str(new_cwd)
