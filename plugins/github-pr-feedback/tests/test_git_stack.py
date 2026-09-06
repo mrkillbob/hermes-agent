@@ -82,7 +82,7 @@ def test_push_verified_head_uses_canonical_repository_and_exact_local_head(
     assert calls[4] == (
         "git", "-C", isolated, "update-ref", "refs/heads/hermes-push", "b" * 40
     )
-    assert calls[5] == (
+    assert calls[7] == (
         "git", "-C", isolated, "push",
         "https://github.com/acme/widgets.git",
         "--force-with-lease=refs/heads/codex/child:" + "a" * 40,
@@ -106,3 +106,36 @@ def test_push_verified_head_rejects_a_non_descendant_without_pushing(
     with pytest.raises(GitStackError, match="not an ancestor"):
         GitStackRunner(tmp_path).push_verified_head("acme/widgets", "codex/child", "a" * 40)
     assert not any(call[3] == "push" for call in calls)
+
+
+def test_push_verified_head_uploads_lfs_objects_before_the_git_ref(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        if argv[3:] == ("init", "--bare", "--quiet"):
+            (Path(argv[2]) / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        if argv[3:] == ("rev-parse", "HEAD"):
+            stdout = "b" * 40
+        elif argv[3:] == ("rev-parse", "--git-path", "objects"):
+            stdout = str(tmp_path / "objects")
+        elif argv[3:] == ("rev-parse", "--git-path", "lfs"):
+            stdout = str(tmp_path / "lfs")
+        elif argv[3:] == ("check-attr", "--cached", "--stdin", "-z", "filter"):
+            stdout = "large.bin\0filter\0lfs\0"
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr("github_pr_feedback.git_stack.subprocess.run", fake_run)
+    GitStackRunner(tmp_path).push_verified_head("acme/widgets", "codex/child", "a" * 40)
+    isolated = calls[3][2]
+    assert calls[3] == ("git", "-C", isolated, "init", "--bare", "--quiet")
+    assert calls[8] == (
+        "git", "-C", isolated,
+        "-c", f"lfs.storage={tmp_path / 'lfs'}", "lfs", "push",
+        "https://github.com/acme/widgets.git", "refs/heads/hermes-push",
+    )
+    assert calls[9][3] == "push"

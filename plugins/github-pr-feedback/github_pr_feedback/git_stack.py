@@ -35,11 +35,28 @@ class GitStackRunner:
     def _run(self, *args: str) -> GitEvidence:
         return self._run_at(self.repository, *args)
 
-    def _run_at(self, repository: Path, *args: str) -> GitEvidence:
+    def _run_at(
+        self, repository: Path, *args: str, input_text: str | None = None
+    ) -> GitEvidence:
         argv = ("git", "-C", str(repository), *args)
-        result = subprocess.run(
-            argv, check=False, capture_output=True, text=True, env=self._environment
-        )
+        if input_text is None:
+            result = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=self._environment,
+                stdin=subprocess.DEVNULL,
+            )
+        else:
+            result = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=self._environment,
+                input=input_text,
+            )
         evidence = GitEvidence(argv, result.returncode, result.stdout, result.stderr)
         if result.returncode:
             raise GitStackError(result.stderr.strip() or "git command failed")
@@ -85,6 +102,8 @@ class GitStackRunner:
             raise GitStackError("local HEAD does not contain a repair commit")
         self._run("merge-base", "--is-ancestor", expected_head_sha, "HEAD")
         objects = Path(self._run("rev-parse", "--git-path", "objects").stdout.strip())
+        if not objects.is_absolute():
+            objects = self.repository / objects
         with tempfile.TemporaryDirectory(prefix="hermes-git-push-") as temporary:
             isolated = Path(temporary)
             self._run_at(isolated, "init", "--bare", "--quiet")
@@ -92,10 +111,39 @@ class GitStackRunner:
                 f"{objects}\n", encoding="utf-8"
             )
             self._run_at(isolated, "update-ref", "refs/heads/hermes-push", local_head)
+            remote = f"https://github.com/{repository}.git"
+            tracked_files = self._run("ls-files", "-z").stdout
+            lfs_attributes = self._run_at(
+                self.repository,
+                "check-attr",
+                "--cached",
+                "--stdin",
+                "-z",
+                "filter",
+                input_text=tracked_files,
+            ).stdout
+            lfs_attribute_parts = lfs_attributes.split("\0")
+            has_lfs_files = any(
+                lfs_attribute_parts[index : index + 2] == ["filter", "lfs"]
+                for index in range(len(lfs_attribute_parts) - 1)
+            )
+            if has_lfs_files:
+                lfs_storage = Path(self._run("rev-parse", "--git-path", "lfs").stdout.strip())
+                if not lfs_storage.is_absolute():
+                    lfs_storage = self.repository / lfs_storage
+                self._run_at(
+                    isolated,
+                    "-c",
+                    f"lfs.storage={lfs_storage}",
+                    "lfs",
+                    "push",
+                    remote,
+                    "refs/heads/hermes-push",
+                )
             return self._run_at(
                 isolated,
                 "push",
-                f"https://github.com/{repository}.git",
+                remote,
                 f"--force-with-lease=refs/heads/{branch}:{expected_head_sha}",
                 "refs/heads/hermes-push:refs/heads/" + branch,
             )
