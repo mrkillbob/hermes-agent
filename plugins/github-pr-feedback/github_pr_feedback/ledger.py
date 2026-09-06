@@ -656,13 +656,25 @@ class FeedbackLedger:
             (repository, pr_number),
         ).fetchone() is not None
 
-    def has_pending_ci_audit(self, repository: str, pr_number: int) -> bool:
-        """Return whether a local-CI dispatch currently owns this PR's mutation lane."""
+    def has_pending_ci_audit(
+        self, repository: str, pr_number: int, *, head_sha: str | None = None
+    ) -> bool:
+        """Return whether a local-CI dispatch owns this head's mutation lane.
+
+        A completed audit for an older head remains useful evidence, but it
+        must not prevent a repair receipt for a newer head from being claimed.
+        The mutation gate is therefore exact-head scoped when a head is known.
+        """
+        head_clause = ""
+        params: tuple[object, ...] = (repository, pr_number)
+        if head_sha is not None:
+            head_clause = " AND head_sha = ?"
+            params += (head_sha,)
         return self._connection.execute(
             "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
             "AND feedback_kind = 'pr_local_ci' AND status IN ('claimed', 'completed') "
-            "AND action_status IN ('pending', 'resolving') LIMIT 1",
-            (repository, pr_number),
+            "AND action_status IN ('pending', 'resolving')" + head_clause + " LIMIT 1",
+            params,
         ).fetchone() is not None
 
     def claim(
@@ -684,7 +696,7 @@ class FeedbackLedger:
             ):
                 return None
             if receipt.feedback_kind != "pr_local_ci" and self.has_pending_ci_audit(
-                receipt.repository, receipt.pr_number
+                receipt.repository, receipt.pr_number, head_sha=receipt.head_sha
             ):
                 return None
             serialized_repair = not (
