@@ -9,6 +9,8 @@ HERMES_ENV_CHECK = ('uv', 'sync', '--locked', '--check', '--no-install-project',
                     '--extra', 'daytona', '--extra', 'hindsight', '--extra', 'parallel-web')
 
 _HERMES_MANIFEST = Path(__file__).with_name('hermes_native_ci.toml')
+_DESKTOP_PACKAGE = 'apps/desktop'
+_DESKTOP_NATIVE_CHECKS = ('check:test:desktop:all',)
 
 
 def manifest_path(worktree: Path) -> Path:
@@ -59,11 +61,22 @@ def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple
         for name in ('lint', 'typecheck', 'test', 'build'):
             if name in scripts:
                 commands.append((('npm', 'run', name), root, {'CI': 'true'}))
+        if package == _DESKTOP_PACKAGE:
+            for name in _DESKTOP_NATIVE_CHECKS:
+                if name in scripts:
+                    commands.append((('npm', 'run', name), root, {'CI': 'true'}))
     return commands
 
 
 def hermes_coverage_gap(changed: tuple[str, ...]) -> str | None:
-    if any(p.endswith((".rs", ".ps1", ".nix")) or p.startswith(".github/")
-           or Path(p).name.startswith("Dockerfile") for p in changed):
+    # The hosted desktop lane drives Electron under Linux/Xvfb; native CI runs
+    # the package's deterministic checks but cannot replace that acceptance lane.
+    if any(
+        p.startswith("apps/desktop/")
+        or p.endswith((".rs", ".ps1", ".nix"))
+        or p.startswith(".github/")
+        or Path(p).name.startswith("Dockerfile")
+        for p in changed
+    ):
         return "additional platform or workflow coverage is required beyond host-native CI"
     return None
