@@ -185,6 +185,20 @@ def test_repeated_long_reasoning_without_tool_progress_is_detected() -> None:
     assert finding.count == 3
 
 
+def test_dollar_amounts_and_variables_do_not_hide_reasoning_loop() -> None:
+    paragraph = (
+        "The projected cost is $50 and the shell variable is $VAR; "
+        "I still need to compare the same two strategies before choosing."
+    )
+    log = f"{paragraph}\n\n{paragraph}\n\n{paragraph}"
+
+    finding = detect_log_finding(log, _config())
+
+    assert finding is not None
+    assert finding.category == "reasoning_loop"
+    assert finding.count == 3
+
+
 def test_unique_progress_and_single_compression_are_healthy() -> None:
     """Over-broad matching would block a healthy worker doing distinct work."""
     log = "\n".join([

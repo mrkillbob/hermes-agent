@@ -21,9 +21,12 @@ _DURATION_RE = re.compile(r"\b\d+(?:\.\d+)?s\b", re.IGNORECASE)
 _TOKEN_COUNT_RE = re.compile(r"~?[\d,]+\s+tokens?", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"\s+")
 _FAILED_EXIT_RE = re.compile(r"\[exit\s+(-?\d+)\]", re.IGNORECASE)
-_TOOL_PREFIX_RE = re.compile(r"(?:^|\s)[^$\n]*\$\s*(.+)")
-# The display skin owns the leading prefix.  Keep the detector independent of
-# its configured value by recognizing the stable tool-rendering structure.
+# Terminal completion lines have a stable tool marker after the skin-owned
+# prefix.  Match that structure rather than treating arbitrary prose before a
+# dollar sign as a tool prefix.
+_TOOL_PREFIX_RE = re.compile(
+    r"^.*💻\s+\$\s+(.+?)\s+\d+(?:\.\d+)?s(?:\s+\[exit\s+-?\d+\])?$"
+)
 _EDIT_SUCCESS_RE = re.compile(
     r"^.*(?:🔧\s+patch|✍️?\s+write|⚡\s+skill_man)\s+.*\d+(?:\.\d+)?s$"
 )
