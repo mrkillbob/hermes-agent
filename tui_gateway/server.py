@@ -517,11 +517,22 @@ def _bind_conversation_worktree_on_submit(session: dict) -> None:
 
 
 def _resolve_conversation_worktree_for_resume(session_id: str, *, profile_home=None, db=None):
-    """Find the existing root binding for a compression continuation only."""
+    """Find the existing root binding, recovering a failed root claim when possible."""
     current, seen = str(session_id or "").strip(), set()
     while current and current not in seen:
         seen.add(current)
-        binding = _resolve_existing_conversation_worktree(current, profile_home=profile_home, db=db)
+        try:
+            binding = _resolve_existing_conversation_worktree(current, profile_home=profile_home, db=db)
+        except Exception as exc:
+            from agent.conversation_worktree import ConversationWorktreeError
+
+            if not isinstance(exc, ConversationWorktreeError):
+                raise
+            record = db.get_conversation_worktree(current) if db is not None else None
+            if record is None or record.state != "creation_failed":
+                raise
+            manager, _, _ = _conversation_worktree_manager(profile_home=profile_home, db=db)
+            binding = manager.bind_new_root_session(current, conversation_kind="interactive")
         if binding is not None:
             return binding
         if db is None or not hasattr(db, "get_session"):
