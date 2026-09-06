@@ -2347,6 +2347,12 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
+    # Completion policies are task-owned and generic: a governed task may opt
+    # into a named gate without importing any optional plugin in the core.
+    if task.body and "hermes-completion-gate:pr-local-ci-v1" in task.body:
+        env["HERMES_KANBAN_COMPLETION_GATE"] = "pr-local-ci-v1"
+    else:
+        env.pop("HERMES_KANBAN_COMPLETION_GATE", None)
     env["HERMES_KANBAN_WORKSPACE"] = workspace
     from hermes_cli.kanban_worker_environment import bind_worker_environment
 

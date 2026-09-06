@@ -453,7 +453,7 @@ def _enforce_governed_ci_completion(args: dict) -> None:
     is the always-loaded mutation boundary, so keep the safety check here as
     well as in the compatibility lifecycle hook.
     """
-    if not os.environ.get("HERMES_KANBAN_TASK"):
+    if not os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_KANBAN_COMPLETION_GATE") != "pr-local-ci-v1":
         return
     from tools.kanban_ci_guard import completion_block
 

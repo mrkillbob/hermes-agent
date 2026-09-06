@@ -656,6 +656,15 @@ class FeedbackLedger:
             (repository, pr_number),
         ).fetchone() is not None
 
+    def has_pending_ci_audit(self, repository: str, pr_number: int) -> bool:
+        """Return whether a local-CI dispatch currently owns this PR's mutation lane."""
+        return self._connection.execute(
+            "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+            "AND feedback_kind = 'pr_local_ci' AND status IN ('claimed', 'completed') "
+            "AND action_status IN ('pending', 'resolving') LIMIT 1",
+            (repository, pr_number),
+        ).fetchone() is not None
+
     def claim(
         self,
         receipt: FeedbackReceipt,
@@ -671,6 +680,10 @@ class FeedbackLedger:
         stale_before = _aware_utc(stale_before, "stale_before")
         with self._transaction():
             if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
+            if receipt.feedback_kind != "pr_local_ci" and self.has_pending_ci_audit(
                 receipt.repository, receipt.pr_number
             ):
                 return None

@@ -30,6 +30,8 @@ _UNAVAILABLE_MESSAGE = (
 
 def completion_block(task_id: str | None = None) -> str | None:
     """Return a blocking message for an unproven governed CI completion."""
+    if os.environ.get("HERMES_KANBAN_COMPLETION_GATE") != "pr-local-ci-v1":
+        return None
     worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
     target = str(task_id or worker_task or "").strip()
     if not target:

@@ -402,6 +402,7 @@ def test_complete_happy_path(worker_env):
 def test_complete_runs_governed_ci_gate_at_kanban_boundary(monkeypatch, worker_env):
     """The worker boundary enforces CI receipts without plugin discovery."""
     from tools import kanban_tools as kt
+    monkeypatch.setenv("HERMES_KANBAN_COMPLETION_GATE", "pr-local-ci-v1")
 
     monkeypatch.setattr(
         "tools.kanban_ci_guard.completion_block",
@@ -425,6 +426,7 @@ def test_missing_control_ledger_blocks_completion(monkeypatch, tmp_path):
 
     monkeypatch.setenv("HERMES_CONTROL_HOME", str(tmp_path / "missing-control"))
     monkeypatch.setenv("HERMES_KANBAN_TASK", "audit-task")
+    monkeypatch.setenv("HERMES_KANBAN_COMPLETION_GATE", "pr-local-ci-v1")
 
     assert completion_block() == _UNAVAILABLE_MESSAGE
 

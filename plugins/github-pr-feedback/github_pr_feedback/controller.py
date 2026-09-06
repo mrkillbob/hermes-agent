@@ -3228,6 +3228,7 @@ def _local_ci_task(
         else "Do not write to GitHub. "
     )
     instructions = (
+        "<!-- hermes-completion-gate:pr-local-ci-v1 --> "
         "Audit this pull request read-only from the exact receipt worktree. "
         + _worker_capability_preflight(
             _governed_pr_identity_command(
