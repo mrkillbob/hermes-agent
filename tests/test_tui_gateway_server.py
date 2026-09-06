@@ -277,10 +277,17 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
 
     fake_supervisor = FakeSupervisor()
     seed_history = [{"role": "user", "content": "previous"}]
-    server._sessions["iso-sid"] = _session(history=list(seed_history))
+    server._sessions["iso-sid"] = _session(
+        history=list(seed_history), source="desktop", cwd="/original-workspace",
+        conversation_worktree={},
+    )
     server._sessions["iso-sid"]["agent"] = None
     server._sessions["iso-sid"]["agent_ready"] = threading.Event()
     parent_writes = {"ensure_session": 0, "persist_seed": 0}
+    binding = {
+        "root_session_id": "iso-sid", "path": "/certified-worktree",
+        "branch": "hermes/session/iso-sid", "base_commit": "a" * 40,
+    }
     monkeypatch.setattr(
         server,
         "_load_cfg",
@@ -300,6 +307,11 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
             "persist_seed", parent_writes["persist_seed"] + 1
         ),
     )
+    def bind_on_submit(session):
+        session["conversation_worktree"] = binding
+        session["cwd"] = binding["path"]
+
+    monkeypatch.setattr(server, "_bind_conversation_worktree_on_submit", bind_on_submit)
     monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: fake_supervisor)
 
     try:
@@ -315,8 +327,10 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
         assert fake_supervisor.frames[0]["sid"] == "iso-sid"
         assert fake_supervisor.frames[0]["text"] == "hello"
         assert fake_supervisor.frames[0]["history"] == seed_history
+        assert fake_supervisor.frames[0]["cwd"] == binding["path"]
+        assert fake_supervisor.frames[0]["conversation_worktree"] == binding
         assert server._sessions["iso-sid"]["history"] == seed_history
-        assert parent_writes == {"ensure_session": 0, "persist_seed": 0}
+        assert parent_writes == {"ensure_session": 1, "persist_seed": 1}
         assert server._sessions["iso-sid"]["running"] is True
 
         fake_supervisor.callback(
