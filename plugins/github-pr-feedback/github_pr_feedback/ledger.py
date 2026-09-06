@@ -1051,9 +1051,11 @@ class FeedbackLedger:
             ):
                 return None
             row = self._connection.execute(
-                "SELECT status, action_status, lease_version FROM feedback_receipts "
+                "SELECT status, action_status, lease_version, last_error FROM feedback_receipts "
                 "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
-                "AND feedback_id = ? AND head_sha = ?",
+                "AND feedback_id = ? AND head_sha = ? AND last_error IN "
+                "('canonical PR CLOSED; repair superseded', "
+                "'canonical PR MERGED; repair superseded')",
                 receipt.key,
             ).fetchone()
             if row is None or row[0] != "completed" or row[1] != "superseded":

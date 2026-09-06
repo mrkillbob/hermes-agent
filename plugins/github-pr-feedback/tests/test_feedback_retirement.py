@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from github_pr_feedback.feedback_retirement import retire_closed_feedback
-from github_pr_feedback.ledger import FeedbackLedger
+from github_pr_feedback.ledger import FeedbackLedger, PendingTaskBinding
 from github_pr_feedback.policy import FeedbackReceipt, PullRequest, load_policy
 
 
@@ -64,6 +64,28 @@ def test_retired_exact_dispatch_can_be_reclaimed_after_reopen(dispatched, state)
     assert ledger.exact_receipt_status(receipt) == "claimed"
     assert not ledger.was_actioned_on_any_head(receipt)
     ledger.finalize(receipt, "task-2", reopened)
+
+
+def test_archived_superseded_dispatch_is_not_reclaimed_as_closed_retirement(dispatched):
+    _policy, ledger, receipt, _pull = dispatched
+    replacement = replace(
+        receipt,
+        feedback_kind="pr_repair",
+        feedback_id="repair:base_refresh_required",
+    )
+    now = datetime.now(UTC)
+    replacement_lease = ledger.replace_archived_dispatches(
+        replacement,
+        archived=(PendingTaskBinding(receipt, "task-1"),),
+        owner="replacement",
+        claimed_at=now,
+    )
+
+    assert replacement_lease is not None
+    assert ledger.reopen_superseded_exact_dispatch(
+        receipt, owner="reopened", claimed_at=now
+    ) is None
+    assert ledger.exact_receipt_status(receipt) == "completed"
 
 
 @pytest.mark.parametrize("change", ["open", "raced_open", "head", "repository", "number"])
