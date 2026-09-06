@@ -337,6 +337,10 @@ An audit may complete or block its calling worker only when the ledger binds tha
 
 Required local audits (`local_ci_audit.required_for_open_prs`) are scheduled independently of administrator-only Actions-settings access. During execution, a settings-only permission denial conservatively treats Actions as enabled and still reads the actual checks and statuses. Authentication failures remain failures. This does not substitute a local receipt for hosted checks or change merge gates.
 
+Local CI admission follows the PR's work dependencies, not its position on the board. A canonical conflict or a pending repair/feedback acknowledgement defers the audit, including a pending mutation recorded against an earlier head of the same PR. Independent PRs remain parallel. Completion markers from the configured Hermes identity are receipts rather than new repair requests; ordinary actionable bot feedback remains eligible.
+
+The sequence is repair, focused verification, verified push/reply, feedback acknowledgement, then exact-head local CI. A requested Codex review may run alongside CI. Acknowledgement records the repair, not CI or review approval; merge still requires the independent current-head gates above. A later review finding re-enters the repair sequence and invalidates old-head CI evidence.
+
 When `allow_budget_exhausted_local_ci` is enabled together with required,
 audit-only, no-post local CI, the same exact-head receipt may substitute for
 hosted checks in only two canonical repository states: Actions is explicitly

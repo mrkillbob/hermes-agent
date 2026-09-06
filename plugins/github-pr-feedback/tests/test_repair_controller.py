@@ -389,6 +389,20 @@ def test_repair_controller_escalates_an_action_required_pr_instead_of_repairing_
     ledger.close()
 
 
+def test_scoped_conflict_dispatch_does_not_create_actions_escalation(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+    controller = RepairController(
+        policy(tmp_path), ledger, ActionRequiredGitHub(), kanban, LocalGit(),
+        clock=lambda: datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+    )
+    result = controller.scan(conflicts_only=True, scoped_target=("acme/widgets", 17, SHA))
+    assert result.created == 0
+    assert result.skipped.get("action_required") == 1
+    assert not kanban.tasks
+    ledger.close()
+
+
 def test_repair_controller_routes_a_stale_pr_base_into_the_refresh_lane(
     tmp_path: Path,
 ) -> None:

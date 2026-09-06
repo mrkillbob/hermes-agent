@@ -645,6 +645,17 @@ class FeedbackLedger:
             command_evidence=command_evidence,
         )
 
+    def has_pending_mutation(self, repository: str, pr_number: int) -> bool:
+        """A push may advance the head before its repair acknowledgement returns."""
+        return self._connection.execute(
+            "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+            "AND feedback_kind NOT IN ('pr_local_ci', 'pr_actions_needed') "
+            "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%') "
+            "AND status IN ('claimed', 'completed') "
+            "AND action_status IN ('pending', 'resolving') LIMIT 1",
+            (repository, pr_number),
+        ).fetchone() is not None
+
     def claim(
         self,
         receipt: FeedbackReceipt,
@@ -659,6 +670,10 @@ class FeedbackLedger:
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         stale_before = _aware_utc(stale_before, "stale_before")
         with self._transaction():
+            if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
             serialized_repair = not (
                 receipt.feedback_kind == "pr_repair"
                 and (
@@ -918,6 +933,10 @@ class FeedbackLedger:
             raise ValueError("claim owner and exact archived binding must be valid")
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         with self._transaction():
+            if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
             row = self._connection.execute(
                 "SELECT task_id, status, action_status, lease_version "
                 "FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
@@ -971,6 +990,10 @@ class FeedbackLedger:
             raise ValueError("claim owner and exact blocked binding must be valid")
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         with self._transaction():
+            if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
             row = self._connection.execute(
                 "SELECT task_id, status, action_status, lease_version "
                 "FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
@@ -1272,6 +1295,10 @@ class FeedbackLedger:
         if max_attempts is not None and max_attempts < 1:
             raise ValueError("max_attempts must be positive")
         with self._transaction():
+            if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
             row = self._connection.execute(
                 "SELECT attempts, claimed_at, lease_version FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
                 "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ? AND status = 'failed'",
