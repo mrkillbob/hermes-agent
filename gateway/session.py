@@ -1157,7 +1157,17 @@ class SessionStore(
         db = self._db
         while current not in seen:
             seen.add(current)
-            binding = manager.resolve_existing_session(current)
+            try:
+                binding = manager.resolve_existing_session(current)
+            except ConversationWorktreeError:
+                # A transient bootstrap failure leaves a durable creation_failed
+                # claim.  The manager can recover it when the worktree still
+                # exists; do not strand /resume or /branch behind the failed
+                # read-only resolution path.
+                record = db.get_conversation_worktree(current) if db is not None else None
+                if record is None or record.state != "creation_failed":
+                    raise
+                binding = manager.bind_new_root_session(current, conversation_kind="interactive")
             if binding is not None:
                 return current, binding
             if db is None:

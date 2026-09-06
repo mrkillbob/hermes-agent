@@ -310,19 +310,6 @@ def _(rid, params: dict) -> dict:
     session_model_override, create_reasoning_override, create_service_tier_override = _create_overrides(params)
     conversation_worktree = {}
     conversation_root_lease = None
-    if source in {"desktop", "tui"}:
-        try:
-            binding = _bind_conversation_worktree_for_new_root(key, profile_home=profile_home)
-            if binding is not None:
-                conversation_worktree = _conversation_worktree_metadata(binding)
-                conversation_root_lease = _acquire_conversation_root_lease(binding, surface=source)
-                raw_cwd = conversation_worktree["path"]
-                explicit_cwd = True
-        except Exception as exc:
-            if conversation_root_lease is not None:
-                with contextlib.suppress(Exception):
-                    conversation_root_lease.release()
-            return _err(rid, 5000, f"conversation worktree setup failed: {exc}")
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
@@ -362,7 +349,10 @@ def _(rid, params: dict) -> dict:
     if parent_session_id and history:
         _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
-    _schedule_agent_build(sid)
+    # Plain desktop/TUI drafts are only composer shells.  Delay both the build and
+    # managed worktree claim until the first prompt makes the session durable.
+    if source not in {"desktop", "tui"} or (parent_session_id and history):
+        _schedule_agent_build(sid)
     _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
     cwd = _sessions[sid]["cwd"]
     override = session_model_override or {}

@@ -36,10 +36,6 @@ from tui_gateway._env import env_float, env_int
 from tui_gateway.turn_marker import clear_turn_marker, read_turn_marker, record_turn_start  # noqa: F401
 from tui_gateway.transport import (StdioTransport, Transport, bind_transport, current_transport, reset_transport)
 
-# Compatibility seam for split session handlers and their tests.  Keep the
-# legacy helper name while the implementation lives in the shared git probe.
-_git_branch_for_cwd = git_probe.branch
-
 logger = logging.getLogger(__name__)
 
 _hermes_home = get_hermes_home()
@@ -493,6 +489,31 @@ def _resolve_existing_conversation_worktree(root_session_id: str, *, profile_hom
 def _bind_conversation_worktree_for_new_root(root_session_id: str, *, profile_home=None, db=None):
     """Named seam for root boundaries; distinct from continuation lookup."""
     return _bind_new_interactive_conversation_worktree(root_session_id, profile_home=profile_home, db=db)
+
+
+def _bind_conversation_worktree_on_submit(session: dict) -> None:
+    """Materialize a desktop/TUI draft's worktree when its first prompt makes it durable."""
+    if session.get("conversation_worktree") or session.get("source") not in {"desktop", "tui"}:
+        return
+    key = str(session.get("session_key") or "")
+    if not key:
+        return
+    with _session_db(session) as db:
+        binding = _bind_conversation_worktree_for_new_root(
+            key, profile_home=session.get("profile_home"), db=db)
+        if binding is None:
+            return
+        metadata = _conversation_worktree_metadata(binding)
+        session["conversation_worktree"] = metadata
+        session["conversation_root_lease"] = _acquire_conversation_root_lease(
+            binding, surface=session.get("source") or "desktop")
+        session["cwd"] = metadata["path"]
+        session["explicit_cwd"] = True
+        _register_session_cwd(session)
+        if db is not None:
+            db.update_session_cwd(
+                key, metadata["path"], metadata.get("branch", ""),
+                str(binding.repo_common_dir), replace_git_meta=True)
 
 
 def _resolve_conversation_worktree_for_resume(session_id: str, *, profile_home=None, db=None):

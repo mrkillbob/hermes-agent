@@ -449,6 +449,7 @@ def _persist_session_row_for_submit(rid, session):
                 "session storage unavailable: "
                 f"{_db_error or 'state.db could not be opened'} — the message "
                 "was not saved; repair state.db and try again")
+        _bind_conversation_worktree_on_submit(session)
         _persist_branch_seed(session)
     except Exception as exc:
         from hermes_state_errors import is_disk_full_error

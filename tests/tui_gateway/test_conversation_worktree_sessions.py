@@ -28,7 +28,7 @@ def _clean_sessions(monkeypatch):
     monkeypatch.setattr(server, "_register_session_cwd", lambda _session: None)
     monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda: None)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test/model")
-    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda cwd: "stable")
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "stable")
     monkeypatch.setattr(server, "_project_info_for_cwd", lambda cwd: {})
     monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
     monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "compact")
@@ -52,7 +52,7 @@ def _binding(root: str) -> _Binding:
     )
 
 
-def test_session_create_binds_before_deferred_agent_build(monkeypatch):
+def test_session_create_defers_worktree_until_first_prompt(monkeypatch):
     calls: list[tuple[str, str]] = []
     scheduled: list[tuple[str, str]] = []
 
@@ -74,16 +74,16 @@ def test_session_create_binds_before_deferred_agent_build(monkeypatch):
     assert "error" not in response
     result = response["result"]
     root = result["stored_session_id"]
-    assert calls == [(root, "interactive")]
-    assert result["info"]["cwd"] == f"/repo/.worktrees/{root}"
-    assert scheduled == [(result["session_id"], f"/repo/.worktrees/{root}")]
+    assert calls == []
+    assert result["info"]["cwd"] == server._completion_cwd({"cwd": "/stable"})
+    assert scheduled == []
     record = server._sessions[result["session_id"]]
-    assert record["cwd"] == f"/repo/.worktrees/{root}"
-    assert record["explicit_cwd"] is True
-    assert record["conversation_worktree"]["root_session_id"] == root
+    assert record["cwd"] == server._completion_cwd({"cwd": "/stable"})
+    assert record["explicit_cwd"] is False
+    assert record["conversation_worktree"] == {}
 
 
-def test_desktop_root_lease_lives_until_session_finalize(monkeypatch):
+def test_desktop_draft_has_no_root_lease(monkeypatch):
     lease = MagicMock()
     monkeypatch.setattr(
         server,
@@ -103,15 +103,15 @@ def test_desktop_root_lease_lives_until_session_finalize(monkeypatch):
     sid = response["result"]["session_id"]
     session = server._sessions[sid]
 
-    assert session["conversation_root_lease"] is lease
+    assert session["conversation_root_lease"] is None
     lease.release.assert_not_called()
 
     server._finalize_session(session)
 
-    lease.release.assert_called_once_with()
+    lease.release.assert_not_called()
 
 
-def test_session_create_fails_closed_without_scheduling_agent(monkeypatch):
+def test_session_create_does_not_bootstrap_a_draft(monkeypatch):
     scheduled: list[str] = []
 
     def fail(_root_session_id: str, *, profile_home=None, db=None):
@@ -122,10 +122,9 @@ def test_session_create_fails_closed_without_scheduling_agent(monkeypatch):
 
     response = server._methods["session.create"]("create", {"source": "desktop"})
 
-    assert response["error"]["code"] == 5000
-    assert "conversation worktree" in response["error"]["message"]
+    assert "error" not in response
     assert scheduled == []
-    assert server._sessions == {}
+    assert server._sessions
 
 
 def test_resume_resolves_existing_binding_without_creation(monkeypatch):
