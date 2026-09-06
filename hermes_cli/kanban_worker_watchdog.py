@@ -25,7 +25,7 @@ _TOOL_PREFIX_RE = re.compile(r"(?:^|\s)[^$\n]*\$\s*(.+)")
 # The display skin owns the leading prefix.  Keep the detector independent of
 # its configured value by recognizing the stable tool-rendering structure.
 _EDIT_SUCCESS_RE = re.compile(
-    r"^.*(?:🔧\s+patch|✍️?\s+write)\s+.*\d+(?:\.\d+)?s$"
+    r"^.*(?:🔧\s+patch|✍️?\s+write|⚡\s+skill_man)\s+.*\d+(?:\.\d+)?s$"
 )
 _DIFF_MARKER_RE = re.compile(r"^.*review diff$")
 _DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @")

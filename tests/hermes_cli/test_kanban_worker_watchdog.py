@@ -84,7 +84,7 @@ def test_repeated_failed_tool_call_is_detected() -> None:
     assert len(finding.fingerprint) == 16
 
 
-@pytest.mark.parametrize("edit", ["patch", "write_file"])
+@pytest.mark.parametrize("edit", ["patch", "write_file", "skill_manage"])
 def test_edit_and_retest_is_progress_but_unchanged_retries_still_block(edit) -> None:
     from agent.display import render_edit_diff_with_delta
 
@@ -93,7 +93,7 @@ def test_edit_and_retest_is_progress_but_unchanged_retries_still_block(edit) -> 
         "patch", json.dumps({"diff": "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n"}),
         print_fn=rendered.append,
     )
-    label = "🔧 patch" if edit == "patch" else "✍️  write"
+    label = {"patch": "🔧 patch", "write_file": "✍️  write", "skill_manage": "⚡ skill_man"}[edit]
     change = f"┊ {label} module.py  0.3s\n" + "\n".join(rendered)
     failure = "┊ 💻 $ scripts/run_tests.sh tests/test_a.py  1.2s [exit 1]"
     log = f"{failure}\n{change}\n{failure}\n{change}\n{failure}"
