@@ -768,53 +768,37 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
 
 def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     action = getattr(args, "github_pr_feedback_action", None)
-    if action == "scan":
-        return _scan(ctx)
-    if action == "status":
-        return _status()
-    if action == "doctor":
-        return _doctor(ctx)
-    if action == "inspect-pr":
-        return _inspect_pr(ctx, args)
-    if action == "inspect-ci":
-        from .cli_ci_receipt import inspect_ci
-        return inspect_ci(ctx, args)
-    if action == "submit-review":
-        return _submit_review(ctx, args)
-    if action == "post-comment":
-        return _post_comment(ctx, args)
-    if action == "retry":
-        return _retry(ctx, args)
-    if action == "dispatch-repair":
-        from .cli_repair import dispatch_repair
-        return dispatch_repair(ctx, args)
-    if action == "dispatch-feedback":
-        return _dispatch_feedback(ctx, args)
-    if action == "audit-pr":
-        return _audit_pr(ctx, args)
-    if action == "merge-scan":
-        return _merge_scan(ctx)
-    if action == "merge-status":
-        return _merge_status(details=bool(getattr(args, "details", False)))
-    if action == "merge-enable":
-        return _merge_enable(ctx, args)
-    if action == "merge-disable":
-        return _merge_disable(ctx, args)
-    if action == "stack-create":
-        return _stack_create(ctx, args)
-    if action == "stack-refresh":
-        return _stack_refresh(ctx, args)
-    if action == "stack-merge":
-        return _stack_merge(ctx, args)
-    if action == "close-superseded":
-        return _close_superseded(ctx, args)
-    if action == "resolve-superseded-feedback":
-        return _resolve_superseded_feedback(ctx, args)
-    if action == "complete-feedback":
-        return _complete_feedback(ctx, args)
-    if action == "complete-maintenance":
-        return _complete_maintenance(ctx, args)
-    return 2
+    if not isinstance(action, str):
+        return 2
+    # Table-based dispatcher (AGENTS.md L267-L268): dict replaces ladder at >=4 branches.
+    _HANDLERS = {
+        "scan": lambda: _scan(ctx),
+        "status": _status,
+        "doctor": lambda: _doctor(ctx),
+        "inspect-pr": lambda: _inspect_pr(ctx, args),
+        "inspect-ci": lambda: __import__(".cli_ci_receipt", fromlist=["inspect_ci"]).inspect_ci(ctx, args),
+        "submit-review": lambda: _submit_review(ctx, args),
+        "post-comment": lambda: _post_comment(ctx, args),
+        "retry": lambda: _retry(ctx, args),
+        "dispatch-repair": lambda: __import__(".cli_repair", fromlist=["dispatch_repair"]).dispatch_repair(ctx, args),
+        "dispatch-feedback": lambda: _dispatch_feedback(ctx, args),
+        "audit-pr": lambda: _audit_pr(ctx, args),
+        "merge-scan": _merge_scan,
+        "merge-status": lambda: _merge_status(details=bool(getattr(args, "details", False))),
+        "merge-enable": lambda: _merge_enable(ctx, args),
+        "merge-disable": lambda: _merge_disable(ctx, args),
+        "stack-create": _stack_create,
+        "stack-refresh": _stack_refresh,
+        "stack-merge": _stack_merge,
+        "close-superseded": _close_superseded,
+        "resolve-superseded-feedback": lambda: _resolve_superseded_feedback(ctx, args),
+        "complete-feedback": lambda: _complete_feedback(ctx, args),
+        "complete-maintenance": lambda: _complete_maintenance(ctx, args),
+    }
+    handler = _HANDLERS.get(action)
+    if handler is None:
+        return 2
+    return handler()
 
 
 def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
