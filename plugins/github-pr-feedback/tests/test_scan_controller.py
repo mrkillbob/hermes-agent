@@ -2830,14 +2830,16 @@ def test_scan_suppresses_only_configured_bot_completion_receipts(tmp_path: Path)
         "bot-completion", reviewer="reviewer",
         body=f"Hermes automated repair\\nVerified repair. <!-- pr-maintenance-receipt:v1 status=completed kind=review_comment head={sha} -->",
     )
+    markerless = feedback("markerless", reviewer="reviewer",
+                          body=f"Base refresh completed. Merged base {'b' * 40} and pushed {sha}. Focused verification: 16 passed.")
     actionable = feedback("bot-finding", reviewer="reviewer", body="Fix the missing error handling.")
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     kanban = RecordingKanban()
     result = ScanController(
-        policy, ledger, FakeGitHub(admitted_pull_request(sha), (completed, actionable)),
+        policy, ledger, FakeGitHub(admitted_pull_request(sha), (completed, markerless, actionable)),
         kanban, RecordingLocalGit(),
     ).scan()
-    assert result.skipped.get("self_resolution_receipt") == 1
+    assert result.skipped.get("self_resolution_receipt") == 2
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["bot-finding"]
     ledger.close()
 

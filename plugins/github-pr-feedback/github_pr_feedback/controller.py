@@ -2103,19 +2103,11 @@ class ScanController:
         if _is_self_resolution_receipt(feedback, owner_login=owner_login):
             return "self_resolution_receipt"
         identity = self._policy.github_identity
-        if (
-            identity is not None
-            and feedback.reviewer.login.casefold() == identity.expected_login.casefold()
-            and feedback.kind in {"issue_comment", "review_comment"}
-            and len(feedback.body) < MAX_FEEDBACK_BODY_CHARS
-            and re.search(
-                r"<!--\s*pr-maintenance-receipt:v1\s+status=completed\s+"
-                r"kind=\w+\s+head=[0-9a-f]{40,64}\s*-->",
-                feedback.body,
-            ) is not None
+        if identity is not None and _is_self_resolution_receipt(
+            feedback, owner_login=identity.expected_login,
         ):
-            # Governed automation has a separate identity from the PR owner.
-            # Its completion receipts must not become new repair requests.
+            # The governed publisher is distinct from the PR owner. Apply the
+            # same bounded receipt recognition even when a legacy reply lacks its marker.
             return "self_resolution_receipt"
         return None
 

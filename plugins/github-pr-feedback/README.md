@@ -575,3 +575,7 @@ completion comment nor claims passing CI. Open, changed-head, and raced PRs keep
 their pending gate. Protected terminal replay preserves the lifecycle result.
 
 Repair completion policies also gate the shared `request_review` transition. A worker must finish its durable push/reply/acknowledgement contract before handing the implementation to an independent reviewer; review and CI still remain separate requirements. Original dispatch identities remain provenance, not evidence that the published repair still has its original head.
+
+### Retire a misclassified automation receipt
+
+`retire-feedback --self-receipt` accepts the existing exact repository, PR, feedback kind/id, and receipt-head arguments. It requires an admitted OPEN PR at that head and a freshly fetched comment authored by the configured automation identity that satisfies the same high-confidence completed-work classifier used by intake. It rechecks both PR identity and comment contents before retiring only that exact ledger dispatch as superseded. External findings, actionable bot comments, missing comments, and changed heads remain pending. The default retirement command still requires verified PR closure. Neither path creates repair-success or CI evidence; after successful retirement, the exact card may be completed as non-actionable with this reason.

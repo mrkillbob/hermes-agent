@@ -748,6 +748,7 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     retired.add_argument("--feedback-kind", required=True)
     retired.add_argument("--feedback-id", required=True)
     retired.add_argument("--receipt-head-sha", required=True)
+    retired.add_argument("--self-receipt", action="store_true", help="Retire only a verified non-actionable comment by the configured automation identity")
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
