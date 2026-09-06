@@ -153,7 +153,7 @@ class RepairController:
     def scan(self, *, conflicts_only: bool = False, retry_receipt: FeedbackReceipt | None = None, scoped_target: tuple[str, int, str] | None = None) -> RepairScanResult:
         configured = self._policy.repair_steward
         if configured is None:
-            return RepairScanResult(0, {}, False)
+            return RepairScanResult(0, {}, retry_receipt is not None)
         if scoped_target is not None and (scoped_target[0] not in configured.repositories or retry_receipt is not None):
             raise ValueError("scoped repair requires a configured repository and cannot retry a receipt")
         created = 0
@@ -509,6 +509,12 @@ class RepairController:
                     skipped["dispatch_failed"] += 1
                     degraded = True
             refresh_executor.shutdown(wait=True)
+        if (
+            retry_receipt is not None
+            and created == 0
+            and skipped.get("base_refresh_completed", 0) == 0
+        ):
+            degraded = True
         return RepairScanResult(created, dict(skipped), degraded)
 
     def _dispatch_action_required(

@@ -797,6 +797,46 @@ def test_explicit_repair_retry_revalidates_receipt_and_recovers_failed_environme
     ledger.close()
 
 
+def test_failed_repair_retry_degrades_when_pr_is_no_longer_open(tmp_path):
+    class ClosedGitHub(GitHub):
+        def list_open_pull_requests(self, repository: str, owner: str):
+            return ()
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = RepairController(policy(tmp_path), ledger, ClosedGitHub(), Kanban(), LocalGit())
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "pr_repair", "repair:merge_conflict:target-base:" + "b" * 40, SHA
+    )
+
+    result = controller.scan(retry_receipt=receipt)
+
+    assert result.created == 0
+    assert result.skipped == {}
+    assert result.degraded is True
+    ledger.close()
+
+
+def test_failed_repair_retry_degrades_when_trigger_identity_changes(tmp_path):
+    class ChangedTriggerGitHub(GitHub):
+        def get_merge_state(self, repository: str, number: int):
+            return merge_state()
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = RepairController(
+        policy(tmp_path), ledger, ChangedTriggerGitHub(), Kanban(), LocalGit()
+    )
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "pr_repair", "repair:merge_conflict:target-base:" + "b" * 40, SHA
+    )
+
+    result = controller.scan(retry_receipt=receipt)
+
+    assert result.created == 0
+    assert result.skipped == {"no_repair_trigger": 1}
+    assert result.degraded is True
+    ledger.close()
+
+
 def test_repair_card_acquires_pinned_base_after_mutable_branch_advances(
     tmp_path: Path,
 ) -> None:
