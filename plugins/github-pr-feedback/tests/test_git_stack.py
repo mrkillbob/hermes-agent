@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -57,24 +58,36 @@ def test_push_verified_head_uses_canonical_repository_and_exact_local_head(
 
     def fake_run(argv, **_kwargs):
         calls.append(argv)
-        stdout = "b" * 40 if argv[-2:] == ("rev-parse", "HEAD") else ""
+        if argv[3:] == ("init", "--bare", "--quiet"):
+            (Path(argv[2]) / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        stdout = "b" * 40 if argv[3:] == ("rev-parse", "HEAD") else ""
+        if argv[3:] == ("rev-parse", "--git-path", "objects"):
+            stdout = str(tmp_path / "objects")
         return subprocess.CompletedProcess(argv, 0, stdout, "")
 
     monkeypatch.setattr("github_pr_feedback.git_stack.subprocess.run", fake_run)
     GitStackRunner(tmp_path).push_verified_head("acme/widgets", "codex/child", "a" * 40)
-    assert calls == [
+    assert calls[:3] == [
         ("git", "-C", str(tmp_path), "rev-parse", "HEAD"),
         (
             "git", "-C", str(tmp_path), "merge-base", "--is-ancestor",
             "a" * 40, "HEAD",
         ),
         (
-            "git", "-C", str(tmp_path), "push",
-            "https://github.com/acme/widgets.git",
-            "--force-with-lease=refs/heads/codex/child:" + "a" * 40,
-            "HEAD:refs/heads/codex/child",
+            "git", "-C", str(tmp_path), "rev-parse", "--git-path", "objects",
         ),
     ]
+    isolated = calls[3][2]
+    assert calls[3] == ("git", "-C", isolated, "init", "--bare", "--quiet")
+    assert calls[4] == (
+        "git", "-C", isolated, "update-ref", "refs/heads/hermes-push", "b" * 40
+    )
+    assert calls[5] == (
+        "git", "-C", isolated, "push",
+        "https://github.com/acme/widgets.git",
+        "--force-with-lease=refs/heads/codex/child:" + "a" * 40,
+        "refs/heads/hermes-push:refs/heads/codex/child",
+    )
 
 
 def test_push_verified_head_rejects_a_non_descendant_without_pushing(

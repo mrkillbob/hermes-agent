@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -32,7 +33,10 @@ class GitStackRunner:
         self._environment = None if environment is None else dict(environment)
 
     def _run(self, *args: str) -> GitEvidence:
-        argv = ("git", "-C", str(self.repository), *args)
+        return self._run_at(self.repository, *args)
+
+    def _run_at(self, repository: Path, *args: str) -> GitEvidence:
+        argv = ("git", "-C", str(repository), *args)
         result = subprocess.run(
             argv, check=False, capture_output=True, text=True, env=self._environment
         )
@@ -80,9 +84,18 @@ class GitStackRunner:
         if local_head.casefold() == expected_head_sha.casefold():
             raise GitStackError("local HEAD does not contain a repair commit")
         self._run("merge-base", "--is-ancestor", expected_head_sha, "HEAD")
-        return self._run(
-            "push",
-            f"https://github.com/{repository}.git",
-            f"--force-with-lease=refs/heads/{branch}:{expected_head_sha}",
-            f"HEAD:refs/heads/{branch}",
-        )
+        objects = Path(self._run("rev-parse", "--git-path", "objects").stdout.strip())
+        with tempfile.TemporaryDirectory(prefix="hermes-git-push-") as temporary:
+            isolated = Path(temporary)
+            self._run_at(isolated, "init", "--bare", "--quiet")
+            (isolated / "objects" / "info" / "alternates").write_text(
+                f"{objects}\n", encoding="utf-8"
+            )
+            self._run_at(isolated, "update-ref", "refs/heads/hermes-push", local_head)
+            return self._run_at(
+                isolated,
+                "push",
+                f"https://github.com/{repository}.git",
+                f"--force-with-lease=refs/heads/{branch}:{expected_head_sha}",
+                "refs/heads/hermes-push:refs/heads/" + branch,
+            )
