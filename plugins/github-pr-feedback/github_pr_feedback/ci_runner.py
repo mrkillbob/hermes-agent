@@ -751,7 +751,7 @@ class LocalCIRunner:
                 result = self._commands.run(
                     probe,
                     cwd=worktree,
-                    env=ci_environment(worktree),
+                    env=ci_environment(worktree, include_worktree_roots=False),
                     timeout=30,
                 )
                 actual = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""

@@ -34,3 +34,17 @@ def test_ci_import_roots_do_not_follow_scripts_symlink_outside_worktree(tmp_path
     env = ci_environment(repo, {'STATIC_BASE_REF': 'b' * 40})
     assert env['PYTHONPATH'].split(os.pathsep) == [str(repo.resolve())]
     assert env['STATIC_BASE_REF'] == 'b' * 40
+
+
+def test_ci_environment_can_remove_import_roots_for_startup_probe(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    monkeypatch.setenv('PYTHONPATH', str(tmp_path / 'foreign'))
+
+    env = ci_environment(
+        repo,
+        {'PYTHONPATH': str(tmp_path / 'caller')},
+        include_worktree_roots=False,
+    )
+
+    assert 'PYTHONPATH' not in env
