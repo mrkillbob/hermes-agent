@@ -400,10 +400,12 @@ class SubprocessCICommandRunner:
                 duration_ms=int((time.monotonic() - started) * 1000),
                 timed_out=False,
             )
-        from .ci_output import retain_output
+        from .ci_output import cleanup_outputs, retain_output
 
-        retain_output(result.stdout)
-        retain_output(result.stderr)
+        cleanup_outputs()
+        if result.returncode != 0 or result.timed_out:
+            retain_output(result.stdout)
+            retain_output(result.stderr)
         return result
 
 
