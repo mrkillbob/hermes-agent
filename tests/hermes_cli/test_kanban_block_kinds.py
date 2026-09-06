@@ -5,8 +5,8 @@ task, a cron unblocks it, the worker re-blocks for the same reason, repeat
 forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 ``block_recurrences`` counter:
 
-* ``dependency`` blocks route to ``todo`` (parent-gated, auto-resumed) and
-  never enter the human ``blocked`` bucket a cron would keep unblocking.
+* ``dependency`` blocks with unfinished linked parents wait in ``todo``;
+  missing or completed dependency links remain blocked to prevent retry churn.
 * ``needs_input`` / ``capability`` / un-typed blocks land in ``blocked``;
   each same-cause re-block after an unblock increments ``block_recurrences``,
   and at ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
@@ -139,6 +139,20 @@ def test_intent_review_needs_input_triage_stays_human_gated(kanban_home: Path) -
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("finished_parent", [False, True])
+def test_dependency_without_pending_parent_stays_blocked(kanban_home, finished_parent):
+    with kbc.connect_closing() as conn:
+        child = _running_task(conn, title="missing external prerequisite")
+        if finished_parent:
+            parent = _running_task(conn, title="finished prerequisite")
+            kb.complete_task(conn, parent, result="done")
+            kb.link_tasks(conn, parent_id=parent, child_id=child)
+        assert kb.block_task(conn, child, reason="source unavailable", kind="dependency")
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, child).status == "blocked"
+        assert kb.claim_task(conn, child, claimer="worker") is None
+
+
 def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
     """A dependency-parked child becomes ready once its parent completes."""
     with kbc.connect_closing() as conn:
@@ -164,4 +178,3 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
 # ---------------------------------------------------------------------------
 # Validation + back-compat
 # ---------------------------------------------------------------------------
-

@@ -402,3 +402,20 @@ def test_seed_rejects_unknown_role_or_department() -> None:
         seed_federation(manifest, role_ids=["does-not-exist"], apply=False)
     with pytest.raises(ValueError, match="unknown federation department"):
         seed_federation(manifest, department="does-not-exist", apply=False)
+
+
+def test_federation_audit_is_reachable_through_real_cli(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    environment = dict(os.environ, HERMES_HOME=str(tmp_path / 'hermes'))
+    result = subprocess.run(
+        [sys.executable, '-m', 'hermes_cli.main', 'federation', 'audit', '--json'],
+        cwd=MANIFEST.parents[2], env=environment, capture_output=True, text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["summary"]["roles"] == len(report["roles"])
+    assert {row["role_id"] for row in report["roles"]} == {role.id for role in load_manifest(MANIFEST).roles}

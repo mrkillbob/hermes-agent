@@ -399,13 +399,59 @@ def test_github_client_posts_bounded_issue_comment_with_fixed_argv() -> None:
         "repos/acme/widgets/issues/17/comments",
         "--method",
         "POST",
-        "--field",
+        "--raw-field",
         "body=exact-head receipt passed",
     )
     runner = RecordingRunner({argv: {"id": 1}})
 
     GitHubClient(runner).post_issue_comment(
         "acme/widgets", 17, "exact-head receipt passed"
+    )
+
+    assert runner.calls == [argv]
+
+
+def test_github_client_decodes_accidentally_base64_encoded_receipt_comment() -> None:
+    body = (
+        "Hermes automated repair (task-orchestrator)\n\n"
+        "Verification passed.\n\n"
+        "<!-- pr-maintenance-receipt:v1 status=completed kind=review_comment "
+        "head=" + "a" * 40 + " -->"
+    )
+    encoded = __import__("base64").b64encode(body.encode()).decode()
+    argv = (
+        "gh",
+        "api",
+        "repos/acme/widgets/issues/17/comments",
+        "--method",
+        "POST",
+        "--raw-field",
+        f"body={body}",
+    )
+    runner = RecordingRunner({argv: {"id": 1}})
+
+    GitHubClient(runner).post_issue_comment("acme/widgets", 17, encoded)
+
+    assert runner.calls == [argv]
+
+
+def test_github_client_posts_review_body_as_literal_raw_field() -> None:
+    body = "Hermes automated review\n\nNo blocking findings."
+    argv = (
+        "gh",
+        "api",
+        "-X",
+        "POST",
+        "repos/acme/widgets/pulls/17/reviews",
+        "--raw-field",
+        "event=COMMENT",
+        "--raw-field",
+        f"body={body}",
+    )
+    runner = RecordingRunner({argv: {"id": 1}})
+
+    GitHubClient(runner).submit_pull_request_review(
+        "acme/widgets", 17, event="COMMENT", body=body
     )
 
     assert runner.calls == [argv]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -64,6 +65,7 @@ _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _MERGE_FLAGS = {"squash": "--squash", "rebase": "--rebase", "merge": "--merge"}
 _PROCESS_REQUEST_LOCK = threading.Lock()
+_BASE64_TEXT = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
 
 def _automation_gh_config_dir() -> Path:
@@ -617,7 +619,9 @@ class GitHubClient:
         normalized_event = _required_string(event).upper()
         if normalized_event not in {"APPROVE", "REQUEST_CHANGES", "COMMENT"}:
             raise ValueError("review event is invalid")
-        body = _bounded_text(body, "review body", MAX_FEEDBACK_BODY_CHARS, allow_newlines=True)
+        body = _normalized_outbound_comment_body(
+            body, "review body", MAX_FEEDBACK_BODY_CHARS
+        )
         self._runner.run(
             [
                 "gh",
@@ -625,9 +629,9 @@ class GitHubClient:
                 "-X",
                 "POST",
                 f"repos/{repository}/pulls/{number}/reviews",
-                "-f",
+                "--raw-field",
                 f"event={normalized_event}",
-                "-f",
+                "--raw-field",
                 f"body={body}",
             ]
         )
@@ -1096,8 +1100,7 @@ class GitHubClient:
 
         repository = _validated_repository(repository)
         number = _positive_number(number)
-        if not isinstance(body, str) or not body.strip() or len(body) > 4000:
-            raise ValueError("comment body must contain 1 to 4000 characters")
+        body = _normalized_outbound_comment_body(body, "comment body", 4000)
         self._runner.run(
             [
                 "gh",
@@ -1105,7 +1108,7 @@ class GitHubClient:
                 f"repos/{repository}/issues/{number}/comments",
                 "--method",
                 "POST",
-                "--field",
+                "--raw-field",
                 f"body={body}",
             ]
         )
@@ -1543,6 +1546,40 @@ def _bounded_text(
     if not allow_empty and not value.strip():
         raise ValueError(f"{field} must be non-empty")
     return value
+
+
+def _normalized_outbound_comment_body(
+    value: object, field: str, maximum: int
+) -> str:
+    """Return literal Markdown, recovering only an unmistakable encoded receipt.
+
+    Model-driven workers sometimes Base64-encode a whole comment while trying
+    to make a shell argument safe. That encoding is not a valid human-facing
+    GitHub comment. Decode only text that is strict Base64 and contains the
+    governed completion marker; arbitrary encoded payloads remain unchanged.
+    """
+
+    if not isinstance(value, str) or "\x00" in value:
+        raise ValueError(f"{field} is invalid or too long")
+    candidate = value
+    if (
+        len(candidate) <= maximum * 2
+        and len(candidate) % 4 == 0
+        and _BASE64_TEXT.fullmatch(candidate)
+    ):
+        try:
+            decoded = base64.b64decode(candidate, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            decoded = None
+        if (
+            isinstance(decoded, str)
+            and "pr-maintenance-receipt:v1" in decoded
+            and "\n" in decoded
+            and decoded.startswith("Hermes automated")
+            and len(decoded) <= maximum
+        ):
+            candidate = decoded
+    return _bounded_text(candidate, field, maximum, allow_newlines=True)
 
 
 def _validated_label(value: object) -> str:

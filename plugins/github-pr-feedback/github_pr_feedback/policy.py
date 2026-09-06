@@ -478,6 +478,7 @@ class PluginPolicy:
     repair_steward: RepairStewardPolicy | None = None
     release_maintenance: ReleaseMaintenancePolicy | None = None
     merge_maintainers: tuple[MergeMaintainerPolicy, ...] = ()
+    release_maintenances: tuple[ReleaseMaintenancePolicy, ...] = ()
     github_identity: GitHubIdentityPolicy | None = None
     github_actions_permissions_identity: GitHubActionsPermissionsIdentityPolicy | None = None
 
@@ -493,6 +494,25 @@ class PluginPolicy:
     def merge_policy_for(self, repository: str) -> MergeMaintainerPolicy | None:
         return next(
             (candidate for candidate in self.merge_policies() if candidate.repository == repository),
+            None,
+        )
+
+    def release_policies(self) -> tuple[ReleaseMaintenancePolicy, ...]:
+        """Return configured release lanes, preserving the legacy singular field."""
+
+        if self.release_maintenances:
+            return self.release_maintenances
+        if self.release_maintenance is not None:
+            return (self.release_maintenance,)
+        return ()
+
+    def release_policy_for(self, repository: str) -> ReleaseMaintenancePolicy | None:
+        return next(
+            (
+                candidate
+                for candidate in self.release_policies()
+                if candidate.repository == repository
+            ),
             None,
         )
 
@@ -586,7 +606,7 @@ class PluginPolicy:
             return Admission(False, "pull_request_not_open")
         if pull_request.author_login.casefold() != target.owner_login.casefold():
             return Admission(False, "author_not_allowed")
-        if not any(
+        if target.branch_prefixes and not any(
             pull_request.head_ref_name.startswith(prefix)
             for prefix in target.branch_prefixes
         ):
@@ -639,7 +659,10 @@ def _parse_target(raw: object) -> RepositoryTarget:
     path = Path(_nonempty_string(raw["local_path"], "local_path"))
     if not path.is_absolute() or not path.is_dir() or not _is_git_worktree(path):
         raise ValueError("local_path must be an existing local Git repository")
-    prefixes = _string_list(raw["branch_prefixes"], "branch_prefixes")
+    # An empty prefix list means all branches in an admitted repository.  Keep
+    # the repository, reviewer, and exact-head gates authoritative; branch
+    # prefixes are only an optional narrowing filter.
+    prefixes = _optional_string_list(raw["branch_prefixes"], "branch_prefixes")
     if any(
         prefix.startswith("refs/") or any(char.isspace() for char in prefix)
         for prefix in prefixes
@@ -1301,6 +1324,7 @@ def load_policy(raw: object) -> PluginPolicy:
         "merge_maintainers",
         "repair_steward",
         "release_maintenance",
+        "release_maintenances",
         "github_identity",
         "github_actions_permissions_identity",
     }
@@ -1368,8 +1392,10 @@ def load_policy(raw: object) -> PluginPolicy:
         ):
             raise ValueError("merge_maintainers must be a non-empty list")
         merge_policies = tuple(
-            _parse_merge_maintainer(item, targets=targets)
+            policy
             for item in raw_merge_policies
+            for policy in (_parse_merge_maintainer(item, targets=targets),)
+            if policy is not None
         )
         if len({item.repository for item in merge_policies}) != len(merge_policies):
             raise ValueError("merge_maintainers repositories must be unique")
@@ -1389,6 +1415,33 @@ def load_policy(raw: object) -> PluginPolicy:
             raise ValueError(
                 "budget-exhausted CI substitution requires required, audit-only, no-post local CI"
             )
+    singular_release_policy = (
+        _parse_release_maintenance(raw["release_maintenance"], targets=targets)
+        if "release_maintenance" in raw
+        else None
+    )
+    raw_release_policies = raw.get("release_maintenances")
+    if singular_release_policy is not None and raw_release_policies is not None:
+        raise ValueError("use release_maintenance or release_maintenances, not both")
+    if raw_release_policies is None:
+        release_policies = (
+            (singular_release_policy,) if singular_release_policy is not None else ()
+        )
+    else:
+        if (
+            isinstance(raw_release_policies, (str, bytes))
+            or not isinstance(raw_release_policies, Sequence)
+            or not raw_release_policies
+        ):
+            raise ValueError("release_maintenances must be a non-empty list")
+        release_policies = tuple(
+            policy
+            for item in raw_release_policies
+            for policy in (_parse_release_maintenance(item, targets=targets),)
+            if policy is not None
+        )
+        if len({item.repository for item in release_policies}) != len(release_policies):
+            raise ValueError("release_maintenances repositories must be unique")
     github_identity = (
         _parse_github_identity(
             raw["github_identity"],
@@ -1429,12 +1482,9 @@ def load_policy(raw: object) -> PluginPolicy:
             if "repair_steward" in raw
             else None
         ),
-        release_maintenance=(
-            _parse_release_maintenance(raw["release_maintenance"], targets=targets)
-            if "release_maintenance" in raw
-            else None
-        ),
+        release_maintenance=singular_release_policy,
         merge_maintainers=merge_policies,
+        release_maintenances=release_policies,
         github_identity=github_identity,
         github_actions_permissions_identity=(
             _parse_github_actions_permissions_identity(

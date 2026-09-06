@@ -150,17 +150,24 @@ class RepairController:
         self._owner = f"repair-scanner-{uuid4().hex}"
         self._base_refresher = base_refresher or DeterministicBaseRefresher(github)
 
-    def scan(self) -> RepairScanResult:
+    def scan(self, *, conflicts_only: bool = False, retry_receipt: FeedbackReceipt | None = None, scoped_target: tuple[str, int, str] | None = None) -> RepairScanResult:
         configured = self._policy.repair_steward
         if configured is None:
             return RepairScanResult(0, {}, False)
+        if scoped_target is not None and (scoped_target[0] not in configured.repositories or retry_receipt is not None):
+            raise ValueError("scoped repair requires a configured repository and cannot retry a receipt")
         created = 0
         skipped: Counter[str] = Counter()
         degraded = False
         for repository in sorted(configured.repositories):
+            if scoped_target is not None and repository != scoped_target[0]:
+                continue
+            if retry_receipt is not None and repository != retry_receipt.repository:
+                continue
             base_refresh_slots_used = 0
             target = self._policy.targets[repository]
             merge_policy = self._policy.merge_policy_for(repository)
+            branch_heads: dict[str, str] = {}
             base_head: str | None = None
             if merge_policy is not None and merge_policy.repository == repository:
                 try:
@@ -178,6 +185,15 @@ class RepairController:
                 skipped["github_state_unavailable"] += 1
                 degraded = True
                 continue
+            if scoped_target is not None:
+                pulls = tuple(pull for pull in pulls if pull.number == scoped_target[1])
+                if not pulls:
+                    skipped["target_not_open"] += 1
+                elif pulls[0].head_sha != scoped_target[2]:
+                    skipped["head_changed"] += 1
+                    continue
+            if retry_receipt is not None:
+                pulls = tuple(pull for pull in pulls if pull.number == retry_receipt.pr_number)
             pulls = tuple(
                 sorted(
                     pulls,
@@ -228,9 +244,12 @@ class RepairController:
                 if pull.head_sha != listed.head_sha:
                     skipped["head_changed"] += 1
                     continue
-                if pull.head_repository != target.head_repository or not any(
-                    pull.head_ref_name.startswith(prefix)
-                    for prefix in target.branch_prefixes
+                if pull.head_repository != target.head_repository or (
+                    target.branch_prefixes
+                    and not any(
+                        pull.head_ref_name.startswith(prefix)
+                        for prefix in target.branch_prefixes
+                    )
                 ):
                     skipped["branch_not_allowed"] += 1
                     continue
@@ -246,7 +265,7 @@ class RepairController:
                     checks,
                     base_refresh_required=base_refresh_required,
                 )
-                if checks.actions_enabled and checks.action_required:
+                if retry_receipt is None and checks.actions_enabled and checks.action_required:
                     # Independent of every other trigger above: no repair
                     # commit or merge can clear GitHub's own action_required
                     # conclusion, so this always gets its own escalation card
@@ -270,16 +289,38 @@ class RepairController:
                 if not triggers:
                     skipped["no_repair_trigger"] += 1
                     continue
+                if conflicts_only:
+                    if "merge_conflict" not in triggers:
+                        skipped["non_conflict_deferred"] += 1
+                        continue
+                    if not base_refresh_required:
+                        if base_refresh_slots_used >= configured.max_base_refresh_in_flight:
+                            skipped["base_refresh_serialized"] += 1
+                            continue
                 mode = "report" if configured.report_only else "repair"
                 trigger_id = f"{mode}:{'+'.join(triggers)}"
                 target_base_sha = base_head if base_refresh_required else None
+                if "merge_conflict" in triggers and target_base_sha is None:
+                    try:
+                        if pull.base_branch not in branch_heads:
+                            branch_heads[pull.base_branch] = self._github.get_branch_head(
+                                repository, pull.base_branch
+                            )
+                        target_base_sha = branch_heads[pull.base_branch]
+                    except Exception:
+                        skipped["base_state_unavailable"] += 1
+                        degraded = True
+                        continue
                 if target_base_sha is not None:
                     trigger_id = f"{trigger_id}:target-base:{target_base_sha}"
                 receipt = FeedbackReceipt(
                     repository, pull.number, "pr_repair", trigger_id, pull.head_sha
                 )
+                if retry_receipt is not None and receipt != retry_receipt:
+                    skipped["retry_identity_changed"] += 1
+                    continue
                 claimed_at = self._clock()
-                lease = _claim_with_orphan_recovery(
+                lease = self._ledger.retry(receipt, owner=self._owner, claimed_at=claimed_at) if retry_receipt else _claim_with_orphan_recovery(
                     self._ledger,
                     self._kanban,
                     receipt,
@@ -290,7 +331,7 @@ class RepairController:
                 )
                 if lease is None:
                     if (
-                        base_refresh_required
+                        (base_refresh_required or conflicts_only)
                         and _has_active_base_refresh_binding(
                             self._ledger,
                             self._kanban,
@@ -301,7 +342,7 @@ class RepairController:
                         base_refresh_slots_used += 1
                     skipped["duplicate"] += 1
                     continue
-                if base_refresh_required:
+                if base_refresh_required or conflicts_only:
                     base_refresh_slots_used += 1
                 try:
                     prepared = _prepare_receipt_worktree_with_overflow(
@@ -644,8 +685,10 @@ def _repair_task(
             "equal every expected identity field. "
             f"For a merge conflict or base_refresh_required trigger, run exactly "
             f"`git fetch --quiet --no-tags --no-recurse-submodules "
-            f"https://github.com/{receipt.repository}.git refs/heads/{pull.base_branch}` and require "
-            f"`FETCH_HEAD` to equal the target base SHA `{target_base_sha or pull.base_sha}`. Then, "
+            f"https://github.com/{receipt.repository}.git {target_base_sha or pull.base_sha}` and require "
+            f"`git cat-file -e {target_base_sha or pull.base_sha}^{{commit}}` to succeed. "
+            "The mutable base branch must not be fetched or used as the target; verify the "
+            "pinned object directly. Then, "
             "while remaining on the already verified head branch, run this literal command without "
             f"appending any words or arguments: `git merge --no-ff --no-edit "
             f"{target_base_sha or pull.base_sha}`. Never reset, rebase, checkout or merge a mutable local branch "

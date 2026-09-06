@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .ci_contract import manifest_path as ci_manifest_path
+
 import json
 import re
 import shlex
@@ -491,13 +493,15 @@ class LocalGitRepository:
 
         repository_root = repository.resolve(strict=True)
         workspace_root = workspace.resolve(strict=True)
-        source = repository / ".venv"
+        from .worktree_venv import select_environment
+
         destination = workspace / ".venv"
+        managed_venv_root = (repository_root.parent / "venvs").resolve(strict=False)
+        governed_roots = (_LUNABOT_ROOT / ".venv", managed_venv_root)
+        source = select_environment(repository, workspace, (repository_root, *governed_roots))
         if not source.exists():
             return
         resolved_source = source.resolve(strict=True)
-        managed_venv_root = (repository_root.parent / "venvs").resolve(strict=False)
-        governed_roots = (_LUNABOT_ROOT / ".venv", managed_venv_root)
         is_governed_root = resolved_source.is_relative_to(repository_root) or any(
             resolved_source == root or resolved_source.is_relative_to(root)
             for root in governed_roots
@@ -512,53 +516,31 @@ class LocalGitRepository:
             try:
                 resolved_destination = destination.resolve(strict=True)
             except FileNotFoundError:
-                original_target = os.readlink(destination)
-                try:
-                    tracked = subprocess.run(
-                        (
-                            "git",
-                            "-C",
-                            str(workspace_root),
-                            "ls-files",
-                            "--stage",
-                            "--",
-                            ".venv",
-                        ),
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                except (OSError, subprocess.TimeoutExpired) as error:
-                    raise RuntimeError(
-                        "receipt worktree virtualenv ownership is unavailable"
-                    ) from error
-                if tracked.returncode != 0 or tracked.stdout.strip():
-                    raise RuntimeError(
-                        "receipt worktree virtualenv target is inconsistent"
-                    )
-                replacement = workspace / ".venv.hermes-repair"
-                if replacement.exists() or replacement.is_symlink():
-                    raise RuntimeError(
-                        "receipt worktree virtualenv repair path is occupied"
-                    )
-                os.symlink(resolved_source, replacement, target_is_directory=True)
-                try:
-                    if (
-                        not destination.is_symlink()
-                        or os.readlink(destination) != original_target
-                    ):
-                        raise RuntimeError(
-                            "receipt worktree virtualenv target changed during repair"
-                        )
-                    os.replace(replacement, destination)
-                finally:
-                    if replacement.is_symlink():
-                        replacement.unlink()
+                resolved_destination = None
+            if resolved_destination == resolved_source:
                 return
-            if resolved_destination != resolved_source:
+            if resolved_destination is not None:
+                owned_candidates = [repository / ".venv", repository / "venv", *repository.glob("venv-*")]
+                if not any(candidate.resolve() == resolved_destination for candidate in owned_candidates):
+                    raise RuntimeError("receipt worktree virtualenv target is inconsistent")
+            original_target = os.readlink(destination)
+            tracked = subprocess.run(
+                ["git", "-C", str(workspace_root), "ls-files", "--stage", "--", ".venv"],
+                check=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+            )
+            if tracked.returncode != 0 or tracked.stdout.strip():
                 raise RuntimeError("receipt worktree virtualenv target is inconsistent")
+            replacement = workspace / ".venv.hermes-repair"
+            if replacement.exists() or replacement.is_symlink():
+                raise RuntimeError("receipt worktree virtualenv repair path is occupied")
+            os.symlink(resolved_source, replacement, target_is_directory=True)
+            try:
+                if not destination.is_symlink() or os.readlink(destination) != original_target:
+                    raise RuntimeError("receipt worktree virtualenv target changed during repair")
+                os.replace(replacement, destination)
+            finally:
+                if replacement.is_symlink():
+                    replacement.unlink()
             return
         if destination.exists():
             raise RuntimeError("receipt worktree virtualenv target is inconsistent")
@@ -993,7 +975,10 @@ class PooledLocalGitRepository:
                 "--untracked-files=all",
             ])
             venv = workspace / ".venv"
-            governed_link = venv.is_symlink() and venv.resolve() == (path / ".venv").resolve()
+            governed_link = venv.is_symlink() and any(
+                venv.resolve() == candidate.resolve()
+                for candidate in [path / ".venv", path / "venv", *path.glob("venv-*")]
+            )
             dirty = [
                 line for line in status.splitlines()
                 if not (governed_link and line == "?? .venv")
@@ -1194,6 +1179,7 @@ class ScanController:
                 local_ci_policy is not None
                 and local_ci_policy.applies_to(repository)
                 and not budget_local_ci
+                and not local_ci_policy.required_for_open_prs
             ):
                 try:
                     actions_enabled = self._github.actions_enabled(repository)
@@ -1630,21 +1616,22 @@ class ScanController:
         if audit_policy is None or not audit_policy.applies_to(current.base_repository):
             return "local_ci_disabled"
         try:
-            checks = (
-                self._github.get_check_state(
-                    current.base_repository,
-                    current.head_sha,
-                    actions_enabled_hint=True,
+            if not audit_policy.required_for_open_prs:
+                checks = (
+                    self._github.get_check_state(
+                        current.base_repository,
+                        current.head_sha,
+                        actions_enabled_hint=True,
+                    )
+                    if self._policy.uses_budget_exhausted_local_ci(
+                        current.base_repository
+                    )
+                    else self._github.get_check_state(
+                        current.base_repository, current.head_sha
+                    )
                 )
-                if self._policy.uses_budget_exhausted_local_ci(
-                    current.base_repository
-                )
-                else self._github.get_check_state(
-                    current.base_repository, current.head_sha
-                )
-            )
-            if checks.actions_enabled and not checks.billing_blocked:
-                return "github_ci_enabled"
+                if checks.actions_enabled and not checks.billing_blocked:
+                    return "github_ci_enabled"
             feedback_items = self._github.list_feedback(
                 current.base_repository, current.number
             )
@@ -2663,7 +2650,7 @@ def _required_local_ci_backlog_count(
     )
     if not admitted:
         return 0
-    manifest_path = target.local_path / "tests" / "manifests" / "test_lanes.toml"
+    manifest_path = ci_manifest_path(target.local_path)
     try:
         manifest_digest = sha256(manifest_path.read_bytes()).hexdigest()
     except OSError:
@@ -2786,7 +2773,7 @@ def _has_current_passed_ci_receipt(
 
     if pull.base_sha is None:
         return False
-    manifest_path = target.local_path / "tests" / "manifests" / "test_lanes.toml"
+    manifest_path = ci_manifest_path(target.local_path)
     try:
         manifest_digest = sha256(manifest_path.read_bytes()).hexdigest()
         receipt = ledger.latest_ci_receipt(
@@ -2904,8 +2891,11 @@ def _task(
         "acknowledge the exact receipt and complete. Do not retry a tool-blocked command; use one "
         "literal repository-owned command or stop with its exact blocker. Validate the reported issue "
         "against the exact receipt worktree before editing. If confirmed, make only the bounded fix, "
-        "run focused verification, commit and push to the verified PR head branch, and post a factual "
-        "PR reply with the commit and test evidence"
+        "run focused verification, commit and push to the verified PR head branch, and publish one "
+        "factual PR reply with the commit and test evidence only through the governed command "
+        + f"`{_governed_command_prefix(control_home)} post-comment --repository "
+        f"{shlex.quote(receipt.repository)} --pr-number {receipt.pr_number} --head-sha "
+        "<full literal resolved head SHA> --body <one literal UTF-8 Markdown argument>`"
         + (
             f", starting with the exact line `{pr_repair_attribution_line(routing.assignee)}` "
             "on its own line so this repository can always tell an automated Hermes reply apart "
@@ -2915,6 +2905,9 @@ def _task(
         )
         + " ending with the neutral marker `<!-- pr-maintenance-receipt:v1 status=completed "
         f"kind={receipt.feedback_kind} head=<full literal resolved head SHA> -->`. "
+        "The reply body must be literal UTF-8 Markdown: never Base64-encode, JSON-serialize, or "
+        "otherwise encode the entire comment; Base64 is reserved for binary file transport. Do not "
+        "use `gh pr review` or a raw GitHub write for this reply. "
         "Before any GitHub write, re-read the canonical PR "
         "and require that its head still equals the expected receipt SHA; otherwise stop fail-closed. "
         "Do not merge; merge remains controlled by deterministic safety gates. After the verified "
@@ -3141,7 +3134,8 @@ def _ci_failure_task(
         "identities before editing and immediately before every GitHub write. Run focused "
         "verification plus the affected CI lane. Keep all required checks, tests, validation, "
         "and safety gates intact. Commit and push normally to the existing verified PR head branch, "
-        "then post one factual reply with commit and test evidence"
+        "then publish one factual reply with commit and test evidence only through the governed "
+        "`post-comment` command using the exact resolved head SHA"
         + (
             f", starting with the exact line `{pr_repair_attribution_line(assignee)}` "
             "on its own line so this repository can always tell an automated Hermes fix apart "
@@ -3158,6 +3152,8 @@ def _ci_failure_task(
         f"pr_repair --feedback-id {shlex.quote(receipt.feedback_id)} --receipt-head-sha "
         f"{shlex.quote(receipt.head_sha)} --resolved-head-sha <full literal resolved head SHA>`. "
         "The factual reply must state that merge remains gated and no CI/safety gate was relaxed. "
+        "Write it as literal UTF-8 Markdown; never Base64-encode or JSON-serialize the entire comment body. "
+        "Do not use `gh pr review` or a raw GitHub write; use the governed `post-comment` command. "
         "End the reply with the neutral marker `<!-- pr-maintenance-receipt:v1 "
         "status=completed kind=ci_repair head=<full literal resolved head SHA> -->`. "
         "Never acknowledge before the push and reply both succeed."

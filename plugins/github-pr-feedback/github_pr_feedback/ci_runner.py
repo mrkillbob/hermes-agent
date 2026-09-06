@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands, hermes_coverage_gap, HERMES_ENV_CHECK
+
 import hashlib
 import json
 import os
@@ -16,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .github_client import CheckState, GitHubClient, PullRequestMergeState
+from .github_client import CheckState, GitHubClient, GitHubClientError, PullRequestMergeState
 from .ledger import CIRunLease, FeedbackLedger
 
 
@@ -375,7 +377,7 @@ class SubprocessCICommandRunner:
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as error:
-            return CompletedCommand(
+            result = CompletedCommand(
                 returncode=124,
                 stdout=str(error.stdout or ""),
                 stderr=str(error.stderr or ""),
@@ -383,20 +385,26 @@ class SubprocessCICommandRunner:
                 timed_out=True,
             )
         except OSError as error:
-            return CompletedCommand(
+            result = CompletedCommand(
                 returncode=127,
                 stdout="",
                 stderr=type(error).__name__,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 timed_out=False,
             )
-        return CompletedCommand(
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            timed_out=False,
-        )
+        else:
+            result = CompletedCommand(
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                timed_out=False,
+            )
+        from .ci_output import retain_output
+
+        retain_output(result.stdout)
+        retain_output(result.stderr)
+        return result
 
 
 class GitRepositoryInspector:
@@ -448,6 +456,7 @@ class LocalCIRunner:
         supervisor_pid: Callable[[], int] | None = None,
         pid_is_alive: Callable[[int], bool] | None = None,
         actions_enabled_hint: bool | None = None,
+        required_local_ci: bool = False,
     ) -> None:
         self._github = github
         self._ledger = ledger
@@ -460,8 +469,20 @@ class LocalCIRunner:
         if actions_enabled_hint is not None and not isinstance(actions_enabled_hint, bool):
             raise TypeError("actions_enabled_hint must be a boolean or None")
         self._actions_enabled_hint = actions_enabled_hint
+        self._required_local_ci = required_local_ci
 
     def _check_state(self, repository: str, head_sha: str) -> CheckState:
+        if self._required_local_ci:
+            # Required local evidence is independent of administrator-only
+            # settings access. Preserve verified disabled settings when available;
+            # a settings-only denial must never imply disabled/green Actions.
+            try:
+                enabled = self._github.actions_enabled(repository, refresh=True)
+            except GitHubClientError as error:
+                if error.code != "permission_denied":
+                    raise
+                enabled = True
+            return self._github.get_check_state(repository, head_sha, actions_enabled_hint=enabled)
         if self._actions_enabled_hint is None:
             return self._github.get_check_state(repository, head_sha)
         actions_enabled = self._github.actions_enabled(repository, refresh=True)
@@ -477,7 +498,7 @@ class LocalCIRunner:
         """Run exact-head CI under a durable, PID-backed single-owner lease."""
 
         resolved = Path(worktree).resolve()
-        manifest_path = resolved / "tests/manifests/test_lanes.toml"
+        manifest_path = ci_manifest_path(resolved)
         if not resolved.is_dir() or not manifest_path.is_file():
             raise CIValidationError("required CI owner files are missing")
         manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
@@ -569,14 +590,17 @@ class LocalCIRunner:
         worktree = Path(worktree).resolve()
         if not worktree.is_dir():
             raise CIValidationError("CI worktree does not exist")
-        manifest_path = worktree / "tests/manifests/test_lanes.toml"
+        manifest_path = ci_manifest_path(worktree)
         scripts = tuple(worktree / relative for relative in _REQUIRED_SCRIPTS)
-        if not manifest_path.is_file() or any(not script.is_file() for script in scripts):
+        if not manifest_path.is_file() or (
+            not is_hermes_contract(manifest_path.read_bytes())
+            and any(not script.is_file() for script in scripts)
+        ):
             raise CIValidationError("required CI owner files are missing")
         bootstrap_evidence = self._ensure_python_environment(worktree)
         manifest_bytes = manifest_path.read_bytes()
         manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
-        lanes = _required_lanes(manifest_bytes)
+        lanes = () if is_hermes_contract(manifest_bytes) else _required_lanes(manifest_bytes)
 
         initial_state = self._github.get_merge_state(identity.repository, identity.pr_number)
         initial_checks = self._check_state(identity.repository, identity.head_sha)
@@ -625,6 +649,12 @@ class LocalCIRunner:
                 )
             )
 
+        if is_hermes_contract(manifest_bytes):
+            try:
+                command_specs = hermes_commands(worktree, identity.base_sha, identity.head_sha, changed_files)
+            except ValueError as error:
+                raise CIValidationError(str(error)) from error
+
         evidence: list[CommandEvidence] = []
         if bootstrap_evidence is not None:
             evidence.append(bootstrap_evidence)
@@ -662,6 +692,9 @@ class LocalCIRunner:
         status = "passed" if len(evidence) == expected_command_count and all(
             item.returncode == 0 and not item.timed_out for item in evidence
         ) else "failed"
+        coverage_gap = hermes_coverage_gap(changed_files) if is_hermes_contract(manifest_bytes) else None
+        if coverage_gap:
+            status = "failed"
         failed_commands = tuple(
             item for item in evidence if item.returncode != 0 or item.timed_out
         )
@@ -689,7 +722,7 @@ class LocalCIRunner:
             commands=tuple(evidence),
             ci_mode=ci_mode,
             failure_reason=(
-                None
+                coverage_gap
                 if not failed_commands
                 else "failed command: "
                 + shlex.join(failed_commands[0].argv)
@@ -835,6 +868,20 @@ def actions_disabled_local_ci_evidence(
         or receipt.actions_state.billing_blocked
     ):
         return None
+    if is_hermes_contract(manifest_bytes):
+        expected = (
+            ("git", "diff", "--check", f"{receipt.identity.base_sha}..{receipt.identity.head_sha}"),
+            ("uv", "lock", "--check"),
+            HERMES_ENV_CHECK,
+            ("bash", "scripts/run_tests.sh"),
+        )
+        if len(receipt.commands) < len(expected) or any(
+            command.cwd != "." or command.argv != argv
+            for command, argv in zip(receipt.commands, expected)
+        ):
+            return None
+        return ActionsDisabledLocalCIEvidence(receipt.receipt_id, receipt.manifest_digest,
+                                             len(receipt.commands), len(expected))
     lanes = _required_lanes(manifest_bytes)
     required: list[tuple[str, ...]] = [
         ("scripts/check_ci_governance.py",),
