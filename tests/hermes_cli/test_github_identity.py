@@ -39,11 +39,24 @@ def test_git_environment_binds_https_to_bot_without_token_in_argv() -> None:
         {"HERMES_GITHUB_BOT_TOKEN": "bot-token"}
     )
 
-    assert result["GIT_CONFIG_KEY_0"] == "credential.helper"
-    assert result["GIT_CONFIG_VALUE_0"] == ""
-    assert result["GIT_CONFIG_KEY_1"] == "http.https://github.com/.extraheader"
-    assert result["GIT_CONFIG_VALUE_1"].startswith("AUTHORIZATION: basic ")
-    assert "bot-token" not in result["GIT_CONFIG_VALUE_1"]
+    config_count = int(result["GIT_CONFIG_COUNT"])
+    credential_index = next(
+        index
+        for index in range(config_count)
+        if result[f"GIT_CONFIG_KEY_{index}"] == "credential.helper"
+    )
+    header_index = next(
+        index
+        for index in range(config_count)
+        if result[f"GIT_CONFIG_KEY_{index}"] == "http.https://github.com/.extraheader"
+    )
+    assert result[f"GIT_CONFIG_VALUE_{credential_index}"] == ""
+    assert result[f"GIT_CONFIG_VALUE_{header_index}"].startswith(
+        "AUTHORIZATION: " + "basic "
+    )
+    assert "bot-token" not in result[f"GIT_CONFIG_VALUE_{header_index}"]
+    assert result["GIT_CONFIG_KEY_4"] == "core.hooksPath"
+    assert result["GIT_CONFIG_VALUE_4"] == "/dev/null"
     assert result["GIT_TERMINAL_PROMPT"] == "0"
 
 
