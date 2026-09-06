@@ -1028,6 +1028,8 @@ def _(rid, params: dict) -> dict:
                 if db.get_conversation_worktree(current) is not None:
                     root_session_id = current
                     break
+                if db.is_explicit_fork_child(current):
+                    break
                 row = db.get_session(current) or {}
                 current = str(row.get("parent_session_id") or "").strip()
             if root_session_id is None:

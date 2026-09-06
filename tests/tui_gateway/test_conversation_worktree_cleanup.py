@@ -24,6 +24,7 @@ class _DB:
     def __init__(self):
         self.record = _Record()
         self.deleted: list[str] = []
+        self.explicit_fork_children: set[str] = set()
 
     def get_conversation_worktree(self, root_session_id):
         return self.record if root_session_id == self.record.root_session_id else None
@@ -32,6 +33,9 @@ class _DB:
         if session_id == "tip":
             return {"parent_session_id": "root"}
         return None
+
+    def is_explicit_fork_child(self, session_id):
+        return session_id in self.explicit_fork_children
 
     def delete_session(self, target, *, sessions_dir):
         self.deleted.append(target)
@@ -135,6 +139,22 @@ def test_remove_requires_explicit_action_and_returns_verified_result(monkeypatch
     assert removed["result"]["removed"] is True
     assert manager.inspect_calls == [("root", False)]
     assert manager.remove_calls == [("root", False)]
+
+
+def test_explicit_fork_child_cannot_cleanup_ancestor_worktree(monkeypatch):
+    manager = _Manager(CleanupVerdict(allowed=True, reasons=()))
+    db = _DB()
+    db.explicit_fork_children.add("tip")
+    install(monkeypatch, manager, db)
+
+    response = call({"session_id": "tip", "action": "remove"})
+
+    assert response["error"] == {
+        "code": 4007,
+        "message": "conversation worktree binding not found",
+    }
+    assert manager.inspect_calls == []
+    assert manager.remove_calls == []
 
 
 def test_remove_failure_returns_stable_reason_phase_and_safe_message(monkeypatch):
