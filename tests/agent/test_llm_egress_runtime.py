@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,14 @@ from agent.llm_egress_runtime import (
     dispatch_authorized_agent_request,
 )
 from agent.source_provenance import SourceProvenanceRegistry
+
+
+_FEEDBACK_PLUGIN_PATH = Path(__file__).parents[2] / "plugins" / "github-pr-feedback"
+if str(_FEEDBACK_PLUGIN_PATH) not in sys.path:
+    sys.path.insert(0, str(_FEEDBACK_PLUGIN_PATH))
+from github_pr_feedback.egress_projection import register as register_feedback_egress_projection
+
+register_feedback_egress_projection()
 
 
 def _agent(tmp_path: Path, registry: SourceProvenanceRegistry | None = None):
