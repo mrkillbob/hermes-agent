@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.display import render_edit_diff_with_delta
 from hermes_cli import kanban_db as kb
 from hermes_cli import projects_db as pdb
 from hermes_cli.kanban_worker_watchdog import (
@@ -102,11 +103,21 @@ def test_edit_and_retest_is_progress_but_unchanged_retries_still_block(edit) -> 
 
 
 @pytest.mark.parametrize("prefix", ["╎", "│", "»"])
-@pytest.mark.parametrize("diff_line", ["+added.py", "# Moved: old.py → new.py"])
-def test_skin_and_file_operation_edits_reset_failure_loop(prefix: str, diff_line: str) -> None:
+@pytest.mark.parametrize(
+    "diff",
+    [
+        "--- /dev/null\n+++ b/added.py\n+content",
+        "# Moved: old.py -> new.py",
+    ],
+)
+def test_skin_and_file_operation_edits_reset_failure_loop(prefix: str, diff: str) -> None:
     failure = f"{prefix} 💻 $ scripts/run_tests.sh tests/test_a.py  1.2s [exit 1]"
     edit = f"{prefix} 🔧 patch module.py  0.3s"
-    log = f"{failure}\n{failure}\n{edit}\n┊ review diff\n{diff_line}\n{failure}"
+    rendered = []
+    assert render_edit_diff_with_delta(
+        "patch", json.dumps({"diff": diff}), print_fn=rendered.append
+    )
+    log = f"{failure}\n{failure}\n{edit}\n" + "\n".join(rendered) + f"\n{failure}"
 
     assert detect_log_finding(f"{failure}\n{failure}\n{failure}", _config()) is not None
     assert detect_log_finding(log, _config()) is None
