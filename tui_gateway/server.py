@@ -504,9 +504,10 @@ def _bind_conversation_worktree_on_submit(session: dict) -> None:
         if binding is None:
             return
         metadata = _conversation_worktree_metadata(binding)
-        session["conversation_worktree"] = metadata
-        session["conversation_root_lease"] = _acquire_conversation_root_lease(
+        root_lease = _acquire_conversation_root_lease(
             binding, surface=session.get("source") or "desktop")
+        session["conversation_worktree"] = metadata
+        session["conversation_root_lease"] = root_lease
         session["cwd"] = metadata["path"]
         session["explicit_cwd"] = True
         _register_session_cwd(session)

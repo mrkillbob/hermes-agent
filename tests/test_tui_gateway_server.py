@@ -221,6 +221,41 @@ def test_handoff_fail_marks_only_inflight_rows(monkeypatch):
         server._sessions.pop(sid, None)
 
 
+def test_submit_does_not_publish_worktree_before_root_lease(monkeypatch):
+    class DbContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    session = {
+        "session_key": "draft-key",
+        "source": "desktop",
+        "conversation_worktree": {},
+        "conversation_root_lease": None,
+    }
+    binding = object()
+    metadata = {"root_session_id": "draft-key", "path": "/tmp/draft"}
+
+    monkeypatch.setattr(server, "_session_db", lambda _session: DbContext())
+    monkeypatch.setattr(server, "_bind_conversation_worktree_for_new_root", lambda *args, **kwargs: binding)
+    monkeypatch.setattr(server, "_conversation_worktree_metadata", lambda _binding: metadata)
+
+    def fail_acquire(_binding, *, surface):
+        assert surface == "desktop"
+        raise RuntimeError("lease unavailable")
+
+    monkeypatch.setattr(server, "_acquire_conversation_root_lease", fail_acquire)
+
+    with pytest.raises(RuntimeError, match="lease unavailable"):
+        server._bind_conversation_worktree_on_submit(session)
+
+    assert session["conversation_worktree"] == {}
+    assert session["conversation_root_lease"] is None
+    assert "cwd" not in session
+
+
 def test_dashboard_process_isolation_config_defaults_without_default_merge(monkeypatch):
     """tui_gateway.server::_load_cfg is raw YAML, so defaults live at read site."""
     monkeypatch.setattr(server, "_load_cfg", lambda: {})
