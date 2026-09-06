@@ -4424,6 +4424,22 @@ def test_metadata_labels_add_all_matching_areas_without_claiming_readiness(tmp_p
     ledger.close()
 
 
+@pytest.mark.parametrize("label", ["STATUS/security", "Priority/high", "CI-REVIEWED"])
+def test_metadata_rules_reject_case_insensitive_authority_labels(label):
+    from github_pr_feedback.metadata_labels import parse_metadata_rules
+
+    rule = {
+        "label": label,
+        "repositories": ["acme/widgets"],
+        "title_terms": ["fix"],
+        "path_patterns": [],
+        "color": "123456",
+        "description": "Advisory metadata",
+    }
+    with pytest.raises(ValueError, match="evidence and authority"):
+        parse_metadata_rules([rule])
+
+
 def test_label_reconciliation_skips_read_only_repository_before_writes(tmp_path):
     local_path, sha = initialized_repository(tmp_path)
     policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z", agent_labels=True)

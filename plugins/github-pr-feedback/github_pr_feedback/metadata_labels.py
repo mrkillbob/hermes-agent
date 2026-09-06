@@ -40,7 +40,8 @@ def parse_metadata_rules(raw):
         label = rule["label"]
         if not isinstance(label, str) or not label.strip() or len(label) > 50 or "," in label:
             raise ValueError("invalid metadata label")
-        if label.startswith(("status/", "priority/")) or label == "ci-reviewed":
+        normalized_label = label.casefold()
+        if normalized_label.startswith(("status/", "priority/")) or normalized_label == "ci-reviewed":
             raise ValueError("evidence and authority labels cannot be inferred from text or paths")
         if not rule["repositories"] or not (rule["title_terms"] or rule["path_patterns"]):
             raise ValueError("metadata rules require explicit repositories and selectors")
