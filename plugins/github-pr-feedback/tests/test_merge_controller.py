@@ -4,6 +4,7 @@ import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -20,6 +21,7 @@ from github_pr_feedback.ci_runner import (
 from github_pr_feedback.github_client import (
     CheckState,
     Feedback,
+    GitHubClient,
     GitHubClientError,
     PullRequestMergeState,
     RepositoryMergePolicy,
@@ -35,6 +37,11 @@ from github_pr_feedback.merge_controller import (
     evaluate_merge,
 )
 from github_pr_feedback.policy import MergeMaintainerPolicy, Reviewer, load_policy
+from github_pr_feedback.policy import (
+    GitHubIdentityPolicy,
+    PluginPolicy,
+    RepositoryTarget,
+)
 
 
 BASE_SHA = "b" * 40
@@ -590,6 +597,56 @@ def test_governed_bot_approval_receipt_requires_identity_event_and_exact_head() 
         expected_login="mrkillbobbot",
         head_sha=HEAD_SHA,
     )
+
+
+def test_feedback_clear_exempts_configured_publisher_completion_receipt(
+    tmp_path: Path,
+) -> None:
+    repository = "acme/widgets"
+    plugin_policy = PluginPolicy(
+        enabled=True,
+        targets={
+            repository: RepositoryTarget(
+                repository, repository, tmp_path, "owner", ("codex/",)
+            )
+        },
+        reviewer_logins=frozenset(),
+        reviewer_associations=frozenset(),
+        include_self_feedback=False,
+        include_bot_feedback=True,
+        auto_dispatch=False,
+        not_before=None,
+        assignee="fallback",
+        board="Pull Request Maintenance",
+        merge_maintainer=policy(),
+        github_identity=GitHubIdentityPolicy("publisher", "BOT_TOKEN"),
+    )
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    source = CanonicalMergeEvidenceSource(
+        plugin_policy, cast("GitHubClient", object()), ledger
+    )
+    body = (
+        f"Base refresh completed. Merged base {BASE_SHA} and pushed {HEAD_SHA}. "
+        "Focused verification: 16 passed."
+    )
+    publisher_receipt = Feedback(
+        "issue_comment",
+        "publisher-receipt",
+        Reviewer("publisher", "OWNER"),
+        body,
+        NOW,
+        True,
+    )
+    other_bot_feedback = replace(
+        publisher_receipt,
+        feedback_id="other-bot-feedback",
+        reviewer=Reviewer("other-bot", "MEMBER"),
+        body="Fix the missing error handling.",
+    )
+
+    assert source._feedback_clear(pr_state(), (publisher_receipt,)) is True
+    assert source._feedback_clear(pr_state(), (other_bot_feedback,)) is False
+    ledger.close()
 
 
 def test_merge_controller_rereads_under_lease_and_stops_on_a_race(tmp_path: Path) -> None:
