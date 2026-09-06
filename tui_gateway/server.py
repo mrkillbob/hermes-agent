@@ -36,6 +36,10 @@ from tui_gateway._env import env_float, env_int
 from tui_gateway.turn_marker import clear_turn_marker, read_turn_marker, record_turn_start  # noqa: F401
 from tui_gateway.transport import (StdioTransport, Transport, bind_transport, current_transport, reset_transport)
 
+# Compatibility seam for split session handlers and their tests.  Keep the
+# legacy helper name while the implementation lives in the shared git probe.
+_git_branch_for_cwd = git_probe.branch
+
 logger = logging.getLogger(__name__)
 
 _hermes_home = get_hermes_home()
@@ -415,6 +419,104 @@ def _open_profile_session_db(profile_home):
         return acquire(db_path)
     except Exception as exc:
         raise RuntimeError(f"profile session store unavailable: {db_path}: {exc}") from exc
+
+
+def _conversation_worktree_metadata(binding) -> dict:
+    """Return the UI/prompt-safe projection of a certified binding."""
+    return {"root_session_id": str(binding.root_session_id), "path": str(binding.path),
+            "branch": str(binding.branch), "base_commit": str(binding.base_commit)}
+
+
+def _acquire_conversation_root_lease(binding, *, surface: str):
+    from agent.conversation_worktree import acquire_conversation_root_lease
+    return acquire_conversation_root_lease(root_session_id=str(binding.root_session_id),
+                                           worktree_path=Path(binding.path),
+                                           repo_common_dir=Path(binding.repo_common_dir), surface=surface)
+
+
+def _conversation_worktree_manager(*, profile_home=None, db=None):
+    """Construct the policy-governed manager against the owning profile DB."""
+    owns_db = False
+    home_token = set_hermes_home_override(str(profile_home)) if profile_home else None
+    try:
+        from agent.conversation_worktree import ConversationWorktreeError, ConversationWorktreeManager
+        from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+        policy = resolve_conversation_worktree_policy(_load_cfg())
+        if not policy.enabled:
+            return None, db, owns_db
+        if db is None:
+            if profile_home:
+                db = _open_profile_session_db(profile_home)
+                owns_db = True
+            else:
+                db = _get_db()
+        if db is None:
+            raise ConversationWorktreeError("state.db is unavailable", phase="state")
+        return ConversationWorktreeManager(policy, db), db, owns_db
+    except Exception:
+        if owns_db and db is not None:
+            with contextlib.suppress(Exception):
+                db.close()
+        raise
+    finally:
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
+def _bind_new_interactive_conversation_worktree(root_session_id: str, *, profile_home=None, db=None):
+    """Create/recover one worktree for a brand-new interactive root only."""
+    manager = owned_db = None
+    owns_db = False
+    try:
+        manager, owned_db, owns_db = _conversation_worktree_manager(profile_home=profile_home, db=db)
+        return None if manager is None else manager.bind_new_root_session(
+            root_session_id, conversation_kind="interactive")
+    finally:
+        if owns_db and owned_db is not None:
+            with contextlib.suppress(Exception):
+                owned_db.close()
+
+
+def _resolve_existing_conversation_worktree(root_session_id: str, *, profile_home=None, db=None):
+    """Resolve a ready binding without ever creating a worktree on resume."""
+    manager = owned_db = None
+    owns_db = False
+    try:
+        manager, owned_db, owns_db = _conversation_worktree_manager(profile_home=profile_home, db=db)
+        return None if manager is None else manager.resolve_existing_session(root_session_id)
+    finally:
+        if owns_db and owned_db is not None:
+            with contextlib.suppress(Exception):
+                owned_db.close()
+
+
+def _bind_conversation_worktree_for_new_root(root_session_id: str, *, profile_home=None, db=None):
+    """Named seam for root boundaries; distinct from continuation lookup."""
+    return _bind_new_interactive_conversation_worktree(root_session_id, profile_home=profile_home, db=db)
+
+
+def _resolve_conversation_worktree_for_resume(session_id: str, *, profile_home=None, db=None):
+    """Find the existing root binding for a compression continuation only."""
+    current, seen = str(session_id or "").strip(), set()
+    while current and current not in seen:
+        seen.add(current)
+        binding = _resolve_existing_conversation_worktree(current, profile_home=profile_home, db=db)
+        if binding is not None:
+            return binding
+        if db is None or not hasattr(db, "get_session"):
+            return None
+        if db.is_explicit_fork_child(current):
+            return None
+        current = str((db.get_session(current) or {}).get("parent_session_id") or "").strip()
+    return None
+
+
+def _conversation_worktree_prompt_fragment(metadata: dict | None) -> str:
+    if not isinstance(metadata, dict) or not metadata.get("path"):
+        return ""
+    return ("This interactive conversation is isolated in a certified Git worktree. "
+            f"Use {metadata['path']} as its workspace (branch {metadata.get('branch') or 'unknown'}, "
+            f"base {metadata.get('base_commit') or 'unknown'}). Do not switch to the stable source checkout.")
 
 
 @contextlib.contextmanager
@@ -2260,7 +2362,8 @@ def _make_agent(
     sid: str, key: str, session_id: str | None = None, session_db=None,
     model_override: dict | str | None = None, provider_override: str | None = None,
     reasoning_config_override: dict | None = None, service_tier_override: str | None = None,
-    platform_override: str | None = None, context_cwd_is_launch_artifact: bool | None = None):
+    platform_override: str | None = None, context_cwd_is_launch_artifact: bool | None = None,
+    conversation_worktree: dict | None = None):
     # AC-4 test seam: dead unless armed by the isolated certify harness.
     from tui_gateway.synthetic_turn import maybe_build_synthetic_agent
     synthetic = maybe_build_synthetic_agent(session_id or key, model_override)
@@ -2274,29 +2377,41 @@ def _make_agent(
             importlib.import_module(_mod).wait_for_mcp_discovery()
     cfg = _load_cfg()
     system_prompt = _startup_system_prompt(cfg, session_id or key)
+    if conversation_worktree is None:
+        with _sessions_lock:
+            conversation_worktree = (_sessions.get(sid) or {}).get("conversation_worktree")
+    worktree_note = _conversation_worktree_prompt_fragment(conversation_worktree)
+    if worktree_note:
+        system_prompt = "\n\n".join(part for part in (system_prompt, worktree_note) if part)
     model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
     _pr = _load_provider_routing()
     platform = _resolve_agent_platform(platform_override)
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
-    agent = AIAgent(
-        model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
-        base_url=runtime.get("base_url"), api_key=runtime.get("api_key"), api_mode=runtime.get("api_mode"),
-        acp_command=runtime.get("command"), acp_args=runtime.get("args"),
-        credential_pool=runtime.get("credential_pool"), quiet_mode=True,
-        verbose_logging=False,  # DEBUG agent logging; independent of tool_progress_mode
-        reasoning_config=(
-            reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
-        service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
-        enabled_toolsets=_load_enabled_toolsets(platform),
-        # OpenRouter provider_routing prefs (gateway + CLI parity).
-        providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
-        provider_sort=_pr.get("sort"), provider_require_parameters=_pr.get("require_parameters", False),
-        provider_data_collection=_pr.get("data_collection"), platform=platform, session_id=session_id or key,
-        session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
-        checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
-        pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
-        skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
-        **_agent_cbs(sid))
+    from agent.runtime_cwd import set_session_cwd
+    cwd_token = set_session_cwd(conversation_worktree["path"]) if conversation_worktree else None
+    try:
+        agent = AIAgent(
+            model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
+            base_url=runtime.get("base_url"), api_key=runtime.get("api_key"), api_mode=runtime.get("api_mode"),
+            acp_command=runtime.get("command"), acp_args=runtime.get("args"),
+            credential_pool=runtime.get("credential_pool"), quiet_mode=True,
+            verbose_logging=False,  # DEBUG agent logging; independent of tool_progress_mode
+            reasoning_config=(
+                reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
+            service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
+            enabled_toolsets=_load_enabled_toolsets(platform),
+            # OpenRouter provider_routing prefs (gateway + CLI parity).
+            providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
+            provider_sort=_pr.get("sort"), provider_require_parameters=_pr.get("require_parameters", False),
+            provider_data_collection=_pr.get("data_collection"), platform=platform, session_id=session_id or key,
+            session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
+            checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
+            pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
+            skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
+            **_agent_cbs(sid))
+    finally:
+        if cwd_token is not None:
+            cwd_token.var.reset(cwd_token)
     if context_cwd_is_launch_artifact is None:
         with _sessions_lock:
             context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(_sessions.get(sid))
@@ -2321,7 +2436,7 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
     try:
         if db is not None:
             row = db.get_session(key) if hasattr(db, "get_session") else None
-            if row and row.get("cwd") and not conversation_worktree:
+            if row and row.get("cwd") and not (_sessions.get(sid) or {}).get("conversation_worktree"):
                 with _sessions_lock:
                     if sid in _sessions:
                         _sessions[sid]["cwd"] = row["cwd"]
@@ -2339,10 +2454,12 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
 def _init_session(
     sid: str, key: str, agent, history: list, cols: int = 80, cwd: str | None = None,
     session_db=None, source: str | None = None, profile_home: str | None = None,
-    explicit_cwd: bool = False):
+    explicit_cwd: bool = False, conversation_worktree=None, conversation_root_lease=None):
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
+            "conversation_worktree": conversation_worktree or {},
+            "conversation_root_lease": conversation_root_lease,
             "agent": agent, "session_key": key, "history": history, "history_lock": threading.Lock(),
             "history_version": 0, "inflight_turn": None, "created_at": now, "last_active": now,
             "running": False, "attached_images": [], "image_counter": 0, "cwd": cwd or _completion_cwd(),
