@@ -85,27 +85,32 @@ def test_repeated_failed_tool_call_is_detected() -> None:
 
 
 @pytest.mark.parametrize(
-    "edit, prefix, diff",
+    "edit, prefix, diff, receipt",
     [
-        ("patch", "┊", "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n"),
-        ("write_file", "┊", "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n"),
-        ("skill_manage", "┊", "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n"),
-        ("patch", "╎", "--- /dev/null\n+++ b/added.py\n+content"),
-        ("patch", "│", "# Moved: old.py -> new.py"),
-        ("patch", "»", "--- /dev/null\n+++ b/added.py\n+content"),
-        ("patch", "CUSTOM PREFIX", "# Moved: old.py -> new.py"),
+        ("patch", "┊", "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n", ""),
+        ("write_file", "┊", "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n", ""),
+        ("skill_manage", "┊", "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n", ""),
+        ("patch", "╎", "--- /dev/null\n+++ b/added.py\n+content", ""),
+        ("patch", "│", "# Moved: old.py -> new.py", ""),
+        ("patch", "»", "--- /dev/null\n+++ b/added.py\n+content", ""),
+        ("patch", "CUSTOM PREFIX", "# Moved: old.py -> new.py", ""),
+        ("patch", "┊", "", "[edit landed]"),
+        ("write_file", "┊", "", "[edit landed]"),
     ],
 )
 def test_actual_edits_reset_failure_loop_but_unchanged_retries_still_block(
-    edit: str, prefix: str, diff: str
+    edit: str, prefix: str, diff: str, receipt: str
 ) -> None:
-    rendered = []
-    assert render_edit_diff_with_delta(
-        "patch", json.dumps({"diff": diff}),
-        print_fn=rendered.append,
-    )
     label = {"patch": "🔧 patch", "write_file": "✍️  write", "skill_manage": "⚡ skill_man"}[edit]
-    change = f"{prefix} {label} module.py  0.3s\n" + "\n".join(rendered)
+    if receipt:
+        change = f"{prefix} {label} module.py  0.3s {receipt}"
+    else:
+        rendered = []
+        assert render_edit_diff_with_delta(
+            "patch", json.dumps({"diff": diff}),
+            print_fn=rendered.append,
+        )
+        change = f"{prefix} {label} module.py  0.3s\n" + "\n".join(rendered)
     failure = f"{prefix} 💻 $ scripts/run_tests.sh tests/test_a.py  1.2s [exit 1]"
     log = f"{failure}\n{change}\n{failure}\n{change}\n{failure}"
     assert detect_log_finding(log, _config()) is None

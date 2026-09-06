@@ -30,6 +30,9 @@ _TOOL_PREFIX_RE = re.compile(
 _EDIT_SUCCESS_RE = re.compile(
     r"^.*(?:🔧\s+patch|✍️?\s+write|⚡\s+skill_man)\s+.*\d+(?:\.\d+)?s$"
 )
+_EDIT_LANDED_RE = re.compile(
+    r"^.*(?:🔧\s+patch|✍️?\s+write)\s+.*\d+(?:\.\d+)?s \[edit landed\]$"
+)
 _DIFF_MARKER_RE = re.compile(r"^.*review diff$")
 _DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @")
 _DIFF_CONTENT_RE = re.compile(r"^(?:@@\s|---\s|\+\+\+\s|[+-]|#\s+Moved:)")
@@ -189,7 +192,12 @@ def _failed_tool_finding(lines: list[str], threshold: int) -> Optional[WatchdogF
     edit_pending = False
     diff_pending = False
     for line in lines:
-        if _EDIT_SUCCESS_RE.fullmatch(line):
+        if _EDIT_LANDED_RE.fullmatch(line):
+            # The completion receipt proves the mutation landed even when the
+            # optional inline diff callbacks were disabled.
+            signatures.clear()
+            edit_pending = diff_pending = False
+        elif _EDIT_SUCCESS_RE.fullmatch(line):
             edit_pending = bool(_EDIT_SUCCESS_RE.fullmatch(line))
             diff_pending = False
         elif edit_pending and _DIFF_MARKER_RE.fullmatch(line):
