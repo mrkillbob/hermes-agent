@@ -1004,6 +1004,12 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
+            from tools.kanban_ci_guard import completion_block
+
+            ci_gate_err = completion_block(tid)
+            if ci_gate_err:
+                fail_msg[tid] = ci_gate_err
+                return False
             gate_err = _goal_gate_error(
                 conn, tid, (summary or args.result or "").strip(), "completion",
                 "Re-scope with kanban edit, or record the block with kanban block instead of completing.",
