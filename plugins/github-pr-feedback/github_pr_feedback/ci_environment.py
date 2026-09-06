@@ -13,10 +13,11 @@ def ci_environment(worktree: Path, additions=None, *, include_worktree_roots=Tru
         # checks. Remove inherited and caller-provided import paths entirely.
         env.pop("PYTHONPATH", None)
         return env
-    roots = [root]
+    roots = []
     scripts = (root / "scripts").resolve()
     if scripts.is_dir() and scripts.is_relative_to(root):
         roots.append(scripts)
+    roots.append(root)  # root after scripts preserves sibling-helper precedence
     # Replace inherited paths from the controller or another worktree. This
     # explicitly admits only the checked repository and its CLI helper folder;
     # PYTHONSAFEPATH remains in force for every other implicit import location.
