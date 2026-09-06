@@ -1595,8 +1595,9 @@ class ScanController:
             missing = {label: mapping for label, mapping in desired.items()
                        if label.casefold() not in existing_by_fold}
             owned_labels = {mapping.label.casefold() for mapping in label_policy.mappings}
-            owned_labels.update(rule.label.casefold() for rule in label_policy.metadata_rules
-                                if repository in rule.repositories)
+            if metadata_error is None:
+                owned_labels.update(rule.label.casefold() for rule in label_policy.metadata_rules
+                                    if repository in rule.repositories)
             stale = tuple(existing_by_fold[fold] for fold in owned_labels
                           if fold in existing_by_fold and fold not in {label.casefold() for label in desired})
             if not missing:

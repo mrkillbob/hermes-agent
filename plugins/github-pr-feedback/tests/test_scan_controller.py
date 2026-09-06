@@ -130,6 +130,7 @@ class FakeGitHub:
         self.feedback_calls: list[tuple[str, int]] = []
         self.branch_calls: list[tuple[str, str]] = []
         self.label_calls: list[tuple[str, int, tuple[str, ...]]] = []
+        self.removed_label_calls: list[tuple[str, int, str]] = []
         self.ensure_label_calls: list[tuple[str, str, str, str]] = []
         self.actions_are_enabled = True
         self.billing_blocked = False
@@ -207,6 +208,15 @@ class FakeGitHub:
 
     def can_label_repository(self, repository):
         return True
+
+    def remove_issue_label(self, repository: str, number: int, label: str) -> None:
+        self.removed_label_calls.append((repository, number, label))
+        current = self.current_by_number[number]
+        self.current_by_number[number] = replace(
+            current, labels=tuple(existing for existing in current.labels if existing != label)
+        )
+        if number == self.current.number:
+            self.current = self.current_by_number[number]
 
     def ensure_issue_label(
         self, repository: str, label: str, *, color: str, description: str, preserve_existing: bool = False
@@ -4491,7 +4501,10 @@ def test_incomplete_metadata_skips_only_affected_pr(tmp_path):
     policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z", agent_labels=True)
     rule = MetadataLabelRule("area/ci", ("acme/widgets",), (), (".github/**",), "123456", "CI files")
     policy = replace(policy, agent_labels=replace(policy.agent_labels, metadata_rules=(rule,)))
-    pulls = tuple(replace(admitted_pull_request(sha), number=n) for n in (1,2))
+    pulls = (
+        replace(admitted_pull_request(sha), number=1, labels=("area/ci",)),
+        replace(admitted_pull_request(sha), number=2),
+    )
     class MetadataGitHub(FakeGitHub):
         def get_pull_request_metadata(self, repository, number):
             if number == 1:
@@ -4504,4 +4517,5 @@ def test_incomplete_metadata_skips_only_affected_pr(tmp_path):
     assert [(number, set(labels)) for _,number,labels in github.label_calls] == [
         (1, {"codex"}), (2, {"codex", "area/ci"})
     ]
+    assert github.removed_label_calls == []
     ledger.close()
