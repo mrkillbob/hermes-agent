@@ -1537,6 +1537,10 @@ def _run_grouped_exact_head_audit(
     ).run((job,))[0]
     if outcome.error is not None or outcome.receipt is None:
         reason = outcome.error or "no receipt returned"
+        if reason.startswith("audit_deferred:"):
+            from .github_client import MergeStateStillComputingError
+
+            raise MergeStateStillComputingError(reason.partition(":")[2].strip())
         raise CIValidationError(f"grouped exact-head CI audit was unavailable: {reason}")
     return outcome.receipt
 
@@ -1624,6 +1628,15 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
             actions_enabled_hint=actions_enabled_hint,
             required_local_ci=policy.local_ci_audit.required_for_open_prs,
         )
+    except MergeStateStillComputingError:
+        print(
+            json.dumps(
+                {"status": "audit_deferred", "reason": "mergeable_state_still_computing",
+                 "retryable": True, "retry_after_seconds": 60},
+                sort_keys=True,
+            )
+        )
+        return_code = 1
     except (CIValidationError, GitHubClientError, LedgerStateError) as error:
         print(
             json.dumps(

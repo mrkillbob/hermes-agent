@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
-from .ci_runner import CIAuditIdentity, CIAuditReceipt
+from .ci_runner import CIAuditDeferred, CIAuditIdentity, CIAuditReceipt
 
 _MAX_PARALLEL_CI_AUDITS = 4
 
@@ -158,6 +158,8 @@ class GroupedCICoordinator:
     def _run_one(self, job: CIAuditJob, expected_manifest_digest: str) -> CIAuditOutcome:
         try:
             receipt = self._runner_factory().run(job.identity, job.worktree)
+        except CIAuditDeferred as error:
+            return CIAuditOutcome(job.identity, None, f"audit_deferred: {error}"[:1000])
         except Exception as error:  # noqa: BLE001 - preserve an outcome for every queued exact head.
             # Keep the typed exception and its bounded message in the outcome.
             # The caller cannot manufacture a receipt when the runner failed
