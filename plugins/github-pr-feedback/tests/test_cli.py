@@ -2168,6 +2168,84 @@ def profile_snapshot(root: Path) -> dict[str, tuple[int, int]]:
     }
 
 
+def test_merge_handoff_auto_enrolls_before_enrollment_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from github_pr_feedback.cli import _load_policy_from_context, _run_single_pr_merge_handoff
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": False,
+        "post_merge": {"enabled": False},
+        "auto_enroll_owned_prs": True,
+    }
+    policy = _load_policy_from_context(RecordingContext(settings))
+    pull = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        "a" * 40,
+        base_branch="stable",
+        base_sha="b" * 40,
+    )
+
+    class Ledger:
+        enrolled = False
+
+        def is_merge_enrolled(self, _repository: str, _pr_number: int) -> bool:
+            return self.enrolled
+
+    class GitHub:
+        def get_pull_request(self, repository: str, pr_number: int) -> PullRequest:
+            assert (repository, pr_number) == ("acme/widgets", 17)
+            return pull
+
+    admitted: list[tuple[PullRequest, ...]] = []
+
+    def enroll(policy, merge_policy, ledger: Ledger, pulls: tuple[PullRequest, ...]) -> int:
+        assert policy.merge_policy_for("acme/widgets") is merge_policy
+        admitted.append(pulls)
+        ledger.enrolled = True
+        return 1
+
+    class Controller:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run(self, number: int):
+            assert number == 17
+            return SimpleNamespace(
+                receipt=SimpleNamespace(
+                    tested_head_sha=pull.head_sha,
+                    method="squash",
+                    merge_commit_oid="c" * 40,
+                )
+            )
+
+    monkeypatch.setattr("github_pr_feedback.cli.enroll_owned_pulls", enroll)
+    monkeypatch.setattr("github_pr_feedback.cli.CanonicalMergeEvidenceSource", lambda *args: object())
+    monkeypatch.setattr("github_pr_feedback.cli.MergeController", Controller)
+
+    result = _run_single_pr_merge_handoff(
+        policy, Ledger(), 17, repository="acme/widgets", github=GitHub()
+    )
+
+    assert result["status"] == "merged"
+    assert admitted == [(pull,)]
+
+
 def test_ci_audit_handoff_completes_current_task_without_waiting_for_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
