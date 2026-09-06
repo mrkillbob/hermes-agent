@@ -41,6 +41,9 @@ def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple
     locked_packages = json.loads(root_lock.read_text()).get('packages', {}) if root_lock.is_file() else {}
     root_installed = False
     shared_changed = any(p.startswith('apps/shared/') or p in {'package.json', 'package-lock.json'} for p in changed)
+    desktop_changed = shared_changed or any(
+        p == _DESKTOP_PACKAGE or p.startswith(_DESKTOP_PACKAGE + '/') for p in changed
+    )
     for package in ('apps/desktop', 'apps/shared', 'ui-tui', 'web', 'website'):
         if not shared_changed and not any(p == package or p.startswith(package + '/') for p in changed):
             continue
@@ -49,10 +52,12 @@ def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple
             continue
         if package in locked_packages:
             if not root_installed:
-                commands.append((('npm', 'ci', '--ignore-scripts'), worktree, {}))
+                install = ('npm', 'ci') if desktop_changed else ('npm', 'ci', '--ignore-scripts')
+                commands.append((install, worktree, {}))
                 root_installed = True
         elif (root / 'package-lock.json').is_file():
-            commands.append((('npm', 'ci', '--ignore-scripts'), root, {}))
+            install = ('npm', 'ci') if package == _DESKTOP_PACKAGE else ('npm', 'ci', '--ignore-scripts')
+            commands.append((install, root, {}))
         else:
             raise ValueError(f'Hermes CI package lock missing: {package}')
         scripts = json.loads((root / 'package.json').read_text()).get('scripts', {})

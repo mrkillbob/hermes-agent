@@ -838,6 +838,9 @@ def test_hermes_native_contract_runs_desktop_native_check(tmp_path):
         tmp_path, BASE_SHA, HEAD_SHA, ("apps/desktop/src/App.tsx",)
     )
 
+    assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ("npm", "ci")] == [
+        (("npm", "ci"), tmp_path)
+    ]
     assert ("npm", "run", "check:test:desktop:all") in [
         argv for argv, _, _ in commands
     ]
@@ -854,7 +857,7 @@ def test_hermes_native_ci_uses_shared_workspace_lock_once(tmp_path):
         (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}))
     commands = hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ('apps/shared/src/client.ts',))
     assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ('npm', 'ci')] == [
-        (('npm', 'ci', '--ignore-scripts'), tmp_path)]
+        (('npm', 'ci'), tmp_path)]
     assert {cwd for argv, cwd, _ in commands if argv == ('npm', 'run', 'test')} == {
         tmp_path / package for package in packages}
 
