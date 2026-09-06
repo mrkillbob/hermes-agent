@@ -13,7 +13,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -242,6 +242,13 @@ class ScanResult:
     degraded: bool = False
     required_local_ci_backlog: int = 0
     local_ci_catalogue_deferred: int = 0
+
+
+def _dispatch_generation(task: KanbanTask, lease: ClaimLease) -> KanbanTask:
+    """Give a reclaimed receipt a fresh Kanban identity instead of reusing a done card."""
+    if not lease.reopened:
+        return task
+    return replace(task, idempotency_key=f"{task.idempotency_key}:dispatch-{lease.version}")
 
 
 def _bind_pooled_worktree_task(
@@ -1789,14 +1796,14 @@ class ScanController:
                 receipt, lease, prepared.path, prepared.expected_sha
             )
             task_id = self._kanban.create_or_get_task(
-                _ci_failure_task(
+                _dispatch_generation(_ci_failure_task(
                     self._policy,
                     receipt,
                     audit,
                     prepared,
                     assignee=assignee,
                     control_home=self._control_home,
-                )
+                ), lease)
             )
             _bind_pooled_worktree_task(
                 self._local_git, receipt, task_id, self._policy.board or ""
@@ -1913,13 +1920,13 @@ class ScanController:
                 prepared.expected_sha,
             )
             task_id = self._kanban.create_or_get_task(
-                _local_ci_task(
+                _dispatch_generation(_local_ci_task(
                     self._policy,
                     receipt,
                     prepared,
                     control_home=self._control_home,
                     post_results=audit_policy.post_results,
-                )
+                ), lease)
             )
             _bind_pooled_worktree_task(
                 self._local_git, receipt, task_id, self._policy.board or ""
@@ -2206,7 +2213,7 @@ class ScanController:
                 prepared.expected_sha,
             )
             task_id = self._kanban.create_or_get_task(
-                _task(
+                _dispatch_generation(_task(
                     self._policy,
                     receipt,
                     prepared,
@@ -2215,7 +2222,7 @@ class ScanController:
                     assignee_override=self._typed_ci_assignee(receipt, feedback.body),
                     labels=labels,
                     internal_intent_review=internal_intent_review,
-                )
+                ), lease)
             )
             _bind_pooled_worktree_task(
                 self._local_git, receipt, task_id, self._policy.board or ""

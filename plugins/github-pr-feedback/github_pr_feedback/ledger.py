@@ -65,6 +65,10 @@ class ClaimLease:
     owner: str
     claimed_at: datetime
     version: int
+    # True only when a closure-retired receipt is being re-admitted.  Ordinary
+    # retries must retain their idempotency key so a lost Kanban response can
+    # safely resolve to the original card.
+    reopened: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -967,7 +971,7 @@ class FeedbackLedger:
             )
             if reopened.rowcount != 1:
                 raise LedgerStateError("exact archived dispatch changed during replacement")
-            return ClaimLease(owner, claimed_at, version)
+            return ClaimLease(owner, claimed_at, version, reopened=True)
 
     def reopen_legacy_exact_dispatch(
         self,
@@ -1072,7 +1076,7 @@ class FeedbackLedger:
             )
             if reopened.rowcount != 1:
                 raise LedgerStateError("exact superseded dispatch changed during re-admission")
-            return ClaimLease(owner, claimed_at, version)
+            return ClaimLease(owner, claimed_at, version, reopened=True)
 
     def replace_archived_dispatches(
         self,
