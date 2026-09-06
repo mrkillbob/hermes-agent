@@ -44,14 +44,15 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
     if tool_name != "kanban_complete":
         return None
     worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
-    if not worker_task and ctx.get_config("enabled", default=False) is not True:
+    governed_local_ci = os.environ.get("HERMES_KANBAN_TASK_KIND", "").strip() == "pr_local_ci"
+    if not governed_local_ci and ctx.get_config("enabled", default=False) is not True:
         return None
     args = args if isinstance(args, dict) else {}
     target = str(args.get("task_id") or worker_task or "").strip()
     if not target:
         return None
     try:
-        if worker_task:
+        if governed_local_ci:
             from hermes_constants import get_default_hermes_root
 
             control_home = os.environ.get("HERMES_CONTROL_HOME", "").strip()

@@ -60,6 +60,7 @@ def test_registered_ci_completion_gate_uses_durable_exact_dispatch(tmp_path, mon
                                     CheckState(False, True, 0), commands)
             ledger.record_ci_receipt(receipt)
         monkeypatch.setenv("HERMES_KANBAN_TASK", "audit-task")
+        monkeypatch.setenv("HERMES_KANBAN_TASK_KIND", "pr_local_ci")
         hook = _registered_guard(enabled=False)  # worker settings do not own the control ledger
         monkeypatch.setattr(lifecycle, "invoke_hook", lambda name, **kw: [hook(**kw)])
         rejection = get_pre_tool_call_block_message("kanban_complete", {
@@ -74,6 +75,7 @@ def test_ledger_unavailable_blocks_completion_without_creating_it(tmp_path, monk
     target = tmp_path / "github-pr-feedback" / "ledger.sqlite3"
     monkeypatch.setenv("HERMES_CONTROL_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_TASK", "audit-task")
+    monkeypatch.setenv("HERMES_KANBAN_TASK_KIND", "pr_local_ci")
     result = _registered_guard()(tool_name="kanban_complete", args={})
     assert result["action"] == "block"
     assert not target.exists()
