@@ -82,4 +82,9 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
 
 
 def register_completion_guard(ctx) -> None:
-    ctx.register_hook("pre_tool_call", partial(guard_completion, ctx))
+    # Directory-plugin hosts predating native hook support still expose the
+    # CLI registration surface.  Keep those hosts usable while enabling the
+    # guard wherever the host explicitly provides the hook boundary.
+    register_hook = getattr(ctx, "register_hook", None)
+    if callable(register_hook):
+        register_hook("pre_tool_call", partial(guard_completion, ctx))
