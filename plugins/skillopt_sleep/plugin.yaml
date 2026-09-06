@@ -1,0 +1,9 @@
+name: skillopt-sleep
+version: 0.2.0
+description: "Validation-gated self-improvement for Hermes skills from past sessions."
+author: "mrkillbob"
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
