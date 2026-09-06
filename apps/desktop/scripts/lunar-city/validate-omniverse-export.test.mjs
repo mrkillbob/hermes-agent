@@ -75,6 +75,12 @@ test('invalid mode is rejected and malformed receipts return structured errors',
   assert.ok(Array.isArray(malformed.errors))
 })
 
+test('malformed production receipts return structured errors without throwing', () => {
+  const result = validateOmniverseExport(null, manifest, { mode: 'production' })
+  assert.equal(result.ok, false)
+  assert.ok(Array.isArray(result.errors))
+})
+
 test('rejects contradictory approval flags', () => {
   const result = validateOmniverseExport(receipt({ production_approved: true }), manifest)
   assert.equal(result.ok, false)

@@ -92,9 +92,9 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
   }
 
   if (mode === 'production') {
-    if (receipt.reference_only !== false) errors.push('production mode rejects reference-only exports')
-    if (receipt.production_approved !== true) errors.push('production mode requires production_approved')
-    if (receipt.status !== 'accepted') errors.push('production mode requires accepted status')
+    if (receipt?.reference_only !== false) errors.push('production mode rejects reference-only exports')
+    if (receipt?.production_approved !== true) errors.push('production mode requires production_approved')
+    if (receipt?.status !== 'accepted') errors.push('production mode requires accepted status')
   }
   if (receipt?.production_approved === true && receipt?.reference_only === true) {
     errors.push('reference-only export cannot be production-approved')
