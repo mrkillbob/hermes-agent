@@ -20,6 +20,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
+from hermes_cli.github_identity import GitHubAutomationIdentity, GitHubIdentityError
+
 from .cli_audit_task import owns_current_audit_task
 from .controller import KanbanTask, LocalGitRepository, PooledLocalGitRepository, ScanController
 from .ci_coordinator import CIAuditJob, GroupedCICoordinator
@@ -31,6 +33,7 @@ from .ci_runner import (
     _required_lanes,
 )
 from .github_client import GitHubClient, GitHubClientError
+from .git_stack import GitStackError, GitStackRunner
 from .ledger import (
     FeedbackLedger,
     LedgerStateError,
@@ -641,6 +644,13 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     post_comment.add_argument("--pr-number", required=True, type=int)
     post_comment.add_argument("--head-sha", required=True)
     post_comment.add_argument("--body", required=True)
+    push_head = subcommands.add_parser(
+        "push-head", help="Push one verified pull-request head through the bot identity"
+    )
+    push_head.add_argument("--repository", required=True)
+    push_head.add_argument("--pr-number", required=True, type=int)
+    push_head.add_argument("--head-sha", required=True)
+    push_head.add_argument("--worktree", required=True, type=Path)
     retry = subcommands.add_parser(
         "retry", help="Retry one failed, immutable feedback receipt"
     )
@@ -775,6 +785,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _submit_review(ctx, args)
     if action == "post-comment":
         return _post_comment(ctx, args)
+    if action == "push-head":
+        return _push_head(ctx, args)
     if action == "retry":
         return _retry(ctx, args)
     if action == "dispatch-repair":
@@ -1061,6 +1073,83 @@ def _post_comment(ctx: Any, args: argparse.Namespace) -> int:
                 "pr_number": args.pr_number,
                 "head_sha": pull_request.head_sha,
                 "poster": viewer_login,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _push_head(ctx: Any, args: argparse.Namespace) -> int:
+    """Push one exact local PR head through the configured bot credential."""
+
+    try:
+        policy = _load_policy_from_context(ctx)
+        if not policy.enabled or args.repository not in policy.targets:
+            raise ValueError("repository is not a configured target")
+        if not isinstance(args.head_sha, str) or not _FULL_SHA.fullmatch(args.head_sha):
+            raise ValueError("head_sha must be a full hexadecimal SHA")
+        settings = policy.github_identity
+        if settings is None:
+            raise GitHubClientError(
+                "Hermes GitHub automation identity is not configured",
+                code="automation_identity_not_configured",
+            )
+        github = _github_client(policy)
+        pull_request = github.get_pull_request(args.repository, args.pr_number)
+        expected_head_sha = args.head_sha.casefold()
+        if pull_request.head_sha != expected_head_sha:
+            print(
+                json.dumps(
+                    {
+                        "status": "stale_head",
+                        "repository": args.repository,
+                        "pr_number": args.pr_number,
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": pull_request.head_sha,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        if str(pull_request.state or "").strip().upper() != "OPEN":
+            raise ValueError("pull request is not open")
+        git_environment = GitHubAutomationIdentity(
+            settings.expected_login, settings.token_env
+        ).git_command_environment()
+        runner = GitStackRunner(args.worktree, environment=git_environment)
+        pushed_head_sha = runner.head_sha()
+        runner.push_verified_head(
+            pull_request.head_repository,
+            pull_request.head_ref_name,
+            args.head_sha,
+        )
+        observed = github.get_pull_request(args.repository, args.pr_number)
+        if observed.head_sha != pushed_head_sha.casefold():
+            raise GitHubClientError("pushed head was not confirmed on the pull request")
+    except (
+        GitHubClientError,
+        GitHubIdentityError,
+        GitStackError,
+        TypeError,
+        ValueError,
+    ) as error:
+        print(
+            json.dumps(
+                {"status": "push_unavailable", "reason": str(error)},
+                sort_keys=True,
+            )
+        )
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "pushed",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+                "head_sha": observed.head_sha,
+                "head_repository": observed.head_repository,
+                "head_ref_name": observed.head_ref_name,
             },
             sort_keys=True,
         )

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
 from .stack import _branch
+
+
+_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +45,14 @@ class GitStackRunner:
         _branch(branch, "branch")
         return self._run("rev-parse", f"refs/remotes/origin/{branch}").stdout.strip()
 
+    def head_sha(self) -> str:
+        """Return the full commit ID currently checked out in the worktree."""
+
+        head = self._run("rev-parse", "HEAD").stdout.strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", head):
+            raise GitStackError("local HEAD was not a full Git object ID")
+        return head
+
     def merge_base_into_branch(self, branch: str, base_branch: str) -> GitEvidence:
         _branch(branch, "branch")
         _branch(base_branch, "base_branch")
@@ -53,5 +65,22 @@ class GitStackRunner:
         return self._run(
             "push",
             "origin",
+            f"HEAD:refs/heads/{branch}",
+        )
+
+    def push_verified_head(
+        self, repository: str, branch: str, expected_head_sha: str
+    ) -> GitEvidence:
+        if not _REPOSITORY.fullmatch(repository):
+            raise ValueError("repository must be an owner/repository name")
+        _branch(branch, "branch")
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", expected_head_sha):
+            raise ValueError("expected_head_sha must be a full Git object ID")
+        local_head = self.head_sha()
+        if local_head.casefold() == expected_head_sha.casefold():
+            raise GitStackError("local HEAD does not contain a repair commit")
+        return self._run(
+            "push",
+            f"https://github.com/{repository}.git",
             f"HEAD:refs/heads/{branch}",
         )
