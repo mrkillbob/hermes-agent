@@ -101,12 +101,12 @@ def test_edit_and_retest_is_progress_but_unchanged_retries_still_block(edit) -> 
     assert finding is not None and finding.category == "tool_failure_loop"
 
 
-@pytest.mark.parametrize("prefix", ["╎", "│"])
+@pytest.mark.parametrize("prefix", ["╎", "│", "»"])
 @pytest.mark.parametrize("diff_line", ["+added.py", "# Moved: old.py → new.py"])
 def test_skin_and_file_operation_edits_reset_failure_loop(prefix: str, diff_line: str) -> None:
     failure = f"{prefix} 💻 $ scripts/run_tests.sh tests/test_a.py  1.2s [exit 1]"
     edit = f"{prefix} 🔧 patch module.py  0.3s"
-    log = f"{failure}\n{failure}\n{edit}\n{prefix} review diff\n{diff_line}\n{failure}"
+    log = f"{failure}\n{failure}\n{edit}\n┊ review diff\n{diff_line}\n{failure}"
 
     assert detect_log_finding(f"{failure}\n{failure}\n{failure}", _config()) is not None
     assert detect_log_finding(log, _config()) is None

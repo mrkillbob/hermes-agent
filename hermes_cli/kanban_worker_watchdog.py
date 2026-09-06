@@ -21,12 +21,11 @@ _DURATION_RE = re.compile(r"\b\d+(?:\.\d+)?s\b", re.IGNORECASE)
 _TOKEN_COUNT_RE = re.compile(r"~?[\d,]+\s+tokens?", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"\s+")
 _FAILED_EXIT_RE = re.compile(r"\[exit\s+(-?\d+)\]", re.IGNORECASE)
-_TOOL_PREFIX_RE = re.compile(r"(?:^|\s)[┊|╎│]\s*[^$\n]*\$\s*(.+)")
+_TOOL_PREFIX_RE = re.compile(r"(?:^|\s)\S+\s*[^$\n]*\$\s*(.+)")
 # The display skin owns the leading glyph.  Keep the detector independent of
-# the active skin so a worker using ``╎`` or ``│`` is treated the same as the
-# default ``┊`` skin.
+# the active skin so configured prefixes are treated like the default ``┊``.
 _EDIT_SUCCESS_RE = re.compile(
-    r"^[┊|╎│]\s+(?:🔧\s+patch|✍️?\s+write)\s+.*\d+(?:\.\d+)?s$"
+    r"^\S+\s+(?:🔧\s+patch|✍️?\s+write)\s+.*\d+(?:\.\d+)?s$"
 )
 _DIFF_MARKER_RE = re.compile(r"^[┊|╎│]\s+review diff$")
 _DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @")
