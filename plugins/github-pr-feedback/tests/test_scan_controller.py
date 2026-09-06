@@ -4474,7 +4474,7 @@ def test_metadata_labels_remove_stale_owned_labels(tmp_path):
         "path_patterns": ["frontend/**"], "color": "123456", "description": "GUI files",
     }])
     policy = replace(policy, agent_labels=replace(policy.agent_labels, metadata_rules=rules))
-    pull = replace(admitted_pull_request(sha), labels=("codex", "area/gui"))
+    pull = replace(admitted_pull_request(sha), labels=("codex", "Area/CI", "area/gui"))
 
     class MetadataGitHub(FakeGitHub):
         def get_pull_request_metadata(self, repository, number):
@@ -4488,7 +4488,7 @@ def test_metadata_labels_remove_stale_owned_labels(tmp_path):
         )
         assert result["updated"] == 1
         assert github.removed_label_calls == [("acme/widgets", pull.number, "area/gui")]
-        assert set(github.current.labels) == {"codex"}
+        assert set(github.current.labels) == {"codex", "Area/CI"}
     finally:
         ledger.close()
 
