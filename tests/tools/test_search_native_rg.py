@@ -14,7 +14,7 @@ import pytest
 from tools.environments.local import LocalEnvironment
 from tools.file_operations import ShellFileOperations
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="native rg lane is POSIX-only")
+pytestmark = pytest.mark.macos_only if sys.platform == "darwin" else pytest.mark.linux_only
 
 
 @pytest.fixture
