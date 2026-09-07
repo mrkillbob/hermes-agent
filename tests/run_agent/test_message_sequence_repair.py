@@ -1386,5 +1386,3 @@ def test_sanitize_stubs_interrupted_first_occurrence_keeps_replay_pair():
     assert "Result unavailable" in out[2]["content"]
     # Replayed pair keeps the REAL result, not a stub.
     assert out[5]["content"] == "real result"
-
-

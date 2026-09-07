@@ -1,6 +1,6 @@
 # Lunar City strategy-game diagnostic
 
-**Date:** 2026-09-01  
+**Date:** 2026-09-01
 **Purpose:** Use the readable, high-level design language of classic
 StarCraft/Warcraft-style strategy games as a diagnostic aid for Lunar City.
 

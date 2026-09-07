@@ -264,4 +264,3 @@ Desktop/E2E coverage will verify:
 Acceptance will distinguish focused UI/static/asset-audit evidence from full
 desktop E2E and packaged-app evidence. A successful typecheck or screenshot
 alone is not acceptance for the live-source or command-bound paths.
-
