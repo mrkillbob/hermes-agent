@@ -264,6 +264,8 @@ DEFAULT_CONFIG = {
         # traceback.
         "degraded_mode": "warn",
         "cwd": ".",  # Use current directory
+        # Use the native POSIX file-read/search fast path when the configured environment is local.
+        "native_file_read": True,
         # Root for terminal session temp files (background logs/pid/exit files, code-exec
         # sandboxes). Empty = TMPDIR/TMP/TEMP if set, else HERMES_HOME/cache/terminal (auto-pruned
         # after 72h) — NOT tmpfs /tmp, which is RAM-capped and fills under load. Must be an existing

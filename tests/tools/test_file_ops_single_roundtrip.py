@@ -299,6 +299,20 @@ class TestNativeRead:
         ops.read_file(p)
         assert len(calls) == 1 and READ_PROBE_MARK in calls[0]
 
+    def test_config_switch_routes_to_the_shell(self, native, tmp_path, monkeypatch):
+        from hermes_cli import config as config_module
+
+        ops, calls = native
+        p = _write(tmp_path, "a.txt", b"one\n")
+        monkeypatch.delenv("HERMES_NATIVE_FILE_READ", raising=False)
+        monkeypatch.setattr(
+            config_module,
+            "load_config_readonly",
+            lambda: {"terminal": {"native_file_read": False}},
+        )
+        ops.read_file(p)
+        assert len(calls) == 1 and READ_PROBE_MARK in calls[0]
+
     def test_non_local_environment_keeps_the_shell_path(self):
         from unittest.mock import MagicMock
 
