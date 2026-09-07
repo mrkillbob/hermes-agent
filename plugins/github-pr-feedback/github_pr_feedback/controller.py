@@ -40,6 +40,21 @@ from .policy import (
 )
 
 MAX_ADMISSIONS_PER_SCAN = 128
+LOCAL_CI_NON_ADMISSION_RESULTS = frozenset(
+    {
+        "duplicate",
+        "github_error",
+        "head_changed",
+        "local_ci_disabled",
+        "merge_conflict",
+        "mergeable_state_still_computing",
+        "mutation_pending",
+        "not_admitted",
+        "retry_backoff",
+        "retry_exhausted",
+        "retry_unavailable",
+    }
+)
 # The subprocess boundary is globally serialized across profiles, but keeping
 # this pool small also bounds fake/in-process adapters and avoids accumulating
 # a long queue of already-stale snapshots behind the shared request gate.
@@ -1452,12 +1467,7 @@ class ScanController:
                             current=current,
                             retry_failed=local_ci_receipt_status == "failed",
                         )
-                        if audit_error not in {
-                            "duplicate",
-                            "retry_backoff",
-                            "retry_exhausted",
-                            "retry_unavailable",
-                        }:
+                        if audit_error not in LOCAL_CI_NON_ADMISSION_RESULTS:
                             attempted += 1
                         if audit_error is None:
                             created += 1
