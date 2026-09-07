@@ -72,4 +72,3 @@ def mask_builtin_annotations(text: str) -> str:
         cursor = end
     pieces.append(raw[cursor:])
     return b"".join(pieces).decode("utf-8")
-
