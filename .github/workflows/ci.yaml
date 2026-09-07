@@ -220,9 +220,8 @@ jobs:
     uses: ./.github/workflows/osv-scanner.yml
     with:
       # The fork's existing Code Scanning baseline cannot correlate the upgraded
-      # reusable-workflow identity on CI PR runs. The standalone weekly scan
-      # keeps the default upload-sarif=true for durable main-branch findings.
-      upload-sarif: false
+      # reusable-workflow identity on CI PR runs; main pushes retain SARIF.
+      upload-sarif: ${{ github.event_name != 'pull_request' }}
 
   # ─────────────────────────────────────────────────────────────────────
   # Gate: runs after everything. ``if: always()`` ensures it reports a

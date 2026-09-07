@@ -10,7 +10,8 @@ export function runBackendDial<T>(
   deps: BackendDialRoutingDeps,
   connectionId: string | null,
   profile: string | null | undefined,
-  dial: () => Promise<T> | T
+  dial: () => Promise<T> | T,
+  claimKey?: string
 ): Promise<T> {
-  return deps.claims.run(deps.scopeKey(connectionId, profile), dial)
+  return deps.claims.run(claimKey ?? deps.scopeKey(connectionId, profile), dial)
 }
