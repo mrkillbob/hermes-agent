@@ -144,7 +144,9 @@ def test_lan_and_unknown_are_remote_while_numeric_loopback_is_loopback():
 def test_egress_assignment_scan_ignores_code_defaults_but_catches_literals():
     assert not _is_egress_secret_assignment("token = os.getenv(\"TOKEN\")")
     assert not _is_egress_secret_assignment("def request(token: str): pass")
-    assert _is_egress_secret_assignment("token=sk_live_1234567890")
+    assert _is_egress_secret_assignment("token=sk_liv...7890")
+    assert _is_egress_secret_assignment('password = "correcthorsebatterystaple"')
+    assert _is_egress_secret_assignment("token=«redacted:sk_live_…»")
 
 
 def test_destination_classification_does_not_trust_dns_or_provider_name():
@@ -418,6 +420,7 @@ def test_sanitized_segment_cap_remains_independent_from_larger_aggregate_cap(tmp
     ("text", "reason"),
     [
         ("token=super-secret-value", "secret_detected"),
+        ('password = "correcthorsebatterystaple"', "secret_detected"),
         (base64.b64encode(b"encoded private detail").decode("ascii"), "base64_payload"),
         ("Read /Users/private/repository/file.py", "private_absolute_path"),
         (r"Read C:\\Users\\private\\secrets.txt", "private_absolute_path"),

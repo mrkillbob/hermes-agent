@@ -390,7 +390,8 @@ _EGRESS_SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?<![A-Za-z0-9_])"
     r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|"
     r"password|passwd|api[_-]?key|apikey|client[_-]?secret|private[_-]?key)"
-    r"\s*(?P<delim>[:=])\s*(?!<redacted>)(?P<value>[^\s,}\"']+)"
+    r"\s*(?P<delim>[:=])\s*(?!<redacted>)(?P<quote>[\"']?)"
+    r"(?P<value>[^\s,}\"']+)(?P=quote)"
 )
 # A plausible token/key value: only "word" characters plus common token
 # punctuation, long enough to be a credential rather than a short type
@@ -401,6 +402,10 @@ _EGRESS_SECRET_ASSIGNMENT = re.compile(
 _CREDENTIAL_SHAPED_VALUE = re.compile(
     r"^(?=[A-Za-z0-9_.+/-]{12,}$)(?=[^0-9]*[0-9])[A-Za-z0-9_.+/-]+$"
 )
+# Quoted values are explicit literals, so passphrases made only of letters
+# must also be rejected even though the broader unquoted heuristic requires a
+# digit to avoid treating ordinary identifiers as credentials.
+_QUOTED_CREDENTIAL_LITERAL = re.compile(r"^[A-Za-z0-9_.+/-]{12,}$")
 
 
 def _is_egress_secret_assignment(text: str) -> bool:
@@ -414,6 +419,9 @@ def _is_egress_secret_assignment(text: str) -> bool:
     for match in _EGRESS_SECRET_ASSIGNMENT.finditer(text):
         value = match.group("value")
         looks_like_literal = bool(_CREDENTIAL_SHAPED_VALUE.match(value)) or (
+            bool(match.group("quote"))
+            and bool(_QUOTED_CREDENTIAL_LITERAL.fullmatch(value))
+        ) or (
             match.group("delim") == "="
             and len(value) >= 12
             and any(marker in value for marker in "-_")
