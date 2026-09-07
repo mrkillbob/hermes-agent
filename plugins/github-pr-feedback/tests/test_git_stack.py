@@ -48,3 +48,24 @@ def test_git_failures_are_not_hidden(monkeypatch, tmp_path):
     monkeypatch.setattr("github_pr_feedback.git_stack.subprocess.run", fake_run)
     with pytest.raises(GitStackError, match="non-fast-forward"):
         GitStackRunner(tmp_path).push_branch("codex/child")
+
+
+def test_push_verified_head_uses_canonical_repository_and_exact_local_head(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        stdout = "b" * 40 if argv[-2:] == ("rev-parse", "HEAD") else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr("github_pr_feedback.git_stack.subprocess.run", fake_run)
+    GitStackRunner(tmp_path).push_verified_head("acme/widgets", "codex/child", "a" * 40)
+    assert calls == [
+        ("git", "-C", str(tmp_path), "rev-parse", "HEAD"),
+        (
+            "git", "-C", str(tmp_path), "push",
+            "https://github.com/acme/widgets.git", "HEAD:refs/heads/codex/child",
+        ),
+    ]
