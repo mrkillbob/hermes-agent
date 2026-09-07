@@ -4573,6 +4573,7 @@ def test_incomplete_metadata_skips_only_affected_pr(tmp_path):
         (1, {"codex"}), (2, {"codex", "area/ci"})
     ]
     assert github.removed_label_calls == []
+    assert set(github.current_by_number[1].labels) == {"area/ci", "codex"}
     ledger.close()
 
 
