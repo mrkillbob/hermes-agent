@@ -15,7 +15,7 @@ Write ML papers for NeurIPS/ICML/ICLR: design→submit.
 | | |
 |---|---|
 | Source | Optional — install with `hermes skills install official/research/research-paper-writing` |
-| Path | `optional-skills/research\research-paper-writing` |
+| Path | `optional-skills/research/research-paper-writing` |
 | Version | `1.1.0` |
 | Author | Orchestra Research |
 | License | MIT |
@@ -358,7 +358,7 @@ If you cannot verify a citation:
 
 **Always tell the scientist**: "I've marked [X] citations as placeholders that need verification."
 
-See [references/citation-workflow.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/citation-workflow.md) for complete API documentation and the full `CitationManager` class.
+See [references/citation-workflow.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/citation-workflow.md) for complete API documentation and the full `CitationManager` class.
 
 ### Step 1.4: Organize Related Work
 
@@ -440,7 +440,7 @@ analyze_results.py             # Statistical analysis
 make_charts.py                 # Visualization
 ```
 
-See [references/experiment-patterns.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/experiment-patterns.md) for complete design patterns, cron monitoring, and error recovery.
+See [references/experiment-patterns.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/experiment-patterns.md) for complete design patterns, cron monitoring, and error recovery.
 
 ### Step 2.5: Design Human Evaluation (If Applicable)
 
@@ -479,7 +479,7 @@ Many NLP, HCI, and alignment papers require human evaluation as primary or compl
 - Annotation interface description or screenshot (appendix)
 - Total annotation time
 
-See [references/human-evaluation.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/human-evaluation.md) for complete guide including statistical tests for human eval data, crowdsourcing quality control patterns, and IRB guidance.
+See [references/human-evaluation.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/human-evaluation.md) for complete guide including statistical tests for human eval data, crowdsourcing quality control patterns, and IRB guidance.
 
 ---
 
@@ -609,7 +609,7 @@ Always compute:
 - **Pairwise tests**: McNemar's test for comparing two methods
 - **Effect sizes**: Cohen's d or h for practical significance
 
-See [references/experiment-patterns.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/experiment-patterns.md) for complete implementations of McNemar's test, bootstrapped CIs, and Cohen's h.
+See [references/experiment-patterns.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/experiment-patterns.md) for complete implementations of McNemar's test, bootstrapped CIs, and Cohen's h.
 
 ### Step 4.3: Identify the Story
 
@@ -789,7 +789,7 @@ When refining the paper itself through autoreason:
 | Overfitting (code) | High public-test pass, low private-test pass | Use structured analysis, not just test feedback |
 | Broken judges | Parsing failures reduce panel below 3 | Fix parser before continuing |
 
-See [references/autoreason-methodology.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/autoreason-methodology.md) for complete prompts, Borda scoring details, model selection guide, scope constraint design patterns, and compute budget reference.
+See [references/autoreason-methodology.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/autoreason-methodology.md) for complete prompts, Borda scoring details, model selection guide, scope constraint design patterns, and compute budget reference.
 
 ---
 
@@ -867,7 +867,7 @@ Each reviewer can refine their review after seeing the meta-review. Use an early
 
 **Model selection for reviewing**: Reviewing is best done with the strongest available model, even if you wrote the paper with a cheaper one. The reviewer model should be chosen independently from the writing model.
 
-**Few-shot calibration**: If available, include 1-2 real published reviews from the target venue as examples. This dramatically improves score calibration. See [references/reviewer-guidelines.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/reviewer-guidelines.md) for example reviews.
+**Few-shot calibration**: If available, include 1-2 real published reviews from the target venue as examples. This dramatically improves score calibration. See [references/reviewer-guidelines.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/reviewer-guidelines.md) for example reviews.
 
 ### Step 6.1b: Visual Review Pass (VLM)
 
@@ -930,8 +930,8 @@ When responding to actual reviews (post-submission), rebuttals are a distinct sk
 ```
 > R1-W1: "The paper lacks comparison with Method X."
 
-We thank the reviewer for this suggestion. We have added a comparison with
-Method X in Table 3 (revised). Our method outperforms X by 3.2pp on [metric]
+We thank the reviewer for this suggestion. We have added a comparison with 
+Method X in Table 3 (revised). Our method outperforms X by 3.2pp on [metric] 
 (p<0.05). We note that X requires 2x our compute budget.
 ```
 
@@ -968,7 +968,7 @@ paper/
 
 Every venue has mandatory checklists. Complete them carefully — incomplete checklists can result in desk rejection.
 
-See [references/checklists.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/checklists.md) for:
+See [references/checklists.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/checklists.md) for:
 - NeurIPS 16-item paper checklist
 - ICML broader impact + reproducibility
 - ICLR LLM disclosure policy
@@ -1328,7 +1328,7 @@ ACL venues have distinct submission types:
 
 ## Paper Types Beyond Empirical ML
 
-The main pipeline above targets empirical ML papers. Other paper types require different structures and evidence standards. See [references/paper-types.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/paper-types.md) for detailed guidance on each type.
+The main pipeline above targets empirical ML papers. Other paper types require different structures and evidence standards. See [references/paper-types.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/paper-types.md) for detailed guidance on each type.
 
 ### Theory Papers
 
@@ -1432,14 +1432,14 @@ terminal("ps aux | grep <pattern>")
 
 **Parallel section drafting** (using delegation):
 ```
-delegate_task("Draft the Methods section based on these experiment scripts and configs.
-  Include: pseudocode, all hyperparameters, architectural details sufficient for
+delegate_task("Draft the Methods section based on these experiment scripts and configs. 
+  Include: pseudocode, all hyperparameters, architectural details sufficient for 
   reproduction. Write in LaTeX using the neurips2025 template conventions.")
 
-delegate_task("Draft the Related Work section. Use web_search and web_extract to
+delegate_task("Draft the Related Work section. Use web_search and web_extract to 
   find papers. Verify every citation via Semantic Scholar. Group by methodology.")
 
-delegate_task("Draft the Experiments section. Read all result files in results/.
+delegate_task("Draft the Experiments section. Read all result files in results/. 
   State which claim each experiment supports. Include error bars and significance.")
 ```
 
@@ -1456,7 +1456,7 @@ results = sch.search_paper("attention mechanism transformers", limit=5)
 for paper in results:
     doi = paper.externalIds.get('DOI', 'N/A')
     if doi != 'N/A':
-        bibtex = requests.get(f"https://doi.org/{doi}",
+        bibtex = requests.get(f"https://doi.org/{doi}", 
                               headers={"Accept": "application/x-bibtex"}).text
         print(bibtex)
 ```
@@ -1466,7 +1466,7 @@ for paper in results:
 **`memory` tool** — persist key decisions (bounded: ~2200 chars for MEMORY.md):
 
 ```
-memory("add", "Paper: autoreason. Venue: NeurIPS 2025 (9 pages).
+memory("add", "Paper: autoreason. Venue: NeurIPS 2025 (9 pages). 
   Contribution: structured refinement works when generation-evaluation gap is wide.
   Key results: Haiku 42/42, Sonnet 3/5, S4.6 constrained 2/3.
   Status: Phase 5 — drafting Methods section.")
@@ -1505,7 +1505,7 @@ cronjob("create", {
     1. ps aux | grep run_experiment
     2. tail -30 logs/experiment_haiku.log
     3. ls results/haiku_baselines/
-    4. If complete: read results, compute Borda scores,
+    4. If complete: read results, compute Borda scores, 
        git add -A && git commit -m 'Add Haiku results' && git push
     5. Report: table of results, key finding, next step
     6. If nothing changed: respond with [SILENT]"
@@ -1518,9 +1518,9 @@ cronjob("create", {
 ```
 cronjob("create", {
   "schedule": "0 9 * * *",  # Daily at 9am
-  "prompt": "NeurIPS 2025 deadline: May 22. Today is {date}.
-    Days remaining: {compute}.
-    Check todo list — are we on track?
+  "prompt": "NeurIPS 2025 deadline: May 22. Today is {date}. 
+    Days remaining: {compute}. 
+    Check todo list — are we on track? 
     If <7 days: warn user about remaining tasks."
 })
 ```
@@ -1588,7 +1588,7 @@ Understanding what reviewers look for helps focus effort:
 - 2: Reject — technical flaws
 - 1: Strong Reject — known results or ethics issues
 
-See [references/reviewer-guidelines.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/reviewer-guidelines.md) for detailed guidelines, common concerns, and rebuttal strategies.
+See [references/reviewer-guidelines.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/reviewer-guidelines.md) for detailed guidelines, common concerns, and rebuttal strategies.
 
 ---
 
@@ -1604,9 +1604,9 @@ See [references/reviewer-guidelines.md](https://github.com/NousResearch/hermes-a
 | Scope creep in experiments | Every experiment must map to a specific claim. Cut experiments that don't. |
 | Paper rejected, need to resubmit | See Conference Resubmission in Phase 7. Address reviewer concerns without referencing reviews. |
 | Missing broader impact statement | See Step 5.10. Most venues require it. "No negative impacts" is almost never credible. |
-| Human eval criticized as weak | See Step 2.5 and [references/human-evaluation.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/human-evaluation.md). Report agreement metrics, annotator details, compensation. |
+| Human eval criticized as weak | See Step 2.5 and [references/human-evaluation.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/human-evaluation.md). Report agreement metrics, annotator details, compensation. |
 | Reviewers question reproducibility | Release code (Step 7.9), document all hyperparameters, include seeds and compute details. |
-| Theory paper lacks intuition | Add proof sketches with plain-language explanations before formal proofs. See [references/paper-types.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/paper-types.md). |
+| Theory paper lacks intuition | Add proof sketches with plain-language explanations before formal proofs. See [references/paper-types.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/paper-types.md). |
 | Results are negative/null | See Phase 4.3 on handling negative results. Consider workshops, TMLR, or reframing as analysis. |
 
 ---
@@ -1615,21 +1615,21 @@ See [references/reviewer-guidelines.md](https://github.com/NousResearch/hermes-a
 
 | Document | Contents |
 |----------|----------|
-| [references/writing-guide.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/writing-guide.md) | Gopen & Swan 7 principles, Perez micro-tips, Lipton word choice, Steinhardt precision, figure design |
-| [references/citation-workflow.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/citation-workflow.md) | Citation APIs, Python code, CitationManager class, BibTeX management |
-| [references/checklists.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/checklists.md) | NeurIPS 16-item, ICML, ICLR, ACL requirements, universal pre-submission checklist |
-| [references/reviewer-guidelines.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/reviewer-guidelines.md) | Evaluation criteria, scoring, common concerns, rebuttal template |
-| [references/sources.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/sources.md) | Complete bibliography of all writing guides, conference guidelines, APIs |
-| [references/experiment-patterns.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/experiment-patterns.md) | Experiment design patterns, evaluation protocols, monitoring, error recovery |
-| [references/autoreason-methodology.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/autoreason-methodology.md) | Autoreason loop, strategy selection, model guide, prompts, scope constraints, Borda scoring |
-| [references/human-evaluation.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/human-evaluation.md) | Human evaluation design, annotation guidelines, agreement metrics, crowdsourcing QC, IRB guidance |
-| [references/paper-types.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/references/paper-types.md) | Theory papers (proof writing, theorem structure), survey papers, benchmark papers, position papers |
+| [references/writing-guide.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/writing-guide.md) | Gopen & Swan 7 principles, Perez micro-tips, Lipton word choice, Steinhardt precision, figure design |
+| [references/citation-workflow.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/citation-workflow.md) | Citation APIs, Python code, CitationManager class, BibTeX management |
+| [references/checklists.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/checklists.md) | NeurIPS 16-item, ICML, ICLR, ACL requirements, universal pre-submission checklist |
+| [references/reviewer-guidelines.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/reviewer-guidelines.md) | Evaluation criteria, scoring, common concerns, rebuttal template |
+| [references/sources.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/sources.md) | Complete bibliography of all writing guides, conference guidelines, APIs |
+| [references/experiment-patterns.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/experiment-patterns.md) | Experiment design patterns, evaluation protocols, monitoring, error recovery |
+| [references/autoreason-methodology.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/autoreason-methodology.md) | Autoreason loop, strategy selection, model guide, prompts, scope constraints, Borda scoring |
+| [references/human-evaluation.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/human-evaluation.md) | Human evaluation design, annotation guidelines, agreement metrics, crowdsourcing QC, IRB guidance |
+| [references/paper-types.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/references/paper-types.md) | Theory papers (proof writing, theorem structure), survey papers, benchmark papers, position papers |
 
 ### LaTeX Templates
 
 Templates in `templates/` for: **NeurIPS 2025**, **ICML 2026**, **ICLR 2026**, **ACL**, **AAAI 2026**, **COLM 2025**.
 
-See [templates/README.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research\research-paper-writing/templates/README.md) for compilation instructions.
+See [templates/README.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/research/research-paper-writing/templates/README.md) for compilation instructions.
 
 ### Key External Sources
 

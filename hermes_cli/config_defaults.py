@@ -20,6 +20,9 @@ def _aux(timeout, *, reasoning_effort=True, **extra):
 
 DEFAULT_CONFIG = {
     "model": "",
+    # Restore the SDK's typed request transformation for Codex Responses calls. The legacy
+    # HERMES_CODEX_SDK_TRANSFORM environment variable remains an internal compatibility bridge.
+    "codex_sdk_transform": False,
     "providers": {},
     "fallback_providers": [],
     "credential_pool_strategies": {},

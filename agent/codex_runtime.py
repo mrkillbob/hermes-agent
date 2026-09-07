@@ -805,7 +805,11 @@ def _bypass_sdk_request_transform(stream_kwargs: dict) -> dict:
     multi-MB conversations can wedge for hours, pre-network, where no watchdog socket kill helps. The SDK
     merges ``extra_body`` AFTER the transform, so moving wire-format bulk fields there yields a byte-identical
     request without the walk. HERMES_CODEX_SDK_TRANSFORM=1 disables."""
-    if os.environ.get("HERMES_CODEX_SDK_TRANSFORM", "").strip().lower() in {"1", "true", "yes", "on"}:
+    # The config key is the user-facing control; keep the env var as a private compatibility bridge.
+    from hermes_cli.config import load_config
+    config_enabled = bool(load_config().get("codex_sdk_transform", False))
+    env_enabled = os.environ.get("HERMES_CODEX_SDK_TRANSFORM", "").strip().lower() in {"1", "true", "yes", "on"}
+    if config_enabled or env_enabled:
         return stream_kwargs
     moved = {f: stream_kwargs[f] for f in _SDK_TRANSFORM_BYPASS_FIELDS
              if isinstance(stream_kwargs.get(f), (dict, list)) and _is_plain_json_data(stream_kwargs[f])}
