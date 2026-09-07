@@ -30,6 +30,8 @@ _UNAVAILABLE_MESSAGE = (
 
 def completion_block(task_id: str | None = None) -> str | None:
     """Return a blocking message for an unproven governed CI completion."""
+    if os.environ.get("HERMES_KANBAN_COMPLETION_GATE") != "pr-local-ci-v1":
+        return None
     worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
     target = str(task_id or worker_task or "").strip()
     if not target:
@@ -38,7 +40,7 @@ def completion_block(task_id: str | None = None) -> str | None:
         root = Path(os.environ.get("HERMES_CONTROL_HOME", "").strip() or _default_hermes_root())
         path = root / "github-pr-feedback" / "ledger.sqlite3"
         if not path.exists():
-            return None
+            return _UNAVAILABLE_MESSAGE
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
             connection.execute("BEGIN")
             bindings = connection.execute(

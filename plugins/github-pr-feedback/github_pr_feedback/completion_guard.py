@@ -44,14 +44,15 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
     if tool_name != "kanban_complete":
         return None
     worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
-    if not worker_task and ctx.get_config("enabled", default=False) is not True:
+    governed_local_ci = os.environ.get("HERMES_KANBAN_TASK_KIND", "").strip() == "pr_local_ci"
+    if not governed_local_ci and ctx.get_config("enabled", default=False) is not True:
         return None
     args = args if isinstance(args, dict) else {}
     target = str(args.get("task_id") or worker_task or "").strip()
     if not target:
         return None
     try:
-        if worker_task:
+        if governed_local_ci:
             from hermes_constants import get_default_hermes_root
 
             control_home = os.environ.get("HERMES_CONTROL_HOME", "").strip()
@@ -67,9 +68,7 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
                 "FROM feedback_receipts WHERE task_id = ? AND feedback_kind = 'pr_local_ci'",
                 (target,),
             ).fetchall()
-            if not bindings:
-                return None
-            if all(_has_receipt(connection, binding) for binding in bindings):
+            if bindings and all(_has_receipt(connection, binding) for binding in bindings):
                 return None
         reason = "no typed passing durable CI receipt matches this task's exact PR head/base and dispatch"
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):

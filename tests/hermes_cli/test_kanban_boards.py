@@ -275,6 +275,7 @@ class TestWorkerSpawnEnv:
             claim_lock=None,
             claim_expires=None,
             tenant=None,
+            idempotency_key="github-pr-feedback:legacy:supervised-v4",
         )
 
         kbd._default_spawn(task, str(fresh_home / "ws"), board="spawntest")
@@ -282,6 +283,7 @@ class TestWorkerSpawnEnv:
         env = captured["env"]
         assert env["HERMES_KANBAN_BOARD"] == "spawntest"
         assert env["HERMES_KANBAN_TASK"] == "t_abc"
+        assert env["HERMES_KANBAN_COMPLETION_GATE"] == "pr-local-ci-v1"
         # DB path should match the per-board DB, not the legacy default.
         expected_db = fresh_home / "kanban" / "boards" / "spawntest" / "kanban.db"
         assert env["HERMES_KANBAN_DB"] == str(expected_db)

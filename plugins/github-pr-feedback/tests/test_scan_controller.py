@@ -1756,13 +1756,13 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     task = kanban.tasks[0]
     assert task.title == "Local PR CI audit: acme/widgets#17"
     assert task.assignee == "pr-local-ci-auditor"
-    assert task.provider_override is None
-    assert task.model_override is None
-    assert task.reasoning_effort is None
+    assert task.provider_override == "ollama-launch"
+    assert task.model_override == "qwen3.5:4b"
+    assert task.reasoning_effort == "none"
     assert task.initial_status == "running"
     assert task.max_retries == 3
     assert task.max_runtime_seconds == 8 * 60 * 60
-    assert task.idempotency_key.endswith(":supervised-v4")
+    assert task.idempotency_key.endswith(":supervised-v5")
     assert task.evidence_heading == "Canonical PR audit receipt (JSON)"
     assert task.evidence == {
         "repository": "acme/widgets",
@@ -1849,9 +1849,9 @@ def test_scan_reconciles_existing_failed_exact_head_receipt_to_typed_fixer(
     assert second.created == 0
     assert len(kanban.tasks) == 1
     assert kanban.tasks[0].assignee == "ci-static-fixer"
-    assert kanban.tasks[0].provider_override is None
-    assert kanban.tasks[0].model_override is None
-    assert kanban.tasks[0].reasoning_effort is None
+    assert kanban.tasks[0].provider_override == "ollama-launch"
+    assert kanban.tasks[0].model_override == "qwen3.5:4b"
+    assert kanban.tasks[0].reasoning_effort == "none"
     assert kanban.tasks[0].evidence["ci_receipt_id"] == "f" * 64
     assert "background terminal process" in kanban.tasks[0].instructions
     assert "process wait" in kanban.tasks[0].instructions

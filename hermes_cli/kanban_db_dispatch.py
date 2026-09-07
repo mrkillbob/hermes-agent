@@ -41,6 +41,41 @@ DEFAULT_LOG_BACKUP_COUNT = 1
 # and call kanban_block/kanban_complete before max_runtime_seconds kills it.
 KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS = 30
 
+_LOCAL_CI_COMPLETION_GATE_MARKER = "hermes-completion-gate:pr-local-ci-v1"
+_LOCAL_CI_LEGACY_IDEMPOTENCY_SUFFIX = ":supervised-v4"
+
+
+def _has_local_ci_ledger_binding(task_id: str, env: Mapping[str, str]) -> bool:
+    """Recognize governed audit cards even when their body predates the gate marker."""
+    try:
+        from hermes_constants import get_default_hermes_root
+
+        control_home = (
+            env.get("HERMES_CONTROL_HOME")
+            or os.environ.get("HERMES_CONTROL_HOME")
+            or str(get_default_hermes_root())
+        )
+        ledger_path = Path(control_home) / "github-pr-feedback" / "ledger.sqlite3"
+        with contextlib.closing(
+            sqlite3.connect(ledger_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        ) as connection:
+            return connection.execute(
+                "SELECT 1 FROM feedback_receipts "
+                "WHERE task_id = ? AND feedback_kind = 'pr_local_ci' LIMIT 1",
+                (task_id,),
+            ).fetchone() is not None
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return False
+
+
+def _task_requires_local_ci_completion_gate(task: "Task", env: Mapping[str, str]) -> bool:
+    """Keep pre-marker audit cards governed while using a versioned new contract."""
+    if _LOCAL_CI_COMPLETION_GATE_MARKER in (task.body or ""):
+        return True
+    if (task.idempotency_key or "").endswith(_LOCAL_CI_LEGACY_IDEMPOTENCY_SUFFIX):
+        return True
+    return _has_local_ci_ledger_binding(task.id, env)
+
 # ---------------------------------------------------------------------------
 # Respawn guard constants
 # ---------------------------------------------------------------------------
@@ -2347,6 +2382,12 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
+    # Completion policies are task-owned and generic: a governed task may opt
+    # into a named gate without importing any optional plugin in the core.
+    if _task_requires_local_ci_completion_gate(task, env):
+        env["HERMES_KANBAN_COMPLETION_GATE"] = "pr-local-ci-v1"
+    else:
+        env.pop("HERMES_KANBAN_COMPLETION_GATE", None)
     env["HERMES_KANBAN_WORKSPACE"] = workspace
     from hermes_cli.kanban_worker_environment import bind_worker_environment
 

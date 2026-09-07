@@ -40,11 +40,33 @@ from .policy import (
 )
 
 MAX_ADMISSIONS_PER_SCAN = 128
+LOCAL_CI_NON_ADMISSION_RESULTS = frozenset(
+    {
+        "duplicate",
+        "github_error",
+        "head_changed",
+        "local_ci_disabled",
+        "merge_conflict",
+        "mergeable_state_still_computing",
+        "mutation_pending",
+        "not_admitted",
+        "retry_backoff",
+        "retry_exhausted",
+        "retry_unavailable",
+    }
+)
 # The subprocess boundary is globally serialized across profiles, but keeping
 # this pool small also bounds fake/in-process adapters and avoids accumulating
 # a long queue of already-stale snapshots behind the shared request gate.
 MAX_PARALLEL_PR_READS = 2
 LOCAL_CI_FEEDBACK_ID = "local-ci-audit-v2"
+# CI audit and repair workers execute repository-owned commands and must not
+# spend a remote model turn before the egress firewall rejects their payload.
+# Keep this route explicit on the durable task so it survives profile/global
+# config drift; the provider/model are the operator's configured loopback
+# route in the active Hermes installation.
+LOCAL_CI_WORKER_PROVIDER = "ollama-launch"
+LOCAL_CI_WORKER_MODEL = "qwen3.5:4b"
 # Additional venv roots trusted as "governed" besides a repository's own
 # tree. This repo's worktrees deliberately symlink .venv to one shared,
 # operator-owned install (see repo CLAUDE.md and scripts/bootstrap_agent_
@@ -1445,12 +1467,7 @@ class ScanController:
                             current=current,
                             retry_failed=local_ci_receipt_status == "failed",
                         )
-                        if audit_error not in {
-                            "duplicate",
-                            "retry_backoff",
-                            "retry_exhausted",
-                            "retry_unavailable",
-                        }:
+                        if audit_error not in LOCAL_CI_NON_ADMISSION_RESULTS:
                             attempted += 1
                         if audit_error is None:
                             created += 1
@@ -3196,7 +3213,9 @@ def _ci_failure_task(
         # the focused fix.  Keep the exact-head lease authoritative instead of
         # killing valid work at the old 15-minute wall.
         max_runtime_seconds=60 * 60 if policy.auto_dispatch else None,
-        # Inherit the assigned profile's benchmark-qualified model and effort.
+        model_override=LOCAL_CI_WORKER_MODEL,
+        provider_override=LOCAL_CI_WORKER_PROVIDER,
+        reasoning_effort="none",
     )
 
 
@@ -3228,6 +3247,7 @@ def _local_ci_task(
         else "Do not write to GitHub. "
     )
     instructions = (
+        "<!-- hermes-completion-gate:pr-local-ci-v1 --> "
         "Audit this pull request read-only from the exact receipt worktree. "
         + _worker_capability_preflight(
             _governed_pr_identity_command(
@@ -3280,7 +3300,7 @@ def _local_ci_task(
         branch=prepared.branch,
         # Version the runner contract so an archived foreground-timeout card
         # can be recreated with supervised background execution.
-        idempotency_key=f"{_receipt_idempotency_key(receipt)}:supervised-v4",
+        idempotency_key=f"{_receipt_idempotency_key(receipt)}:supervised-v5",
         evidence=evidence,
         evidence_heading="Canonical PR audit receipt (JSON)",
         initial_status="running",
@@ -3291,7 +3311,9 @@ def _local_ci_task(
         # exact-head CI lease prevents duplicate restarts while the real
         # supervisor PID is alive; give the full lane sequence an 8h envelope.
         max_runtime_seconds=8 * 60 * 60,
-        # Inherit the assigned profile's benchmark-qualified model and effort.
+        model_override=LOCAL_CI_WORKER_MODEL,
+        provider_override=LOCAL_CI_WORKER_PROVIDER,
+        reasoning_effort="none",
     )
 
 

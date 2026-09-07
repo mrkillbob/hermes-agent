@@ -445,23 +445,6 @@ def _worker_guard(tool_name: str, args: dict) -> str:
     return tid
 
 
-def _enforce_governed_ci_completion(args: dict) -> None:
-    """Apply the local-CI receipt gate even when the feedback plugin is disabled.
-
-    Kanban workers run with their assignee profile, while the governed feedback
-    plugin is normally enabled only in the control profile. ``kanban_complete``
-    is the always-loaded mutation boundary, so keep the safety check here as
-    well as in the compatibility lifecycle hook.
-    """
-    if not os.environ.get("HERMES_KANBAN_TASK"):
-        return
-    from tools.kanban_ci_guard import completion_block
-
-    message = completion_block(args.get("task_id"))
-    if message:
-        raise _Reject(message)
-
-
 def _require_orchestrator_tool(tool_name: str) -> None:
     """The check_fn already hides orchestrator tools from workers; this catches
     a stale registration or test harness routing a worker here anyway."""
@@ -896,7 +879,6 @@ def _handle_list(args: dict, **kw) -> str:
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
     tid = _worker_guard("kanban_complete", args)
-    _enforce_governed_ci_completion(args)
     summary = _redact_opt(args.get("summary"))
     result = _redact_opt(args.get("result"))
     metadata = args.get("metadata")
@@ -913,9 +895,14 @@ def _handle_complete(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
         # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
-        # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
+        # gate by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        from tools import kanban_ci_guard
+
+        ci_gate_rejection = kanban_ci_guard.completion_block(tid)
+        if ci_gate_rejection is not None:
+            return tool_error(ci_gate_rejection)
         verifier_rejection = _verifier_handoff_rejection(
             task, (summary or result or "").strip(), metadata,
         )
