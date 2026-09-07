@@ -2520,7 +2520,12 @@ def _has_unresolved_action(body: str) -> bool:
     if bounded_action is not None:
         bounded_context = body[max(0, bounded_action.start() - 80) : bounded_action.end() + 80]
         historical_reproduction = (
-            "pre-existing" in bounded_context
+            re.search(
+                r"\bpre-existing(?:\s+[\w-]+){0,4}\s+"
+                r"(?:failure|finding|issue|lane)\b",
+                bounded_context,
+            )
+            is not None
             or "reproduced identically" in bounded_context
         ) and _LANE_PASS_EVIDENCE.search(body[bounded_action.end() :]) is not None
         if not historical_reproduction:

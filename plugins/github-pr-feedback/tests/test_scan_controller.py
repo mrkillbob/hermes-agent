@@ -3107,6 +3107,19 @@ def test_self_resolution_fail_opens_for_bounded_unresolved_action_language(
     assert _is_self_resolution_receipt(item, owner_login="owner") is False
 
 
+def test_self_resolution_does_not_hide_current_reproduction_near_pre_existing_text() -> None:
+    item = feedback(
+        "mixed-current-reproduction",
+        reviewer="owner",
+        body=(
+            "Fixed in abcdef0. Verification: pre-existing setup is unchanged, "
+            "but the second finding still reproduces. Unit tests passed."
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is False
+
+
 def test_self_resolution_rejects_a_partial_finding_receipt() -> None:
     item = feedback(
         "partial-finding-completion",
