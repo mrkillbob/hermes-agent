@@ -59,7 +59,7 @@ keys into a request, `SKILL.md`, or generated receipt.
 4. Import only its structured JSON result through the LunaBot bridge:
 
    ```text
-   python3 scripts/bridge_nvidia_signal_result.py \
+   python3 <lunabot-root>/scripts/bridge_nvidia_signal_result.py \
      --input <nvidia-result.json> \
      --output <lunabot-artifacts>/nvidia-signal-receipt.json \
      --data-source <explicit-dataset-label>
@@ -127,7 +127,7 @@ Run the LunaBot bridge tests and validate the emitted receipt:
 
 ```text
 python3 -m pytest tests/test_nvidia_signal_discovery.py -q
-python3 scripts/bridge_nvidia_signal_result.py --help
+python3 <lunabot-root>/scripts/bridge_nvidia_signal_result.py --help
 ```
 
 The required final classification is one of: `research_only`,
