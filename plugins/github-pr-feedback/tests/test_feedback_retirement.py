@@ -66,6 +66,28 @@ def test_retired_exact_dispatch_can_be_reclaimed_after_reopen(dispatched, state)
     ledger.finalize(receipt, "task-2", reopened)
 
 
+@pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
+def test_reopening_superseded_dispatch_preserves_repair_serialization(dispatched, state):
+    policy, ledger, receipt, pull = dispatched
+    closed = replace(pull, state=state)
+    github = SimpleNamespace(get_pull_request=lambda *_: closed)
+    retire_closed_feedback(policy, github, ledger, receipt)
+
+    other = replace(receipt, feedback_id="other")
+    now = datetime.now(UTC)
+    assert ledger.claim(
+        other,
+        owner="active-repair",
+        claimed_at=now,
+        stale_before=now - timedelta(minutes=5),
+    ) is not None
+
+    assert ledger.reopen_superseded_exact_dispatch(
+        receipt, owner="reopened", claimed_at=now
+    ) is None
+    assert ledger.exact_receipt_status(receipt) == "completed"
+
+
 def test_archived_superseded_dispatch_is_not_reclaimed_as_closed_retirement(dispatched):
     _policy, ledger, receipt, _pull = dispatched
     replacement = replace(

@@ -1054,6 +1054,30 @@ class FeedbackLedger:
                 receipt.repository, receipt.pr_number
             ):
                 return None
+            serialized_repair = not (
+                receipt.feedback_kind == "pr_repair"
+                and (
+                    receipt.feedback_id.startswith("report:")
+                    or receipt.feedback_id.startswith("ci-receipt:")
+                )
+            )
+            if serialized_repair:
+                active_repair = self._connection.execute(
+                    "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                    "AND head_sha = ? AND feedback_kind != 'pr_local_ci' "
+                    "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%') "
+                    "AND NOT (feedback_kind = ? AND feedback_id = ?) "
+                    "AND status IN ('claimed', 'completed') AND action_status = 'pending' LIMIT 1",
+                    (
+                        receipt.repository,
+                        receipt.pr_number,
+                        receipt.head_sha,
+                        receipt.feedback_kind,
+                        receipt.feedback_id,
+                    ),
+                ).fetchone()
+                if active_repair is not None:
+                    return None
             row = self._connection.execute(
                 "SELECT status, action_status, lease_version, last_error FROM feedback_receipts "
                 "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
