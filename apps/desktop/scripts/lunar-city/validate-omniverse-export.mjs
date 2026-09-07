@@ -128,7 +128,7 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
 }
 function option(args, name, fallback = undefined) {
   const index = args.indexOf(name)
-  return index >= 0 ? args[index + 1] ?? fallback : fallback
+  return index >= 0 ? args[index + 1] : fallback
 }
 
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
@@ -136,7 +136,7 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   const receiptPath = option(args, '--receipt')
   const manifestPath = option(args, '--manifest', 'public/lunar-city/v2/world-manifest.v2.json')
   const mode = option(args, '--mode', 'preview')
-  if (!receiptPath) {
+  if (!receiptPath || mode === undefined) {
     console.error('Usage: node validate-omniverse-export.mjs --receipt <receipt.json> [--manifest <manifest.json>] [--mode preview|production]')
     process.exitCode = 2
   } else {

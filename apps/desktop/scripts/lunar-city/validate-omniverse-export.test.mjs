@@ -1,4 +1,9 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
 
 import { OMNIVERSE_RECEIPT_SCHEMA, validateOmniverseExport } from './validate-omniverse-export.mjs'
@@ -138,4 +143,25 @@ test('requires an own quality-budget profile with finite limits', () => {
   )
   assert.equal(malformedBudget.ok, false)
   assert.match(malformedBudget.errors.join('\n'), /quality budget limits must be finite and non-negative/)
+})
+
+test('requires a value when the CLI mode flag is present', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'omniverse-export-'))
+  try {
+    const receiptPath = join(workspace, 'reference.json')
+    const manifestPath = join(workspace, 'manifest.json')
+    writeFileSync(receiptPath, JSON.stringify(receipt()))
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+
+    const scriptPath = join(dirname(fileURLToPath(import.meta.url)), 'validate-omniverse-export.mjs')
+    const result = spawnSync(process.execPath, [scriptPath, '--receipt', receiptPath, '--manifest', manifestPath, '--mode'], {
+      encoding: 'utf8'
+    })
+
+    assert.equal(result.status, 2)
+    assert.match(result.stderr, /Usage: node validate-omniverse-export\.mjs/)
+    assert.equal(result.stdout, '')
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
 })
