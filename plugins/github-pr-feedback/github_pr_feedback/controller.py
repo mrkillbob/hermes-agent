@@ -131,6 +131,7 @@ _DEGRADED_REASONS = frozenset(
         "github_ci_state_unavailable",
         "base_state_unavailable",
         "admission_cap",
+        "ci_receipt_unavailable",
         "dispatch_failed",
         "exact_head_unavailable",
     }
@@ -1962,6 +1963,37 @@ class ScanController:
             skipped[dispatch_error] += 1
             return _scan_result(0, skipped)
         return _scan_result(1, skipped)
+
+    def retry_ci_failure(self, receipt: FeedbackReceipt) -> ScanResult:
+        """Retry a failed local-CI dispatch through its immutable audit receipt."""
+
+        skipped: Counter[str] = Counter()
+        if (
+            receipt.feedback_kind != "pr_repair"
+            or not receipt.feedback_id.startswith("ci-receipt:")
+        ):
+            skipped["ci_receipt_unavailable"] += 1
+            return _scan_result(0, skipped)
+        receipt_id = receipt.feedback_id.removeprefix("ci-receipt:")
+        audit = self._ledger.ci_receipt_by_id(
+            receipt.repository, receipt.pr_number, receipt_id
+        )
+        from .ci_runner import CIAuditReceipt
+
+        if (
+            not isinstance(audit, CIAuditReceipt)
+            or audit.status != "failed"
+            or audit.identity.repository != receipt.repository
+            or audit.identity.pr_number != receipt.pr_number
+            or audit.identity.head_sha != receipt.head_sha
+        ):
+            skipped["ci_receipt_unavailable"] += 1
+            return _scan_result(0, skipped)
+        status = self.dispatch_ci_failure(audit)
+        if status == "scheduled":
+            return _scan_result(1, skipped)
+        skipped[status] += 1
+        return _scan_result(0, skipped)
 
     def _legacy_dispatch_is_reopenable(self, receipt: FeedbackReceipt) -> bool:
         """Check the exact pending card before bypassing completed-ledger dedupe."""

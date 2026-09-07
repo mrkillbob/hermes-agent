@@ -53,6 +53,51 @@ def test_scan_admission_budget_covers_a_large_pr_repair_queue() -> None:
     assert MAX_ADMISSIONS_PER_SCAN >= 128
 
 
+def test_ci_receipt_retry_reuses_the_failed_typed_audit() -> None:
+    audit = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, "b" * 40, "a" * 40),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+
+    class Ledger:
+        def ci_receipt_by_id(
+            self, repository: str, pr_number: int, receipt_id: str
+        ) -> object:
+            assert (repository, pr_number, receipt_id) == (
+                "acme/widgets",
+                17,
+                audit.receipt_id,
+            )
+            return audit
+
+    controller = ScanController.__new__(ScanController)
+    object.__setattr__(controller, "_ledger", Ledger())
+    dispatched: list[CIAuditReceipt] = []
+
+    def dispatch_ci_failure(audit: object) -> str:
+        assert isinstance(audit, CIAuditReceipt)
+        dispatched.append(audit)
+        return "scheduled"
+
+    object.__setattr__(controller, "dispatch_ci_failure", dispatch_ci_failure)
+
+    result = controller.retry_ci_failure(
+        FeedbackReceipt(
+            "acme/widgets", 17, "pr_repair", f"ci-receipt:{audit.receipt_id}", "a" * 40
+        )
+    )
+
+    assert result.created == 1
+    assert result.skipped == {}
+    assert dispatched == [audit]
+
+
 def test_intent_review_card_uses_valid_zero_retry_encoding(tmp_path: Path) -> None:
     policy = SimpleNamespace(
         merge_maintainer=None,

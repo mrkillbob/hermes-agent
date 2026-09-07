@@ -1741,6 +1741,7 @@ def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
     from github_pr_feedback.controller import ScanResult
 
     seen: list[FeedbackReceipt] = []
+    ci_seen: list[FeedbackReceipt] = []
 
     class RevalidatingController:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -1748,6 +1749,10 @@ def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
 
         def retry_failed(self, receipt: FeedbackReceipt) -> ScanResult:
             seen.append(receipt)
+            return ScanResult(1, {})
+
+        def retry_ci_failure(self, receipt: FeedbackReceipt) -> ScanResult:
+            ci_seen.append(receipt)
             return ScanResult(1, {})
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
@@ -1786,6 +1791,32 @@ def test_retry_passes_the_exact_immutable_receipt_to_controller_revalidation(
         "skipped": {},
         "status": "ok",
     }
+
+    ci_exit_code = cli.handle_cli_with_context(
+        context,
+        parser.parse_args(
+            [
+                "retry",
+                "--repository",
+                "acme/widgets",
+                "--pr-number",
+                "17",
+                "--feedback-kind",
+                "pr_repair",
+                "--feedback-id",
+                "ci-receipt:" + "f" * 64,
+                "--head-sha",
+                "a" * 40,
+            ]
+        ),
+    )
+
+    assert ci_exit_code == 0
+    assert ci_seen == [
+        FeedbackReceipt(
+            "acme/widgets", 17, "pr_repair", "ci-receipt:" + "f" * 64, "a" * 40
+        )
+    ]
 
 
 @pytest.mark.parametrize("action", ["scan", "retry"])
