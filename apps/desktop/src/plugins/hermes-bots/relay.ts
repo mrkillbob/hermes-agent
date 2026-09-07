@@ -48,19 +48,20 @@ const RELAY_DRAIN_INTERVAL_MS = 30_000
 // while Desktop reports its generic timeout first.
 //
 // These three are mirrors of backend values, so a change there must not
-// silently invalidate this constant: relay-deliver-budget.test.ts reads
-// hermes_cli/config_defaults.py and tui_gateway/methods_bot_relay.py and fails
-// if the mirrors drift or the margin stops being positive.
-const RELAY_TURN_LOCK_WAIT_MS = 120_000 // bot_mode.turn_wait_seconds default
-const RELAY_TURN_ATTEMPT_MS = 600_000 // subprocess.run(..., timeout=600)
-const RELAY_TURN_MAX_ATTEMPTS = 2 // first attempt + the policy-gated re-run
+// silently invalidate this constant: classify_changes routes the backend leaves
+// that define the mirror into the frontend lane, where relay-deliver-budget.test.ts
+// exercises the exported budget behavior.
+export const RELAY_TURN_LOCK_WAIT_MS = 120_000 // bot_mode.turn_wait_seconds default
+export const RELAY_TURN_ATTEMPT_MS = 600_000 // subprocess.run(..., timeout=600)
+export const RELAY_TURN_MAX_ATTEMPTS = 2 // first attempt + the policy-gated re-run
 
-const RELAY_DELIVER_BACKEND_CEILING_MS = RELAY_TURN_LOCK_WAIT_MS + RELAY_TURN_ATTEMPT_MS * RELAY_TURN_MAX_ATTEMPTS
+export const RELAY_DELIVER_BACKEND_CEILING_MS =
+  RELAY_TURN_LOCK_WAIT_MS + RELAY_TURN_ATTEMPT_MS * RELAY_TURN_MAX_ATTEMPTS
 
 // Settlement + transport headroom on top of the ceiling, so a backend that
 // answers at its own limit still wins the race against this timer.
-const RELAY_DELIVER_SETTLEMENT_MARGIN_MS = 180_000
-const RELAY_DELIVER_TIMEOUT_MS = RELAY_DELIVER_BACKEND_CEILING_MS + RELAY_DELIVER_SETTLEMENT_MARGIN_MS
+export const RELAY_DELIVER_SETTLEMENT_MARGIN_MS = 180_000
+export const RELAY_DELIVER_TIMEOUT_MS = RELAY_DELIVER_BACKEND_CEILING_MS + RELAY_DELIVER_SETTLEMENT_MARGIN_MS
 // Push path (#93091): the gateway broadcasts `bot_relay.outbox.pending` when
 // an envelope lands on disk; a burst of signals inside this window collapses
 // to ONE drain. The interval poll above stays as the backstop for older

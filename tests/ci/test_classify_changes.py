@@ -159,6 +159,14 @@ CASES = {
         ["scripts/desktop-update/ui.html"],
         _lanes(python=True, frontend=True, desktop_updater=True),
     ),
+    "bot relay backend budget → frontend guard": (
+        ["tui_gateway/methods_bot_relay.py"],
+        _lanes(python=True, frontend=True, scan=True),
+    ),
+    "bot relay lock default → frontend guard": (
+        ["hermes_cli/config_defaults.py"],
+        _lanes(python=True, frontend=True, scan=True),
+    ),
     "desktop-update test → desktop_updater": (
         ["tests/test_desktop_update_windows_progress.py"],
         _lanes(python=True, python_prod=False, scan=True, desktop_updater=True),

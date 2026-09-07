@@ -68,7 +68,14 @@ import sys
 
 _FRONTEND = ("ui-tui/", "web/", "apps/")  # TS typecheck-matrix packages
 # Shipped page outside those packages, exercised by the desktop Electron suite.
-_FRONTEND_FILES = {"scripts/desktop-update/ui.html"}
+# The bot-relay deadline spans backend defaults and Desktop behavior; route those
+# backend leaves into the frontend lane so the Vitest behavior guard runs before
+# merge instead of only after push CI fails open.
+_FRONTEND_FILES = {
+    "scripts/desktop-update/ui.html",
+    "hermes_cli/config_defaults.py",
+    "tui_gateway/methods_bot_relay.py",
+}
 _ROOT_NPM = {"package.json", "package-lock.json"}  # shifts every package's tree
 _DOCKER_META = ("docker/", ".hadolint.yml", "Dockerfile") # docker setup
 _NIX_PATHS = ("nix/",) # nix files
