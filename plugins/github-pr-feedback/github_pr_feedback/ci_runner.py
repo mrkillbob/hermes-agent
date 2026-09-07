@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from .github_client import MergeStateStillComputingError
-
-from .ci_environment import ci_environment
-
 from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands, hermes_coverage_gap, HERMES_ENV_CHECK
+from .ci_environment import ci_environment
 
 import hashlib
 import json
@@ -22,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .github_client import CheckState, GitHubClient, GitHubClientError, PullRequestMergeState
+from .github_client import CheckState, GitHubClient, GitHubClientError, MergeStateStillComputingError, PullRequestMergeState
 from .ledger import CIRunLease, FeedbackLedger
 
 
@@ -416,10 +413,12 @@ class SubprocessCICommandRunner:
                 duration_ms=int((time.monotonic() - started) * 1000),
                 timed_out=False,
             )
-        from .ci_output import retain_output
+        from .ci_output import cleanup_outputs, retain_output
 
-        retain_output(result.stdout)
-        retain_output(result.stderr)
+        cleanup_outputs()
+        if result.returncode != 0 or result.timed_out:
+            retain_output(result.stdout)
+            retain_output(result.stderr)
         return result
 
 
@@ -713,7 +712,16 @@ class LocalCIRunner:
         status = "passed" if len(evidence) == expected_command_count and all(
             item.returncode == 0 and not item.timed_out for item in evidence
         ) else "failed"
-        coverage_gap = hermes_coverage_gap(changed_files) if is_hermes_contract(manifest_bytes) else None
+        coverage_gap = (
+            hermes_coverage_gap(
+                changed_files,
+                hosted_coverage_available=(
+                    initial_checks.actions_enabled and initial_checks.check_count > 0
+                ),
+            )
+            if is_hermes_contract(manifest_bytes)
+            else None
+        )
         if coverage_gap:
             status = "failed"
         failed_commands = tuple(
@@ -894,19 +902,15 @@ def actions_disabled_local_ci_evidence(
             ("git", "diff", "--check", f"{receipt.identity.base_sha}..{receipt.identity.head_sha}"),
             ("uv", "lock", "--check"),
             HERMES_ENV_CHECK,
+            ("bash", "scripts/run_tests.sh"),
         )
-        if len(receipt.commands) < len(expected) + 1 or any(
+        if len(receipt.commands) < len(expected) or any(
             command.cwd != "." or command.argv != argv
             for command, argv in zip(receipt.commands, expected)
         ):
             return None
-        # The fourth Hermes-native command is targeted: changed test files are
-        # executed, source-only changes are compiled, and non-Python changes
-        # do not trigger the full pytest suite locally.
-        if receipt.commands[len(expected)].cwd != ".":
-            return None
         return ActionsDisabledLocalCIEvidence(receipt.receipt_id, receipt.manifest_digest,
-                                             len(receipt.commands), len(expected) + 1)
+                                             len(receipt.commands), len(expected))
     lanes = _required_lanes(manifest_bytes)
     required: list[tuple[str, ...]] = [
         ("scripts/check_ci_governance.py",),

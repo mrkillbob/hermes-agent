@@ -365,10 +365,6 @@ An audit may complete or block its calling worker only when the ledger binds tha
 
 Required local audits (`local_ci_audit.required_for_open_prs`) are scheduled independently of administrator-only Actions-settings access. During execution, a settings-only permission denial conservatively treats Actions as enabled and still reads the actual checks and statuses. Authentication failures remain failures. This does not substitute a local receipt for hosted checks or change merge gates.
 
-Local CI admission follows the PR's work dependencies, not its position on the board. A canonical conflict or a pending repair/feedback acknowledgement defers the audit, including a pending mutation recorded against an earlier head of the same PR. Independent PRs remain parallel. Completion markers from the configured Hermes identity are receipts rather than new repair requests; ordinary actionable bot feedback remains eligible.
-
-The sequence is repair, focused verification, verified push/reply, feedback acknowledgement, then exact-head local CI. A requested Codex review may run alongside CI. Acknowledgement records the repair, not CI or review approval; merge still requires the independent current-head gates above. A later review finding re-enters the repair sequence and invalidates old-head CI evidence.
-
 When `allow_budget_exhausted_local_ci` is enabled together with required,
 audit-only, no-post local CI, the same exact-head receipt may substitute for
 hosted checks in only two canonical repository states: Actions is explicitly
@@ -536,21 +532,3 @@ explicitly enabled and not in report-only mode.
 
 `hermes github-pr-feedback dispatch-repair --repository OWNER/REPO --pr-number N --head-sha FULL_SHA`
 revalidates one open PR and dispatches only its confirmed merge conflict through the existing repair controller. The expected head must still match. Repository/branch admission, immutable current-base acquisition, worktree preparation, receipt deduplication and scan locking are preserved. It does not audit CI, approve or merge, and does not resolve existing blocked cards. Archive an obsolete receipt card only with verified supersession evidence; a passing focused repair is not a full CI receipt.
-
-Repair completion policies also gate the shared `request_review` transition. A worker must finish its durable push/reply/acknowledgement contract before handing the implementation to an independent reviewer; review and CI still remain separate requirements. Original dispatch identities remain provenance, not evidence that the published repair still has its original head.
-
-### Retire a misclassified automation receipt
-
-`retire-feedback --self-receipt` accepts the existing exact repository, PR, feedback kind/id, and receipt-head arguments. It requires an admitted OPEN PR at that head and a freshly fetched comment authored by the configured automation identity that satisfies the same high-confidence completed-work classifier used by intake. It rechecks both PR identity and comment contents before retiring only that exact ledger dispatch as superseded. External findings, actionable bot comments, missing comments, and changed heads remain pending. The default retirement command still requires verified PR closure. Neither path creates repair-success or CI evidence; after successful retirement, the exact card may be completed as non-actionable with this reason.
-
-## Worker completion-policy readiness
-
-Each configured assignee profile must explicitly enable `github-pr-feedback`.
-Profiles have independent plugin opt-in lists: enabling it in the control profile
-alone does not load completion hooks in a worker. `doctor` reports
-`worker_completion_policy: failed` when a configured worker lacks this opt-in or
-explicitly disables it. Enable it through that profile's `hermes -p <profile>
-plugins enable github-pr-feedback` command before dispatch. The worker still
-uses its own model configuration; its completion hook reads the task's trusted
-control-home ledger. Real-discovery tests cover both the missing-hook failure
-and the enabled policy, rather than manually registering a test callback.

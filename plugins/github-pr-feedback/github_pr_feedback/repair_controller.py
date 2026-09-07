@@ -168,19 +168,16 @@ class RepairController:
         self._owner = f"repair-scanner-{uuid4().hex}"
         self._base_refresher = base_refresher or DeterministicBaseRefresher(github)
 
-    def scan(self, *, conflicts_only: bool = False, retry_receipt: FeedbackReceipt | None = None, scoped_target: tuple[str, int, str] | None = None, repository_filter: str | None = None) -> RepairScanResult:
+    def scan(self, *, conflicts_only: bool = False, retry_receipt: FeedbackReceipt | None = None, scoped_target: tuple[str, int, str] | None = None) -> RepairScanResult:
         configured = self._policy.repair_steward
         if configured is None:
-            return RepairScanResult(0, {}, False)
+            return RepairScanResult(0, {}, retry_receipt is not None)
         if scoped_target is not None and (scoped_target[0] not in configured.repositories or retry_receipt is not None):
             raise ValueError("scoped repair requires a configured repository and cannot retry a receipt")
         created = 0
         skipped: Counter[str] = Counter()
         degraded = False
-        repositories = sorted(configured.repositories)
-        if repository_filter is not None:
-            repositories = [repository for repository in repositories if repository == repository_filter]
-        for repository in repositories:
+        for repository in sorted(configured.repositories):
             if scoped_target is not None and repository != scoped_target[0]:
                 continue
             if retry_receipt is not None and repository != retry_receipt.repository:
@@ -215,9 +212,16 @@ class RepairController:
                     continue
             if retry_receipt is not None:
                 pulls = tuple(pull for pull in pulls if pull.number == retry_receipt.pr_number)
-            from .pr_ordering import repair_window
-
-            pulls = repair_window(self._ledger, repository, pulls, _MAX_REPAIR_SNAPSHOTS_PER_SCAN)
+            pulls = tuple(
+                sorted(
+                    pulls,
+                    key=lambda pull: (
+                        pull.updated_at or datetime.min.replace(tzinfo=UTC),
+                        pull.number,
+                    ),
+                    reverse=True,
+                )[:_MAX_REPAIR_SNAPSHOTS_PER_SCAN]
+            )
             with ThreadPoolExecutor(max_workers=min(2, max(1, len(pulls)))) as executor:
                 snapshots = executor.map(
                     lambda listed: self._read_snapshot(repository, listed), pulls
@@ -298,24 +302,23 @@ class RepairController:
                     checks,
                     base_refresh_required=base_refresh_required,
                 )
-                if scoped_target is not None and checks.actions_enabled and checks.action_required:
-                    # Exact conflict dispatch must not create a separate human
-                    # escalation. The broad scan owns that independent lane.
-                    skipped["action_required"] += 1
-                elif retry_receipt is None and checks.actions_enabled and checks.action_required:
+                if retry_receipt is None and checks.actions_enabled and checks.action_required:
+                    if conflicts_only:
+                        skipped["action_required"] += 1
+                    else:
                     # Independent of every other trigger above: no repair
                     # commit or merge can clear GitHub's own action_required
                     # conclusion, so this always gets its own escalation card
                     # rather than competing with (or being silently absorbed
                     # by) the ordinary repair path.
-                    escalation_status = self._dispatch_action_required(
-                        repository, target, pull
-                    )
-                    if escalation_status is None:
-                        created += 1
-                    elif escalation_status != "duplicate":
-                        skipped[escalation_status] += 1
-                        degraded = True
+                        escalation_status = self._dispatch_action_required(
+                            repository, target, pull
+                        )
+                        if escalation_status is None:
+                            created += 1
+                        elif escalation_status != "duplicate":
+                            skipped[escalation_status] += 1
+                            degraded = True
                 if base_refresh_required:
                     if (
                         base_refresh_slots_used
@@ -546,6 +549,12 @@ class RepairController:
                     skipped["dispatch_failed"] += 1
                     degraded = True
             refresh_executor.shutdown(wait=True)
+        if (
+            retry_receipt is not None
+            and created == 0
+            and skipped.get("base_refresh_completed", 0) == 0
+        ):
+            degraded = True
         return RepairScanResult(created, dict(skipped), degraded)
 
     def _dispatch_action_required(

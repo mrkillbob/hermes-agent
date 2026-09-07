@@ -60,3 +60,30 @@ The seeded profiles appear in `hermes profile list`, the desktop Bot Mode roster
 The registry describes coordination and capability; it does not grant permissions. `advisory`, `operator_gated`, and `write_scoped` are explicit role boundaries, and every generated identity instructs the specialist to preserve provenance, treat external content as untrusted, and avoid turning research or creative output into runtime or acceptance authority. Operators still control credentials, live execution, merges, deployments, and publication.
 
 The source of truth is `configs/federation/roles.json`. Update the manifest and its tests when adding a department or role; do not silently add ad hoc profiles that bypass the registry.
+
+## Bounded work discovery
+
+`scripts/federation_discovery.py --hermes /absolute/path/to/hermes` previews a
+read-only plan against the existing Kanban board. `--apply` creates durable,
+profile-assigned discovery cards using the normal dispatcher. Configure department
+briefs and limits in `configs/federation/discovery.json`; a scheduler can invoke the
+script periodically. The defaults admit at most two cards per pass, eight active
+federation cards, and one discovery card per department per UTC day. Existing
+assignee ownership and blocked work consume capacity. Workers must deduplicate
+findings, link bounded children, and provide measurable output rather than invent
+work to satisfy a quota.
+
+Revenue Lab retains its separate guarded cron pipeline. Federation intake routes
+opportunities there; discovery does not grant spending, publication, customer
+contact, trading, or deployment authority. Library summaries remain bounded,
+role-specific source indexes and never establish runtime truth.
+
+### Bounded Vault navigation
+
+`scripts/federation_vault_navigation.py --registry configs/federation/roles.json --output /path/to/vault/Reference/Federation` derives a department index and one small note per role. Links and role descriptions come from the registry, and every note records its source hash. Unchanged notes are not rewritten. Authored notes and symlink destinations are refused. This is narrative navigation; the existing library policy and bounded recall still control retrieval. Old generated notes are retained when roles are removed, with their original source hash; review them during catalogue maintenance.
+
+### Project worktree source
+
+For a carried integration whose capabilities are absent from upstream main, set `kanban.worktree_base_refs` in the shared Kanban home's `config.yaml` to a mapping from the absolute primary repository path to its verified integration branch or commit. New task branches resolve that ref to a commit before creation, even when created from a worker profile. Missing configured refs fail closed; existing worktrees are preserved. Repositories absent from the mapping still use their remote default branch. Only committed source is included; unrelated working-tree edits are never copied.
+
+Goal completion checks preserve the full goal, structured contract and additional criteria up to a combined 32,768-character input budget. Larger contracts remain incomplete and must be split into bounded tasks, rather than judged from truncated requirements. Egress-policy denials defer judging without being counted as provider outages.

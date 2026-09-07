@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -22,14 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
 from .cli_audit_task import owns_current_audit_task
-from .worker_contract import configured_assignees, worker_contract_enabled
-from .controller import (
-    AUTO_DISPATCH_MAX_RUNTIME_SECONDS,
-    KanbanTask,
-    LocalGitRepository,
-    PooledLocalGitRepository,
-    ScanController,
-)
+from .controller import KanbanTask, LocalGitRepository, PooledLocalGitRepository, ScanController
 from .ci_coordinator import CIAuditJob, GroupedCICoordinator
 from .ci_runner import (
     CIAuditIdentity,
@@ -38,6 +32,7 @@ from .ci_runner import (
     LocalCIRunner,
     _required_lanes,
 )
+from .worker_contract import configured_assignees, worker_contract_enabled
 from .github_client import GitHubClient, GitHubClientError
 from .ledger import (
     FeedbackLedger,
@@ -272,7 +267,35 @@ class DoctorProbe:
                 hermes and self._hermes_executable_ready(hermes)
             ),
             "board": self._board_exists(policy.board or ""),
-            "assignee": all(self._assignee_exists(name) for name in configured_assignees(policy)),
+            "assignee": all(
+                self._assignee_exists(assignee)
+                for assignee in {
+                    policy.assignee or "",
+                    *(rule.assignee for rule in policy.assignee_rules),
+                    *(rule.assignee for rule in policy.routing_rules),
+                    *(
+                        [policy.local_ci_audit.assignee]
+                        if policy.local_ci_audit is not None
+                        else []
+                    ),
+                    *(item.assignee for item in policy.merge_policies()),
+                    *(
+                        [policy.repair_steward.assignee]
+                        if policy.repair_steward is not None
+                        else []
+                    ),
+                    *(
+                        [
+                            assignee
+                            for maintenance in policy.release_policies()
+                            for assignee in (
+                                maintenance.assignee,
+                                *(lane.assignee for lane in maintenance.lanes),
+                            )
+                        ]
+                    ),
+                }
+            ),
             "worker_completion_policy": all(
                 worker_contract_enabled(self._hermes_root, name)
                 for name in configured_assignees(policy)
@@ -1134,7 +1157,7 @@ def _scan(ctx: Any) -> int:
                 # leased simply falls back to its lease timeout.
                 pass
             controller = _controller(policy, ledger)
-            result = controller.scan(apply_labels=False, repository_filter=repository_filter or None)
+            result = controller.scan(apply_labels=False)
             # Conflicts must be repairable while CI is pending; otherwise the
             # backlog can never clear. Keep this pass bounded and conflict-only.
             # Merge/release retain their own independent exact-head gates.
@@ -1146,7 +1169,7 @@ def _scan(ctx: Any) -> int:
                     _github_client(policy),
                     KanbanSubprocessClient(),
                     control_home=get_default_hermes_root(),
-                ).scan(conflicts_only=required_ci_backlog, repository_filter=repository_filter or None)
+                ).scan(conflicts_only=required_ci_backlog)
                 repair_payload = _scan_payload(repair)
             if policy.merge_policies():
                 merge_payload = _run_merge_scan(policy, ledger)
@@ -1159,20 +1182,34 @@ def _scan(ctx: Any) -> int:
                     else ()
                 )
             )
-            if release_policies and not required_ci_backlog:
+            backlog_by_repository = getattr(
+                result, "required_local_ci_backlog_by_repository", None
+            )
+            if isinstance(backlog_by_repository, Mapping):
+                eligible_release_policies = tuple(
+                    maintenance
+                    for maintenance in release_policies
+                    if backlog_by_repository.get(maintenance.repository, 0) == 0
+                )
+            else:
+                # Preserve the aggregate gate for older controller adapters.
+                eligible_release_policies = (
+                    release_policies if not required_ci_backlog else ()
+                )
+            if eligible_release_policies:
                 maintenance_results = [
                     _run_release_maintenance_scan(
                         policy, ledger, maintenance=maintenance
                     )
-                    for maintenance in release_policies
+                    for maintenance in eligible_release_policies
                 ]
                 maintenance_payload = (
                     maintenance_results[0]
-                    if len(maintenance_results) == 1
+                    if len(release_policies) == 1
                     else {
-                        maintenance.repository: result
+                        getattr(maintenance, "repository"): result
                         for maintenance, result in zip(
-                            release_policies, maintenance_results
+                            eligible_release_policies, maintenance_results
                         )
                     }
                 )
@@ -1290,10 +1327,13 @@ def _retry(ctx: Any, args: argparse.Namespace) -> int:
     ledger = FeedbackLedger.for_current_profile()
     try:
         if receipt.feedback_kind == "pr_repair":
-            result = RepairController(
-                policy, ledger, _github_client(policy), KanbanSubprocessClient(),
-                control_home=get_default_hermes_root(),
-            ).scan(retry_receipt=receipt)
+            if receipt.feedback_id.startswith("ci-receipt:"):
+                result = _controller(policy, ledger).retry_ci_failure(receipt)
+            else:
+                result = RepairController(
+                    policy, ledger, _github_client(policy), KanbanSubprocessClient(),
+                    control_home=get_default_hermes_root(),
+                ).scan(retry_receipt=receipt)
         else:
             result = _controller(policy, ledger).retry_failed(receipt)
     finally:
@@ -1597,8 +1637,6 @@ def _ci_receipt_payload(receipt: CIAuditReceipt) -> dict[str, object]:
 
 
 def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
-    from .github_client import MergeStateStillComputingError
-
     handoff_blocked = False
     handoff_blockers: list[str] = []
     merge_handoff: dict[str, object] | None = None
@@ -1717,22 +1755,19 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     if isinstance(raw_blockers, list):
                         handoff_blockers = [str(blocker) for blocker in raw_blockers]
                     next_step = _dispatch_merge_next_step(
-                        policy,
-                        ledger,
-                        github,
-                        KanbanSubprocessClient(),
-                        receipt.identity.repository,
-                        receipt.identity.pr_number,
+                        policy, ledger, github, KanbanSubprocessClient(),
+                        receipt.identity.repository, receipt.identity.pr_number,
                         handoff_blockers,
                     )
                     successor_scheduled = bool(
                         isinstance(next_step, dict)
                         and next_step.get("status") in {"scheduled", "duplicate", "already_scheduled"}
                     )
-                    if owns_task and not successor_scheduled:
-                        _block_current_ci_task(receipt, handoff_blockers)
-                    elif owns_task and successor_scheduled:
-                        _complete_current_ci_task(receipt)
+                    if owns_task:
+                        if successor_scheduled:
+                            _complete_current_ci_task(receipt)
+                        else:
+                            _block_current_ci_task(receipt, handoff_blockers)
                     handoff_blocked = True
                     if next_step is not None:
                         merge_handoff["next_step"] = next_step

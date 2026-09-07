@@ -13,7 +13,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -126,6 +126,7 @@ _DEGRADED_REASONS = frozenset(
         "github_ci_state_unavailable",
         "base_state_unavailable",
         "admission_cap",
+        "ci_receipt_unavailable",
         "dispatch_failed",
         "exact_head_unavailable",
     }
@@ -250,6 +251,9 @@ class ScanResult:
     degraded: bool = False
     required_local_ci_backlog: int = 0
     local_ci_catalogue_deferred: int = 0
+    required_local_ci_backlog_by_repository: Mapping[str, int] = field(
+        default_factory=dict
+    )
 
 
 def _bind_pooled_worktree_task(
@@ -1292,6 +1296,7 @@ class ScanController:
         created = 0
         attempted = 0
         required_local_ci_backlog = 0
+        required_local_ci_backlog_by_repository: dict[str, int] = {}
         local_ci_catalogue_deferred = 0
         self._label_batches = []
         if not self._policy.enabled or self._policy.not_before is None:
@@ -1335,12 +1340,14 @@ class ScanController:
 
             pull_requests = order_pull_requests(pull_requests)
             self._label_batches.append((repository, target, pull_requests))
-            required_local_ci_backlog += _required_local_ci_backlog_count(
+            repository_backlog = _required_local_ci_backlog_count(
                 self._policy,
                 self._ledger,
                 target,
                 pull_requests,
             )
+            required_local_ci_backlog += repository_backlog
+            required_local_ci_backlog_by_repository[repository] = repository_backlog
             if (
                 self._policy.local_ci_audit is not None
                 and self._policy.local_ci_audit.applies_to(repository)
@@ -1605,6 +1612,7 @@ class ScanController:
             skipped,
             required_local_ci_backlog=required_local_ci_backlog,
             local_ci_catalogue_deferred=local_ci_catalogue_deferred,
+            required_local_ci_backlog_by_repository=required_local_ci_backlog_by_repository,
         )
 
     def reconcile_labels(self, repository: str) -> dict[str, object]:
@@ -2127,6 +2135,37 @@ class ScanController:
             skipped[dispatch_error] += 1
             return _scan_result(0, skipped)
         return _scan_result(1, skipped)
+
+    def retry_ci_failure(self, receipt: FeedbackReceipt) -> ScanResult:
+        """Retry a failed local-CI dispatch through its immutable audit receipt."""
+
+        skipped: Counter[str] = Counter()
+        if (
+            receipt.feedback_kind != "pr_repair"
+            or not receipt.feedback_id.startswith("ci-receipt:")
+        ):
+            skipped["ci_receipt_unavailable"] += 1
+            return _scan_result(0, skipped)
+        receipt_id = receipt.feedback_id.removeprefix("ci-receipt:")
+        audit = self._ledger.ci_receipt_by_id(
+            receipt.repository, receipt.pr_number, receipt_id
+        )
+        from .ci_runner import CIAuditReceipt
+
+        if (
+            not isinstance(audit, CIAuditReceipt)
+            or audit.status != "failed"
+            or audit.identity.repository != receipt.repository
+            or audit.identity.pr_number != receipt.pr_number
+            or audit.identity.head_sha != receipt.head_sha
+        ):
+            skipped["ci_receipt_unavailable"] += 1
+            return _scan_result(0, skipped)
+        status = self.dispatch_ci_failure(audit)
+        if status == "scheduled":
+            return _scan_result(1, skipped)
+        skipped[status] += 1
+        return _scan_result(0, skipped)
 
     def _legacy_dispatch_is_reopenable(self, receipt: FeedbackReceipt) -> bool:
         """Check the exact pending card before bypassing completed-ledger dedupe."""
@@ -3096,11 +3135,7 @@ def _task(
         "acknowledge the exact receipt and complete. Do not retry a tool-blocked command; use one "
         "literal repository-owned command or stop with its exact blocker. Validate the reported issue "
         "against the exact receipt worktree before editing. If confirmed, make only the bounded fix, "
-        "run focused verification, commit, then push to the verified PR head repository and branch "
-        "with this literal shape: `git push https://github.com/<full literal head repository>.git "
-        "HEAD:refs/heads/<full literal PR head branch>`. Resolve both placeholders from the fresh "
-        "inspect-pr result. Never use `origin`: upstream worktrees intentionally configure it as "
-        "read-only and the writable destination is the verified head repository, and publish one "
+        "run focused verification, commit and push to the verified PR head branch, and publish one "
         "factual PR reply with the commit and test evidence only through the governed command "
         + f"`{_governed_command_prefix(control_home)} post-comment --repository "
         f"{shlex.quote(receipt.repository)} --pr-number {receipt.pr_number} --head-sha "
@@ -3367,12 +3402,8 @@ def _ci_failure_task(
         "Re-read the canonical pull request and require both its base and head to equal the receipt "
         "identities before editing and immediately before every GitHub write. Run focused "
         "verification plus the affected CI lane. Keep all required checks, tests, validation, "
-        "and safety gates intact. Commit, then push to the verified PR head repository and branch "
-        "with this literal shape: `git push https://github.com/<full literal head repository>.git "
-        "HEAD:refs/heads/<full literal PR head branch>`. Resolve both placeholders from the fresh "
-        "inspect-pr result. Never use `origin`: upstream worktrees intentionally configure it as "
-        "read-only and the writable destination is the verified head repository. Then publish one "
-        "factual reply with commit and test evidence only through the governed "
+        "and safety gates intact. Commit and push normally to the existing verified PR head branch, "
+        "then publish one factual reply with commit and test evidence only through the governed "
         "`post-comment` command using the exact resolved head SHA"
         + (
             f", starting with the exact line `{pr_repair_attribution_line(assignee)}` "
@@ -3540,6 +3571,7 @@ def _scan_result(
     *,
     required_local_ci_backlog: int = 0,
     local_ci_catalogue_deferred: int = 0,
+    required_local_ci_backlog_by_repository: Mapping[str, int] | None = None,
 ) -> ScanResult:
     values = dict(skipped)
     degraded = any(values.get(reason, 0) > 0 for reason in _DEGRADED_REASONS)
@@ -3549,4 +3581,7 @@ def _scan_result(
         degraded,
         required_local_ci_backlog=required_local_ci_backlog,
         local_ci_catalogue_deferred=local_ci_catalogue_deferred,
+        required_local_ci_backlog_by_repository=(
+            required_local_ci_backlog_by_repository or {}
+        ),
     )

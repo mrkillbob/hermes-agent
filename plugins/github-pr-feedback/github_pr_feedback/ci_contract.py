@@ -9,6 +9,8 @@ HERMES_ENV_CHECK = ('uv', 'sync', '--locked', '--check', '--no-install-project',
                     '--extra', 'daytona', '--extra', 'hindsight', '--extra', 'parallel-web')
 
 _HERMES_MANIFEST = Path(__file__).with_name('hermes_native_ci.toml')
+_DESKTOP_PACKAGE = 'apps/desktop'
+_DESKTOP_NATIVE_CHECKS = ('check:test:desktop:all',)
 
 
 def manifest_path(worktree: Path) -> Path:
@@ -29,30 +31,19 @@ def is_hermes_contract(payload: bytes) -> bool:
 
 
 def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple[str, ...]):
-    targeted_tests = tuple(
-        path for path in changed
-        if path.startswith('tests/') and path.endswith('.py')
-    )
-    targeted_python = tuple(path for path in changed if path.endswith('.py'))
-    if targeted_tests:
-        test_command = ('bash', 'scripts/run_tests.sh', *targeted_tests)
-    elif targeted_python:
-        test_command = ('python', '-m', 'compileall', '-q', *targeted_python)
-    else:
-        test_command = ('git', 'diff', '--check', f'{base_sha}..{head_sha}')
     commands = [
         (('git', 'diff', '--check', f'{base_sha}..{head_sha}'), worktree, {}),
         (('uv', 'lock', '--check'), worktree, {}),
         (HERMES_ENV_CHECK, worktree, {}),
-        # Local CI is a receipt worker, not a second hosted full-suite lane.
-        # Run only test files changed by this PR; hosted CI remains responsible
-        # for the repository-wide matrix.
-        (test_command, worktree, {}),
+        (('bash', 'scripts/run_tests.sh'), worktree, {}),
     ]
     root_lock = worktree / 'package-lock.json'
     locked_packages = json.loads(root_lock.read_text()).get('packages', {}) if root_lock.is_file() else {}
     root_installed = False
     shared_changed = any(p.startswith('apps/shared/') or p in {'package.json', 'package-lock.json'} for p in changed)
+    desktop_changed = shared_changed or any(
+        p == _DESKTOP_PACKAGE or p.startswith(_DESKTOP_PACKAGE + '/') for p in changed
+    )
     for package in ('apps/desktop', 'apps/shared', 'ui-tui', 'web', 'website'):
         if not shared_changed and not any(p == package or p.startswith(package + '/') for p in changed):
             continue
@@ -61,10 +52,12 @@ def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple
             continue
         if package in locked_packages:
             if not root_installed:
-                commands.append((('npm', 'ci', '--ignore-scripts'), worktree, {}))
+                install = ('npm', 'ci') if desktop_changed else ('npm', 'ci', '--ignore-scripts')
+                commands.append((install, worktree, {}))
                 root_installed = True
         elif (root / 'package-lock.json').is_file():
-            commands.append((('npm', 'ci', '--ignore-scripts'), root, {}))
+            install = ('npm', 'ci') if package == _DESKTOP_PACKAGE else ('npm', 'ci', '--ignore-scripts')
+            commands.append((install, root, {}))
         else:
             raise ValueError(f'Hermes CI package lock missing: {package}')
         scripts = json.loads((root / 'package.json').read_text()).get('scripts', {})
@@ -73,11 +66,24 @@ def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple
         for name in ('lint', 'typecheck', 'test', 'build'):
             if name in scripts:
                 commands.append((('npm', 'run', name), root, {'CI': 'true'}))
+        if package == _DESKTOP_PACKAGE:
+            for name in _DESKTOP_NATIVE_CHECKS:
+                if name in scripts:
+                    commands.append((('npm', 'run', name), root, {'CI': 'true'}))
     return commands
 
 
-def hermes_coverage_gap(changed: tuple[str, ...]) -> str | None:
-    if any(p.endswith((".rs", ".ps1", ".nix")) or p.startswith(".github/")
-           or Path(p).name.startswith("Dockerfile") for p in changed):
+def hermes_coverage_gap(
+    changed: tuple[str, ...], *, hosted_coverage_available: bool = False
+) -> str | None:
+    # The hosted desktop lane drives Electron under Linux/Xvfb; native CI runs
+    # the package's deterministic checks but cannot replace that acceptance lane.
+    if not hosted_coverage_available and any(
+        p.startswith("apps/desktop/")
+        or p.endswith((".rs", ".ps1", ".nix"))
+        or p.startswith(".github/")
+        or Path(p).name.startswith("Dockerfile")
+        for p in changed
+    ):
         return "additional platform or workflow coverage is required beyond host-native CI"
     return None

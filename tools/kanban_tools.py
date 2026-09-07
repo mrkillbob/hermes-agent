@@ -1196,6 +1196,9 @@ def _handle_create(args: dict, **kw) -> str:
         _parse_bool_arg(args, "goal_mode"))
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
+    max_retries = _opt_int(args.get("max_retries"))
+    _check(max_retries is None or max_retries >= 1,
+           f"'max_retries' must be >= 1 (got {max_retries}); use 1 to trip on the first failure.")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
         self_tid = os.environ.get("HERMES_KANBAN_TASK")
@@ -1213,7 +1216,7 @@ def _handle_create(args: dict, **kw) -> str:
             project_source_task_id=project_source_task_id, triage=triage,
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-            max_retries=_opt_int(args.get("max_retries")),
+            max_retries=max_retries,
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             initial_status=str(args.get("initial_status") or "running"),
