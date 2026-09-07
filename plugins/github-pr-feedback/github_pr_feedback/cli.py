@@ -2820,9 +2820,10 @@ def _label_scan(ctx, args):
             result = _controller(policy, ledger).reconcile_labels(args.repository)
         finally:
             ledger.close()
-    except Exception as error:  # noqa: BLE001 - CLI callers require a stable JSON envelope.
-        print(json.dumps({"status": "error", "code": getattr(error, "code", "label_scan_failed"),
-                          "message": str(error)}))
+    except (GitHubClientError, ValueError) as error:
+        code = getattr(error, "code", "invalid_request")
+        print(json.dumps({"status": "unavailable", "reason": code,
+                          "retryable": code in {"rate_limited", "transient", "timeout"}}, sort_keys=True))
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0
