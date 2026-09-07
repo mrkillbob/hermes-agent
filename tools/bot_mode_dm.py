@@ -303,8 +303,23 @@ def message_agent_tool(
             )
         dm_target = f"{peer_name}/{peer_profile}" if peer_profile else peer_name
         label = f"@{peer_profile or peer_name} on peer '{peer_name}'"
+        # Pin the registry-owning profile (#93935): `hermes peer` resolves
+        # bot_peers through load_config(), which is profile-scoped — an
+        # unpinned subprocess inherits THIS gateway's profile context, so a
+        # secondary-profile bot's peer DM ran against an empty registry and
+        # died with "No peer named". The tool-side roster above reads the
+        # machine-root config (the default profile's home), so the CLI must
+        # run in that same profile to see the same registry. Mirrors the
+        # local-teammate path's `-p <resolved>` pin below.
         return _start_delivery(
-            ["hermes", "peer", "dm", dm_target],
+            [
+                "hermes",
+                "-p",
+                _self_profile_name(root),
+                "peer",
+                "dm",
+                dm_target,
+            ],
             prefix + body,
             label,
             stdin_file=True,
@@ -527,7 +542,19 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool):
     lock in ``tools.bot_relay``. Peer transports (stdin mode) run on the
     remote gateway; their turn is locked THERE by its own deliver path.
     """
-    if stdin_file or len(argv) < 3 or argv[0] != "hermes" or argv[1] != "-p":
+    # The CLI element is matched by basename: local_delivery_command now
+    # resolves the venv-relative hermes next to this gateway's interpreter
+    # (#93590 — service contexts lack PATH), so argv[0] may be an absolute
+    # path (and on Windows carries the .exe suffix). Split on both
+    # separators so the shape matches regardless of which platform built
+    # the argv.
+    cli = (argv[0] if argv else "").rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+    if (
+        stdin_file
+        or len(argv) < 3
+        or cli not in ("hermes", "hermes.exe")
+        or argv[1] != "-p"
+    ):
         return contextlib.nullcontext()
     from tools.bot_relay import acquire_turn_lock
 
@@ -560,6 +587,7 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
             proc = subprocess.run(
                 [*argv, "--query-file", dm_file],
                 check=False,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
             )
@@ -575,6 +603,7 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
                     proc = subprocess.run(
                         [*argv, "--query-file", dm_file],
                         check=False,
+                        stdin=subprocess.DEVNULL,
                         capture_output=True,
                         text=True,
                     )
@@ -601,6 +630,12 @@ def _delivery_command(argv: list[str], dm_file: str, *, stdin_file: bool) -> str
         dm_file,
         *argv,
     ]
+    if sys.platform == "win32":
+        # The tracked local backend uses Git Bash on native Windows. Forward
+        # slashes preserve native drive paths while remaining executable by
+        # that shell; backslash-form paths are parsed as command names and die
+        # with exit 127 before this runner starts.
+        runner_argv = [part.replace("\\", "/") for part in runner_argv]
     return shlex.join(runner_argv)
 
 
@@ -652,6 +687,8 @@ def _spawn_delivery(
             background=True,
             notify_on_complete=True,
             task_id=task_id,
+            workdir=str(Path(__file__).resolve().parent.parent),
+            _host_local=True,
         )
         try:
             parsed = json.loads(raw)

@@ -41,6 +41,89 @@ class TestApprovalModeParsing:
             assert _get_approval_mode() == "off"
 
 
+class TestKanbanGitHubActionsMutationGuard:
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "gh run rerun 123456",
+            "gh run cancel 123456",
+            "gh workflow run ci.yml --ref stable",
+            "gh api -X POST repos/acme/widgets/actions/runs/123456/rerun",
+            "curl -X POST https://api.github.com/repos/acme/widgets/actions/workflows/ci.yml/dispatches",
+            "bash -lc 'gh run rerun 123456'",
+        ),
+    )
+    def test_kanban_worker_cannot_mutate_github_actions(
+        self, monkeypatch: pytest.MonkeyPatch, command: str
+    ) -> None:
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_cost_guard")
+
+        for checker in (
+            approval_module.check_dangerous_command,
+            approval_module.check_all_command_guards,
+        ):
+            result = checker(command, "docker")
+            assert result["approved"] is False
+            assert result["kanban_policy"] == "github_actions_mutation"
+
+    def test_kanban_worker_can_inspect_github_actions_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_cost_guard")
+
+        for command in (
+            "gh run list --limit 20",
+            "gh run view 123456 --json status,conclusion",
+            "gh pr checks 17",
+        ):
+            result = approval_module.check_all_command_guards(command, "docker")
+            assert result["approved"] is True
+
+    def test_non_kanban_operator_keeps_normal_github_actions_authority(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+
+        result = approval_module.check_all_command_guards(
+            "gh workflow run ci.yml --ref stable", "docker"
+        )
+
+        assert result["approved"] is True
+
+
+class TestKanbanPullRequestCreationGuard:
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "gh pr create --fill",
+            "gh api -X POST repos/acme/widgets/pulls -f head=codex/fix -f base=stable",
+            "curl -X POST https://api.github.com/repos/acme/widgets/pulls",
+            "bash -lc 'gh pr create --fill'",
+        ),
+    )
+    def test_kanban_worker_cannot_create_pull_request_without_governed_receipt(
+        self, monkeypatch: pytest.MonkeyPatch, command: str
+    ) -> None:
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_pr_receipt_guard")
+
+        for checker in (
+            approval_module.check_dangerous_command,
+            approval_module.check_all_command_guards,
+        ):
+            result = checker(command, "docker")
+            assert result["approved"] is False
+            assert result["kanban_policy"] == "pull_request_creation_requires_exact_head_ci_receipt"
+
+    def test_non_kanban_operator_keeps_pull_request_creation_authority(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+
+        result = approval_module.check_all_command_guards("gh pr create --fill", "docker")
+
+        assert result["approved"] is True
+
+
 class TestSmartApproval:
     def test_smart_approval_uses_call_llm(self):
         response = SimpleNamespace(
@@ -700,6 +783,166 @@ class TestGatewayProtection:
         """pkill targeting unrelated processes should not be flagged."""
         dangerous, key, desc = detect_dangerous_command("pkill -f nginx")
         assert dangerous is False
+
+
+
+
+class TestWebhookApprovalExclusion:
+    """Unattended platform sessions must NOT be treated as gateway approval contexts.
+
+    The webhook / msgraph_webhook / api_server adapters have no
+    ``send_exec_approval`` method and no way to receive ``/approve`` replies.
+    If such a session triggers a dangerous command and falls through to the
+    gateway approval branch, the session blocks for the full timeout
+    (60-300 s) with no human who can resolve it (#37284, #87509).
+
+    Fix: ``_is_gateway_approval_context()`` returns ``False`` for platforms
+    in ``_UNATTENDED_APPROVAL_PLATFORMS``; the decision is governed by
+    ``approvals.unattended_mode`` (default deny) instead.
+    """
+
+    def test_webhook_platform_returns_false(self, monkeypatch):
+        """Webhook sessions are not gateway approval contexts."""
+        from tools.approval import _is_gateway_approval_context
+
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webhook")
+
+        assert _is_gateway_approval_context() is False
+
+    def test_all_unattended_platforms_return_false(self, monkeypatch):
+        """Every unattended programmatic platform is excluded, not just webhook."""
+        from tools.approval import (
+            _UNATTENDED_APPROVAL_PLATFORMS,
+            _is_gateway_approval_context,
+        )
+
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        for platform in _UNATTENDED_APPROVAL_PLATFORMS:
+            monkeypatch.setenv("HERMES_SESSION_PLATFORM", platform)
+            assert _is_gateway_approval_context() is False, platform
+
+    def test_non_webhook_gateway_session_returns_true(self, monkeypatch):
+        """Non-webhook gateway sessions (e.g. Telegram) are still gateway contexts."""
+        from tools.approval import _is_gateway_approval_context
+
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+
+        assert _is_gateway_approval_context() is True
+
+    def test_cron_session_returns_false_regardless_of_platform(self, monkeypatch):
+        """Cron sessions are never gateway approval contexts."""
+        from tools.approval import _is_gateway_approval_context
+
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+
+        assert _is_gateway_approval_context() is False
+
+    def test_no_platform_returns_false(self, monkeypatch):
+        """No session platform means not a gateway context."""
+        from tools.approval import _is_gateway_approval_context
+
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+
+        assert _is_gateway_approval_context() is False
+
+    def _isolate(self, monkeypatch):
+        """Neutralize host leakage: yolo frozen at import time + real config."""
+        import tools.approval as approval_mod
+
+        monkeypatch.setattr(approval_mod, "_YOLO_MODE_FROZEN", False)
+        monkeypatch.setattr(approval_mod, "_get_approval_mode", lambda: "smart")
+
+    def test_webhook_dangerous_command_denies_by_default(self, monkeypatch):
+        """Webhook sessions that trigger dangerous commands DENY instantly.
+
+        Deny-by-default (approvals.unattended_mode: deny) mirrors cron: an
+        unattended session must never silently execute a flagged command,
+        and must never block waiting for an approval nobody can answer.
+        The deny message tells the agent how the operator can opt in.
+        """
+        from tools.approval import check_all_command_guards
+
+        self._isolate(monkeypatch)
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webhook")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "test-webhook-session")
+
+        result = check_all_command_guards("sudo systemctl restart nginx", "local")
+        assert result["approved"] is False
+        assert "unattended platform" in result["message"]
+        assert "approvals.unattended_mode" in result["message"]
+
+    def test_webhook_dangerous_command_approves_when_opted_in(self, monkeypatch):
+        """approvals.unattended_mode: approve restores the old auto-approve path."""
+        import tools.approval as approval_mod
+        from tools.approval import check_all_command_guards
+
+        self._isolate(monkeypatch)
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webhook")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "test-webhook-session")
+        monkeypatch.setattr(
+            approval_mod, "_get_unattended_approval_mode", lambda: "approve"
+        )
+
+        result = check_all_command_guards("sudo systemctl restart nginx", "local")
+        assert result["approved"] is True
+
+    def test_webhook_safe_command_still_approves(self, monkeypatch):
+        """Non-dangerous commands on unattended platforms are unaffected."""
+        from tools.approval import check_all_command_guards
+
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webhook")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "test-webhook-session")
+
+        result = check_all_command_guards("ls -la /tmp", "local")
+        assert result["approved"] is True
+
+    def test_api_server_dangerous_command_denies_by_default(self, monkeypatch):
+        """api_server sessions get the same instant deny (#87509)."""
+        from tools.approval import check_all_command_guards
+
+        self._isolate(monkeypatch)
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "api_server")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "test-api-session")
+
+        result = check_all_command_guards("sudo systemctl restart nginx", "local")
+        assert result["approved"] is False
+        assert "api_server" in result["message"]
+
+    def test_execute_code_denied_on_unattended_platform(self, monkeypatch):
+        """execute_code is denied instantly on unattended platforms (parity with cron)."""
+        from tools.approval import check_execute_code_guard
+
+        self._isolate(monkeypatch)
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webhook")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "test-webhook-session")
+
+        result = check_execute_code_guard("import os", "local")
+        assert result["approved"] is False
+        assert "approvals.unattended_mode" in result["message"]
 
 
 class TestNormalizationBypass:

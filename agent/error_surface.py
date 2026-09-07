@@ -75,6 +75,7 @@ _NON_RETRYABLE_REASONS = {
     "provider_policy_blocked",
     "model_not_found",
     "format_error",
+    "unsupported_thinking",
     "ssl_cert_verification",
 }
 
