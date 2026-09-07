@@ -20,6 +20,20 @@ _SQLITE_BUSY_TIMEOUT_MS = 5_000
 _SQLITE_WAL_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
 
 
+def _pid_is_alive(pid: int) -> bool | None:
+    if pid < 2:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
 def _enable_wal_with_bounded_retry(connection: sqlite3.Connection) -> None:
     """Enable WAL without losing startup to a concurrent opener.
 
@@ -664,6 +678,29 @@ class FeedbackLedger:
             (repository, pr_number),
         ).fetchone() is not None
 
+    def _reclaim_dead_ci_audits(
+        self,
+        repository: str,
+        pr_number: int,
+        *,
+        stale_before: datetime,
+        pid_is_alive: Callable[[int], bool | None],
+    ) -> None:
+        rows = self._connection.execute(
+            "SELECT run_id, supervisor_pid, updated_at FROM ci_audit_runs "
+            "WHERE repository = ? AND pr_number = ? AND status = 'running'",
+            (repository, pr_number),
+        ).fetchall()
+        for run_id, supervisor_pid, updated_at in rows:
+            alive = pid_is_alive(int(supervisor_pid))
+            if alive is not False and datetime.fromisoformat(str(updated_at)) >= stale_before:
+                continue
+            self._connection.execute(
+                "UPDATE ci_audit_runs SET status = 'failed', updated_at = ?, "
+                "last_error = ? WHERE run_id = ? AND status = 'running'",
+                (stale_before.isoformat(), "CI supervisor lease expired", run_id),
+            )
+
     def claim(
         self,
         receipt: FeedbackReceipt,
@@ -671,6 +708,7 @@ class FeedbackLedger:
         owner: str,
         claimed_at: datetime,
         stale_before: datetime,
+        pid_is_alive: Callable[[int], bool | None] | None = None,
     ) -> ClaimLease | None:
         owner = owner.strip() if isinstance(owner, str) else ""
         if not owner:
@@ -678,6 +716,12 @@ class FeedbackLedger:
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         stale_before = _aware_utc(stale_before, "stale_before")
         with self._transaction():
+            self._reclaim_dead_ci_audits(
+                receipt.repository,
+                receipt.pr_number,
+                stale_before=stale_before,
+                pid_is_alive=pid_is_alive or (lambda _pid: True),
+            )
             if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
                 receipt.repository, receipt.pr_number
             ):
