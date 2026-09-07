@@ -23,6 +23,8 @@ def _require(value: object, field: str) -> str:
 
 def _branch(value: object, field: str) -> str:
     value = _require(value, field)
+    if value.startswith("-"):
+        raise ValueError(f"{field} is not a safe branch name")
     result = _run(
         ("git", "check-ref-format", f"refs/heads/{value}"),
         check=False,

@@ -42,6 +42,19 @@ def test_push_rejects_every_force_option(monkeypatch, tmp_path):
     assert "--force-with-lease" not in flattened
 
 
+def test_branch_rejects_option_like_names(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("github_pr_feedback.stack._run", fake_run)
+    with pytest.raises(ValueError, match="safe branch name"):
+        GitStackRunner(tmp_path).merge_base_into_branch("-f", "stable")
+    assert calls == []
+
+
 def test_git_failures_are_not_hidden(monkeypatch, tmp_path):
     def fake_run(argv, **_kwargs):
         return subprocess.CompletedProcess(argv, 1, "", "non-fast-forward")
