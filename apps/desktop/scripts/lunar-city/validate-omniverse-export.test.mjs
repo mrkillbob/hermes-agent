@@ -81,6 +81,14 @@ test('malformed production receipts return structured errors without throwing', 
   assert.ok(Array.isArray(result.errors))
 })
 
+test('malformed production receipts stop before direct property access', () => {
+  for (const malformed of [null, [], 'receipt']) {
+    const result = validateOmniverseExport(malformed, manifest, { mode: 'production' })
+    assert.equal(result.ok, false)
+    assert.match(result.errors.join('\\n'), /receipt schema_name is invalid/)
+  }
+})
+
 test('rejects contradictory approval flags', () => {
   const result = validateOmniverseExport(receipt({ production_approved: true }), manifest)
   assert.equal(result.ok, false)
