@@ -1305,6 +1305,26 @@ def test_repair_claim_waits_for_active_exact_head_local_ci(tmp_path: Path) -> No
     ledger.close()
 
 
+def test_local_ci_run_claim_waits_for_pending_mutation(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    repair = receipt(feedback_kind="pr_repair", feedback_id="repair:merge_conflict")
+    repair_lease = claim_lease(ledger, repair)
+
+    assert repair_lease is not None
+    assert ledger.claim_ci_run(
+        repair.repository,
+        repair.pr_number,
+        "b" * 40,
+        repair.head_sha,
+        "m" * 64,
+        supervisor_pid=123,
+        claimed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+        stale_before=datetime(2026, 8, 24, 11, 55, tzinfo=UTC),
+        pid_is_alive=lambda _pid: False,
+    ) is None
+    ledger.close()
+
+
 def test_feedback_action_uses_a_retryable_resolving_transition(tmp_path: Path) -> None:
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     item = receipt(feedback_kind="review_comment", feedback_id="42")

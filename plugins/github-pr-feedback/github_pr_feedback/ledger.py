@@ -1638,6 +1638,8 @@ class FeedbackLedger:
             "\0".join(map(str, key)).encode("utf-8")
         ).hexdigest()
         with self._transaction():
+            if self.has_pending_mutation(repository, pr_number):
+                return None
             row = self._connection.execute(
                 "SELECT status, supervisor_pid, updated_at, lease_version "
                 "FROM ci_audit_runs WHERE repository = ? AND pr_number = ? AND base_sha = ? "
