@@ -805,10 +805,40 @@ def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp
     ledger.close()
 
 
+def test_hermes_native_contract_accepts_platform_change_with_hosted_coverage(tmp_path):
+    root = tmp_path / "hermes"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts/run_tests.sh").write_text("exit 0\n")
+    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n')
+    github = FakeGitHub(merge_state())
+    github.checks = [
+        CheckState(actions_enabled=True, all_green=True, check_count=1),
+        CheckState(actions_enabled=True, all_green=True, check_count=1),
+    ]
+    ledger = FeedbackLedger(tmp_path / "ci.sqlite3")
+    runner = LocalCIRunner(
+        github,
+        ledger,
+        command_runner=RecordingRunner(),
+        inspector=FakeInspector(changed=("apps/desktop/src/App.tsx",)),
+        python_argv=("python3",),
+        now=lambda: NOW,
+    )
+
+    receipt = runner.run(CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), root)
+
+    assert receipt.status == "passed"
+    assert receipt.failure_reason is None
+    ledger.close()
+
+
 def test_hermes_native_contract_does_not_claim_uncovered_platform_changes(tmp_path):
     from github_pr_feedback.ci_contract import hermes_commands, hermes_coverage_gap
     assert hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ("installer/windows.ps1",))
     assert hermes_coverage_gap(("installer/windows.ps1",)) is not None
+    assert hermes_coverage_gap(
+        ("installer/windows.ps1",), hosted_coverage_available=True
+    ) is None
     assert hermes_coverage_gap(("apps/desktop/src/App.tsx",)) is not None
     assert hermes_coverage_gap(("agent/worker.py",)) is None
 

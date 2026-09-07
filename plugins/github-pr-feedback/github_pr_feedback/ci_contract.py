@@ -73,10 +73,12 @@ def hermes_commands(worktree: Path, base_sha: str, head_sha: str, changed: tuple
     return commands
 
 
-def hermes_coverage_gap(changed: tuple[str, ...]) -> str | None:
+def hermes_coverage_gap(
+    changed: tuple[str, ...], *, hosted_coverage_available: bool = False
+) -> str | None:
     # The hosted desktop lane drives Electron under Linux/Xvfb; native CI runs
     # the package's deterministic checks but cannot replace that acceptance lane.
-    if any(
+    if not hosted_coverage_available and any(
         p.startswith("apps/desktop/")
         or p.endswith((".rs", ".ps1", ".nix"))
         or p.startswith(".github/")

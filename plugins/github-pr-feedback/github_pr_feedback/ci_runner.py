@@ -694,7 +694,16 @@ class LocalCIRunner:
         status = "passed" if len(evidence) == expected_command_count and all(
             item.returncode == 0 and not item.timed_out for item in evidence
         ) else "failed"
-        coverage_gap = hermes_coverage_gap(changed_files) if is_hermes_contract(manifest_bytes) else None
+        coverage_gap = (
+            hermes_coverage_gap(
+                changed_files,
+                hosted_coverage_available=(
+                    initial_checks.actions_enabled and initial_checks.check_count > 0
+                ),
+            )
+            if is_hermes_contract(manifest_bytes)
+            else None
+        )
         if coverage_gap:
             status = "failed"
         failed_commands = tuple(
