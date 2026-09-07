@@ -3,6 +3,7 @@
 // and remove them. Git is the source of truth; the renderer just drives these.
 
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -179,13 +180,34 @@ async function defaultBranch(gitBin, cwd, remoteRef = '') {
   return ''
 }
 
-// Age of `ref`'s own remote-tracking ref file, or null when it can't be
-// determined (packed refs, missing ref, ...). Tied to the specific ref being
-// used rather than the repo-wide `FETCH_HEAD`, which records the most recent
-// fetch of *any* remote/branch and would otherwise let an unrelated fetch
-// mask a stale `origin/main`.
+async function fetchFreshnessMarkerPath(gitBin, cwd, ref) {
+  const digest = createHash('sha256').update(ref, 'utf8').digest('hex')
+
+  const gitPath = await gitLine(
+    gitBin,
+    ['rev-parse', '--git-path', `hermes/worktree-base-freshness/${digest}`],
+    cwd
+  )
+
+  if (!gitPath) {
+    return null
+  }
+
+  return path.isAbsolute(gitPath) ? gitPath : path.join(cwd, gitPath)
+}
+
+// Age of the successful fetch marker for `ref`, falling back to the ref's own
+// remote-tracking ref file for clones created before markers existed. Tied to
+// the specific ref being used rather than the repo-wide `FETCH_HEAD`, which
+// records the most recent fetch of any remote/branch.
 async function refAgeMs(gitBin, cwd, ref) {
   try {
+    const markerPath = await fetchFreshnessMarkerPath(gitBin, cwd, ref)
+
+    if (markerPath && fs.existsSync(markerPath)) {
+      return Math.max(0, Date.now() - fs.statSync(markerPath).mtimeMs)
+    }
+
     const gitPath = await gitLine(gitBin, ['rev-parse', '--git-path', `refs/remotes/${ref}`], cwd)
 
     if (!gitPath) {
@@ -215,12 +237,29 @@ async function refreshRemoteRef(gitBin, cwd, ref) {
   const branch = ref.slice(slash + 1)
   const ageMs = await refAgeMs(gitBin, cwd, ref)
 
-  if (ageMs !== null && ageMs < BASE_FRESHNESS_WINDOW_MS) {
+  if (
+    ageMs !== null &&
+    ageMs < BASE_FRESHNESS_WINDOW_MS &&
+    (await gitOk(gitBin, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], cwd))
+  ) {
     return
   }
 
   try {
     await runGit(gitBin, ['fetch', remote, branch], cwd, BASE_FETCH_TIMEOUT_MS)
+
+    try {
+      const markerPath = await fetchFreshnessMarkerPath(gitBin, cwd, ref)
+
+      if (markerPath) {
+        fs.mkdirSync(path.dirname(markerPath), { recursive: true })
+        fs.closeSync(fs.openSync(markerPath, 'a'))
+        const now = new Date()
+        fs.utimesSync(markerPath, now, now)
+      }
+    } catch {
+      // A successful fetch remains usable if its freshness marker cannot be written.
+    }
   } catch {
     // Offline/slow remotes are fail-soft when the cached ref still exists.
   }
