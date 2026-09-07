@@ -49,6 +49,30 @@ def test_closed_retirement_clears_pending_gate_without_claiming_repair_success(d
 
 
 @pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
+def test_closed_retirement_recovers_a_resolving_feedback_action(dispatched, state):
+    policy, ledger, receipt, pull = dispatched
+    closed = replace(pull, state=state)
+    github = SimpleNamespace(get_pull_request=lambda *_: closed)
+    resolved_head = "b" * 40
+    ledger.begin_feedback_action(
+        receipt,
+        resolved_head_sha=resolved_head,
+        actioned_at=datetime(2026, 8, 24, 13, 0, tzinfo=UTC),
+    )
+
+    result = retire_closed_feedback(policy, github, ledger, receipt)
+
+    assert result["status"] == "retired"
+    row = ledger._connection.execute(
+        "SELECT action_status, actioned_head_sha FROM feedback_receipts WHERE "
+        "repository = ? AND pr_number = ? AND feedback_kind = ? AND feedback_id = ? "
+        "AND head_sha = ?",
+        receipt.key,
+    ).fetchone()
+    assert row == ("superseded", resolved_head)
+
+
+@pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
 def test_retired_exact_dispatch_can_be_reclaimed_after_reopen(dispatched, state):
     policy, ledger, receipt, pull = dispatched
     closed = replace(pull, state=state)
