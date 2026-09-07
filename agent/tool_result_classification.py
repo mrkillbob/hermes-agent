@@ -36,5 +36,5 @@ def file_mutation_result_landed(tool_name: str, result: Any) -> bool:
     if tool_name == "write_file":
         return "bytes_written" in data
     if tool_name == "patch":
-        return data.get("success") is True
+        return data.get("success") is True and data.get("no_change") is not True
     return False
