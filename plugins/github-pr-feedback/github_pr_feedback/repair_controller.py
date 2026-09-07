@@ -689,7 +689,7 @@ def _repair_task(
         )
         self_receipt_command = (
             f"env HERMES_HOME={shlex.quote(str(control_home))} "
-            f"{shlex.quote(sys.executable)} -m hermes_cli.main "
+            f"{shlex.quote(sys.executable)} -P -m hermes_cli.main "
             "github-pr-feedback retire-feedback "
             f"--repository {shlex.quote(receipt.repository)} "
             f"--pr-number {receipt.pr_number} "

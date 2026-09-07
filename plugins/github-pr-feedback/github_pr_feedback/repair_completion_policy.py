@@ -44,7 +44,7 @@ def guard_repair_completion(ctx, *, task_id, **_kwargs):
                     recovery_commands.append(
                         "env HERMES_HOME="
                         f"{shlex.quote(str(root))} {shlex.quote(sys.executable)} "
-                        "-m hermes_cli.main github-pr-feedback retire-feedback "
+                        "-P -m hermes_cli.main github-pr-feedback retire-feedback "
                         f"--repository {shlex.quote(repository)} --pr-number {pr_number} "
                         f"--feedback-kind {shlex.quote(feedback_kind)} "
                         f"--feedback-id {shlex.quote(feedback_id)} "

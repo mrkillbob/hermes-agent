@@ -35,7 +35,7 @@ def test_completion_policy_provides_exact_self_receipt_recovery_command(tmp_path
         assert result is not None
         command = (
             f"env HERMES_HOME={shlex.quote(str(home))} {shlex.quote(sys.executable)} "
-            "-m hermes_cli.main github-pr-feedback retire-feedback "
+            "-P -m hermes_cli.main github-pr-feedback retire-feedback "
             "--repository acme/repo --pr-number 1 --feedback-kind issue_comment "
             "--feedback-id comment-1 --receipt-head-sha " + "a" * 40 + " --self-receipt"
         )
