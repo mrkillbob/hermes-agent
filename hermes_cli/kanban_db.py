@@ -2946,6 +2946,15 @@ def complete_task(
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
         return False
+    from hermes_cli.kanban_completion_policy import enforce_completion_policies
+
+    task = get_task(conn, task_id)
+    if task is None:
+        return False
+    enforce_completion_policies(
+        task_id=task_id, board=_lifecycle_board(conn, board), assignee=task.assignee,
+        summary=summary or result or "",
+    )
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
@@ -3319,7 +3328,8 @@ def block_task(
                 return False
     with write_txn(conn):
         cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
+            "SELECT status, block_kind, block_recurrences, title, idempotency_key "
+            "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if cur_row is None:
             return False
@@ -3346,7 +3356,11 @@ def block_task(
         if conn.execute(sql, params).rowcount != 1:
             return False
         run_id = _end_or_synthesize_run(
-            conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
+            conn, task_id,
+            outcome="blocked" if new_status in {"blocked", "triage"} else "handoff",
+            status=new_status,
+            summary=reason,
+            synthesize=bool(reason),
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
@@ -3377,6 +3391,15 @@ def _route_block(
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency" and pending_dependency:
         return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
+    if machine_owned:
+        payload.update({"handoff": "dispatcher_retry", "machine_owned": True})
+        return (
+            "ready",
+            "machine_handoff",
+            "block_kind = NULL,\n                       block_recurrences = 0",
+            (),
+            payload,
+        )
     recurrences = prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
@@ -3384,6 +3407,23 @@ def _route_block(
         payload["limit"] = BLOCK_RECURRENCE_LIMIT
         return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
     return "blocked", "blocked", set_sql, (kind, recurrences), payload
+
+
+def _is_machine_owned_pr_feedback(*, title: Optional[str], idempotency_key: Optional[str]) -> bool:
+    """Return whether a card belongs to an automated PR/CI handoff lane.
+
+    These lanes may need another worker or another pass, but they must not turn
+    a recoverable worker failure into a human-only sticky card. Intent-review
+    cards are deliberately excluded because they encode an actual policy choice.
+    """
+    title_text = (title or "").strip()
+    key = (idempotency_key or "").strip().casefold()
+    if key.startswith(_GITHUB_PR_INTENT_REVIEW_PREFIX):
+        return False
+    return (
+        title_text.startswith(("GitHub PR feedback:", "Local PR CI audit:", "Local CI repair:"))
+        or key.startswith(_GITHUB_PR_FEEDBACK_IDEMPOTENCY_PREFIX)
+    )
 
 
 def redact_review_value(value: Any) -> Any:
@@ -3417,6 +3457,19 @@ def request_review(
 
     def _ret(ok: bool, reason: Optional[str] = None):
         return (ok, reason) if with_reason else ok
+
+    from hermes_cli.kanban_completion_policy import CompletionPolicyError, enforce_completion_policies
+
+    task = get_task(conn, task_id)
+    if task is None:
+        return _ret(False, "task not found")
+    try:
+        enforce_completion_policies(
+            task_id=task_id, board=_lifecycle_board(conn, None), assignee=task.assignee,
+            summary=summary or "",
+        )
+    except CompletionPolicyError as exc:
+        return _ret(False, str(exc))
 
     summary = redact_review_value(summary)
     metadata = redact_review_value(metadata)

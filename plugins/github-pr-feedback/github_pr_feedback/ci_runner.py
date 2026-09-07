@@ -39,6 +39,13 @@ CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT = "budget-exhausted-local-equivalent"
 _CI_MODES = frozenset(
     {CI_MODE_STANDARD, CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT}
 )
+_STRUCTURAL_RATCHET_MARKERS = (
+    "structural ratchet",
+    "structural-ratchet",
+    "ratchet violation",
+    "hot-file loc",
+    "hot file loc",
+)
 
 
 class CIValidationError(RuntimeError):
@@ -242,7 +249,12 @@ class CIAuditReceipt:
             classification = _required_text(
                 command.get("classification"), "command classification", 32
             )
-            if classification not in {"passed", "logic-regression", "environment-blocked"}:
+            if classification not in {
+                "passed",
+                "logic-regression",
+                "structural-ratchet",
+                "environment-blocked",
+            }:
                 raise ValueError("CI receipt payload has invalid command classification")
             parsed_commands.append(
                 CommandEvidence(
@@ -520,6 +532,12 @@ class LocalCIRunner:
             raise CIValidationError("exact-head CI audit is already running")
         try:
             receipt = self._run_claimed(identity, resolved)
+        except MergeStateStillComputingError:
+            self._ledger.finish_ci_run(
+                lease, status="failed", completed_at=_aware_now(self._now()),
+                error="mergeability_still_computing",
+            )
+            raise
         except Exception as error:
             completed_at = _aware_now(self._now())
             receipt = _failed_receipt(
@@ -661,8 +679,7 @@ class LocalCIRunner:
         if bootstrap_evidence is not None:
             evidence.append(bootstrap_evidence)
         for argv, cwd, additions in command_specs:
-            environment = dict(os.environ)
-            environment.update(additions)
+            environment = ci_environment(worktree, additions)
             result = self._commands.run(
                 argv, cwd=cwd, env=environment, timeout=_COMMAND_TIMEOUT_SECONDS
             )
@@ -761,7 +778,7 @@ class LocalCIRunner:
                 result = self._commands.run(
                     probe,
                     cwd=worktree,
-                    env=dict(os.environ),
+                    env=ci_environment(worktree),
                     timeout=30,
                 )
                 actual = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
@@ -792,7 +809,7 @@ class LocalCIRunner:
         result = self._commands.run(
             argv,
             cwd=worktree,
-            env=dict(os.environ),
+            env=ci_environment(worktree),
             timeout=_BOOTSTRAP_TIMEOUT_SECONDS,
         )
         evidence = _command_evidence(argv, worktree, worktree, result)
@@ -959,7 +976,12 @@ def _command_evidence(
     if result.timed_out or result.returncode in {126, 127}:
         classification = "environment-blocked"
     elif result.returncode != 0:
-        classification = "logic-regression"
+        combined_output = f"{result.stdout}\n{result.stderr}".casefold()
+        classification = (
+            "structural-ratchet"
+            if any(marker in combined_output for marker in _STRUCTURAL_RATCHET_MARKERS)
+            else "logic-regression"
+        )
     return CommandEvidence(
         argv=argv,
         cwd=relative_cwd,

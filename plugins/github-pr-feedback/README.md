@@ -240,6 +240,34 @@ hermes github-pr-feedback merge-disable --repository owner/repository --pr-numbe
 outcome is ambiguous remains eligible for verification even if the PR is no longer open
 or its enrollment was later removed; this readback is required to reconcile durable state.
 
+Before dispatching local CI, obsolete duplicate review/comment dispatches are reconciled
+only when the same immutable feedback identity has already been acknowledged and the old
+Kanban task is done or archived. The canonical PR head/base is reread before the exact
+ledger transition. Active, unknown, or unacknowledged work remains pending; this recovery
+creates no CI receipt and does not satisfy any merge gate.
+
+Repair task completion is also checked at Kanban's shared completion boundary. A task
+bound to a review/comment or repair dispatch cannot become done until its durable action
+is acknowledged or superseded. This covers both `kanban_complete` and CLI completion;
+a local commit, a summary, or an earlier plugin approval cannot satisfy the contract.
+If the push, factual reply, or acknowledgement cannot finish, block the task with the
+actual cause. CI tasks retain their separate exact-receipt contract. Advisory `pr_repair`
+`report:*` tasks are excluded, matching their existing non-mutating admission contract.
+If the control ledger cannot be read, the registered policy rejects completion rather
+than guessing that a task is unbound. A successfully read ledger with no matching repair
+binding leaves ordinary Kanban completion unchanged. The acknowledgement is recorded by
+`complete-feedback` before its downstream CI handoff; the worker then completes Kanban.
+
+PR intake prefers older PR numbers and places an open parent before its child when
+canonical repository/branch identities establish that dependency. Repair inspection
+rotates a durable 12-PR window across the catalogue, so repeated updates to newer PRs
+cannot exclude older work forever. Independent repairs remain concurrent within the
+configured worker limits; inexpensive clean-base refreshes retain priority among
+independent candidates. Merge evaluation uses the same dependency order after any
+outstanding merge-write verification. Every existing enrollment, exact-head, review,
+and CI gate still applies. Shared-base PRs need an explicit stack to express dependencies
+that cannot be determined from their GitHub base branches.
+
 `scan` is safe to repeat. It records durable receipt state and creates one
 Kanban card only for feedback that passes all admission checks. By default the
 card starts `blocked`. With the explicit `auto_dispatch: true` opt-in, it starts

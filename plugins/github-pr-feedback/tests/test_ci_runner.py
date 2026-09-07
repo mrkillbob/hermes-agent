@@ -14,6 +14,7 @@ from github_pr_feedback.ci_runner import (
     CIValidationError,
     CompletedCommand,
     LocalCIRunner,
+    _command_evidence,
 )
 from github_pr_feedback.ci_coordinator import CIAuditJob, GroupedCICoordinator
 from github_pr_feedback.github_client import CheckState, GitHubClientError, PullRequestMergeState
@@ -23,6 +24,23 @@ from github_pr_feedback.ledger import FeedbackLedger
 BASE_SHA = "b" * 40
 HEAD_SHA = "a" * 40
 NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+
+
+def test_structural_ratchet_output_is_typed_without_becoming_pass() -> None:
+    evidence = _command_evidence(
+        ("./scripts/run_static_lane.py",),
+        Path("/tmp/worktree"),
+        Path("/tmp/worktree"),
+        CompletedCommand(
+            returncode=1,
+            stdout="structural ratchet violation: signal_engine.py +23 LOC",
+            stderr="",
+            duration_ms=10,
+            timed_out=False,
+        ),
+    )
+    assert evidence.classification == "structural-ratchet"
+    assert evidence.returncode != 0
 
 
 class FakeGitHub:

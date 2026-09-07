@@ -11,6 +11,7 @@ import threading
 import pytest
 
 from github_pr_feedback.controller import FeedbackReceipt, PreparedWorktree
+from github_pr_feedback.controller import _reconcile_stale_dispatches
 from github_pr_feedback.github_client import (
     CheckState,
     PullRequestMergeState,
@@ -43,6 +44,29 @@ def merge_state(
         merged=False,
         merge_commit_oid=None,
     )
+
+
+def test_stale_dispatch_reconciliation_accepts_merge_state_repository() -> None:
+    class Ledger:
+        def __init__(self) -> None:
+            self.repositories: list[str] = []
+
+        def pending_task_bindings_for_pr(self, repository: str, number: int):
+            self.repositories.append(repository)
+            return ()
+
+    class Kanban:
+        def task_details(self, board: str, task_id: str):
+            return None
+
+        def task_status(self, board: str, task_id: str):
+            return "blocked"
+
+    ledger = Ledger()
+    assert _reconcile_stale_dispatches(
+        ledger, Kanban(), merge_state(), board="repairs"
+    ) == 0
+    assert ledger.repositories == ["acme/widgets"]
 
 
 def policy(
@@ -330,7 +354,7 @@ def test_repair_controller_dedupes_exact_head_and_preserves_merge_authority(
     task = kanban.tasks[0]
     assert task.assignee == "pr-repair-steward"
     assert task.initial_status == "running"
-    assert task.max_runtime_seconds == 1200
+    assert task.max_runtime_seconds == 60 * 60
     assert "git merge --no-ff --no-edit" in task.instructions
     assert "Commit the resolved merge before running base-relative" in task.instructions
     assert "Do not merge the pull request" in task.instructions
@@ -340,6 +364,15 @@ def test_repair_controller_dedupes_exact_head_and_preserves_merge_authority(
     assert task.evidence["expected_base_sha"] == "b" * 40
     assert task.evidence["expected_head_branch"] == "codex/fix"
     assert task.evidence["expected_head_repository"] == "acme/widgets"
+    import re
+    import shlex
+
+    push = re.search(r"`(git push [^`]+)`", task.instructions)
+    assert push is not None
+    assert shlex.split(push.group(1)) == [
+        "git", "push", f"https://github.com/{task.evidence['expected_head_repository']}.git",
+        f"HEAD:refs/heads/{task.evidence['expected_head_branch']}",
+    ]
     assert task.evidence["expected_head_sha"] == SHA
     identity_command = (
         "github-pr-feedback inspect-pr --repository acme/widgets --pr-number 17"
@@ -390,6 +423,20 @@ def test_repair_controller_escalates_an_action_required_pr_instead_of_repairing_
     assert "action_required" in task.instructions
     assert "Do not push, edit, approve, or merge" in task.instructions
     assert task.evidence["reason"] == "github_check_action_required"
+    ledger.close()
+
+
+def test_scoped_conflict_dispatch_does_not_create_actions_escalation(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+    controller = RepairController(
+        policy(tmp_path), ledger, ActionRequiredGitHub(), kanban, LocalGit(),
+        clock=lambda: datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+    )
+    result = controller.scan(conflicts_only=True, scoped_target=("acme/widgets", 17, SHA))
+    assert result.created == 0
+    assert result.skipped.get("action_required") == 1
+    assert not kanban.tasks
     ledger.close()
 
 
@@ -509,7 +556,7 @@ def test_terminal_refresh_binding_does_not_hold_slot_before_archived_recovery(
     ).scan()
 
     assert result.created == 1
-    assert result.skipped == {"base_refresh_serialized": 1}
+    assert result.skipped == {"duplicate": 1}
     assert [task.evidence["pr_number"] for task in kanban.tasks] == [18]
     assert any(
         binding.task_id == "repair-task"
@@ -548,7 +595,7 @@ def test_old_head_terminal_binding_does_not_hold_current_refresh_slot(
 
     assert result.created == 1
     assert result.skipped["base_refresh_serialized"] == 1
-    assert [task.evidence["pr_number"] for task in kanban.tasks] == [18]
+    assert [task.evidence["pr_number"] for task in kanban.tasks] == [17]
     ledger.close()
 
 
@@ -621,7 +668,7 @@ def test_unrelated_pending_feedback_does_not_consume_the_base_refresh_slot(
     ).scan()
 
     assert result.created == 1
-    assert result.skipped["base_refresh_serialized"] == 1
+    assert result.skipped["duplicate"] == 1
     assert kanban.tasks[0].evidence["pr_number"] == 18
     ledger.close()
 
