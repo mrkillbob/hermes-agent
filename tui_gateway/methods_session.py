@@ -898,7 +898,17 @@ def _(rid, params: dict) -> dict:
         if db is None:
             return _db_unavailable_error(rid, code=5007)
         # A draft has no row yet; the live re-home still applies (row inherits cwd on write).
-        if not db.get_session(target):
+        row = db.get_session(target)
+        if row and hasattr(db, "get_conversation_worktree"):
+            current, seen = target, set()
+            while current and current not in seen:
+                seen.add(current)
+                if db.get_conversation_worktree(current) is not None:
+                    return _err(rid, 4018, "workspace is managed by conversation worktree")
+                if hasattr(db, "is_explicit_fork_child") and db.is_explicit_fork_child(current):
+                    break
+                current = str((db.get_session(current) or {}).get("parent_session_id") or "").strip()
+        if not row:
             if live is None:
                 return _err(rid, 4007, "session not found")
         else:

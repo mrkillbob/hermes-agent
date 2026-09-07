@@ -22397,3 +22397,43 @@ def test_workspace_move_rejects_managed_running_session(monkeypatch, tmp_path):
 
     assert res["error"]["code"] == 4018
     assert live["cwd"] != str(new_cwd)
+
+
+def test_workspace_move_rejects_managed_stored_session(monkeypatch, tmp_path):
+    target = "managed-stored-session"
+    new_cwd = tmp_path / "dest-project"
+    new_cwd.mkdir()
+    captured = {}
+
+    class FakeDB:
+        def get_session(self, session_id):
+            return {"id": session_id}
+
+        def get_conversation_worktree(self, session_id):
+            return object() if session_id == target else None
+
+        def is_explicit_fork_child(self, _session_id):
+            return False
+
+        def update_session_cwd(self, *_args, **_kwargs):
+            captured["row_update"] = True
+
+        def close(self):
+            pass
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def _fake_db(_params):
+        yield FakeDB()
+
+    monkeypatch.setattr(server, "_profile_db", _fake_db)
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "main")
+    monkeypatch.setattr(server.git_probe, "common_repo_root", lambda cwd: str(new_cwd))
+
+    res = server._methods["session.workspace.move"](
+        "rid", {"session_key": target, "cwd": str(new_cwd)}
+    )
+
+    assert res["error"]["code"] == 4018
+    assert "row_update" not in captured
