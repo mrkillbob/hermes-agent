@@ -121,6 +121,34 @@ def test_push_verified_head_rejects_a_non_descendant_without_pushing(
     assert not any(call[3] == "push" for call in calls)
 
 
+def test_push_verified_head_lease_rejects_a_remote_advance(tmp_path):
+    remote = tmp_path / "remote.git"
+    work = tmp_path / "work"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(remote)], check=True)
+    subprocess.run(["git", "init", "--quiet", str(work)], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.name", "Test"], check=True)
+    (work / "file").write_text("a\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "file"], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "--quiet", "-m", "a"], check=True)
+    first = subprocess.check_output(["git", "-C", str(work), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run(["git", "-C", str(work), "push", "--quiet", str(remote), "HEAD:refs/heads/main"], check=True)
+    (work / "file").write_text("b\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "commit", "--quiet", "-am", "b"], check=True)
+    subprocess.run(["git", "-C", str(work), "push", "--quiet", str(remote), "HEAD:refs/heads/main"], check=True)
+    (work / "file").write_text("c\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "commit", "--quiet", "-am", "c"], check=True)
+    result = subprocess.run(
+        [
+            "git", "-C", str(work), "push", str(remote),
+            f"--force-with-lease=refs/heads/main:{first}",
+            "HEAD:refs/heads/main",
+        ], capture_output=True, text=True, check=False
+    )
+    assert result.returncode != 0
+    assert "stale info" in result.stderr
+
+
 def test_push_verified_head_uploads_lfs_objects_before_the_git_ref(
     monkeypatch, tmp_path
 ):
