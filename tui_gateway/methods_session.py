@@ -1068,23 +1068,26 @@ def _(rid, params: dict) -> dict:
                     == root_session_id
                     for session in _sessions.values()
                 )
-                if action == "inspect":
-                    verdict = manager.inspect_cleanup(
-                        root_session_id,
-                        active_session_bound=active,
-                    )
-                    removed = False
-                    failure_phase = None
-                    failure_message = None
-                else:
-                    result = manager.remove_after_explicit_request(
-                        root_session_id,
-                        active_session_bound=active,
-                    )
-                    verdict = result.verdict
-                    removed = result.removed
-                    failure_phase = result.failure_phase
-                    failure_message = result.failure_message
+            # Cleanup performs bounded Git subprocesses; do not hold the global
+            # session registry lock while it runs. Root-lease fencing governs the
+            # destructive race after the active-state snapshot above.
+            if action == "inspect":
+                verdict = manager.inspect_cleanup(
+                    root_session_id,
+                    active_session_bound=active,
+                )
+                removed = False
+                failure_phase = None
+                failure_message = None
+            else:
+                result = manager.remove_after_explicit_request(
+                    root_session_id,
+                    active_session_bound=active,
+                )
+                verdict = result.verdict
+                removed = result.removed
+                failure_phase = result.failure_phase
+                failure_message = result.failure_message
 
             record = db.get_conversation_worktree(root_session_id)
             if record is None:

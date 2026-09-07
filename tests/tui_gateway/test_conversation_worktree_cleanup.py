@@ -191,6 +191,44 @@ def test_unknown_cleanup_action_fails_without_inspection_or_removal(monkeypatch)
     assert manager.remove_calls == []
 
 
+@pytest.mark.parametrize("action", ["inspect", "remove"])
+def test_cleanup_manager_runs_after_releasing_sessions_lock(monkeypatch, action):
+    verdict = CleanupVerdict(allowed=True, reasons=())
+    manager = _Manager(verdict)
+    db = _DB()
+
+    class _LockProbe:
+        held = False
+
+        def __enter__(self):
+            assert not self.held
+            self.held = True
+            return self
+
+        def __exit__(self, *_exc):
+            self.held = False
+
+    lock = _LockProbe()
+
+    def assert_unlocked(*args, **kwargs):
+        assert not lock.held
+        return _Manager.inspect_cleanup(manager, *args, **kwargs)
+
+    def assert_unlocked_remove(*args, **kwargs):
+        assert not lock.held
+        return _Manager.remove_after_explicit_request(manager, *args, **kwargs)
+
+    monkeypatch.setattr(server, "_sessions_lock", lock)
+    monkeypatch.setattr(manager, "inspect_cleanup", assert_unlocked)
+    monkeypatch.setattr(manager, "remove_after_explicit_request", assert_unlocked_remove)
+    install(monkeypatch, manager, db)
+
+    response = call({"session_id": "root", "action": action})
+
+    assert "error" not in response
+    assert not lock.held
+
+
 def test_close_and_delete_never_imply_worktree_cleanup(monkeypatch, tmp_path):
     db = _DB()
 
