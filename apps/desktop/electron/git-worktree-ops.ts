@@ -135,6 +135,12 @@ async function gitOk(gitBin, args, cwd) {
   }
 }
 
+// Bounded fetch + freshness window for base resolution, mirroring the Python
+// resolver (hermes_cli/worktree_base.py): an offline/slow remote must not
+// stall "Start work" for `runGit`'s full 30s default timeout.
+const BASE_FETCH_TIMEOUT_MS = 5_000
+const BASE_FRESHNESS_WINDOW_MS = 300_000
+
 // The remote that a ref belongs to ("origin" for "origin/main"), or "" when the
 // name is not a remote-tracking ref in this repo. This function asks git. It
 // does not assume that the remote has the name "origin", because a repo can
@@ -151,10 +157,8 @@ async function remoteOfRef(gitBin, cwd, name) {
   return name.slice(0, name.indexOf('/'))
 }
 
-async function defaultBranch(gitBin, cwd) {
-  const remote = (
-    await gitLine(gitBin, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], cwd)
-  ).replace(/^origin\//, '')
+async function defaultBranch(gitBin, cwd, remoteRef = '') {
+  const remote = (remoteRef || (await remoteDefaultRef(gitBin, cwd))).replace(/^origin\//, '')
 
   if (remote) {
     return remote
@@ -174,12 +178,6 @@ async function defaultBranch(gitBin, cwd) {
 
   return ''
 }
-
-// Bounded fetch + freshness window for base resolution, mirroring the Python
-// resolver (hermes_cli/worktree_base.py): an offline/slow remote must not
-// stall "Start work" for `runGit`'s full 30s default timeout.
-const BASE_FETCH_TIMEOUT_MS = 5_000
-const BASE_FRESHNESS_WINDOW_MS = 300_000
 
 // Age of `ref`'s own remote-tracking ref file, or null when it can't be
 // determined (packed refs, missing ref, ...). Tied to the specific ref being
@@ -203,20 +201,74 @@ async function refAgeMs(gitBin, cwd, ref) {
   }
 }
 
-async function newWorktreeBase(gitBin, cwd) {
-  const defaultRef = await gitLine(gitBin, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], cwd)
+// Refresh one remote-tracking ref without making the worktree flow wait on the
+// default 30-second git timeout. The freshness check is tied to this ref, so a
+// fetch of another branch cannot make it look current.
+async function refreshRemoteRef(gitBin, cwd, ref) {
+  const slash = ref.indexOf('/')
 
-  if (defaultRef && defaultRef.startsWith('origin/')) {
-    const branch = defaultRef.slice('origin/'.length)
-    const ageMs = await refAgeMs(gitBin, cwd, defaultRef)
+  if (slash <= 0 || slash === ref.length - 1) {
+    return
+  }
 
-    if (ageMs === null || ageMs >= BASE_FRESHNESS_WINDOW_MS) {
-      try {
-        await runGit(gitBin, ['fetch', 'origin', branch], cwd, BASE_FETCH_TIMEOUT_MS)
-      } catch {
-        // Offline/slow is fail-soft when the cached remote-tracking ref still exists.
+  const remote = ref.slice(0, slash)
+  const branch = ref.slice(slash + 1)
+  const ageMs = await refAgeMs(gitBin, cwd, ref)
+
+  if (ageMs !== null && ageMs < BASE_FRESHNESS_WINDOW_MS) {
+    return
+  }
+
+  try {
+    await runGit(gitBin, ['fetch', remote, branch], cwd, BASE_FETCH_TIMEOUT_MS)
+  } catch {
+    // Offline/slow remotes are fail-soft when the cached ref still exists.
+  }
+}
+
+// Resolve the remote default even when the local origin/HEAD symbolic ref is
+// absent. `remote show` is the source-bound fallback for clones that have not
+// fetched the remote HEAD metadata yet; its timeout keeps a disconnected
+// remote from blocking the worktree flow.
+async function remoteDefaultRef(gitBin, cwd) {
+  const symbolic = await gitLine(
+    gitBin,
+    ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
+    cwd
+  )
+
+  if (symbolic && symbolic.startsWith('origin/')) {
+    return symbolic
+  }
+
+  try {
+    const output = await runGit(gitBin, ['remote', 'show', 'origin'], cwd, BASE_FETCH_TIMEOUT_MS)
+
+    for (const rawLine of output.split('\n')) {
+      const line = rawLine.trim()
+
+      if (!line.startsWith('HEAD branch:')) {
+        continue
+      }
+
+      const branch = line.slice('HEAD branch:'.length).trim()
+
+      if (branch && branch !== '(unknown)') {
+        return `origin/${branch}`
       }
     }
+  } catch {
+    // Offline/slow remotes are handled by the cached-ref/HEAD fallback below.
+  }
+
+  return ''
+}
+
+async function newWorktreeBase(gitBin, cwd) {
+  const defaultRef = await remoteDefaultRef(gitBin, cwd)
+
+  if (defaultRef && defaultRef.startsWith('origin/')) {
+    await refreshRemoteRef(gitBin, cwd, defaultRef)
 
     if (await gitOk(gitBin, ['rev-parse', '--verify', '--quiet', `${defaultRef}^{commit}`], cwd)) {
       return defaultRef
@@ -316,15 +368,7 @@ async function addExistingBranchWorktree(gitBin, root, name) {
   const dir = uniqueDir(path.join(root, '.worktrees', slugify(branch)))
 
   if (remote) {
-    // The remote-tracking ref is stale if the user did not fetch recently. This
-    // fetch is best effort: after a failure, the last known ref is still there
-    // to branch from.
-    try {
-      await runGit(gitBin, ['fetch', remote, branch], root)
-    } catch {
-      // The user is offline, or the branch is gone from the remote. Use the ref
-      // that the repo already has.
-    }
+    await refreshRemoteRef(gitBin, root, requested)
 
     await runGit(gitBin, ['worktree', 'add', '--track', '-b', branch, dir, requested], root)
 
@@ -364,13 +408,7 @@ async function addWorktree(repoPath, options, gitBin) {
     if (base.startsWith('origin/')) {
       const remoteBranch = base.slice('origin/'.length)
 
-      try {
-        await runGit(gitBin, ['fetch', 'origin', remoteBranch], root)
-      } catch {
-        // The fetch isn't mandatory, but it would be nice to do if possible.
-        // If it's not possible, just use the local ref of the remote branch.
-        // If it doesn't exist locally, we'll get an error
-      }
+      await refreshRemoteRef(gitBin, root, `origin/${remoteBranch}`)
 
       // When branching off a remote-tracking ref, git auto-sets up tracking
       // (e.g. `new-branch` → tracks `origin/main`). The user almost certainly
@@ -546,13 +584,9 @@ async function listBaseBranches(repoPath, gitBin) {
       resolved
     )
 
-    const remoteDefault = await gitLine(
-      gitBin,
-      ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
-      resolved
-    )
+    const remoteDefault = await remoteDefaultRef(gitBin, resolved)
 
-    const localDefault = await defaultBranch(gitBin, resolved)
+    const localDefault = await defaultBranch(gitBin, resolved, remoteDefault)
 
     return out
       .split('\n')

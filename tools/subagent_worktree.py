@@ -45,7 +45,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
-from hermes_cli.worktree_base import resolve_worktree_base
 from hermes_cli.worktree_environment import bootstrap_worktree_environments
 logger = logging.getLogger(__name__)
 
@@ -158,9 +157,11 @@ def create_subagent_worktree(
     _ensure_gitignore_entry(repo_root)
 
     try:
-        base_ref, _base_label = resolve_worktree_base(
-            repo_root, prefer_current_upstream=False
-        )
+        # Delegated children must see the exact committed state the parent is
+        # using. Remote-default resolution belongs to genuinely new-work
+        # flows; applying it here would silently discard the parent's feature
+        # commits when the parent is parked on a branch.
+        base_ref = "HEAD"
         base = _run_git(["rev-parse", base_ref], cwd=repo_root)
         base_commit = base.stdout.strip() if base.returncode == 0 else ""
         result = _run_git(

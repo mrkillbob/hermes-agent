@@ -25,9 +25,11 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import hermes_cli._subprocess_compat as subprocess_compat
 from hermes_cli._subprocess_compat import noninteractive_git_env
 
 
@@ -76,7 +78,21 @@ class TestNoninteractiveGitEnv:
         }
         assert values["core.pager"] == "cat"
         assert values["core.hooksPath"] == os.devnull
-        assert values["credential.helper"] == ""
+
+    def test_preserves_trusted_helpers_and_resets_repo_helpers(self, monkeypatch):
+        def fake_run(argv, **kwargs):
+            assert argv == ["git", "config", "--global", "--get-all", "credential.helper"]
+            return SimpleNamespace(returncode=0, stdout="trusted-helper\n", stderr="")
+
+        monkeypatch.setattr(subprocess_compat.subprocess, "run", fake_run)
+        env = noninteractive_git_env({})
+        credential_values = [
+            env[f"GIT_CONFIG_VALUE_{idx}"]
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+            if env[f"GIT_CONFIG_KEY_{idx}"] == "credential.helper"
+        ]
+
+        assert credential_values == ["", "trusted-helper"]
 
     def test_disables_pagers_hooks_editors_and_user_config(self):
         env = noninteractive_git_env({})

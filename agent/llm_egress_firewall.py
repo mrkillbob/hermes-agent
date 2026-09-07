@@ -406,15 +406,20 @@ _CREDENTIAL_SHAPED_VALUE = re.compile(
 def _is_egress_secret_assignment(text: str) -> bool:
     """Return True if ``text`` contains a credential-shaped secret assignment.
 
-    ``=`` is always treated as an assignment. ``:`` is additionally required
-    to have a credential-shaped value, so ordinary type annotations like
-    ``def request(token: str)`` are not mistaken for a leaked secret.
+    Both delimiters must carry a credential-shaped value. This keeps ordinary
+    code such as ``token = os.getenv("TOKEN")`` and type annotations out of
+    the remote secret gate while still rejecting literal credential material.
     """
 
     for match in _EGRESS_SECRET_ASSIGNMENT.finditer(text):
-        if match.group("delim") == ":" and not _CREDENTIAL_SHAPED_VALUE.match(
-            match.group("value")
-        ):
+        value = match.group("value")
+        looks_like_literal = bool(_CREDENTIAL_SHAPED_VALUE.match(value)) or (
+            match.group("delim") == "="
+            and len(value) >= 12
+            and any(marker in value for marker in "-_")
+            and "(" not in value
+        )
+        if not looks_like_literal:
             continue
         return True
     return False
