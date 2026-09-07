@@ -118,6 +118,22 @@ def test_actual_edits_reset_failure_loop_but_unchanged_retries_still_block(
     assert finding is not None and finding.category == "tool_failure_loop"
 
 
+def test_prose_review_diff_does_not_count_as_rendered_diff() -> None:
+    failure = "┊ 💻 $ scripts/run_tests.sh tests/test_a.py  1.2s [exit 1]"
+    log = "\n".join([
+        failure,
+        "✍️  write_file module.py  0.3s",
+        "I should now review diff",
+        "- this is ordinary reasoning, not renderer output",
+        failure,
+        failure,
+    ])
+
+    finding = detect_log_finding(log, _config())
+
+    assert finding is not None and finding.category == "tool_failure_loop"
+
+
 @pytest.mark.parametrize("interlude", [
     "I patched module.py and will retry.",
     "┊ 🔧 patch module.py  0.3s [Patch validation failed]",

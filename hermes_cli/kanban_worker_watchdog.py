@@ -33,7 +33,7 @@ _EDIT_SUCCESS_RE = re.compile(
 _EDIT_LANDED_RE = re.compile(
     r"^.*(?:🔧\s+patch|✍️?\s+write)\s+.*\d+(?:\.\d+)?s \[edit landed\]$"
 )
-_DIFF_MARKER_RE = re.compile(r"^.*review diff$")
+_DIFF_MARKER_RE = re.compile(r"^┊ review diff$")
 _DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @")
 _DIFF_CONTENT_RE = re.compile(r"^(?:@@\s|---\s|\+\+\+\s|[+-]|#\s+Moved:)")
 _PROVIDER_STALL_RE = re.compile(
