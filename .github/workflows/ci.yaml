@@ -218,6 +218,10 @@ jobs:
   osv-scanner:
     name: OSV scan
     uses: ./.github/workflows/osv-scanner.yml
+    with:
+      # Code Scanning cannot correlate the upgraded reusable-workflow identity
+      # against the fork's old PR baseline; scheduled/main scans retain SARIF.
+      upload-sarif: ${{ needs.detect.outputs.event_name != 'pull_request' }}
 
   # ─────────────────────────────────────────────────────────────────────
   # Gate: runs after everything. ``if: always()`` ensures it reports a

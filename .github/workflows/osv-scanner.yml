@@ -15,7 +15,8 @@ name: OSV-Scanner
 # dep became known-vulnerable" case.
 #
 # Uses Google's officially-recommended reusable workflow, pinned by SHA.
-# Findings remain available in the workflow artifact and unified PR review status.
+# Findings land in the repo's Security tab for scheduled/main scans. PR scans
+# keep the artifact and unified review status without creating a baseline-mismatch check.
 # fail-on-vuln is disabled so the job does not block merges on pre-existing
 # vulnerabilities in pinned deps that we may need to patch deliberately.
 #
@@ -25,6 +26,12 @@ name: OSV-Scanner
 
 on:
   workflow_call:
+    inputs:
+      upload-sarif:
+        description: "Upload SARIF to Code Scanning (disabled for PR baseline mismatch)"
+        type: boolean
+        required: false
+        default: true
   schedule:
     # Weekly scan against main — catches CVEs published after merge for
     # deps that haven't changed since.
@@ -53,10 +60,7 @@ jobs:
       # The upstream reusable workflow uploads this exact file under its
       # fixed artifact name, which the wrapper downloads below.
       results-file-name: osv-results.sarif
-      # The fork's existing code-scanning baseline was created by the older
-      # reusable-workflow identity; uploading this new identity produces a
-      # misleading neutral "configuration not found" check on every PR.
-      upload-sarif: false
+      upload-sarif: ${{ inputs.upload-sarif }}
       fail-on-vuln: false
 
   emit-status:
