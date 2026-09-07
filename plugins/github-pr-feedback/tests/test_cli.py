@@ -314,6 +314,81 @@ def test_scan_keeps_merge_maintainer_moving_during_required_ci_backlog(
     assert payload["merge"]["status"] == "ok"
 
 
+def test_scan_runs_release_maintenance_for_repositories_without_ci_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _scan
+
+    order: list[str] = []
+
+    class Lock:
+        def __enter__(self) -> bool:
+            return True
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class Ledger:
+        @classmethod
+        def for_current_profile(cls):
+            return cls()
+
+        def close(self) -> None:
+            pass
+
+    blocked = SimpleNamespace(repository="acme/blocked")
+    clear = SimpleNamespace(repository="acme/clear")
+
+    class Policy:
+        enabled = True
+        repair_steward = None
+        merge_maintainer = None
+        release_maintenance = None
+
+        def merge_policies(self):
+            return ()
+
+        def release_policies(self):
+            return (blocked, clear)
+
+    class Primary:
+        def scan(self, *, apply_labels: bool):
+            assert apply_labels is False
+            return SimpleNamespace(
+                created=0,
+                skipped={},
+                degraded=False,
+                required_local_ci_backlog=1,
+                required_local_ci_backlog_by_repository={
+                    blocked.repository: 1,
+                    clear.repository: 0,
+                },
+            )
+
+        def apply_agent_labels(self):
+            return {"status": "ok", "updated": 0, "skipped": {}}
+
+    def release(*_args: object, **kwargs: object) -> dict[str, object]:
+        repository = str(getattr(kwargs["maintenance"], "repository"))
+        order.append(repository)
+        return {"status": "ok", "repository": repository}
+
+    monkeypatch.setattr("github_pr_feedback.cli._load_policy_from_context", lambda _ctx: Policy())
+    monkeypatch.setattr("github_pr_feedback.cli._exclusive_scan_lock", lambda: Lock())
+    monkeypatch.setattr("github_pr_feedback.cli.FeedbackLedger", Ledger)
+    monkeypatch.setattr("github_pr_feedback.cli._controller", lambda *_args: Primary())
+    monkeypatch.setattr("github_pr_feedback.cli._run_release_maintenance_scan", release)
+
+    assert _scan(object()) == 0
+    assert order == [clear.repository]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["release_maintenance"] == {
+        clear.repository: {"repository": clear.repository, "status": "ok"}
+    }
+    assert payload["deferred"] == ["non_conflict_repair", "release_maintenance"]
+
+
 def test_scan_runs_label_side_lane_after_merge_maintainer(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

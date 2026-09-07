@@ -13,7 +13,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -249,6 +249,9 @@ class ScanResult:
     degraded: bool = False
     required_local_ci_backlog: int = 0
     local_ci_catalogue_deferred: int = 0
+    required_local_ci_backlog_by_repository: Mapping[str, int] = field(
+        default_factory=dict
+    )
 
 
 def _bind_pooled_worktree_task(
@@ -1160,6 +1163,7 @@ class ScanController:
         created = 0
         attempted = 0
         required_local_ci_backlog = 0
+        required_local_ci_backlog_by_repository: dict[str, int] = {}
         local_ci_catalogue_deferred = 0
         self._label_batches = []
         if not self._policy.enabled or self._policy.not_before is None:
@@ -1209,12 +1213,14 @@ class ScanController:
                 )
             )
             self._label_batches.append((repository, target, pull_requests))
-            required_local_ci_backlog += _required_local_ci_backlog_count(
+            repository_backlog = _required_local_ci_backlog_count(
                 self._policy,
                 self._ledger,
                 target,
                 pull_requests,
             )
+            required_local_ci_backlog += repository_backlog
+            required_local_ci_backlog_by_repository[repository] = repository_backlog
             if (
                 self._policy.local_ci_audit is not None
                 and self._policy.local_ci_audit.applies_to(repository)
@@ -1471,6 +1477,7 @@ class ScanController:
             skipped,
             required_local_ci_backlog=required_local_ci_backlog,
             local_ci_catalogue_deferred=local_ci_catalogue_deferred,
+            required_local_ci_backlog_by_repository=required_local_ci_backlog_by_repository,
         )
 
     def apply_agent_labels(self) -> dict[str, object]:
@@ -3301,6 +3308,7 @@ def _scan_result(
     *,
     required_local_ci_backlog: int = 0,
     local_ci_catalogue_deferred: int = 0,
+    required_local_ci_backlog_by_repository: Mapping[str, int] | None = None,
 ) -> ScanResult:
     values = dict(skipped)
     degraded = any(values.get(reason, 0) > 0 for reason in _DEGRADED_REASONS)
@@ -3310,4 +3318,7 @@ def _scan_result(
         degraded,
         required_local_ci_backlog=required_local_ci_backlog,
         local_ci_catalogue_deferred=local_ci_catalogue_deferred,
+        required_local_ci_backlog_by_repository=(
+            required_local_ci_backlog_by_repository or {}
+        ),
     )

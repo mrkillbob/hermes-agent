@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -1121,20 +1122,34 @@ def _scan(ctx: Any) -> int:
                     else ()
                 )
             )
-            if release_policies and not required_ci_backlog:
+            backlog_by_repository = getattr(
+                result, "required_local_ci_backlog_by_repository", None
+            )
+            if isinstance(backlog_by_repository, Mapping):
+                eligible_release_policies = tuple(
+                    maintenance
+                    for maintenance in release_policies
+                    if backlog_by_repository.get(maintenance.repository, 0) == 0
+                )
+            else:
+                # Preserve the aggregate gate for older controller adapters.
+                eligible_release_policies = (
+                    release_policies if not required_ci_backlog else ()
+                )
+            if eligible_release_policies:
                 maintenance_results = [
                     _run_release_maintenance_scan(
                         policy, ledger, maintenance=maintenance
                     )
-                    for maintenance in release_policies
+                    for maintenance in eligible_release_policies
                 ]
                 maintenance_payload = (
                     maintenance_results[0]
-                    if len(maintenance_results) == 1
+                    if len(release_policies) == 1
                     else {
-                        maintenance.repository: result
+                        getattr(maintenance, "repository"): result
                         for maintenance, result in zip(
-                            release_policies, maintenance_results
+                            eligible_release_policies, maintenance_results
                         )
                     }
                 )
