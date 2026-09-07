@@ -1417,7 +1417,10 @@ class GatewayStartupMixin:
         resolver = getattr(store, "resolve_task_owned_workspace", None)
         switch_kwargs = {}
         if callable(resolver):
-            resolver(cli_session_id, row.get("cwd"))
+            # Workspace lineage validation can wait on several Git subprocesses. Keep
+            # that synchronous preflight off the gateway event loop; switch_session
+            # repeats the validation asynchronously below.
+            await asyncio.to_thread(resolver, cli_session_id, row.get("cwd"))
             switch_kwargs = {"conversation_kind": "task", "persisted_cwd": row.get("cwd")}
         # Ensure a session_store entry exists for this key; switch_session then re-points it.
         await self.async_session_store.get_or_create_session(
