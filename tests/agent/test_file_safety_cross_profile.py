@@ -165,4 +165,3 @@ class TestGetCrossProfileWarning:
         from agent.file_safety import get_cross_profile_warning
         target = fake_hermes["root"] / "profiles" / "security" / "skills" / "x" / "SKILL.md"
         assert get_cross_profile_warning(str(target)) is None
-

@@ -788,7 +788,7 @@ class BuzzAdapter(BasePlatformAdapter):
         # env — the default profile's bridge output — is not consulted)
         _relay_raw = _scoped_platform_setting("BUZZ_RELAY_URL", extra, "relay_url")
         self.relay_url = (_relay_raw or extra.get("relay_url", "")).strip()
-        
+
         configured_attachment_hosts = extra.get("attachment_hosts", [])
         if isinstance(configured_attachment_hosts, str):
             configured_attachment_hosts = configured_attachment_hosts.split(",")

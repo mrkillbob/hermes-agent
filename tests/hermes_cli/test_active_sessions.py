@@ -565,4 +565,3 @@ def test_release_wins_against_transfer_waiting_on_same_lease_lock(
     assert transfer_result == [False]
     assert lease.released is True
     assert active_sessions.active_session_registry_snapshot() == []
-

@@ -1222,4 +1222,3 @@ def convert_messages_to_anthropic(
     _scrub_blank_text_blocks(result)
 
     return system, result
-

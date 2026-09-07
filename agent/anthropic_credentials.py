@@ -1121,4 +1121,3 @@ def _write_hermes_oauth_credentials(
             "Failed to write refreshed Hermes OAuth credentials to %s: %s", oauth_file, e
         )
         raise CredentialPersistError(oauth_file, e) from e
-
