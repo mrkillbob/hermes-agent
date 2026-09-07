@@ -3338,6 +3338,10 @@ def block_task(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
             pending_dependency=not _parents_satisfied(conn, task_id),
+            machine_owned=_is_machine_owned_pr_feedback(
+                title=_row_get(cur_row, "title"),
+                idempotency_key=_row_get(cur_row, "idempotency_key"),
+            ),
         )
         sql = f"""
                 UPDATE tasks
@@ -3375,7 +3379,7 @@ def block_task(
 def _route_block(
     kind: Optional[str], reason: Optional[str], source_status: str, *,
     prev_kind: Optional[str], prev_recurrences: int,
-    pending_dependency: bool,
+    pending_dependency: bool, machine_owned: bool = False,
 ) -> tuple[str, str, str, tuple, dict]:
     """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
 

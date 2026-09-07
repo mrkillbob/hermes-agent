@@ -32,6 +32,7 @@ from .ci_runner import (
     LocalCIRunner,
     _required_lanes,
 )
+from .worker_contract import configured_assignees, worker_contract_enabled
 from .github_client import GitHubClient, GitHubClientError
 from .ledger import (
     FeedbackLedger,
@@ -294,6 +295,10 @@ class DoctorProbe:
                         ]
                     ),
                 }
+            ),
+            "worker_completion_policy": all(
+                worker_contract_enabled(self._hermes_root, name)
+                for name in configured_assignees(policy)
             ),
             "ledger_access": self._ledger_access(ledger_path),
             "repository_worktree": self._repositories_ready(
@@ -1749,8 +1754,20 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     raw_blockers = merge_handoff.get("blockers", [])
                     if isinstance(raw_blockers, list):
                         handoff_blockers = [str(blocker) for blocker in raw_blockers]
+                    next_step = _dispatch_merge_next_step(
+                        policy, ledger, github, KanbanSubprocessClient(),
+                        receipt.identity.repository, receipt.identity.pr_number,
+                        handoff_blockers,
+                    )
+                    successor_scheduled = bool(
+                        isinstance(next_step, dict)
+                        and next_step.get("status") in {"scheduled", "duplicate", "already_scheduled"}
+                    )
                     if owns_task:
-                        _block_current_ci_task(receipt, handoff_blockers)
+                        if successor_scheduled:
+                            _complete_current_ci_task(receipt)
+                        else:
+                            _block_current_ci_task(receipt, handoff_blockers)
                     handoff_blocked = True
                     if next_step is not None:
                         merge_handoff["next_step"] = next_step

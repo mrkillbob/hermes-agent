@@ -303,19 +303,22 @@ class RepairController:
                     base_refresh_required=base_refresh_required,
                 )
                 if retry_receipt is None and checks.actions_enabled and checks.action_required:
+                    if conflicts_only:
+                        skipped["action_required"] += 1
+                    else:
                     # Independent of every other trigger above: no repair
                     # commit or merge can clear GitHub's own action_required
                     # conclusion, so this always gets its own escalation card
                     # rather than competing with (or being silently absorbed
                     # by) the ordinary repair path.
-                    escalation_status = self._dispatch_action_required(
-                        repository, target, pull
-                    )
-                    if escalation_status is None:
-                        created += 1
-                    elif escalation_status != "duplicate":
-                        skipped[escalation_status] += 1
-                        degraded = True
+                        escalation_status = self._dispatch_action_required(
+                            repository, target, pull
+                        )
+                        if escalation_status is None:
+                            created += 1
+                        elif escalation_status != "duplicate":
+                            skipped[escalation_status] += 1
+                            degraded = True
                 if base_refresh_required:
                     if (
                         base_refresh_slots_used

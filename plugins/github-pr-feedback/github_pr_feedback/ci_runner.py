@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands, hermes_coverage_gap, HERMES_ENV_CHECK
+from .ci_environment import ci_environment
 
 import hashlib
 import json
@@ -18,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .github_client import CheckState, GitHubClient, GitHubClientError, PullRequestMergeState
+from .github_client import CheckState, GitHubClient, GitHubClientError, MergeStateStillComputingError, PullRequestMergeState
 from .ledger import CIRunLease, FeedbackLedger
 
 
