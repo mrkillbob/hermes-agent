@@ -15,7 +15,7 @@ name: OSV-Scanner
 # dep became known-vulnerable" case.
 #
 # Uses Google's officially-recommended reusable workflow, pinned by SHA.
-# Findings land in the repo's Security tab (Code Scanning > OSV-Scanner).
+# Findings remain available in the workflow artifact and unified PR review status.
 # fail-on-vuln is disabled so the job does not block merges on pre-existing
 # vulnerabilities in pinned deps that we may need to patch deliberately.
 #
@@ -53,6 +53,10 @@ jobs:
       # The upstream reusable workflow uploads this exact file under its
       # fixed artifact name, which the wrapper downloads below.
       results-file-name: osv-results.sarif
+      # The fork's existing code-scanning baseline was created by the older
+      # reusable-workflow identity; uploading this new identity produces a
+      # misleading neutral "configuration not found" check on every PR.
+      upload-sarif: false
       fail-on-vuln: false
 
   emit-status:
