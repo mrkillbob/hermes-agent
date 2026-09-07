@@ -16,6 +16,12 @@ def test_write_file_with_nested_lint_error_counts_as_landed():
     assert file_mutation_result_landed("write_file", result) is True
 
 
+def test_unchanged_write_file_does_not_count_as_landed():
+    result = json.dumps({"bytes_written": 12, "no_change": True})
+
+    assert file_mutation_result_landed("write_file", result) is False
+
+
 def test_already_applied_patch_does_not_count_as_landed():
     result = json.dumps({"success": True, "no_change": True})
 

@@ -34,7 +34,7 @@ def file_mutation_result_landed(tool_name: str, result: Any) -> bool:
     if not isinstance(data, dict) or data.get("error"):
         return False
     if tool_name == "write_file":
-        return "bytes_written" in data
+        return "bytes_written" in data and data.get("no_change") is not True
     if tool_name == "patch":
         return data.get("success") is True and data.get("no_change") is not True
     return False
