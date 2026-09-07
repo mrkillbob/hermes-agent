@@ -253,7 +253,7 @@ def test_source_grant_allows_pr_metadata_without_disabling_base64_detection(tmp_
 
     path = tmp_path / "pr.diff"
     source = (
-        "Q383-LIVE-RUNNER-STAGE1-CONTRACT-GAP-FREEZE\n"
+        "Q383-LIVE-RUNNER-STAGE1-CONTRACT-GAP-FREEZE-X\n"
         "--diff-filter=ACMR\n"
         "+status\n"
     )
@@ -267,6 +267,22 @@ def test_source_grant_allows_pr_metadata_without_disabling_base64_detection(tmp_
     )
 
     assert decision.allowed is True
+
+
+def test_source_grant_keeps_canonical_base64_shaped_issue_keys_visible(tmp_path):
+    path = tmp_path / "source.txt"
+    source = "ABC123-DEAD-BEEF\n"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path)
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _typed_request(_request(source), source_grant=grant),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "base64_payload" in exc_info.value.decision.reason_codes
 
 
 def test_source_grant_allows_pr_metadata_diff_filter_at_end_of_text(tmp_path):

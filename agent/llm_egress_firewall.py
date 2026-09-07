@@ -961,7 +961,16 @@ def _source_text_for_base64_scan(text: str) -> str:
     # opaque payloads. Keep this grammar tied to a long-option assignment so
     # short quoted Base64 values elsewhere remain rejected.
     masked = _BOUNDED_SOURCE_CODE_ASSIGNMENT.sub("<code>", masked)
-    masked = _BOUNDED_SOURCE_ISSUE_KEY.sub("<source issue key>", masked)
+
+    def mask_source_issue_key(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        # Source grants can represent arbitrary files, not only trusted PR
+        # metadata. Keep canonical URL-safe Base64-shaped issue keys visible
+        # to the fail-closed scanner instead of treating their grammar as
+        # sufficient provenance for masking.
+        return candidate if _canonical_base64_candidate(candidate) else "<source issue key>"
+
+    masked = _BOUNDED_SOURCE_ISSUE_KEY.sub(mask_source_issue_key, masked)
 
     def mask_diff_metadata(match: re.Match[str]) -> str:
         line = match.group(0)
