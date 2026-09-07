@@ -121,7 +121,14 @@ def _enabled_config() -> dict:
     return config
 
 
-def _build_cli(monkeypatch, manager: _Manager, db: _SessionDB | None = None, **kwargs):
+def _build_cli(
+    monkeypatch,
+    manager: _Manager,
+    db: _SessionDB | None = None,
+    *,
+    bind_initial: bool = True,
+    **kwargs,
+):
     db = db or _SessionDB()
     monkeypatch.setenv("HERMES_SESSION_SOURCE", "cli")
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
@@ -134,16 +141,44 @@ def _build_cli(monkeypatch, manager: _Manager, db: _SessionDB | None = None, **k
         "_build_cli_conversation_worktree_manager",
         lambda _config, _db: manager,
     )
-    return cli_module.HermesCLI(compact=True, **kwargs), db
+    cli = cli_module.HermesCLI(compact=True, **kwargs)
+    if bind_initial:
+        cli._ensure_conversation_worktree_binding()
+    return cli, db
 
 
-def test_enabled_conversation_policy_binds_initial_cli_root(monkeypatch, manager):
-    cli, _db = _build_cli(monkeypatch, manager)
+def test_enabled_conversation_policy_defers_initial_cli_root(monkeypatch, manager):
+    cli, _db = _build_cli(monkeypatch, manager, bind_initial=False)
+
+    assert manager.bound_roots == []
+    assert cli._conversation_worktree_binding is None
+    assert cli.agent is None
+    assert "certified Git worktree" not in cli.system_prompt
+
+
+def test_first_cli_prompt_binds_initial_cli_root(monkeypatch, manager):
+    cli, _db = _build_cli(monkeypatch, manager, bind_initial=False)
+
+    cli._ensure_conversation_worktree_binding()
 
     assert cli.working_directory == str(manager.worktree_root / cli.session_id)
     assert manager.bound_roots == [cli.session_id]
-    assert cli.agent is None
     assert "certified Git worktree" in cli.system_prompt
+
+
+def test_cli_chat_binds_before_runtime_setup(monkeypatch, manager):
+    cli, _db = _build_cli(monkeypatch, manager, bind_initial=False)
+    events: list[str] = []
+
+    def credentials_ready():
+        events.append("credentials")
+        return False
+
+    monkeypatch.setattr(cli, "_ensure_runtime_credentials", credentials_ready)
+
+    assert cli.chat("first prompt") is None
+    assert manager.bound_roots == [cli.session_id]
+    assert events == ["credentials"]
 
 
 def test_cli_resume_reuses_durable_root_binding(monkeypatch, manager):

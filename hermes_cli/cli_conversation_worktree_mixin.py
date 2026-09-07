@@ -146,21 +146,38 @@ class CLIConversationWorktreeMixin:
                         phase="recovery",
                     )
             else:
-                binding = self._conversation_worktree_manager.bind_new_root_session(
-                    self.session_id, conversation_kind="interactive"
+                # A new CLI session is only a draft until its first prompt.  Do not
+                # create a retained manager-owned worktree for a process that exits
+                # before the user ever sends a message.
+                binding = None
+            if binding is not None:
+                self._apply_conversation_worktree_binding(binding)
+                self._conversation_root_lease = self._acquire_conversation_root_lease(
+                    binding, surface="cli"
                 )
-                if binding is None:
-                    from agent.conversation_worktree import ConversationWorktreeError
-
-                    raise ConversationWorktreeError(
-                        f"conversation worktree policy did not bind CLI root {self.session_id}",
-                        phase="create",
-                    )
-            self._apply_conversation_worktree_binding(binding)
-            self._conversation_root_lease = self._acquire_conversation_root_lease(
-                binding, surface="cli"
-            )
             atexit.register(self._release_active_session)
+
+    def _ensure_conversation_worktree_binding(self):
+        """Bind a new CLI root when its first prompt makes the session durable."""
+        manager = getattr(self, "_conversation_worktree_manager", None)
+        if manager is None or getattr(self, "_conversation_worktree_binding", None) is not None:
+            return getattr(self, "_conversation_worktree_binding", None)
+
+        from agent.conversation_worktree import ConversationWorktreeError
+
+        binding = manager.bind_new_root_session(
+            self.session_id, conversation_kind="interactive"
+        )
+        if binding is None:
+            raise ConversationWorktreeError(
+                f"conversation worktree policy did not bind CLI root {self.session_id}",
+                phase="create",
+            )
+        self._apply_conversation_worktree_binding(binding)
+        self._conversation_root_lease = self._acquire_conversation_root_lease(
+            binding, surface="cli"
+        )
+        return binding
 
     def _restore_managed_conversation_cwd(self, *, session_id=None):
         managed_binding = getattr(self, "_conversation_worktree_binding", None)
