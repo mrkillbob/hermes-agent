@@ -439,12 +439,14 @@ def check_for_updates() -> Optional[int]:
     # cache so an old result cannot survive a normal update or merge.
     repo_dir: Path | None = None
     cache_rev = embedded_rev
+    cache_target = None
     if not embedded_rev:
         repo_dir = Path(__file__).parent.parent.resolve()
         if not (repo_dir / ".git").exists():
             repo_dir = hermes_home / "hermes-agent"
         if (repo_dir / ".git").exists():
             cache_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
+            cache_target = _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir)
 
     # Docker images have no working tree to count commits against — the
     # published image excludes `.git` (see .dockerignore) and sets no
@@ -460,8 +462,9 @@ def check_for_updates() -> Optional[int]:
     except Exception:
         pass
 
-    # Read cache — invalidate if the embedded rev OR installed version has
-    # changed since the last check.
+    # Read cache — invalidate if the embedded rev, installed version, checkout
+    # HEAD, or tracking tip has changed. A successful ``hermes update --check``
+    # fetch must not leave the startup banner on old evidence for six hours.
     now = time.time()
     try:
         if cache_file.exists():
@@ -469,7 +472,9 @@ def check_for_updates() -> Optional[int]:
             if (
                 now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
                 and cached.get("rev") == cache_rev
+                and cached.get("target") == cache_target
                 and cached.get("ver") == VERSION
+                and (embedded_rev or (cache_rev and cache_target))
             ):
                 return cached.get("behind")
     except Exception:
@@ -497,7 +502,10 @@ def check_for_updates() -> Optional[int]:
         # connectivity is restored (#82166).
         if behind is not None:
             cache_file.write_text(
-                json.dumps({"ts": now, "behind": behind, "rev": cache_rev, "ver": VERSION}),
+                json.dumps({
+                    "ts": now, "behind": behind, "rev": cache_rev,
+                    "target": cache_target, "ver": VERSION,
+                }),
                 encoding="utf-8",
             )
     except Exception:

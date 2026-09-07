@@ -1893,6 +1893,7 @@ def _run_single_pr_merge_handoff(
 
 
 _READY_TO_MERGE_MARKER_PREFIX = "<!-- pr-ready-to-merge-receipt:v1 head="
+_READY_TO_MERGE_LABEL = "ready-to-merge"
 
 
 def _announce_ready_to_merge(github: GitHubClient, repository: str, pull_request) -> None:
@@ -1906,12 +1907,6 @@ def _announce_ready_to_merge(github: GitHubClient, repository: str, pull_request
     """
 
     marker = f"{_READY_TO_MERGE_MARKER_PREFIX}{pull_request.head_sha} -->"
-    try:
-        feedback = github.list_feedback(repository, pull_request.number)
-    except (GitHubClientError, RuntimeError):
-        return
-    if any(marker in (item.body or "") for item in feedback):
-        return
     body = (
         "**Ready to merge.** Local CI passed and every tracked repair/review "
         "item is clear for this exact head. The merge maintainer is running "
@@ -1920,9 +1915,20 @@ def _announce_ready_to_merge(github: GitHubClient, repository: str, pull_request
         f"{marker}"
     )
     try:
-        github.post_issue_comment(repository, pull_request.number, body)
+        current = github.get_pull_request(repository, pull_request.number)
+        if current.head_sha.casefold() != pull_request.head_sha.casefold():
+            return
+        if not any(label.casefold() == _READY_TO_MERGE_LABEL for label in current.labels):
+            github.add_issue_labels(repository, pull_request.number, (_READY_TO_MERGE_LABEL,))
+        readback = github.get_pull_request(repository, pull_request.number)
+        if (readback.head_sha.casefold() != pull_request.head_sha.casefold()
+                or not any(label.casefold() == _READY_TO_MERGE_LABEL for label in readback.labels)):
+            return
+        feedback = github.list_feedback(repository, pull_request.number)
+        if not any(marker in (item.body or "") for item in feedback):
+            github.post_issue_comment(repository, pull_request.number, body)
     except (GitHubClientError, RuntimeError):
-        pass
+        return
 
 
 def _merge_maintainer_task(
