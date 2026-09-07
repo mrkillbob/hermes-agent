@@ -83,9 +83,21 @@ class TestNoninteractiveGitEnv:
         observed = {}
 
         def fake_run(argv, **kwargs):
-            assert argv == ["git", "config", "--global", "--get-all", "credential.helper"]
             observed["env"] = dict(kwargs["env"])
-            return SimpleNamespace(returncode=0, stdout="trusted-helper\n", stderr="")
+            if argv == ["git", "config", "--global", "--get-all", "credential.helper"]:
+                return SimpleNamespace(returncode=0, stdout="trusted-helper\n", stderr="")
+            assert argv == ["git", "config", "--global", "--null", "--list"]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "url.https://mirror.example/.insteadof\nhttps://github.com/\0"
+                    "http.sslCAInfo\n/tmp/corporate-ca.pem\0"
+                    "http.https://github.com/.proxy\nhttp://proxy.example:8080\0"
+                    "http.extraHeader\nAuthorization: Basic trusted\0"
+                    "http.postBuffer\n999999999\0"
+                ),
+                stderr="",
+            )
 
         monkeypatch.setattr(subprocess_compat.subprocess, "run", fake_run)
         env = noninteractive_git_env({"GIT_CONFIG_GLOBAL": "/trusted/global.gitconfig"})
@@ -97,6 +109,15 @@ class TestNoninteractiveGitEnv:
 
         assert observed["env"]["GIT_CONFIG_GLOBAL"] == "/trusted/global.gitconfig"
         assert credential_values == ["", "trusted-helper"]
+        values = [
+            (env[f"GIT_CONFIG_KEY_{idx}"], env[f"GIT_CONFIG_VALUE_{idx}"])
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+        ]
+        assert ("url.https://mirror.example/.insteadof", "https://github.com/") in values
+        assert ("http.sslCAInfo", "/tmp/corporate-ca.pem") in values
+        assert ("http.https://github.com/.proxy", "http://proxy.example:8080") in values
+        assert ("http.extraHeader", "Authorization: Basic trusted") in values
+        assert ("http.postBuffer", "999999999") not in values
 
     def test_real_git_ignores_repo_helper_but_replays_global_helper(self, tmp_path):
         global_config = tmp_path / "global.gitconfig"
@@ -111,7 +132,15 @@ class TestNoninteractiveGitEnv:
             f"#!/bin/sh\nprintf x > '{marker}'\nprintf 'username=malicious\\npassword=malicious-secret\\n'\n"
         )
         malicious_helper.chmod(0o700)
-        global_config.write_text(f"[credential]\n\thelper = !{trusted_helper}\n")
+        global_config.write_text(
+            f"[credential]\n\thelper = !{trusted_helper}\n"
+            "[url \"https://mirror.example/\"]\n"
+            "\tinsteadOf = https://github.com/\n"
+            "[http]\n"
+            "\tsslCAInfo = /tmp/corporate-ca.pem\n"
+            "\tproxy = http://proxy.example:8080\n"
+            "\tpostBuffer = 999999999\n"
+        )
         repo = tmp_path / "repo"
         subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
         subprocess.run(
@@ -121,6 +150,14 @@ class TestNoninteractiveGitEnv:
         )
 
         env = noninteractive_git_env({"GIT_CONFIG_GLOBAL": str(global_config)})
+        transport_values = {
+            env[f"GIT_CONFIG_KEY_{idx}"].lower(): env[f"GIT_CONFIG_VALUE_{idx}"]
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+        }
+        assert transport_values["url.https://mirror.example/.insteadof"] == "https://github.com/"
+        assert transport_values["http.sslcainfo"] == "/tmp/corporate-ca.pem"
+        assert transport_values["http.proxy"] == "http://proxy.example:8080"
+        assert "http.postbuffer" not in transport_values
         result = subprocess.run(
             ["git", "credential", "fill"],
             cwd=repo,
