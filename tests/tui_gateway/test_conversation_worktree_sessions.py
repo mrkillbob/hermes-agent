@@ -83,6 +83,40 @@ def test_session_create_defers_worktree_until_first_prompt(monkeypatch):
     assert record["conversation_worktree"] == {}
 
 
+def test_isolated_session_defers_agent_prewarm_until_worktree_binding(monkeypatch, tmp_path):
+    started: list[str] = []
+
+    class _Timer:
+        def __init__(self, _delay, target):
+            self.target = target
+
+        def start(self):
+            started.append("timer")
+            self.target()
+
+    monkeypatch.setattr(server, "_load_cfg", lambda: {
+        "conversation_worktree": {
+            "enabled": True,
+            "source_worktree": str(tmp_path),
+            "worktree_root": str(tmp_path / "worktrees"),
+        },
+    })
+    monkeypatch.setattr(server.threading, "Timer", _Timer)
+    monkeypatch.setattr(server, "_start_agent_build", lambda sid, _session: started.append(sid))
+
+    session = {
+        "source": "desktop",
+        "conversation_worktree": {},
+    }
+    server._sessions["isolated"] = session
+    server._schedule_agent_build("isolated")
+    assert started == []
+
+    session["conversation_worktree"] = {"path": str(tmp_path / "worktrees" / "isolated")}
+    server._schedule_agent_build("isolated")
+    assert started == ["timer", "isolated"]
+
+
 def test_desktop_draft_has_no_root_lease(monkeypatch):
     lease = MagicMock()
     monkeypatch.setattr(
