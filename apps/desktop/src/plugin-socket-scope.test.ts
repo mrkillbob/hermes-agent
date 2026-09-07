@@ -118,3 +118,180 @@ describe('pluginSocket active-backend scoping (#73044)', () => {
     dispose()
   })
 })
+
+class FakePluginWebSocket {
+  static instances: FakePluginWebSocket[] = []
+  readonly url: string
+  onopen: (() => void) | null = null
+  onmessage: ((event: { data: string }) => void) | null = null
+  onclose: (() => void) | null = null
+  closed = false
+
+  constructor(url: string) {
+    this.url = url
+    FakePluginWebSocket.instances.push(this)
+  }
+
+  close(): void {
+    if (this.closed) {
+      return
+    }
+
+    this.closed = true
+    this.onclose?.()
+  }
+
+  drop(): void {
+    this.onclose?.()
+  }
+
+  open(): void {
+    this.onopen?.()
+  }
+}
+
+const scopedConn = (connectionId: string, profile: string, over: Partial<HermesConnection> = {}): HermesConnection =>
+  conn({
+    authMode: 'token',
+    baseUrl: `https://${connectionId}.invalid`,
+    connectionId,
+    profile,
+    registryScoped: true,
+    token: 'scoped-token',
+    ...over
+  })
+
+describe('pluginSocket explicit source scope', () => {
+  beforeEach(() => {
+    FakePluginWebSocket.instances = []
+    vi.stubGlobal('WebSocket', FakePluginWebSocket)
+    Object.defineProperty(window, 'WebSocket', { configurable: true, writable: true, value: FakePluginWebSocket })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('uses only getConnectionFor for an explicit scope, regardless of ambient source', async () => {
+    setApiRequestConnection('ambient-a')
+    setApiRequestProfile('ambient-profile')
+    const source = scopedConn('source-b', 'research')
+    getConnectionFor.mockResolvedValue(source)
+
+    const dispose = pluginSocket('kanban', '/events', () => {}, {
+      scope: { connectionId: 'source-b', profile: 'research' }
+    })
+
+    await vi.waitFor(() => expect(getConnectionFor).toHaveBeenCalled())
+    await vi.waitFor(() => expect(FakePluginWebSocket.instances).toHaveLength(1))
+    expect(getConnectionFor).toHaveBeenCalledWith({ connectionId: 'source-b', profile: 'research' })
+    expect(getConnection).not.toHaveBeenCalled()
+    expect(FakePluginWebSocket.instances[0]?.url).toBe(
+      'wss://source-b.invalid/api/plugins/kanban/events?token=scoped-token'
+    )
+    dispose()
+  })
+
+  it('retains the captured scope across reconnect and ignores caller mutation', async () => {
+    const source = scopedConn('source-a', 'default')
+    getConnectionFor.mockResolvedValue(source)
+    const scope = { connectionId: ' source-a ', profile: ' default ' }
+    const dispose = pluginSocket('kanban', '/events', () => {}, { scope })
+    scope.connectionId = 'source-b'
+    scope.profile = 'other'
+
+    await vi.waitFor(() => expect(FakePluginWebSocket.instances).toHaveLength(1))
+    FakePluginWebSocket.instances[0].drop()
+    await vi.waitFor(() => expect(getConnectionFor).toHaveBeenCalledTimes(2), { timeout: 2_000 })
+    expect(getConnectionFor).toHaveBeenNthCalledWith(1, { connectionId: 'source-a', profile: 'default' })
+    expect(getConnectionFor).toHaveBeenNthCalledWith(2, { connectionId: 'source-a', profile: 'default' })
+    dispose()
+  })
+
+  it('reports only a completed reconnect after the initial scoped socket has opened', async () => {
+    const source = scopedConn('source-a', 'default')
+    const reconnected = vi.fn()
+    getConnectionFor.mockResolvedValue(source)
+
+    const dispose = pluginSocket('kanban', '/events', () => {}, {
+      onReconnect: reconnected,
+      scope: { connectionId: 'source-a', profile: 'default' }
+    })
+
+    await vi.waitFor(() => expect(FakePluginWebSocket.instances).toHaveLength(1))
+    FakePluginWebSocket.instances[0]?.open()
+    expect(reconnected).not.toHaveBeenCalled()
+
+    FakePluginWebSocket.instances[0]?.drop()
+    await vi.waitFor(() => expect(FakePluginWebSocket.instances).toHaveLength(2), { timeout: 2_000 })
+    FakePluginWebSocket.instances[1]?.open()
+
+    expect(reconnected).toHaveBeenCalledOnce()
+    dispose()
+  })
+
+  it('never ambient-dials when getConnectionFor is unavailable or the descriptor mismatches', async () => {
+    const desktop = window.hermesDesktop
+    Reflect.deleteProperty(desktop, 'getConnectionFor')
+
+    const unavailableDispose = pluginSocket('kanban', '/events', () => {}, {
+      scope: { connectionId: 'source-b', profile: 'research' }
+    })
+
+    await Promise.resolve()
+    expect(getConnection).not.toHaveBeenCalled()
+    expect(FakePluginWebSocket.instances).toHaveLength(0)
+    unavailableDispose()
+
+    desktop.getConnectionFor = vi.fn().mockResolvedValue(scopedConn('other', 'research'))
+
+    const mismatchDispose = pluginSocket('kanban', '/events', () => {}, {
+      scope: { connectionId: 'source-b', profile: 'research' }
+    })
+
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(desktop.getConnectionFor).toHaveBeenCalledWith({ connectionId: 'source-b', profile: 'research' })
+    expect(FakePluginWebSocket.instances).toHaveLength(0)
+    mismatchDispose()
+  })
+
+  it('does not dial or deliver a late result after disposal during resolution', async () => {
+    let resolveConnection: (connection: HermesConnection) => void = () => undefined
+    getConnectionFor.mockImplementation(
+      () =>
+        new Promise<HermesConnection>(resolve => {
+          resolveConnection = resolve
+        })
+    )
+
+    const dispose = pluginSocket('kanban', '/events', () => {}, {
+      scope: { connectionId: 'source-b', profile: 'research' }
+    })
+
+    dispose()
+    resolveConnection(scopedConn('source-b', 'research'))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(FakePluginWebSocket.instances).toHaveLength(0)
+  })
+
+  it('keeps OAuth explicit sockets as polling no-ops', async () => {
+    getConnectionFor.mockResolvedValue(scopedConn('source-b', 'research', { authMode: 'oauth' }))
+
+    const dispose = pluginSocket('kanban', '/events', () => {}, {
+      scope: { connectionId: 'source-b', profile: 'research' }
+    })
+
+    await vi.waitFor(() => expect(getConnectionFor).toHaveBeenCalled())
+    expect(FakePluginWebSocket.instances).toHaveLength(0)
+    dispose()
+  })
+
+  it('rejects empty explicit scope before resolving any backend', () => {
+    expect(() =>
+      pluginSocket('kanban', '/events', () => {}, { scope: { connectionId: ' ', profile: 'research' } })
+    ).toThrow('pluginSocket: scope.connectionId must not be empty')
+    expect(getConnectionFor).not.toHaveBeenCalled()
+  })
+})

@@ -162,7 +162,7 @@ class MiniSWERunner:
     
     def __init__(
         self,
-        model: str = "anthropic/claude-sonnet-4.6",
+        model: str = "openai-codex/gpt-5.5",
         base_url: str = None,
         api_key: str = None,
         env_type: str = "local",
@@ -631,7 +631,7 @@ def main(
     task: str = None,
     prompts_file: str = None,
     output_file: str = "swe-runner-test1.jsonl",
-    model: str = "claude-sonnet-4-20250514",
+    model: str = "gpt-5.5",
     base_url: str = None,
     api_key: str = None,
     env: str = "local",
@@ -648,7 +648,7 @@ def main(
         task: Single task to run (use this OR prompts_file)
         prompts_file: JSONL file with prompts (each line: {"prompt": "..."})
         output_file: Output JSONL file for trajectories
-        model: Model name (default: claude-sonnet-4-20250514)
+        model: Model name (default: gpt-5.5)
         base_url: API base URL (optional)
         api_key: API key (optional, uses env vars)
         env: Environment type - "local", "docker", or "modal"

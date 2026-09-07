@@ -1,5 +1,6 @@
 .DS_Store
 /venv/
+/venv
 /venv.old/
 /venv.stale.runtime-*/
 /bin/
@@ -139,6 +140,7 @@ models-dev-upstream/
 .codex/
 .cursor/
 .gemini/
+.serena/
 .zed/
 .mcp.json
 opencode.json
@@ -212,3 +214,4 @@ native/fts5_cjk/*.so
 # interrupted; consumed by launch-time recovery. Never commit it (was tracked
 # by accident via 3a69e34702, removed in the #72002 salvage).
 .lazy-refresh-incomplete
+.skills_prompt_snapshot.json

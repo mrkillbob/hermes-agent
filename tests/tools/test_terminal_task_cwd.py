@@ -76,6 +76,49 @@ def test_explicit_workdir_still_wins_over_registered_task_cwd(monkeypatch):
     assert calls == [{"timeout": 60, "cwd": "/explicit/workdir", "bounded_capture": True}]
 
 
+def test_kanban_workspace_beats_stale_recorded_session_cwd(monkeypatch, tmp_path):
+    """A worker must not inherit the profile's stable session snapshot."""
+    calls = []
+
+    class FakeEnv:
+        env = {}
+
+        def execute(self, command, **kwargs):
+            calls.append(kwargs)
+            return {"output": "ok", "returncode": 0}
+
+    stable = tmp_path / "stable-base"
+    workspace = tmp_path / "task-worktree"
+    stable.mkdir()
+    workspace.mkdir()
+    task_id = "kanban-worker-session"
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_workspace")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+    monkeypatch.setattr(terminal_tool, "_active_environments", {"default": FakeEnv()})
+    monkeypatch.setattr(terminal_tool, "_last_activity", {})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+    monkeypatch.setattr(
+        terminal_tool,
+        "_get_env_config",
+        lambda: _minimal_terminal_config(cwd=str(workspace)),
+    )
+    monkeypatch.setattr(
+        terminal_tool,
+        "_check_all_guards",
+        lambda command, env_type, **kwargs: {"approved": True},
+    )
+    terminal_tool.record_session_cwd(task_id, str(stable))
+    try:
+        result = json.loads(terminal_tool.terminal_tool(command="pwd", task_id=task_id))
+    finally:
+        terminal_tool.clear_session_cwd(task_id)
+
+    assert result["exit_code"] == 0
+    assert calls == [
+        {"timeout": 60, "cwd": str(workspace), "bounded_capture": True}
+    ]
+
+
 def test_explicit_workdir_does_not_persist_into_session_cwd(monkeypatch):
     """A per-command ``workdir`` must not hijack the durable session cwd.
 
@@ -171,6 +214,73 @@ def test_background_command_prefers_recorded_session_cwd_over_init_time_cwd(monk
         "env_vars": {},
         "use_pty": False,
     }]
+
+
+def test_host_local_background_command_bypasses_configured_backend(tmp_path, monkeypatch):
+    """Hermes control-plane children stay on the host when tools use Docker."""
+    calls = []
+
+    class FakeEnv:
+        env = {}
+        cwd = str(tmp_path)
+
+    class FakeRegistry:
+        pending_watchers = []
+
+        def spawn_local(self, **kwargs):
+            calls.append(("local", kwargs))
+            return SimpleNamespace(id="proc_host", pid=1234)
+
+        def spawn_via_env(self, **kwargs):
+            calls.append(("configured", kwargs))
+            raise AssertionError("host-local command reached configured backend")
+
+    import tools.process_registry as process_registry_mod
+    import tools.self_repo_guard as self_repo_guard
+
+    task_id = "bot-delivery"
+    monkeypatch.setattr(
+        terminal_tool,
+        "_get_env_config",
+        lambda: {
+            "env_type": "docker",
+            "docker_image": "python:3.11",
+            "cwd": str(tmp_path),
+            "timeout": 60,
+            "lifetime_seconds": 3600,
+        },
+    )
+    monkeypatch.setattr(
+        terminal_tool,
+        "_active_environments",
+        {f"host-local-{task_id}": FakeEnv()},
+    )
+    monkeypatch.setattr(terminal_tool, "_last_activity", {})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+    monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+    monkeypatch.setattr(terminal_tool, "_resolve_container_task_id", lambda value: value)
+    monkeypatch.setattr(terminal_tool, "_docker_has_host_access", lambda config: False)
+    monkeypatch.setattr(
+        terminal_tool,
+        "_check_all_guards",
+        lambda command, env_type, **kwargs: {"approved": env_type == "local"},
+    )
+    monkeypatch.setattr(self_repo_guard, "guard_active", lambda: False)
+    monkeypatch.setattr(process_registry_mod, "process_registry", FakeRegistry())
+
+    result = json.loads(
+        terminal_tool.terminal_tool(
+            command="host-runner",
+            task_id=task_id,
+            workdir=str(tmp_path),
+            background=True,
+            _host_local=True,
+        )
+    )
+
+    assert result["session_id"] == "proc_host"
+    assert calls[0][0] == "local"
+    assert calls[0][1]["task_id"] == f"host-local-{task_id}"
 
 
 def test_safe_getcwd_falls_back_to_home_when_no_terminal_cwd(monkeypatch):

@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { isLunarCityBrowserPreview } from '@/app/gateway/hooks/use-gateway-boot'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Input } from '@/components/ui/input'
@@ -188,6 +189,7 @@ export function DesktopOnboardingOverlay({
   const { t } = useI18n()
   const onboarding = useStore($desktopOnboarding)
   const boot = useStore($desktopBoot)
+  const browserPreview = isLunarCityBrowserPreview()
   const ctxRef = useRef<OnboardingContext>({ requestGateway, onCompleted, profile })
   ctxRef.current = { requestGateway, onCompleted, profile }
 
@@ -225,10 +227,10 @@ export function DesktopOnboardingOverlay({
   }
 
   useEffect(() => {
-    if (enabled || onboarding.requested) {
+    if (!browserPreview && (enabled || onboarding.requested)) {
       void refreshOnboarding(ctx)
     }
-  }, [ctx, enabled, onboarding.requested])
+  }, [browserPreview, ctx, enabled, onboarding.requested])
 
   // When the Providers settings page asked to connect a specific provider, the
   // store stashed its id. Once the provider list has loaded and we're back at
@@ -259,6 +261,11 @@ export function DesktopOnboardingOverlay({
       clearPendingProviderOAuth()
     }
   }, [ctx, onboarding.flow.status, onboarding.manual, onboarding.providers])
+
+  // Direct browser renders are a read-only preview with no provider setup flow.
+  if (browserPreview) {
+    return null
+  }
 
   // Mount from frame 1 so we replace the boot overlay seamlessly. The
   // configured field stays null until the runtime check resolves; only then

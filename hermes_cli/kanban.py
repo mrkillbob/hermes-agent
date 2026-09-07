@@ -133,6 +133,89 @@ def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     return branch
 
 
+def _dispatcher_readiness(hermes_home: Optional[Path] = None) -> dict[str, Any]:
+    """Return strict, machine-readable gateway dispatcher readiness.
+
+    Unlike the legacy CLI warning wrapper below, uncertainty is not treated as
+    ready.  Startup/readiness gates use this strict result so a dashboard-only
+    ``hermes serve`` process cannot silently strand assigned ready work.
+    """
+    try:
+        from gateway.status import resolve_gateway_liveness  # type: ignore
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": None,
+            "message": f"Gateway dispatcher readiness could not be verified: {exc}",
+        }
+    try:
+        liveness = resolve_gateway_liveness(
+            profile_dir=hermes_home, use_cache=False
+        )
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": None,
+            "message": f"Gateway dispatcher readiness probe failed: {exc}",
+        }
+    if liveness.probe_error:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": liveness.pid,
+            "message": "Gateway dispatcher readiness probe returned an unreadable state",
+        }
+
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        cfg = load_config_readonly()
+        dispatch_on = bool(cfg.get("kanban", {}).get("dispatch_in_gateway", True))
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "ready": False,
+            "gateway_pid": liveness.pid,
+            "message": f"Kanban dispatcher configuration could not be read: {exc}",
+        }
+
+    pid = liveness.pid
+    if pid and dispatch_on:
+        return {
+            "status": "ready",
+            "ready": True,
+            "gateway_pid": pid,
+            "message": f"gateway pid={pid}, dispatch enabled",
+        }
+    if pid:
+        return {
+            "status": "disabled",
+            "ready": False,
+            "gateway_pid": pid,
+            "message": (
+                "Gateway is running but kanban.dispatch_in_gateway=false in "
+                "config.yaml — the task will sit in 'ready' until you flip it "
+                "back on and restart the gateway, OR run the legacy "
+                "standalone daemon (`hermes kanban daemon --force`)."
+            ),
+        }
+    return {
+        "status": "offline",
+        "ready": False,
+        "gateway_pid": None,
+        "message": (
+            "No gateway is running — the task will sit in 'ready' until you "
+            "start it. Run:\n"
+            "    hermes gateway start\n"
+            "The gateway hosts an embedded dispatcher (tick interval 60s by "
+            "default); your task will be picked up on the next tick after "
+            "the gateway comes up."
+        ),
+    }
+
+
 def _check_dispatcher_presence(
     hermes_home: Optional[Path] = None,
 ) -> tuple[bool, str]:
@@ -158,55 +241,13 @@ def _check_dispatcher_presence(
     against a perfectly healthy profile gateway (#71211). CLI callers leave
     it ``None`` and keep the existing process-level behavior.
     """
-    try:
-        from gateway.status import resolve_gateway_liveness  # type: ignore
-    except Exception:
-        return (True, "")  # can't probe — silent
-    try:
-        # Same shared ladder the dashboard status endpoints use, so a
-        # PID-file-less (launch-service-managed) or cross-container gateway
-        # is not misreported as absent. use_cache=False: this is a one-shot
-        # CLI/create-time probe, not a polling loop, and it must observe the
-        # gateway's state right now rather than a cached snapshot.
-        liveness = resolve_gateway_liveness(
-            profile_dir=hermes_home, use_cache=False
-        )
-    except Exception:
-        return (True, "")  # probe errored — silent
-    if liveness.probe_error:
-        # The resolver swallows per-rung failures so status endpoints never
-        # 500. This caller must still fail OPEN: an unreadable probe means
-        # "can't tell", not "no gateway", and warning on it cries wolf.
+    readiness = _dispatcher_readiness(hermes_home=hermes_home)
+    if readiness["status"] == "unknown":
+        # Preserve the established create-time warning behavior: uncertainty
+        # must not emit a false warning. Strict startup callers use the typed
+        # function directly and fail closed instead.
         return (True, "")
-    pid = liveness.pid
-
-    # Even if the gateway is up, dispatch_in_gateway may be off.
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
-        dispatch_on = bool(cfg.get("kanban", {}).get("dispatch_in_gateway", True))
-    except Exception:
-        dispatch_on = True  # can't tell — assume default
-
-    if pid and dispatch_on:
-        return (True, f"gateway pid={pid}, dispatch enabled")
-    if pid and not dispatch_on:
-        return (
-            False,
-            "Gateway is running but kanban.dispatch_in_gateway=false in "
-            "config.yaml — the task will sit in 'ready' until you flip it "
-            "back on and restart the gateway, OR run the legacy "
-            "standalone daemon (`hermes kanban daemon --force`)."
-        )
-    return (
-        False,
-        "No gateway is running — the task will sit in 'ready' until you "
-        "start it. Run:\n"
-        "    hermes gateway start\n"
-        "The gateway hosts an embedded dispatcher (tick interval 60s by "
-        "default); your task will be picked up on the next tick after "
-        "the gateway comes up."
-    )
+    return (bool(readiness["ready"]), str(readiness["message"]))
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +366,44 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     b_set_wd.add_argument("slug")
     b_set_wd.add_argument("path", nargs="?", default=None,
                           help="Absolute path to use as default workdir. Omit to clear.")
+
+    b_export = boards_sub.add_parser(
+        "export",
+        help="Export a board to a portable .tar.gz archive",
+        description=(
+            "Package a board's tasks, comments, links, history, and file "
+            "attachments into one archive that can be imported on another "
+            "machine. Claims, worker PIDs, chat subscriptions, and paths "
+            "belonging to this machine are stripped. Workspaces are never "
+            "included — they are rebuilt on demand."
+        ),
+    )
+    b_export.add_argument("slug", nargs="?", default=None,
+                          help="Board to export (default: the current board)")
+    b_export.add_argument("-o", "--output", default=None,
+                          help="Archive path (default: ./<slug>.tar.gz)")
+    b_export.add_argument("--no-attachments", action="store_true",
+                          help="Skip attachment files, keeping the archive small")
+    b_export.add_argument("--include-logs", action="store_true",
+                          help="Include per-task worker logs")
+    b_export.add_argument("--json", action="store_true")
+
+    b_import = boards_sub.add_parser(
+        "import",
+        help="Import a board archive as a new board",
+        description=(
+            "Import a .tar.gz produced by `hermes kanban boards export`. "
+            "The board always lands as a NEW board — the slug gains a "
+            "numeric suffix if it is already taken — so an import can "
+            "never overwrite or merge into a board you already have."
+        ),
+    )
+    b_import.add_argument("archive", help="Path to the .tar.gz archive")
+    b_import.add_argument("--as", dest="as_slug", default=None,
+                          help="Slug for the imported board (default: from the archive)")
+    b_import.add_argument("--switch", action="store_true",
+                          help="Switch to the imported board afterwards")
+    b_import.add_argument("--json", action="store_true")
 
     # --- create ---
     p_create = sub.add_parser("create", help="Create a new task")
@@ -1180,6 +1259,14 @@ def _profile_author() -> str:
         return "user"
 
 
+def _unblock_author() -> str:
+    """Distinguish an operator CLI transition from a worker retry."""
+
+    if str(os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+        return _profile_author()
+    return "operator"
+
+
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init",
     "create",
@@ -1268,6 +1355,10 @@ def _dispatch_boards(args: argparse.Namespace) -> int:
         return _cmd_boards_rename(args)
     if sub == "set-default-workdir":
         return _cmd_boards_set_default_workdir(args)
+    if sub == "export":
+        return _cmd_boards_export(args)
+    if sub == "import":
+        return _cmd_boards_import(args)
     print(f"kanban boards: unknown action {sub!r}", file=sys.stderr)
     return 2
 
@@ -1440,6 +1531,64 @@ def _cmd_boards_set_default_workdir(args: argparse.Namespace) -> int:
         print(f"Board {normed!r} default workdir set to {new_val!r}.")
     else:
         print(f"Board {normed!r} default workdir cleared.")
+    return 0
+
+
+def _cmd_boards_export(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_transfer
+    from hermes_cli.sizefmt import format_bytes
+
+    slug = args.slug or kb.get_current_board()
+    output = args.output or f"{slug}.tar.gz"
+    try:
+        res = kanban_transfer.export_board(
+            slug,
+            output,
+            include_attachments=not args.no_attachments,
+            include_logs=args.include_logs,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"kanban boards export: {exc}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+    counts = res["counts"]
+    print(f"Exported board {res['board']!r} → {res['archive']}")
+    print(f"  Size:        {format_bytes(res['size'])}")
+    print(f"  Tasks:       {counts['tasks']}")
+    print(f"  Comments:    {counts['task_comments']}")
+    print(f"  Attachments: {counts['attachment_files']}")
+    print("Import it with `hermes kanban boards import <archive>`.")
+    return 0
+
+
+def _cmd_boards_import(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_transfer
+
+    try:
+        res = kanban_transfer.import_board(
+            args.archive, args.as_slug, activate=args.switch
+        )
+    except (OSError, ValueError) as exc:
+        print(f"kanban boards import: {exc}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+    print(f"Imported board {res['board']!r} ({res['name']}).")
+    if res["renamed"]:
+        print(f"  Renamed from {res['requested_board']!r} — that slug was taken.")
+    print(f"  Path:  {res['path']}")
+    print(f"  Tasks: {res['counts']['tasks']}")
+    for warning in res["warnings"]:
+        print(f"  Note:  {warning}")
+    if res["activated"]:
+        print(f"  Active board is now {res['board']!r}.")
+    else:
+        print(f"  Switch to it with `hermes kanban boards switch {res['board']}`.")
     return 0
 
 
@@ -2401,7 +2550,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     reason = getattr(args, "reason", None)
     if reason is not None:
         reason = reason.strip() or None
-    author = _profile_author() if reason else None
+    author = _unblock_author() if reason else None
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
@@ -2642,11 +2791,31 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_in_progress_per_profile = _coerce_positive_int(
             _kanban_cfg.get("max_in_progress_per_profile")
         )
+        max_in_progress_per_model = _coerce_positive_int(
+            _kanban_cfg.get("max_in_progress_per_model")
+        )
+        raw_profile_caps = _kanban_cfg.get("max_in_progress_by_profile", {})
+        max_in_progress_by_profile = {}
+        if isinstance(raw_profile_caps, dict):
+            for profile, raw_cap in raw_profile_caps.items():
+                cap = _coerce_positive_int(raw_cap)
+                if isinstance(profile, str) and profile.strip() and cap is not None:
+                    max_in_progress_by_profile[profile.strip()] = cap
+        raw_model_caps = _kanban_cfg.get("max_in_progress_by_model", {})
+        max_in_progress_by_model = {}
+        if isinstance(raw_model_caps, dict):
+            for model_key, raw_cap in raw_model_caps.items():
+                cap = _coerce_positive_int(raw_cap)
+                if isinstance(model_key, str) and model_key.strip() and cap is not None:
+                    max_in_progress_by_model[model_key.strip()] = cap
         max_in_progress = _coerce_positive_int(_kanban_cfg.get("max_in_progress"))
         # Memory-derived default when unset (OOF-30/OOF-77) — same
         # fallback the gateway-embedded dispatcher applies, so behaviour
         # matches regardless of which path runs the tick.
-        max_in_progress = kb.resolve_max_in_progress(max_in_progress)
+        max_in_progress = kb.resolve_max_in_progress(
+            max_in_progress,
+            priority_runtime_guard=_kanban_cfg.get("priority_runtime_guard"),
+        )
         # CLI --max overrides config kanban.max_spawn when both are present;
         # CLI is the more explicit signal so it wins.
         cli_max = getattr(args, "max", None)
@@ -2656,6 +2825,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except Exception:
         default_assignee = None
         max_in_progress_per_profile = None
+        max_in_progress_per_model = None
+        max_in_progress_by_profile = {}
+        max_in_progress_by_model = {}
         max_in_progress = None
         max_spawn = getattr(args, "max", None)
     with kb.connect_closing() as conn:
@@ -2667,6 +2839,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            max_in_progress_by_profile=max_in_progress_by_profile,
+            max_in_progress_per_model=max_in_progress_per_model,
+            max_in_progress_by_model=max_in_progress_by_model,
         )
     if getattr(args, "json", False):
         print(json.dumps({
@@ -2685,6 +2860,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "skipped_per_profile_capped": [
                 {"task_id": tid, "assignee": who, "current": current}
                 for (tid, who, current) in res.skipped_per_profile_capped
+            ],
+            "skipped_per_model_capped": [
+                {"task_id": tid, "provider": provider, "model": model, "current": current}
+                for (tid, provider, model, current) in res.skipped_per_model_capped
             ],
             "auto_assigned_default": res.auto_assigned_default,
         }, indent=2))
@@ -2718,6 +2897,11 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         for tid, who, current in res.skipped_per_profile_capped:
             print(
                 f"Deferred ({who} at per-profile cap, {current} running): {tid}"
+            )
+    if res.skipped_per_model_capped:
+        for tid, provider, model, current in res.skipped_per_model_capped:
+            print(
+                f"Deferred ({provider}:{model} at per-model cap, {current} running): {tid}"
             )
     if res.skipped_nonspawnable:
         print(

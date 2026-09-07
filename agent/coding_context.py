@@ -353,6 +353,50 @@ def _coding_mode(config: Optional[dict[str, Any]]) -> str:
     return "auto"
 
 
+def guarded_prompt_enabled(
+    *,
+    platform: Optional[str] = None,
+    cwd: Optional[str | Path] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    config: Optional[dict[str, Any]] = None,
+) -> bool:
+    """Whether this session may use the explicitly opt-in local prompt profile.
+
+    The smaller profile is deliberately fail-closed. It is available only in
+    a focused coding workspace and only when the active provider/model pair
+    is an exact entry in ``agent.guarded_prompt_mode.routes``.
+    """
+    if config is None:
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            config = load_config_readonly()
+        except Exception:
+            return False
+    agent_cfg = (config or {}).get("agent", {}) or {}
+    if not isinstance(agent_cfg, dict) or _coding_mode(config) != "focus":
+        return False
+    raw = agent_cfg.get("guarded_prompt_mode")
+    if not isinstance(raw, dict) or raw.get("enabled") is not True:
+        return False
+    routes = raw.get("routes")
+    if not isinstance(routes, (list, tuple)):
+        return False
+    provider_name = str(provider or "").strip().lower()
+    model_name = str(model or "").strip().lower()
+    allowed_routes = {
+        (str(route.get("provider") or "").strip().lower(), str(route.get("model") or "").strip().lower())
+        for route in routes
+        if isinstance(route, dict)
+    }
+    if not provider_name or not model_name or (provider_name, model_name) not in allowed_routes:
+        return False
+    return resolve_runtime_mode(
+        platform=platform, cwd=cwd, config=config, model=model
+    ).is_coding
+
+
 def _coding_instructions(config: Optional[dict[str, Any]]) -> str:
     """Standing operator instructions for the coding posture (config).
 
@@ -520,12 +564,20 @@ class RuntimeMode:
             return None
         return [self.profile.toolset, *_enabled_mcp_servers(config)]
 
-    def system_prompt_parts(self) -> tuple[list[str], list[str], list[str]]:
+    def system_prompt_parts(
+        self, valid_tool_names=None
+    ) -> tuple[list[str], list[str], list[str]]:
         """Return prefix, workspace, and trailing posture blocks separately.
 
         The operating brief carries a model-family edit-format nudge appended
         to it (one cached string, not a separate block) so the model is steered
         toward the `patch` mode it handles best — see ``_edit_format_line``.
+
+        ``valid_tool_names`` (when provided) tailors the brief to the session's
+        toolset: the ``todo`` tracking sentence is dropped when the todo tool
+        isn't loaded (e.g. Blank Slate), so the brief never references a tool
+        the model can't call. The toolset is fixed at session construction,
+        so the rendered brief is deterministic per session — cache-safe.
 
         The three lists preserve the historical flat prompt order: the brief,
         the live workspace snapshot, then configured operator instructions.
@@ -539,6 +591,13 @@ class RuntimeMode:
         trailing: list[str] = []
         if self.profile.guidance:
             brief = self.profile.guidance
+            if valid_tool_names is not None and "todo" not in valid_tool_names:
+                brief = brief.replace(
+                    "- Track multi-step work with `todo`. Reference code as "
+                    "`path:line` instead of pasting whole files.",
+                    "- Reference code as `path:line` instead of pasting "
+                    "whole files.",
+                )
             edit_line = _edit_format_line(self.model)
             if edit_line:
                 brief = f"{brief}\n{edit_line}"
@@ -666,11 +725,12 @@ def coding_system_prompt_parts(
     cwd: Optional[str | Path] = None,
     config: Optional[dict[str, Any]] = None,
     model: Optional[str] = None,
+    valid_tool_names=None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Return coding prefix, workspace snapshot, and trailing guidance."""
     return resolve_runtime_mode(
         platform=platform, cwd=cwd, config=config, model=model
-    ).system_prompt_parts()
+    ).system_prompt_parts(valid_tool_names=valid_tool_names)
 
 
 def coding_compact_skill_categories(

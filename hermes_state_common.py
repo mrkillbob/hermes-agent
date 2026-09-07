@@ -446,6 +446,7 @@ CREATE TABLE IF NOT EXISTS messages (
     codex_message_items TEXT,
     platform_message_id TEXT,
     observed INTEGER DEFAULT 0,
+    _compressed_summary INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     compacted INTEGER NOT NULL DEFAULT 0,
     api_content TEXT,
@@ -493,6 +494,23 @@ CREATE TABLE IF NOT EXISTS gateway_hygiene_state (
     failure_streak INTEGER NOT NULL DEFAULT 0
 );
 
+-- Per-backend liveness heartbeat (#94895). Each serve / tui_gateway process
+-- registers a row at startup and refreshes ``last_heartbeat`` periodically.
+-- The startup orphan sweep (sessions.startup_orphan_reap) consults this
+-- table to avoid reaping rows whose owning backend is still alive but
+-- just idle (multi-backend state.db shared by isolated serve processes).
+-- A backend whose ``last_heartbeat`` is older than the heartbeat staleness
+-- window is treated as dead; rows without ANY matching heartbeat fall back
+-- to the original staleness predicate so legacy deployments keep working.
+CREATE TABLE IF NOT EXISTS gateway_heartbeats (
+    backend_id TEXT PRIMARY KEY,
+    pid INTEGER NOT NULL,
+    started_at REAL NOT NULL,
+    last_heartbeat REAL NOT NULL,
+    profile TEXT NOT NULL DEFAULT '',
+    host TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS compression_locks (
     session_id TEXT PRIMARY KEY,
     holder TEXT NOT NULL,
@@ -526,6 +544,21 @@ CREATE TABLE IF NOT EXISTS async_delegations (
     task_json TEXT,
     delivery_claim TEXT,
     delivery_claimed_at REAL
+);
+
+-- Deliberately has no sessions(id) foreign key. A desktop or gateway root
+-- claims its Git identity before lazy session persistence creates the row.
+CREATE TABLE IF NOT EXISTS conversation_worktree_bindings (
+    root_session_id TEXT PRIMARY KEY,
+    worktree_path TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    repo_common_dir TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('creating', 'ready', 'creation_failed', 'retained', 'removed')),
+    failure_phase TEXT,
+    failure_message TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);

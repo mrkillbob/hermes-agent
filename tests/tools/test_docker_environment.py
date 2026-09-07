@@ -54,7 +54,9 @@ def _make_dummy_env(**kwargs):
         run_as_host_user=kwargs.get("run_as_host_user", False),
         extra_args=kwargs.get("extra_args", []),
         persist_across_processes=kwargs.get("persist_across_processes", True),
+        shared_container_key=kwargs.get("shared_container_key", ""),
         shm_size=kwargs.get("shm_size", docker_env._DEFAULT_SHM_SIZE),
+        isolate_host_data=kwargs.get("isolate_host_data", False),
     )
 
 
@@ -99,6 +101,53 @@ def test_auto_mount_host_cwd_adds_volume(monkeypatch, tmp_path):
     assert run_calls, "docker run should have been called"
     run_args_str = " ".join(run_calls[0][0])
     assert f"{project_dir}:/workspace" in run_args_str
+
+
+def test_isolate_host_data_suppresses_automatic_credentials_skills_and_caches(
+    monkeypatch, tmp_path
+):
+    """Secure workers must not inherit Hermes' ambient automatic host mounts."""
+    project_dir = tmp_path / "sanitized-pack"
+    project_dir.mkdir()
+    credential = tmp_path / "token.json"
+    credential.write_text("secret")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+    import tools.credential_files as credential_files
+    monkeypatch.setattr(
+        credential_files,
+        "get_credential_file_mounts",
+        lambda: [{"host_path": str(credential), "container_path": "/root/.auth/token.json"}],
+    )
+    monkeypatch.setattr(
+        credential_files,
+        "get_skills_directory_mount",
+        lambda: [{"host_path": str(skills), "container_path": "/root/.hermes/skills"}],
+    )
+    monkeypatch.setattr(
+        credential_files,
+        "get_cache_directory_mounts",
+        lambda: [{"host_path": str(cache), "container_path": "/root/.hermes/cache"}],
+    )
+
+    _make_dummy_env(
+        cwd="/workspace",
+        host_cwd=str(project_dir),
+        auto_mount_cwd=True,
+        isolate_host_data=True,
+    )
+
+    run_call = next(c for c in calls if c[0][1] == "run")
+    run_args = " ".join(run_call[0])
+    assert f"{project_dir}:/workspace" in run_args
+    assert str(credential) not in run_args
+    assert str(skills) not in run_args
+    assert str(cache) not in run_args
 
 
 def test_non_persistent_cleanup_removes_container(monkeypatch):
@@ -712,7 +761,71 @@ def test_labels_attribute_populated_after_init(monkeypatch):
         "hermes-task-id": "abc",
         "hermes-profile": "default",
         "hermes-egress": "off",
+        "hermes-host-data": "ambient",
     }
+
+
+def test_isolated_container_reuse_is_label_partitioned(monkeypatch):
+    """A secure worker must never reuse a container created with ambient host mounts."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "secure")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    env = _make_dummy_env(task_id="reuse-boundary", isolate_host_data=True)
+
+    assert env._labels["hermes-host-data"] == "isolated"
+    ps_call = next(c[0] for c in calls if c[0][1] == "ps")
+    assert "label=hermes-host-data=isolated" in ps_call
+
+
+def test_shared_container_key_replaces_profile_identity(monkeypatch):
+    """Trusted profiles using the same explicit key share the reuse label."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "research")
+    _mock_subprocess_run(monkeypatch)
+
+    a = _make_dummy_env(task_id="abc", shared_container_key="team/workspace")
+    b = _make_dummy_env(task_id="abc", shared_container_key="team/workspace")
+
+    # Deterministic across processes/profiles, not the profile label, and
+    # digest-suffixed (label sanitization alone is lossy).
+    assert a._labels["hermes-profile"] == b._labels["hermes-profile"]
+    assert a._labels["hermes-profile"] != "research"
+    assert a._labels["hermes-profile"].startswith("team_workspace-")
+
+
+def test_distinct_shared_keys_never_collide(monkeypatch):
+    """Label sanitization is lossy — different raw keys MUST NOT resolve to
+    one container identity, or two 'isolated' teams silently attach to the
+    same running container (filesystem, processes, env)."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "research")
+    _mock_subprocess_run(monkeypatch)
+
+    # Sanitize-collision pair: both stems clean to "team_workspace".
+    a = _make_dummy_env(task_id="abc", shared_container_key="team/workspace")
+    b = _make_dummy_env(task_id="abc", shared_container_key="team_workspace")
+    assert a._labels["hermes-profile"] != b._labels["hermes-profile"]
+
+    # Truncation pair: identical first 63 chars, differ after.
+    long_a = "x" * 70 + "A"
+    long_b = "x" * 70 + "B"
+    c = _make_dummy_env(task_id="abc", shared_container_key=long_a)
+    d = _make_dummy_env(task_id="abc", shared_container_key=long_b)
+    assert c._labels["hermes-profile"] != d._labels["hermes-profile"]
+    # Both stay within Docker's 63-char label-value bound.
+    assert len(c._labels["hermes-profile"]) <= 63
+    assert len(d._labels["hermes-profile"]) <= 63
+
+
+def test_empty_shared_container_key_preserves_profile_isolation(monkeypatch):
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "research")
+    _mock_subprocess_run(monkeypatch)
+
+    env = _make_dummy_env(task_id="abc", shared_container_key="")
+
+    assert env._labels["hermes-profile"] == "research"
 
 
 # ── Cross-process container reuse (issue #20561) ──────────────────

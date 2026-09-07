@@ -22,7 +22,11 @@ class _StubAgent:
     def __init__(self, accept: bool = True, boom: bool = False):
         self.accept = accept
         self.boom = boom
+        self.interrupted: list[str] = []
         self.steered: list[str] = []
+
+    def interrupt(self, message: str) -> None:
+        self.interrupted.append(message)
 
     def steer(self, text: str) -> bool:
         if self.boom:
@@ -149,6 +153,7 @@ def test_status_snapshot_never_leaks_owner_or_lifecycle_metadata():
         assert "owner_transport" not in snapshot
         assert "owner_session_record" not in snapshot
         assert "accepting_steer" not in snapshot
+        assert "_authority_generation" not in snapshot
         assert "private-owner" not in repr(snapshot)
         assert all(value is not owner_transport for value in snapshot.values())
         assert all(value is not owner_session_record for value in snapshot.values())
@@ -357,9 +362,19 @@ class TestSubagentSteerRPC:
         def close(self) -> None:
             return None
 
-    def _call(self, params: dict, *, transport=None, session_record=None) -> dict:
+    def _call(
+        self,
+        params: dict,
+        *,
+        method: str = "subagent.steer",
+        supply_generation: bool = True,
+        transport=None,
+        session_record=None,
+    ) -> dict:
         import tui_gateway.server as srv
+        from tools.delegate_tool import owned_subagent_status
 
+        params = dict(params)
         session_id = params.get("session_id")
         if session_id:
             srv._sessions[session_id] = session_record or {
@@ -367,9 +382,22 @@ class TestSubagentSteerRPC:
                 "history": [],
                 "transport": transport,
             }
+            if (
+                supply_generation
+                and method in {"subagent.interrupt", "subagent.steer"}
+                and "expected_generation" not in params
+            ):
+                status = owned_subagent_status(
+                    str(params.get("subagent_id") or ""),
+                    owner_session_id=str(session_id),
+                    owner_transport=transport,
+                    owner_session_record=srv._sessions[session_id],
+                )
+                if status:
+                    params["expected_generation"] = status["generation"]
         try:
             return srv.dispatch(
-                {"id": 1, "method": "subagent.steer", "params": params},
+                {"id": 1, "method": method, "params": params},
                 transport=transport,
             )
         finally:
@@ -417,6 +445,221 @@ class TestSubagentSteerRPC:
             assert agent.steered == ["check the edge cases"]
         finally:
             _unregister_subagent("sid-rpc-2")
+
+    def test_status_and_interrupt_require_exact_live_owner_artifacts(self):
+        owner_transport = self._Transport()
+        foreign_transport = self._Transport()
+        owner_record = {
+            "session_key": "owner-session",
+            "history": [],
+            "transport": owner_transport,
+        }
+        agent = _StubAgent()
+        _with_registered(
+            "sid-rpc-authority",
+            agent,
+            owner_session_id="owner-session",
+            owner_transport=owner_transport,
+            owner_session_record=owner_record,
+        )
+        try:
+            exact = self._call(
+                {
+                    "session_id": "owner-session",
+                    "subagent_id": "sid-rpc-authority",
+                },
+                method="subagent.status",
+                transport=owner_transport,
+                session_record=owner_record,
+            )
+            assert exact["result"]["found"] is True
+            exact_subagent = exact["result"]["subagent"]
+            assert exact_subagent == {
+                "generation": exact_subagent["generation"],
+                "parent_id": "root",
+                "status": "running",
+                "subagent_id": "sid-rpc-authority",
+            }
+            assert isinstance(exact_subagent["generation"], str)
+            assert exact_subagent["generation"]
+
+            foreign = self._call(
+                {
+                    "session_id": "owner-session",
+                    "subagent_id": "sid-rpc-authority",
+                },
+                method="subagent.status",
+                transport=foreign_transport,
+                session_record=owner_record,
+            )
+            assert foreign["result"] == {"found": False, "subagent": None}
+
+            rejected_interrupt = self._call(
+                {
+                    "session_id": "owner-session",
+                    "subagent_id": "sid-rpc-authority",
+                },
+                method="subagent.interrupt",
+                transport=foreign_transport,
+                session_record=owner_record,
+            )
+            assert rejected_interrupt["result"]["found"] is False
+            assert agent.interrupted == []
+
+            accepted_interrupt = self._call(
+                {
+                    "expected_generation": exact_subagent["generation"],
+                    "session_id": "owner-session",
+                    "subagent_id": "sid-rpc-authority",
+                },
+                method="subagent.interrupt",
+                transport=owner_transport,
+                session_record=owner_record,
+            )
+            assert accepted_interrupt["result"] == {
+                "found": True,
+                "subagent_id": "sid-rpc-authority",
+            }
+            assert len(agent.interrupted) == 1
+        finally:
+            _unregister_subagent("sid-rpc-authority")
+
+    def test_same_owner_recycled_id_rejects_stale_status_generation(self):
+        owner_transport = self._Transport()
+        owner_record = {
+            "session_key": "same-owner",
+            "history": [],
+            "transport": owner_transport,
+        }
+        old_agent = _StubAgent()
+        replacement = _StubAgent()
+        _with_registered(
+            "sid-rpc-same-owner-recycle",
+            old_agent,
+            owner_session_id="same-owner",
+            owner_transport=owner_transport,
+            owner_session_record=owner_record,
+        )
+        try:
+            status = self._call(
+                {
+                    "session_id": "same-owner",
+                    "subagent_id": "sid-rpc-same-owner-recycle",
+                },
+                method="subagent.status",
+                transport=owner_transport,
+                session_record=owner_record,
+            )
+            stale_generation = status["result"]["subagent"]["generation"]
+
+            _with_registered(
+                "sid-rpc-same-owner-recycle",
+                replacement,
+                owner_session_id="same-owner",
+                owner_transport=owner_transport,
+                owner_session_record=owner_record,
+            )
+
+            steer = self._call(
+                {
+                    "expected_generation": stale_generation,
+                    "session_id": "same-owner",
+                    "subagent_id": "sid-rpc-same-owner-recycle",
+                    "text": "must not reach replacement",
+                },
+                transport=owner_transport,
+                session_record=owner_record,
+            )
+            assert steer["result"]["status"] == "rejected"
+
+            interrupt = self._call(
+                {
+                    "expected_generation": stale_generation,
+                    "session_id": "same-owner",
+                    "subagent_id": "sid-rpc-same-owner-recycle",
+                },
+                method="subagent.interrupt",
+                transport=owner_transport,
+                session_record=owner_record,
+            )
+            assert interrupt["result"]["found"] is False
+            assert replacement.steered == []
+            assert replacement.interrupted == []
+        finally:
+            _unregister_subagent("sid-rpc-same-owner-recycle", agent=replacement)
+
+    def test_gateway_mutations_reject_missing_or_wrong_generation(self):
+        owner_transport = self._Transport()
+        owner_record = {
+            "session_key": "generation-owner",
+            "history": [],
+            "transport": owner_transport,
+        }
+        agent = _StubAgent()
+        _with_registered(
+            "sid-rpc-generation-required",
+            agent,
+            owner_session_id="generation-owner",
+            owner_transport=owner_transport,
+            owner_session_record=owner_record,
+        )
+        try:
+            for expected_generation in (None, "wrong-generation"):
+                params = {
+                    "session_id": "generation-owner",
+                    "subagent_id": "sid-rpc-generation-required",
+                    "text": "must reject",
+                }
+                if expected_generation is not None:
+                    params["expected_generation"] = expected_generation
+                steer = self._call(
+                    params,
+                    supply_generation=False,
+                    transport=owner_transport,
+                    session_record=owner_record,
+                )
+                assert steer["result"]["status"] == "rejected"
+
+                interrupt_params = {
+                    "session_id": "generation-owner",
+                    "subagent_id": "sid-rpc-generation-required",
+                }
+                if expected_generation is not None:
+                    interrupt_params["expected_generation"] = expected_generation
+                interrupt = self._call(
+                    interrupt_params,
+                    method="subagent.interrupt",
+                    supply_generation=False,
+                    transport=owner_transport,
+                    session_record=owner_record,
+                )
+                assert interrupt["result"]["found"] is False
+            assert agent.steered == []
+            assert agent.interrupted == []
+        finally:
+            _unregister_subagent("sid-rpc-generation-required", agent=agent)
+
+    def test_status_rejects_an_id_recycled_onto_another_owner(self):
+        old_transport = self._Transport()
+        old_record = {"session_key": "old-owner", "history": [], "transport": old_transport}
+        replacement = _StubAgent()
+        _with_registered(
+            "sid-rpc-recycled-status",
+            replacement,
+            owner_session_id="new-owner",
+            owner_transport=self._Transport(),
+            owner_session_record={"session_key": "new-owner"},
+        )
+        try:
+            envelope = self._call(
+                {"session_id": "old-owner", "subagent_id": "sid-rpc-recycled-status"},
+                method="subagent.status",
+                transport=old_transport,
+                session_record=old_record,
+            )
+            assert envelope["result"] == {"found": False, "subagent": None}
+        finally:
+            _unregister_subagent("sid-rpc-recycled-status", agent=replacement)
 
     def test_run_single_child_binds_exact_runtime_owner_artifacts(self):
         from gateway.session_context import clear_session_vars, set_session_vars

@@ -8,6 +8,7 @@ import {
   getStatus,
   restartGateway,
   saveMemoryProviderConfig,
+  setApiRequestConnection,
   setApiRequestProfile,
   speakText,
   transcribeAudio,
@@ -79,5 +80,19 @@ describe('backend action helpers are profile-scoped', () => {
     for (const call of api.mock.calls) {
       expect(call[0].profile).toBe('jarvis')
     }
+  })
+
+  it('pins leader transcription relay audio to its exact connection and profile', async () => {
+    setApiRequestConnection('newly-active')
+    setApiRequestProfile('new-profile')
+
+    await transcribeAudio('data:audio/webm;base64,AAAA', 'audio/webm', {
+      connectionId: 'leader-source',
+      profile: 'owl'
+    })
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionId: 'leader-source', path: '/api/audio/transcribe', profile: 'owl' })
+    )
   })
 })
