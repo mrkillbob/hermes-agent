@@ -9,6 +9,10 @@ metadata:
   hermes:
     tags: [NVIDIA, AI-Q, Quantitative Research, LunaBot, Governance]
     category: mlops
+    config:
+      - key: AIQ_SERVER_URL
+        description: Trusted NVIDIA AI-Q service endpoint.
+        prompt: Enter the trusted NVIDIA AI-Q service URL.
 ---
 
 # NVIDIA AI-Q Signal Discovery Skill
@@ -31,7 +35,8 @@ broker/data-authority changes.
 
 ## Prerequisites
 
-- A trusted AI-Q server URL, normally supplied as `AIQ_SERVER_URL`.
+- A trusted AI-Q server URL declared as skill config key `AIQ_SERVER_URL` and
+  injected by Hermes when this skill loads.
 - NVIDIA credentials configured in the AI-Q service, not copied into Hermes
   prompts or receipts.
 - A LunaBot checkout resolved from the operator's configured project root.
