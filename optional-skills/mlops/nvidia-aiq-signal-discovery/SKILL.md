@@ -40,7 +40,7 @@ broker/data-authority changes.
 - NVIDIA credentials configured in the AI-Q service, not copied into Hermes
   prompts or receipts.
 - A LunaBot checkout resolved from the operator's configured project root.
-- The LunaBot bridge script `scripts/bridge_nvidia_signal_result.py`.
+- The skill-relative client `scripts/aiq_client.py` and a JSON request file.
 - If using NemoClaw, a supported NVIDIA OpenShell host and an explicit user
   decision to install or run its preview tooling.
 
@@ -52,8 +52,23 @@ keys into a request, `SKILL.md`, or generated receipt.
 
 1. Use `terminal` to record the LunaBot root, branch, HEAD, dirty state, and
    data source before starting.
-2. Use the AI-Q service for research planning and durable artifacts. Preserve
-   its job ID, profile, report ID, and artifact paths.
+2. Submit a JSON request, poll the returned job, and download its result with
+   the bundled client. Preserve its job ID, profile, report ID, and artifact
+   paths. The client uses this concrete HTTP contract:
+
+   ```text
+   POST <AIQ_SERVER_URL>/v1/jobs       request JSON; response JSON includes job_id
+   GET  <AIQ_SERVER_URL>/v1/jobs/<id>  job status JSON
+   GET  <AIQ_SERVER_URL>/v1/jobs/<id>/result  completed result JSON
+   ```
+
+   ```text
+   python3 scripts/aiq_client.py submit request.json
+   python3 scripts/aiq_client.py status <job-id>
+   python3 scripts/aiq_client.py download <job-id> result.json
+   ```
+   Override endpoint paths with `--path` or `--path-template` when the
+   trusted deployment exposes the same contract under a gateway prefix.
 3. Run the NVIDIA Quantitative Signal Discovery workflow in its own external
    checkout with a bounded iteration count and the no-telemetry profile.
 4. Import only its structured JSON result through the LunaBot bridge:
