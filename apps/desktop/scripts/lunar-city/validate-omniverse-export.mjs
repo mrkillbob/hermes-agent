@@ -110,6 +110,9 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
   if (receipt?.production_approved === true && receipt?.reference_only === true) {
     errors.push('reference-only export cannot be production-approved')
   }
+  if (receipt?.reference_only === receipt?.production_approved) {
+    errors.push('exactly one of reference_only and production_approved must be true')
+  }
 
   const productionApproved = receipt?.production_approved === true
   const classification = productionApproved ? 'production_candidate' : 'reference_only'

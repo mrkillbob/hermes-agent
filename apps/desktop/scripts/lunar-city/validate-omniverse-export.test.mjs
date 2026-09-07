@@ -95,6 +95,12 @@ test('rejects contradictory approval flags', () => {
   assert.match(result.errors.join('\n'), /reference-only export/)
 })
 
+test('rejects indeterminate approval flags', () => {
+  const result = validateOmniverseExport(receipt({ reference_only: false, production_approved: false }), manifest)
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /exactly one of reference_only and production_approved/)
+})
+
 test('rejects production receipts when manifest bindings are missing', () => {
   for (const manifestOverride of [{ assetVersion: undefined }, { source: {} }]) {
     const result = validateOmniverseExport(
