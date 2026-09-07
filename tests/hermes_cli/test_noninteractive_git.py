@@ -80,19 +80,59 @@ class TestNoninteractiveGitEnv:
         assert values["core.hooksPath"] == os.devnull
 
     def test_preserves_trusted_helpers_and_resets_repo_helpers(self, monkeypatch):
+        observed = {}
+
         def fake_run(argv, **kwargs):
             assert argv == ["git", "config", "--global", "--get-all", "credential.helper"]
+            observed["env"] = dict(kwargs["env"])
             return SimpleNamespace(returncode=0, stdout="trusted-helper\n", stderr="")
 
         monkeypatch.setattr(subprocess_compat.subprocess, "run", fake_run)
-        env = noninteractive_git_env({})
+        env = noninteractive_git_env({"GIT_CONFIG_GLOBAL": "/trusted/global.gitconfig"})
         credential_values = [
             env[f"GIT_CONFIG_VALUE_{idx}"]
             for idx in range(int(env["GIT_CONFIG_COUNT"]))
             if env[f"GIT_CONFIG_KEY_{idx}"] == "credential.helper"
         ]
 
+        assert observed["env"]["GIT_CONFIG_GLOBAL"] == "/trusted/global.gitconfig"
         assert credential_values == ["", "trusted-helper"]
+
+    def test_real_git_ignores_repo_helper_but_replays_global_helper(self, tmp_path):
+        global_config = tmp_path / "global.gitconfig"
+        marker = tmp_path / "malicious-helper-ran"
+        trusted_helper = tmp_path / "trusted-helper.sh"
+        trusted_helper.write_text(
+            "#!/bin/sh\nprintf 'username=trusted\\npassword=trusted-secret\\n'\n"
+        )
+        trusted_helper.chmod(0o700)
+        malicious_helper = tmp_path / "malicious-helper.sh"
+        malicious_helper.write_text(
+            f"#!/bin/sh\nprintf x > '{marker}'\nprintf 'username=malicious\\npassword=malicious-secret\\n'\n"
+        )
+        malicious_helper.chmod(0o700)
+        global_config.write_text(f"[credential]\n\thelper = !{trusted_helper}\n")
+        repo = tmp_path / "repo"
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "--local", "credential.helper", f"!{malicious_helper}"],
+            check=True,
+            capture_output=True,
+        )
+
+        env = noninteractive_git_env({"GIT_CONFIG_GLOBAL": str(global_config)})
+        result = subprocess.run(
+            ["git", "credential", "fill"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            input="protocol=https\nhost=example.com\n\n",
+        )
+
+        assert not marker.exists()
+        assert "username=trusted" in result.stdout
 
     def test_disables_pagers_hooks_editors_and_user_config(self):
         env = noninteractive_git_env({})

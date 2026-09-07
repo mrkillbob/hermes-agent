@@ -453,18 +453,10 @@ def noninteractive_git_env(
             env.pop(key, None)
     env.pop("GIT_CONFIG_COUNT", None)
 
-    devnull = os.devnull
-    env["GIT_CONFIG_GLOBAL"] = devnull
-    env["GIT_CONFIG_SYSTEM"] = devnull
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
-    env["GIT_PAGER"] = "cat"
-    env["PAGER"] = "cat"
-    env["GIT_EDITOR"] = "true"
-
     # Preserve helpers explicitly configured by the user while keeping
     # repository-controlled config from selecting an arbitrary helper. The
-    # empty entry resets lower-precedence repository values before Git applies
-    # the trusted global values replayed below.
+    # probe must run before global config is isolated, otherwise the user's
+    # trusted helpers cannot be discovered for replay below.
     trusted_helpers: list[str] = []
     try:
         helper_probe = subprocess.run(
@@ -473,7 +465,7 @@ def noninteractive_git_env(
             text=True,
             stdin=subprocess.DEVNULL,
             timeout=2,
-            env={k: v for k, v in env.items() if not k.startswith("GIT_CONFIG_")},
+            env=env,
             check=False,
         )
         if helper_probe.returncode == 0:
@@ -481,7 +473,17 @@ def noninteractive_git_env(
     except (OSError, subprocess.TimeoutExpired):
         pass
 
+    devnull = os.devnull
+    env["GIT_CONFIG_GLOBAL"] = devnull
+    env["GIT_CONFIG_SYSTEM"] = devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_PAGER"] = "cat"
+    env["PAGER"] = "cat"
+    env["GIT_EDITOR"] = "true"
+
     config_overrides = {
+        # This empty entry resets repository-controlled helpers before Git
+        # applies the trusted global values replayed below.
         "credential.helper": "",
         "core.askPass": "",
         "core.fsmonitor": "false",
