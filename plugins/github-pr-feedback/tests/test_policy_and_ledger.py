@@ -13,6 +13,7 @@ import github_pr_feedback.ledger as ledger_module
 from github_pr_feedback.ledger import (
     ClaimLease,
     FeedbackLedger,
+    LedgerStateError,
     MaintenanceCommandEvidence,
 )
 from github_pr_feedback.policy import (
@@ -1311,17 +1312,18 @@ def test_local_ci_run_claim_waits_for_pending_mutation(tmp_path: Path) -> None:
     repair_lease = claim_lease(ledger, repair)
 
     assert repair_lease is not None
-    assert ledger.claim_ci_run(
-        repair.repository,
-        repair.pr_number,
-        "b" * 40,
-        repair.head_sha,
-        "m" * 64,
-        supervisor_pid=123,
-        claimed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
-        stale_before=datetime(2026, 8, 24, 11, 55, tzinfo=UTC),
-        pid_is_alive=lambda _pid: False,
-    ) is None
+    with pytest.raises(LedgerStateError, match="PR mutation is pending"):
+        ledger.claim_ci_run(
+            repair.repository,
+            repair.pr_number,
+            "b" * 40,
+            repair.head_sha,
+            "m" * 64,
+            supervisor_pid=123,
+            claimed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+            stale_before=datetime(2026, 8, 24, 11, 55, tzinfo=UTC),
+            pid_is_alive=lambda _pid: False,
+        )
     ledger.close()
 
 
