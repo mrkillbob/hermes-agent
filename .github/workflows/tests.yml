@@ -14,14 +14,13 @@ concurrency:
 jobs:
   test:
     name: Run tests
-    # One 96-core runner for the whole suite. There is no slicing. Slicing
+    # One runner for the whole suite. There is no slicing. Slicing
     # existed to spread the suite over 4-core runners. It cost a matrix job, a
     # duration cache, a per-slice artifact and a merge job to do it.
     #
-    # 96 cores clear the floor that the slowest single test file sets (about
-    # 82s). A second slice divides work that is already at that floor, and
-    # adds a second setup.
-    runs-on: ubuntu-latest-96-core
+    # The standard hosted pool is used here because the formerly requested
+    # large-runner label is not available on this repository.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout code
