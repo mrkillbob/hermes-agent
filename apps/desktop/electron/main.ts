@@ -48,6 +48,7 @@ import {
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { BackendDialClaims } from './backend-dial-claim'
+import { runBackendDial } from './backend-dial-routing'
 import { buildDesktopBackendEnv, hermesManagedNodePathEntries, normalizeHermesHomeRoot } from './backend-env'
 import {
   isReauthRequiredError,
@@ -401,6 +402,7 @@ import {
   sandboxFallbackFromEnv,
   spawnUpdaterProcess,
   stagedUpdaterSupportsPrewrittenMarker,
+  windowsUpdatePrerequisiteError,
   wrapHandoffForDetachedConsole
 } from './updater-process'
 import {
@@ -1393,7 +1395,7 @@ function registerMediaProtocol() {
     // reconnect dial for the same (connectionId, profile) scope; coalescing
     // here avoids bootstrapping a second SSH tunnel / remote dashboard.
     resolveRemoteConnection: ({ connectionId, profile }) =>
-      backendDialClaims.run(backendScopeKey(connectionId, profile), () =>
+      runClaimedBackendDial(connectionId, profile, () =>
         connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)
       )
   })
@@ -1412,6 +1414,13 @@ const registryDispatchRevalidation = new RemoteRevalidationCoordinator()
 // lifecycles, so concurrent dials for one (connectionId, profile) scope
 // coalesce here — the second caller awaits the first spawn's result.
 const backendDialClaims = new BackendDialClaims()
+const runClaimedBackendDial = <T>(
+  connectionId: string | null,
+  profile: string | null | undefined,
+  dial: () => Promise<T>,
+  claimKey?: string
+) =>
+  runBackendDial({ claims: backendDialClaims, scopeKey: backendScopeKey }, connectionId, profile, dial, claimKey)
 // True while connection-config:apply soft-rehomes the primary — suppresses the
 // backend-exit toast so an intentional kill doesn't look like a crash.
 let softRehomeInProgress = false
@@ -4048,6 +4057,16 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
     // Emergency backup and header verification before the update touches
     // anything.  Runs while the backend is still alive.
     preflightStateDb(HERMES_HOME, rememberLog)
+
+    if (IS_WINDOWS && resolveUpdateScriptHandoff(updateRoot)) {
+      const message = windowsUpdatePrerequisiteError(updateRoot)
+
+      if (message) {
+        emitUpdateProgress({ stage: 'error', message, percent: null })
+
+        return { ok: false, error: message }
+      }
+    }
 
     // Stop our own backend(s) and wait for the venv shim to unlock BEFORE we
     // spawn the updater. Without this the updater races a still-locked
@@ -8147,6 +8166,7 @@ interface GatewayFileSaveContext {
 }
 
 interface GatewayFileSavePayload {
+  sessionId?: string
   connectionId?: unknown
   path?: unknown
   profile?: unknown
@@ -8187,8 +8207,10 @@ async function saveGatewayFile(payload: GatewayFileSavePayload = {}) {
   const fallbackName = path.basename(filePath) || suggested || 'download'
   const ctx = { suggested, fallbackName }
 
-  const requestPaths = gatewayFileRequestPaths(filePath, requestPath =>
-    gatewayFileRequestPath(connection, connectionId, profile, requestPath)
+  const requestPaths = gatewayFileRequestPaths(
+    filePath,
+    requestPath => gatewayFileRequestPath(connection, connectionId, profile, requestPath),
+    payload.sessionId
   )
 
   const url = `${connection.baseUrl}${requestPaths.download}`
@@ -10430,14 +10452,14 @@ async function ensureTerminalBackend(webContentsId: number) {
   // reconnect dial for the same (connectionId, profile) scope; coalescing
   // here avoids bootstrapping a second SSH tunnel / remote dashboard.
   if (windowRoute?.registryScoped && windowRoute.connectionId) {
-    return backendDialClaims.run(backendScopeKey(windowRoute.connectionId, windowRoute.profile), () =>
+    return runClaimedBackendDial(windowRoute.connectionId, windowRoute.profile, () =>
       ensureRegistryBackend(windowRoute.connectionId, windowRoute.profile)
     )
   }
 
   const profile = windowRoute?.profile ?? primaryProfileKey()
 
-  return backendDialClaims.run(backendScopeKey(null, profile), () => ensureBackend(profile))
+  return runClaimedBackendDial(null, profile, () => ensureBackend(profile))
 }
 
 // Loopback reach for the browser pane. Scoped to the SSH connection that
@@ -14819,7 +14841,7 @@ ipcMain.handle('hermes:connection', async (_event, profile, extra) => {
   let connection
 
   try {
-    connection = await backendDialClaims.run(scopeKey, () => ensureBackend(profile, { spawnPriority }))
+    connection = await runClaimedBackendDial(null, profileKey, () => ensureBackend(profile, { spawnPriority }))
   } finally {
     clearSpawnPriority()
   }
@@ -14848,7 +14870,7 @@ ipcMain.handle('hermes:connection:for', async (_event, payload) => {
   let connection
 
   try {
-    connection = await backendDialClaims.run(scopeKey, () => ensureRegistryBackend(id, profile, '', { spawnPriority }))
+    connection = await runClaimedBackendDial(id, profile, () => ensureRegistryBackend(id, profile, '', { spawnPriority }))
   } finally {
     clearSpawnPriority()
   }
@@ -14950,8 +14972,11 @@ function revalidatePool() {
 function redialPoolBackendAfterResume(poolKey: string) {
   const { connectionId, profile } = parseBackendScopeKey(poolKey)
 
-  return backendDialClaims.run(poolKey, () =>
-    connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)
+  return runClaimedBackendDial(
+    connectionId,
+    profile,
+    () => connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile),
+    poolKey
   )
 }
 
@@ -15680,7 +15705,7 @@ async function enumerateRegistryAgentSources(registry = readDesktopConnectionsRe
           // bootstrapping a second SSH tunnel / remote dashboard.
           const descriptor: any = await withEnumerationDeadline(
             Promise.resolve(
-              backendDialClaims.run(backendScopeKey(connection.id, null), () =>
+              runClaimedBackendDial(connection.id, null, () =>
                 ensureRegistryBackend(connection.id, null)
               )
             )
@@ -15900,7 +15925,7 @@ ipcMain.handle('hermes:connections:update-all', async (_event, payload) => {
 
           // Claim-guarded (#90812): coalesce with a concurrent renderer dial
           // for the same connection instead of bootstrapping a second backend.
-          const descriptor: any = await backendDialClaims.run(backendScopeKey(connection.id, null), () =>
+          const descriptor: any = await runClaimedBackendDial(connection.id, null, () =>
             ensureRegistryBackend(connection.id, null)
           )
 
@@ -16546,7 +16571,7 @@ async function dispatchRegistryApiRequest(
   // here, so it can race a renderer's own WS reconnect dial for the same
   // (connectionId, profile) scope; coalescing avoids bootstrapping a second
   // SSH tunnel / remote dashboard.
-  const connection: any = await backendDialClaims.run(backendScopeKey(registryConnectionId, routeProfile), () =>
+  const connection: any = await runClaimedBackendDial(registryConnectionId, routeProfile, () =>
     ensureRegistryBackend(registryConnectionId, routeProfile)
   )
 
