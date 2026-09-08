@@ -133,6 +133,7 @@ _CODEX_REVIEW_ROW = re.compile(
 
 def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
     short_head = head_sha[:7].casefold()
+    reviewed = False
     for item in feedback:
         if (
             item.reviewer.login.casefold() != _CODEX_REVIEW_LOGIN
@@ -144,8 +145,17 @@ def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
                 match.group("sha").casefold() == short_head
                 and "completed" in match.group("status").casefold()
             ):
-                return True
-    return False
+                reviewed = True
+    if not reviewed:
+        return False
+    # A completed summary is not a clean review: actionable Codex findings
+    # arrive as separate review/issue comments. Keep those heads out of the
+    # ready queue; the canonical feedback_clear gate remains authoritative.
+    return not any(
+        item.reviewer.login.casefold() == _CODEX_REVIEW_LOGIN
+        and _CODEX_REVIEW_MARKER not in item.body
+        for item in feedback
+    )
 
 
 def _is_governed_approval_receipt(
@@ -496,6 +506,7 @@ class CanonicalMergeEvidenceSource:
         github: GitHubClient,
         ledger: FeedbackLedger,
         merge_policy: MergeMaintainerPolicy | None = None,
+        feedback_cache: Mapping[int, tuple[Feedback, ...]] | None = None,
     ) -> None:
         selected_policy = merge_policy or plugin_policy.merge_maintainer
         if selected_policy is None:
@@ -504,6 +515,7 @@ class CanonicalMergeEvidenceSource:
         self._merge_policy = selected_policy
         self._github = github
         self._ledger = ledger
+        self._feedback_cache = feedback_cache
 
     def snapshot(self, number: int) -> MergeSnapshot:
         policy = self._merge_policy
@@ -523,7 +535,13 @@ class CanonicalMergeEvidenceSource:
         )
         if receipt is not None and not isinstance(receipt, CIAuditReceipt):
             raise GitHubClientError("CI receipt had an invalid type")
-        feedback = self._github.list_feedback(policy.repository, number)
+        feedback = (
+            self._feedback_cache.pop(number, None)
+            if self._feedback_cache is not None
+            else None
+        )
+        if feedback is None:
+            feedback = self._github.list_feedback(policy.repository, number)
         feedback_clear = self._feedback_clear(pull, feedback)
         intent_pending = pending_intent_review(feedback, owner_login=target.owner_login)
         codex_pending = not _codex_reviewed_head(feedback, pull.head_sha)

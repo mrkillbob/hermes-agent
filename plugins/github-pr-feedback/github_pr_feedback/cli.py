@@ -28,7 +28,7 @@ from .ci_runner import (
     LocalCIRunner,
     _required_lanes,
 )
-from .github_client import GitHubClient, GitHubClientError
+from .github_client import Feedback, GitHubClient, GitHubClientError
 from .ledger import (
     FeedbackLedger,
     LedgerStateError,
@@ -1669,7 +1669,15 @@ def _run_merge_scan_for_policy(
             "merged": [],
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
-    source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
+    feedback_cache: dict[int, tuple[Feedback, ...]] = {}
+    try:
+        source = CanonicalMergeEvidenceSource(
+            policy, github, ledger, merge_policy, feedback_cache=feedback_cache
+        )
+    except TypeError:
+        # Keep lightweight test doubles and older plugin integrations usable;
+        # the production source accepts the cache keyword.
+        source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     manifest_path = (
         policy.targets[merge_policy.repository].local_path
         / "tests"
@@ -1713,11 +1721,42 @@ def _run_merge_scan_for_policy(
         pull_request = open_by_number.get(number)
         if pull_request is None:
             continue
-        try:
-            codex_clean = _codex_reviewed_head(
-                github.list_feedback(merge_policy.repository, number),
+        # Do not spend three paginated GitHub reads on a PR that cannot pass
+        # the manifest-bound CI gate. The normal processing loop records the
+        # precise blocker (including manifest mismatch) below.
+        if number not in pending_set:
+            receipt = ledger.latest_ci_receipt(
+                merge_policy.repository,
+                pull_request.number,
                 pull_request.head_sha,
+                manifest_digest=manifest_digest,
+                not_before=datetime.min.replace(tzinfo=UTC),
             )
+            if receipt is None:
+                reader = getattr(ledger, "latest_ci_receipt_for_head", None)
+                exact_head_receipt = (
+                    reader(
+                        merge_policy.repository,
+                        pull_request.number,
+                        pull_request.head_sha,
+                    )
+                    if callable(reader)
+                    else None
+                )
+                blocked[str(number)] = [
+                    "ci_receipt_not_passing"
+                    if exact_head_receipt is not None
+                    and exact_head_receipt.status != "passed"
+                    else "ci_receipt_missing"
+                ]
+                continue
+            if receipt.status != "passed":
+                blocked[str(number)] = ["ci_receipt_not_passing"]
+                continue
+        try:
+            feedback = github.list_feedback(merge_policy.repository, number)
+            feedback_cache[number] = feedback
+            codex_clean = _codex_reviewed_head(feedback, pull_request.head_sha)
         except (GitHubClientError, RuntimeError):
             codex_clean = False
         ready_candidates.append(
@@ -1737,6 +1776,8 @@ def _run_merge_scan_for_policy(
     numbers = (*pending_numbers, *ordered_numbers)
     for number in numbers:
         pull_request = open_by_number.get(number)
+        if pull_request is not None:
+            _clear_ready_to_merge_label(github, merge_policy.repository, pull_request)
         if number not in pending_set:
             assert pull_request is not None
             receipt = ledger.latest_ci_receipt(
@@ -1813,15 +1854,6 @@ def _run_merge_scan_for_policy(
             continue
         blocker_codes = list(result.decision.blockers)
         blocked[str(number)] = blocker_codes
-        if pull_request is not None and _READY_TO_MERGE_LABEL in {
-            label.casefold() for label in pull_request.labels
-        }:
-            try:
-                github.remove_issue_label(
-                    merge_policy.repository, number, _READY_TO_MERGE_LABEL
-                )
-            except (GitHubClientError, RuntimeError):
-                degraded = True
         # Deterministic blockers are already durable in the scan result and are
         # actionable by the repair controller. A model-backed observability card
         # can only restate them, adding queue latency without changing authority.
@@ -1972,6 +2004,17 @@ def _announce_ready_to_merge(github: GitHubClient, repository: str, pull_request
         feedback = github.list_feedback(repository, pull_request.number)
         if not any(marker in (item.body or "") for item in feedback):
             github.post_issue_comment(repository, pull_request.number, body)
+    except (GitHubClientError, RuntimeError):
+        return
+
+
+def _clear_ready_to_merge_label(github: GitHubClient, repository: str, pull_request) -> None:
+    """Remove a stale readiness label before any blocked-path early return."""
+
+    if _READY_TO_MERGE_LABEL not in {label.casefold() for label in pull_request.labels}:
+        return
+    try:
+        github.remove_issue_label(repository, pull_request.number, _READY_TO_MERGE_LABEL)
     except (GitHubClientError, RuntimeError):
         return
 
