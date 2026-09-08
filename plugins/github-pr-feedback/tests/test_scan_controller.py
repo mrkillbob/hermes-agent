@@ -1838,7 +1838,8 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert task.initial_status == "running"
     assert task.max_retries == 3
     assert task.max_runtime_seconds == 90 * 60
-    assert task.idempotency_key.endswith(":supervised-v4")
+    assert task.idempotency_key.startswith("acme/widgets#17:")
+    assert task.idempotency_key.endswith(":supervised-v5")
     assert task.evidence_heading == "Canonical PR audit receipt (JSON)"
     assert task.evidence == {
         "repository": "acme/widgets",
