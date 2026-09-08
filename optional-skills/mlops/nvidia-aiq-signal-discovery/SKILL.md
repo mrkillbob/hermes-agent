@@ -4,6 +4,7 @@ description: Run governed NVIDIA signal research for LunaBot.
 version: 0.1.0
 author: Mike DeMott (mrkillbob), Hermes Agent
 license: MIT
+platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [NVIDIA, AI-Q, Quantitative Research, LunaBot, Governance]
