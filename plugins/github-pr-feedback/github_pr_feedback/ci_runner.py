@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 import tomllib
+import psutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -832,7 +833,8 @@ def _pid_is_alive(pid: int) -> bool:
     if pid < 2:
         return False
     try:
-        os.kill(pid, 0)
+        if not psutil.pid_exists(pid):
+            return False
     except ProcessLookupError:
         return False
     except PermissionError:

@@ -803,8 +803,8 @@ def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp
     from github_pr_feedback.ci_runner import actions_disabled_local_ci_evidence
     root = tmp_path / "hermes"
     (root / "scripts").mkdir(parents=True)
-    (root / "scripts/run_tests.sh").write_text("exit 0\n")
-    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n')
+    (root / "scripts/run_tests.sh").write_text("exit 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n', encoding="utf-8")
     ledger = FeedbackLedger(tmp_path / "ci.sqlite3")
     commands = RecordingRunner()
     runner = LocalCIRunner(FakeGitHub(merge_state()), ledger, command_runner=commands,
@@ -826,8 +826,8 @@ def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp
 def test_hermes_native_contract_accepts_platform_change_with_hosted_coverage(tmp_path):
     root = tmp_path / "hermes"
     (root / "scripts").mkdir(parents=True)
-    (root / "scripts/run_tests.sh").write_text("exit 0\n")
-    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n')
+    (root / "scripts/run_tests.sh").write_text("exit 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n', encoding="utf-8")
     github = FakeGitHub(merge_state())
     github.checks = [
         CheckState(actions_enabled=True, all_green=True, check_count=1),
@@ -898,11 +898,11 @@ def test_hermes_native_ci_uses_shared_workspace_lock_once(tmp_path):
     import json
     from github_pr_feedback.ci_contract import hermes_commands
     packages = ('apps/shared', 'apps/desktop', 'web')
-    (tmp_path / 'package-lock.json').write_text(json.dumps({'packages': {p: {} for p in packages}}))
+    (tmp_path / 'package-lock.json').write_text(json.dumps({'packages': {p: {} for p in packages}}), encoding="utf-8")
     for package in packages:
         root = tmp_path / package
         root.mkdir(parents=True)
-        (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}))
+    (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}), encoding="utf-8")
     commands = hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ('apps/shared/src/client.ts',))
     assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ('npm', 'ci')] == [
         (('npm', 'ci'), tmp_path)]

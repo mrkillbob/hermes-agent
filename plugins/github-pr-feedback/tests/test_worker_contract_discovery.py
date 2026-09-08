@@ -22,7 +22,7 @@ from github_pr_feedback.policy import FeedbackReceipt
 def test_doctor_checks_worker_plugin_opt_in_without_changing_profile(tmp_path, plugins, expected):
     profile = tmp_path / "profiles/worker/config.yaml"
     profile.parent.mkdir(parents=True)
-    profile.write_text(yaml.safe_dump({"plugins": plugins, "model": {"name": "keep-this-model"}}))
+    profile.write_text(yaml.safe_dump({"plugins": plugins, "model": {"name": "keep-this-model"}}), encoding="utf-8")
     before = profile.read_bytes()
     policy = SimpleNamespace(assignee="worker", assignee_rules=(), routing_rules=(),
                              local_ci_audit=None, repair_steward=None, targets={}, board="repairs",
@@ -78,7 +78,7 @@ def test_worker_readiness_respects_managed_policy_and_invalid_encoding(tmp_path,
     from github_pr_feedback.worker_contract import worker_contract_enabled
     managed_dir = tmp_path / "managed"
     managed_dir.mkdir()
-    (managed_dir / "config.yaml").write_text(yaml.safe_dump(managed))
+    (managed_dir / "config.yaml").write_text(yaml.safe_dump(managed), encoding="utf-8")
     monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
     profile = tmp_path / "profiles/worker/config.yaml"
     profile.parent.mkdir(parents=True)
