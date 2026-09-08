@@ -3,31 +3,14 @@
 from __future__ import annotations
 
 import json
-import math
-import os
 import re
 import subprocess
-import tempfile
-import threading
 import time
-from contextlib import AbstractContextManager
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import quote
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows falls back to process-local serialization.
-    fcntl = None
-
-try:
-    from hermes_constants import get_default_hermes_root
-except ImportError:  # Standalone plugin installs remain dependency-light.
-
-    def get_default_hermes_root() -> Path:
-        return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 
 from .policy import PullRequest, Reviewer
 
@@ -35,176 +18,12 @@ from .policy import PullRequest, Reviewer
 class GitHubClientError(RuntimeError):
     """Canonical GitHub data was unavailable or did not have the required shape."""
 
-    def __init__(self, message: str = "GitHub command failed", *, code: str = "github_error") -> None:
-        super().__init__(message)
-        self.code = code
-
-
-class MergeStateStillComputingError(GitHubClientError):
-    """GitHub has not finished computing this PR's mergeability yet.
-
-    Distinct from GitHubClientError proper: this is expected, self-resolving
-    eventual-consistency lag on a PR that has not been touched recently, not
-    evidence that GitHub reads are actually failing. Callers should treat it
-    as a benign "try again next cycle" skip, not a hard failure.
-    """
-
 
 MAX_FEEDBACK_BODY_CHARS = 16_384
-# Bumped from 100: a single-operator repo generating many PRs in parallel
-# (burndown-phase branches, PR-repair follow-ups) can genuinely exceed 100
-# open PRs at once, and the discovery-cap check must fail closed rather than
-# silently operate on a truncated page -- so this has to stay ahead of real
-# volume, not just today's count.
-MAX_DISCOVERED_PULL_REQUESTS = 300
+MAX_DISCOVERED_PULL_REQUESTS = 100
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _MERGE_FLAGS = {"squash": "--squash", "rebase": "--rebase", "merge": "--merge"}
-_PROCESS_REQUEST_LOCK = threading.Lock()
-
-
-class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
-    """Serialize GitHub requests and share secondary-limit cooldowns on disk.
-
-    GitHub's secondary limits are burst-sensitive and apply across every Hermes
-    profile using the same account.  A process-local executor cap cannot protect
-    against the cron scanner, audit workers, repair workers, and operator CLI
-    running at once, so the lock and deadline deliberately live at the common
-    Hermes root rather than inside one profile.
-    """
-
-    def __init__(
-        self,
-        path: Path | None = None,
-        *,
-        sleeper: Callable[[float], None] = time.sleep,
-        clock: Callable[[], float] = time.time,
-        # Keep the shared account below GitHub's primary hourly budget even
-        # when several workers and profiles are scanning continuously.
-        min_interval_seconds: float = 1.0,
-    ) -> None:
-        root = get_default_hermes_root() / "github-pr-feedback"
-        self._path = Path(path or root / "github-request-gate.json")
-        self._lock_path = self._path.with_name(self._path.name + ".lock")
-        self._sleeper = sleeper
-        self._clock = clock
-        self._min_interval = max(0.0, float(min_interval_seconds))
-        self._handle: Any = None
-        self._lock_handle: Any = None
-        self._state: dict[str, float] = {}
-        self._process_lock_held = False
-
-    def __enter__(self) -> "GitHubRequestGate":
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        _PROCESS_REQUEST_LOCK.acquire()
-        self._process_lock_held = True
-        try:
-            self._lock_handle = self._lock_path.open("a+", encoding="utf-8")
-            if fcntl is not None:
-                fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
-            self._handle = self._path.open("a+", encoding="utf-8")
-            self._state = self._read_state()
-            now = self._clock()
-            ready_at = max(
-                self._state.get("next_request_at", 0.0),
-                self._state.get("cooldown_until", 0.0),
-            )
-            if ready_at > now:
-                self._sleeper(ready_at - now)
-            return self
-        except BaseException:
-            if self._handle is not None:
-                self._handle.close()
-                self._handle = None
-            if self._lock_handle is not None:
-                if fcntl is not None:
-                    fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
-                self._lock_handle.close()
-                self._lock_handle = None
-            if self._process_lock_held:
-                self._process_lock_held = False
-                _PROCESS_REQUEST_LOCK.release()
-            raise
-
-    def defer(self, seconds: float) -> None:
-        """Hold every cooperating client after one secondary-limit response."""
-
-        deadline = self._clock() + max(0.0, float(seconds))
-        self._state["cooldown_until"] = max(
-            deadline, self._state.get("cooldown_until", 0.0)
-        )
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        try:
-            now = self._clock()
-            self._state["next_request_at"] = max(
-                self._state.get("next_request_at", 0.0), now + self._min_interval
-            )
-            self._write_state(self._state)
-            if fcntl is not None and self._lock_handle is not None:
-                fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            if self._handle is not None:
-                self._handle.close()
-                self._handle = None
-            if self._lock_handle is not None:
-                self._lock_handle.close()
-                self._lock_handle = None
-            if self._process_lock_held:
-                self._process_lock_held = False
-                _PROCESS_REQUEST_LOCK.release()
-
-    def _read_state(self) -> dict[str, float]:
-        assert self._handle is not None
-        self._handle.seek(0)
-        try:
-            raw = json.load(self._handle)
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            return {}
-        if not isinstance(raw, dict):
-            return {}
-        state: dict[str, float] = {}
-        for key in ("next_request_at", "cooldown_until"):
-            if key not in raw:
-                continue
-            value = raw[key]
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                return {"cooldown_until": self._clock() + 5.0}
-            value = float(value)
-            if not math.isfinite(value) or value < 0:
-                return {"cooldown_until": self._clock() + 5.0}
-            state[key] = value
-        return state
-
-    def _write_state(self, state: dict[str, float]) -> None:
-        assert self._handle is not None
-        clean_state: dict[str, float] = {}
-        for key in ("next_request_at", "cooldown_until"):
-            value = state.get(key)
-            if value is None:
-                continue
-            value = float(value)
-            if not math.isfinite(value) or value < 0:
-                raise ValueError("GitHub request gate state must be finite and nonnegative")
-            clean_state[key] = value
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=self._path.parent,
-                prefix=f".{self._path.name}.", suffix=".tmp", delete=False,
-            ) as output:
-                temporary = Path(output.name)
-                json.dump(clean_state, output, sort_keys=True)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, self._path)
-            temporary = None
-        finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
 
 
 class CommandRunner(Protocol):
@@ -218,106 +37,38 @@ class SubprocessCommandRunner:
         self,
         *,
         sleeper: Callable[[float], None] = time.sleep,
-        rate_limit_backoff: float = 60.0,
-        timeout_retry_backoff: float = 1.0,
-        request_gate: GitHubRequestGate | None = None,
+        rate_limit_backoff: float = 1.0,
     ) -> None:
         self._sleeper = sleeper
-        self._rate_limit_backoff = max(1.0, min(float(rate_limit_backoff), 900.0))
-        self._timeout_retry_backoff = max(
-            0.0, min(float(timeout_retry_backoff), 30.0)
-        )
-        self._request_gate = request_gate or GitHubRequestGate()
+        self._rate_limit_backoff = max(0.0, min(float(rate_limit_backoff), 2.0))
 
     def run(self, argv: list[str]) -> str:
         for attempt in range(2):
             try:
-                with self._request_gate as gate:
-                    completed = subprocess.run(
-                        argv,
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                    )
-                    if completed.returncode != 0 and _is_rate_limit_failure(
-                        completed.stderr
-                    ):
-                        gate.defer(
-                            _rate_limit_delay(
-                                completed.stderr, default=self._rate_limit_backoff
-                            )
-                        )
-            except subprocess.TimeoutExpired as error:
-                # A concurrent burst of `gh` invocations (this client is called
-                # from a 6-worker thread pool) can contend on the OS credential
-                # store on the first call after a idle period and blow the 30s
-                # budget even though gh itself is healthy; one retry clears it.
-                if attempt == 0:
-                    self._sleeper(self._timeout_retry_backoff)
-                    continue
-                raise GitHubClientError("GitHub command failed") from error
-            except OSError as error:
+                completed = subprocess.run(
+                    argv,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
                 raise GitHubClientError("GitHub command failed") from error
             if completed.returncode == 0:
                 return completed.stdout
             if attempt == 0 and _is_rate_limit_failure(completed.stderr):
+                self._sleeper(self._rate_limit_backoff)
                 continue
-            code = _github_failure_code(completed.stderr)
-            raise GitHubClientError(f"GitHub command failed ({code})", code=code)
-        raise GitHubClientError("GitHub command failed", code="github_error")
+            raise GitHubClientError("GitHub command failed")
+        raise GitHubClientError("GitHub command failed")
 
 
 def _is_rate_limit_failure(stderr: str) -> bool:
     normalized = str(stderr or "").casefold()
-    if "429" in normalized or "too many requests" in normalized:
-        return True
-    if any(
-        marker in normalized
-        for marker in (
-            "rate limit",
-            "secondary rate",
-            "abuse detection",
-            "x-ratelimit-",
-        )
-    ):
-        return True
-    # Preserve ordinary permission/authentication failures as ordinary
-    # failures; only a 403 carrying a rate-limit marker is retryable.
-    return "403" in normalized and "limit" in normalized
-
-
-def _github_failure_code(stderr: str) -> str:
-    """Classify command failures without retaining provider output."""
-
-    normalized = str(stderr or "").casefold()
-    if _is_rate_limit_failure(normalized):
-        return "rate_limited"
-    if any(marker in normalized for marker in ("401", "bad credentials", "authentication")):
-        return "authentication"
-    if any(
-        marker in normalized
-        for marker in ("403", "permission denied", "resource not accessible", "forbidden")
-    ):
-        return "permission_denied"
-    if "404" in normalized or "not found" in normalized:
-        return "not_found"
-    return "github_error"
-
-
-def _rate_limit_delay(stderr: str, *, default: float) -> float:
-    """Extract a bounded server-requested delay when gh includes one."""
-
-    normalized = str(stderr or "").casefold()
-    matches = (
-        re.search(r"retry[- ]after\D{0,12}(\d+(?:\.\d+)?)", normalized),
-        re.search(r"try again in\D{0,12}(\d+(?:\.\d+)?)\s*(?:s|sec|second)", normalized),
+    return "rate limit" in normalized and (
+        "403" in normalized or "429" in normalized or "secondary" in normalized
     )
-    for match in matches:
-        if match is not None:
-            return max(1.0, min(float(match.group(1)), 900.0))
-    return max(1.0, min(float(default), 900.0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,24 +121,10 @@ class CheckState:
     actions_enabled: bool
     all_green: bool
     check_count: int
-    # GitHub Actions is enabled as a repository setting and reporting check
-    # runs, but every job fails immediately with the account-payment/spending
-    # -limit annotation rather than actually executing. Distinct from
-    # actions_enabled=False (Actions turned off entirely): here Actions is on
-    # but structurally unable to run anything until billing is resolved.
-    billing_blocked: bool = False
-    # At least one check run's canonical conclusion is GitHub's own
-    # "action_required" -- a workflow waiting on a human (first-time
-    # contributor approval to run, a required workflow that never started, a
-    # third-party app requesting manual follow-up). No code change can
-    # satisfy this: it is not a failing test or a lint error, so the repair
-    # steward must not spend a repair attempt on it and the merge maintainer
-    # must never treat it as a transient red check to wait out.
-    action_required: bool = False
 
 
 class GitHubClient:
-    """Use canonical PR/review endpoints and bounded fixed-argv writes."""
+    """Reads only the canonical PR and review endpoints using literal argv."""
 
     REVIEW_STATE_QUERY = (
         "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
@@ -407,7 +144,6 @@ class GitHubClient:
 
     def __init__(self, runner: CommandRunner | None = None) -> None:
         self._runner = runner or SubprocessCommandRunner()
-        self._actions_enabled_cache: dict[str, tuple[bool, float]] = {}
 
     def list_open_pull_requests(
         self, repository: str, owner_login: str
@@ -424,9 +160,9 @@ class GitHubClient:
                 "--author",
                 owner_login,
                 "--limit",
-                str(MAX_DISCOVERED_PULL_REQUESTS),
+                "100",
                 "--json",
-                "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+                "number,state,headRepository,author,headRefName,headRefOid,updatedAt",
             ]
         )
         if not isinstance(payload, list) or any(
@@ -455,9 +191,9 @@ class GitHubClient:
                 "--state",
                 "open",
                 "--limit",
-                str(MAX_DISCOVERED_PULL_REQUESTS),
+                "100",
                 "--json",
-                "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+                "number,state,headRepository,author,headRefName,headRefOid,updatedAt",
             ]
         )
         if not isinstance(payload, list) or any(
@@ -484,25 +220,16 @@ class GitHubClient:
             raise GitHubClientError("GitHub branch head was unavailable") from error
 
     def get_pull_request(self, repository: str, number: int) -> PullRequest:
-        repository = _validated_repository(repository)
-        number = _positive_number(number)
         row = self._read_object(f"repos/{repository}/pulls/{number}")
-        return _pull_request(row, expected_repository=repository, expected_number=number)
+        return _pull_request(row)
 
     def actions_enabled(self, repository: str) -> bool:
-        repository = _validated_repository(repository)
-        now = time.monotonic()
-        cached = self._actions_enabled_cache.get(repository)
-        if cached is not None and now - cached[1] < 60.0:
-            return cached[0]
         payload = self._json(["gh", "api", f"repos/{repository}/actions/permissions"])
         if not isinstance(payload, dict) or not isinstance(
             payload.get("enabled"), bool
         ):
             raise GitHubClientError("GitHub Actions permissions had an invalid shape")
-        enabled = payload["enabled"]
-        self._actions_enabled_cache[repository] = (enabled, now)
-        return enabled
+        return payload["enabled"]
 
     def repository_is_private(self, repository: str) -> bool:
         payload = self._read_object(f"repos/{_validated_repository(repository)}")
@@ -528,42 +255,6 @@ class GitHubClient:
         repository = _validated_repository(repository)
         number = _positive_number(number)
         row = self._read_object(f"repos/{repository}/pulls/{number}")
-        # GitHub computes mergeability lazily: a PR that hasn't been touched
-        # recently reports mergeable=null / mergeable_state="unknown" on the
-        # first read and only starts the real computation as a side effect of
-        # that read. A second read a few seconds later almost always has the
-        # real value, so poll once before treating this as unavailable --
-        # without this, a stale-but-perfectly-normal open PR is
-        # indistinguishable from a genuine API failure.
-        terminal_merged = (
-            isinstance(row.get("state"), str)
-            and row["state"].casefold() == "closed"
-            and row.get("merged") is True
-            and row.get("mergeable") is None
-            and isinstance(row.get("mergeable_state"), str)
-            and row["mergeable_state"].casefold() == "unknown"
-            and isinstance(row.get("merge_commit_sha"), str)
-            and _SHA.fullmatch(row["merge_commit_sha"])
-        )
-        for delay in (3.0, 6.0):
-            if terminal_merged or row.get("mergeable") is not None or row.get("mergeable_state") != "unknown":
-                break
-            time.sleep(delay)
-            row = self._read_object(f"repos/{repository}/pulls/{number}")
-            terminal_merged = (
-                isinstance(row.get("state"), str)
-                and row["state"].casefold() == "closed"
-                and row.get("merged") is True
-                and row.get("mergeable") is None
-                and isinstance(row.get("mergeable_state"), str)
-                and row["mergeable_state"].casefold() == "unknown"
-                and isinstance(row.get("merge_commit_sha"), str)
-                and _SHA.fullmatch(row["merge_commit_sha"])
-            )
-        if not terminal_merged and row.get("mergeable") is None and row.get("mergeable_state") == "unknown":
-            raise MergeStateStillComputingError(
-                "GitHub has not finished computing mergeability for this PR yet"
-            )
         try:
             base = row["base"]
             head = row["head"]
@@ -715,55 +406,11 @@ class GitHubClient:
             )
         except (KeyError, TypeError) as error:
             raise GitHubClientError("GitHub check state was unavailable") from error
-        all_green = check_green and status_state == "success"
-        billing_blocked = False if all_green else self._billing_blocked(
-            repository, check_runs
-        )
-        action_required = any(
-            isinstance(run, dict) and run.get("conclusion") == "action_required"
-            for run in check_runs
-        )
         return CheckState(
             actions_enabled=True,
-            all_green=all_green,
+            all_green=check_green and status_state == "success",
             check_count=total_count + len(statuses),
-            billing_blocked=billing_blocked,
-            action_required=action_required,
         )
-
-    def _billing_blocked(
-        self, repository: str, check_runs: list[dict[str, Any]]
-    ) -> bool:
-        """Return whether a failing run carries GitHub's billing-lockout annotation.
-
-        Only one annotated, non-passing run needs to be inspected: the billing
-        lockout is an account-wide condition, not a per-job failure, so every
-        job in an affected run carries the identical annotation.
-        """
-
-        for run in check_runs:
-            if (
-                not isinstance(run, dict)
-                or run.get("status") != "completed"
-                or run.get("conclusion") in {"success", "neutral", "skipped"}
-            ):
-                continue
-            run_id = run.get("id")
-            output = run.get("output")
-            annotations_count = (
-                output.get("annotations_count") if isinstance(output, dict) else None
-            )
-            if not isinstance(run_id, int) or not annotations_count:
-                continue
-            try:
-                annotations = self._read_pages(
-                    f"repos/{repository}/check-runs/{run_id}/annotations"
-                )
-            except GitHubClientError:
-                continue
-            if any(_is_billing_lockout_message(a.get("message")) for a in annotations):
-                return True
-        return False
 
     def merge_pull_request(
         self, repository: str, number: int, head_sha: str, *, method: str
@@ -804,92 +451,6 @@ class GitHubClient:
                 "POST",
                 "--field",
                 f"body={body}",
-            ]
-        )
-
-    def add_issue_labels(
-        self, repository: str, number: int, labels: tuple[str, ...]
-    ) -> None:
-        """Add an explicit non-empty label set through the issue endpoint."""
-
-        repository = _validated_repository(repository)
-        number = _positive_number(number)
-        if (
-            not isinstance(labels, tuple)
-            or not labels
-            or any(
-                not isinstance(label, str)
-                or not label.strip()
-                or len(label) > 50
-                or "," in label
-                for label in labels
-            )
-            or len(set(labels)) != len(labels)
-        ):
-            raise ValueError("labels must be a unique non-empty tuple")
-        argv = [
-            "gh",
-            "api",
-            f"repos/{repository}/issues/{number}/labels",
-            "--method",
-            "POST",
-        ]
-        for label in labels:
-            argv.extend(("--field", f"labels[]={label}"))
-        self._runner.run(argv)
-
-    def ensure_issue_label(
-        self, repository: str, label: str, *, color: str, description: str
-    ) -> None:
-        """Create or update one configured label using an exact name/color.
-
-        GitHub uses different endpoints for these operations: a missing label
-        is created on the repository's labels collection, while an existing
-        label is updated on its name-specific endpoint. Read first so a
-        missing label is not sent to the update-only endpoint.
-        """
-
-        repository = _validated_repository(repository)
-        label = _validated_label(label)
-        if not re.fullmatch(r"[0-9a-fA-F]{6}", color):
-            raise ValueError("label color must be six hexadecimal characters")
-        if not isinstance(description, str) or not description.strip() or len(description) > 100:
-            raise ValueError("label description must contain 1 to 100 characters")
-        label_endpoint = f"repos/{repository}/labels/{quote(label, safe='')}"
-        try:
-            self._read_object(label_endpoint)
-        except GitHubClientError as error:
-            if error.code != "not_found":
-                raise
-            self._runner.run(
-                [
-                    "gh",
-                    "api",
-                    f"repos/{repository}/labels",
-                    "--method",
-                    "POST",
-                    "--field",
-                    f"name={label}",
-                    "--field",
-                    f"color={color.casefold()}",
-                    "--field",
-                    f"description={description}",
-                ]
-            )
-            return
-        self._runner.run(
-            [
-                "gh",
-                "api",
-                label_endpoint,
-                "--method",
-                "PUT",
-                "--field",
-                f"new_name={label}",
-                "--field",
-                f"color={color.casefold()}",
-                "--field",
-                f"description={description}",
             ]
         )
 
@@ -996,9 +557,10 @@ class GitHubClient:
             f"repos/{repository}/pulls/{number}/comments?per_page=100",
             f"repos/{repository}/pulls/{number}/reviews?per_page=100",
         )
-        issue_comments, review_comments, reviews = (
-            self._read_pages(endpoint) for endpoint in endpoints
-        )
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
+            issue_comments, review_comments, reviews = executor.map(
+                self._read_pages, endpoints
+            )
         feedback = [
             *(
                 _feedback("issue_comment", row, timestamp_key="created_at")
@@ -1041,12 +603,7 @@ class GitHubClient:
             raise GitHubClientError("GitHub response was not valid JSON") from error
 
 
-def _pull_request(
-    row: dict[str, Any],
-    *,
-    expected_repository: str | None = None,
-    expected_number: int | None = None,
-) -> PullRequest:
+def _pull_request(row: dict[str, Any]) -> PullRequest:
     try:
         base = row["base"]
         head = row["head"]
@@ -1056,26 +613,17 @@ def _pull_request(
             for label in raw_labels
         ):
             raise TypeError("labels must be a list of named objects")
-        number = _positive_number(row["number"])
-        base_repository = _validated_repository(base["repo"]["full_name"])
-        head_repository = _validated_repository(head["repo"]["full_name"])
-        head_sha = _validated_sha(head["sha"])
-        base_sha = _validated_sha(base["sha"])
-        if expected_number is not None and number != expected_number:
-            raise ValueError("GitHub pull request number did not match the request")
-        if expected_repository is not None and base_repository != expected_repository:
-            raise ValueError("GitHub pull request repository did not match the request")
         return PullRequest(
-            number=number,
+            number=row["number"],
             state=row["state"],
-            base_repository=base_repository,
-            head_repository=head_repository,
+            base_repository=base["repo"]["full_name"],
+            head_repository=head["repo"]["full_name"],
             author_login=row["user"]["login"],
             head_ref_name=head["ref"],
-            head_sha=head_sha,
+            head_sha=head["sha"],
             labels=tuple(label["name"] for label in raw_labels),
             base_branch=base["ref"],
-            base_sha=base_sha,
+            base_sha=base["sha"],
         )
     except (KeyError, TypeError, ValueError) as error:
         raise GitHubClientError(
@@ -1085,12 +633,6 @@ def _pull_request(
 
 def _listed_pull_request(base_repository: str, row: dict[str, Any]) -> PullRequest:
     try:
-        raw_labels = row.get("labels", [])
-        if not isinstance(raw_labels, list) or any(
-            not isinstance(label, dict) or not isinstance(label.get("name"), str)
-            for label in raw_labels
-        ):
-            raise TypeError("labels must be a list of named objects")
         return PullRequest(
             number=row["number"],
             state=row["state"],
@@ -1099,9 +641,6 @@ def _listed_pull_request(base_repository: str, row: dict[str, Any]) -> PullReque
             author_login=row["author"]["login"],
             head_ref_name=row["headRefName"],
             head_sha=row["headRefOid"],
-            labels=tuple(label["name"] for label in raw_labels),
-            base_branch=row["baseRefName"],
-            base_sha=row["baseRefOid"],
             updated_at=_timestamp(row["updatedAt"]),
         )
     except (KeyError, TypeError, ValueError) as error:
@@ -1132,21 +671,6 @@ def _feedback(kind: str, row: dict[str, Any], *, timestamp_key: str) -> Feedback
         ) from error
 
 
-_BILLING_LOCKOUT_PHRASES = (
-    "recent account payments have failed",
-    "spending limit needs to be increased",
-)
-
-
-def _is_billing_lockout_message(message: object) -> bool:
-    """Match GitHub's literal check-run annotation for an Actions billing lockout."""
-
-    if not isinstance(message, str):
-        return False
-    lowered = message.casefold()
-    return any(phrase in lowered for phrase in _BILLING_LOCKOUT_PHRASES)
-
-
 def _timestamp(value: object) -> datetime:
     if not isinstance(value, str) or not value:
         raise ValueError("timestamp is required")
@@ -1175,13 +699,6 @@ def _required_string(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("required string was absent")
     return value.strip()
-
-
-def _validated_label(value: object) -> str:
-    label = _required_string(value)
-    if len(label) > 50 or "," in label or any(character in label for character in "\r\n"):
-        raise ValueError("label must be a bounded single-line name")
-    return label
 
 
 def _validated_sha(value: object) -> str:

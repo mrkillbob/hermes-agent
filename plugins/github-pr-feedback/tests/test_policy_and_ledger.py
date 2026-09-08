@@ -9,12 +9,7 @@ from pathlib import Path
 
 import pytest
 
-import github_pr_feedback.ledger as ledger_module
-from github_pr_feedback.ledger import (
-    ClaimLease,
-    FeedbackLedger,
-    MaintenanceCommandEvidence,
-)
+from github_pr_feedback.ledger import ClaimLease, FeedbackLedger
 from github_pr_feedback.policy import (
     FeedbackReceipt,
     MergeMaintainerPolicy,
@@ -24,22 +19,6 @@ from github_pr_feedback.policy import (
     _is_git_worktree,
     load_policy,
 )
-
-
-def maintenance_command_evidence(
-    *, returncode: int = 0, timed_out: bool = False
-) -> tuple[MaintenanceCommandEvidence, ...]:
-    return (
-        MaintenanceCommandEvidence(
-            argv=("python3", "-m", "pytest", "-q"),
-            cwd="/tmp/widgets",
-            returncode=returncode,
-            duration_ms=125,
-            timed_out=timed_out,
-            stdout_sha256="a" * 64,
-            stderr_sha256="b" * 64,
-        ),
-    )
 
 
 def configured_policy(tmp_path: Path):
@@ -221,53 +200,12 @@ def test_maintenance_receipts_are_exact_head_and_lane_scoped(tmp_path: Path) -> 
         status="failed",
         summary="3 tests failed",
         completed_at=completed_at,
-        command_evidence=maintenance_command_evidence(returncode=1),
     )
 
     receipts = ledger.maintenance_receipts("acme/widgets", "a" * 40)
     assert receipts["unit-tests"].status == "failed"
     assert receipts["unit-tests"].summary == "3 tests failed"
     assert ledger.maintenance_receipts("acme/widgets", "b" * 40) == {}
-
-
-def test_legacy_summary_only_maintenance_receipt_is_not_passed(tmp_path: Path) -> None:
-    """Old prose-only rows cannot satisfy the maintenance gate after upgrade."""
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
-    try:
-        ledger._connection.execute(
-            "INSERT INTO maintenance_receipts "
-            "(repository, head_sha, lane, status, summary, completed_at) "
-            "VALUES (?, ?, ?, 'passed', ?, ?)",
-            (
-                "acme/widgets",
-                "a" * 40,
-                "unit-tests",
-                "220 tests passed",
-                datetime.now(UTC).isoformat(),
-            ),
-        )
-        receipt = ledger.maintenance_receipts("acme/widgets", "a" * 40)["unit-tests"]
-        assert receipt.status == "invalid"
-        assert receipt.command_evidence == ()
-    finally:
-        ledger.close()
-
-
-def test_passed_maintenance_receipt_rejects_failing_command(tmp_path: Path) -> None:
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
-    try:
-        with pytest.raises(ValueError, match="failing command evidence"):
-            ledger.record_maintenance_receipt(
-                repository="acme/widgets",
-                head_sha="a" * 40,
-                lane="unit-tests",
-                status="passed",
-                summary="claimed passed",
-                completed_at=datetime.now(UTC),
-                command_evidence=maintenance_command_evidence(returncode=1),
-            )
-    finally:
-        ledger.close()
 
 
 def test_merge_maintainer_is_disabled_by_default(tmp_path: Path) -> None:
@@ -277,26 +215,6 @@ def test_merge_maintainer_is_disabled_by_default(tmp_path: Path) -> None:
     policy = load_policy(enabled_raw_config(repository_path))
 
     assert policy.merge_maintainer is None
-
-
-def test_disabled_merge_maintainer_accepts_staged_settings(tmp_path: Path) -> None:
-    repository_path = tmp_path / "widgets"
-    initialize_git_worktree(repository_path)
-    raw = enabled_raw_config(repository_path)
-    raw["merge_maintainer"] = {
-        "enabled": False,
-        "assignee": "pr-merge-maintainer",
-        "repository": "acme/widgets",
-        "author_login": "owner",
-        "base_branch": "stable",
-        "merge_methods": ["squash", "rebase", "merge"],
-        "receipt_max_age_seconds": 21600,
-        "report_only": True,
-        "post_merge": {"enabled": False},
-        "require_per_pr_enrollment": True,
-    }
-
-    assert load_policy(raw).merge_maintainer is None
 
 
 def test_enabled_policy_parses_strict_merge_and_post_merge_settings(
@@ -332,81 +250,6 @@ def test_enabled_policy_parses_strict_merge_and_post_merge_settings(
             relaunch_argv=("/usr/bin/open", "-n"),
         ),
     )
-
-
-def test_merge_enrollment_is_durable_and_scoped_per_pr(tmp_path: Path) -> None:
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
-    try:
-        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == ()
-        ledger.enroll_merge_pr(
-            "acme/widgets",
-            17,
-            enrolled_at=datetime(2026, 8, 25, tzinfo=UTC),
-            enrolled_by="operator",
-        )
-        assert ledger.is_merge_enrolled("acme/widgets", 17)
-        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == (17,)
-        ledger.unenroll_merge_pr("acme/widgets", 17)
-        assert not ledger.is_merge_enrolled("acme/widgets", 17)
-    finally:
-        ledger.close()
-
-
-def test_policy_supports_multiple_same_repository_merge_lanes(tmp_path: Path) -> None:
-    hermes = tmp_path / "hermes"
-    luna = tmp_path / "luna"
-    initialize_git_worktree(hermes)
-    initialize_git_worktree(luna)
-    raw = enabled_raw_config(hermes)
-    raw["repositories"] = [
-        {
-            "base_repository": "mrkillbob/hermes-agent",
-            "head_repository": "mrkillbob/hermes-agent",
-            "local_path": str(hermes),
-            "owner_login": "mrkillbob",
-            "branch_prefixes": ["codex/", "claude/", "hermes/"],
-        },
-        {
-            "base_repository": "mrkillbob/luna-bot",
-            "head_repository": "mrkillbob/luna-bot",
-            "local_path": str(luna),
-            "owner_login": "mrkillbob",
-            "branch_prefixes": ["codex/", "claude/", "hermes/"],
-        },
-    ]
-    raw.pop("merge_maintainer", None)
-    raw["merge_maintainers"] = [
-        {
-            "enabled": True,
-            "assignee": "pr-merge-maintainer",
-            "repository": "mrkillbob/hermes-agent",
-            "author_login": "mrkillbob",
-            "base_branch": "main",
-            "merge_methods": ["squash"],
-            "receipt_max_age_seconds": 3600,
-            "report_only": False,
-            "require_per_pr_enrollment": True,
-            "post_merge": {"enabled": False},
-        },
-        {
-            "enabled": True,
-            "assignee": "pr-merge-maintainer",
-            "repository": "mrkillbob/luna-bot",
-            "author_login": "mrkillbob",
-            "base_branch": "stable",
-            "merge_methods": ["squash"],
-            "receipt_max_age_seconds": 3600,
-            "report_only": False,
-            "require_per_pr_enrollment": True,
-            "post_merge": {"enabled": False},
-        },
-    ]
-    policy = load_policy(raw)
-    assert [item.repository for item in policy.merge_policies()] == [
-        "mrkillbob/hermes-agent",
-        "mrkillbob/luna-bot",
-    ]
-    assert policy.merge_policy_for("mrkillbob/hermes-agent").require_per_pr_enrollment
 
 
 @pytest.mark.parametrize(
@@ -534,39 +377,6 @@ def test_disabled_config_is_not_admitted(tmp_path: Path) -> None:
         ).reason
         == "disabled"
     )
-
-
-def test_enabled_policy_parses_bounded_agent_label_mappings(tmp_path: Path) -> None:
-    repository_path = tmp_path / "widgets"
-    initialize_git_worktree(repository_path)
-    raw = enabled_raw_config(repository_path)
-    raw["agent_labels"] = {
-        "enabled": True,
-        "max_updates_per_scan": 12,
-        "create_missing": True,
-        "mappings": [
-            {
-                "branch_prefix": "codex/",
-                "label": "codex",
-                "color": "1f6feb",
-                "description": "PR authored by Codex",
-            },
-            {
-                "branch_prefix": "hermes/",
-                "label": "hermes",
-                "color": "8250df",
-                "description": "PR authored by Hermes",
-            },
-        ],
-    }
-
-    policy = load_policy(raw)
-
-    assert policy.agent_labels is not None
-    assert policy.agent_labels.label_for_branch("codex/fix") == "codex"
-    assert policy.agent_labels.label_for_branch("hermes/repair") == "hermes"
-    assert policy.agent_labels.label_for_branch("feature/plain") is None
-    assert policy.agent_labels.create_missing is True
 
 
 def test_dispatched_feedback_is_not_actioned_until_explicit_exact_head_acknowledgement(
@@ -706,32 +516,6 @@ def test_enabled_policy_parses_a_bounded_local_ci_audit_lane(tmp_path: Path) -> 
     assert policy.local_ci_audit is not None
     assert policy.local_ci_audit.assignee == "pr-local-ci-auditor"
     assert policy.local_ci_audit.post_results is True
-    assert policy.local_ci_audit.required_for_open_prs is False
-    assert policy.local_ci_audit.max_dispatches_per_scan == 1
-    assert policy.local_ci_audit.max_open_prs_per_scan == 300
-
-
-def test_enabled_policy_parses_bounded_required_local_ci_settings(
-    tmp_path: Path,
-) -> None:
-    repository_path = tmp_path / "widgets"
-    initialize_git_worktree(repository_path)
-    raw = enabled_raw_config(repository_path)
-    raw["local_ci_audit"] = {
-        "enabled": True,
-        "assignee": "pr-local-ci-auditor",
-        "post_results": True,
-        "required_for_open_prs": True,
-        "max_dispatches_per_scan": 2,
-        "max_open_prs_per_scan": 17,
-    }
-
-    policy = load_policy(raw)
-
-    assert policy.local_ci_audit is not None
-    assert policy.local_ci_audit.required_for_open_prs is True
-    assert policy.local_ci_audit.max_dispatches_per_scan == 2
-    assert policy.local_ci_audit.max_open_prs_per_scan == 17
 
 
 @pytest.mark.parametrize(
@@ -1331,39 +1115,6 @@ def test_ledger_enables_bounded_busy_waits_and_wal_autocheckpoint(
     assert ledger._connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5_000
     assert ledger._connection.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 1_000
     ledger.close()
-
-
-def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    calls: list[str] = []
-    connect_attempts = 0
-
-    class FakeConnection:
-        def execute(self, statement: str):
-            calls.append(statement)
-
-        def close(self):
-            calls.append("close")
-
-    connection = FakeConnection()
-
-    def flaky_connect(*args, **kwargs):
-        nonlocal connect_attempts
-        connect_attempts += 1
-        assert kwargs["timeout"] == 5.0
-        if connect_attempts == 1:
-            raise sqlite3.OperationalError("unable to open database file")
-        return connection
-
-    monkeypatch.setattr(ledger_module.sqlite3, "connect", flaky_connect)
-    monkeypatch.setattr(ledger_module.time, "sleep", lambda _delay: None)
-
-    result = ledger_module._connect_ledger(tmp_path / "ledger.sqlite3")
-
-    assert result is connection
-    assert connect_attempts == 2
-    assert calls[:2] == ["PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"]
 
 
 def test_worktree_policy_allows_ten_seconds_for_local_git_probe(
