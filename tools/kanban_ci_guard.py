@@ -30,9 +30,13 @@ _UNAVAILABLE_MESSAGE = (
 def completion_block(task_id: str | None = None) -> str | None:
     """Return a blocking message for an unproven governed CI completion."""
     worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
-    target = str(task_id or worker_task or "").strip()
-    if not target:
+    # The explicit ``task_id`` argument is also used by the human CLI. Only a
+    # dispatcher-spawned worker carries the worker-task binding that proves the
+    # completion is governed by CI; an absent binding must preserve ordinary
+    # Kanban completion even when the control ledger is not installed.
+    if not worker_task:
         return None
+    target = worker_task
     try:
         root = Path(os.environ.get("HERMES_CONTROL_HOME", "").strip() or _default_hermes_root())
         path = root / "github-pr-feedback" / "ledger.sqlite3"
