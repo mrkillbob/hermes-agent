@@ -1044,24 +1044,19 @@ class GitHubClient:
         head_sha = _validated_sha(head_sha)
         if method not in _MERGE_FLAGS:
             raise ValueError("method must be squash, rebase, or merge")
-        payload = self._json_with_runner(
-            self._runner,
-            [
-                "gh",
-                "api",
-                "--method",
-                "PUT",
-                f"repos/{repository}/pulls/{number}/merge",
-                "-f",
-                f"sha={head_sha}",
-                "-f",
-                f"merge_method={method}",
-            ],
-        )
-        if not isinstance(payload, dict) or payload.get("merged") is not True:
-            raise GitHubClientError(
-                "GitHub did not confirm the merge", code="merge_rejected"
+        # `gh pr merge --auto` preserves required merge-queue enrollment.
+        # `--match-head-commit` keeps the write fenced to the reviewed head.
+        try:
+            self._runner.run(
+                [
+                    "gh", "pr", "merge", str(number), "--repo", repository,
+                    _MERGE_FLAGS[method], "--auto", "--match-head-commit", head_sha,
+                ]
             )
+        except GitHubClientError as error:
+            if error.code == "github_error":
+                raise GitHubClientError(str(error), code="merge_rejected") from error
+            raise
 
     def close_pull_request_with_comment(
         self,

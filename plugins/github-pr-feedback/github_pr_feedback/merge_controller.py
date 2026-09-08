@@ -319,13 +319,11 @@ class MergeController:
                 return reconciled
             if (
                 snapshot.pull_request.repository == self._policy.repository
-                and snapshot.pull_request.head_sha == pending.head_sha
+                and snapshot.pull_request.state == "OPEN"
                 and not snapshot.pull_request.merged
             ):
                 self._ledger.release_open_unmerged_merge_lease(
-                    pending.repository,
-                    pending.pr_number,
-                    pending.head_sha,
+                    pending,
                     updated_at=self._now(),
                 )
             blocked = MergeDecision(

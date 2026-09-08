@@ -1207,17 +1207,11 @@ def test_github_client_flags_a_check_run_waiting_on_human_approval_as_action_req
 @pytest.mark.parametrize("method", ["squash", "rebase", "merge"])
 def test_github_client_uses_only_fixed_exact_head_merge_argv(method: str) -> None:
     merge_argv = (
-        "gh",
-        "api",
-        "--method",
-        "PUT",
-        "repos/acme/widgets/pulls/17/merge",
-        "-f",
-        "sha=" + "a" * 40,
-        "-f",
-        "merge_method=" + method,
+        "gh", "pr", "merge", "17", "--repo", "acme/widgets",
+        {"squash": "--squash", "rebase": "--rebase", "merge": "--merge"}[method],
+        "--auto", "--match-head-commit", "a" * 40,
     )
-    runner = RecordingRunner({merge_argv: {"merged": True}})
+    runner = RecordingRunner({merge_argv: {}})
 
     result = GitHubClient(runner).merge_pull_request(
         "acme/widgets", 17, "a" * 40, method=method

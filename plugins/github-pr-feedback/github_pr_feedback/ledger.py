@@ -2006,9 +2006,9 @@ class FeedbackLedger:
         return MergeLease(repository, pr_number, head_sha, owner, claimed_at)
 
     def release_open_unmerged_merge_lease(
-        self, repository: str, pr_number: int, head_sha: str, *, updated_at: datetime
+        self, lease: MergeLease, *, updated_at: datetime
     ) -> None:
-        """Release a verification lease only after canonical open/unmerged readback."""
+        """Release exactly the verification lease after canonical readback."""
 
         updated_at = _aware_utc(updated_at, "updated_at")
         with self._transaction():
@@ -2016,8 +2016,11 @@ class FeedbackLedger:
                 "UPDATE merge_attempts SET status = 'failed', updated_at = ?, "
                 "last_error = 'canonical open unmerged; governed retry is safe' "
                 "WHERE repository = ? AND pr_number = ? AND head_sha = ? "
-                "AND status = 'verification_required'",
-                (updated_at.isoformat(), repository, pr_number, head_sha),
+                "AND status = 'verification_required' AND owner = ? AND claimed_at = ?",
+                (
+                    updated_at.isoformat(), lease.repository, lease.pr_number,
+                    lease.head_sha, lease.owner, lease.claimed_at.isoformat(),
+                ),
             )
 
     def authorize_merge_write(
