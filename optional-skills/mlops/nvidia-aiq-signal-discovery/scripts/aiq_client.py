@@ -9,7 +9,20 @@ import sys
 from pathlib import Path
 from urllib.parse import quote, urlparse
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+class _SafeRedirectHandler(HTTPRedirectHandler):
+    """Allow redirects only when their target meets the same transport policy."""
+
+    def redirect_request(self, request, file, code, message, headers, new_url):
+        parsed = urlparse(new_url)
+        if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            raise URLError("AI-Q redirect target must use HTTPS except for loopback development")
+        return super().redirect_request(request, file, code, message, headers, new_url)
+
+
+_OPENER = build_opener(_SafeRedirectHandler)
 
 
 def request_json(base_url: str, path: str, method: str = "GET", payload: object | None = None) -> object:
@@ -22,7 +35,7 @@ def request_json(base_url: str, path: str, method: str = "GET", payload: object 
     if body is not None:
         request.add_header("Content-Type", "application/json")
     try:
-        with urlopen(request, timeout=30) as response:
+        with _OPENER.open(request, timeout=30) as response:
             return json.load(response)
     except (HTTPError, URLError, TimeoutError) as exc:
         raise SystemExit(f"AI-Q request failed: {exc}") from exc
@@ -50,7 +63,12 @@ def main() -> int:
     if not args.server:
         parser.error("--server or AIQ_SERVER_URL is required")
     if args.command == "submit":
-        result = request_json(args.server, args.path, "POST", json.loads(args.request.read_text()))
+        result = request_json(
+            args.server,
+            args.path,
+            "POST",
+            json.loads(args.request.read_text(encoding="utf-8")),
+        )
         print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "status":
         result = request_json(args.server, args.path_template.format(job_id=quote(args.job_id, safe="")))

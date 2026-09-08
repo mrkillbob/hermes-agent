@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -95,7 +96,7 @@ def test_skill_declares_no_send_and_native_bridge() -> None:
     assert "AIQ_SERVER_URL" in content
 
 
-def test_aiq_client_exercises_submit_status_and_download(tmp_path) -> None:
+def test_aiq_client_exercises_submit_status_and_download(tmp_path, monkeypatch) -> None:
     from importlib.util import module_from_spec, spec_from_file_location
 
     spec = spec_from_file_location("aiq_client", REPO / "optional-skills/mlops/nvidia-aiq-signal-discovery/scripts/aiq_client.py")
@@ -130,9 +131,23 @@ def test_aiq_client_exercises_submit_status_and_download(tmp_path) -> None:
     thread.start()
     try:
         base = f"http://127.0.0.1:{server.server_port}"
-        assert client.request_json(base, "/v1/jobs", "POST", {"symbol": "NVDA"})["job_id"]
-        assert client.request_json(base, "/v1/jobs/job%2Fopaque%3F1")["status"] == "completed"
-        assert client.request_json(base, "/v1/jobs/job%2Fopaque%3F1/result")["result"] is True
+        request_file = tmp_path / "request.json"
+        request_file.write_text('{"signal": "日本語"}\n', encoding="utf-8")
+        output_file = tmp_path / "result.json"
+
+        monkeypatch.setattr(sys, "argv", ["aiq_client.py", "--server", base, "submit", str(request_file)])
+        assert client.main() == 0
+        monkeypatch.setattr(sys, "argv", ["aiq_client.py", "--server", base, "status", "job/opaque?1"])
+        assert client.main() == 0
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["aiq_client.py", "--server", base, "download", "job/opaque?1", str(output_file)],
+        )
+        assert client.main() == 0
+        assert json.loads(output_file.read_text(encoding="utf-8"))["result"] is True
+        assert seen[0][2] == {"signal": "日本語"}
         assert seen[1][1] == "/v1/jobs/job%2Fopaque%3F1"
+        assert seen[2][1] == "/v1/jobs/job%2Fopaque%3F1/result"
     finally:
         server.shutdown()
