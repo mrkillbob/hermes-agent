@@ -57,7 +57,8 @@ it('pause holds physical positions while preserving distinct arrival slots for r
   navigation.setReducedMotion(false)
   navigation.move(a, 'review')
   navigation.move(b, 'review')
-  for (let frame = 0; frame < 30; frame++) navigation.tick(250)
+
+  for (let frame = 0; frame < 30; frame++) {navigation.tick(250)}
   expect(a.position).toEqual(aTarget)
   expect(b.position).toEqual(bTarget)
 })

@@ -26,6 +26,7 @@ export function collectRuntimePublicAssets(publicDir: string): Map<string, Buffe
     if (entry.name === 'lunar-city') {
       continue
     }
+
     const path = join(publicDir, entry.name)
 
     if (entry.isDirectory()) {
@@ -42,6 +43,7 @@ export function collectRuntimePublicAssets(publicDir: string): Map<string, Buffe
     if (!existsSync(manifestPath)) {
       continue
     }
+
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
 
     const uris = new Set<string>([
@@ -60,11 +62,13 @@ export function collectRuntimePublicAssets(publicDir: string): Map<string, Buffe
       if (typeof uri !== 'string' || !/^(models|textures)\/[a-zA-Z0-9_./-]+\.(glb|png|jpg|jpeg|webp|ktx2)$/.test(uri)) {
         throw new Error(`Invalid runtime asset URI: ${uri}`)
       }
+
       const path = resolve(root, uri)
 
       if (!path.startsWith(resolve(root) + sep)) {
         throw new Error(`Asset escapes runtime pack: ${uri}`)
       }
+
       add(path)
     }
 

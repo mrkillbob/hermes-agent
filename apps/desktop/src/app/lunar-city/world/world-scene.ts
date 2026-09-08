@@ -50,8 +50,8 @@ import {
 } from './entities'
 import { createEntityPositionState } from './entity-position-state'
 import { createInteriorNavigation } from './interior-navigation'
-import { observedLeaderLife } from './leader-observed-life'
 import { createLeaderLife, type LeaderLifeMode, type LeaderLifePresentation, measuredLeaderEnvelope, safeLeaderStrollPoints } from './leader-life'
+import { observedLeaderLife } from './leader-observed-life'
 import { createNavigationController, type NavigationQuery } from './navigation'
 import { createOcclusionController, type OcclusionCandidate, type OcclusionSelection } from './occlusion'
 import { createBabylonPerfAdapter } from './perf-adapter'
@@ -1230,18 +1230,23 @@ export async function createWorldScene(
   const leaderOverrides = new Set<LeaderId>()
   let observedModels = new Set<LeaderId>()
   let leaderSnapshot: LunarCitySnapshot | undefined
+
   const updateObservedLeaderLife = (snapshot: LunarCitySnapshot): void => {
     leaderSnapshot = snapshot
     const projections = observedLeaderLife(snapshot, manifest.characterAssets.leaders.map(leader => leader.id))
     const current = new Set(projections.map(projection => projection.id))
+
     for (const id of observedModels) {
       if (!current.has(id) && !leaderOverrides.has(id)) {leaderLife.setMode(id, 'unavailable')}
     }
+
     for (const projection of projections) {
       if (!leaderOverrides.has(projection.id)) {leaderLife.setMode(projection.id, projection.mode)}
     }
+
     observedModels = current
   }
+
   const leaderQueries = new Map<string, NavigationQuery>()
   const leaderBindings: { asset: ReviewLeaderAsset; root: BabylonNodeLike; anchor: Vec3; canWalk: boolean; envelope?: {radius: number; height: number} }[] = []
 
@@ -2111,17 +2116,23 @@ export async function createWorldScene(
           characterAnimations.set(`worker:${id}`, state)
         }
       },
-      getLeaderLife(id) { const life = leaderLife.get(id); return life ? { ...life, manualOverride: leaderOverrides.has(id) } : undefined },
+      getLeaderLife(id) { const life = leaderLife.get(id);
+
+ return life ? { ...life, manualOverride: leaderOverrides.has(id) } : undefined },
       setLeaderLifeMode(id, mode) {
         if (disposed) {return}
+
         if (mode === 'automatic') {
           leaderOverrides.delete(id)
+
           if (leaderSnapshot) {updateObservedLeaderLife(leaderSnapshot)}
+
           if (!observedModels.has(id)) {leaderLife.setMode(id, 'idle')}
         } else {
           leaderOverrides.add(id)
           leaderLife.setMode(id, mode)
         }
+
         schedulerController.requestRender()
       },
       setLeaderAnimation(leaderId, state) {
