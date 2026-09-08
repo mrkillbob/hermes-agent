@@ -320,6 +320,20 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
     provider.start(stop_event, **start_kwargs)
 
 
+def _desktop_cron_ticker_enabled() -> bool:
+    """Return whether this Desktop backend owns the machine-wide cron tick.
+
+    Electron's primary backend is the single scheduler authority. Named-profile
+    pool backends still carry ``HERMES_DESKTOP=1`` because they are app-owned
+    GUI surfaces, but ``HERMES_DESKTOP_POOL=1`` keeps each of those helpers from
+    starting another multiplex ticker across every profile.
+    """
+    return (
+        os.getenv("HERMES_DESKTOP") == "1"
+        and os.getenv("HERMES_DESKTOP_POOL") != "1"
+    )
+
+
 def _warm_gateway_module() -> None:
     """Pre-import heavy modules so the event loop is not stalled on first use.
 
@@ -464,7 +478,7 @@ async def _lifespan(app: "FastAPI"):
     # dashboard` is unaffected — it relies on its own gateway.
     cron_stop: "threading.Event | None" = None
     cron_thread: "threading.Thread | None" = None
-    if os.getenv("HERMES_DESKTOP") == "1":
+    if _desktop_cron_ticker_enabled():
         # Before forking a fresh gateway, reap any orphan left by a previous
         # serve session. Graceful shutdown reaps the managed child, but an
         # abnormal exit (crash, SIGKILL, power loss, forced update) reparents
@@ -820,6 +834,8 @@ def should_require_auth(host: str, allow_public: bool = False) -> bool:
 def should_require_dashboard_auth(
     host: str,
     trusted_public_hosts: Optional[frozenset[str]] = None,
+    *,
+    desktop_local: bool = False,
 ) -> bool:
     """Return whether the dashboard auth gate must be active.
 
@@ -828,6 +844,13 @@ def should_require_dashboard_auth(
     reaches a backend bound to loopback. Callers may pass the already-resolved
     host set so startup and request validation use the same snapshot.
     """
+    # Desktop's owned backend is a headless, ephemeral loopback child. It is
+    # not the browser dashboard named by dashboard.public_url, even though it
+    # shares the same config file. Applying that public URL's gate here makes
+    # the child reject Desktop's per-spawn token and strands the app at boot.
+    # A non-loopback bind remains gated even if a caller mislabels it.
+    if desktop_local and host in _LOOPBACK_HOST_VALUES:
+        return False
     if trusted_public_hosts is None:
         trusted_public_hosts = _dashboard_public_hosts()
     return should_require_auth(host) or any(
@@ -870,6 +893,16 @@ def _desktop_loopback_auth_exempt(
         os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN")
         or ssh_session_token
         or ssh_owner_nonce
+    )
+
+
+def is_desktop_local_backend(host: str, port: int, headless: bool) -> bool:
+    """True only for Desktop's owned ephemeral loopback ``serve`` child."""
+    return (
+        headless
+        and os.environ.get("HERMES_DESKTOP") == "1"
+        and host in _LOOPBACK_HOST_VALUES
+        and port == 0
     )
 
 
@@ -19622,7 +19655,14 @@ def start_server(
     # request middleware never reloads config. Any non-loopback public hostname
     # engages the auth gate even when the backend itself remains on loopback;
     # otherwise the SPA's local session token would become remotely reachable.
-    app.state.trusted_public_hosts = _dashboard_public_hosts()
+    desktop_local = is_desktop_local_backend(host, port, headless)
+    # The app-owned ephemeral backend must not inherit the browser dashboard's
+    # public Host allowlist. Besides keeping auth decisions separate, this
+    # makes a reverse proxy using dashboard.public_url fail the Host guard if
+    # it somehow discovers the one-run ephemeral port.
+    app.state.trusted_public_hosts = (
+        frozenset() if desktop_local else _dashboard_public_hosts()
+    )
     # Stash the auth-gate flag on app.state so middleware / SPA-token injection /
     # WS-auth paths can branch on it consistently. It also decides whether to
     # refuse startup, log the gate-on banner, and enable uvicorn proxy_headers.
@@ -19640,7 +19680,7 @@ def start_server(
         )
     else:
         app.state.auth_required = should_require_dashboard_auth(
-            host, app.state.trusted_public_hosts
+            host, app.state.trusted_public_hosts, desktop_local=desktop_local
         )
 
     # ``--insecure`` no longer disables the auth gate (June 2026 hardening:

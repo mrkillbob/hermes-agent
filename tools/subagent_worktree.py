@@ -44,6 +44,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
 logger = logging.getLogger(__name__)
 
 _GIT_TIMEOUT = 30
@@ -162,6 +164,12 @@ def create_subagent_worktree(
             result.stderr.strip(),
         )
         return None
+
+    # Git worktrees intentionally omit ignored directories.  Provision the
+    # repo-selected environment before the child is released to the agent so
+    # ``./.venv/bin/python`` resolves to this repository's runtime rather than
+    # the parent's or the host's ambient interpreter.
+    bootstrap_worktree_environments(Path(repo_root), wt_path, environment_names=(".venv",))
 
     logger.info("subagent worktree created: %s (branch %s)", wt_path, branch)
     return {

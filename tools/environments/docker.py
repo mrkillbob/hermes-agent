@@ -44,6 +44,7 @@ _DOCKER_SEARCH_PATHS = [
 _docker_executable: Optional[str] = None  # resolved once, cached
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EGRESS_LABEL_KEY = "hermes-egress"
+_HOST_DATA_LABEL_KEY = "hermes-host-data"
 
 
 def _normalize_forward_env_names(forward_env: list[str] | None) -> list[str]:
@@ -918,6 +919,7 @@ class DockerEnvironment(BaseEnvironment):
         extra_args: list = None,
         persist_across_processes: bool = True,
         shm_size: str = _DEFAULT_SHM_SIZE,
+        isolate_host_data: bool = False,
         shared_container_key: str = "",
     ):
         if cwd == "~":
@@ -931,6 +933,7 @@ class DockerEnvironment(BaseEnvironment):
         self._session_scoped = False
         self._task_id = task_id
         self._forward_env = _normalize_forward_env_names(forward_env)
+        self._isolate_host_data = bool(isolate_host_data)
         self._env = _normalize_env_dict(env)
         self._init_unset_passthrough_names: tuple[str, ...] = ()
         self._container_id: Optional[str] = None
@@ -1053,7 +1056,8 @@ class DockerEnvironment(BaseEnvironment):
                 get_cache_directory_mounts,
             )
 
-            for mount_entry in get_credential_file_mounts():
+            credential_mounts = [] if self._isolate_host_data else get_credential_file_mounts()
+            for mount_entry in credential_mounts:
                 src = Path(mount_entry["host_path"])
                 if src.is_dir():
                     # Docker-in-Docker: Docker auto-created the source path as
@@ -1082,7 +1086,8 @@ class DockerEnvironment(BaseEnvironment):
 
             # Mount skill directories (local + external) so skill
             # scripts/templates are available inside the container.
-            for skills_mount in get_skills_directory_mount():
+            skills_mounts = [] if self._isolate_host_data else get_skills_directory_mount()
+            for skills_mount in skills_mounts:
                 src = Path(skills_mount["host_path"])
                 if not src.is_dir():
                     logger.warning(
@@ -1104,7 +1109,8 @@ class DockerEnvironment(BaseEnvironment):
             # screenshots) so the agent can access uploaded files and other
             # cached media from inside the container.  Read-only — the
             # container reads these but the host gateway manages writes.
-            for cache_mount in get_cache_directory_mounts():
+            cache_mounts = [] if self._isolate_host_data else get_cache_directory_mounts()
+            for cache_mount in cache_mounts:
                 src = Path(cache_mount["host_path"])
                 if not src.is_dir():
                     logger.warning(
@@ -1128,9 +1134,12 @@ class DockerEnvironment(BaseEnvironment):
         # mount the CA cert into the sandbox and set HTTPS_PROXY + CA-bundle
         # env vars so outbound traffic routes through the host-side proxy.
         # The sandbox receives PROXY tokens instead of real API keys.
-        egress_volume_args, egress_env_overrides, egress_host_args = (
-            _egress_proxy_args_for_docker()
-        )
+        if self._isolate_host_data:
+            egress_volume_args, egress_env_overrides, egress_host_args = ([], {}, [])
+        else:
+            egress_volume_args, egress_env_overrides, egress_host_args = (
+                _egress_proxy_args_for_docker()
+            )
         egress_label = _egress_reuse_fingerprint(
             egress_volume_args, egress_env_overrides, egress_host_args,
         )
@@ -1413,11 +1422,13 @@ class DockerEnvironment(BaseEnvironment):
         # container-start time and never changes for the container's lifetime.
         profile_name = _container_identity(shared_container_key)
         task_label = _sanitize_label_value(task_id)
+        host_data_label = "isolated" if self._isolate_host_data else "ambient"
         label_args = [
             "--label", "hermes-agent=1",
             "--label", f"hermes-task-id={task_label}",
             "--label", f"hermes-profile={profile_name}",
             "--label", f"{_EGRESS_LABEL_KEY}={egress_label}",
+            "--label", f"{_HOST_DATA_LABEL_KEY}={host_data_label}",
         ]
         # Save args for container recreation on "No such container" recovery.
         self._image = image
@@ -1430,6 +1441,7 @@ class DockerEnvironment(BaseEnvironment):
             "hermes-task-id": task_label,
             "hermes-profile": profile_name,
             _EGRESS_LABEL_KEY: egress_label,
+            _HOST_DATA_LABEL_KEY: host_data_label,
         }
 
         # Cross-process container reuse (issue #20561 — docs claim "ONE long-lived
@@ -1446,7 +1458,7 @@ class DockerEnvironment(BaseEnvironment):
         reused = False
         if persist_across_processes:
             existing = self._find_reusable_container(
-                task_label, profile_name, egress_label,
+                task_label, profile_name, egress_label, host_data_label,
             )
             if existing is not None:
                 container_id, state = existing
@@ -1741,7 +1753,10 @@ class DockerEnvironment(BaseEnvironment):
         task_label = self._labels.get("hermes-task-id", "")
         profile_label = self._labels.get("hermes-profile", "")
         existing = self._find_reusable_container(
-            task_label, profile_label, self._labels.get(_EGRESS_LABEL_KEY, "off"),
+            task_label,
+            profile_label,
+            self._labels.get(_EGRESS_LABEL_KEY, "off"),
+            self._labels.get(_HOST_DATA_LABEL_KEY, "ambient"),
         )
         if existing is not None:
             cid, state = existing
@@ -1907,6 +1922,7 @@ class DockerEnvironment(BaseEnvironment):
         task_label: str,
         profile_label: str,
         egress_label: str,
+        host_data_label: str,
     ) -> Optional[tuple[str, str]]:
         """Look for an existing container labeled for this (task, profile).
 
@@ -1925,6 +1941,7 @@ class DockerEnvironment(BaseEnvironment):
                 "--filter", "label=hermes-agent=1",
                 "--filter", f"label=hermes-task-id={task_label}",
                 "--filter", f"label=hermes-profile={profile_label}",
+                "--filter", f"label={_HOST_DATA_LABEL_KEY}={host_data_label}",
             ]
             if egress_label != "off":
                 filters.extend(["--filter", f"label={_EGRESS_LABEL_KEY}={egress_label}"])

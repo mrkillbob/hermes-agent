@@ -126,6 +126,11 @@ def build_gateway_parser(
         action="store_true",
         help="Stop ALL gateway processes across all profiles",
     )
+    gateway_stop.add_argument(
+        "--drain",
+        action="store_true",
+        help="Stop new work and wait for active gateway/Kanban work to finish",
+    )
 
     # gateway restart
     gateway_restart = gateway_subparsers.add_parser(

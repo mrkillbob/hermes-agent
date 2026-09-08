@@ -21,8 +21,9 @@ import time
 import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from hermes_constants import (
     _get_platform_default_hermes_home,
@@ -2319,6 +2320,28 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
         return None
 
 
+def _iter_full_zip_backup_files(
+    out_path: Path, hermes_root: Path
+) -> Iterator[tuple[Path, Path]]:
+    """Yield eligible full-backup files without retaining the whole tree."""
+    for dirpath, dirnames, filenames in os.walk(hermes_root, followlinks=False):
+        dp = Path(dirpath)
+        # Prune excluded directories in-place so os.walk doesn't descend.
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+
+        for fname in filenames:
+            fpath = dp / fname
+            try:
+                rel = fpath.relative_to(hermes_root)
+            except ValueError:
+                continue
+
+            if _should_skip_backup_file(fpath, rel, out_path):
+                continue
+
+            yield fpath, rel
+
+
 def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional[Path]:
     """Write a full zip snapshot of ``hermes_root`` to ``out_path``.
 
@@ -2328,43 +2351,23 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
     """
     scan_started = time.monotonic()
     logger.info("automatic backup phase=scan status=started")
-    files_to_add: list[tuple[Path, Path]] = []
+    files_seen = 0
+    files = _iter_full_zip_backup_files(out_path, hermes_root)
     try:
-        for dirpath, dirnames, filenames in os.walk(hermes_root, followlinks=False):
-            dp = Path(dirpath)
-            # Prune excluded directories in-place so os.walk doesn't descend
-            dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
-
-            for fname in filenames:
-                fpath = dp / fname
-                try:
-                    rel = fpath.relative_to(hermes_root)
-                except ValueError:
-                    continue
-
-                if _should_skip_backup_file(fpath, rel, out_path):
-                    continue
-
-                files_to_add.append((fpath, rel))
+        first_file = next(files)
     except OSError as exc:
         logger.warning("Full-zip backup: walk failed: %s", exc)
         return None
-
-    if not files_to_add:
+    except StopIteration:
         return None
-
-    logger.info(
-        "automatic backup phase=scan status=complete duration_ms=%.1f files=%d",
-        (time.monotonic() - scan_started) * 1000,
-        len(files_to_add),
-    )
 
     archive_started = time.monotonic()
     try:
         with _atomic_output_path(out_path) as archive_path, zipfile.ZipFile(
             archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6
         ) as zf:
-            for index, (abs_path, rel_path) in enumerate(files_to_add, 1):
+            for index, (abs_path, rel_path) in enumerate(chain((first_file,), files), 1):
+                files_seen = index
                 try:
                     if abs_path.suffix == ".db":
                         # Stage the snapshot alongside the output zip so that the
@@ -2392,10 +2395,14 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
                     continue
                 if index % 500 == 0:
                     logger.info(
-                        "automatic backup phase=archive status=progress completed=%d total=%d",
+                        "automatic backup phase=archive status=progress completed=%d",
                         index,
-                        len(files_to_add),
                     )
+            logger.info(
+                "automatic backup phase=scan status=complete duration_ms=%.1f files=%d",
+                (time.monotonic() - scan_started) * 1000,
+                files_seen,
+            )
     except (OSError, _SQLiteSnapshotError) as exc:
         logger.warning("Full-zip backup: zip write failed: %s", exc)
         # ``_atomic_output_path`` already removed the hidden partial.  Do not
@@ -2406,7 +2413,7 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
     logger.info(
         "automatic backup phase=archive status=complete duration_ms=%.1f files=%d bytes=%d",
         (time.monotonic() - archive_started) * 1000,
-        len(files_to_add),
+        files_seen,
         out_path.stat().st_size,
     )
 

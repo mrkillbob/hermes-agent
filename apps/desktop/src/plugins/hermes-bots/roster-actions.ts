@@ -20,6 +20,7 @@ import { closeGroupChatMainTab } from './group-panes'
 import { displayName } from './labels'
 import { botRosterMeta, botWorkspaceOwnerKey, setBotsWorkspaceOwner } from './routing'
 import { botCanonicalSessionId } from './row-helpers'
+import { reconcileBotProfileSessions } from './session-sweep'
 import { bumpBotOpenGeneration, getBotOpenGeneration, getPluginCtx } from './shared'
 import type { RosterRow } from './types'
 
@@ -217,6 +218,9 @@ export async function openRosterBot(bot: RosterRow, { canonical = false } = {}):
     const focused = focusExistingBotTab(bot)
 
     if (focused) {
+      // Legacy visibility repair is profile-scoped and demand-driven: opening
+      // this bot may inspect this bot, but an idle Desktop never scans peers.
+      void reconcileBotProfileSessions(bot)
       // Open tabs win: no source activation, no registry consult, no open. The
       // claim carries only the fronted tab so the focus edge it fires keeps it
       // (releaseStaleOpenBotChat) and no registry id is recorded, because none
@@ -244,6 +248,10 @@ export async function openRosterBot(bot: RosterRow, { canonical = false } = {}):
   if (generation !== getBotOpenGeneration()) {
     return false
   }
+
+  // The source is now reachable. Reconcile this one selected profile in the
+  // background; do not delay navigation on best-effort legacy cleanup.
+  void reconcileBotProfileSessions(bot)
 
   try {
     const opened = await openBotCanonicalChat(bot, () => generation === getBotOpenGeneration())

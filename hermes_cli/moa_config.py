@@ -17,8 +17,8 @@ DEFAULT_MOA_REFERENCE_MODELS: list[dict[str, str]] = [
 ]
 
 DEFAULT_MOA_AGGREGATOR: dict[str, str] = {
-    "provider": "openrouter",
-    "model": "anthropic/claude-opus-4.8",
+    "provider": "openai-codex",
+    "model": "gpt-5.5",
 }
 
 DEFAULT_MOA_REFERENCE_TIMEOUT: float | None = None
