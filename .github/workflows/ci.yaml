@@ -217,11 +217,14 @@ jobs:
 
   osv-scanner:
     name: OSV scan
+    # PR scans use the artifact/review-status path below. Direct main pushes
+    # are scanned by osv-scanner.yml's push trigger so they can publish SARIF.
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/osv-scanner.yml
     with:
-      # The fork's existing Code Scanning baseline cannot correlate the upgraded
-      # reusable-workflow identity on CI PR runs; main pushes retain SARIF.
-      upload-sarif: ${{ github.event_name != 'pull_request' }}
+      # A literal false avoids re-evaluation across nested reusable-workflow
+      # boundaries, which previously recreated the Advanced Security warning.
+      upload-sarif: false
 
   # ─────────────────────────────────────────────────────────────────────
   # Gate: runs after everything. ``if: always()`` ensures it reports a
