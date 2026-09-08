@@ -1062,8 +1062,6 @@ class GitHubClient:
             if error.code == "merge_queue_required":
                 self._runner.run([*argv[:-2], "--auto", "--match-head-commit", head_sha])
                 return
-            if error.code == "github_error":
-                raise GitHubClientError(str(error), code="merge_rejected") from error
             raise
 
     def close_pull_request_with_comment(
