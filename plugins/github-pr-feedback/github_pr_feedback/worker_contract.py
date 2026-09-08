@@ -25,7 +25,7 @@ def worker_contract_enabled(root: Path, assignee: str) -> bool:
         return False
     home = root if assignee == "default" else root / "profiles" / assignee
     try:
-        config = yaml.safe_load((home / "config.yaml").read_text())
+        config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError):
         return False
     config = apply_managed_overlay(config) if isinstance(config, dict) else {}
