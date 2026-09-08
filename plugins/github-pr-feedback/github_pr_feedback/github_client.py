@@ -348,6 +348,17 @@ def _github_failure_code(stderr: str) -> str:
         return "permission_denied"
     if "merge queue" in normalized or "requires a queue" in normalized:
         return "merge_queue_required"
+    if any(
+        marker in normalized
+        for marker in (
+            "not mergeable",
+            "cannot be merged",
+            "base branch policy",
+            "branch protection",
+            "required status checks",
+        )
+    ):
+        return "merge_rejected"
     if re.search(r"\b(?:405|409)\b", normalized):
         return "merge_rejected"
     if "404" in normalized or "not found" in normalized:

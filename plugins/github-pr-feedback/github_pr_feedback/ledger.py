@@ -1776,9 +1776,9 @@ class FeedbackLedger:
             return None
 
     def latest_ci_receipt_for_head(
-        self, repository: str, pr_number: int, head_sha: str
+        self, repository: str, pr_number: int, head_sha: str, *, base_sha: str | None = None
     ) -> object | None:
-        """Return the newest typed audit receipt for an exact PR head."""
+        """Return the newest typed audit receipt for an exact PR dispatch."""
 
         from .ci_runner import CIAuditReceipt
 
@@ -1790,9 +1790,12 @@ class FeedbackLedger:
         if row is None:
             return None
         try:
-            return CIAuditReceipt.from_payload(json.loads(row[0]))
+            receipt = CIAuditReceipt.from_payload(json.loads(row[0]))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
+        if base_sha is not None and receipt.identity.base_sha != base_sha.casefold():
+            return None
+        return receipt
 
     def ci_receipt_by_id(
         self, repository: str, pr_number: int, receipt_id: str

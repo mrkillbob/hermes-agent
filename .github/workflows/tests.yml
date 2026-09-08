@@ -13,14 +13,11 @@ concurrency:
 
 jobs:
   test:
-    name: Run tests
-    # One 96-core runner for the whole suite. There is no slicing. Slicing
-    # existed to spread the suite over 4-core runners. It cost a matrix job, a
-    # duration cache, a per-slice artifact and a merge job to do it.
-    #
-    # 96 cores clear the floor that the slowest single test file sets (about
-    # 82s). A second slice divides work that is already at that floor, and
-    # adds a second setup.
+    name: Run tests (${{ matrix.slice }})
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: ["1/4", "2/4", "3/4", "4/4"]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -93,12 +90,12 @@ jobs:
         # with bounded parallelism. No xdist, no shared workers, no
         # module-level state leakage between files.
         #
-        # No --files: the runner discovers the suite itself. The discovered
-        # set is identical to the list the removed matrix job used to pass in.
+        # Each hosted runner executes one balanced duration-based slice.
         run: |
           source .venv/bin/activate
           scripts/run_tests.sh
         env:
+          HERMES_TEST_SLICE: ${{ matrix.slice }}
           # run_tests_parallel.py selects the worker count from the runner.
           #
           # Measured on this runner (96-core EPYC 7763, 377GB). Whole suite,

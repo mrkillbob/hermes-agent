@@ -317,12 +317,16 @@ class MergeController:
             reconciled = self._reconcile_verified_merge(pending, snapshot)
             if reconciled is not None:
                 return reconciled
-            if (
-                snapshot.pull_request.repository == self._policy.repository
-                and snapshot.pull_request.state == "OPEN"
-                and not snapshot.pull_request.merged
-                and snapshot.pull_request.head_sha != pending.head_sha
-            ):
+            pull = snapshot.pull_request
+            releaseable_unmerged = (
+                pull.repository == self._policy.repository
+                and not pull.merged
+                and (
+                    (pull.state == "OPEN" and pull.head_sha != pending.head_sha)
+                    or pull.state == "CLOSED"
+                )
+            )
+            if releaseable_unmerged:
                 self._ledger.release_open_unmerged_merge_lease(
                     pending,
                     updated_at=self._now(),
