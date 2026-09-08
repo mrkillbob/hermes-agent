@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
 export const OMNIVERSE_RECEIPT_SCHEMA = 'nvidia_omniverse_asset_receipt_v1'
+const DEFAULT_MANIFEST_PATH = fileURLToPath(new URL('../../public/lunar-city/v2/world-manifest.v2.json', import.meta.url))
 
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -14,6 +15,16 @@ function nonEmpty(value) {
 
 function finiteNonNegative(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function isSha256(value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value)
+}
+
+function isTimestamp(value) {
+  return typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    !Number.isNaN(Date.parse(value))
 }
 
 /**
@@ -47,7 +58,7 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
   } else if (receipt?.asset_version !== manifest.assetVersion) {
     errors.push('asset_version does not match world manifest')
   }
-  if (!nonEmpty(manifest?.source?.sha256)) {
+  if (!isSha256(manifest?.source?.sha256)) {
     errors.push('world manifest source digest is required')
   } else if (receipt?.manifest_source_sha256 !== manifest.source.sha256) {
     errors.push('manifest source digest does not match world manifest')
@@ -57,7 +68,7 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
   if (!isRecord(stage) || !nonEmpty(stage.usd_path) || !nonEmpty(stage.identifier)) {
     errors.push('USD stage path and identifier are required')
   }
-  if (!nonEmpty(receipt?.exported_at)) errors.push('exported_at is required')
+  if (!isTimestamp(receipt?.exported_at)) errors.push('exported_at must be an RFC 3339 timestamp')
   if (!nonEmpty(receipt?.status) || !['validated', 'accepted', 'best_effort'].includes(receipt.status)) {
     errors.push('receipt status is invalid')
   }
@@ -128,18 +139,35 @@ export function validateOmniverseExport(receipt, manifest, { mode = 'preview' } 
 }
 function option(args, name, fallback = undefined) {
   const index = args.indexOf(name)
-  return index >= 0 ? args[index + 1] : fallback
+  if (index < 0) return fallback
+  const value = args[index + 1]
+  if (value === undefined || value.startsWith('--')) throw new Error(`${name} requires a value`)
+  return value
 }
 
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2)
-  const receiptPath = option(args, '--receipt')
-  const manifestPath = option(args, '--manifest', 'public/lunar-city/v2/world-manifest.v2.json')
-  const mode = option(args, '--mode', 'preview')
-  if (!receiptPath || mode === undefined) {
-    console.error('Usage: node validate-omniverse-export.mjs --receipt <receipt.json> [--manifest <manifest.json>] [--mode preview|production]')
+  const known = new Set(['--receipt', '--manifest', '--mode'])
+  const unknown = args.filter((arg) => arg.startsWith('--') && !known.has(arg))
+  if (unknown.length > 0) {
+    console.error(`Unknown option: ${unknown[0]}`)
     process.exitCode = 2
   } else {
+    let receiptPath
+    let manifestPath
+    let mode
+    try {
+      receiptPath = option(args, '--receipt')
+      manifestPath = option(args, '--manifest', DEFAULT_MANIFEST_PATH)
+      mode = option(args, '--mode', 'preview')
+    } catch (error) {
+      console.error(error.message)
+      process.exitCode = 2
+    }
+    if (!receiptPath || mode === undefined) {
+    console.error('Usage: node validate-omniverse-export.mjs --receipt <receipt.json> [--manifest <manifest.json>] [--mode preview|production]')
+    process.exitCode = 2
+    } else if (process.exitCode !== 2) {
     const [receipt, manifest] = await Promise.all([
       readFile(receiptPath, 'utf8').then(JSON.parse),
       readFile(manifestPath, 'utf8').then(JSON.parse)
@@ -147,5 +175,6 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
     const result = validateOmniverseExport(receipt, manifest, { mode })
     console.log(JSON.stringify(result, null, 2))
     if (!result.ok) process.exitCode = 1
+    }
   }
 }

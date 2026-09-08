@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { test } from 'node:test'
+import { test } from 'vitest'
 
 import { OMNIVERSE_RECEIPT_SCHEMA, validateOmniverseExport } from './validate-omniverse-export.mjs'
 
