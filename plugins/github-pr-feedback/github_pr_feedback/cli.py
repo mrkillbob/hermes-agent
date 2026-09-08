@@ -787,7 +787,8 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     if action == "post-comment":
         return _post_comment(ctx, args)
     if action == "push-head":
-        return _push_head(ctx, args)
+        from .cli_push_head import push_head
+        return push_head(ctx, args)
     if action == "retry":
         return _retry(ctx, args)
     if action == "dispatch-repair":

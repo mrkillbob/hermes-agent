@@ -131,17 +131,9 @@ class GitStackRunner:
                 for index in range(len(lfs_attribute_parts) - 1)
             )
             if has_lfs_files:
-                lfs_storage = Path(self._run("rev-parse", "--git-path", "lfs").stdout.strip())
-                if not lfs_storage.is_absolute():
-                    lfs_storage = (self.repository / lfs_storage).resolve()
-                self._run_at(
-                    isolated,
-                    "-c",
-                    f"lfs.storage={lfs_storage}",
-                    "lfs",
-                    "push",
-                    remote,
-                    "refs/heads/hermes-push",
+                raise GitStackError(
+                    "verified repair pushes with Git LFS are unavailable because "
+                    "LFS upload cannot be covered by the ref lease"
                 )
             return self._run_at(
                 isolated,

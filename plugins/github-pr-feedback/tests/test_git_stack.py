@@ -154,7 +154,7 @@ def test_push_verified_head_lease_rejects_a_remote_advance(tmp_path):
     assert "stale info" in result.stderr
 
 
-def test_push_verified_head_uploads_lfs_objects_before_the_git_ref(
+def test_push_verified_head_rejects_unleased_lfs_upload(
     monkeypatch, tmp_path
 ):
     calls = []
@@ -178,12 +178,6 @@ def test_push_verified_head_uploads_lfs_objects_before_the_git_ref(
         return subprocess.CompletedProcess(argv, 0, stdout, "")
 
     monkeypatch.setattr("github_pr_feedback.git_stack.subprocess.run", fake_run)
-    GitStackRunner(tmp_path).push_verified_head("acme/widgets", "codex/child", "a" * 40)
-    isolated = calls[4][2]
-    assert calls[4] == ("git", "-C", isolated, "init", "--bare", "--quiet")
-    assert calls[9] == (
-        "git", "-C", isolated,
-        "-c", f"lfs.storage={tmp_path / 'lfs'}", "lfs", "push",
-        "https://github.com/acme/widgets.git", "refs/heads/hermes-push",
-    )
-    assert calls[10][3] == "push"
+    with pytest.raises(GitStackError, match="Git LFS"):
+        GitStackRunner(tmp_path).push_verified_head("acme/widgets", "codex/child", "a" * 40)
+    assert not any(call[3] == "push" for call in calls)
