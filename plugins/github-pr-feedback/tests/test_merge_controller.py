@@ -708,7 +708,7 @@ def test_successful_merge_command_with_unconfirmed_readback_is_never_resent(
     assert first.decision.blockers == ("merge_verification_required",)
     assert second.decision.blockers == ("merge_verification_required",)
     assert github.merge_calls == [("acme/widgets", 17, HEAD_SHA, "squash")]
-    assert ledger.verification_required_merge_numbers("acme/widgets") == (17,)
+    assert ledger.verification_required_merge_numbers("acme/widgets") == ()
     ledger.close()
 
 
