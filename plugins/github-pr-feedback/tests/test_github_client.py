@@ -1209,7 +1209,7 @@ def test_github_client_uses_only_fixed_exact_head_merge_argv(method: str) -> Non
     merge_argv = (
         "gh", "pr", "merge", "17", "--repo", "acme/widgets",
         {"squash": "--squash", "rebase": "--rebase", "merge": "--merge"}[method],
-        "--auto", "--match-head-commit", "a" * 40,
+        "--match-head-commit", "a" * 40,
     )
     runner = RecordingRunner({merge_argv: {}})
 

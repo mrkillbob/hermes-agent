@@ -744,6 +744,24 @@ class FeedbackLedger:
             raise LedgerStateError("stored feedback receipt status is invalid")
         return str(status)
 
+    def quarantine_malformed_ci_receipt(self, receipt: FeedbackReceipt) -> bool:
+        """Make a completed CI dispatch retryable when its typed evidence is corrupt."""
+        if receipt.feedback_kind != "pr_local_ci":
+            raise ValueError("only local CI receipts can be quarantined")
+        with self._transaction():
+            result = self._connection.execute(
+                "UPDATE feedback_receipts SET status = 'failed', task_id = NULL, "
+                "action_status = 'pending', claim_owner = NULL, claimed_at = NULL, "
+                "last_error = ? WHERE repository = ? AND pr_number = ? "
+                "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ? "
+                "AND status = 'completed'",
+                (
+                    "malformed CI audit receipt quarantined for retry",
+                    *receipt.key,
+                ),
+            )
+            return result.rowcount == 1
+
     def exact_receipt_state(self, receipt: FeedbackReceipt) -> tuple[str, int] | None:
         """Return exact dispatch status and attempts for bounded retry selection."""
 

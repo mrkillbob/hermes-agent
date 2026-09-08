@@ -321,6 +321,7 @@ class MergeController:
                 snapshot.pull_request.repository == self._policy.repository
                 and snapshot.pull_request.state == "OPEN"
                 and not snapshot.pull_request.merged
+                and snapshot.pull_request.head_sha != pending.head_sha
             ):
                 self._ledger.release_open_unmerged_merge_lease(
                     pending,

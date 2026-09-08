@@ -346,6 +346,10 @@ def _github_failure_code(stderr: str) -> str:
         for marker in ("403", "permission denied", "resource not accessible", "forbidden")
     ):
         return "permission_denied"
+    if "merge queue" in normalized or "requires a queue" in normalized:
+        return "merge_queue_required"
+    if re.search(r"\b(?:405|409)\b", normalized):
+        return "merge_rejected"
     if "404" in normalized or "not found" in normalized:
         return "not_found"
     return "github_error"
@@ -1044,16 +1048,20 @@ class GitHubClient:
         head_sha = _validated_sha(head_sha)
         if method not in _MERGE_FLAGS:
             raise ValueError("method must be squash, rebase, or merge")
-        # `gh pr merge --auto` preserves required merge-queue enrollment.
-        # `--match-head-commit` keeps the write fenced to the reviewed head.
+        # Attempt an ordinary exact-head merge first. Only enroll auto-merge
+        # when GitHub explicitly says this base requires a merge queue; doing
+        # so unconditionally would create persistent asynchronous authority on
+        # repositories whose normal merge would have been governed here.
+        argv = [
+            "gh", "pr", "merge", str(number), "--repo", repository,
+            _MERGE_FLAGS[method], "--match-head-commit", head_sha,
+        ]
         try:
-            self._runner.run(
-                [
-                    "gh", "pr", "merge", str(number), "--repo", repository,
-                    _MERGE_FLAGS[method], "--auto", "--match-head-commit", head_sha,
-                ]
-            )
+            self._runner.run(argv)
         except GitHubClientError as error:
+            if error.code == "merge_queue_required":
+                self._runner.run([*argv[:-2], "--auto", "--match-head-commit", head_sha])
+                return
             if error.code == "github_error":
                 raise GitHubClientError(str(error), code="merge_rejected") from error
             raise

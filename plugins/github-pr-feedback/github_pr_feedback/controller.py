@@ -1208,6 +1208,21 @@ class ScanController:
                             head_sha=pull_request.head_sha,
                         )
                     )
+                    if local_ci_receipt_status == "completed":
+                        exact_ci = FeedbackReceipt(
+                            repository=pull_request.base_repository,
+                            pr_number=pull_request.number,
+                            feedback_kind="pr_local_ci",
+                            feedback_id=_local_ci_feedback_id(pull_request),
+                            head_sha=pull_request.head_sha,
+                        )
+                        if self._ledger.latest_ci_receipt_for_head(
+                            pull_request.base_repository,
+                            pull_request.number,
+                            pull_request.head_sha,
+                        ) is None:
+                            self._ledger.quarantine_malformed_ci_receipt(exact_ci)
+                            local_ci_receipt_status = "failed"
                 feedback_pending = False
                 base_refresh_pending = False
                 base_head_cache: dict[tuple[str, str, str], str | None] = {}
