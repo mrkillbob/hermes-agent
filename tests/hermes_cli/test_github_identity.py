@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
@@ -56,7 +57,7 @@ def test_git_environment_binds_https_to_bot_without_token_in_argv() -> None:
     )
     assert "bot-token" not in result[f"GIT_CONFIG_VALUE_{header_index}"]
     assert result["GIT_CONFIG_KEY_4"] == "core.hooksPath"
-    assert result["GIT_CONFIG_VALUE_4"] == "/dev/null"
+    assert result["GIT_CONFIG_VALUE_4"] == os.devnull
     assert result["GIT_TERMINAL_PROMPT"] == "0"
 
 
