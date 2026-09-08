@@ -1449,18 +1449,18 @@ def _run_merge_scan(
         ],
         "blocked": blocked,
         "maintainer_tasks_created": sum(
-            int(result["maintainer_tasks_created"]) for result in results
+            int(result.get("maintainer_tasks_created", 0)) for result in results
         ),
         "maintainer_task_dispatch_failed": [
             f"{merge_policy.repository}#{number}"
             for merge_policy, result in zip(merge_policies, results, strict=True)
-            for number in result["maintainer_task_dispatch_failed"]
+            for number in result.get("maintainer_task_dispatch_failed", [])
         ],
-        "deployments": [item for result in results for item in result["deployments"]],
+        "deployments": [item for result in results for item in result.get("deployments", [])],
         "deployment_failures": [
             f"{merge_policy.repository}#{number}"
             for merge_policy, result in zip(merge_policies, results, strict=True)
-            for number in result["deployment_failures"]
+            for number in result.get("deployment_failures", [])
         ],
         "report_only": all(bool(result["report_only"]) for result in results),
     }
@@ -1684,7 +1684,7 @@ def _run_single_pr_merge_handoff(
     source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     try:
         result = MergeController(
-            merge_policy,
+            replace(merge_policy, report_only=True),
             source,
             github,
             ledger,

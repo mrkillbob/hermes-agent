@@ -1212,8 +1212,10 @@ def load_policy(raw: object) -> PluginPolicy:
         ):
             raise ValueError("merge_maintainers must be a non-empty list")
         merge_policies = tuple(
-            _parse_merge_maintainer(item, targets=targets)
+            parsed
             for item in raw_merge_policies
+            for parsed in (_parse_merge_maintainer(item, targets=targets),)
+            if parsed is not None
         )
         if len({item.repository for item in merge_policies}) != len(merge_policies):
             raise ValueError("merge_maintainers repositories must be unique")

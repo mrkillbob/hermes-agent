@@ -3564,9 +3564,6 @@ _RELAY_AUX_CALL_CONTEXT: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
     contextvars.ContextVar("auxiliary_relay_call", default=None)
 )
 
-_AUX_EGRESS_PROVIDERS = frozenset({"anthropic", "openai-codex", "nous"})
-
-
 def _auxiliary_egress_binding(
     client: Any,
     *,
@@ -3576,8 +3573,9 @@ def _auxiliary_egress_binding(
 ) -> tuple[Any, Any] | None:
     """Build the complete identity and route for protected auxiliary calls."""
     normalized_provider = _normalize_aux_provider(provider)
-    if normalized_provider not in _AUX_EGRESS_PROVIDERS:
-        return None
+    # Apply the firewall based on the resolved destination below, not a
+    # provider allowlist: custom and newly supported remote providers must not
+    # bypass secret, path, provenance, or size checks.
     from agent.source_provenance import DEFAULT_POLICY_DIGEST
 
     runtime = _normalize_main_runtime(None)
