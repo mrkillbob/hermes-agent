@@ -1042,22 +1042,26 @@ class GitHubClient:
         repository = _validated_repository(repository)
         number = _positive_number(number)
         head_sha = _validated_sha(head_sha)
-        flag = _MERGE_FLAGS.get(method)
-        if flag is None:
+        if method not in _MERGE_FLAGS:
             raise ValueError("method must be squash, rebase, or merge")
-        self._runner.run(
+        payload = self._json_with_runner(
+            self._runner,
             [
                 "gh",
-                "pr",
-                "merge",
-                str(number),
-                "--repo",
-                repository,
-                flag,
-                "--match-head-commit",
-                head_sha,
-            ]
+                "api",
+                "--method",
+                "PUT",
+                f"repos/{repository}/pulls/{number}/merge",
+                "-f",
+                f"sha={head_sha}",
+                "-f",
+                f"merge_method={method}",
+            ],
         )
+        if not isinstance(payload, dict) or payload.get("merged") is not True:
+            raise GitHubClientError(
+                "GitHub did not confirm the merge", code="merge_rejected"
+            )
 
     def close_pull_request_with_comment(
         self,

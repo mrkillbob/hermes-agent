@@ -1778,10 +1778,10 @@ class FeedbackLedger:
             return None
         try:
             receipt = CIAuditReceipt.from_payload(json.loads(row[0]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise LedgerStateError("stored CI receipt is invalid") from error
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
         if receipt.status != "passed":
-            raise LedgerStateError("stored CI receipt status is inconsistent")
+            return None
         return receipt
 
     def latest_ci_receipt(
@@ -1808,8 +1808,8 @@ class FeedbackLedger:
             return None
         try:
             return CIAuditReceipt.from_payload(json.loads(row[0]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise LedgerStateError("stored CI receipt is invalid") from error
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     def latest_ci_receipt_for_head(
         self, repository: str, pr_number: int, head_sha: str
@@ -1827,8 +1827,8 @@ class FeedbackLedger:
             return None
         try:
             return CIAuditReceipt.from_payload(json.loads(row[0]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise LedgerStateError("stored CI receipt is invalid") from error
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     def ci_receipt_by_id(
         self, repository: str, pr_number: int, receipt_id: str
@@ -1846,8 +1846,8 @@ class FeedbackLedger:
             return None
         try:
             return CIAuditReceipt.from_payload(json.loads(row[0]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise LedgerStateError("stored CI receipt is invalid") from error
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     def completed_merge_receipt(self, repository: str, pr_number: int) -> object | None:
         from .merge_controller import MergeReceipt
@@ -2058,6 +2058,21 @@ class FeedbackLedger:
             else:
                 return None
         return MergeLease(repository, pr_number, head_sha, owner, claimed_at)
+
+    def release_open_unmerged_merge_lease(
+        self, repository: str, pr_number: int, head_sha: str, *, updated_at: datetime
+    ) -> None:
+        """Release a verification lease only after canonical open/unmerged readback."""
+
+        updated_at = _aware_utc(updated_at, "updated_at")
+        with self._transaction():
+            self._connection.execute(
+                "UPDATE merge_attempts SET status = 'failed', updated_at = ?, "
+                "last_error = 'canonical open unmerged; governed retry is safe' "
+                "WHERE repository = ? AND pr_number = ? AND head_sha = ? "
+                "AND status = 'verification_required'",
+                (updated_at.isoformat(), repository, pr_number, head_sha),
+            )
 
     def authorize_merge_write(
         self, lease: MergeLease, *, updated_at: datetime
