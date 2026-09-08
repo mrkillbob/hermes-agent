@@ -1607,6 +1607,8 @@ def _run_grouped_exact_head_audit(
     ).run((job,))[0]
     if outcome.error is not None or outcome.receipt is None:
         reason = outcome.error or "no receipt returned"
+        if "audit deferred: mutation_pending" in reason:
+            raise CIValidationError("audit deferred: mutation_pending")
         raise CIValidationError(f"grouped exact-head CI audit was unavailable: {reason}")
     return outcome.receipt
 
@@ -1693,6 +1695,12 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
             required_local_ci=policy.local_ci_audit.required_for_open_prs,
         )
     except (CIValidationError, GitHubClientError, LedgerStateError) as error:
+        if "audit deferred:" in str(error):
+            print(json.dumps({
+                "status": "audit_deferred", "reason": str(error).split(":", 1)[-1].strip(),
+                "retryable": True, "retry_after_seconds": 60,
+            }, sort_keys=True))
+            return 1
         print(
             json.dumps(
                 {"status": "audit_unavailable", "reason": str(error)},
@@ -1777,6 +1785,9 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                         f"{handoff_status}"
                     )
             if not handoff_blocked and owns_task:
+                ledger.authorize_ci_completion(
+                    os.environ["HERMES_KANBAN_TASK"], receipt
+                )
                 _complete_current_ci_task(receipt)
         except (CIValidationError, GitHubClientError, RuntimeError) as error:
             if not handoff_blocked and owns_task:

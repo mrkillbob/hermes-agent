@@ -52,6 +52,13 @@ LOCAL_CI_NON_ADMISSION_RESULTS = frozenset(
         "mergeable_state_still_computing",
         "mutation_pending",
         "not_admitted",
+        "disabled",
+        "base_repository_not_allowed",
+        "head_repository_not_allowed",
+        "pull_request_not_open",
+        "author_not_allowed",
+        "branch_not_allowed",
+        "reviewer_not_allowed",
         "retry_backoff",
         "retry_exhausted",
         "retry_unavailable",
@@ -146,8 +153,6 @@ _DEGRADED_REASONS = frozenset(
         "exact_head_unavailable",
     }
 )
-
-
 class ExactHeadUnavailable(RuntimeError):
     """The canonical admitted commit is absent from the configured local repository."""
 

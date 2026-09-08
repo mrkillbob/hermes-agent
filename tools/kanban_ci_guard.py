@@ -10,7 +10,6 @@ import json
 import os
 import sqlite3
 from contextlib import closing
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +29,6 @@ _UNAVAILABLE_MESSAGE = (
 
 def completion_block(task_id: str | None = None) -> str | None:
     """Return a blocking message for an unproven governed CI completion."""
-    if os.environ.get("HERMES_KANBAN_COMPLETION_GATE") != "pr-local-ci-v1":
-        return None
     worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
     target = str(task_id or worker_task or "").strip()
     if not target:
@@ -48,10 +45,22 @@ def completion_block(task_id: str | None = None) -> str | None:
                 "FROM feedback_receipts WHERE task_id = ? AND feedback_kind = 'pr_local_ci'",
                 (target,),
             ).fetchall()
-            if not bindings or all(_has_receipt(connection, binding) for binding in bindings):
+            if not bindings:
+                return None
+            if all(
+                _has_receipt(
+                    connection,
+                    binding,
+                    {row[0] for row in connection.execute(
+                        "SELECT receipt_id FROM ci_completion_authorizations WHERE task_id = ?",
+                        (target,),
+                    )},
+                )
+                for binding in bindings
+            ):
                 return None
         return _BLOCK_MESSAGE
-    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, json.JSONDecodeError):
+    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
         return _UNAVAILABLE_MESSAGE
 
 
@@ -63,30 +72,25 @@ def _default_hermes_root() -> str:
     return str(get_default_hermes_root())
 
 
-def _has_receipt(connection: sqlite3.Connection, binding: tuple[Any, ...]) -> bool:
-    repository, number, feedback_id, head, claimed_at = binding
-    claimed = datetime.fromisoformat(claimed_at)
-    if claimed.tzinfo is None:
-        return False
+def _has_receipt(connection: sqlite3.Connection, binding: tuple[Any, ...], authorized_ids: set[str]) -> bool:
+    from plugins.github_pr_feedback.github_pr_feedback.ci_runner import CIAuditReceipt
+    from plugins.github_pr_feedback.github_pr_feedback.controller import _local_ci_feedback_id
+    repository, number, feedback_id, head, _claimed_at = binding
     rows = connection.execute(
         "SELECT evidence_json FROM ci_audit_receipts WHERE repository = ? AND pr_number = ? "
         "AND head_sha = ? ORDER BY completed_at DESC",
         (repository, number, head),
     )
     for (payload_text,) in rows:
-        payload = json.loads(payload_text)
-        identity = payload.get("identity")
-        if not isinstance(identity, dict):
+        try:
+            receipt = CIAuditReceipt.from_payload(json.loads(payload_text))
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
             continue
-        started_at = datetime.fromisoformat(str(payload["started_at"]))
-        if (
-            payload.get("status") == "passed"
-            and identity.get("repository") == repository
-            and identity.get("pr_number") == number
-            and identity.get("head_sha") == head
-            and str(feedback_id) == f"local-ci-audit-v2:{str(identity.get('base_sha', '')).casefold()}"
-            and started_at.tzinfo is not None
-            and started_at >= claimed
-        ):
+        if (receipt.status in {"passed", "failed"}
+            and receipt.receipt_id in authorized_ids
+            and receipt.identity.repository == repository
+            and receipt.identity.pr_number == number
+            and receipt.identity.head_sha == head
+            and _local_ci_feedback_id(receipt.identity) == feedback_id):
             return True
     return False

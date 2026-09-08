@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from .github_client import CheckState, GitHubClient, GitHubClientError, MergeStateStillComputingError, PullRequestMergeState
-from .ledger import CIRunLease, FeedbackLedger
+from .ledger import CIMutationPendingError, CIRunLease, FeedbackLedger
 
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -519,17 +519,20 @@ class LocalCIRunner:
             raise CIValidationError("required CI owner files are missing")
         manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         claimed_at = _aware_now(self._now())
-        lease = self._ledger.claim_ci_run(
-            identity.repository,
-            identity.pr_number,
-            identity.base_sha,
-            identity.head_sha,
-            manifest_digest,
-            supervisor_pid=self._supervisor_pid(),
-            claimed_at=claimed_at,
-            stale_before=claimed_at - _CI_RUN_LEASE,
-            pid_is_alive=self._pid_is_alive,
-        )
+        try:
+            lease = self._ledger.claim_ci_run(
+                identity.repository,
+                identity.pr_number,
+                identity.base_sha,
+                identity.head_sha,
+                manifest_digest,
+                supervisor_pid=self._supervisor_pid(),
+                claimed_at=claimed_at,
+                stale_before=claimed_at - _CI_RUN_LEASE,
+                pid_is_alive=self._pid_is_alive,
+            )
+        except CIMutationPendingError as error:
+            raise CIValidationError("audit deferred: mutation_pending") from error
         if lease is None:
             raise CIValidationError("exact-head CI audit is already running")
         try:

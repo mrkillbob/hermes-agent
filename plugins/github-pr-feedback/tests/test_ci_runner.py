@@ -902,7 +902,9 @@ def test_hermes_native_ci_uses_shared_workspace_lock_once(tmp_path):
     for package in packages:
         root = tmp_path / package
         root.mkdir(parents=True)
-    (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}), encoding="utf-8")
+        (root / 'package.json').write_text(
+            json.dumps({'scripts': {'test': 'vitest run'}}), encoding="utf-8"
+        )
     commands = hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ('apps/shared/src/client.ts',))
     assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ('npm', 'ci')] == [
         (('npm', 'ci'), tmp_path)]

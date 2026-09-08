@@ -59,12 +59,14 @@ def test_registered_ci_completion_gate_uses_durable_exact_dispatch(tmp_path, mon
                                     actual, "f" * 64, status, started, completed,
                                     CheckState(False, True, 0), commands)
             ledger.record_ci_receipt(receipt)
+            if case in {"valid", "failed"}:
+                ledger.authorize_ci_completion("audit-task", receipt)
         monkeypatch.setenv("HERMES_KANBAN_TASK", "audit-task")
         hook = _registered_guard(enabled=False)  # worker settings do not own the control ledger
         monkeypatch.setattr(lifecycle, "invoke_hook", lambda name, **kw: [hook(**kw)])
         rejection = get_pre_tool_call_block_message("kanban_complete", {
             "summary": "Tests passed, invented command output", "metadata": {"receipt_id": "fabricated"}})
-        assert (rejection is None) is (case in {"valid", "non_ci"})
+        assert (rejection is None) is (case in {"valid", "failed", "non_ci"})
         assert get_pre_tool_call_block_message("kanban_block", {}) is None
     finally:
         ledger.close()
