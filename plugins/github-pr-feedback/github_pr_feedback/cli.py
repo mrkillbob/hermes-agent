@@ -1690,7 +1690,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     if owns_task:
                         _block_current_ci_task(receipt, handoff_blockers)
                     handoff_blocked = True
-                elif handoff_status != "merged":
+                elif handoff_status not in {"merged", "report_only_ready"}:
                     raise RuntimeError(
                         "merge handoff did not produce a durable successor: "
                         f"{handoff_status}"
@@ -2134,6 +2134,13 @@ def _run_single_pr_merge_handoff(
     except (GitHubClientError, RuntimeError, ValueError):
         return {"status": "degraded", "blockers": ["merge_evidence_unavailable"]}
 
+    if result.receipt is None and merge_policy.report_only:
+        return {
+            "status": "report_only_ready",
+            "pr_number": pr_number,
+            "blockers": list(result.decision.blockers),
+            "report_only": True,
+        }
     if result.receipt is None:
         return {"status": "blocked", "blockers": list(result.decision.blockers)}
 

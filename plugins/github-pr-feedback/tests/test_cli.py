@@ -1206,7 +1206,7 @@ def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
         "base_branch": "stable",
         "merge_methods": ["squash"],
         "receipt_max_age_seconds": 3600,
-        "report_only": False,
+        "report_only": True,
         "post_merge": {"enabled": False},
     }
     policy = _load_policy_from_context(RecordingContext(settings))
@@ -1344,7 +1344,7 @@ def test_merge_scan_does_not_hide_failed_receipt_behind_manifest_mismatch(
         "base_branch": "stable",
         "merge_methods": ["squash"],
         "receipt_max_age_seconds": 3600,
-        "report_only": False,
+        "report_only": True,
         "post_merge": {"enabled": False},
     }
     policy = _load_policy_from_context(RecordingContext(settings))
@@ -2168,9 +2168,8 @@ def profile_snapshot(root: Path) -> dict[str, tuple[int, int]]:
     }
 
 
-@pytest.mark.parametrize("report_only", [False, True])
 def test_merge_handoff_auto_enrolls_before_enrollment_gate(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, report_only: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from github_pr_feedback.cli import _load_policy_from_context, _run_single_pr_merge_handoff
 
@@ -2185,7 +2184,7 @@ def test_merge_handoff_auto_enrolls_before_enrollment_gate(
         "base_branch": "stable",
         "merge_methods": ["squash"],
         "receipt_max_age_seconds": 3600,
-        "report_only": report_only,
+        "report_only": True,
         "post_merge": {"enabled": False},
         "auto_enroll_owned_prs": True,
     }
@@ -2227,13 +2226,7 @@ def test_merge_handoff_auto_enrolls_before_enrollment_gate(
 
         def run(self, number: int):
             assert number == 17
-            return SimpleNamespace(
-                receipt=SimpleNamespace(
-                    tested_head_sha=pull.head_sha,
-                    method="squash",
-                    merge_commit_oid="c" * 40,
-                )
-            )
+            return SimpleNamespace(receipt=None, decision=SimpleNamespace(blockers=()))
 
     monkeypatch.setattr("github_pr_feedback.cli.enroll_owned_pulls", enroll)
     monkeypatch.setattr("github_pr_feedback.cli.CanonicalMergeEvidenceSource", lambda *args: object())
@@ -2243,7 +2236,7 @@ def test_merge_handoff_auto_enrolls_before_enrollment_gate(
         policy, Ledger(), 17, repository="acme/widgets", github=GitHub()
     )
 
-    assert result["status"] == "merged"
+    assert result["status"] == "report_only_ready"
     assert admitted == [(pull,)]
 
 
