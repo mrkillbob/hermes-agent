@@ -9,14 +9,14 @@ import { sessionMessagesSignature } from '@/lib/session-signatures'
 import { $changeEventsAvailable, $cronChangeTick, $sessionsChangeTick } from '@/store/live-sync'
 import { $onBattery, batteryPollInterval } from '@/store/power'
 import { refreshActiveProfile } from '@/store/profile'
-import { refreshProjectTree } from '@/store/projects'
 import {
   $activeSessionId,
   $busy,
   $currentCwd,
+  $messagingSessions,
   $selectedStoredSessionId,
+  $sessions,
   getSessionOwnerHint,
-  ownerLookupSessionRows,
   sessionMatchesStoredId,
   setCurrentCwd
 } from '@/store/session'
@@ -39,7 +39,9 @@ interface ActiveTranscriptSession {
 
 /** Resolve an active transcript from visible rows or its unique hidden owner. */
 export function resolveActiveTranscriptSession(storedSessionId: string): ActiveTranscriptSession | undefined {
-  const visible = ownerLookupSessionRows().find(session => sessionMatchesStoredId(session, storedSessionId))
+  const visible =
+    $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId)) ??
+    $messagingSessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
 
   if (visible) {
     return { profile: visible.profile }
@@ -64,22 +66,6 @@ export interface ActiveTranscriptRefreshDeps {
   ) => ClientSessionState
 }
 
-function tileRuntimeOwnsLiveState(runtimeId: string): boolean {
-  const state = $sessionStates.get()[runtimeId]
-
-  return Boolean(state && (state.busy || state.awaitingResponse || state.needsInput || state.turnLive))
-}
-
-type TileTranscriptTarget = { ownerRoute?: SessionProfileRoute; storedSessionId: string; runtimeId?: string }
-
-/** Signature key per tile — carries the owner route so two connections/profiles
- *  sharing a stored id (or a tile re-homed to another owner) never alias. */
-function tileTranscriptSignatureKey(tile: TileTranscriptTarget): string {
-  const route = tile.ownerRoute
-
-  return `tile:${route ? `${route.connectionId}:${route.targetProfile ?? route.profile}:` : ''}${tile.storedSessionId}`
-}
-
 /**
  * Reconcile the persisted transcripts of every open WORKSPACE TILE (#93942
  * slice 1). Bot canonical chats live here — never in $sessions /
@@ -98,13 +84,15 @@ function tileTranscriptSignatureKey(tile: TileTranscriptTarget): string {
  */
 export async function reconcileTileTranscripts({
   requestSequenceRef,
+  busyRef,
   signatureRef,
   updateSessionState,
   tiles: tilesOverride
 }: {
+  busyRef: MutableRefObject<boolean>
   requestSequenceRef: MutableRefObject<number>
   signatureRef: MutableRefObject<Map<string, string>>
-  tiles?: TileTranscriptTarget[]
+  tiles?: Array<{ storedSessionId: string; runtimeId?: string }>
   updateSessionState: (
     sessionId: string,
     updater: (state: ClientSessionState) => ClientSessionState,
@@ -112,13 +100,6 @@ export async function reconcileTileTranscripts({
   ) => ClientSessionState
 }): Promise<void> {
   const tiles = tilesOverride ?? $sessionTiles.get()
-  const openSignatureKeys = new Set(tiles.map(tileTranscriptSignatureKey))
-
-  for (const signatureKey of signatureRef.current.keys()) {
-    if (!openSignatureKeys.has(signatureKey)) {
-      signatureRef.current.delete(signatureKey)
-    }
-  }
 
   for (const tile of tiles) {
     const storedSessionId = tile.storedSessionId
@@ -129,7 +110,7 @@ export async function reconcileTileTranscripts({
       continue
     }
 
-    if (!storedSessionId || !runtimeSessionId || tileRuntimeOwnsLiveState(runtimeSessionId)) {
+    if (!storedSessionId || !runtimeSessionId || busyRef.current) {
       continue
     }
 
@@ -142,39 +123,23 @@ export async function reconcileTileTranscripts({
 
     // With a tiles override (test path), the live $sessionTiles check can't
     // see the synthetic tile — treat override tiles as present.
-    const tileStillPresent = () =>
-      tilesOverride
-        ? tilesOverride.some(t => t.storedSessionId === storedSessionId && t.runtimeId === runtimeSessionId)
-        : $sessionTiles.get().some(t => t.storedSessionId === storedSessionId && t.runtimeId === runtimeSessionId)
-
-    // Bot tiles are pinned to an exact owner (connection + target profile);
-    // read from that backend, not whichever profile is foreground. Tiles
-    // without a route keep the legacy local read.
-    const profileScope: ProfileScope = tile.ownerRoute
-      ? {
-          connectionId: tile.ownerRoute.connectionId,
-          profile: tile.ownerRoute.targetProfile ?? tile.ownerRoute.profile
-        }
-      : undefined
-
-    const signatureKey = tileTranscriptSignatureKey(tile)
+    const stillPresent = tilesOverride
+      ? tilesOverride.some(t => t.storedSessionId === storedSessionId && t.runtimeId === runtimeSessionId)
+      : $sessionTiles.get().some(t => t.storedSessionId === storedSessionId && t.runtimeId === runtimeSessionId)
 
     try {
-      const latest = await getLatestSessionMessages(storedSessionId, profileScope)
+      const latest = await getLatestSessionMessages(storedSessionId)
 
-      if (
-        requestId !== requestSequenceRef.current ||
-        tileRuntimeOwnsLiveState(runtimeSessionId) ||
-        !tileStillPresent()
-      ) {
+      if (requestId !== requestSequenceRef.current || busyRef.current || !stillPresent) {
         // Tile closed or superseded mid-read — discard AND prune its
         // signature so the map doesn't grow one entry per ever-opened tile
         // for the app's lifetime (#94255 review point 3).
-        signatureRef.current.delete(signatureKey)
+        signatureRef.current.delete(`tile:${storedSessionId}`)
 
         continue
       }
 
+      const signatureKey = `tile:${storedSessionId}`
       const signature = sessionMessagesSignature(latest.messages)
 
       if (signatureRef.current.get(signatureKey) === signature) {
@@ -582,8 +547,10 @@ export function useBackgroundSync({
   // transcript signatures, so no-change ticks and closed tiles cost nothing.
   const tileRequestSequenceRef = useRef(0)
   const tileSignatureRef = useRef(new Map<string, string>())
-  // Tile reconciliation reads each runtime's live state directly from
-  // $sessionStates; the primary chat's $busy atom has no authority over tiles.
+  // Read $busy.get() directly inside the reconcile loop instead of mirroring
+  // the atom into a ref (lint: no-restricted-syntax — refs synced from atoms
+  // lag one render). The reconcile runs on tick, not render, so .get() is
+  // always current.
 
   const requestActiveTranscriptRefresh = useCallback(
     (preservePending: boolean) => {
@@ -657,19 +624,6 @@ export function useBackgroundSync({
     }
   }, [activeConnectionId, activeGatewayProfile, gatewayState, refreshCurrentModel, refreshSessions, requestGateway])
 
-  // Reconnect backstop (#94779): turns that finished while the socket was
-  // down never replay their sessions.changed tick, so the open transcript
-  // stayed stale until the user reopened it. Pull one signature-gated tail on
-  // every (re)connect — a no-change read costs nothing. Keyed on the
-  // connection, not the session, so a plain session switch adds no read;
-  // messaging transcripts already refresh on open in their own effect below.
-  useEffect(() => {
-    if (gatewayState === 'open' && !activeIsMessaging && activeSessionId && activeStoredSessionId) {
-      requestActiveTranscriptRefresh(true)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- connect-scoped: session deps would fire on every switch
-  }, [activeConnectionId, activeGatewayProfile, gatewayState])
-
   // A reconnect loses renderer-only working/attention atoms while the backend
   // keeps the actual turns alive. Re-seed from the gateway's in-memory session
   // registry immediately, then re-pull on every sessions.changed broadcast; a
@@ -737,17 +691,17 @@ export function useBackgroundSync({
       lastRunAt = Date.now()
       void refreshSessions()
       void refreshMessagingSessions()
-      // The project tree is a grouping of the same stored rows, so a session
-      // created/deleted/renamed/re-homed outside this window goes stale in the
-      // Projects sidebar without this (#100354). refreshProjectTree() keeps the
-      // cached tree on failure, so a not-yet-ready backend costs nothing.
-      void refreshProjectTree()
       requestActiveTranscriptRefresh(true)
       // Bot canonical chats live in workspace tiles, never in the main-pane
       // selection — without this they never see background deliveries
       // (#93942 scenario A). Signature-gated per tile, so no-change ticks
       // cost nothing.
       void reconcileTileTranscripts({
+        busyRef: {
+          get current() {
+            return $busy.get()
+          }
+        },
         requestSequenceRef: tileRequestSequenceRef,
         signatureRef: tileSignatureRef,
         updateSessionState

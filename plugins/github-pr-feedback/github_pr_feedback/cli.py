@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - native Windows
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
 import hashlib
 import json
 import os
@@ -11,25 +15,50 @@ import re
 import signal
 import shutil
 import subprocess
+import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
-from .controller import KanbanTask, LocalGitRepository, ScanController
-from .ci_runner import CIAuditIdentity, CIAuditReceipt, CIValidationError, LocalCIRunner
+from .controller import KanbanTask, LocalGitRepository, PooledLocalGitRepository, ScanController
+from .ci_coordinator import CIAuditJob, GroupedCICoordinator
+from .ci_runner import (
+    CIAuditIdentity,
+    CIAuditReceipt,
+    CIValidationError,
+    LocalCIRunner,
+    _required_lanes,
+)
 from .github_client import GitHubClient, GitHubClientError
-from .ledger import FeedbackLedger, LedgerStateError
+from .ledger import (
+    FeedbackLedger,
+    LedgerStateError,
+    parse_maintenance_command_evidence,
+)
 from .merge_controller import (
     CanonicalMergeEvidenceSource,
     MergeController,
     MergeDecision,
+    _codex_reviewed_head,
 )
-from .policy import FeedbackReceipt, PluginPolicy, load_policy
+from .policy import (
+    FeedbackReceipt,
+    PluginPolicy,
+    codex_review_trigger_comment,
+    codex_review_trigger_requested,
+    hermes_attribution_line,
+    load_policy,
+)
 from .post_merge import PostMergeExecutor
-from .repair_controller import RepairController
+from .repair_controller import (
+    PR_REPAIR_ATTRIBUTION_PREFIX,
+    RepairController,
+    pr_repair_attribution_required,
+)
 from .release_maintenance import (
     FINAL_LANE,
     MaintenanceGitHub,
@@ -51,7 +80,95 @@ except ImportError:
 
 
 _MISSING = object()
+_REVIEW_REQUIRED_ASSIGNEE = "review-verification-steward"
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(token|secret|password|authorization|api[_-]?key)\s*[:=]\s*\S+"
+)
+# kind is deliberately unconstrained (any word token, not an enumerated set):
+# this same marker covers pr_repair and ci_repair (repair_controller.py /
+# controller.py's typed CI fixer) as well as every ordinary admitted-feedback
+# kind (issue_comment, review_comment, review) via controller.py's _task().
+# The receipt's own FeedbackReceipt already validates feedback_kind against
+# its canonical set; this regex only needs to prove *some* completed-and-
+# matching-head marker exists, not police which kind it names.
+_PR_REPAIR_RECEIPT_COMMENT = re.compile(
+    r"<!--\s*pr-maintenance-receipt:v1\s+status=completed\s+kind=\w+\s+"
+    r"head=([0-9a-fA-F]{40,64})\s*-->"
+)
+# Feedback kinds whose worker-completed reply must carry the marker above.
+# pr_local_ci completes through a different typed-receipt flow (audit-pr),
+# and pr_actions_needed starts blocked and is never worker-completed at all.
+_MARKER_REQUIRED_FEEDBACK_KINDS = frozenset(
+    {"pr_repair", "issue_comment", "review_comment", "review"}
+)
+
+
+def _factual_reply_is_missing(
+    github: GitHubClient, receipt: FeedbackReceipt, *, resolved_head_sha: str
+) -> bool:
+    """Whether no comment yet carries this exact completion's required receipt marker.
+
+    Covers every feedback kind whose worker-completed reply is required to
+    carry the marker (see _MARKER_REQUIRED_FEEDBACK_KINDS) -- repair receipts
+    and ordinary admitted review/issue-comment feedback alike.
+    complete-feedback only reread the resolved PR head match before this
+    check existed; a worker could push a fix, skip the required factual
+    reply, and still successfully complete the task with no trace anything
+    was skipped. This independently rereads canonical PR comments the same
+    way every other completion gate in this plugin rereads canonical state,
+    instead of trusting the worker's self-report that it replied.
+    """
+
+    try:
+        feedback = github.list_feedback(receipt.repository, receipt.pr_number)
+    except GitHubClientError:
+        return True
+    for item in feedback:
+        match = _PR_REPAIR_RECEIPT_COMMENT.search(item.body)
+        if not match or match.group(1).casefold() != resolved_head_sha.casefold():
+            continue
+        if not pr_repair_attribution_required(receipt.repository):
+            return False
+        if PR_REPAIR_ATTRIBUTION_PREFIX in item.body:
+            return False
+    return True
+
+
+def _retrigger_codex_review(
+    github: GitHubClient, repository: str, pr_number: int, resolved_head_sha: str
+) -> str:
+    """Mention @codex review after a verified repair push, once, if needed.
+
+    Codex's GitHub App never re-reviews on an ordinary push -- only on PR
+    opened, marked ready, or this exact mention (see merge_controller's
+    codex_review_pending). Without this, a repaired PR would carry a
+    permanently stale Codex review and sit blocked on that gate forever.
+    Rereads canonical comments first so a PR whose new head Codex has
+    already reviewed (e.g. two repairs landing back to back) does not get a
+    redundant mention.
+    """
+
+    try:
+        feedback = github.list_feedback(repository, pr_number)
+    except GitHubClientError:
+        return "unavailable"
+    if _codex_reviewed_head(feedback, resolved_head_sha):
+        return "already_current"
+    if any(
+        codex_review_trigger_requested(item.body, resolved_head_sha)
+        for item in feedback
+    ):
+        return "already_requested"
+    try:
+        github.post_issue_comment(
+            repository,
+            pr_number,
+            codex_review_trigger_comment(resolved_head_sha),
+        )
+    except GitHubClientError:
+        return "unavailable"
+    return "triggered"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +228,7 @@ class DoctorProbe:
     def checks(self, policy: PluginPolicy, ledger_path: Path) -> dict[str, str]:
         gh = self._runner.which("gh")
         hermes = self._runner.which("hermes")
+        merge_policies = _merge_policies(policy)
         checks = {
             "gh_executable": gh is not None,
             "gh_auth": bool(
@@ -132,11 +250,8 @@ class DoctorProbe:
                         if policy.local_ci_audit is not None
                         else []
                     ),
-                    *(
-                        [policy.merge_maintainer.assignee]
-                        if policy.merge_maintainer is not None
-                        else []
-                    ),
+                    *(merge_policy.assignee for merge_policy in merge_policies),
+                    *([_REVIEW_REQUIRED_ASSIGNEE] if merge_policies else []),
                     *(
                         [policy.repair_steward.assignee]
                         if policy.repair_steward is not None
@@ -263,7 +378,7 @@ class KanbanSubprocessClient:
     def create_or_get_task(self, task: KanbanTask) -> str:
         result = self._runner.run(_kanban_create_argv(task))
         if result.returncode != 0:
-            raise RuntimeError("Kanban task creation failed")
+            raise RuntimeError(_kanban_create_error(result))
         try:
             payload = json.loads(result.stdout)
         except (TypeError, json.JSONDecodeError) as error:
@@ -294,6 +409,13 @@ class KanbanSubprocessClient:
         return status.strip()
 
 
+def _kanban_create_error(result: KanbanCommandResult) -> str:
+    first_line = result.stderr.splitlines()[0].strip() if result.stderr else ""
+    first_line = _SECRET_ASSIGNMENT.sub(r"\1=[redacted]", first_line)
+    detail = f": {first_line[:240]}" if first_line else ""
+    return f"Kanban task creation failed (rc={result.returncode}){detail}"
+
+
 def _kanban_create_argv(task: KanbanTask) -> list[str]:
     body = (
         f"{task.instructions}\n\n{task.evidence_heading}:\n"
@@ -319,7 +441,17 @@ def _kanban_create_argv(task: KanbanTask) -> list[str]:
     ]
     if task.max_runtime_seconds is not None:
         argv.extend(["--max-runtime", str(task.max_runtime_seconds)])
-    argv.extend(["--initial-status", task.initial_status, "--json"])
+    if task.model_override:
+        argv.extend(["--model", task.model_override])
+        if task.provider_override:
+            argv.extend(["--provider", task.provider_override])
+    if task.reasoning_effort:
+        argv.extend(["--reasoning", task.reasoning_effort])
+    if task.initial_status not in {"ready", "blocked", "running"}:
+        raise ValueError("Kanban task initial status is invalid")
+    if task.initial_status != "ready":
+        argv.extend(["--initial-status", task.initial_status])
+    argv.append("--json")
     return argv
 
 
@@ -332,6 +464,11 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     subcommands.add_parser(
         "doctor", help="Check configuration readiness without scanning"
     )
+    inspect = subcommands.add_parser(
+        "inspect-pr", help="Read one configured PR identity through the shared GitHub gate"
+    )
+    inspect.add_argument("--repository", required=True)
+    inspect.add_argument("--pr-number", required=True, type=int)
     retry = subcommands.add_parser(
         "retry", help="Retry one failed, immutable feedback receipt"
     )
@@ -347,12 +484,31 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     audit.add_argument("--pr-number", required=True, type=int)
     audit.add_argument("--head-sha", required=True)
     audit.add_argument("--worktree", required=True, type=Path)
+    audit.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Run new local CI even when an exact-head receipt is reusable",
+    )
     subcommands.add_parser(
-        "merge-scan", help="Evaluate and merge strictly eligible PR heads"
+        "merge-scan",
+        help="Evaluate and hand off strictly eligible PR heads (never merges in handoff mode)",
+    )
+    subcommands.add_parser(
+        "merge-handoff", help="Hand off strictly eligible PR heads without merging"
     )
     subcommands.add_parser(
         "merge-status", help="Show bounded merge and deployment counts"
     )
+    merge_enable = subcommands.add_parser(
+        "merge-enable", help="Enroll one configured PR for automatic merging"
+    )
+    merge_enable.add_argument("--repository", required=True)
+    merge_enable.add_argument("--pr-number", required=True, type=int)
+    merge_disable = subcommands.add_parser(
+        "merge-disable", help="Remove one PR from automatic merge enrollment"
+    )
+    merge_disable.add_argument("--repository", required=True)
+    merge_disable.add_argument("--pr-number", required=True, type=int)
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
@@ -372,6 +528,11 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     maintenance.add_argument("--lane", required=True)
     maintenance.add_argument("--status", required=True, choices=("passed", "failed"))
     maintenance.add_argument("--summary", required=True)
+    maintenance.add_argument(
+        "--command-evidence-json",
+        required=True,
+        help="JSON list containing argv, cwd, return code, timeout, and output digests",
+    )
 
 
 def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
@@ -382,14 +543,22 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _status()
     if action == "doctor":
         return _doctor(ctx)
+    if action == "inspect-pr":
+        return _inspect_pr(ctx, args)
     if action == "retry":
         return _retry(ctx, args)
     if action == "audit-pr":
         return _audit_pr(ctx, args)
     if action == "merge-scan":
         return _merge_scan(ctx)
+    if action == "merge-handoff":
+        return _merge_scan(ctx)
     if action == "merge-status":
         return _merge_status()
+    if action == "merge-enable":
+        return _merge_enable(ctx, args)
+    if action == "merge-disable":
+        return _merge_disable(ctx, args)
     if action == "complete-feedback":
         return _complete_feedback(ctx, args)
     if action == "complete-maintenance":
@@ -410,6 +579,12 @@ def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
             or not _FULL_SHA.fullmatch(args.head_sha)
         ):
             raise ValueError("maintenance receipt identity is not configured")
+        try:
+            command_evidence = parse_maintenance_command_evidence(
+                json.loads(args.command_evidence_json)
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("maintenance command evidence is invalid") from error
         ledger = FeedbackLedger.for_current_profile()
         try:
             ledger.record_maintenance_receipt(
@@ -419,6 +594,7 @@ def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
                 status=args.status,
                 summary=args.summary,
                 completed_at=datetime.now(UTC),
+                command_evidence=command_evidence,
             )
         finally:
             ledger.close()
@@ -457,29 +633,103 @@ def _scan(ctx: Any) -> int:
             print(json.dumps({"status": "scan_in_progress"}, sort_keys=True))
             return 0
         ledger = FeedbackLedger.for_current_profile()
-        merge_payload: dict[str, object] | None = None
         repair_payload: dict[str, object] | None = None
         maintenance_payload: dict[str, object] | None = None
         try:
+            try:
+                PooledLocalGitRepository(
+                    ledger, ledger.path.parent / "worktree-pool"
+                ).reconcile_leases(KanbanSubprocessClient())
+            except Exception:  # noqa: BLE001 - proactive release is an optimization,
+                # never allowed to block the scan it runs ahead of; a slot left
+                # leased simply falls back to its lease timeout.
+                pass
             result = _controller(policy, ledger).scan()
+            # Required exact-head CI is a strict oldest-first merge train. Do
+            # not fan out repair, merge, and release reads while any admitted
+            # head still lacks its current passing receipt; doing so can spend
+            # the API budget before the selected audit starts.
+            required_ci_backlog = result.required_local_ci_backlog > 0
+            backlog_by_repository = getattr(
+                result, "required_local_ci_backlog_by_repository", None
+            )
             if policy.repair_steward is not None:
-                repair = RepairController(
-                    policy,
-                    ledger,
-                    GitHubClient(),
-                    KanbanSubprocessClient(),
-                    control_home=get_default_hermes_root(),
-                ).scan()
-                repair_payload = _scan_payload(repair)
-            if policy.merge_maintainer is not None:
-                merge_payload = _run_merge_scan(policy, ledger)
+                if isinstance(backlog_by_repository, Mapping) and hasattr(
+                    policy.repair_steward, "repositories"
+                ):
+                    repair_payload = _run_repair_scan_by_repository(
+                        policy, ledger, backlog_by_repository
+                    )
+                elif not required_ci_backlog:
+                    repair = RepairController(
+                        policy,
+                        ledger,
+                        GitHubClient(),
+                        KanbanSubprocessClient(),
+                        control_home=get_default_hermes_root(),
+                    ).scan()
+                    repair_payload = _scan_payload(repair)
             if policy.release_maintenance is not None:
-                maintenance_payload = _run_release_maintenance_scan(policy, ledger)
+                maintenance_repository = getattr(
+                    policy.release_maintenance, "repository", None
+                )
+                maintenance_backlog = (
+                    isinstance(backlog_by_repository, Mapping)
+                    and maintenance_repository is not None
+                    and backlog_by_repository.get(maintenance_repository, 0) > 0
+                )
+                if maintenance_backlog:
+                    maintenance_payload = {
+                        "status": "deferred",
+                        "head_sha": None,
+                        "tasks_created": 0,
+                        "blockers": ["required_local_ci_backlog"],
+                        "deferred_repository": maintenance_repository,
+                    }
+                elif not required_ci_backlog or isinstance(
+                    backlog_by_repository, Mapping
+                ):
+                    maintenance_payload = _run_release_maintenance_scan(
+                        policy, ledger
+                    )
         finally:
             ledger.close()
     payload = _scan_payload(result)
-    if merge_payload is not None:
-        payload["merge"] = merge_payload
+    if result.required_local_ci_backlog > 0:
+        backlog_by_repository = getattr(
+            result, "required_local_ci_backlog_by_repository", None
+        )
+        if isinstance(backlog_by_repository, Mapping):
+            deferred_repositories = {
+                "repair": sorted(
+                    repository
+                    for repository in (
+                        policy.repair_steward.repositories
+                        if policy.repair_steward
+                        and hasattr(policy.repair_steward, "repositories")
+                        else ()
+                    )
+                    if backlog_by_repository.get(repository, 0) > 0
+                ),
+                "release_maintenance": (
+                    [policy.release_maintenance.repository]
+                    if policy.release_maintenance is not None
+                    and backlog_by_repository.get(
+                        policy.release_maintenance.repository, 0
+                    )
+                    > 0
+                    else []
+                ),
+            }
+            payload["deferred_repositories"] = {
+                lane: repositories
+                for lane, repositories in deferred_repositories.items()
+                if repositories
+            }
+            if payload["deferred_repositories"]:
+                payload["deferred"] = list(payload["deferred_repositories"])
+        else:
+            payload["deferred"] = ["repair", "release_maintenance"]
     if repair_payload is not None:
         payload["repair"] = repair_payload
     if maintenance_payload is not None:
@@ -490,11 +740,76 @@ def _scan(ctx: Any) -> int:
         if (
             result.degraded
             or (repair_payload or {}).get("status") == "degraded"
-            or (merge_payload or {}).get("status") == "degraded"
             or (maintenance_payload or {}).get("status") == "degraded"
         )
         else 0
     )
+
+
+def _run_repair_scan_by_repository(
+    policy: PluginPolicy,
+    ledger: FeedbackLedger,
+    backlog_by_repository: Mapping[str, int],
+) -> dict[str, object]:
+    """Run repair lanes independently when local CI backlog is repository-local."""
+
+    configured = policy.repair_steward
+    assert configured is not None
+    deferred = sorted(
+        repository
+        for repository in configured.repositories
+        if backlog_by_repository.get(repository, 0) > 0
+    )
+    eligible = sorted(set(configured.repositories).difference(deferred))
+    if not deferred:
+        repair = RepairController(
+            policy,
+            ledger,
+            GitHubClient(),
+            KanbanSubprocessClient(),
+            control_home=get_default_hermes_root(),
+        ).scan()
+        return _scan_payload(repair)
+    if not eligible:
+        return {
+            "status": "deferred",
+            "created": 0,
+            "skipped": {},
+            "deferred_repositories": deferred,
+        }
+
+    created = 0
+    skipped: dict[str, int] = {}
+    degraded = False
+    github = GitHubClient()
+    kanban = KanbanSubprocessClient()
+    for repository in eligible:
+        serial_policy = replace(
+            policy,
+            repair_steward=replace(
+                configured,
+                repositories=frozenset({repository}),
+            ),
+        )
+        repair = RepairController(
+            serial_policy,
+            ledger,
+            github,
+            kanban,
+            control_home=get_default_hermes_root(),
+        ).scan()
+        created += repair.created
+        degraded = degraded or repair.degraded
+        for reason, count in repair.skipped.items():
+            skipped[reason] = skipped.get(reason, 0) + count
+    payload: dict[str, object] = {
+        "status": "degraded" if degraded else "ok",
+        "created": created,
+        "skipped": skipped,
+    }
+    if deferred:
+        payload["deferred_repositories"] = deferred
+    return payload
 
 
 def _run_release_maintenance_scan(
@@ -545,14 +860,26 @@ def _exclusive_scan_lock(control_home: Path | None = None) -> Iterator[bool]:
     acquired = False
     try:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write("\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             acquired = True
-        except BlockingIOError:
+        except (BlockingIOError, OSError):
             pass
         yield acquired
     finally:
         if acquired:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            else:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         handle.close()
 
 
@@ -601,6 +928,11 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
             json.dumps({"status": "invalid_or_raced_feedback_action"}, sort_keys=True)
         )
         return 1
+    if receipt.feedback_kind in _MARKER_REQUIRED_FEEDBACK_KINDS and _factual_reply_is_missing(
+        github, receipt, resolved_head_sha=str(args.resolved_head_sha)
+    ):
+        print(json.dumps({"status": "factual_reply_missing"}, sort_keys=True))
+        return 1
     ledger = FeedbackLedger.for_current_profile()
     try:
         ledger.begin_feedback_action(
@@ -632,6 +964,11 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
         print(json.dumps({"status": "feedback_action_not_recorded"}, sort_keys=True))
         return_code = 1
     else:
+        codex_retrigger_status = "not_applicable"
+        if receipt.feedback_kind in _MARKER_REQUIRED_FEEDBACK_KINDS:
+            codex_retrigger_status = _retrigger_codex_review(
+                github, receipt.repository, receipt.pr_number, str(args.resolved_head_sha)
+            )
         local_ci_status = _controller(policy, ledger).dispatch_local_ci_after_feedback(
             current
         )
@@ -646,6 +983,7 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
                     "resolved_head_sha": str(args.resolved_head_sha).casefold(),
                     "review_thread_resolved": review_thread_resolved,
                     "local_ci_status": local_ci_status,
+                    "codex_retrigger_status": codex_retrigger_status,
                 },
                 sort_keys=True,
             )
@@ -667,11 +1005,17 @@ def _controller(policy: PluginPolicy, ledger: FeedbackLedger) -> ScanController:
 
 
 def _scan_payload(result) -> dict[str, object]:
-    return {
+    payload = {
         "status": "degraded" if result.degraded else "ok",
         "created": result.created,
         "skipped": result.skipped,
     }
+    if result.required_local_ci_backlog > 0:
+        payload["required_local_ci_backlog"] = result.required_local_ci_backlog
+    catalogue_deferred = getattr(result, "local_ci_catalogue_deferred", 0)
+    if catalogue_deferred > 0:
+        payload["local_ci_catalogue_deferred"] = catalogue_deferred
+    return payload
 
 
 def _status() -> int:
@@ -688,9 +1032,13 @@ def _reusable_ci_receipt(
     ledger: object,
     identity: CIAuditIdentity,
     worktree: Path,
+    *,
+    allow_reuse: bool = True,
 ) -> CIAuditReceipt | None:
     """Reuse immutable exact-head evidence instead of repeating an expensive lane."""
 
+    if not allow_reuse:
+        return None
     reader = getattr(ledger, "latest_ci_receipt_for_head", None)
     if not callable(reader):
         return None
@@ -718,8 +1066,85 @@ def _reusable_ci_receipt(
     return receipt if receipt.manifest_digest == manifest_digest else None
 
 
+class _ThreadOwnedCIRunner:
+    """Close a per-worker ledger after one grouped exact-head audit."""
+
+    def __init__(self, runner: LocalCIRunner, ledger: FeedbackLedger) -> None:
+        self._runner = runner
+        self._ledger = ledger
+
+    def run(self, identity: CIAuditIdentity, worktree: Path) -> CIAuditReceipt:
+        try:
+            return self._runner.run(identity, worktree)
+        finally:
+            self._ledger.close()
+
+
+def _run_grouped_exact_head_audit(
+    github: GitHubClient,
+    ledger: FeedbackLedger,
+    identity: CIAuditIdentity,
+    worktree: Path,
+    *,
+    force_fresh: bool = False,
+) -> CIAuditReceipt:
+    """Run one immutable audit through the bounded grouped-coordination boundary."""
+
+    receipt = _reusable_ci_receipt(
+        ledger, identity, worktree, allow_reuse=not force_fresh
+    )
+    if receipt is not None:
+        return receipt
+    manifest_path = worktree / "tests/manifests/test_lanes.toml"
+    if not manifest_path.is_file():
+        raise CIValidationError("CI lane manifest is unavailable")
+    job = CIAuditJob(
+        identity=identity,
+        worktree=worktree,
+        failure_lanes=_required_lanes(manifest_path.read_bytes()),
+    )
+    def runner_factory() -> _ThreadOwnedCIRunner:
+        # The coordinator invokes this factory inside its worker thread. Each
+        # SQLite connection must therefore be opened and closed in that same
+        # thread; sharing one grouped connection would fail immediately with
+        # sqlite3.ProgrammingError and lose a typed failed receipt.
+        worker_ledger = FeedbackLedger.for_current_profile()
+        return _ThreadOwnedCIRunner(
+            LocalCIRunner(github, worker_ledger),
+            worker_ledger,
+        )
+
+    outcome = GroupedCICoordinator(
+        runner_factory,
+        max_parallel=4,
+    ).run((job,))[0]
+    if outcome.error is not None or outcome.receipt is None:
+        reason = outcome.error or "no receipt returned"
+        raise CIValidationError(f"grouped exact-head CI audit was unavailable: {reason}")
+    return outcome.receipt
+
+
+def _ci_receipt_payload(receipt: CIAuditReceipt) -> dict[str, object]:
+    """Return the durable receipt fields rendered before any handoff work."""
+
+    return {
+        "status": receipt.status,
+        "receipt_id": receipt.receipt_id,
+        "repository": receipt.identity.repository,
+        "pr_number": receipt.identity.pr_number,
+        "head_sha": receipt.identity.head_sha,
+        "manifest_digest": receipt.manifest_digest,
+        "command_count": len(receipt.commands),
+        "handoff_status": "pending",
+    }
+
+
 def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
     handoff_completed = False
+    handoff_blocked = False
+    handoff_blockers: list[str] = []
+    merge_handoff: dict[str, object] | None = None
+    repair_status: str | None = None
     try:
         policy = _load_policy_from_context(ctx)
         if policy.local_ci_audit is None:
@@ -740,13 +1165,26 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
         return 1
     ledger = FeedbackLedger.for_current_profile()
     try:
-        receipt = _reusable_ci_receipt(ledger, identity, worktree)
-        if receipt is None:
-            receipt = LocalCIRunner(github, ledger).run(identity, worktree)
-    except (CIValidationError, GitHubClientError, LedgerStateError):
-        print(json.dumps({"status": "audit_unavailable"}, sort_keys=True))
+        receipt = _run_grouped_exact_head_audit(
+            github,
+            ledger,
+            identity,
+            worktree,
+            force_fresh=bool(getattr(args, "fresh", False)),
+        )
+    except (CIValidationError, GitHubClientError, LedgerStateError) as error:
+        print(
+            json.dumps(
+                {"status": "audit_unavailable", "reason": str(error)},
+                sort_keys=True,
+            )
+        )
         return_code = 1
     else:
+        # Receipt persistence is the audit boundary. Render it before the
+        # GitHub comment, repair dispatch, merge handoff, or task completion;
+        # those are separate integrations and may fail independently.
+        print(json.dumps(_ci_receipt_payload(receipt), sort_keys=True), flush=True)
         try:
             final_state = github.get_merge_state(args.repository, args.pr_number)
             if final_state.head_sha != receipt.identity.head_sha:
@@ -765,28 +1203,81 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                 repair_status = _controller(policy, ledger).dispatch_ci_failure(receipt)
                 if repair_status not in {"scheduled", "duplicate"}:
                     raise RuntimeError(f"typed CI repair handoff failed: {repair_status}")
-            _complete_current_ci_task(receipt)
-            handoff_completed = True
-        except (CIValidationError, GitHubClientError, RuntimeError):
-            print(json.dumps({"status": "audit_handoff_unavailable"}, sort_keys=True))
+            else:
+                merge_handoff = _run_single_pr_merge_handoff(
+                    policy,
+                    ledger,
+                    receipt.identity.pr_number,
+                    repository=receipt.identity.repository,
+                    github=github,
+                )
+                handoff_status = str(merge_handoff.get("status", ""))
+                if handoff_status == "blocked":
+                    raw_blockers = merge_handoff.get("blockers", [])
+                    if isinstance(raw_blockers, list):
+                        handoff_blockers = [str(blocker) for blocker in raw_blockers]
+                    _block_current_ci_task(receipt, handoff_blockers)
+                    handoff_blocked = True
+                elif handoff_status != "merged":
+                    raise RuntimeError(
+                        "merge handoff did not produce a durable successor: "
+                        f"{handoff_status}"
+                    )
+            if not handoff_blocked:
+                _complete_current_ci_task(receipt)
+                handoff_completed = True
+        except (CIValidationError, GitHubClientError, RuntimeError) as error:
+            if not handoff_blocked:
+                try:
+                    _block_current_ci_task(
+                        receipt, ["transient_handoff_failure"], kind="transient"
+                    )
+                except RuntimeError:
+                    pass
+            handoff_reason = repair_status or str(error) or "transient_handoff_failure"
+            retryable_payload: dict[str, object] = {
+                "status": "audit_handoff_retryable",
+                "receipt_id": receipt.receipt_id,
+                "retryable": True,
+                "handoff_reason": handoff_reason,
+            }
+            if repair_status is not None:
+                retryable_payload["repair_status"] = repair_status
+            print(
+                json.dumps(
+                    retryable_payload,
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             return_code = 1
         else:
-            return_code = 0 if receipt.status == "passed" else 1
-        print(
-            json.dumps(
-                {
-                    "status": receipt.status,
-                    "receipt_id": receipt.receipt_id,
-                    "repository": receipt.identity.repository,
-                    "pr_number": receipt.identity.pr_number,
-                    "head_sha": receipt.identity.head_sha,
-                    "manifest_digest": receipt.manifest_digest,
-                    "command_count": len(receipt.commands),
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
+            return_code = 1 if handoff_blocked else (0 if receipt.status == "passed" else 1)
+        if handoff_blocked:
+            print(
+                json.dumps(
+                    {
+                        "status": "audit_handoff_blocked",
+                        "receipt_id": receipt.receipt_id,
+                        "blockers": handoff_blockers,
+                        "retryable": False,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+        if merge_handoff is not None and not handoff_blocked:
+            print(
+                json.dumps(
+                    {
+                        "status": "merge_handoff_recorded",
+                        "receipt_id": receipt.receipt_id,
+                        "merge_handoff": merge_handoff,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
         if handoff_completed:
             _terminate_current_ci_worker()
     finally:
@@ -800,8 +1291,14 @@ def _ci_audit_comment(receipt: CIAuditReceipt) -> str:
         f"({command.classification}, {command.duration_ms / 1000:.2f}s)"
         for command in receipt.commands
     )
+    attribution = (
+        f"{hermes_attribution_line('pr-local-ci-auditor', action='CI audit')}\n\n"
+        if pr_repair_attribution_required(receipt.identity.repository)
+        else ""
+    )
     body = (
-        f"Addressed local CI audit for exact head `{receipt.identity.head_sha}` "
+        attribution
+        + f"Addressed local CI audit for exact head `{receipt.identity.head_sha}` "
         f"(base `{receipt.identity.base_sha}`). Commands: {commands}. "
         f"Authoritative receipt: `{receipt.receipt_id}`. "
         + (
@@ -809,6 +1306,9 @@ def _ci_audit_comment(receipt: CIAuditReceipt) -> str:
             if receipt.status == "passed"
             else "The failed receipt remains merge-blocking; later fail-fast lanes may be absent."
         )
+        + "\n\n"
+        + f"<!-- pr-ci-receipt:v1 status={receipt.status} "
+        f"id={receipt.receipt_id} head={receipt.identity.head_sha} -->"
     )
     if len(body) > 4000:
         raise RuntimeError("CI audit comment exceeds the bounded GitHub payload")
@@ -820,7 +1320,7 @@ def _complete_current_ci_task(receipt: CIAuditReceipt) -> None:
     if not task_id:
         return
     board = os.environ.get("HERMES_KANBAN_BOARD", "").strip()
-    argv = ["hermes", "kanban"]
+    argv = [sys.executable, "-m", "hermes_cli.main", "kanban"]
     if board:
         argv.extend(["--board", board])
     argv.extend(
@@ -831,16 +1331,55 @@ def _complete_current_ci_task(receipt: CIAuditReceipt) -> None:
             f"Exact-head local CI receipt {receipt.receipt_id}: {receipt.status}.",
         ]
     )
-    completed = subprocess.run(
-        argv,
-        check=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=15,
-    )
+    try:
+        completed = subprocess.run(
+            argv,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except OSError as exc:
+        raise RuntimeError("Hermes runtime unavailable for Kanban audit completion") from exc
     if completed.returncode != 0:
         raise RuntimeError("Kanban audit completion failed")
+
+
+def _block_current_ci_task(
+    receipt: CIAuditReceipt,
+    blockers: list[str],
+    *,
+    kind: str | None = None,
+) -> None:
+    """Persist a blocked or transient handoff on the current Kanban task."""
+
+    task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    if not task_id:
+        return
+    board = os.environ.get("HERMES_KANBAN_BOARD", "").strip()
+    reason = f"Exact-head CI receipt {receipt.receipt_id}: "
+    reason += ", ".join(blockers) if blockers else "handoff did not complete"
+    argv = [sys.executable, "-m", "hermes_cli.main", "kanban"]
+    if board:
+        argv.extend(["--board", board])
+    argv.extend(["block", task_id])
+    if kind is not None:
+        argv.extend(["--kind", kind])
+    argv.append(reason)
+    try:
+        completed = subprocess.run(
+            argv,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except OSError as exc:
+        raise RuntimeError("Hermes runtime unavailable for Kanban audit block") from exc
+    if completed.returncode != 0:
+        raise RuntimeError("Kanban audit block failed")
 
 
 def _terminate_current_ci_worker() -> None:
@@ -859,7 +1398,7 @@ def _merge_scan(ctx: Any) -> int:
     except ValueError:
         print(json.dumps({"status": "invalid_configuration"}, sort_keys=True))
         return 1
-    if policy.merge_maintainer is None:
+    if not _merge_policies(policy):
         print(json.dumps({"status": "disabled"}, sort_keys=True))
         return 0
     ledger = FeedbackLedger.for_current_profile()
@@ -878,9 +1417,63 @@ def _run_merge_scan(
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
 ) -> dict[str, object]:
-    merge_policy = policy.merge_maintainer
-    if merge_policy is None:
-        return {"status": "disabled", "processed": 0, "merged": [], "blocked": {}}
+    merge_policies = _merge_policies(policy)
+    if not merge_policies:
+        return {
+            "status": "disabled",
+            "processed": 0,
+            "merged": [],
+            "handed_off": [],
+            "blocked": {},
+        }
+    if len(merge_policies) == 1:
+        return _run_merge_scan_for_policy(
+            policy, merge_policies[0], ledger, github=github, kanban=kanban
+        )
+    results = [
+        _run_merge_scan_for_policy(
+            policy, merge_policy, ledger, github=github, kanban=kanban
+        )
+        for merge_policy in merge_policies
+    ]
+    blocked: dict[str, list[str]] = {}
+    for merge_policy, result in zip(merge_policies, results, strict=True):
+        for number, blockers in result["blocked"].items():
+            blocked[f"{merge_policy.repository}#{number}"] = blockers
+    return {
+        "status": "degraded" if any(result["status"] == "degraded" for result in results) else "ok",
+        "processed": sum(int(result["processed"]) for result in results),
+        "merged": [item for result in results for item in result["merged"]],
+        "handed_off": [
+            item for result in results for item in result.get("handed_off", [])
+        ],
+        "blocked": blocked,
+        "maintainer_tasks_created": sum(
+            int(result.get("maintainer_tasks_created", 0)) for result in results
+        ),
+        "maintainer_task_dispatch_failed": [
+            f"{merge_policy.repository}#{number}"
+            for merge_policy, result in zip(merge_policies, results, strict=True)
+            for number in result.get("maintainer_task_dispatch_failed", [])
+        ],
+        "deployments": [item for result in results for item in result.get("deployments", [])],
+        "deployment_failures": [
+            f"{merge_policy.repository}#{number}"
+            for merge_policy, result in zip(merge_policies, results, strict=True)
+            for number in result.get("deployment_failures", [])
+        ],
+        "report_only": all(bool(result["report_only"]) for result in results),
+    }
+
+
+def _run_merge_scan_for_policy(
+    policy: PluginPolicy,
+    merge_policy,
+    ledger: FeedbackLedger,
+    *,
+    github: GitHubClient | None = None,
+    kanban: KanbanSubprocessClient | None = None,
+) -> dict[str, object]:
     github = github or GitHubClient()
     kanban = kanban or KanbanSubprocessClient()
     try:
@@ -892,9 +1485,17 @@ def _run_merge_scan(
             "status": "degraded",
             "processed": 0,
             "merged": [],
+            "handed_off": [],
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
-    source = CanonicalMergeEvidenceSource(policy, github, ledger)
+    if merge_policy.require_per_pr_enrollment:
+        enrolled = set(ledger.enrolled_merge_pr_numbers(merge_policy.repository))
+        pull_requests = tuple(
+            pull_request
+            for pull_request in pull_requests
+            if pull_request.number in enrolled
+        )
+    source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     manifest_path = (
         policy.targets[merge_policy.repository].local_path
         / "tests"
@@ -906,12 +1507,17 @@ def _run_merge_scan(
             "status": "degraded",
             "processed": 0,
             "merged": [],
+            "handed_off": [],
             "blocked": {"canonical_read": ["ci_manifest_unavailable"]},
         }
     manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     merged: list[dict[str, object]] = []
+    handed_off: list[dict[str, object]] = []
     blocked: dict[str, list[str]] = {}
     deployments: list[dict[str, object]] = []
+    deployment_failures: list[int] = []
+    maintainer_task_dispatch_failed: list[int] = []
+    review_tasks_created = 0
     tasks_created = 0
     degraded = False
     open_by_number = {pull_request.number: pull_request for pull_request in pull_requests}
@@ -936,7 +1542,25 @@ def _run_merge_scan(
                 not_before=datetime.min.replace(tzinfo=UTC),
             )
             if receipt is None:
-                blocked[str(pull_request.number)] = ["ci_receipt_missing"]
+                # Keep the merge gate manifest-bound, but do not misreport an
+                # existing exact-head failed receipt as missing merely because
+                # its audit used a different manifest revision.
+                reader = getattr(ledger, "latest_ci_receipt_for_head", None)
+                exact_head_receipt = (
+                    reader(
+                        merge_policy.repository,
+                        pull_request.number,
+                        pull_request.head_sha,
+                    )
+                    if callable(reader)
+                    else None
+                )
+                if exact_head_receipt is None:
+                    blocked[str(pull_request.number)] = ["ci_receipt_missing"]
+                elif exact_head_receipt.status == "passed":
+                    blocked[str(pull_request.number)] = ["ci_manifest_mismatch"]
+                else:
+                    blocked[str(pull_request.number)] = ["ci_receipt_not_passing"]
                 continue
             if receipt.status != "passed":
                 blocked[str(pull_request.number)] = ["ci_receipt_not_passing"]
@@ -949,16 +1573,21 @@ def _run_merge_scan(
                 ledger,
                 owner="github-pr-feedback-merge-controller",
             ).run(number)
-            if result.receipt is not None:
-                merged.append(
-                    {
-                        "pr_number": number,
-                        "head_sha": result.receipt.tested_head_sha,
-                        "method": result.receipt.method,
-                        "merge_commit_oid": result.receipt.merge_commit_oid,
-                    }
-                )
-                if merge_policy.post_merge is not None:
+        except (GitHubClientError, RuntimeError, ValueError):
+            degraded = True
+            blocked[str(number)] = ["merge_evidence_unavailable"]
+            continue
+        if result.receipt is not None:
+            merged.append(
+                {
+                    "pr_number": number,
+                    "head_sha": result.receipt.tested_head_sha,
+                    "method": result.receipt.method,
+                    "merge_commit_oid": result.receipt.merge_commit_oid,
+                }
+            )
+            if merge_policy.post_merge is not None:
+                try:
                     existing = ledger.latest_deployment_receipt(
                         merge_policy.repository, number
                     )
@@ -973,33 +1602,185 @@ def _run_merge_scan(
                                 "blocker": deployment.blocker,
                             }
                         )
-                continue
-            blocker_codes = list(result.decision.blockers)
-            blocked[str(number)] = blocker_codes
-            if pull_request is not None:
+                except (RuntimeError, ValueError):
+                    degraded = True
+                    deployment_failures.append(number)
+            continue
+        blocker_codes = list(result.decision.blockers)
+        blocked[str(number)] = blocker_codes
+        # Deterministic blockers are already durable in the scan result and are
+        # actionable by the repair controller. A model-backed observability card
+        # can only restate them, adding queue latency without changing authority.
+        # Report-only mode has no repair owner, so retain its explicit human-facing
+        # readiness report without enabling any write authority.
+        if merge_policy.report_only and pull_request is not None and not blocker_codes:
+            _announce_ready_to_merge(
+                github, merge_policy.repository, pull_request
+            )
+            handed_off.append(
+                {
+                    "repository": merge_policy.repository,
+                    "pr_number": number,
+                    "head_sha": pull_request.head_sha,
+                }
+            )
+            try:
                 kanban.create_or_get_task(
-                    _merge_maintainer_task(policy, pull_request, result.decision)
+                    _merge_maintainer_task(
+                        policy, merge_policy, pull_request, result.decision
+                    )
                 )
                 tasks_created += 1
-        except (GitHubClientError, RuntimeError, ValueError):
-            degraded = True
-            blocked[str(number)] = ["merge_evidence_unavailable"]
+            except (RuntimeError, ValueError):
+                degraded = True
+                maintainer_task_dispatch_failed.append(number)
+        if "review_required" in blocker_codes and pull_request is not None:
+            try:
+                kanban.create_or_get_task(
+                    _review_required_task(policy, merge_policy, pull_request)
+                )
+                review_tasks_created += 1
+            except (RuntimeError, ValueError):
+                degraded = True
     return {
         "status": "degraded" if degraded else "ok",
         "processed": len(numbers),
         "merged": merged,
+        "handed_off": handed_off,
         "blocked": blocked,
         "maintainer_tasks_created": tasks_created,
+        "review_tasks_created": review_tasks_created,
+        "maintainer_task_dispatch_failed": maintainer_task_dispatch_failed,
         "deployments": deployments,
+        "deployment_failures": deployment_failures,
         "report_only": merge_policy.report_only,
     }
 
 
-def _merge_maintainer_task(
-    policy: PluginPolicy, pull_request, decision: MergeDecision
-) -> KanbanTask:
-    merge_policy = policy.merge_maintainer
+def _run_single_pr_merge_handoff(
+    policy: PluginPolicy,
+    ledger: FeedbackLedger,
+    pr_number: int,
+    *,
+    repository: str | None = None,
+    github: GitHubClient | None = None,
+    kanban: KanbanSubprocessClient | None = None,
+) -> dict[str, object]:
+    """Attempt one exact PR merge, then admit at most one successor repair."""
+
+    merge_policy = (
+        policy.merge_policy_for(repository)
+        if repository is not None
+        else policy.merge_maintainer
+    )
     if merge_policy is None:
+        return {"status": "disabled", "blockers": ["merge_maintainer_disabled"]}
+    github = github or GitHubClient()
+    kanban = kanban or KanbanSubprocessClient()
+    if merge_policy.require_per_pr_enrollment and not ledger.is_merge_enrolled(
+        merge_policy.repository, pr_number
+    ):
+        return {"status": "blocked", "blockers": ["merge_pr_not_enrolled"]}
+    source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
+    try:
+        result = MergeController(
+            replace(merge_policy, report_only=True),
+            source,
+            github,
+            ledger,
+            owner="github-pr-feedback-ci-handoff",
+        ).run(pr_number)
+    except (GitHubClientError, RuntimeError, ValueError):
+        return {"status": "degraded", "blockers": ["merge_evidence_unavailable"]}
+
+    if result.receipt is None:
+        return {"status": "blocked", "blockers": list(result.decision.blockers)}
+
+    payload: dict[str, object] = {
+        "status": "merged",
+        "pr_number": pr_number,
+        "head_sha": result.receipt.tested_head_sha,
+        "method": result.receipt.method,
+        "merge_commit_oid": result.receipt.merge_commit_oid,
+    }
+    repair_policy = policy.repair_steward
+    if repair_policy is None:
+        payload["next_repair"] = {"status": "disabled", "created": 0, "skipped": {}}
+        return payload
+
+    serial_policy = replace(
+        policy,
+        repair_steward=replace(
+            repair_policy,
+            repositories=frozenset({merge_policy.repository}),
+            max_base_refresh_in_flight=1,
+        ),
+    )
+    try:
+        repair_result = RepairController(
+            serial_policy,
+            ledger,
+            github,
+            kanban,
+            control_home=get_default_hermes_root(),
+        ).scan()
+    except (GitHubClientError, LedgerStateError, RuntimeError, ValueError):
+        payload["next_repair"] = {
+            "status": "degraded",
+            "created": 0,
+            "skipped": {"repair_scan_unavailable": 1},
+        }
+    else:
+        payload["next_repair"] = _scan_payload(repair_result)
+    return payload
+
+
+_READY_TO_MERGE_MARKER_PREFIX = "<!-- pr-ready-to-merge-receipt:v1 head="
+
+
+def _announce_ready_to_merge(github: GitHubClient, repository: str, pull_request) -> None:
+    """Post one visible, idempotent PR comment when every report-only gate clears.
+
+    Report-only mode never merges automatically, so a human maintainer has no
+    other visible signal that a PR is done: the deterministic readiness card
+    only completes an internal Kanban record. Marker-gated on the exact head
+    SHA so a re-scan of an already-announced head is a no-op, and a new head
+    (new commits) gets its own fresh announcement.
+    """
+
+    marker = f"{_READY_TO_MERGE_MARKER_PREFIX}{pull_request.head_sha} -->"
+    try:
+        feedback = github.list_feedback(repository, pull_request.number)
+    except (GitHubClientError, RuntimeError):
+        return
+    if any(marker in (item.body or "") for item in feedback):
+        return
+    body = (
+        "**Ready to merge.** Local CI passed and every tracked repair/review "
+        "item is clear for this exact head. The merge maintainer is running "
+        "in report-only mode, so nothing merges automatically here — merge "
+        "manually when ready.\n\n"
+        f"{marker}"
+    )
+    try:
+        github.post_issue_comment(repository, pull_request.number, body)
+    except (GitHubClientError, RuntimeError):
+        pass
+
+
+def _merge_maintainer_task(
+    policy: PluginPolicy,
+    merge_policy,
+    pull_request=None,
+    decision: MergeDecision | None = None,
+) -> KanbanTask:
+    # Keep the test/plugin helper's historical three-argument form working
+    # while the multi-repository scan passes its selected policy explicitly.
+    if decision is None:
+        decision = pull_request
+        pull_request = merge_policy
+        merge_policy = policy.merge_maintainer
+    if merge_policy is None or decision is None or pull_request is None:
         raise ValueError("merge maintainer is disabled")
     target = policy.targets[merge_policy.repository]
     evidence = {
@@ -1019,15 +1800,16 @@ def _merge_maintainer_task(
     return KanbanTask(
         title=f"PR merge readiness: {merge_policy.repository}#{pull_request.number}",
         instructions=(
-            "Inspect only the deterministic blocker codes and explain what canonical evidence is "
+            "This is a read-only observability card with no repository or GitHub mutation "
+            "authority. Inspect only the deterministic blocker codes and explain what canonical evidence is "
             "missing from the supplied deterministic evidence; do not inspect the repository, GitHub, "
             "or other sources. The listed PR blockers are the requested report, not a blocker for this "
-            "observability card. Do not edit source, push, reply, approve, merge, change configuration, "
-            "or construct GitHub write commands. Model output cannot waive a blocker or create CI or "
+            "observability card. Model output cannot waive a blocker or create CI or "
             "merge receipts. After the bounded explanation, immediately call kanban_complete with the "
             "repository, PR number, expected head, blockers, and snapshot digest. Call kanban_block only "
-            "if kanban_complete itself is unavailable or rejected. A deterministic controller will act "
-            "automatically after every gate passes."
+            "if kanban_complete itself is unavailable or rejected. An operator will review this exact-head "
+            "handoff and perform the normal repository merge separately; do not merge or claim that it was "
+            "merged."
         ),
         board=policy.board or "",
         assignee=merge_policy.assignee,
@@ -1049,6 +1831,146 @@ def _merge_status() -> int:
     finally:
         ledger.close()
     print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _review_required_task(policy: PluginPolicy, merge_policy, pull_request) -> KanbanTask:
+    """Create an exact-head review task when GitHub reports review required."""
+
+    target = policy.targets[merge_policy.repository]
+    key = hashlib.sha256(
+        f"{merge_policy.repository}\0{pull_request.number}\0{pull_request.head_sha}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return KanbanTask(
+        title=f"Review required: {merge_policy.repository}#{pull_request.number}",
+        instructions=(
+            "Perform an independent code review of this exact pull-request head. Re-read the "
+            "canonical PR identity and review the complete diff and relevant tests. Leave factual "
+            "review feedback on GitHub for any issue found; if the change is sound, submit the "
+            "repository's normal approval review. Do not edit, push, force-push, change branch "
+            "protection, or merge the pull request. Stop if the base or head SHA changes. The "
+            "merge controller will re-read the review state automatically and will not waive this "
+            "gate from model output."
+        ),
+        board=policy.board or "",
+        assignee=_REVIEW_REQUIRED_ASSIGNEE,
+        repository_path=target.local_path,
+        head_sha=pull_request.head_sha,
+        branch=pull_request.head_ref_name,
+        idempotency_key=f"github-pr-review-required:{key}",
+        evidence={
+            "repository": merge_policy.repository,
+            "pr_number": pull_request.number,
+            "expected_head_sha": pull_request.head_sha,
+            "base_branch": pull_request.base_branch,
+            "reason": "review_required",
+        },
+        evidence_heading="Canonical review-required evidence (JSON)",
+        initial_status="running" if policy.auto_dispatch else "blocked",
+        max_retries=2 if policy.auto_dispatch else 1,
+        max_runtime_seconds=1200 if policy.auto_dispatch else None,
+    )
+
+
+def _merge_enable(ctx: Any, args: argparse.Namespace) -> int:
+    """Enroll one exact configured PR without granting the worker new authority."""
+
+    try:
+        policy = _load_policy_from_context(ctx)
+        merge_policy = policy.merge_policy_for(args.repository)
+        if merge_policy is None:
+            raise ValueError("repository is not configured for merging")
+        github = GitHubClient()
+        pull = github.get_merge_state(args.repository, args.pr_number)
+        if (
+            pull.repository != merge_policy.repository
+            or pull.head_repository != merge_policy.repository
+            or pull.author_login.casefold() != merge_policy.author_login.casefold()
+            or pull.base_branch != merge_policy.base_branch
+            or pull.state != "OPEN"
+            or pull.merged
+        ):
+            raise ValueError("PR identity is outside the configured merge lane")
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            ledger.enroll_merge_pr(
+                args.repository,
+                args.pr_number,
+                enrolled_at=datetime.now(UTC),
+                enrolled_by=os.environ.get("USER", "hermes-operator"),
+            )
+        finally:
+            ledger.close()
+    except (GitHubClientError, LedgerStateError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "unavailable", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "enrolled",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+                "head_sha": pull.head_sha,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _merge_disable(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        if policy.merge_policy_for(args.repository) is None:
+            raise ValueError("repository is not configured for merging")
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            ledger.unenroll_merge_pr(args.repository, args.pr_number)
+        finally:
+            ledger.close()
+    except (LedgerStateError, RuntimeError, ValueError) as error:
+        print(json.dumps({"status": "unavailable", "reason": str(error)}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "unenrolled",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _inspect_pr(ctx: Any, args: argparse.Namespace) -> int:
+    try:
+        policy = _load_policy_from_context(ctx)
+        if not policy.enabled or args.repository not in policy.targets:
+            raise ValueError("repository is not a configured target")
+        pull_request = GitHubClient().get_pull_request(
+            args.repository, args.pr_number
+        )
+    except (GitHubClientError, ValueError):
+        print(json.dumps({"status": "unavailable"}, sort_keys=True))
+        return 1
+    print(
+        json.dumps(
+            {
+                "base_branch": pull_request.base_branch,
+                "base_sha": pull_request.base_sha,
+                "head_ref_name": pull_request.head_ref_name,
+                "head_repository": pull_request.head_repository,
+                "head_sha": pull_request.head_sha,
+                "number": pull_request.number,
+                "repository": pull_request.base_repository,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -1093,7 +2015,9 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         "assignee_rules",
         "routing_rules",
         "local_ci_audit",
+        "agent_labels",
         "merge_maintainer",
+        "merge_maintainers",
         "repair_steward",
         "release_maintenance",
         "not_before",
@@ -1104,6 +2028,16 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
         if value is not _MISSING:
             settings[key] = value
     return load_policy(settings)
+
+
+def _merge_policies(policy: PluginPolicy) -> tuple[object, ...]:
+    """Read merge policies while keeping injected legacy test policies usable."""
+
+    reader = getattr(policy, "merge_policies", None)
+    if callable(reader):
+        return tuple(reader())
+    legacy = getattr(policy, "merge_maintainer", None)
+    return (legacy,) if legacy is not None else ()
 
 
 def _safe_name(value: str) -> bool:

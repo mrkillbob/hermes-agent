@@ -9,8 +9,7 @@ import pytest
 
 import gateway.run as gateway_run
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, SendResult
-from gateway.platforms.event import MessageEvent, ProcessingOutcome
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, ProcessingOutcome, SendResult
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 

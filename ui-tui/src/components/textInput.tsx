@@ -1447,10 +1447,7 @@ export function TextInput({
         return swap(undo, redo)
       }
 
-      // Extended-key terminals (kitty CSI-u / modifyOtherKeys) deliver a shifted
-      // letter as its uppercase char, so Cmd+Shift+Z arrives as inp 'Z' — match
-      // case-insensitively like the copy/paste chords above.
-      if ((mod && inp === 'y') || (mod && k.shift && inp.toLowerCase() === 'z')) {
+      if ((mod && inp === 'y') || (mod && k.shift && inp === 'z')) {
         return swap(redo, undo)
       }
 

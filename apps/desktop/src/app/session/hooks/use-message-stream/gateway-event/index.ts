@@ -12,7 +12,6 @@ import { $gateway, activeGatewayConnectionId } from '@/store/gateway'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { replayPendingApproval } from '@/store/prompts'
 import { setSessionProviderWait } from '@/store/provider-wait'
-import { isSessionGone } from '@/store/session-gone-latch'
 import { setSessionDraftingTool } from '@/store/tool-drafting'
 import type { RpcEvent } from '@/types/hermes'
 
@@ -20,7 +19,6 @@ import { handleDesktopBridgeEvent } from './desktop-bridge'
 import { handleInputRequestEvent } from './input-requests'
 import { handleLifecycleEvent } from './lifecycle'
 import { handleMessageStreamEvent } from './message-stream'
-import { handleControlEvent } from './session-control'
 import { handleSessionInfoEvent } from './session-info'
 import { handleStatusEvent } from './status'
 import { handleToolEvent } from './tools'
@@ -85,7 +83,6 @@ const PROVIDER_WAIT_SUPERSEDING_EVENT_TYPES = new Set([
 const HANDLERS: GatewayEventHandler[] = [
   handleLifecycleEvent,
   handleSessionInfoEvent,
-  handleControlEvent,
   handleMessageStreamEvent,
   handleToolEvent,
   handleInputRequestEvent,
@@ -198,10 +195,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
 
       const isActiveEvent = !!sessionId && sessionId === activeSessionIdRef.current
 
-      const replaySessionId = approvalReplaySessionId(event.type, activeSessionIdRef.current, sessionId, {
-        explicit: Boolean(explicitSid),
-        isGone: isSessionGone
-      })
+      const replaySessionId = approvalReplaySessionId(event.type, activeSessionIdRef.current, sessionId)
 
       if (replaySessionId) {
         void replayPendingApproval($gateway.get(), replaySessionId).catch(() => undefined)

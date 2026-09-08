@@ -259,13 +259,13 @@ class TestBlueBubblesAttachmentDownload:
 
         cached_path = None
 
-        async def mock_cache_image(data, ext):
+        def mock_cache_image(data, ext):
             nonlocal cached_path
             cached_path = f"/tmp/test_image{ext}"
             return cached_path
 
         monkeypatch.setattr(
-            "gateway.platforms.bluebubbles.cache_image_from_bytes_async",
+            "gateway.platforms.bluebubbles.cache_image_from_bytes",
             mock_cache_image,
         )
 

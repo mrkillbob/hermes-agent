@@ -21,11 +21,9 @@ import {
   ensureGatewayForAgent,
   ensureGatewayForProfile,
   openGatewayForAgent,
-  openGatewayForProfile,
-  openSecondaryCount
+  openGatewayForProfile
 } from '@/store/gateway'
 import { notifyError } from '@/store/notifications'
-import { $poolLimits } from '@/store/pool-limits'
 import { notifyRemoteOverrideAuthFailure } from '@/store/profile-remote-override'
 import { clearComposerSelectionOwner, setComposerSelectionOwner, setConnection } from '@/store/session'
 import type { SessionOwnerRoute } from '@/store/session-request-router'
@@ -319,14 +317,14 @@ function profilePickConnectionId(profile?: string): null | string {
  * the owner hint, the optimistic row and every later session-scoped RPC name
  * the same registry entry. A legacy profile-only activation yields null.
  */
-export function resolveNewChatOwnerRoute(forProfile?: string): AgentProfileRoute | null {
+export function resolveNewChatOwnerRoute(): AgentProfileRoute | null {
   const explicit = $newChatRoute.get()
 
-  if (explicit && (!forProfile || normalizeProfileKey(explicit.profile) === normalizeProfileKey(forProfile))) {
+  if (explicit) {
     return explicit
   }
 
-  const intentProfile = forProfile ? normalizeProfileKey(forProfile) : $newChatProfile.get()
+  const intentProfile = $newChatProfile.get()
 
   const connectionId = (
     (intentProfile
@@ -425,17 +423,6 @@ export function prewarmProfileBackend(name: string): void {
     return
   }
 
-  // Prewarm/cap harmony (#91545): the pool caps spawned backends at the
-  // configured max, and a spawn over the cap LRU-evicts the warmest idle
-  // backend. A hover sweep across the rail therefore evicted backends for
-  // profiles the user was about to click — prewarming caused the exact churn
-  // it exists to prevent. Skip speculative spawns once every pool slot is
-  // occupied by an open socket; the real click still spawns on demand, it
-  // just doesn't get a head start.
-  if (openSecondaryCount() + 1 > $poolLimits.get().maxBackends) {
-    return
-  }
-
   prewarmedAt.set(key, now)
   openGatewayForProfile(key).catch(() => undefined)
 }
@@ -504,7 +491,7 @@ export async function ensureGatewayProfile(profile: string | null | undefined): 
 
   const target = normalizeProfileKey(profile)
 
-  if (normalizeProfileKey($activeGatewayProfile.get()) === target && $gateway.get()?.connectionState === 'open') {
+  if (normalizeProfileKey($activeGatewayProfile.get()) === target && $gateway.get()) {
     return
   }
 
@@ -516,7 +503,7 @@ export async function ensureGatewayProfile(profile: string | null | undefined): 
     await gatewaySwitch.catch(() => undefined)
   }
 
-  if (normalizeProfileKey($activeGatewayProfile.get()) === target && $gateway.get()?.connectionState === 'open') {
+  if (normalizeProfileKey($activeGatewayProfile.get()) === target && $gateway.get()) {
     return
   }
 
@@ -603,10 +590,7 @@ export async function openGatewayAgent(connectionId: string, profile: string): P
     return
   }
 
-  await openGatewayForAgent(connection, normalizeProfileKey(profile), {
-    activationLease: true,
-    spawnPriority: 'foreground'
-  })
+  await openGatewayForAgent(connection, normalizeProfileKey(profile), { activationLease: true })
 }
 
 // Activate a connection-scoped agent's gateway — the (connectionId, profile)
@@ -873,18 +857,6 @@ function activateOnCurrentSource(target: string): Promise<void> {
   return connectionId ? ensureGatewayAgent(connectionId, target) : ensureGatewayProfile(target)
 }
 
-// Pin the next new chat to `name` (legacy profile-only door) so session.create
-// reads the profile the user clicked "+" under, not whatever
-// $activeGatewayProfile holds once an in-flight profile swap settles (#79005).
-export function pinNewChatProfile(name: string): string {
-  const target = normalizeProfileKey(name)
-  $newChatProfile.set(target)
-  $newChatRoute.set(null)
-  captureNewChatSource(profilePickConnectionId(target))
-
-  return target
-}
-
 // Start a fresh session in `name` WITHOUT collapsing the "All profiles" browse
 // view. Unlike selectProfile, it leaves $showAllProfiles untouched, so the
 // unified sidebar stays put — used by the per-profile "+" in the all-profiles
@@ -892,7 +864,10 @@ export function pinNewChatProfile(name: string): string {
 // is in. Points new chats at the profile and opens its backend so the next
 // message lands in the right place.
 export function newSessionInProfile(name: string): void {
-  const target = pinNewChatProfile(name)
+  const target = normalizeProfileKey(name)
+  $newChatProfile.set(target)
+  $newChatRoute.set(null)
+  captureNewChatSource(profilePickConnectionId(target))
   requestFreshSession()
   // #81094: surface the failed dial instead of failing silently.
   void activateOnCurrentSource(target).catch((error: unknown) => {

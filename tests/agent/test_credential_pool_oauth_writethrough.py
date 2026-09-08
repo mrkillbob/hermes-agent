@@ -30,7 +30,6 @@ from agent.credential_pool import (
     load_pool,
 )
 from hermes_cli import auth as A
-import hermes_cli.auth_codex as auth_codex
 
 
 def _write_store(path, store):
@@ -219,7 +218,6 @@ def test_codex_pool_refresh_holds_auth_store_lock_across_post(monkeypatch, tmp_p
         }
 
     monkeypatch.setattr(A, "refresh_codex_oauth_pure", fake_refresh)
-    monkeypatch.setattr(auth_codex, "refresh_codex_oauth_pure", fake_refresh)
 
     entry = _entry(
         provider,

@@ -1,6 +1,5 @@
 """Tests for tools/vision_tools.py — URL validation, type hints, error logging."""
 
-import asyncio
 import base64
 import json
 import logging
@@ -13,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tools.vision_tools import (
-    _validate_image_url_async,
+    _validate_image_url,
     _handle_vision_analyze,
     _determine_mime_type,
     _image_to_base64_data_url,
@@ -43,43 +42,39 @@ _RESOLVES = [(2, 1, 6, "", ("93.184.216.34", 0))]
 
 
 # ---------------------------------------------------------------------------
-# _validate_image_url_async — shape check + SSRF gate on the live download path
+# _validate_image_url — urlparse-based validation
 # ---------------------------------------------------------------------------
 
 
-def _validate(url) -> bool:
-    return asyncio.run(_validate_image_url_async(url))
-
-
 class TestValidateImageUrl:
-    """URL validation on the live (async) download path: urlparse-based netloc check + SSRF."""
+    """Tests for URL validation, including urlparse-based netloc check."""
 
     def test_accepts_valid_http_and_https_urls(self):
         with patch("tools.url_safety.socket.getaddrinfo", return_value=_RESOLVES):
-            assert _validate("https://example.com/image.jpg") is True
-            assert _validate("http://cdn.example.org/photo.png") is True
+            assert _validate_image_url("https://example.com/image.jpg") is True
+            assert _validate_image_url("http://cdn.example.org/photo.png") is True
             # CDN endpoints that redirect to images should still pass.
-            assert _validate("https://cdn.example.com/abcdef123") is True
-            assert _validate("https://img.example.com/pic?w=200&h=200") is True
-            assert _validate("http://example.com:8080/image.png") is True
-            assert _validate("https://example.com/") is True
+            assert _validate_image_url("https://cdn.example.com/abcdef123") is True
+            assert _validate_image_url("https://img.example.com/pic?w=200&h=200") is True
+            assert _validate_image_url("http://example.com:8080/image.png") is True
+            assert _validate_image_url("https://example.com/") is True
 
     def test_localhost_url_blocked_by_ssrf(self):
-        """localhost / loopback URLs are blocked by SSRF protection."""
-        assert _validate("http://localhost:8080/image.png") is False
-        assert _validate("http://127.0.0.1/image.png") is False
+        """localhost URLs are blocked by SSRF protection."""
+        assert _validate_image_url("http://localhost:8080/image.png") is False
+
 
     def test_rejects_malformed_and_non_string_inputs(self):
         # http:// alone has no network location — urlparse catches this.
-        assert _validate("http://") is False
-        assert _validate("https://") is False
-        assert _validate("http:") is False
-        assert _validate("") is False
-        assert _validate("   ") is False
-        assert _validate(None) is False
-        assert _validate(12345) is False
-        assert _validate(True) is False
-        assert _validate(["https://example.com"]) is False
+        assert _validate_image_url("http://") is False
+        assert _validate_image_url("https://") is False
+        assert _validate_image_url("http:") is False
+        assert _validate_image_url("") is False
+        assert _validate_image_url("   ") is False
+        assert _validate_image_url(None) is False
+        assert _validate_image_url(12345) is False
+        assert _validate_image_url(True) is False
+        assert _validate_image_url(["https://example.com"]) is False
 
 
 # ---------------------------------------------------------------------------

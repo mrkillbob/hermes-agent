@@ -35,7 +35,6 @@ import {
   COMPOSER_FADE_BACKGROUND,
   implicitSlashAcceptIndex,
   type QueueEditState,
-  shouldDisableComposerInput,
   slashArgStage
 } from './composer-utils'
 import { ContextMenu } from './context-menu'
@@ -221,8 +220,8 @@ export function ChatBar({
 
   const { t } = useI18n()
   const gatewayState = useStore($gatewayState)
-  const reconnecting = gatewayState !== 'open'
-  const inputDisabled = shouldDisableComposerInput(disabled, gatewayState)
+  const reconnecting = gatewayState === 'closed' || gatewayState === 'error'
+  const inputDisabled = disabled && !reconnecting
 
   // The draft engine — detached source of truth (DOM + draftRef + edge
   // selectors); typing never re-renders the chrome. ChatBar owns `queueEditRef`
@@ -1195,7 +1194,6 @@ export function ChatBar({
               grows upward over the thread and the dock's own measurement covers
               it. Collapses to nothing when every status is empty. */}
           <ComposerStatusStack
-            onSubmit={onSubmit}
             queue={
               activeQueueSessionKey && queuedPrompts.length > 0 ? (
                 <QueuePanel

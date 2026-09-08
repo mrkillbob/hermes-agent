@@ -264,7 +264,6 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/bundled/research/research-competitor-news-monitor',
                     'user-guide/skills/bundled/research/research-grounded-citations',
                     'user-guide/skills/bundled/research/research-llm-wiki',
-                    'user-guide/skills/bundled/research/research-rss-feeds',
                   ],
                 },
                 {
@@ -273,7 +272,6 @@ const sidebars: SidebarsConfig = {
                   key: 'skills-bundled-social-media',
                   collapsed: true,
                   items: [
-                    'user-guide/skills/bundled/social-media/social-media-reddit-reading',
                     'user-guide/skills/bundled/social-media/social-media-xurl',
                   ],
                 },
@@ -764,7 +762,6 @@ const sidebars: SidebarsConfig = {
             'developer-guide/prompt-assembly',
             'developer-guide/context-compression-and-caching',
             'developer-guide/gateway-internals',
-            'developer-guide/completion-backlog-delivery',
             'developer-guide/session-storage',
             'developer-guide/provider-runtime',
             'developer-guide/programmatic-integration',

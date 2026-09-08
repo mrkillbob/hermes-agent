@@ -14,8 +14,7 @@ import types
 import pytest
 
 from gateway.config import Platform
-from gateway.run import GatewayRunner
-from gateway.run_turn_runner import TurnRunner
+from gateway.run import GatewayRunner, TurnRunner
 
 
 def _attach(lane):

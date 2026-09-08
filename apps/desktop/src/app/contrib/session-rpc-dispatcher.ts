@@ -106,8 +106,6 @@ export function createSessionRpcDispatcher(deps: SessionRpcDispatcherDeps): Ambi
       // calls; this seam covers the other session-scoped callers and wakes
       // route-resume for the visible main session only. Do not retry the
       // failing RPC — it may be destructive, and a fresh binding is async.
-      // A session the user just deleted is filtered by requestSessionResume,
-      // which drops resume requests for a removal-pending id.
       if (
         method !== 'session.resume' &&
         method !== 'session.activate' &&

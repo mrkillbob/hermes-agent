@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import time
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from .github_client import CheckState, GitHubClient, PullRequestMergeState
-from .ledger import FeedbackLedger
+from .ledger import CIRunLease, FeedbackLedger
 
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -35,6 +36,15 @@ _CI_RUN_LEASE = timedelta(hours=2)
 
 class CIValidationError(RuntimeError):
     """The requested CI run was not authoritative for its claimed identity."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        command_evidence: tuple[CommandEvidence, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.command_evidence = command_evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +101,42 @@ class CIAuditReceipt:
     completed_at: datetime
     actions_state: CheckState
     commands: tuple[CommandEvidence, ...]
+    failure_reason: str | None = None
+
+    def validate(self) -> None:
+        """Validate the receipt's self-authenticating identity and evidence."""
+
+        if not re.fullmatch(r"[0-9a-f]{64}", self.receipt_id, re.IGNORECASE):
+            raise ValueError("CI receipt payload has invalid receipt_id")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.manifest_digest, re.IGNORECASE):
+            raise ValueError("CI receipt payload has invalid manifest digest")
+        if self.completed_at < self.started_at:
+            raise ValueError("CI receipt payload has inverted timestamps")
+        for command in self.commands:
+            if not re.fullmatch(r"[0-9a-f]{64}", command.stdout_sha256, re.IGNORECASE):
+                raise ValueError("CI receipt payload has invalid stdout digest")
+            if not re.fullmatch(r"[0-9a-f]{64}", command.stderr_sha256, re.IGNORECASE):
+                raise ValueError("CI receipt payload has invalid stderr digest")
+        if self.status == "passed":
+            if not self.commands:
+                raise ValueError("passed CI receipt has no command evidence")
+            if any(
+                command.returncode != 0
+                or command.timed_out
+                or command.classification != "passed"
+                for command in self.commands
+            ):
+                raise ValueError("passed CI receipt has incomplete command evidence")
+        if self.status == "passed":
+            expected_id = _receipt_id(
+                self.identity,
+                self.manifest_digest,
+                self.status,
+                self.completed_at,
+                self.commands,
+            )
+            if self.receipt_id.casefold() != expected_id:
+                raise ValueError("CI receipt payload receipt_id does not match its evidence")
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -109,6 +155,7 @@ class CIAuditReceipt:
                 "actions_enabled": self.actions_state.actions_enabled,
                 "all_green": self.actions_state.all_green,
                 "check_count": self.actions_state.check_count,
+                "billing_blocked": self.actions_state.billing_blocked,
             },
             "commands": [
                 {
@@ -123,49 +170,128 @@ class CIAuditReceipt:
                 }
                 for command in self.commands
             ],
+            "failure_reason": self.failure_reason,
         }
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> CIAuditReceipt:
-        identity = payload["identity"]
-        actions = payload["actions_state"]
-        commands = payload["commands"]
+        if not isinstance(payload, Mapping):
+            raise ValueError("CI receipt payload must be an object")
+        identity = payload.get("identity")
+        actions = payload.get("actions_state")
+        commands = payload.get("commands")
         if not isinstance(identity, Mapping) or not isinstance(actions, Mapping):
-            raise ValueError("CI receipt payload has invalid identity")
+            raise ValueError("CI receipt payload has invalid identity or action state")
         if not isinstance(commands, list):
             raise ValueError("CI receipt payload has invalid commands")
-        return cls(
-            receipt_id=str(payload["receipt_id"]),
-            identity=CIAuditIdentity(
-                str(identity["repository"]),
-                int(identity["pr_number"]),
-                str(identity["base_sha"]),
-                str(identity["head_sha"]),
-            ),
-            manifest_digest=str(payload["manifest_digest"]),
-            status=str(payload["status"]),
-            started_at=datetime.fromisoformat(str(payload["started_at"])),
-            completed_at=datetime.fromisoformat(str(payload["completed_at"])),
-            actions_state=CheckState(
-                actions_enabled=bool(actions["actions_enabled"]),
-                all_green=bool(actions["all_green"]),
-                check_count=int(actions["check_count"]),
-            ),
-            commands=tuple(
-                CommandEvidence(
-                    argv=tuple(str(argument) for argument in command["argv"]),
-                    cwd=str(command["cwd"]),
-                    returncode=int(command["returncode"]),
-                    duration_ms=int(command["duration_ms"]),
-                    timed_out=bool(command["timed_out"]),
-                    stdout_sha256=str(command["stdout_sha256"]),
-                    stderr_sha256=str(command["stderr_sha256"]),
-                    classification=str(command["classification"]),
-                )
-                for command in commands
-                if isinstance(command, Mapping)
-            ),
+        receipt_id = _required_text(payload.get("receipt_id"), "receipt_id", 128)
+        manifest_digest = _required_text(
+            payload.get("manifest_digest"), "manifest_digest", 64
         )
+        status = _required_text(payload.get("status"), "status", 16)
+        if status not in {"passed", "failed"}:
+            raise ValueError("CI receipt payload has invalid status")
+        parsed_commands: list[CommandEvidence] = []
+        for command in commands:
+            if not isinstance(command, Mapping):
+                raise ValueError("CI receipt payload has an invalid command")
+            argv = command.get("argv")
+            if (
+                not isinstance(argv, list)
+                or not argv
+                or any(not isinstance(argument, str) or not argument for argument in argv)
+            ):
+                raise ValueError("CI receipt payload has invalid command argv")
+            classification = _required_text(
+                command.get("classification"), "command classification", 32
+            )
+            if classification not in {"passed", "logic-regression", "environment-blocked"}:
+                raise ValueError("CI receipt payload has invalid command classification")
+            parsed_commands.append(
+                CommandEvidence(
+                    argv=tuple(argv),
+                    cwd=_required_text(command.get("cwd"), "command cwd", 4096),
+                    returncode=_required_int(command.get("returncode"), "command returncode"),
+                    duration_ms=_required_nonnegative_int(
+                        command.get("duration_ms"), "command duration"
+                    ),
+                    timed_out=_required_bool(command.get("timed_out"), "command timeout"),
+                    stdout_sha256=_required_text(
+                        command.get("stdout_sha256"), "stdout digest", 64
+                    ),
+                    stderr_sha256=_required_text(
+                        command.get("stderr_sha256"), "stderr digest", 64
+                    ),
+                    classification=classification,
+                )
+            )
+        failure_reason = payload.get("failure_reason")
+        if failure_reason is not None:
+            failure_reason = _required_text(failure_reason, "failure reason", 1000)
+        receipt = cls(
+            receipt_id=receipt_id,
+            identity=CIAuditIdentity(
+                _required_text(identity.get("repository"), "repository", 255),
+                _required_int(identity.get("pr_number"), "pr number"),
+                _required_text(identity.get("base_sha"), "base SHA", 64),
+                _required_text(identity.get("head_sha"), "head SHA", 64),
+            ),
+            manifest_digest=manifest_digest,
+            status=status,
+            started_at=_required_timestamp(payload.get("started_at"), "started_at"),
+            completed_at=_required_timestamp(payload.get("completed_at"), "completed_at"),
+            actions_state=CheckState(
+                actions_enabled=_required_bool(actions.get("actions_enabled"), "actions enabled"),
+                all_green=_required_bool(actions.get("all_green"), "actions green"),
+                check_count=_required_nonnegative_int(
+                    actions.get("check_count"), "check count"
+                ),
+                billing_blocked=_required_bool(
+                    actions.get("billing_blocked", False), "billing blocked"
+                ),
+            ),
+            commands=tuple(parsed_commands),
+            failure_reason=failure_reason,
+        )
+        receipt.validate()
+        return receipt
+
+
+def _required_text(value: object, field: str, max_length: int) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > max_length:
+        raise ValueError(f"CI receipt payload has invalid {field}")
+    return value
+
+
+def _required_bool(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"CI receipt payload has invalid {field}")
+    return value
+
+
+def _required_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"CI receipt payload has invalid {field}")
+    return value
+
+
+def _required_nonnegative_int(value: object, field: str) -> int:
+    value = _required_int(value, field)
+    if value < 0:
+        raise ValueError(f"CI receipt payload has invalid {field}")
+    return value
+
+
+def _required_timestamp(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"CI receipt payload has invalid {field}")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(f"CI receipt payload has invalid {field}") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"CI receipt payload has non-aware {field}")
+    return parsed.astimezone(UTC)
 
 
 class CICommandRunner(Protocol):
@@ -318,19 +444,71 @@ class LocalCIRunner:
         try:
             receipt = self._run_claimed(identity, resolved)
         except Exception as error:
-            self._ledger.finish_ci_run(
+            completed_at = _aware_now(self._now())
+            receipt = _failed_receipt(
+                identity,
+                manifest_digest,
+                claimed_at,
+                completed_at,
+                error,
+                commands=getattr(error, "command_evidence", ()),
+            )
+            receipt = self._finalize_ci_run_or_recover(
                 lease,
-                status="failed",
-                completed_at=_aware_now(self._now()),
+                receipt,
+                status="completed",
+                completed_at=completed_at,
                 error=type(error).__name__,
             )
-            raise
-        self._ledger.finish_ci_run(
+            return receipt
+        receipt = self._finalize_ci_run_or_recover(
             lease,
+            receipt,
             status="completed",
             completed_at=receipt.completed_at,
-            receipt_id=receipt.receipt_id,
         )
+        return receipt
+
+    def _finalize_ci_run_or_recover(
+        self,
+        lease: CIRunLease,
+        receipt: CIAuditReceipt,
+        *,
+        status: str,
+        completed_at: datetime,
+        error: str | None = None,
+    ) -> CIAuditReceipt:
+        try:
+            self._ledger.finalize_ci_run(
+                lease,
+                receipt,
+                status=status,
+                completed_at=completed_at,
+                error=error,
+            )
+        except Exception:
+            try:
+                persisted = self._ledger.ci_receipt_by_id(
+                    receipt.identity.repository,
+                    receipt.identity.pr_number,
+                    receipt.receipt_id,
+                )
+                lifecycle = self._ledger.latest_ci_run(
+                    receipt.identity.repository,
+                    receipt.identity.pr_number,
+                    receipt.identity.head_sha,
+                )
+            except Exception:
+                raise
+            if (
+                isinstance(persisted, CIAuditReceipt)
+                and persisted == receipt
+                and lifecycle is not None
+                and lifecycle.get("status") == "completed"
+                and lifecycle.get("receipt_id") == receipt.receipt_id
+            ):
+                return persisted
+            raise
         return receipt
 
     def _run_claimed(self, identity: CIAuditIdentity, worktree: Path) -> CIAuditReceipt:
@@ -341,7 +519,7 @@ class LocalCIRunner:
         scripts = tuple(worktree / relative for relative in _REQUIRED_SCRIPTS)
         if not manifest_path.is_file() or any(not script.is_file() for script in scripts):
             raise CIValidationError("required CI owner files are missing")
-        self._ensure_python_environment(worktree)
+        bootstrap_evidence = self._ensure_python_environment(worktree)
         manifest_bytes = manifest_path.read_bytes()
         manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
         lanes = _required_lanes(manifest_bytes)
@@ -394,6 +572,8 @@ class LocalCIRunner:
             )
 
         evidence: list[CommandEvidence] = []
+        if bootstrap_evidence is not None:
+            evidence.append(bootstrap_evidence)
         for argv, cwd, additions in command_specs:
             environment = dict(os.environ)
             environment.update(additions)
@@ -405,19 +585,32 @@ class LocalCIRunner:
                 break
 
         if self._inspector.head_sha(worktree) != identity.head_sha:
-            raise CIValidationError("CI worktree head changed during execution")
+            raise CIValidationError(
+                "CI worktree head changed during execution",
+                command_evidence=tuple(evidence),
+            )
         if not self._inspector.is_clean(worktree):
-            raise CIValidationError("CI worktree became dirty during execution")
+            raise CIValidationError(
+                "CI worktree became dirty during execution",
+                command_evidence=tuple(evidence),
+            )
         final_state = self._github.get_merge_state(identity.repository, identity.pr_number)
         final_checks = self._github.get_check_state(identity.repository, identity.head_sha)
         _require_identity(identity, final_state)
         if final_checks != initial_checks:
-            raise CIValidationError("GitHub Actions state changed during CI execution")
+            raise CIValidationError(
+                "GitHub Actions state changed during CI execution",
+                command_evidence=tuple(evidence),
+            )
 
         completed_at = _aware_now(self._now())
-        status = "passed" if len(evidence) == len(command_specs) and all(
+        expected_command_count = len(command_specs) + (1 if bootstrap_evidence else 0)
+        status = "passed" if len(evidence) == expected_command_count and all(
             item.returncode == 0 and not item.timed_out for item in evidence
         ) else "failed"
+        failed_commands = tuple(
+            item for item in evidence if item.returncode != 0 or item.timed_out
+        )
         receipt_id = _receipt_id(
             identity, manifest_digest, status, completed_at, tuple(evidence)
         )
@@ -430,33 +623,80 @@ class LocalCIRunner:
             completed_at=completed_at,
             actions_state=initial_checks,
             commands=tuple(evidence),
+            failure_reason=(
+                None
+                if not failed_commands
+                else "failed command: "
+                + shlex.join(failed_commands[0].argv)
+                + f" rc={failed_commands[0].returncode}"
+            ),
         )
-        self._ledger.record_ci_receipt(receipt)
         return receipt
 
-    def _ensure_python_environment(self, worktree: Path) -> None:
+    def _ensure_python_environment(self, worktree: Path) -> CommandEvidence | None:
         executable = Path(self._python_argv[0])
         if executable.is_absolute() or "/" not in str(executable):
-            return
+            return None
         resolved = worktree / executable
         if resolved.is_file() and os.access(resolved, os.X_OK):
-            return
+            expected_path = worktree / ".python-version"
+            if expected_path.is_file():
+                expected = expected_path.read_text(encoding="utf-8").strip().splitlines()[0]
+                if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", expected):
+                    raise CIValidationError("worktree Python version pin is invalid")
+                probe = (
+                    str(resolved),
+                    "-c",
+                    "import sys; print('.'.join(map(str, sys.version_info[:3])))",
+                )
+                result = self._commands.run(
+                    probe,
+                    cwd=worktree,
+                    env=dict(os.environ),
+                    timeout=30,
+                )
+                actual = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+                matches = actual == expected or (
+                    expected.count(".") == 1 and actual.startswith(expected + ".")
+                )
+                if result.returncode != 0 or result.timed_out or not matches:
+                    evidence = _command_evidence(probe, worktree, worktree, result)
+                    evidence = CommandEvidence(
+                        argv=evidence.argv,
+                        cwd=evidence.cwd,
+                        returncode=evidence.returncode,
+                        duration_ms=evidence.duration_ms,
+                        timed_out=evidence.timed_out,
+                        stdout_sha256=evidence.stdout_sha256,
+                        stderr_sha256=evidence.stderr_sha256,
+                        classification="environment-blocked",
+                    )
+                    raise CIValidationError(
+                        f"Python interpreter mismatch: expected {expected}, got {actual or 'unavailable'}",
+                        command_evidence=(evidence,),
+                    )
+            return None
         bootstrap = worktree / "scripts/bootstrap_agent_workspace.py"
         if not bootstrap.is_file():
             raise CIValidationError("worktree Python environment is missing")
+        argv = ("python3", "scripts/bootstrap_agent_workspace.py", "--venv", "link")
         result = self._commands.run(
-            ("python3", "scripts/bootstrap_agent_workspace.py", "--venv", "link"),
+            argv,
             cwd=worktree,
             env=dict(os.environ),
             timeout=_BOOTSTRAP_TIMEOUT_SECONDS,
         )
+        evidence = _command_evidence(argv, worktree, worktree, result)
         if (
             result.returncode != 0
             or result.timed_out
             or not resolved.is_file()
             or not os.access(resolved, os.X_OK)
         ):
-            raise CIValidationError("worktree Python bootstrap failed")
+            raise CIValidationError(
+                "worktree Python bootstrap failed", command_evidence=(evidence,)
+            )
+        return evidence
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -464,11 +704,15 @@ def _pid_is_alive(pid: int) -> bool:
 
     if pid < 2:
         return False
-    # Use Hermes' cross-platform probe: on Windows ``os.kill(pid, 0)`` can
-    # deliver CTRL_C_EVENT to the target's console process group.
-    from gateway.status import _pid_exists
-
-    return _pid_exists(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _lane_argv(
@@ -570,6 +814,37 @@ def _receipt_id(
         "commands": [command.stdout_sha256 + command.stderr_sha256 for command in evidence],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _failed_receipt(
+    identity: CIAuditIdentity,
+    manifest_digest: str,
+    started_at: datetime,
+    completed_at: datetime,
+    error: Exception,
+    *,
+    commands: tuple[CommandEvidence, ...] = (),
+) -> CIAuditReceipt:
+    """Persist typed failure evidence when validation aborts before lane output."""
+
+    reason = f"{type(error).__name__}: {error}"[:1000]
+    receipt_id = _receipt_id(identity, manifest_digest, "failed", completed_at, commands)
+    return CIAuditReceipt(
+        receipt_id=receipt_id,
+        identity=identity,
+        manifest_digest=manifest_digest,
+        status="failed",
+        started_at=started_at,
+        completed_at=completed_at,
+        actions_state=CheckState(
+            actions_enabled=False,
+            all_green=False,
+            check_count=0,
+            billing_blocked=False,
+        ),
+        commands=commands,
+        failure_reason=reason,
+    )
 
 
 def _aware_now(value: datetime) -> datetime:

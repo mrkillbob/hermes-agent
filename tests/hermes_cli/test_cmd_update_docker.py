@@ -21,8 +21,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_cli.main import cmd_update
-from hermes_cli.update_cmd import _cmd_update_check
+from hermes_cli.main import _cmd_update_check, cmd_update
 
 
 # ---------- cmd_update (apply path) ----------

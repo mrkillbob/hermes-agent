@@ -65,8 +65,9 @@ optional_env:
 
 ```python
 import os
-from gateway.platforms.base import BasePlatformAdapter, SendResult
-from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.base import (
+    BasePlatformAdapter, SendResult, MessageEvent, MessageType,
+)
 from gateway.config import Platform, PlatformConfig
 
 
@@ -475,8 +476,9 @@ class Platform(str, Enum):
 
 ```python
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, SendResult
-from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.base import (
+    BasePlatformAdapter, MessageEvent, MessageType, SendResult,
+)
 
 def check_newplat_requirements() -> bool:
     """如果依赖可用则返回 True。"""
@@ -535,9 +537,9 @@ await self.handle_message(event)
 
 ### 4. Gateway Runner（`gateway/run.py`）
 
-六个接触点：
+五个接触点：
 
-1. **`_instantiate_adapter()`** — 添加 `elif platform == Platform.NEWPLAT:` 分支。`_create_adapter()` 包装器会将每个成功创建的适配器绑定到其网关运行器。
+1. **`_create_adapter()`** — 添加 `elif platform == Platform.NEWPLAT:` 分支
 2. **`_is_user_authorized()` allowed_users 映射** — `Platform.NEWPLAT: "NEWPLAT_ALLOWED_USERS"`
 3. **`_is_user_authorized()` allow_all 映射** — `Platform.NEWPLAT: "NEWPLAT_ALLOW_ALL_USERS"`
 4. **早期环境检查 `_any_allowlist` 元组** — 添加 `"NEWPLAT_ALLOWED_USERS"`

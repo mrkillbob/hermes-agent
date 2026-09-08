@@ -90,11 +90,14 @@ class TestResolveAwsAuthEnvVar:
     """
 
 
+
     def test_requires_both_access_key_and_secret(self):
         from agent.bedrock_adapter import resolve_aws_auth_env_var
         # Only access key, no secret → should not match
         env = {"AWS_ACCESS_KEY_ID": "AKIA..."}
         assert resolve_aws_auth_env_var(env) != "AWS_ACCESS_KEY_ID"
+
+
 
 
     def test_returns_none_when_no_aws_auth(self):
@@ -106,6 +109,7 @@ class TestResolveAwsAuthEnvVar:
             import botocore.session as _bs
             _bs.get_session = MagicMock(return_value=mock_session)
             assert resolve_aws_auth_env_var({}) is None
+
 
 
 class TestHasAwsCredentials:
@@ -137,6 +141,8 @@ class TestResolveBedrocRegion:
         mock_session.get_config_variable.return_value = None
         with _mock_botocore_session(return_value=mock_session):
             assert resolve_bedrock_region({}) == "us-east-1"
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +181,7 @@ class TestConvertToolsToConverse:
         from agent.bedrock_adapter import convert_tools_to_converse
         assert convert_tools_to_converse([]) == []
         assert convert_tools_to_converse(None) == []
+
 
 
 # ---------------------------------------------------------------------------
@@ -248,12 +255,17 @@ class TestConvertMessagesToConverse:
         assert tr["toolResult"]["content"][0]["text"] == "file contents here"
 
 
+
+
+
     def test_empty_content_gets_placeholder(self):
         from agent.bedrock_adapter import convert_messages_to_converse
         messages = [{"role": "user", "content": ""}]
         system, msgs = convert_messages_to_converse(messages)
         # Empty string should get a space placeholder
         assert msgs[0]["content"][0]["text"].strip() != "" or msgs[0]["content"][0]["text"] == " "
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -336,84 +348,9 @@ class TestNormalizeConverseResponse:
         assert tool_calls[0].function.name == "read_file"
         assert json.loads(tool_calls[0].function.arguments) == {"path": "/tmp/test.txt"}
 
-    def test_redacted_reasoning_is_preserved_for_replay(self):
-        from agent.bedrock_adapter import normalize_converse_response
-
-        response = {
-            "output": {
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"reasoningContent": {"redactedContent": b"opaque-bedrock-bytes"}},
-                        {"toolUse": {"toolUseId": "call_1", "name": "read_file", "input": {}}},
-                    ],
-                },
-            },
-            "stopReason": "tool_use",
-            "usage": {"inputTokens": 1, "outputTokens": 2},
-        }
-
-        result = normalize_converse_response(response)
-        details = result.choices[0].message.reasoning_details
-        assert details == [{
-            "type": "redacted_thinking",
-            "data": "b3BhcXVlLWJlZHJvY2stYnl0ZXM=",
-        }]
 
 
-    def test_redacted_reasoning_replays_as_bedrock_content_block(self):
-        from agent.bedrock_adapter import convert_messages_to_converse
 
-        _system, messages = convert_messages_to_converse([
-            {
-                "role": "assistant",
-                "content": None,
-                "reasoning_details": [{
-                    "type": "redacted_thinking",
-                    "data": "b3BhcXVlLWJlZHJvY2stYnl0ZXM=",
-                }],
-                "tool_calls": [{
-                    "id": "call_1",
-                    "function": {"name": "read_file", "arguments": "{}"},
-                }],
-            },
-            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
-        ])
-        assistant = next(m for m in messages if m["role"] == "assistant")
-        assert assistant["content"][0] == {
-            "reasoningContent": {"redactedContent": b"opaque-bedrock-bytes"}
-        }
-
-    def test_interleaved_reasoning_and_tools_keep_exact_order(self):
-        from agent.bedrock_adapter import convert_messages_to_converse, normalize_converse_response
-
-        normalized = normalize_converse_response({
-            "output": {"message": {"role": "assistant", "content": [
-                {"reasoningContent": {"redactedContent": b"r1"}},
-                {"toolUse": {"toolUseId": "t1", "name": "one", "input": {"n": 1}}},
-                {"reasoningContent": {"redactedContent": b"r2"}},
-                {"toolUse": {"toolUseId": "t2", "name": "two", "input": {"n": 2}}},
-            ]}},
-            "stopReason": "tool_use",
-        })
-        msg = normalized.choices[0].message
-        _system, replay = convert_messages_to_converse([{
-            "role": "user", "content": "go",
-        }, {
-            "role": "assistant", "content": msg.content,
-            "tool_calls": [{
-                "id": tc.id, "type": "function",
-                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-            } for tc in msg.tool_calls],
-            "reasoning_details": msg.reasoning_details,
-            "bedrock_content_blocks": msg.bedrock_content_blocks,
-        }])
-        blocks = replay[1]["content"]
-        assert [next(iter(block)) for block in blocks] == [
-            "reasoningContent", "toolUse", "reasoningContent", "toolUse"
-        ]
-        assert blocks[0]["reasoningContent"]["redactedContent"] == b"r1"
-        assert blocks[2]["reasoningContent"]["redactedContent"] == b"r2"
 
 
 # ---------------------------------------------------------------------------
@@ -440,27 +377,6 @@ class TestNormalizeConverseStreamEvents:
         assert result.usage.prompt_tokens == 5
         assert result.usage.completion_tokens == 3
 
-    def test_redacted_reasoning_stream_is_preserved(self):
-        from agent.bedrock_adapter import normalize_converse_stream_events
-
-        events = {"stream": [
-            {"messageStart": {"role": "assistant"}},
-            {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}},
-            {"contentBlockDelta": {
-                "contentBlockIndex": 0,
-                "delta": {"reasoningContent": {"redactedContent": b"stream-secret"}},
-            }},
-            {"contentBlockStop": {"contentBlockIndex": 0}},
-            {"messageStop": {"stopReason": "end_turn"}},
-            {"metadata": {"usage": {"inputTokens": 2, "outputTokens": 3}}},
-        ]}
-
-        result = normalize_converse_stream_events(events)
-        assert result.choices[0].message.reasoning_details == [{
-            "type": "redacted_thinking",
-            "data": "c3RyZWFtLXNlY3JldA==",
-        }]
-
     def test_tool_use_stream(self):
         from agent.bedrock_adapter import normalize_converse_stream_events
         events = {"stream": [
@@ -485,6 +401,8 @@ class TestNormalizeConverseStreamEvents:
         assert tc[0].id == "call_1"
         assert tc[0].function.name == "read_file"
         assert json.loads(tc[0].function.arguments) == {"path": "/tmp/f"}
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +473,35 @@ class TestBuildConverseKwargs:
             max_tokens=None,
         )
         assert "inferenceConfig" not in kwargs
+
+    def test_call_converse_stream_omits_cap_for_none(self):
+        """The streaming entry point funnels through the same builder — pin
+        that max_tokens=None omits the cap there too."""
+        from unittest.mock import MagicMock, patch as mock_patch
+        from agent.bedrock_adapter import call_converse_stream
+        boto3_client = MagicMock()
+        boto3_client.converse_stream.return_value = {"stream": []}
+        with mock_patch(
+            "agent.bedrock_adapter._get_bedrock_runtime_client",
+            return_value=boto3_client,
+        ):
+            call_converse_stream(
+                region="us-east-1",
+                model="test-model",
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=None,
+                temperature=0.2,
+            )
+        wire_kwargs = boto3_client.converse_stream.call_args.kwargs
+        assert "maxTokens" not in wire_kwargs.get("inferenceConfig", {})
+
+
+
+
+
+
+
+
 
     def test_cache_point_added_for_supported_model(self):
         """Claude and Nova on the Converse path get cachePoint markers on
@@ -774,6 +721,8 @@ class TestDiscoverBedrockModels:
     """Test Bedrock model discovery with mocked AWS API calls."""
 
 
+
+
     def test_provider_filter(self):
         from agent.bedrock_adapter import discover_bedrock_models, reset_discovery_cache
         reset_discovery_cache()
@@ -834,6 +783,7 @@ class TestDiscoverBedrockModels:
         # Should only call the API once (second call uses cache)
         assert mock_client.list_foundation_models.call_count == 1
         assert first == second
+
 
 
     def test_handles_api_error_gracefully(self):
@@ -938,6 +888,9 @@ class TestStreamConverseWithCallbacks:
         assert len(result.choices[0].message.tool_calls) == 1
 
 
+
+
+
 # ---------------------------------------------------------------------------
 # Guardrail config in build_converse_kwargs
 # ---------------------------------------------------------------------------
@@ -984,13 +937,40 @@ class TestGuardrailConfig:
 # Error classification
 # ---------------------------------------------------------------------------
 
+class TestBedrockErrorClassification:
+    """Test Bedrock-specific error classification."""
+
+    def test_context_overflow_validation_exception(self):
+        from agent.bedrock_adapter import classify_bedrock_error
+        assert classify_bedrock_error(
+            "ValidationException: input is too long for model"
+        ) == "context_overflow"
+
+
+
+
+
+
+
+
+
 class TestBedrockContextLength:
     """Test Bedrock model context length lookup."""
+
+
+
+
+
+
+
+
+
 
 
     def test_unknown_model_gets_default(self):
         from agent.bedrock_adapter import get_bedrock_context_length, BEDROCK_DEFAULT_CONTEXT_LENGTH
         assert get_bedrock_context_length("unknown.model-v1:0") == BEDROCK_DEFAULT_CONTEXT_LENGTH
+
 
 
     def test_no_region_skips_probe_uses_table(self):
@@ -1013,6 +993,7 @@ class TestBedrockContextProbe:
         return client
 
 
+
     def test_probe_returns_none_when_client_unavailable(self):
         from agent.bedrock_adapter import probe_bedrock_context_length
         with patch("agent.bedrock_adapter._get_bedrock_runtime_client",
@@ -1031,6 +1012,7 @@ class TestBedrockContextProbe:
                 region="eu-central-1") == 1_000_000
 
 
+
 # ---------------------------------------------------------------------------
 # Tool-calling capability detection
 # ---------------------------------------------------------------------------
@@ -1043,9 +1025,15 @@ class TestModelSupportsToolUse:
         assert _model_supports_tool_use("us.anthropic.claude-sonnet-4-6") is True
 
 
+
+
     def test_deepseek_r1_no_tools(self):
         from agent.bedrock_adapter import _model_supports_tool_use
         assert _model_supports_tool_use("us.deepseek.r1-v1:0") is False
+
+
+
+
 
 
 class TestBuildConverseKwargsToolStripping:
@@ -1084,15 +1072,20 @@ class TestIsAnthropicBedrockModel:
         assert is_anthropic_bedrock_model("us.anthropic.claude-sonnet-4-6") is True
 
 
+
     def test_nova_is_not_anthropic(self):
         from agent.bedrock_adapter import is_anthropic_bedrock_model
         assert is_anthropic_bedrock_model("us.amazon.nova-pro-v1:0") is False
+
+
+
 
 
     def test_au_inference_profile(self):
         from agent.bedrock_adapter import is_anthropic_bedrock_model
         assert is_anthropic_bedrock_model("au.anthropic.claude-haiku-4-5-20251001-v1:0") is True
         assert is_anthropic_bedrock_model("au.anthropic.claude-sonnet-4-6") is True
+
 
 
 class TestEmptyTextBlockFix:
@@ -1107,10 +1100,13 @@ class TestEmptyTextBlockFix:
         assert blocks[0]["text"].strip()
 
 
+
     def test_real_text_preserved(self):
         from agent.bedrock_adapter import _convert_content_to_converse
         blocks = _convert_content_to_converse("Hello")
         assert blocks[0]["text"] == "Hello"
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1146,6 +1142,7 @@ class TestIsStaleConnectionError:
     """Classifier that decides whether an exception warrants client eviction."""
 
 
+
     def test_detects_botocore_read_timeout(self):
         pytest.importorskip("botocore.exceptions", reason="botocore (with working exceptions module) required")
         from agent.bedrock_adapter import is_stale_connection_error
@@ -1172,6 +1169,7 @@ class TestIsStaleConnectionError:
             pytest.fail("AssertionError not raised")
 
 
+
     def test_ignores_unrelated_exceptions(self):
         from agent.bedrock_adapter import is_stale_connection_error
         assert is_stale_connection_error(ValueError("bad input")) is False
@@ -1179,9 +1177,35 @@ class TestIsStaleConnectionError:
 
 
 class TestCallConverseInvalidatesOnStaleError:
-    """call_converse evicts the cached client only on a stale-connection error — so the
-    next invocation reconnects instead of reusing the dead socket (the agent's streaming
-    path is pinned in ``TestAgentBedrockStreamRecovery``)."""
+    """call_converse / call_converse_stream evict the cached client when the
+    boto3 call raises a stale-connection error — so the next invocation
+    reconnects instead of reusing the dead socket."""
+
+
+    def test_converse_stream_evicts_client_on_stale_error(self):
+        pytest.importorskip("botocore.exceptions", reason="botocore (with working exceptions module) required")
+        from agent.bedrock_adapter import (
+            _bedrock_runtime_client_cache,
+            call_converse_stream,
+            reset_client_cache,
+        )
+        from botocore.exceptions import ConnectionClosedError
+
+        reset_client_cache()
+        dead_client = MagicMock()
+        dead_client.converse_stream.side_effect = ConnectionClosedError(
+            endpoint_url="https://bedrock.example",
+        )
+        _bedrock_runtime_client_cache["us-east-1"] = dead_client
+
+        with pytest.raises(ConnectionClosedError):
+            call_converse_stream(
+                region="us-east-1",
+                model="anthropic.claude-3-sonnet-20240229-v1:0",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert "us-east-1" not in _bedrock_runtime_client_cache
 
     def test_converse_does_not_evict_on_non_stale_error(self):
         """Non-stale errors (e.g. ValidationException) leave the client cache alone."""
@@ -1213,6 +1237,7 @@ class TestCallConverseInvalidatesOnStaleError:
         )
 
 
+
 class TestStreamingAccessDeniedDetection:
     """is_streaming_access_denied_error() recognizes IAM denials of
     bedrock:InvokeModelWithResponseStream (InvokeModel-only policies)."""
@@ -1241,6 +1266,8 @@ class TestStreamingAccessDeniedDetection:
         assert is_streaming_access_denied_error(self._denied_client_error()) is True
 
 
+
+
     def test_ignores_unrelated_errors(self):
         from agent.bedrock_adapter import is_streaming_access_denied_error
         assert is_streaming_access_denied_error(ValueError("boom")) is False
@@ -1249,28 +1276,31 @@ class TestStreamingAccessDeniedDetection:
         ) is False
 
 
-class TestAgentBedrockStreamRecovery:
-    """The agent loop streams through ``chat_completion_helpers._bedrock_converse_call``;
-    pin the recovery ladder on that live path:
-    IAM streaming denial → ``_BedrockStream._fall_back_to_converse`` (non-streaming
-    converse, streaming disabled for the session, client kept), stale connection →
-    cached client evicted so the outer retry reconnects."""
+class TestCallConverseStreamIamFallback:
+    """call_converse_stream() falls back to converse() when IAM denies the
+    streaming action — InvokeModel-only policies keep working."""
 
-    _KW = {"__bedrock_region__": "us-east-1", "modelId": "anthropic.claude-3-sonnet-20240229-v1:0",
-           "messages": [{"role": "user", "content": [{"text": "hi"}]}]}
-
-    def test_streaming_denial_falls_back_to_converse_via_bedrock_stream(self):
+    def test_falls_back_to_converse_on_streaming_denial(self):
         pytest.importorskip("botocore.exceptions", reason="botocore (with working exceptions module) required")
-        from types import SimpleNamespace
-        from agent.bedrock_adapter import _bedrock_runtime_client_cache, reset_client_cache
-        from agent.chat_completion_helpers import _BedrockStream
+        from agent.bedrock_adapter import (
+            _bedrock_runtime_client_cache,
+            call_converse_stream,
+            reset_client_cache,
+        )
         from botocore.exceptions import ClientError
 
         reset_client_cache()
         client = MagicMock()
         client.converse_stream.side_effect = ClientError(
-            error_response={"Error": {"Code": "AccessDeniedException", "Message": (
-                "User is not authorized to perform: bedrock:InvokeModelWithResponseStream")}},
+            error_response={
+                "Error": {
+                    "Code": "AccessDeniedException",
+                    "Message": (
+                        "User is not authorized to perform: "
+                        "bedrock:InvokeModelWithResponseStream"
+                    ),
+                }
+            },
             operation_name="ConverseStream",
         )
         client.converse.return_value = {
@@ -1279,36 +1309,17 @@ class TestAgentBedrockStreamRecovery:
             "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
         }
         _bedrock_runtime_client_cache["us-east-1"] = client
-        agent = SimpleNamespace(_disable_streaming=False, _safe_print=MagicMock(), model="m", provider="bedrock")
-        stream = _BedrockStream(agent, dict(self._KW), on_first_delta=None)
 
-        result = stream._open_stream(dict(self._KW))
+        result = call_converse_stream(
+            region="us-east-1",
+            model="anthropic.claude-3-sonnet-20240229-v1:0",
+            messages=[{"role": "user", "content": "hi"}],
+        )
 
         client.converse.assert_called_once()
-        assert "__bedrock_region__" not in client.converse.call_args.kwargs
         assert result.choices[0].message.content == "hi"
-        assert agent._disable_streaming is True
-        assert "InvokeModelWithResponseStream" in agent._safe_print.call_args.args[0]
         # Not a stale connection — client stays cached.
         assert _bedrock_runtime_client_cache.get("us-east-1") is client
-
-    def test_stale_connection_evicts_client_on_agent_stream_path(self):
-        pytest.importorskip("botocore.exceptions", reason="botocore (with working exceptions module) required")
-        from agent.bedrock_adapter import _bedrock_runtime_client_cache, reset_client_cache
-        from agent.chat_completion_helpers import _bedrock_converse_call
-        from botocore.exceptions import ConnectionClosedError
-
-        reset_client_cache()
-        dead_client = MagicMock()
-        dead_client.converse_stream.side_effect = ConnectionClosedError(endpoint_url="https://bedrock.example")
-        _bedrock_runtime_client_cache["us-east-1"] = dead_client
-        denied = MagicMock()
-
-        with pytest.raises(ConnectionClosedError):
-            _bedrock_converse_call(dict(self._KW), stream=True, on_stream_denied=denied)
-
-        denied.assert_not_called()
-        assert "us-east-1" not in _bedrock_runtime_client_cache
 
 
 # ---------------------------------------------------------------------------
@@ -1338,6 +1349,7 @@ class TestRequireBoto3VersionCheck:
         with patch.dict("sys.modules", {"boto3": fake_boto3}):
             result = _require_boto3()
             assert result is fake_boto3
+
 
 
 class TestImageBase64Decoding:

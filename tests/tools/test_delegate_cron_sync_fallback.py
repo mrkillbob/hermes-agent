@@ -26,6 +26,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 import tools.delegate_tool as dt
 
@@ -46,10 +47,10 @@ def _make_real_child():
     from run_agent import AIAgent
 
     with (
-        patch("model_tools.get_tool_definitions", return_value=[]),
-        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
         patch("hermes_cli.config.load_config", return_value={}),
-        patch("agent.process_bootstrap.OpenAI"),
+        patch("run_agent.OpenAI"),
     ):
         child = AIAgent(
             api_key="test-key-1234567890",
@@ -82,7 +83,7 @@ def _make_real_child():
     # Keep the test hermetic: no session persistence.
     child._persist_disabled = True
     child._session_db = None
-
+    child._session_json_enabled = False
     return child
 
 

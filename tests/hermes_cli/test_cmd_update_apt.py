@@ -7,8 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_cli.main import cmd_update
-from hermes_cli.update_cmd import _cmd_update_check
+from hermes_cli.main import _cmd_update_check, cmd_update
 
 
 def test_apt_stamp_is_detected_and_recommends_pkg_upgrade(tmp_path):

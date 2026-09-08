@@ -17,7 +17,6 @@ import pytest
 from fastapi import HTTPException
 
 from hermes_cli import web_server
-import hermes_cli.web_server_sessions as _web_server_sessions
 from hermes_cli.web_routers import sessions as sessions_router
 
 
@@ -41,7 +40,7 @@ class _MalformedDB:
 def malformed_db(monkeypatch):
     db = _MalformedDB()
     monkeypatch.setattr(
-        _web_server_sessions, "_open_session_db_for_profile", lambda profile, *, read_only: db
+        web_server, "_open_session_db_for_profile", lambda profile, *, read_only: db
     )
     return db
 
@@ -136,7 +135,7 @@ class _EmptyDB:
 @pytest.mark.asyncio
 async def test_absent_session_is_still_404(monkeypatch):
     monkeypatch.setattr(
-        _web_server_sessions,
+        web_server,
         "_open_session_db_for_profile",
         lambda profile, *, read_only: _EmptyDB(),
     )
@@ -156,7 +155,7 @@ class _OtherErrorDB(_EmptyDB):
 @pytest.mark.asyncio
 async def test_non_corruption_database_error_is_not_swallowed(monkeypatch):
     monkeypatch.setattr(
-        _web_server_sessions,
+        web_server,
         "_open_session_db_for_profile",
         lambda profile, *, read_only: _OtherErrorDB(),
     )

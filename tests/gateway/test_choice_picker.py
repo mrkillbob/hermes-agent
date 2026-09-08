@@ -15,8 +15,7 @@ import yaml
 
 import gateway.run as gateway_run
 from gateway.config import Platform
-from gateway.platforms.base import SendResult
-from gateway.platforms.event import MessageEvent
+from gateway.platforms.base import MessageEvent, SendResult
 from gateway.session import SessionSource
 
 
@@ -127,7 +126,7 @@ class TestFastChoicePicker:
 
         assert result is None
         values = [c["value"] for c in adapter.calls[0]["choices"]]
-        assert values == ["fast", "normal", "auto", "cold"]
+        assert values == ["fast", "normal"]
 
     @pytest.mark.asyncio
     async def test_fast_picker_selection_is_session_scoped(self, tmp_path, monkeypatch):

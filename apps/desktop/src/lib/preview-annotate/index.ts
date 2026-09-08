@@ -1,5 +1,4 @@
 export { type AnnotateFlushPorts, type AnnotateFlushResult, flushAnnotateStack } from './flush'
-export { type AnnotateGroup, annotateSplitDepth, groupAnnotations } from './group'
 export { compactIdentity, type CompactIdentity, type ElementSnapshot, formatIdentityLine } from './identity'
 export {
   ANNOTATE_HOST_TAG,
@@ -43,7 +42,6 @@ export {
   ANNOTATE_CARD_WIDTH,
   ANNOTATE_CROP_PAD,
   ANNOTATE_CSS_KEYS,
-  ANNOTATE_HTML_BUDGET,
   ANNOTATE_MARKER_SIZE,
   ANNOTATE_OUTLINE_WIDTH,
   ANNOTATE_PILL_BG,

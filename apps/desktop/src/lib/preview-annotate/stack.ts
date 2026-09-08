@@ -1,5 +1,3 @@
-import type { CompactIdentity } from './identity'
-
 /**
  * Numbered pin stack for comment mode. Saving a pin only appends — it never
  * sends a turn. Numbers are assigned 1..N in add order and stay put if a pin
@@ -15,8 +13,12 @@ export interface AnnotateRect {
   y: number
 }
 
-/** What a pin knows about its element. One shape, owned by `identity`. */
-export type AnnotateIdentity = CompactIdentity
+export interface AnnotateIdentity {
+  css: Record<string, string>
+  selector: string
+  tag: string
+  text: string
+}
 
 export interface AnnotatePin {
   id: string

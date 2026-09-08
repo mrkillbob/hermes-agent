@@ -945,13 +945,11 @@ export function TaskDrawer({
               </Section>
             )}
 
-            {Array.isArray(detail.attachments) && (
-              <AttachmentsSection
-                attachments={detail.attachments}
-                onUpload={file => uploadMut.mutate(file)}
-                pending={uploadMut.isPending}
-              />
-            )}
+            <AttachmentsSection
+              attachments={detail.attachments}
+              onUpload={file => uploadMut.mutate(file)}
+              pending={uploadMut.isPending}
+            />
           </div>
         )}
       </div>

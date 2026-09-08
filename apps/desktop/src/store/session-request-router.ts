@@ -1,7 +1,5 @@
 import { requestGatewayForAgent, requestGatewayForProfile, retainGatewayForSessionTurn } from '@/store/gateway'
 
-import { resetBackgroundPollingGuardAfterRebind } from './session-gone-latch'
-
 /**
  * The ONE authoritative exact owner of a session: the registry connection whose
  * socket minted (or resumed) the runtime, plus the Desktop profile that selects
@@ -109,14 +107,13 @@ async function withRoutedTurnLease<T>(
   const sessionId = promptSessionId(method, params)
 
   if (!sessionId) {
-    return requestWithRebindGuard(method, params, request)
+    return request()
   }
 
   const release = await retainGatewayForSessionTurn(connectionId, profile, sessionId)
 
   try {
     const result = await request()
-    resetBackgroundPollingGuardAfterRebind(method, params, result)
 
     if (!turnKeepsRunning(result)) {
       release()
@@ -127,17 +124,6 @@ async function withRoutedTurnLease<T>(
     release()
     throw error
   }
-}
-
-async function requestWithRebindGuard<T>(
-  method: string,
-  params: Record<string, unknown>,
-  request: () => Promise<T>
-): Promise<T> {
-  const result = await request()
-  resetBackgroundPollingGuardAfterRebind(method, params, result)
-
-  return result
 }
 
 /**
@@ -207,14 +193,14 @@ export function requestForSessionProfile<T>(
     // for a deadline (the plugin host bridge in contrib/wiring is the only one
     // that does).
     if (signal !== undefined) {
-      return requestWithRebindGuard(method, params, () => ambientRequest<T>(method, params, timeoutMs, signal))
+      return ambientRequest<T>(method, params, timeoutMs, signal)
     }
 
     if (timeoutMs !== undefined) {
-      return requestWithRebindGuard(method, params, () => ambientRequest<T>(method, params, timeoutMs))
+      return ambientRequest<T>(method, params, timeoutMs)
     }
 
-    return requestWithRebindGuard(method, params, () => ambientRequest<T>(method, params))
+    return ambientRequest<T>(method, params)
   }
 
   const profile = normKey(ownerProfile)

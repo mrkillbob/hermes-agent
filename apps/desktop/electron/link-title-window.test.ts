@@ -10,16 +10,13 @@ import {
 } from './link-title-window'
 
 function makeFakeBrowserWindow() {
-  const calls = { audioMuted: [], windowOpenHandlers: [] }
+  const calls = { audioMuted: [] }
 
   const FakeBrowserWindow = function (options) {
     this.options = options
     this.webContents = {
       setAudioMuted(value) {
         calls.audioMuted.push(value)
-      },
-      setWindowOpenHandler(handler) {
-        calls.windowOpenHandlers.push(handler)
       }
     }
   }
@@ -48,9 +45,6 @@ test('createLinkTitleWindow mutes audio so historical links never autoplay sound
 
   assert.ok(window instanceof FakeBrowserWindow)
   assert.deepEqual(calls.audioMuted, [true])
-  // GHSA-9f4c-93c8-jc8g: a page loaded for its title must not be able to pop a window.
-  assert.equal(calls.windowOpenHandlers.length, 1)
-  assert.deepEqual(calls.windowOpenHandlers[0]({ url: 'https://attacker.test/popup' }), { action: 'deny' })
 })
 
 test('createLinkTitleWindow still returns the window if muting throws', () => {

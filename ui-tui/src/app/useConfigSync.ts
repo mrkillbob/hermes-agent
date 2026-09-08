@@ -253,11 +253,10 @@ const _pasteCollapseCharsFromConfig = (cfg: ConfigFullResponse | null): number =
 export async function hydrateFullConfig(
   gw: GatewayClient,
   setBell: (v: boolean) => void,
-  setVoiceRecordKey?: (v: ParsedVoiceRecordKey) => void,
-  setBellOnPrompt?: (v: boolean) => void
+  setVoiceRecordKey?: (v: ParsedVoiceRecordKey) => void
 ): Promise<ConfigFullResponse | null> {
   const cfg = await quietRpc<ConfigFullResponse>(gw, 'config.get', { key: 'full' })
-  applyDisplay(cfg, setBell, setVoiceRecordKey, setBellOnPrompt)
+  applyDisplay(cfg, setBell, setVoiceRecordKey)
 
   return cfg
 }
@@ -265,15 +264,12 @@ export async function hydrateFullConfig(
 export const applyDisplay = (
   cfg: ConfigFullResponse | null,
   setBell: (v: boolean) => void,
-  setVoiceRecordKey?: (v: ParsedVoiceRecordKey) => void,
-  setBellOnPrompt?: (v: boolean) => void
+  setVoiceRecordKey?: (v: ParsedVoiceRecordKey) => void
 ) => {
   const d = cfg?.config?.display ?? {}
   const approvals = cfg?.config?.approvals
 
   setBell(!!d.bell_on_complete)
-
-  setBellOnPrompt?.(!!d.bell_on_prompt)
 
   applyConfiguredTuiTheme(d.tui_theme)
 
@@ -318,7 +314,6 @@ export const applyDisplay = (
 export function useConfigSync({
   gw,
   setBellOnComplete,
-  setBellOnPrompt,
   setVoiceEnabled,
   setVoiceRecordKey,
   sid
@@ -344,8 +339,8 @@ export function useConfigSync({
       // mcp_rev) look like an MCP change and fire a needless reload.mcp.
       mcpRevRef.current.accepted = String(r?.mcp_rev ?? '')
     })
-    void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey, setBellOnPrompt)
-  }, [gw, setBellOnComplete, setBellOnPrompt, setVoiceEnabled, setVoiceRecordKey, sid])
+    void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey)
+  }, [gw, setBellOnComplete, setVoiceEnabled, setVoiceRecordKey, sid])
 
   useEffect(() => {
     if (!sid) {
@@ -392,18 +387,17 @@ export function useConfigSync({
           )
         }
 
-        void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey, setBellOnPrompt)
+        void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey)
       })
     }, MTIME_POLL_MS)
 
     return () => clearInterval(id)
-  }, [gw, setBellOnComplete, setBellOnPrompt, setVoiceRecordKey, sid])
+  }, [gw, setBellOnComplete, setVoiceRecordKey, sid])
 }
 
 export interface UseConfigSyncOptions {
   gw: GatewayClient
   setBellOnComplete: (v: boolean) => void
-  setBellOnPrompt?: (v: boolean) => void
   setVoiceEnabled: (v: boolean) => void
   setVoiceRecordKey?: (v: ParsedVoiceRecordKey) => void
   sid: null | string

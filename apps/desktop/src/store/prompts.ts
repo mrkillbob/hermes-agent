@@ -3,8 +3,6 @@ import { atom, computed, type ReadableAtom } from 'nanostores'
 import { $clarifyRequest, $clarifyRequests } from './clarify'
 import { isSessionGone, isSessionGoneForBackgroundPolling, markSessionGone } from './runtime-gone'
 import { $activeSessionId } from './session'
-import { ambientRequestFor } from './session-gone-latch'
-import { requestForOwnedSession } from './session-states'
 
 // Blocking interactive prompts the gateway raises mid-turn. Each maps to a
 // `*.request` event the Python side emits while it blocks the agent thread
@@ -122,20 +120,10 @@ export async function receiveApprovalRequest(gateway: ApprovalGateway | null, re
   setApprovalRequest(request)
 
   if (gateway && request.requestId && request.sessionId) {
-    try {
-      await requestForOwnedSession(request.sessionId, ambientRequestFor(gateway), 'approval.received', {
-        request_id: request.requestId,
-        session_id: request.sessionId
-      })
-    } catch (error) {
-      if (isSessionGoneForBackgroundPolling(error)) {
-        markSessionGone(request.sessionId)
-
-        return
-      }
-
-      throw error
-    }
+    await gateway.request('approval.received', {
+      request_id: request.requestId,
+      session_id: request.sessionId
+    })
   }
 }
 
@@ -147,7 +135,7 @@ export async function replayPendingApproval(gateway: ApprovalGateway | null, ses
   let rawResult: unknown
 
   try {
-    rawResult = await requestForOwnedSession(sessionId, ambientRequestFor(gateway), 'approval.pending', {
+    rawResult = await gateway.request('approval.pending', {
       session_id: sessionId
     })
   } catch (error) {

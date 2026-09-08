@@ -22,7 +22,6 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
-from hermes_cli import kanban_db_connect as kbc
 
 
 @pytest.fixture
@@ -65,7 +64,7 @@ def _make_running_again(conn, tid):
 
 
 def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
-    with kbc.connect_closing() as conn:
+    with kb.connect_closing() as conn:
         tid = _running_task(conn)
         kb.block_task(conn, tid, reason="x", kind="capability")
         kb.unblock_task(conn, tid)
@@ -79,13 +78,6 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
         assert payload.get("kind") == "capability"
 
 
-def test_live_home_preserves_external_assignee_lane(kanban_home: Path) -> None:
-    (kanban_home / "profiles").mkdir()
-    with kbc.connect_closing() as conn:
-        task_id = kb.create_task(conn, title="Review worker", assignee="worker")
-        assert kb.get_task(conn, task_id).assignee == "worker"
-
-
 # ---------------------------------------------------------------------------
 # Dependency routing
 # ---------------------------------------------------------------------------
@@ -93,7 +85,7 @@ def test_live_home_preserves_external_assignee_lane(kanban_home: Path) -> None:
 
 def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
     """A dependency-parked child becomes ready once its parent completes."""
-    with kbc.connect_closing() as conn:
+    with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="worker")
         child = _running_task(conn, title="child")
         kb.link_tasks(conn, parent_id=parent, child_id=child)
@@ -116,3 +108,5 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
 # ---------------------------------------------------------------------------
 # Validation + back-compat
 # ---------------------------------------------------------------------------
+
+

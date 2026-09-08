@@ -1,5 +1,5 @@
 import { firstStringField, normalize } from '@/lib/text'
-import { isTodoToolName, parseTodos } from '@/lib/todos'
+import { parseTodos } from '@/lib/todos'
 import type { SessionMessage } from '@/types/hermes'
 
 import type { ChatMessage, ChatMessagePart, GatewayEventPayload } from './types'
@@ -231,7 +231,7 @@ function carryTodos(payload: GatewayEventPayload | undefined, ...prev: unknown[]
     return next === null ? undefined : { todos: next }
   }
 
-  if (!isTodoToolName(payload?.name)) {
+  if (payload?.name !== 'todo') {
     return undefined
   }
 

@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
-from collections.abc import Callable, Iterator
+import time
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .policy import FeedbackReceipt
@@ -52,6 +54,13 @@ class CIRunLease:
 
 
 @dataclass(frozen=True, slots=True)
+class WorktreeSlotLease:
+    slot_id: int
+    version: int
+    owner_pid: int
+
+
+@dataclass(frozen=True, slots=True)
 class MaintenanceReceipt:
     repository: str
     head_sha: str
@@ -59,10 +68,145 @@ class MaintenanceReceipt:
     status: str
     summary: str
     completed_at: datetime
+    command_evidence: tuple["MaintenanceCommandEvidence", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceCommandEvidence:
+    """Typed evidence for one command executed by a maintenance worker.
+
+    Maintenance summaries are explanatory text, not proof that a command ran.
+    Keeping argv, return code, timeout state, and output digests in the ledger
+    makes a passed maintenance receipt auditable and prevents prose-only
+    completion from advancing the release-maintenance state machine.
+    """
+
+    argv: tuple[str, ...]
+    cwd: str
+    returncode: int
+    duration_ms: int
+    timed_out: bool
+    stdout_sha256: str
+    stderr_sha256: str
+
+    def validate(self) -> None:
+        if not self.argv or any(not isinstance(arg, str) or not arg for arg in self.argv):
+            raise ValueError("maintenance command argv is invalid")
+        if not isinstance(self.cwd, str) or not self.cwd.strip():
+            raise ValueError("maintenance command cwd is invalid")
+        if isinstance(self.returncode, bool) or not isinstance(self.returncode, int):
+            raise ValueError("maintenance command return code is invalid")
+        if (
+            isinstance(self.duration_ms, bool)
+            or not isinstance(self.duration_ms, int)
+            or self.duration_ms < 0
+        ):
+            raise ValueError("maintenance command duration is invalid")
+        if not isinstance(self.timed_out, bool):
+            raise ValueError("maintenance command timeout is invalid")
+        for name in ("stdout_sha256", "stderr_sha256"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not _SHA256.fullmatch(value):
+                raise ValueError(f"maintenance command {name} is invalid")
+
+    def to_payload(self) -> dict[str, object]:
+        self.validate()
+        return {
+            "argv": list(self.argv),
+            "cwd": self.cwd,
+            "returncode": self.returncode,
+            "duration_ms": self.duration_ms,
+            "timed_out": self.timed_out,
+            "stdout_sha256": self.stdout_sha256,
+            "stderr_sha256": self.stderr_sha256,
+        }
+
+
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def parse_maintenance_command_evidence(
+    payload: object,
+) -> tuple[MaintenanceCommandEvidence, ...]:
+    """Parse and validate the command evidence accepted by the ledger."""
+
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("maintenance command evidence must be a non-empty list")
+    parsed: list[MaintenanceCommandEvidence] = []
+    for item in payload:
+        if not isinstance(item, Mapping):
+            raise ValueError("maintenance command evidence item is invalid")
+        argv = item.get("argv")
+        if not isinstance(argv, list):
+            raise ValueError("maintenance command argv is invalid")
+        command = MaintenanceCommandEvidence(
+            argv=tuple(argv),
+            cwd=item.get("cwd"),
+            returncode=item.get("returncode"),
+            duration_ms=item.get("duration_ms"),
+            timed_out=item.get("timed_out"),
+            stdout_sha256=item.get("stdout_sha256"),
+            stderr_sha256=item.get("stderr_sha256"),
+        )
+        command.validate()
+        parsed.append(command)
+    return tuple(parsed)
 
 
 class LedgerStateError(RuntimeError):
     """The caller tried to finalize or fail a receipt it does not hold."""
+
+
+_LEDGER_BUSY_TIMEOUT_MS = 5_000
+_LEDGER_STARTUP_RETRY_DELAYS = (0.05, 0.1, 0.25, 0.5, 1.0)
+
+
+def _is_transient_startup_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "database is locked",
+            "database is busy",
+            "unable to open database file",
+        )
+    )
+
+
+def _connect_ledger(path: Path) -> sqlite3.Connection:
+    """Open a ledger with busy waiting installed before WAL negotiation.
+
+    Multiple Hermes profiles can initialize the same feedback ledger after a
+    restart. SQLite negotiates WAL by taking a write lock, so the busy timeout
+    must be installed before the WAL pragma rather than after it. A short,
+    bounded retry also covers the narrow window where another process is
+    creating the database or its WAL sidecars. Persistent permission/path
+    errors still surface unchanged; this is not an infinite retry loop.
+    """
+    for attempt in range(len(_LEDGER_STARTUP_RETRY_DELAYS) + 1):
+        connection = None
+        try:
+            connection = sqlite3.connect(
+                path,
+                isolation_level=None,
+                timeout=_LEDGER_BUSY_TIMEOUT_MS / 1000,
+            )
+            # Set this before journal_mode=WAL. sqlite3.connect(timeout=...) is
+            # not enough as an observable contract and future wrappers may
+            # replace the default connection timeout.
+            connection.execute(f"PRAGMA busy_timeout={_LEDGER_BUSY_TIMEOUT_MS}")
+            connection.execute("PRAGMA journal_mode=WAL")
+            return connection
+        except sqlite3.OperationalError as exc:
+            if connection is not None:
+                connection.close()
+            if (
+                not _is_transient_startup_error(exc)
+                or attempt >= len(_LEDGER_STARTUP_RETRY_DELAYS)
+            ):
+                raise
+            time.sleep(_LEDGER_STARTUP_RETRY_DELAYS[attempt])
+    raise AssertionError("unreachable ledger startup retry state")
 
 
 class FeedbackLedger:
@@ -71,10 +215,8 @@ class FeedbackLedger:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.path, isolation_level=None, timeout=5.0)
-        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection = _connect_ledger(self.path)
         self._connection.execute("PRAGMA foreign_keys=ON")
-        self._connection.execute("PRAGMA busy_timeout=5000")
         self._connection.execute("PRAGMA wal_autocheckpoint=1000")
         self._connection.execute("""
             CREATE TABLE IF NOT EXISTS feedback_receipts (
@@ -112,9 +254,18 @@ class FeedbackLedger:
                 status TEXT NOT NULL CHECK (status IN ('passed', 'failed')),
                 summary TEXT NOT NULL,
                 completed_at TEXT NOT NULL,
+                command_evidence_json TEXT,
                 PRIMARY KEY (repository, head_sha, lane)
             )
             """)
+        maintenance_columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(maintenance_receipts)")
+        }
+        if "command_evidence_json" not in maintenance_columns:
+            self._connection.execute(
+                "ALTER TABLE maintenance_receipts ADD COLUMN command_evidence_json TEXT"
+            )
         self._migrate_lease_columns()
         self._connection.execute("""
             CREATE TABLE IF NOT EXISTS ci_audit_receipts (
@@ -170,6 +321,15 @@ class FeedbackLedger:
             )
             """)
         self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS merge_enrollments (
+                repository TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                enrolled_at TEXT NOT NULL,
+                enrolled_by TEXT NOT NULL,
+                PRIMARY KEY (repository, pr_number)
+            )
+            """)
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS deployment_receipts (
                 receipt_id TEXT PRIMARY KEY,
                 repository TEXT NOT NULL,
@@ -190,6 +350,42 @@ class FeedbackLedger:
                 PRIMARY KEY (repository, pr_number)
             )
             """)
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS local_ci_selection_cursors (
+                repository TEXT PRIMARY KEY,
+                cursor INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS worktree_pool_slots (
+                slot_id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL CHECK (status IN ('leased', 'free')),
+                owner_pid INTEGER NOT NULL,
+                head_sha TEXT,
+                task_id TEXT,
+                board TEXT,
+                claimed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                lease_version INTEGER NOT NULL
+            )
+            """)
+        self._migrate_worktree_pool_columns()
+
+    def _migrate_worktree_pool_columns(self) -> None:
+        columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(worktree_pool_slots)")
+        }
+        additions = {
+            "task_id": "task_id TEXT",
+            "board": "board TEXT",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                self._connection.execute(
+                    f"ALTER TABLE worktree_pool_slots ADD COLUMN {declaration}"
+                )
 
     def _migrate_lease_columns(self) -> None:
         columns = {
@@ -320,8 +516,9 @@ class FeedbackLedger:
         status: str,
         summary: str,
         completed_at: datetime,
+        command_evidence: tuple[MaintenanceCommandEvidence, ...],
     ) -> None:
-        """Record one immutable, exact-head lane outcome; identical retries are idempotent."""
+        """Record one immutable, exact-head lane outcome with command proof."""
 
         completed_at = _aware_utc(completed_at, "completed_at")
         values = tuple(
@@ -331,10 +528,27 @@ class FeedbackLedger:
             raise ValueError("maintenance receipt is invalid")
         if len(summary) > 4000:
             raise ValueError("maintenance receipt summary is too long")
-        row_values = (*values, completed_at.isoformat())
+        if not isinstance(command_evidence, tuple) or not command_evidence:
+            raise ValueError("maintenance receipt has no command evidence")
+        for command in command_evidence:
+            if not isinstance(command, MaintenanceCommandEvidence):
+                raise TypeError("maintenance command evidence has invalid type")
+            command.validate()
+        if status == "passed" and any(
+            command.returncode != 0 or command.timed_out
+            for command in command_evidence
+        ):
+            raise ValueError("passed maintenance receipt has failing command evidence")
+        evidence_json = json.dumps(
+            [command.to_payload() for command in command_evidence],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        row_values = (*values, completed_at.isoformat(), evidence_json)
         with self._transaction():
             existing = self._connection.execute(
-                "SELECT repository, head_sha, lane, status, summary, completed_at "
+                "SELECT repository, head_sha, lane, status, summary, completed_at, "
+                "command_evidence_json "
                 "FROM maintenance_receipts WHERE repository = ? AND head_sha = ? AND lane = ?",
                 values[:3],
             ).fetchone()
@@ -344,8 +558,8 @@ class FeedbackLedger:
                 return
             self._connection.execute(
                 "INSERT INTO maintenance_receipts "
-                "(repository, head_sha, lane, status, summary, completed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(repository, head_sha, lane, status, summary, completed_at, "
+                "command_evidence_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 row_values,
             )
 
@@ -353,21 +567,40 @@ class FeedbackLedger:
         self, repository: str, head_sha: str
     ) -> dict[str, MaintenanceReceipt]:
         rows = self._connection.execute(
-            "SELECT lane, status, summary, completed_at FROM maintenance_receipts "
+            "SELECT lane, status, summary, completed_at, command_evidence_json "
+            "FROM maintenance_receipts "
             "WHERE repository = ? AND head_sha = ?",
             (repository, head_sha),
         )
         return {
-            row[0]: MaintenanceReceipt(
-                repository=repository,
-                head_sha=head_sha,
-                lane=row[0],
-                status=row[1],
-                summary=row[2],
-                completed_at=datetime.fromisoformat(row[3]),
-            )
+            row[0]: self._maintenance_receipt_from_row(repository, head_sha, row)
             for row in rows
         }
+
+    @staticmethod
+    def _maintenance_receipt_from_row(
+        repository: str, head_sha: str, row: tuple[object, ...]
+    ) -> MaintenanceReceipt:
+        evidence_json = row[4]
+        try:
+            command_evidence = parse_maintenance_command_evidence(
+                json.loads(evidence_json) if isinstance(evidence_json, str) else None
+            )
+            status = str(row[1])
+            summary = str(row[2])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            command_evidence = ()
+            status = "invalid"
+            summary = f"legacy maintenance receipt lacks valid command evidence: {row[2]}"
+        return MaintenanceReceipt(
+            repository=repository,
+            head_sha=head_sha,
+            lane=str(row[0]),
+            status=status,
+            summary=summary,
+            completed_at=datetime.fromisoformat(str(row[3])),
+            command_evidence=command_evidence,
+        )
 
     def claim(
         self,
@@ -385,7 +618,10 @@ class FeedbackLedger:
         with self._transaction():
             serialized_repair = not (
                 receipt.feedback_kind == "pr_repair"
-                and receipt.feedback_id.startswith("report:")
+                and (
+                    receipt.feedback_id.startswith("report:")
+                    or receipt.feedback_id.startswith("ci-receipt:")
+                )
             )
             if serialized_repair:
                 active_repair = self._connection.execute(
@@ -464,6 +700,87 @@ class FeedbackLedger:
         if status not in {"claimed", "completed", "failed"}:
             raise LedgerStateError("stored feedback receipt status is invalid")
         return str(status)
+
+    def exact_receipt_state(self, receipt: FeedbackReceipt) -> tuple[str, int] | None:
+        """Return exact dispatch status and attempts for bounded retry selection."""
+
+        row = self._connection.execute(
+            "SELECT status, attempts FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+            "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+            receipt.key,
+        ).fetchone()
+        if row is None:
+            return None
+        status = str(row[0])
+        if status not in {"claimed", "completed", "failed"}:
+            raise LedgerStateError("stored feedback receipt status is invalid")
+        return status, int(row[1] or 0)
+
+    def failed_receipt_retry_state(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        claimed_at: datetime,
+        retry_after: timedelta,
+        max_attempts: int | None,
+    ) -> str:
+        """Classify whether a failed receipt may be retried without mutating it."""
+
+        claimed_at = _aware_utc(claimed_at, "claimed_at")
+        if retry_after < timedelta(0):
+            raise ValueError("retry_after must not be negative")
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        row = self._connection.execute(
+            "SELECT status, attempts, claimed_at FROM feedback_receipts "
+            "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+            "AND feedback_id = ? AND head_sha = ?",
+            receipt.key,
+        ).fetchone()
+        if row is None or row[0] != "failed":
+            return "not_failed"
+        attempts = int(row[1] or 0)
+        if max_attempts is not None and attempts >= max_attempts:
+            return "exhausted"
+        if row[2] is not None:
+            try:
+                failed_at = datetime.fromisoformat(str(row[2])).astimezone(UTC)
+            except (TypeError, ValueError):
+                failed_at = claimed_at
+            if failed_at + retry_after > claimed_at:
+                return "backoff"
+        return "due"
+
+    def local_ci_selection_cursor(self, repository: str) -> int:
+        """Return the durable round-robin offset for one repository catalogue."""
+
+        row = self._connection.execute(
+            "SELECT cursor FROM local_ci_selection_cursors WHERE repository = ?",
+            (repository,),
+        ).fetchone()
+        return max(0, int(row[0])) if row is not None else 0
+
+    def advance_local_ci_selection_cursor(
+        self,
+        repository: str,
+        *,
+        cursor: int,
+        candidate_count: int,
+        updated_at: datetime,
+    ) -> None:
+        """Persist the next bounded catalogue offset after one scan window."""
+
+        if candidate_count < 1:
+            raise ValueError("candidate_count must be positive")
+        updated = _aware_utc(updated_at, "updated_at")
+        next_cursor = int(cursor) % candidate_count
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO local_ci_selection_cursors(repository, cursor, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(repository) DO UPDATE SET cursor = excluded.cursor, "
+                "updated_at = excluded.updated_at",
+                (repository, next_cursor, updated.isoformat()),
+            )
 
     def pending_task_bindings_for_head(
         self, receipt: FeedbackReceipt
@@ -751,6 +1068,8 @@ class FeedbackLedger:
         *,
         owner: str,
         claimed_at: datetime,
+        retry_after: timedelta = timedelta(0),
+        max_attempts: int | None = None,
     ) -> ClaimLease | None:
         """Atomically retry a receipt after an explicitly recorded dispatch failure."""
 
@@ -758,15 +1077,29 @@ class FeedbackLedger:
         if not owner:
             raise ValueError("claim owner must be a non-empty string")
         claimed_at = _aware_utc(claimed_at, "claimed_at")
+        if retry_after < timedelta(0):
+            raise ValueError("retry_after must not be negative")
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
         with self._transaction():
             row = self._connection.execute(
-                "SELECT lease_version FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                "SELECT attempts, claimed_at, lease_version FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
                 "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ? AND status = 'failed'",
                 receipt.key,
             ).fetchone()
             if row is None:
                 return None
-            version = int(row[0] or 0) + 1
+            attempts = int(row[0] or 0)
+            if max_attempts is not None and attempts >= max_attempts:
+                return None
+            if row[1] is not None:
+                try:
+                    failed_at = datetime.fromisoformat(str(row[1])).astimezone(UTC)
+                except (TypeError, ValueError):
+                    failed_at = claimed_at
+                if failed_at + retry_after > claimed_at:
+                    return None
+            version = int(row[2] or 0) + 1
             result = self._connection.execute(
                 "UPDATE feedback_receipts SET status = 'claimed', last_error = NULL, attempts = attempts + 1, "
                 "claim_owner = ?, claimed_at = ?, lease_version = ? "
@@ -805,16 +1138,29 @@ class FeedbackLedger:
                     (task_id, *receipt.key),
                 )
 
-    def fail(self, receipt: FeedbackReceipt, error: str, lease: ClaimLease) -> None:
+    def fail(
+        self,
+        receipt: FeedbackReceipt,
+        error: str,
+        lease: ClaimLease,
+        *,
+        failed_at: datetime | None = None,
+    ) -> None:
         error = error.strip() if isinstance(error, str) else ""
         if not error:
             raise ValueError("error must be a non-empty string")
+        failed_at_value = (
+            _aware_utc(failed_at, "failed_at").isoformat()
+            if failed_at is not None
+            else None
+        )
         with self._transaction():
             result = self._connection.execute(
-                "UPDATE feedback_receipts SET status = 'failed', last_error = ? "
+                "UPDATE feedback_receipts SET status = 'failed', last_error = ?, "
+                "claimed_at = COALESCE(?, claimed_at) "
                 "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? AND feedback_id = ? "
                 "AND head_sha = ? AND status = 'claimed' AND claim_owner = ? AND lease_version = ?",
-                (error[:1000], *receipt.key, lease.owner, lease.version),
+                (error[:1000], failed_at_value, *receipt.key, lease.owner, lease.version),
             )
             if result.rowcount != 1:
                 raise LedgerStateError("receipt lease is not held")
@@ -883,6 +1229,7 @@ class FeedbackLedger:
 
         if not isinstance(receipt, CIAuditReceipt):
             raise TypeError("receipt must be a CIAuditReceipt")
+        receipt.validate()
         payload = json.dumps(
             receipt.to_payload(), sort_keys=True, separators=(",", ":")
         )
@@ -906,6 +1253,87 @@ class FeedbackLedger:
                     payload,
                 ),
             )
+
+    def finalize_ci_run(
+        self,
+        lease: CIRunLease,
+        receipt: object,
+        *,
+        status: str,
+        completed_at: datetime,
+        error: str | None = None,
+    ) -> None:
+        """Persist receipt and terminalize its lease in one SQLite transaction."""
+
+        from .ci_runner import CIAuditReceipt
+
+        if not isinstance(receipt, CIAuditReceipt):
+            raise TypeError("receipt must be a CIAuditReceipt")
+        if status not in {"completed", "failed"}:
+            raise ValueError("CI run terminal status is invalid")
+        receipt.validate()
+        completed = _aware_utc(completed_at, "completed_at")
+        payload = json.dumps(receipt.to_payload(), sort_keys=True, separators=(",", ":"))
+        if len(payload.encode("utf-8")) > 1_000_000:
+            raise ValueError("CI receipt evidence exceeds its bounded limit")
+        row_values = (
+            receipt.receipt_id,
+            receipt.identity.repository,
+            receipt.identity.pr_number,
+            receipt.identity.base_sha,
+            receipt.identity.head_sha,
+            receipt.manifest_digest,
+            receipt.status,
+            receipt.started_at.isoformat(),
+            receipt.completed_at.isoformat(),
+            payload,
+        )
+        with self._transaction():
+            existing = self._connection.execute(
+                "SELECT receipt_id, repository, pr_number, base_sha, head_sha, "
+                "manifest_digest, status, started_at, completed_at, evidence_json "
+                "FROM ci_audit_receipts WHERE receipt_id = ?",
+                (receipt.receipt_id,),
+            ).fetchone()
+            if existing is None:
+                collision = self._connection.execute(
+                    "SELECT receipt_id FROM ci_audit_receipts WHERE repository = ? "
+                    "AND pr_number = ? AND head_sha = ? AND manifest_digest = ? "
+                    "AND completed_at = ?",
+                    (
+                        receipt.identity.repository,
+                        receipt.identity.pr_number,
+                        receipt.identity.head_sha,
+                        receipt.manifest_digest,
+                        receipt.completed_at.isoformat(),
+                    ),
+                ).fetchone()
+                if collision is not None:
+                    raise LedgerStateError("CI receipt identity collision")
+                self._connection.execute(
+                    "INSERT INTO ci_audit_receipts "
+                    "(receipt_id, repository, pr_number, base_sha, head_sha, manifest_digest, status, "
+                    "started_at, completed_at, evidence_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    row_values,
+                )
+            elif tuple(existing) != row_values:
+                raise LedgerStateError("CI receipt is immutable")
+            result = self._connection.execute(
+                "UPDATE ci_audit_runs SET status = ?, updated_at = ?, receipt_id = ?, "
+                "last_error = ? WHERE run_id = ? AND status = 'running' AND lease_version = ? "
+                "AND supervisor_pid = ?",
+                (
+                    status,
+                    completed.isoformat(),
+                    receipt.receipt_id,
+                    (error or "")[:1000] or None,
+                    lease.run_id,
+                    lease.version,
+                    lease.supervisor_pid,
+                ),
+            )
+            if result.rowcount != 1:
+                raise LedgerStateError("CI run lease is not held")
 
     def claim_ci_run(
         self,
@@ -989,6 +1417,120 @@ class FeedbackLedger:
             )
             if result.rowcount != 1:
                 raise LedgerStateError("CI run lease is not held")
+
+    def claim_worktree_slot(
+        self,
+        slot_id: int,
+        *,
+        owner_pid: int,
+        head_sha: str | None,
+        claimed_at: datetime,
+        stale_before: datetime,
+    ) -> WorktreeSlotLease | None:
+        """Claim one worktree-pool slot, fencing a not-yet-stale lease.
+
+        Deliberately time-only, unlike claim_ci_run's PID-liveness check: a
+        worktree-pool slot is handed off to a *dispatched Kanban agent task*
+        that outlives the short-lived dispatcher process making this call, so
+        the dispatcher's own PID going away is not evidence the slot is
+        free -- only elapsed time against stale_before is. Callers must pass
+        a stale_before comfortably longer than the longest task
+        max_runtime_seconds that can hold a slot.
+        """
+
+        if owner_pid < 2:
+            raise ValueError("worktree slot owner PID must identify a real process")
+        claimed = _aware_utc(claimed_at, "claimed_at")
+        stale = _aware_utc(stale_before, "stale_before")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT status, owner_pid, updated_at, lease_version, task_id "
+                "FROM worktree_pool_slots WHERE slot_id = ?",
+                (slot_id,),
+            ).fetchone()
+            version = 1
+            if row is not None:
+                version = int(row[3]) + 1
+                if row[0] == "leased":
+                    # A bound Kanban task owns this checkout until the board
+                    # positively reports that task terminal and
+                    # reconcile_leases releases it.  Time-based reclamation is
+                    # only safe for an unbound lease stranded mid-dispatch;
+                    # retryable blocked/triage cards may legitimately outlive
+                    # the timeout and must retain their exact-head workspace.
+                    if row[4] is not None:
+                        return None
+                    updated_at = datetime.fromisoformat(str(row[2]))
+                    if updated_at >= stale:
+                        return None
+                self._connection.execute(
+                    "UPDATE worktree_pool_slots SET status = 'leased', owner_pid = ?, "
+                    "head_sha = ?, claimed_at = ?, updated_at = ?, lease_version = ? "
+                    "WHERE slot_id = ?",
+                    (owner_pid, head_sha, claimed.isoformat(), claimed.isoformat(), version, slot_id),
+                )
+            else:
+                self._connection.execute(
+                    "INSERT INTO worktree_pool_slots (slot_id, status, owner_pid, head_sha, "
+                    "claimed_at, updated_at, lease_version) VALUES (?, 'leased', ?, ?, ?, ?, ?)",
+                    (slot_id, owner_pid, head_sha, claimed.isoformat(), claimed.isoformat(), version),
+                )
+        return WorktreeSlotLease(slot_id, version, owner_pid)
+
+    def finish_worktree_slot(self, lease: WorktreeSlotLease) -> None:
+        """Release a held slot back to the free pool. Idempotent no-op if the
+
+        lease was already reclaimed by orphan recovery (never raises --
+        releasing a slot you no longer hold is not an error, unlike failing a
+        CI run you no longer hold).
+        """
+
+        with self._transaction():
+            self._connection.execute(
+                "UPDATE worktree_pool_slots SET status = 'free', updated_at = ? "
+                "WHERE slot_id = ? AND lease_version = ? AND owner_pid = ? AND status = 'leased'",
+                (
+                    _aware_utc(datetime.now(UTC), "updated_at").isoformat(),
+                    lease.slot_id,
+                    lease.version,
+                    lease.owner_pid,
+                ),
+            )
+
+    def bind_worktree_slot_task(self, head_sha: str, task_id: str, board: str) -> None:
+        """Record which dispatched Kanban task now owns a leased slot.
+
+        Best-effort by design: if the slot was already reconciled away (or a
+        non-pooled LocalGit is in use and no such slot exists), this is a
+        silent no-op rather than an error -- proactive release is an
+        optimization over the lease timeout, not a correctness requirement.
+        """
+
+        with self._transaction():
+            self._connection.execute(
+                "UPDATE worktree_pool_slots SET task_id = ?, board = ? "
+                "WHERE head_sha = ? AND status = 'leased'",
+                (task_id, board, head_sha),
+            )
+
+    def leased_worktree_slots(self) -> tuple[dict[str, object], ...]:
+        """List every currently-leased slot with an attached task binding."""
+
+        rows = self._connection.execute(
+            "SELECT slot_id, lease_version, owner_pid, task_id, board "
+            "FROM worktree_pool_slots WHERE status = 'leased' AND task_id IS NOT NULL "
+            "AND board IS NOT NULL"
+        ).fetchall()
+        return tuple(
+            {
+                "slot_id": int(row[0]),
+                "lease_version": int(row[1]),
+                "owner_pid": int(row[2]),
+                "task_id": row[3],
+                "board": row[4],
+            }
+            for row in rows
+        )
 
     def latest_ci_run(
         self, repository: str, pr_number: int, head_sha: str
@@ -1120,6 +1662,50 @@ class FeedbackLedger:
             return MergeReceipt.from_payload(json.loads(row[0]))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise LedgerStateError("stored merge receipt is invalid") from error
+
+    def enroll_merge_pr(
+        self,
+        repository: str,
+        pr_number: int,
+        *,
+        enrolled_at: datetime,
+        enrolled_by: str,
+    ) -> None:
+        """Persist per-PR merge intent; it survives worker and app restarts."""
+
+        if not repository or pr_number < 1 or not enrolled_by.strip():
+            raise ValueError("merge enrollment identity is invalid")
+        enrolled_at = _aware_utc(enrolled_at, "enrolled_at")
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO merge_enrollments (repository, pr_number, enrolled_at, enrolled_by) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(repository, pr_number) DO UPDATE SET "
+                "enrolled_at = excluded.enrolled_at, enrolled_by = excluded.enrolled_by",
+                (repository, pr_number, enrolled_at.isoformat(), enrolled_by.strip()),
+            )
+
+    def unenroll_merge_pr(self, repository: str, pr_number: int) -> None:
+        if not repository or pr_number < 1:
+            raise ValueError("merge enrollment identity is invalid")
+        with self._transaction():
+            self._connection.execute(
+                "DELETE FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
+                (repository, pr_number),
+            )
+
+    def is_merge_enrolled(self, repository: str, pr_number: int) -> bool:
+        row = self._connection.execute(
+            "SELECT 1 FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
+            (repository, pr_number),
+        ).fetchone()
+        return row is not None
+
+    def enrolled_merge_pr_numbers(self, repository: str) -> tuple[int, ...]:
+        rows = self._connection.execute(
+            "SELECT pr_number FROM merge_enrollments WHERE repository = ? ORDER BY pr_number",
+            (repository,),
+        ).fetchall()
+        return tuple(int(row[0]) for row in rows)
 
     def verification_required_merge_lease(
         self, repository: str, pr_number: int

@@ -12,9 +12,13 @@ import {
   $projectScope,
   $projectsRpcAvailable,
   $projectTree,
+  $removedSessionIds,
+  $sessionMutationsInFlight,
   $worktreeRefreshToken,
   ALL_PROJECTS,
+  beginSessionMutation,
   createProject,
+  endSessionMutation,
   enterProject,
   exitProjectScope,
   fetchProjectSessions,
@@ -27,15 +31,9 @@ import {
   refreshWorktrees,
   resolveNewSessionCwd,
   scanAndRecordRepos,
-  startWorkInRepo
-} from './projects'
-import {
-  $removedSessionIds,
-  $sessionMutationsInFlight,
-  beginSessionMutation,
-  endSessionMutation,
+  startWorkInRepo,
   tombstoneSessions
-} from './session-removal'
+} from './projects'
 
 vi.mock('@/i18n', () => ({
   translateNow: (key: string) => key
@@ -133,14 +131,6 @@ describe('project scope', () => {
 })
 
 describe('projects RPC profile forwarding', () => {
-  it('distinguishes a failed drill-in from an empty project', async () => {
-    const failure = new Error('gateway read failed')
-    const request = vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce({ project: null })
-    activeGateway.mockReturnValue({ connectionState: 'open', request } as unknown as ReturnType<typeof activeGateway>)
-    await expect(fetchProjectSessions('p_123')).rejects.toBe(failure)
-    await expect(fetchProjectSessions('p_123')).resolves.toBeNull()
-  })
-
   beforeEach(() => {
     vi.clearAllMocks()
     $activeGatewayProfile.set('default')

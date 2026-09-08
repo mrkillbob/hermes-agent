@@ -245,7 +245,7 @@ class TestCliApprovalUi:
                     "failed": False,
                 }
 
-        with patch("run_agent.AIAgent", FakeAgent), \
+        with patch.object(cli_module, "AIAgent", FakeAgent), \
              patch.object(cli_module, "_cprint"), \
              patch.object(cli_module, "ChatConsole") as chat_console:
             chat_console.return_value.print = MagicMock()

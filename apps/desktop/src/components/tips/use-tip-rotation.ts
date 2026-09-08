@@ -20,17 +20,13 @@
  */
 
 import { useEffect } from 'react'
-import { useNavigate } from 'react-router'
 
-import { SETTINGS_ROUTE } from '@/app/routes'
 import type { Translations } from '@/i18n/types'
 import { resolveTipAnchor } from '@/lib/tips/anchor'
 import { TIP_CATALOG } from '@/lib/tips/catalog'
 import { nextTip } from '@/lib/tips/rotation'
 import { $awaitingResponse, $busy } from '@/store/session'
 import { $activeTip, $lastTipId, $nextTipAt, $retiredTips, $tipsEnabled, showTip } from '@/store/tips'
-
-import { offerLocalSetupTip } from './local-setup-offer'
 
 const TICK_MS = 30_000
 /** Nothing in the first stretch of a launch, however long the cooldown says
@@ -64,8 +60,6 @@ function appIsQuiet(lastTypedAt: number): boolean {
 
 /** Drive the ambient rotation for as long as the host is mounted. */
 export function useTipRotation(copy: Translations['tips']) {
-  const navigate = useNavigate()
-
   useEffect(() => {
     let lastTypedAt = 0
     let settledAt = Date.now() + SETTLE_MIN_MS + Math.random() * SETTLE_SPREAD_MS
@@ -86,18 +80,6 @@ export function useTipRotation(copy: Translations['tips']) {
       }
 
       if (!isDue() || !appIsQuiet(lastTypedAt)) {
-        return
-      }
-
-      // Campaigns outrank the walk: a conditional, actionable tip that is
-      // live right now (the local-setup CTA) says something about THIS
-      // machine, which beats the catalog's standing introduction. It shares
-      // the cooldown, so taking the moment still costs it the usual hours.
-      if (
-        offerLocalSetupTip(copy, () => {
-          navigate(`${SETTINGS_ROUTE}?tab=providers&pview=local`)
-        })
-      ) {
         return
       }
 
@@ -146,5 +128,5 @@ export function useTipRotation(copy: Translations['tips']) {
       window.clearInterval(timer)
       window.removeEventListener('keydown', noteTyping, true)
     }
-  }, [copy, navigate])
+  }, [copy])
 }

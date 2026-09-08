@@ -14,7 +14,6 @@ import os
 
 import pytest
 import yaml
-import hermes_cli.web_server_config as _web_server_config
 
 
 @pytest.fixture()
@@ -40,7 +39,7 @@ def _write_config(home, providers):
 def _apply(provider, model="local/model"):
     import hermes_cli.web_server as ws
 
-    return _web_server_config._apply_model_assignment_sync("main", provider, model, "", "")
+    return ws._apply_model_assignment_sync("main", provider, model, "", "")
 
 
 def _raw_model_cfg(home):

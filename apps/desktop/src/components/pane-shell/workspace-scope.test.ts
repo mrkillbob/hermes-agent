@@ -9,9 +9,7 @@ import {
   rememberActivePane,
   resetRememberedActivePanes,
   resolveRememberedActivePane,
-  setWorkspaceOwnerLabel,
-  setWorkspaceScope,
-  workspaceOwnerTitle
+  setWorkspaceScope
 } from './workspace-scope'
 
 afterEach(() => {
@@ -66,21 +64,6 @@ describe('workspace scope', () => {
 
     expect($workspaceOwnerKey.get()).toBe('group:room-1')
     expect($workspaceNewSessionTarget.get()).toEqual(target)
-  })
-})
-
-describe('workspace owner title', () => {
-  it('captions a bot chat by its bot instead of the canonical stored title, and leaves everything else alone (#99152)', () => {
-    setWorkspaceOwnerLabel('bot:alpha', 'Alpha')
-    const botChat = { workspaceMode: 'bots' as const, workspaceOwnerKey: 'bot:alpha', workspaceTabTitle: 'Bot Chat' }
-
-    expect(workspaceOwnerTitle('Bot Chat', botChat)).toBe('Alpha')
-    // A `+` side thread under the same bot keeps its own title.
-    expect(workspaceOwnerTitle('Plan the launch', botChat)).toBe('Plan the launch')
-    // A Sessions tab titled the same way is not a bot chat.
-    expect(workspaceOwnerTitle('Bot Chat', { workspaceMode: 'sessions' })).toBe('Bot Chat')
-    // No label yet (roster not loaded): the stored title stands.
-    expect(workspaceOwnerTitle('Bot Chat', { ...botChat, workspaceOwnerKey: 'bot:beta' })).toBe('Bot Chat')
   })
 })
 

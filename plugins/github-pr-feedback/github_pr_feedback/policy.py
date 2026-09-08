@@ -12,8 +12,66 @@ from typing import Mapping, Sequence
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _FEEDBACK_KINDS = frozenset(
-    {"issue_comment", "review_comment", "review", "pr_local_ci", "pr_repair"}
+    {
+        "issue_comment",
+        "review_comment",
+        "review",
+        "pr_local_ci",
+        "pr_repair",
+        "pr_actions_needed",
+    }
 )
+# NousResearch/hermes-agent is a foreign upstream repository (its issue
+# tracker is the hermes-white-knight flow's own "assistant-brand-neutral"
+# public surface); every other configured repository is ours, so a completed
+# repair reply or audit comment there must self-identify as automated instead
+# of reading like an ordinary human comment.
+_BRAND_NEUTRAL_REPOSITORIES = frozenset({"NousResearch/hermes-agent"})
+HERMES_ATTRIBUTION_PREFIX = "Hermes automated"
+PR_REPAIR_ATTRIBUTION_PREFIX = f"{HERMES_ATTRIBUTION_PREFIX} repair"
+
+
+def pr_repair_attribution_required(repository: str) -> bool:
+    return repository not in _BRAND_NEUTRAL_REPOSITORIES
+
+
+def pr_repair_attribution_line(assignee: str) -> str:
+    return f"{PR_REPAIR_ATTRIBUTION_PREFIX} ({assignee})"
+
+
+def hermes_attribution_line(assignee: str, *, action: str) -> str:
+    """A generic 'Hermes automated <action> (<assignee>)' line for non-repair comments."""
+
+    return f"{HERMES_ATTRIBUTION_PREFIX} {action} ({assignee})"
+
+
+# Codex's GitHub App only re-reviews on PR-opened, marked-ready, or an
+# explicit "@codex review" mention -- never on an ordinary push. Every path
+# that pushes a new commit to an already-open PR (a worker's repair push, or
+# the deterministic base-refresh merge-forward) must mention this after
+# pushing, or the merge maintainer's codex_review_pending gate would wait
+# forever for a re-review nothing ever asks for.
+CODEX_REVIEW_TRIGGER = "@codex review"
+_CODEX_REVIEW_TRIGGER_MARKER = "hermes-codex-review-trigger:v1"
+
+
+def codex_review_trigger_comment(head_sha: str) -> str:
+    """Build the idempotent exact-head Codex review request comment."""
+
+    resolved = _sha(head_sha, "head_sha")
+    return (
+        f"{CODEX_REVIEW_TRIGGER}\n\n"
+        f"<!-- {_CODEX_REVIEW_TRIGGER_MARKER} head={resolved} -->"
+    )
+
+
+def codex_review_trigger_requested(body: str, head_sha: str) -> bool:
+    """Return whether Hermes already requested Codex review for this exact head."""
+
+    resolved = _sha(head_sha, "head_sha")
+    return f"<!-- {_CODEX_REVIEW_TRIGGER_MARKER} head={resolved} -->" in body
+
+
 MAX_ASSIGNEE_RULES = 32
 MAX_MATCH_TERMS_PER_RULE = 32
 MAX_COMMAND_ARGUMENTS = 32
@@ -253,14 +311,47 @@ class RoutingDecision:
 
 @dataclass(frozen=True, slots=True)
 class LocalCIAuditPolicy:
-    """Opt-in, read-only local CI coverage for repositories without Actions."""
+    """Opt-in exact-head local CI coverage for configured pull requests."""
 
     assignee: str
     post_results: bool
     repositories: frozenset[str] = frozenset()
+    required_for_open_prs: bool = False
+    max_dispatches_per_scan: int = 1
+    max_open_prs_per_scan: int = 300
 
     def applies_to(self, repository: str) -> bool:
         return not self.repositories or repository in self.repositories
+
+
+@dataclass(frozen=True, slots=True)
+class AgentLabelMapping:
+    """One explicit branch-prefix to canonical GitHub label mapping."""
+
+    branch_prefix: str
+    label: str
+    color: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentLabelPolicy:
+    """Bounded, opt-in labels applied by the Hermes feedback scanner."""
+
+    enabled: bool
+    max_updates_per_scan: int = 1
+    create_missing: bool = False
+    mappings: tuple[AgentLabelMapping, ...] = ()
+
+    def label_for_branch(self, branch: str) -> str | None:
+        matches = [
+            mapping
+            for mapping in self.mappings
+            if branch.startswith(mapping.branch_prefix)
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda mapping: len(mapping.branch_prefix)).label
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +378,7 @@ class MergeMaintainerPolicy:
     receipt_max_age_seconds: int
     report_only: bool
     post_merge: PostMergePolicy | None
+    require_per_pr_enrollment: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +410,13 @@ class ReleaseMaintenancePolicy:
     quiet_period_seconds: int
     max_runtime_seconds: int
     lanes: tuple[ReleaseMaintenanceLane, ...]
+    # Default preserves the original design: never run while any PR remains
+    # open repository-wide. A continuously-active burndown repository can
+    # legitimately carry dozens of open PRs indefinitely, so that condition
+    # alone would mean maintenance never runs at all. quiet_period_seconds
+    # already re-arms per new base SHA and is the gate that actually matters
+    # for "don't run mid-churn" -- set this false to rely on it alone.
+    require_zero_open_prs: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,9 +434,26 @@ class PluginPolicy:
     assignee_rules: tuple[AssigneeRule, ...] = ()
     routing_rules: tuple[RoutingRule, ...] = ()
     local_ci_audit: LocalCIAuditPolicy | None = None
+    agent_labels: AgentLabelPolicy | None = None
     merge_maintainer: MergeMaintainerPolicy | None = None
     repair_steward: RepairStewardPolicy | None = None
     release_maintenance: ReleaseMaintenancePolicy | None = None
+    merge_maintainers: tuple[MergeMaintainerPolicy, ...] = ()
+
+    def merge_policies(self) -> tuple[MergeMaintainerPolicy, ...]:
+        """Return configured merge lanes, preserving the legacy singular field."""
+
+        if self.merge_maintainers:
+            return self.merge_maintainers
+        if self.merge_maintainer is not None:
+            return (self.merge_maintainer,)
+        return ()
+
+    def merge_policy_for(self, repository: str) -> MergeMaintainerPolicy | None:
+        return next(
+            (candidate for candidate in self.merge_policies() if candidate.repository == repository),
+            None,
+        )
 
     def assignee_for(self, body: str) -> str:
         """Choose the unique highest-scoring specialist, otherwise the fallback."""
@@ -591,11 +707,30 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
     if not isinstance(raw, Mapping):
         raise ValueError("local_ci_audit must be a mapping")
     required = {"enabled", "assignee", "post_results"}
-    if not required.issubset(raw) or set(raw).difference(required | {"repositories"}):
+    optional = {
+        "repositories",
+        "required_for_open_prs",
+        "max_dispatches_per_scan",
+        "max_open_prs_per_scan",
+    }
+    if not required.issubset(raw) or set(raw).difference(required | optional):
         raise ValueError("local_ci_audit has missing or unknown fields")
     enabled = raw["enabled"]
     post_results = raw["post_results"]
-    if not isinstance(enabled, bool) or not isinstance(post_results, bool):
+    required_for_open_prs = raw.get("required_for_open_prs", False)
+    max_dispatches_per_scan = raw.get("max_dispatches_per_scan", 1)
+    max_open_prs_per_scan = raw.get("max_open_prs_per_scan", 300)
+    if (
+        not isinstance(enabled, bool)
+        or not isinstance(post_results, bool)
+        or not isinstance(required_for_open_prs, bool)
+        or not isinstance(max_dispatches_per_scan, int)
+        or isinstance(max_dispatches_per_scan, bool)
+        or max_dispatches_per_scan < 1
+        or not isinstance(max_open_prs_per_scan, int)
+        or isinstance(max_open_prs_per_scan, bool)
+        or max_open_prs_per_scan < 1
+    ):
         raise ValueError("local_ci_audit booleans are invalid")
     assignee = _nonempty_string(raw["assignee"], "local_ci_audit assignee")
     repositories = (
@@ -606,7 +741,75 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
     if not enabled:
         return None
     return LocalCIAuditPolicy(
-        assignee=assignee, post_results=post_results, repositories=repositories
+        assignee=assignee,
+        post_results=post_results,
+        repositories=repositories,
+        required_for_open_prs=required_for_open_prs,
+        max_dispatches_per_scan=max_dispatches_per_scan,
+        max_open_prs_per_scan=max_open_prs_per_scan,
+    )
+
+
+def _parse_agent_labels(raw: object) -> AgentLabelPolicy | None:
+    if not isinstance(raw, Mapping):
+        raise ValueError("agent_labels must be a mapping")
+    enabled = raw.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ValueError("agent_labels enabled must be a boolean")
+    if not enabled:
+        if set(raw) != {"enabled"}:
+            raise ValueError("disabled agent_labels has unknown fields")
+        return None
+    expected = {"enabled", "max_updates_per_scan", "create_missing", "mappings"}
+    if set(raw) != expected:
+        raise ValueError("agent_labels has missing or unknown fields")
+    max_updates = raw["max_updates_per_scan"]
+    if (
+        not isinstance(max_updates, int)
+        or isinstance(max_updates, bool)
+        or not 1 <= max_updates <= 100
+    ):
+        raise ValueError("agent_labels max_updates_per_scan must be between 1 and 100")
+    create_missing = raw["create_missing"]
+    if not isinstance(create_missing, bool):
+        raise ValueError("agent_labels create_missing must be a boolean")
+    raw_mappings = raw["mappings"]
+    if isinstance(raw_mappings, (str, bytes)) or not isinstance(raw_mappings, Sequence):
+        raise ValueError("agent_labels mappings must be a non-empty list")
+    if not 1 <= len(raw_mappings) <= 8:
+        raise ValueError("agent_labels mappings must contain between 1 and 8 items")
+    mappings: list[AgentLabelMapping] = []
+    for item in raw_mappings:
+        if not isinstance(item, Mapping) or set(item) != {
+            "branch_prefix",
+            "label",
+            "color",
+            "description",
+        }:
+            raise ValueError("agent_labels mapping has missing or unknown fields")
+        branch_prefix = _nonempty_string(item["branch_prefix"], "agent label branch_prefix")
+        label = _nonempty_string(item["label"], "agent label")
+        color = _nonempty_string(item["color"], "agent label color").casefold()
+        description = _nonempty_string(item["description"], "agent label description")
+        if (
+            branch_prefix.startswith("refs/")
+            or any(character.isspace() for character in branch_prefix)
+            or len(label) > 50
+            or "," in label
+            or not re.fullmatch(r"[0-9a-f]{6}", color)
+            or len(description) > 100
+        ):
+            raise ValueError("agent label mapping contains an invalid value")
+        mappings.append(AgentLabelMapping(branch_prefix, label, color, description))
+    if len({mapping.branch_prefix for mapping in mappings}) != len(mappings):
+        raise ValueError("agent label branch prefixes must be unique")
+    if len({mapping.label for mapping in mappings}) != len(mappings):
+        raise ValueError("agent label names must be unique")
+    return AgentLabelPolicy(
+        enabled=True,
+        max_updates_per_scan=max_updates,
+        create_missing=create_missing,
+        mappings=tuple(mappings),
     )
 
 
@@ -731,8 +934,6 @@ def _parse_merge_maintainer(
     if not isinstance(enabled, bool):
         raise ValueError("merge_maintainer enabled must be a boolean")
     if not enabled:
-        if set(raw) != {"enabled"}:
-            raise ValueError("disabled merge_maintainer has unknown fields")
         return None
     expected = {
         "enabled",
@@ -745,7 +946,8 @@ def _parse_merge_maintainer(
         "report_only",
         "post_merge",
     }
-    if set(raw) != expected:
+    optional = {"require_per_pr_enrollment"}
+    if not expected.issubset(raw) or set(raw) - expected - optional:
         raise ValueError("merge_maintainer has missing or unknown fields")
     repository = _repository(raw["repository"], "merge_maintainer repository")
     target = targets.get(repository)
@@ -780,6 +982,9 @@ def _parse_merge_maintainer(
     report_only = raw["report_only"]
     if not isinstance(report_only, bool):
         raise ValueError("report_only must be a boolean")
+    require_per_pr_enrollment = raw.get("require_per_pr_enrollment", False)
+    if not isinstance(require_per_pr_enrollment, bool):
+        raise ValueError("require_per_pr_enrollment must be a boolean")
     return MergeMaintainerPolicy(
         assignee=_nonempty_string(raw["assignee"], "merge_maintainer assignee"),
         repository=repository,
@@ -789,6 +994,7 @@ def _parse_merge_maintainer(
         receipt_max_age_seconds=receipt_max_age_seconds,
         report_only=report_only,
         post_merge=_parse_post_merge(raw["post_merge"], target=target),
+        require_per_pr_enrollment=require_per_pr_enrollment,
     )
 
 
@@ -804,7 +1010,7 @@ def _parse_release_maintenance(
         if set(raw) != {"enabled"}:
             raise ValueError("disabled release_maintenance has unknown fields")
         return None
-    expected = {
+    required = {
         "enabled",
         "assignee",
         "repository",
@@ -813,8 +1019,13 @@ def _parse_release_maintenance(
         "max_runtime_seconds",
         "lanes",
     }
-    if set(raw) != expected:
+    if not required.issubset(raw) or set(raw) - (
+        required | {"require_zero_open_prs"}
+    ):
         raise ValueError("release_maintenance has missing or unknown fields")
+    require_zero_open_prs = raw.get("require_zero_open_prs", True)
+    if not isinstance(require_zero_open_prs, bool):
+        raise ValueError("release_maintenance require_zero_open_prs must be a boolean")
     repository = _repository(raw["repository"], "release_maintenance repository")
     target = targets.get(repository)
     if target is None or target.head_repository != repository:
@@ -885,6 +1096,7 @@ def _parse_release_maintenance(
         quiet_period_seconds=quiet_period_seconds,
         max_runtime_seconds=max_runtime_seconds,
         lanes=tuple(lanes),
+        require_zero_open_prs=require_zero_open_prs,
     )
 
 
@@ -916,7 +1128,9 @@ def load_policy(raw: object) -> PluginPolicy:
         "assignee_rules",
         "routing_rules",
         "local_ci_audit",
+        "agent_labels",
         "merge_maintainer",
+        "merge_maintainers",
         "repair_steward",
         "release_maintenance",
     }
@@ -964,6 +1178,33 @@ def load_policy(raw: object) -> PluginPolicy:
     )
     if not reviewer_logins and not reviewer_associations:
         raise ValueError("at least one reviewer login or association is required")
+    singular_merge_policy = (
+        _parse_merge_maintainer(raw["merge_maintainer"], targets=targets)
+        if "merge_maintainer" in raw
+        else None
+    )
+    raw_merge_policies = raw.get("merge_maintainers")
+    if singular_merge_policy is not None and raw_merge_policies is not None:
+        raise ValueError("use merge_maintainer or merge_maintainers, not both")
+    if raw_merge_policies is None:
+        merge_policies = (
+            (singular_merge_policy,) if singular_merge_policy is not None else ()
+        )
+    else:
+        if (
+            isinstance(raw_merge_policies, (str, bytes))
+            or not isinstance(raw_merge_policies, Sequence)
+            or not raw_merge_policies
+        ):
+            raise ValueError("merge_maintainers must be a non-empty list")
+        merge_policies = tuple(
+            parsed
+            for item in raw_merge_policies
+            for parsed in (_parse_merge_maintainer(item, targets=targets),)
+            if parsed is not None
+        )
+        if len({item.repository for item in merge_policies}) != len(merge_policies):
+            raise ValueError("merge_maintainers repositories must be unique")
     return PluginPolicy(
         enabled=True,
         targets=targets,
@@ -984,11 +1225,12 @@ def load_policy(raw: object) -> PluginPolicy:
             _parse_routing_rules(raw["routing_rules"]) if "routing_rules" in raw else ()
         ),
         local_ci_audit=_validated_local_ci_audit(raw, targets),
-        merge_maintainer=(
-            _parse_merge_maintainer(raw["merge_maintainer"], targets=targets)
-            if "merge_maintainer" in raw
+        agent_labels=(
+            _parse_agent_labels(raw["agent_labels"])
+            if "agent_labels" in raw
             else None
         ),
+        merge_maintainer=merge_policies[0] if len(merge_policies) == 1 else None,
         repair_steward=(
             _parse_repair_steward(raw["repair_steward"], targets=targets)
             if "repair_steward" in raw
@@ -999,6 +1241,7 @@ def load_policy(raw: object) -> PluginPolicy:
             if "release_maintenance" in raw
             else None
         ),
+        merge_maintainers=merge_policies,
     )
 
 

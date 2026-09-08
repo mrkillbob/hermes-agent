@@ -206,9 +206,6 @@ export const $dismissedWorktreeIds = persistentAtom(
   [] as string[],
   Codecs.stringArray
 )
-// Only successful git removals may reappear on discovery. Explicit hides,
-// including legacy dismissals without provenance, remain hidden.
-export const $removedWorktreeIds = persistentAtom('hermes.desktop.removedWorktrees', [] as string[], Codecs.stringArray)
 export const $sidebarPinsOpen = atom(true)
 export const $sidebarRecentsOpen = atom(true)
 // Cron-job sessions live in their own section below recents, collapsed by
@@ -470,9 +467,8 @@ export function filterVisibleProjects<T extends { id: string; isAuto?: boolean }
   return projects.filter(project => !(project.isAuto && dismissed.has(project.id)))
 }
 
-export function dismissWorktree(id: string, { removed = false }: { removed?: boolean } = {}): void {
-  const removedIds = $removedWorktreeIds.get().filter(worktreeId => worktreeId !== id)
-  $removedWorktreeIds.set(removed ? [...removedIds, id] : removedIds)
+// Hide a worktree row after it's been removed via git.
+export function dismissWorktree(id: string): void {
   const current = $dismissedWorktreeIds.get()
 
   if (!current.includes(id)) {
@@ -483,7 +479,6 @@ export function dismissWorktree(id: string, { removed = false }: { removed?: boo
 // A hidden worktree becomes visible again as soon as the user explicitly starts
 // or opens work there (for example, selecting an already-checked-out branch).
 export function restoreWorktree(id: string): void {
-  $removedWorktreeIds.set($removedWorktreeIds.get().filter(worktreeId => worktreeId !== id))
   const current = $dismissedWorktreeIds.get()
 
   if (current.includes(id)) {

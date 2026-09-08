@@ -59,10 +59,9 @@ import {
   closeTreeTabsToRight,
   collapseTreePane,
   hideOnlyZoneTabs,
-  hostsSessionDropTarget,
   isCollapsePane,
+  isMainStripPane,
   isSessionStripPane,
-  NEW_SESSION_DRAG,
   noteActiveTreeGroup,
   reloadTreePane,
   restoreTreePane,
@@ -851,15 +850,10 @@ function ZoneDropOverlay({ node }: { node: GroupNode }) {
   // than painting an idle outline the drop would only refuse. Same test
   // `tileZoneHost` (session-drag.ts) resolves the drop with, so what lights
   // up and what commits cannot disagree.
-  //
-  // A NEW-session drag (the "New session" row, the projects' "+" buttons, and
-  // the "New project" +) shares the same eligibility contract via the one
-  // shared predicate — a fresh session is a chat, so it lands exactly where an
-  // existing one may dock. Overlay and resolvers cannot disagree.
-  const sessionDrag = dragging === SESSION_TILE_DRAG || dragging === NEW_SESSION_DRAG
+  const sessionDrag = dragging === SESSION_TILE_DRAG
   const chatZone = node.panes.some(isSessionStripPane)
 
-  if (sessionDrag && !hostsSessionDropTarget(node.panes)) {
+  if (sessionDrag && !chatZone && !node.panes.some(isMainStripPane)) {
     return null
   }
 

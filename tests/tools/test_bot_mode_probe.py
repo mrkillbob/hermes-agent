@@ -94,16 +94,15 @@ def test_roster_lines_carry_roles(tmp_path):
     assert "Deep research and literature review" in section
 
 
-def test_soul_legacy_protocol_no_longer_suppresses_live_section(tmp_path):
-    """Plugin-era SOUL append is stripped at load time; the live roster is the only copy."""
+def test_silent_when_soul_already_carries_protocol(tmp_path):
+    """Legacy plugin-side append — never double the section."""
     home = tmp_path / ".hermes"
     home.mkdir()
     _make_bot_profile(home, "coder", managed=True)
     (home / "SOUL.md").write_text(
         "# Me\n\n## Messaging other agents\nold plugin text\n", encoding="utf-8"
     )
-    assert "`@coder`" in bot_mode_probe.get_bot_mode_protocol_section(home)
-    assert bot_mode_probe.strip_legacy_protocol((home / "SOUL.md").read_text()) == "# Me\n"
+    assert bot_mode_probe.get_bot_mode_protocol_section(home) == ""
 
 
 def test_deterministic_across_calls(tmp_path):
@@ -212,8 +211,14 @@ def test_legacy_bot_chat_upgrade(tmp_path):
     upgraded = legacy + "\n\n" + bot_mode_probe.get_bot_mode_protocol_section(home) + "\n\n" + bot_mode_probe.epoch_line(home)
     assert not bot_mode_probe.stored_bot_chat_prompt_needs_upgrade(upgraded, home)
 
-    # SOUL-era prompt (frozen roster rode in from SOUL.md, no stamp) → upgrade once
-    assert bot_mode_probe.stored_bot_chat_prompt_needs_upgrade(
+    # SOUL already carries the legacy plugin-side append → probe silent →
+    # no upgrade (rebuilding would loop: the new prompt would be unstamped too)
+    bot_mode_probe._reset_cache_for_tests()
+    (home / "SOUL.md").write_text("# Me\n\n## Messaging other agents\nlegacy\n", encoding="utf-8")
+    assert not bot_mode_probe.stored_bot_chat_prompt_needs_upgrade(legacy, home)
+
+    # prompt whose SOUL section rode into it → protocol heading present → no upgrade
+    assert not bot_mode_probe.stored_bot_chat_prompt_needs_upgrade(
         "prompt containing\n## Messaging other agents\nfrom SOUL", home
     )
 

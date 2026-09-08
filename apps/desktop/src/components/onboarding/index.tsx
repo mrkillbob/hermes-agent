@@ -11,7 +11,6 @@ import { Check, ChevronDown, ChevronLeft, KeyRound, Loader2 } from '@/lib/icons'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { cn } from '@/lib/utils'
 import { $desktopBoot, type DesktopBootState } from '@/store/boot'
-import { $localModelsEnabled } from '@/store/local-models-flag'
 import {
   $desktopOnboarding,
   clearPendingProviderOAuth,
@@ -33,7 +32,6 @@ import { DocsLink, FlowPanel, Status } from './flow'
 import {
   FeaturedProviderRow,
   FireworksProviderRow,
-  LocalModelsProviderRow,
   OpenRouterProviderRow,
   ProviderRow,
   sortProviders
@@ -43,14 +41,11 @@ export {
   FeaturedProviderRow,
   FireworksProviderRow,
   KeyProviderRow,
-  LocalModelsProviderRow,
   OpenRouterProviderRow,
   ProviderRow,
   providerTitle,
   sortProviders
 } from './providers'
-
-import { requestGatewayForProfile } from '@/store/gateway'
 
 interface DesktopOnboardingOverlayProps {
   enabled: boolean
@@ -193,20 +188,18 @@ export function DesktopOnboardingOverlay({
   const { t } = useI18n()
   const onboarding = useStore($desktopOnboarding)
   const boot = useStore($desktopBoot)
-  const onCompletedRef = useRef(onCompleted)
-  onCompletedRef.current = onCompleted
-  const targetProfile = onboarding.targetProfile ?? profile
+  const ctxRef = useRef<OnboardingContext>({ requestGateway, onCompleted, profile })
+  ctxRef.current = { requestGateway, onCompleted, profile }
 
-  // Async flows retain the initiating route even after the overlay closes.
   const ctx = useMemo<OnboardingContext>(
     () => ({
-      profile: targetProfile,
-      requestGateway: onboarding.targetProfile
-        ? (method, params) => requestGatewayForProfile(targetProfile, method, params)
-        : requestGateway,
-      onCompleted: () => onCompletedRef.current?.()
+      requestGateway: (...args) => ctxRef.current.requestGateway(...args),
+      onCompleted: () => ctxRef.current.onCompleted?.(),
+      get profile() {
+        return ctxRef.current.profile
+      }
     }),
-    [onboarding.targetProfile, targetProfile, requestGateway]
+    []
   )
 
   // Cinematic exit on "Begin": dissolve the panel + overlay (revealing the chat
@@ -485,29 +478,10 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
   const collapsible = Boolean(featured)
   const showRest = !collapsible || showAll
 
-  // "Run models locally" leaves the picker for Settings -> Providers ->
-  // Local Models, where install/download live. First-run: persist the skip
-  // (same contract as ChooseLaterLink) so the blocking overlay never
-  // re-nags; manual mode just closes. window.location keeps this picker
-  // router-independent (it renders outside the route tree on first run).
-  const openLocalModels = () => {
-    if (manual) {
-      closeManualOnboarding()
-    } else {
-      dismissFirstRunOnboarding()
-    }
-
-    window.location.hash = '#/settings?tab=providers&pview=local'
-  }
-
   return (
     <div className="grid gap-2">
       <div className="grid max-h-[60dvh] gap-2 overflow-y-auto p-1">
         {featured ? <FeaturedProviderRow onSelect={select} provider={featured} /> : null}
-        {/* The no-account path: everything runs on this machine. Shipped
-            behind the --local launch flag. (Fireworks moved into the
-            expanded list on main.) */}
-        {$localModelsEnabled.get() ? <LocalModelsProviderRow onClick={openLocalModels} /> : null}
         {showRest ? (
           <>
             {/* Fireworks leads the expanded list, matching CANONICAL_PROVIDERS

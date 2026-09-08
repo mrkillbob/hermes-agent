@@ -18,9 +18,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hermes_cli import main as cli_main
-from hermes_cli import dashboard_procs
-from hermes_cli import main_install_repair
-from hermes_cli import update_cmd
 
 
 # Tests in this module either exercise the REAL _detect_concurrent_hermes_instances
@@ -97,7 +94,7 @@ def _fake_psutil_with_parent_chain(
     )
 
 
-@patch.object(main_install_repair, "_is_windows", return_value=True)
+@patch.object(cli_main, "_is_windows", return_value=True)
 def test_detect_concurrent_parents_call_robust_to_one_bad_hop(_winp, tmp_path):
     """The launcher shim is still excluded even when an ancestor exe is unreadable.
 
@@ -146,13 +143,13 @@ def test_detect_concurrent_parents_call_robust_to_one_bad_hop(_winp, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@patch.object(main_install_repair, "_is_windows", return_value=True)
+@patch.object(cli_main, "_is_windows", return_value=True)
 def test_quarantine_succeeds_first_attempt(_winp, tmp_path):
     """When the rename works immediately, no warning, single rename pair returned."""
     shim = tmp_path / "hermes.exe"
     shim.write_bytes(b"old")
 
-    pairs = main_install_repair._quarantine_running_hermes_exe(tmp_path)
+    pairs = cli_main._quarantine_running_hermes_exe(tmp_path)
 
     assert len(pairs) == 1
     orig, quarantine = pairs[0]
@@ -162,7 +159,7 @@ def test_quarantine_succeeds_first_attempt(_winp, tmp_path):
     assert not shim.exists()
 
 
-@patch.object(main_install_repair, "_is_windows", return_value=True)
+@patch.object(cli_main, "_is_windows", return_value=True)
 def test_quarantine_reports_a_lock_it_cannot_break(_winp, tmp_path, capsys, monkeypatch):
     """Every retry failed: name the likely culprits, queue nothing for reboot."""
     shim = tmp_path / "hermes.exe"
@@ -171,11 +168,11 @@ def test_quarantine_reports_a_lock_it_cannot_break(_winp, tmp_path, capsys, monk
     def always_fails(self, target):
         raise OSError(32, "The process cannot access the file (simulated lock)")
 
-    monkeypatch.setattr(main_install_repair, "_hermes_exe_shims", lambda d: [shim])
+    monkeypatch.setattr(cli_main, "_hermes_exe_shims", lambda d: [shim])
     with patch.object(Path, "rename", always_fails), patch(
         "time.sleep", lambda *_a, **_k: None
     ):
-        pairs = main_install_repair._quarantine_running_hermes_exe(tmp_path)
+        pairs = cli_main._quarantine_running_hermes_exe(tmp_path)
 
     captured = capsys.readouterr().out.lower()
 
@@ -278,7 +275,6 @@ def test_pause_and_resume_windows_gateway_service(
     afterward instead of spawning a competing detached gateway."""
     import hermes_cli.gateway as gateway_mod
     import hermes_cli.update_cmd as update_cmd
-    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     profile_home = tmp_path / "profiles" / "default"
     profile_home.mkdir(parents=True)
@@ -314,19 +310,7 @@ def test_pause_and_resume_windows_gateway_service(
         raising=False,
     )
     monkeypatch.setattr(
-        update_cmd_windows,
-        "_stop_windows_gateway_service",
-        lambda name, **_kwargs: stopped.append(name),
-        raising=False,
-    )
-    monkeypatch.setattr(
         update_cmd,
-        "_start_windows_gateway_service",
-        lambda name: started.append(name),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        update_cmd_windows,
         "_start_windows_gateway_service",
         lambda name: started.append(name),
         raising=False,
@@ -363,7 +347,6 @@ def test_pause_windows_gateway_service_failure_restores_every_attempted_service(
     """A service that times out after accepting stop is restarted too."""
     import hermes_cli.gateway as gateway_mod
     import hermes_cli.update_cmd as update_cmd
-    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     services = [
         SimpleNamespace(name="HermesGateway", service_pid=11, service_create_time=11.0, gateway_pid=101, gateway_create_time=101.0, descendant_identities=()),
@@ -380,15 +363,8 @@ def test_pause_windows_gateway_service_failure_restores_every_attempted_service(
 
     restarted = []
     monkeypatch.setattr(update_cmd, "_stop_windows_gateway_service", fake_stop)
-    monkeypatch.setattr(update_cmd_windows, "_stop_windows_gateway_service", fake_stop)
     monkeypatch.setattr(
         update_cmd,
-        "_restore_windows_gateway_service",
-        lambda name: restarted.append(name),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        update_cmd_windows,
         "_restore_windows_gateway_service",
         lambda name: restarted.append(name),
         raising=False,
@@ -407,7 +383,6 @@ def test_pause_windows_gateway_service_surfaces_rollback_start_failure(
 ):
     import hermes_cli.gateway as gateway_mod
     import hermes_cli.update_cmd as update_cmd
-    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     services = [
         SimpleNamespace(name="HermesGateway", service_pid=11, service_create_time=11.0, gateway_pid=101, gateway_create_time=101.0, descendant_identities=()),
@@ -427,15 +402,8 @@ def test_pause_windows_gateway_service_surfaces_rollback_start_failure(
             raise RuntimeError("simulated rollback start failure")
 
     monkeypatch.setattr(update_cmd, "_stop_windows_gateway_service", fake_stop)
-    monkeypatch.setattr(update_cmd_windows, "_stop_windows_gateway_service", fake_stop)
     monkeypatch.setattr(
         update_cmd,
-        "_restore_windows_gateway_service",
-        fake_start,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        update_cmd_windows,
         "_restore_windows_gateway_service",
         fake_start,
         raising=False,
@@ -447,7 +415,6 @@ def test_pause_windows_gateway_service_surfaces_rollback_start_failure(
 
 def test_restore_windows_gateway_service_waits_out_stop_pending(monkeypatch):
     import hermes_cli.update_cmd as update_cmd
-    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     statuses = iter(["stop_pending", "stopped"])
     service = SimpleNamespace(status=lambda: next(statuses))
@@ -457,11 +424,6 @@ def test_restore_windows_gateway_service_waits_out_stop_pending(monkeypatch):
     monkeypatch.setattr(update_cmd._time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         update_cmd,
-        "_start_windows_gateway_service",
-        lambda name: restarted.append(name),
-    )
-    monkeypatch.setattr(
-        update_cmd_windows,
         "_start_windows_gateway_service",
         lambda name: restarted.append(name),
     )
@@ -544,7 +506,6 @@ def test_resume_windows_gateway_service_failure_stays_retryable(
     monkeypatch,
 ):
     import hermes_cli.update_cmd as update_cmd
-    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     token = {
         "resume_needed": True,
@@ -555,11 +516,6 @@ def test_resume_windows_gateway_service_failure_stays_retryable(
     monkeypatch.setattr(cli_main, "_refresh_windows_gateway_launchers", lambda: None)
     monkeypatch.setattr(
         update_cmd,
-        "_start_windows_gateway_service",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("simulated start failure")),
-    )
-    monkeypatch.setattr(
-        update_cmd_windows,
         "_start_windows_gateway_service",
         lambda _name: (_ for _ in ()).throw(RuntimeError("simulated start failure")),
     )
@@ -942,7 +898,7 @@ def test_classify_concurrent_instance_recognises_gateway_runtimes(monkeypatch):
     ]
     for argv in cases:
         monkeypatch.setitem(sys.modules, "psutil", _fake_psutil_classify({77: argv}))
-        result = update_cmd._classify_concurrent_instance(77)
+        result = cli_main._classify_concurrent_instance(77)
         assert result == "gateway", f"expected gateway for {argv!r}, got {result!r}"
 
 
@@ -961,7 +917,7 @@ def test_classify_concurrent_instance_recognises_non_gateways(monkeypatch):
     ]
     for argv in cases:
         monkeypatch.setitem(sys.modules, "psutil", _fake_psutil_classify({77: argv}))
-        result = update_cmd._classify_concurrent_instance(77)
+        result = cli_main._classify_concurrent_instance(77)
         assert result == "non-gateway", (
             f"expected non-gateway for {argv!r}, got {result!r}"
         )
@@ -971,13 +927,13 @@ def test_classify_concurrent_instance_unknown_on_psutil_error(monkeypatch):
     """Unreadable cmdline (process gone / AccessDenied) → ``unknown`` —
     treated as non-gateway by the filter, so the gate still aborts."""
     monkeypatch.setitem(sys.modules, "psutil", _fake_psutil_classify({}))
-    assert update_cmd._classify_concurrent_instance(4242) == "unknown"
+    assert cli_main._classify_concurrent_instance(4242) == "unknown"
 
 
 def test_classify_concurrent_instance_unknown_without_psutil(monkeypatch):
     """Missing psutil entirely → ``unknown``, never a crash."""
     monkeypatch.setitem(sys.modules, "psutil", None)
-    assert update_cmd._classify_concurrent_instance(4242) == "unknown"
+    assert cli_main._classify_concurrent_instance(4242) == "unknown"
 
 
 def test_filter_non_gateway_concurrent_instances_splits(monkeypatch):
@@ -1060,7 +1016,7 @@ def test_update_gate_skips_abort_when_only_concurrent_is_gateway(
     ) as mock_backup:
         mock_backup.side_effect = RuntimeError("reached post-gate body")
         with pytest.raises(RuntimeError, match="reached post-gate body"):
-            update_cmd._cmd_update_impl(_update_args(), gateway_mode=False)
+            cli_main._cmd_update_impl(_update_args(), gateway_mode=False)
 
     mock_filter.assert_called_once()
     mock_backup.assert_called_once()
@@ -1092,7 +1048,7 @@ def test_update_gate_still_aborts_on_non_gateway_concurrent(
         cli_main, "_run_pre_update_backup"
     ) as mock_backup:
         with pytest.raises(SystemExit) as excinfo:
-            update_cmd._cmd_update_impl(_update_args(), gateway_mode=False)
+            cli_main._cmd_update_impl(_update_args(), gateway_mode=False)
 
     assert excinfo.value.code == 2
     mock_backup.assert_not_called()
@@ -1137,7 +1093,7 @@ def test_update_impl_refuses_before_terminating_gateway_ancestor(
         status_mod, "terminate_pid"
     ) as terminate:
         with pytest.raises(SystemExit) as excinfo:
-            update_cmd._cmd_update_impl(_update_args(), gateway_mode=False)
+            cli_main._cmd_update_impl(_update_args(), gateway_mode=False)
 
     assert excinfo.value.code == 2
     terminate.assert_not_called()

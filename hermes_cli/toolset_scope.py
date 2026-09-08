@@ -1,10 +1,17 @@
-"""Platform scope rules for configured toolsets."""
+"""Platform scope rules for configured toolsets.
+
+This module is intentionally independent of tool resolution and CLI setup so
+configuration validation and runtime resolution apply the same platform policy.
+"""
 
 from typing import Set
 
 
 # Toolsets without a restriction entry are available on every platform.
-_TOOLSET_PLATFORM_RESTRICTIONS = {"discord": {"discord"}, "discord_admin": {"discord"}}
+_TOOLSET_PLATFORM_RESTRICTIONS = {
+    "discord": {"discord"},
+    "discord_admin": {"discord"},
+}
 
 
 def toolset_allowed_for_platform(ts_key: str, platform: str) -> bool:

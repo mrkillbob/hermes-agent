@@ -4,7 +4,6 @@ import { type ToolCallMessagePartProps, useAuiState } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { capabilityScoped } from '@/api/client'
 import { useSessionView } from '@/app/chat/session-view'
 import { ToolFallback } from '@/components/assistant-ui/tool/fallback'
 import { WIDGET_SHELL_CLASS } from '@/components/chat/widget-shell'
@@ -13,8 +12,11 @@ import { Codicon } from '@/components/ui/codicon'
 import { Input } from '@/components/ui/input'
 import {
   addMcpServer,
+  authMcpServer,
+  cancelMcpOAuthFlow,
   getActionStatus,
   getMcpCatalog,
+  getMcpOAuthFlow,
   installMcpCatalogEntry,
   type McpCatalogEntry,
   removeMcpServer,
@@ -248,7 +250,6 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
 
   const approve = useCallback(async () => {
     cancelRef.current = false
-    const oauthScope = capabilityScoped()
     setWorking(true)
 
     // Poll-boundary abort for the background-install loop; the OAuth flows
@@ -273,8 +274,11 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
       if (action === 'authorize') {
         const flow = await completeMcpDesktopOAuth({
           serverName: server,
-          profile: oauthScope,
-          cancelled: () => cancelRef.current
+          start: authMcpServer,
+          status: getMcpOAuthFlow,
+          cancelled: () => cancelRef.current,
+          cancel: cancelMcpOAuthFlow,
+          openExternal: url => window.hermesDesktop.openExternal(url)
         })
 
         triggerHaptic('submit')
@@ -310,18 +314,21 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
         // flow dies after the config write (cancel, closed OAuth tab), roll
         // the write back — decline means "no server", not an unauthorized
         // entry squatting in mcp_servers (authoritative-write rule).
-        await addMcpServer({ name: known.name, url: known.url }, oauthScope)
+        await addMcpServer({ name: known.name, url: known.url })
 
         let flow
 
         try {
           flow = await completeMcpDesktopOAuth({
             serverName: known.name,
-            profile: oauthScope,
-            cancelled: () => cancelRef.current
+            start: authMcpServer,
+            status: getMcpOAuthFlow,
+            cancelled: () => cancelRef.current,
+            cancel: cancelMcpOAuthFlow,
+            openExternal: url => window.hermesDesktop.openExternal(url)
           })
         } catch (error) {
-          await removeMcpServer(known.name, oauthScope).catch(() => {
+          await removeMcpServer(known.name).catch(() => {
             // Rollback is best-effort; the primary error/cancel wins.
           })
           throw error
