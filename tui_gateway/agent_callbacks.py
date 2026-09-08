@@ -5,6 +5,7 @@ globals at install time (method_ctx.bind_module), so they reference server.py gl
 from __future__ import annotations
 
 import threading
+import os
 
 from .method_ctx import bind_module
 
