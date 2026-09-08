@@ -1060,8 +1060,14 @@ class GitHubClient:
             self._runner.run(argv)
         except GitHubClientError as error:
             if error.code == "merge_queue_required":
-                self._runner.run([*argv[:-2], "--auto", "--match-head-commit", head_sha])
-                return
+                # Queue enrollment transfers authority to GitHub while the PR
+                # waits for a merge-group run. The governed controller cannot
+                # revalidate its Hermes-only gates or cancel that enrollment,
+                # so never create a persistent queue entry here.
+                raise GitHubClientError(
+                    "GitHub requires a merge queue; no queue entry was enrolled",
+                    code="merge_queue_required",
+                ) from error
             raise
 
     def close_pull_request_with_comment(

@@ -390,7 +390,7 @@ class MergeController:
                 method=second.method,
             )
         except GitHubClientError as error:
-            if error.code == "merge_rejected":
+            if error.code in {"merge_rejected", "merge_queue_required"}:
                 self._ledger.finish_merge_lease(
                     lease,
                     status="failed",
@@ -400,7 +400,7 @@ class MergeController:
                 )
                 return MergeRunResult(
                     MergeDecision(
-                        False, ("merge_rejected",), None, second.snapshot_digest
+                        False, (error.code,), None, second.snapshot_digest
                     ),
                     None,
                 )
