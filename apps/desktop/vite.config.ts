@@ -1,6 +1,8 @@
-import { defineConfig } from 'vite'
 import babel from '@rolldown/plugin-babel'
 import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import { defineConfig } from 'vite'
+
+import { runtimePublicAssetsPlugin } from './scripts/lunar-city/runtime-public-assets.ts'
 
 /** React Compiler preset scoped to modules that can actually contain
  *  components/hooks (JSX syntax or a react-ish import). The preset's default
@@ -10,12 +12,15 @@ import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 function compilerPreset() {
   const preset = reactCompilerPreset()
   preset.rolldown.filter.code = /\/>|<\/|from\s*['"][^'"]*react/
+
   return preset
 }
-import tailwindcss from '@tailwindcss/vite'
-import path from 'path'
+
 import fs from 'fs'
 import { createRequire } from 'module'
+import path from 'path'
+
+import tailwindcss from '@tailwindcss/vite'
 
 // `hgui` symlinks a worktree's node_modules to the main checkout. Vite realpaths
 // those before enforcing server.fs.allow, so codicon/font assets resolve outside
@@ -80,9 +85,16 @@ const emojibaseAssets = () => ({
   }) {
     server.middlewares.use('/emojibase', (req, res, next) => {
       const rel = (req.url ?? '').split('?')[0].replace(/^\/+/, '')
-      if (!emojibaseDir || !EMOJIBASE_PATH.test(rel)) return next()
+
+      if (!emojibaseDir || !EMOJIBASE_PATH.test(rel)) {
+        return next()
+      }
+
       fs.readFile(path.join(emojibaseDir, rel), (err: unknown, buf: Buffer) => {
-        if (err) return next()
+        if (err) {
+          return next()
+        }
+
         res.setHeader('Content-Type', 'application/json')
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
         res.end(buf)
@@ -90,7 +102,10 @@ const emojibaseAssets = () => ({
     })
   },
   generateBundle(this: { emitFile: (asset: { type: 'asset'; fileName: string; source: Uint8Array }) => void }) {
-    if (!emojibaseDir) return
+    if (!emojibaseDir) {
+      return
+    }
+
     for (const rel of ['en/data.json', 'en/messages.json', 'en/shortcodes/emojibase.json']) {
       this.emitFile({
         type: 'asset',
@@ -103,7 +118,13 @@ const emojibaseAssets = () => ({
 
 export default defineConfig(({ command }) => ({
   base: './',
-  plugins: [react(), babel({ presets: [compilerPreset()] }), tailwindcss(), emojibaseAssets()],
+  plugins: [
+    react(),
+    babel({ presets: [compilerPreset()] }),
+    tailwindcss(),
+    emojibaseAssets(),
+    runtimePublicAssetsPlugin()
+  ],
   css: {
     // Pin an explicit (empty) PostCSS config. Tailwind is handled entirely by
     // `@tailwindcss/vite`, so the renderer needs no PostCSS plugins — and
@@ -118,6 +139,7 @@ export default defineConfig(({ command }) => ({
     postcss: { plugins: [] }
   },
   build: {
+    copyPublicDir: false,
     // The renderer intentionally ships FEW chunks (not one, not thousands):
     //   · `codeSplitting: false` (the old setup) inlines every `lazy()` /
     //     dynamic import into the entry, so heavyweight lazy-only deps
@@ -131,6 +153,10 @@ export default defineConfig(({ command }) => ({
     // imports stay lazy, and the file count stays in the tens.
     chunkSizeWarningLimit: 25000,
     rolldownOptions: {
+      input: {
+        index: path.resolve(__dirname, 'index.html'),
+        lunarCityReview: path.resolve(__dirname, 'lunar-city-review.html')
+      },
       output: {
         advancedChunks: {
           groups: [

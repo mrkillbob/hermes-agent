@@ -30,6 +30,8 @@ import {
   systemPreferences
 } from 'electron'
 
+import { installLunarCityPerfBridge } from './lunar-city-perf-install'
+
 import { classifyActiveRuntime } from './active-runtime-state'
 import { destroyKeepaliveAgents, downloadAgentFor, jsonAgentFor, withRetry } from './api-transport'
 import { appIconCandidates, resolveAppIcon } from './app-icon'
@@ -1404,6 +1406,7 @@ function registerMediaProtocol() {
 }
 
 let mainWindow = null
+const lunarCityPerfBridge = installLunarCityPerfBridge({ buildStamp: INSTALL_STAMP, getMainWindow: () => mainWindow })
 const backendConnectionState = createBackendConnectionState<ReturnType<typeof spawn>, any>()
 const remoteLiveness = new RemoteLivenessTracker()
 const remoteRevalidation = new RemoteRevalidationCoordinator()
@@ -14606,6 +14609,7 @@ function createWindow() {
   })
 
   const createdMainWindow = mainWindow
+  lunarCityPerfBridge.attachWindow(createdMainWindow)
 
   // Chat-surface registration: see applyWindowTranslucency.
   translucencyBackedWindows.add(mainWindow)
@@ -17221,6 +17225,7 @@ app.on('before-quit', () => {
 // Close the pooled keep-alive sockets on quit so lingering connections can't
 // hold the event loop open or leak FDs past app teardown.
 app.on('will-quit', () => {
+  lunarCityPerfBridge.dispose()
   destroyKeepaliveAgents()
 })
 
