@@ -19,7 +19,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from hermes_cli._subprocess_compat import noninteractive_git_env
+from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
+from hermes_cli.worktree_base import resolve_worktree_base
 
 _GIT_TIMEOUT = 30
 _GH_TIMEOUT = 30
@@ -42,7 +43,7 @@ def _git(cwd: str, args: list[str], *, timeout: int = _GIT_TIMEOUT) -> tuple[int
     the real auth error in the toast instead."""
     try:
         proc = subprocess.run(
-            ["git", *args],
+            ["git", *harden_git_argv(args)],
             cwd=cwd,
             capture_output=True,
             text=True, encoding='utf-8', errors='replace',
@@ -809,6 +810,11 @@ def worktree_add(cwd: str, options: dict) -> dict:
             # checkout -b new` — so suppress it (parity with the Electron op).
             args.append("--no-track")
         args.append(base)
+    else:
+        base, _base_label = resolve_worktree_base(
+            root, prefer_current_upstream=False
+        )
+        args.extend(["--no-track", base])
     code, _, err = _git(root, args)
     if code != 0:
         if "already exists" in (err or "").lower():

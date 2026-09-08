@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -316,6 +317,76 @@ test('addWorktree: base origin/main does not set up upstream tracking', async ()
     }
 
     assert.equal(hasUpstream, false)
+  } finally {
+    fs.rmSync(remoteDir, { recursive: true, force: true })
+    fs.rmSync(cloneDir, { recursive: true, force: true })
+  }
+})
+
+test('addWorktree: omitted base uses remote default, not parked feature HEAD', async () => {
+  const { cloneDir, remoteDir } = seedRemoteAndClone('implicit-remote-default', [])
+
+  const git = (...args) =>
+    execFileSync('git', ['-C', cloneDir, ...args])
+      .toString()
+      .trim()
+
+  try {
+    const mainSha = git('rev-parse', 'origin/main')
+    git('switch', '-c', 'parked-feature')
+    git('-c', 'user.email=hermes@localhost', '-c', 'user.name=Hermes', 'commit', '--allow-empty', '-m', 'feature only')
+
+    const result = await addWorktree(cloneDir, { branch: 'fresh-default', name: 'fresh-default' }, 'git')
+
+    assert.equal(git('-C', result.path, 'rev-parse', 'HEAD'), mainSha)
+  } finally {
+    fs.rmSync(remoteDir, { recursive: true, force: true })
+    fs.rmSync(cloneDir, { recursive: true, force: true })
+  }
+})
+
+test('addWorktree: omitted base discovers remote default without origin/HEAD', async () => {
+  const { cloneDir, remoteDir } = seedRemoteAndClone('implicit-remote-show', [])
+
+  const git = (...args) =>
+    execFileSync('git', ['-C', cloneDir, ...args])
+      .toString()
+      .trim()
+
+  try {
+    const mainSha = git('rev-parse', 'origin/main')
+    execFileSync('git', ['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'], { cwd: cloneDir })
+    git('switch', '-c', 'parked-feature')
+    git('-c', 'user.email=hermes@localhost', '-c', 'user.name=Hermes', 'commit', '--allow-empty', '-m', 'feature only')
+
+    const result = await addWorktree(cloneDir, { branch: 'fresh-without-head', name: 'fresh-without-head' }, 'git')
+
+    assert.equal(git('-C', result.path, 'rev-parse', 'HEAD'), mainSha)
+  } finally {
+    fs.rmSync(remoteDir, { recursive: true, force: true })
+    fs.rmSync(cloneDir, { recursive: true, force: true })
+  }
+})
+
+test('addWorktree: omitted base records successful fetch freshness for packed refs', async () => {
+  const { cloneDir, remoteDir } = seedRemoteAndClone('packed-freshness', [])
+
+  const git = (...args) =>
+    execFileSync('git', ['-C', cloneDir, ...args])
+      .toString()
+      .trim()
+
+  try {
+    const remoteRefPath = git('rev-parse', '--git-path', 'refs/remotes/origin/main')
+    execFileSync('git', ['-C', cloneDir, 'pack-refs', '--all', '--prune'])
+    assert.equal(fs.existsSync(path.resolve(cloneDir, remoteRefPath)), false)
+
+    const result = await addWorktree(cloneDir, { branch: 'packed-freshness', name: 'packed-freshness' }, 'git')
+    assert.equal(git('-C', result.path, 'rev-parse', 'HEAD'), git('rev-parse', 'origin/main'))
+
+    const digest = createHash('sha256').update('origin/main', 'utf8').digest('hex')
+    const markerPath = git('rev-parse', '--git-path', `hermes/worktree-base-freshness/${digest}`)
+    assert.equal(fs.existsSync(path.resolve(cloneDir, markerPath)), true)
   } finally {
     fs.rmSync(remoteDir, { recursive: true, force: true })
     fs.rmSync(cloneDir, { recursive: true, force: true })

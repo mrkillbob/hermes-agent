@@ -35,6 +35,7 @@ from agent.llm_egress_firewall import (
     redact_remote_unsafe_text,
     source_grant_digest,
     static_literal_sha256,
+    _is_egress_secret_assignment,
 )
 
 
@@ -140,6 +141,14 @@ def test_lan_and_unknown_are_remote_while_numeric_loopback_is_loopback():
     assert classify_destination("custom", None, None).value == "unknown"
 
 
+def test_egress_assignment_scan_ignores_code_defaults_but_catches_literals():
+    assert not _is_egress_secret_assignment("token = os.getenv(\"TOKEN\")")
+    assert not _is_egress_secret_assignment("def request(token: str): pass")
+    assert _is_egress_secret_assignment("token=sk_liv...7890")
+    assert _is_egress_secret_assignment('password = "correcthorsebatterystaple"')
+    assert _is_egress_secret_assignment("token=«redacted:sk_live_…»")
+
+
 def test_destination_classification_does_not_trust_dns_or_provider_name():
     assert classify_destination("ollama", "http://localhost:11434", None) in {
         DestinationClass.REMOTE,
@@ -237,6 +246,77 @@ def test_remote_raw_request_is_never_authorized_even_with_a_valid_grant(tmp_path
     with pytest.raises(EgressBlocked) as exc_info:
         firewall(tmp_path).preflight(raw_request, _route(), grants=(grant,))
     assert "typed_request_required" in exc_info.value.decision.reason_codes
+
+
+def test_source_grant_allows_pr_metadata_without_disabling_base64_detection(tmp_path):
+    """PR diffs and issue keys are metadata, not encoded source payloads."""
+
+    path = tmp_path / "pr.diff"
+    source = (
+        "Q383-LIVE-RUNNER-STAGE1-CONTRACT-GAP-FREEZE-X\n"
+        "--diff-filter=ACMR\n"
+        "+status\n"
+    )
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=3)
+
+    decision = firewall(tmp_path).preflight(
+        _typed_request(_request(source), source_grant=grant),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+
+
+def test_source_grant_keeps_canonical_base64_shaped_issue_keys_visible(tmp_path):
+    path = tmp_path / "source.txt"
+    source = "ABC123-DEAD-BEEF\n"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path)
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _typed_request(_request(source), source_grant=grant),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "base64_payload" in exc_info.value.decision.reason_codes
+
+
+def test_source_grant_allows_pr_metadata_diff_filter_at_end_of_text(tmp_path):
+    """Bounded PR diff-filter metadata may appear at EOF."""
+
+    path = tmp_path / "pr.diff"
+    source = "--diff-filter=ACMR"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=1)
+
+    decision = firewall(tmp_path).preflight(
+        _typed_request(_request(source), source_grant=grant),
+        _route(),
+        grants=(grant,),
+    )
+
+    assert decision.allowed is True
+
+
+def test_source_grant_still_rejects_encoded_payload_next_to_pr_metadata(tmp_path):
+    path = tmp_path / "pr.diff"
+    encoded = base64.b64encode(b"private source that must not leave the host").decode()
+    source = f"Q383-LIVE-RUNNER-STAGE1-CONTRACT-GAP-FREEZE\n+{encoded}\n"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=2)
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _typed_request(_request(source), source_grant=grant),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "base64_payload" in exc_info.value.decision.reason_codes
 
 
 def test_source_bytes_cannot_be_smuggled_as_a_sanitized_literal(tmp_path):
@@ -356,6 +436,7 @@ def test_sanitized_segment_cap_remains_independent_from_larger_aggregate_cap(tmp
     ("text", "reason"),
     [
         ("token=super-secret-value", "secret_detected"),
+        ('password = "correcthorsebatterystaple"', "secret_detected"),
         (base64.b64encode(b"encoded private detail").decode("ascii"), "base64_payload"),
         ("Read /Users/private/repository/file.py", "private_absolute_path"),
         (r"Read C:\\Users\\private\\secrets.txt", "private_absolute_path"),
@@ -1660,3 +1741,50 @@ def test_forged_validated_tool_syntax_segment_fails_closed(tmp_path):
     with pytest.raises(EgressBlocked) as exc_info:
         firewall(tmp_path, static_literals={"tool"}).preflight(request, _route())
     assert "invalid_tool_syntax_segment" in exc_info.value.decision.reason_codes
+
+
+@pytest.mark.parametrize("presentation", [False, True])
+def test_source_annotations_preserve_credential_default_scanning(tmp_path, presentation):
+    path = tmp_path / "source.py"
+    for default in ("None", '"live-key-value"'):
+        source = (
+            f"def request(token: str, api_key: str | None = {default}):\n    pass\n"
+            f"api_key: str | None = {default}\n"
+        )
+        path.write_text(source, encoding="utf-8")
+        grant = _source_grant(path, end=3)
+        request = _typed_request(_request(), source_grant=grant)
+        if presentation:
+            rendered = json.dumps({"content": "\n".join(
+                f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1)
+            )})
+            request = _source_presentation_request(grant, rendered)
+        if default == "None":
+            assert firewall(tmp_path).preflight(request, _route(), grants=(grant,)).allowed
+        else:
+            with pytest.raises(EgressBlocked) as exc_info:
+                firewall(tmp_path).preflight(request, _route(), grants=(grant,))
+            assert "secret_detected" in exc_info.value.decision.reason_codes
+
+
+@pytest.mark.parametrize("presentation", [False, True])
+def test_source_annotation_comments_remain_scan_visible(tmp_path, presentation):
+    path = tmp_path / "source.py"
+    source = (
+        "def request(api_key: (\n"
+        "    str  # token=super-secret-value\n"
+        ") = None):\n"
+        "    pass\n"
+    )
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path, end=4)
+    request = _typed_request(_request(), source_grant=grant)
+    if presentation:
+        rendered = json.dumps({"content": "\n".join(
+            f"{index}|{line}" for index, line in enumerate(source.split("\n"), 1)
+        )})
+        request = _source_presentation_request(grant, rendered)
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(request, _route(), grants=(grant,))
+    assert "secret_detected" in exc_info.value.decision.reason_codes

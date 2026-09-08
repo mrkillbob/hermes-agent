@@ -25,9 +25,11 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import hermes_cli._subprocess_compat as subprocess_compat
 from hermes_cli._subprocess_compat import noninteractive_git_env
 
 
@@ -55,6 +57,138 @@ class TestNoninteractiveGitEnv:
     def test_overrides_explicit_prompt_enable(self):
         env = noninteractive_git_env({"GIT_TERMINAL_PROMPT": "1"})
         assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_strips_ambient_git_config_injection(self):
+        env = noninteractive_git_env(
+            {
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "core.pager",
+                "GIT_CONFIG_VALUE_0": "less",
+                "GIT_CONFIG_KEY_1": "core.hooksPath",
+                "GIT_CONFIG_VALUE_1": ".git/hooks",
+                "GIT_CONFIG_PARAMETERS": "'core.pager=less'",
+            }
+        )
+
+        assert env["GIT_CONFIG_COUNT"] != "2"
+        assert "GIT_CONFIG_PARAMETERS" not in env
+        values = {
+            env[f"GIT_CONFIG_KEY_{idx}"]: env[f"GIT_CONFIG_VALUE_{idx}"]
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+        }
+        assert values["core.pager"] == "cat"
+        assert values["core.hooksPath"] == os.devnull
+
+    def test_preserves_trusted_helpers_and_resets_repo_helpers(self, monkeypatch):
+        observed = {}
+
+        def fake_run(argv, **kwargs):
+            observed["env"] = dict(kwargs["env"])
+            if argv == ["git", "config", "--global", "--get-all", "credential.helper"]:
+                return SimpleNamespace(returncode=0, stdout="trusted-helper\n", stderr="")
+            assert argv == ["git", "config", "--global", "--null", "--list"]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "url.https://mirror.example/.insteadof\nhttps://github.com/\0"
+                    "http.sslCAInfo\n/tmp/corporate-ca.pem\0"
+                    "http.https://github.com/.proxy\nhttp://proxy.example:8080\0"
+                    "http.extraHeader\nAuthorization: Basic trusted\0"
+                    "http.postBuffer\n999999999\0"
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess_compat.subprocess, "run", fake_run)
+        env = noninteractive_git_env({"GIT_CONFIG_GLOBAL": "/trusted/global.gitconfig"})
+        credential_values = [
+            env[f"GIT_CONFIG_VALUE_{idx}"]
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+            if env[f"GIT_CONFIG_KEY_{idx}"] == "credential.helper"
+        ]
+
+        assert observed["env"]["GIT_CONFIG_GLOBAL"] == "/trusted/global.gitconfig"
+        assert credential_values == ["", "trusted-helper"]
+        values = [
+            (env[f"GIT_CONFIG_KEY_{idx}"], env[f"GIT_CONFIG_VALUE_{idx}"])
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+        ]
+        assert ("url.https://mirror.example/.insteadof", "https://github.com/") in values
+        assert ("http.sslCAInfo", "/tmp/corporate-ca.pem") in values
+        assert ("http.https://github.com/.proxy", "http://proxy.example:8080") in values
+        assert ("http.extraHeader", "Authorization: Basic trusted") in values
+        assert ("http.postBuffer", "999999999") not in values
+
+    def test_real_git_ignores_repo_helper_but_replays_global_helper(self, tmp_path):
+        global_config = tmp_path / "global.gitconfig"
+        marker = tmp_path / "malicious-helper-ran"
+        trusted_helper = tmp_path / "trusted-helper.sh"
+        trusted_helper.write_text(
+            "#!/bin/sh\nprintf 'username=trusted\\npassword=trusted-secret\\n'\n"
+        )
+        trusted_helper.chmod(0o700)
+        malicious_helper = tmp_path / "malicious-helper.sh"
+        malicious_helper.write_text(
+            f"#!/bin/sh\nprintf x > '{marker}'\nprintf 'username=malicious\\npassword=malicious-secret\\n'\n"
+        )
+        malicious_helper.chmod(0o700)
+        global_config.write_text(
+            f"[credential]\n\thelper = !{trusted_helper}\n"
+            "[url \"https://mirror.example/\"]\n"
+            "\tinsteadOf = https://github.com/\n"
+            "[http]\n"
+            "\tsslCAInfo = /tmp/corporate-ca.pem\n"
+            "\tproxy = http://proxy.example:8080\n"
+            "\tpostBuffer = 999999999\n"
+        )
+        repo = tmp_path / "repo"
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "--local", "credential.helper", f"!{malicious_helper}"],
+            check=True,
+            capture_output=True,
+        )
+
+        env = noninteractive_git_env({"GIT_CONFIG_GLOBAL": str(global_config)})
+        transport_values = {
+            env[f"GIT_CONFIG_KEY_{idx}"].lower(): env[f"GIT_CONFIG_VALUE_{idx}"]
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+        }
+        assert transport_values["url.https://mirror.example/.insteadof"] == "https://github.com/"
+        assert transport_values["http.sslcainfo"] == "/tmp/corporate-ca.pem"
+        assert transport_values["http.proxy"] == "http://proxy.example:8080"
+        assert "http.postbuffer" not in transport_values
+        result = subprocess.run(
+            ["git", "credential", "fill"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            input="protocol=https\nhost=example.com\n\n",
+        )
+
+        assert not marker.exists()
+        assert "username=trusted" in result.stdout
+
+    def test_disables_pagers_hooks_editors_and_user_config(self):
+        env = noninteractive_git_env({})
+        values = {
+            env[f"GIT_CONFIG_KEY_{idx}"]: env[f"GIT_CONFIG_VALUE_{idx}"]
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+        }
+
+        assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert env["GIT_CONFIG_SYSTEM"] == os.devnull
+        assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert env["GIT_PAGER"] == "cat"
+        assert env["PAGER"] == "cat"
+        assert env["GIT_EDITOR"] == "true"
+        assert values["core.fsmonitor"] == "false"
+        assert values["core.hooksPath"] == os.devnull
+        assert values["core.editor"] == "true"
+        assert values["sequence.editor"] == "true"
+        assert values["diff.external"] == ""
 
 
 # ---------------------------------------------------------------------------
