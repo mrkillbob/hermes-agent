@@ -21,7 +21,10 @@ jobs:
     # The standard hosted pool is used here because the formerly requested
     # large-runner label is not available on this repository.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Standard hosted runners have less parallel capacity than the former
+    # large-runner pool; allow the full suite to finish instead of cancelling
+    # it at the old 30-minute ceiling.
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
