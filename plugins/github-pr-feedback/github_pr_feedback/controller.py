@@ -1220,7 +1220,11 @@ class ScanController:
                             pull_request.base_repository,
                             pull_request.number,
                             pull_request.head_sha,
-                            base_sha=current.base_sha,
+                            base_sha=(
+                                current.base_sha
+                                if current is not None
+                                else pull_request.base_sha
+                            ),
                         ) is None:
                             self._ledger.quarantine_malformed_ci_receipt(exact_ci)
                             local_ci_receipt_status = "failed"
