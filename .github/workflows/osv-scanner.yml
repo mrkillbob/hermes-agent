@@ -63,8 +63,10 @@ jobs:
       # The upstream reusable workflow uploads this exact file under its
       # fixed artifact name, which the wrapper downloads below.
       results-file-name: osv-results.sarif
-      # Direct schedule/dispatch runs do not populate workflow_call inputs.
-      upload-sarif: ${{ inputs.upload-sarif || github.event_name != 'workflow_call' }}
+      # Direct schedule/push/dispatch runs do not populate workflow_call
+      # inputs. In a called workflow github.event_name remains the caller's
+      # original event, so exclude both PR and workflow_call contexts here.
+      upload-sarif: ${{ inputs.upload-sarif || (github.event_name != 'pull_request' && github.event_name != 'workflow_call') }}
       fail-on-vuln: false
 
   emit-status:
