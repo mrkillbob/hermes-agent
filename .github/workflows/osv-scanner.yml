@@ -108,6 +108,10 @@ jobs:
 
       - name: Upload to code scanning
         if: ${{ !cancelled() }}
+        # Fork PR tokens may not have security-events:write even when the job
+        # itself has the requested permission. Keep the scan/reporting lane
+        # green and preserve the SARIF artifact in that neutral case.
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@cdefb33c0f6224e58673d9004f47f7cb3e328b89 # v4.31.10
         with:
           sarif_file: osv-results/osv-results.sarif
