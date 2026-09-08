@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 
+import { installLunarCityPerfPreload } from './lunar-city-perf-preload-install'
+
+installLunarCityPerfPreload()
+
 // Which translucency the OS can back. Asked synchronously because the renderer
 // needs it before its first paint, and answered by main because deciding it
 // needs `os.release()` — a sandboxed preload may only require electron, events,
