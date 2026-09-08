@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -90,3 +93,46 @@ def test_skill_declares_no_send_and_native_bridge() -> None:
     assert "does not place orders" in content
     assert "research_only" in content
     assert "AIQ_SERVER_URL" in content
+
+
+def test_aiq_client_exercises_submit_status_and_download(tmp_path) -> None:
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    spec = spec_from_file_location("aiq_client", REPO / "optional-skills/mlops/nvidia-aiq-signal-discovery/scripts/aiq_client.py")
+    client = module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(client)
+    seen: list[tuple[str, str, object | None]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            size = int(self.headers["Content-Length"])
+            seen.append((self.command, self.path, json.loads(self.rfile.read(size))))
+            self._reply({"job_id": "job/opaque?1"})
+
+        def do_GET(self):  # noqa: N802
+            seen.append((self.command, self.path, None))
+            self._reply({"status": "completed", "result": True})
+
+        def _reply(self, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        assert client.request_json(base, "/v1/jobs", "POST", {"symbol": "NVDA"})["job_id"]
+        assert client.request_json(base, "/v1/jobs/job%2Fopaque%3F1")["status"] == "completed"
+        assert client.request_json(base, "/v1/jobs/job%2Fopaque%3F1/result")["result"] is True
+        assert seen[1][1] == "/v1/jobs/job%2Fopaque%3F1"
+    finally:
+        server.shutdown()

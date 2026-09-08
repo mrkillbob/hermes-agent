@@ -4,7 +4,6 @@ description: Run governed NVIDIA signal research for LunaBot.
 version: 0.1.0
 author: Mike DeMott (mrkillbob), Hermes Agent
 license: MIT
-platforms: [macos, linux]
 metadata:
   hermes:
     tags: [NVIDIA, AI-Q, Quantitative Research, LunaBot, Governance]
@@ -63,9 +62,9 @@ keys into a request, `SKILL.md`, or generated receipt.
    ```
 
    ```text
-   python3 scripts/aiq_client.py submit request.json
-   python3 scripts/aiq_client.py status <job-id>
-   python3 scripts/aiq_client.py download <job-id> result.json
+   python3 scripts/aiq_client.py --server "<configured AIQ_SERVER_URL>" submit request.json
+   python3 scripts/aiq_client.py --server "<configured AIQ_SERVER_URL>" status <job-id>
+   python3 scripts/aiq_client.py --server "<configured AIQ_SERVER_URL>" download <job-id> result.json
    ```
    Override endpoint paths with `--path` or `--path-template` when the
    trusted deployment exposes the same contract under a gateway prefix.

@@ -7,11 +7,15 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 def request_json(base_url: str, path: str, method: str = "GET", payload: object | None = None) -> object:
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise SystemExit("AI-Q server must use HTTPS except for loopback development")
     url = base_url.rstrip("/") + "/" + path.lstrip("/")
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     request = Request(url, data=body, method=method, headers={"Accept": "application/json"})
@@ -49,10 +53,10 @@ def main() -> int:
         result = request_json(args.server, args.path, "POST", json.loads(args.request.read_text()))
         print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "status":
-        result = request_json(args.server, args.path_template.format(job_id=args.job_id))
+        result = request_json(args.server, args.path_template.format(job_id=quote(args.job_id, safe="")))
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
-        result = request_json(args.server, args.path_template.format(job_id=args.job_id))
+        result = request_json(args.server, args.path_template.format(job_id=quote(args.job_id, safe="")))
         args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
         print(args.output)
     return 0
