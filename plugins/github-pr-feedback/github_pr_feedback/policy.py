@@ -356,6 +356,7 @@ class AgentLabelPolicy:
     create_missing: bool = False
     repositories: frozenset[str] = frozenset()
     mappings: tuple[AgentLabelMapping, ...] = ()
+    metadata_rules: tuple = ()
 
     def applies_to(self, repository: str) -> bool:
         return not self.repositories or repository in self.repositories
@@ -396,6 +397,7 @@ class MergeMaintainerPolicy:
     report_only: bool
     post_merge: PostMergePolicy | None
     allow_budget_exhausted_local_ci: bool = False
+    auto_enroll_owned_prs: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,6 +838,8 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
 
 
 def _parse_agent_labels(raw: object) -> AgentLabelPolicy | None:
+    from .metadata_labels import parse_metadata_rules
+
     if not isinstance(raw, Mapping):
         raise ValueError("agent_labels must be a mapping")
     enabled = raw.get("enabled")
@@ -846,7 +850,7 @@ def _parse_agent_labels(raw: object) -> AgentLabelPolicy | None:
             raise ValueError("disabled agent_labels has unknown fields")
         return None
     required = {"enabled", "max_updates_per_scan", "create_missing", "mappings"}
-    optional = {"repositories"}
+    optional = {"repositories", "metadata_rules"}
     if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("agent_labels has missing or unknown fields")
     max_updates = raw["max_updates_per_scan"]
@@ -901,6 +905,7 @@ def _parse_agent_labels(raw: object) -> AgentLabelPolicy | None:
             else frozenset()
         ),
         mappings=tuple(mappings),
+        metadata_rules=parse_metadata_rules(raw.get("metadata_rules", [])),
     )
 
 
@@ -1039,6 +1044,7 @@ def _parse_merge_maintainer(
             "report_only",
             "post_merge",
             "require_per_pr_enrollment",
+            "auto_enroll_owned_prs",
         }
         if set(raw) - allowed:
             raise ValueError("disabled merge_maintainer has unknown fields")
@@ -1054,7 +1060,7 @@ def _parse_merge_maintainer(
         "report_only",
         "post_merge",
     }
-    optional = {"allow_budget_exhausted_local_ci"}
+    optional = {"allow_budget_exhausted_local_ci", "auto_enroll_owned_prs"}
     if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("merge_maintainer has missing or unknown fields")
     repository = _repository(raw["repository"], "merge_maintainer repository")
@@ -1095,6 +1101,9 @@ def _parse_merge_maintainer(
     )
     if not isinstance(allow_budget_exhausted_local_ci, bool):
         raise ValueError("allow_budget_exhausted_local_ci must be a boolean")
+    auto_enroll_owned_prs = raw.get("auto_enroll_owned_prs", False)
+    if not isinstance(auto_enroll_owned_prs, bool):
+        raise ValueError("auto_enroll_owned_prs must be a boolean")
     return MergeMaintainerPolicy(
         assignee=_nonempty_string(raw["assignee"], "merge_maintainer assignee"),
         repository=repository,
@@ -1105,6 +1114,7 @@ def _parse_merge_maintainer(
         report_only=report_only,
         post_merge=_parse_post_merge(raw["post_merge"], target=target),
         allow_budget_exhausted_local_ci=allow_budget_exhausted_local_ci,
+        auto_enroll_owned_prs=auto_enroll_owned_prs,
     )
 
 

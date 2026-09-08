@@ -44,15 +44,14 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
     if tool_name != "kanban_complete":
         return None
     worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
-    governed_local_ci = os.environ.get("HERMES_KANBAN_TASK_KIND", "").strip() == "pr_local_ci"
-    if not governed_local_ci and ctx.get_config("enabled", default=False) is not True:
+    if not worker_task and ctx.get_config("enabled", default=False) is not True:
         return None
     args = args if isinstance(args, dict) else {}
     target = str(args.get("task_id") or worker_task or "").strip()
     if not target:
         return None
     try:
-        if governed_local_ci:
+        if worker_task:
             from hermes_constants import get_default_hermes_root
 
             control_home = os.environ.get("HERMES_CONTROL_HOME", "").strip()
@@ -68,7 +67,9 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
                 "FROM feedback_receipts WHERE task_id = ? AND feedback_kind = 'pr_local_ci'",
                 (target,),
             ).fetchall()
-            if bindings and all(_has_receipt(connection, binding) for binding in bindings):
+            if not bindings:
+                return None
+            if all(_has_receipt(connection, binding) for binding in bindings):
                 return None
         reason = "no typed passing durable CI receipt matches this task's exact PR head/base and dispatch"
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
@@ -81,9 +82,6 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
 
 
 def register_completion_guard(ctx) -> None:
-    # Directory-plugin hosts predating native hook support still expose the
-    # CLI registration surface.  Keep those hosts usable while enabling the
-    # guard wherever the host explicitly provides the hook boundary.
     register_hook = getattr(ctx, "register_hook", None)
     if callable(register_hook):
         register_hook("pre_tool_call", partial(guard_completion, ctx))

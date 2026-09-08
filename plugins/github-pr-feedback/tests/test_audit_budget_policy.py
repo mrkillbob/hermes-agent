@@ -47,13 +47,16 @@ def test_audit_pr_passes_fresh_canonical_actions_state_to_exact_head_runner(
         def get_merge_state(self, _repository: str, _number: int):
             return state
 
+        def get_pull_request(self, _repository: str, _number: int):
+            return state
+
         def actions_enabled(self, repository: str, *, refresh: bool = False) -> bool:
             assert repository == "acme/widgets"
             assert refresh is True
             return actions_enabled
 
     class Ledger:
-        def has_pending_mutation(self, _repository: str, _pr_number: int) -> bool:
+        def has_pending_mutation(self, _repository: str, _number: int) -> bool:
             return False
 
         def close(self) -> None:
@@ -69,7 +72,7 @@ def test_audit_pr_passes_fresh_canonical_actions_state_to_exact_head_runner(
         *,
         force_fresh: bool = False,
         actions_enabled_hint: bool | None = None,
-        required_local_ci: bool = True,
+        required_local_ci: bool = False,
     ) -> CIAuditReceipt:
         assert force_fresh is True
         captured.append(actions_enabled_hint)
