@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Protocol
 
 from hermes_cli.github_identity import GitHubAutomationIdentity, GitHubIdentityError
@@ -1102,6 +1103,19 @@ def _push_head(ctx: Any, args: argparse.Namespace) -> int:
             raise ValueError(
                 f"pull request is not admitted: {admission.reason or 'unknown reason'}"
             )
+        task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+        if task_id:
+            audit_identity = SimpleNamespace(
+                repository=args.repository,
+                pr_number=args.pr_number,
+                head_sha=pull_request.head_sha,
+            )
+            ledger = FeedbackLedger.for_current_profile()
+            try:
+                if not owns_current_audit_task(ledger, audit_identity):
+                    raise ValueError("push-head is not bound to the current audit task")
+            finally:
+                ledger.close()
         expected_head_sha = args.head_sha.casefold()
         runner = GitStackRunner(args.worktree)
         if pull_request.head_sha != expected_head_sha:
@@ -1125,6 +1139,12 @@ def _push_head(ctx: Any, args: argparse.Namespace) -> int:
         else:
             if str(pull_request.state or "").strip().upper() != "OPEN":
                 raise ValueError("pull request is not open")
+            viewer_login = getattr(github, "viewer_login", None)
+            if callable(viewer_login) and viewer_login().casefold() != settings.expected_login.casefold():
+                raise GitHubClientError(
+                    "Hermes GitHub automation identity does not match policy",
+                    code="automation_identity_mismatch",
+                )
             git_environment = GitHubAutomationIdentity(
                 settings.expected_login, settings.token_env
             ).git_command_environment()

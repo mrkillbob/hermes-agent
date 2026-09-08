@@ -248,6 +248,11 @@ def noninteractive_git_env(base: "Mapping[str, str] | None" = None) -> dict[str,
     for input nobody can type.
     """
     env = dict(base if base is not None else os.environ)
+    # Never let inherited trace settings write credential-bearing HTTP headers
+    # to a worker-controlled file while the bot token is in the environment.
+    env.pop("GIT_TRACE", None)
+    env.pop("GIT_TRACE_CURL", None)
+    env.pop("GIT_TRACE_REDACT", None)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "Never"
     # Drop caller-supplied config injection; the GIT_CONFIG_COUNT block is rebuilt below so
@@ -460,4 +465,3 @@ def bounded_git_probe(argv: Sequence[str], *, timeout: float) -> str:
     if result is None or result.returncode != 0:
         return ""
     return (result.stdout or "").strip()
-

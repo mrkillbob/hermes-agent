@@ -74,28 +74,33 @@ def test_push_verified_head_uses_canonical_repository_and_exact_local_head(
         if argv[3:] == ("init", "--bare", "--quiet"):
             (Path(argv[2]) / "objects" / "info").mkdir(parents=True, exist_ok=True)
         stdout = "b" * 40 if argv[3:] == ("rev-parse", "HEAD") else ""
+        if argv[3:] == ("rev-list", "--first-parent", "HEAD"):
+            stdout = "a" * 40 + "\n"
         if argv[3:] == ("rev-parse", "--git-path", "objects"):
             stdout = str(tmp_path / "objects")
         return subprocess.CompletedProcess(argv, 0, stdout, "")
 
     monkeypatch.setattr("github_pr_feedback.git_stack.subprocess.run", fake_run)
     GitStackRunner(tmp_path).push_verified_head("acme/widgets", "codex/child", "a" * 40)
-    assert calls[:3] == [
+    assert calls[:4] == [
         ("git", "-C", str(tmp_path), "rev-parse", "HEAD"),
         (
             "git", "-C", str(tmp_path), "merge-base", "--is-ancestor",
             "a" * 40, "HEAD",
         ),
         (
+            "git", "-C", str(tmp_path), "rev-list", "--first-parent", "HEAD",
+        ),
+        (
             "git", "-C", str(tmp_path), "rev-parse", "--git-path", "objects",
         ),
     ]
-    isolated = calls[3][2]
-    assert calls[3] == ("git", "-C", isolated, "init", "--bare", "--quiet")
-    assert calls[4] == (
+    isolated = calls[4][2]
+    assert calls[4] == ("git", "-C", isolated, "init", "--bare", "--quiet")
+    assert calls[5] == (
         "git", "-C", isolated, "update-ref", "refs/heads/hermes-push", "b" * 40
     )
-    assert calls[7] == (
+    assert calls[8] == (
         "git", "-C", isolated, "push",
         "https://github.com/acme/widgets.git",
         "--force-with-lease=refs/heads/codex/child:" + "a" * 40,
@@ -162,6 +167,8 @@ def test_push_verified_head_uploads_lfs_objects_before_the_git_ref(
             stdout = "b" * 40
         elif argv[3:] == ("rev-parse", "--git-path", "objects"):
             stdout = str(tmp_path / "objects")
+        elif argv[3:] == ("rev-list", "--first-parent", "HEAD"):
+            stdout = "a" * 40 + "\n"
         elif argv[3:] == ("rev-parse", "--git-path", "lfs"):
             stdout = str(tmp_path / "lfs")
         elif argv[3:] == ("check-attr", "--cached", "--stdin", "-z", "filter"):
@@ -172,11 +179,11 @@ def test_push_verified_head_uploads_lfs_objects_before_the_git_ref(
 
     monkeypatch.setattr("github_pr_feedback.git_stack.subprocess.run", fake_run)
     GitStackRunner(tmp_path).push_verified_head("acme/widgets", "codex/child", "a" * 40)
-    isolated = calls[3][2]
-    assert calls[3] == ("git", "-C", isolated, "init", "--bare", "--quiet")
-    assert calls[8] == (
+    isolated = calls[4][2]
+    assert calls[4] == ("git", "-C", isolated, "init", "--bare", "--quiet")
+    assert calls[9] == (
         "git", "-C", isolated,
         "-c", f"lfs.storage={tmp_path / 'lfs'}", "lfs", "push",
         "https://github.com/acme/widgets.git", "refs/heads/hermes-push",
     )
-    assert calls[9][3] == "push"
+    assert calls[10][3] == "push"

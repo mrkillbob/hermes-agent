@@ -29,7 +29,7 @@ class GitStackError(RuntimeError):
 
 class GitStackRunner:
     def __init__(self, repository: Path, *, environment: Mapping[str, str] | None = None) -> None:
-        self.repository = Path(repository)
+        self.repository = Path(repository).resolve()
         self._environment = None if environment is None else dict(environment)
 
     def _run(self, *args: str) -> GitEvidence:
@@ -101,9 +101,12 @@ class GitStackRunner:
         if local_head.casefold() == expected_head_sha.casefold():
             raise GitStackError("local HEAD does not contain a repair commit")
         self._run("merge-base", "--is-ancestor", expected_head_sha, "HEAD")
+        first_parent_chain = self._run("rev-list", "--first-parent", "HEAD").stdout.splitlines()
+        if expected_head_sha.casefold() not in {sha.casefold() for sha in first_parent_chain}:
+            raise GitStackError("expected head is not on the first-parent chain")
         objects = Path(self._run("rev-parse", "--git-path", "objects").stdout.strip())
         if not objects.is_absolute():
-            objects = self.repository / objects
+            objects = (self.repository / objects).resolve()
         with tempfile.TemporaryDirectory(prefix="hermes-git-push-") as temporary:
             isolated = Path(temporary)
             self._run_at(isolated, "init", "--bare", "--quiet")
@@ -130,7 +133,7 @@ class GitStackRunner:
             if has_lfs_files:
                 lfs_storage = Path(self._run("rev-parse", "--git-path", "lfs").stdout.strip())
                 if not lfs_storage.is_absolute():
-                    lfs_storage = self.repository / lfs_storage
+                    lfs_storage = (self.repository / lfs_storage).resolve()
                 self._run_at(
                     isolated,
                     "-c",
