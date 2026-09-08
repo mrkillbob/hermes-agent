@@ -88,6 +88,13 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
 
 
 def register_completion_guard(ctx) -> None:
+    from tools.kanban_ci_guard import register_completion_policy
+
+    def completion_policy(task_id):
+        result = guard_completion(None, tool_name="kanban_complete", args={"task_id": task_id})
+        return result["message"] if isinstance(result, dict) and result.get("action") == "block" else None
+
+    register_completion_policy(completion_policy)
     register_hook = getattr(ctx, "register_hook", None)
     if callable(register_hook):
         register_hook("pre_tool_call", partial(guard_completion, ctx))

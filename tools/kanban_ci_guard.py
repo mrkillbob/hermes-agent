@@ -6,12 +6,8 @@ worker still owns a governed local-CI task.
 """
 from __future__ import annotations
 
-import json
 import os
-import sqlite3
-from contextlib import closing
-from pathlib import Path
-from typing import Any
+from collections.abc import Callable
 
 
 _BLOCK_MESSAGE = (
@@ -27,74 +23,21 @@ _UNAVAILABLE_MESSAGE = (
 )
 
 
+_POLICIES: list[Callable[[str | None], str | None]] = []
+
+
+def register_completion_policy(policy: Callable[[str | None], str | None]) -> None:
+    """Register an optional, capability-owned completion policy."""
+    if policy not in _POLICIES:
+        _POLICIES.append(policy)
+
+
 def completion_block(task_id: str | None = None) -> str | None:
-    """Return a blocking message for an unproven governed CI completion."""
-    worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
-    # The explicit ``task_id`` argument is also used by the human CLI. Only a
-    # dispatcher-spawned worker carries the worker-task binding that proves the
-    # completion is governed by CI; an absent binding must preserve ordinary
-    # Kanban completion even when the control ledger is not installed.
-    if not worker_task:
+    """Run registered completion policies without importing any plugin."""
+    if not os.environ.get("HERMES_KANBAN_TASK", "").strip():
         return None
-    target = worker_task
-    try:
-        root = Path(os.environ.get("HERMES_CONTROL_HOME", "").strip() or _default_hermes_root())
-        path = root / "github-pr-feedback" / "ledger.sqlite3"
-        if not path.exists():
-            return _UNAVAILABLE_MESSAGE
-        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
-            connection.execute("BEGIN")
-            bindings = connection.execute(
-                "SELECT repository, pr_number, feedback_id, head_sha, claimed_at "
-                "FROM feedback_receipts WHERE task_id = ? AND feedback_kind = 'pr_local_ci'",
-                (target,),
-            ).fetchall()
-            if not bindings:
-                return None
-            if all(
-                _has_receipt(
-                    connection,
-                    binding,
-                    {row[0] for row in connection.execute(
-                        "SELECT receipt_id FROM ci_completion_authorizations WHERE task_id = ?",
-                        (target,),
-                    )},
-                )
-                for binding in bindings
-            ):
-                return None
-        return _BLOCK_MESSAGE
-    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
-        return _UNAVAILABLE_MESSAGE
-
-
-def _default_hermes_root() -> str:
-    try:
-        from hermes_constants import get_default_hermes_root
-    except ImportError:
-        return str(Path.home() / ".hermes")
-    return str(get_default_hermes_root())
-
-
-def _has_receipt(connection: sqlite3.Connection, binding: tuple[Any, ...], authorized_ids: set[str]) -> bool:
-    from github_pr_feedback.ci_runner import CIAuditReceipt
-    from github_pr_feedback.controller import _local_ci_feedback_id
-    repository, number, feedback_id, head, _claimed_at = binding
-    rows = connection.execute(
-        "SELECT evidence_json FROM ci_audit_receipts WHERE repository = ? AND pr_number = ? "
-        "AND head_sha = ? ORDER BY completed_at DESC",
-        (repository, number, head),
-    )
-    for (payload_text,) in rows:
-        try:
-            receipt = CIAuditReceipt.from_payload(json.loads(payload_text))
-        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
-            continue
-        if (receipt.status in {"passed", "failed"}
-            and receipt.receipt_id in authorized_ids
-            and receipt.identity.repository == repository
-            and receipt.identity.pr_number == number
-            and receipt.identity.head_sha == head
-            and _local_ci_feedback_id(receipt.identity) == feedback_id):
-            return True
-    return False
+    for policy in _POLICIES:
+        rejection = policy(task_id)
+        if rejection is not None:
+            return rejection
+    return _UNAVAILABLE_MESSAGE if os.environ.get("HERMES_KANBAN_COMPLETION_GATE") else None
