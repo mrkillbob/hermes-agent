@@ -73,8 +73,8 @@ def _default_hermes_root() -> str:
 
 
 def _has_receipt(connection: sqlite3.Connection, binding: tuple[Any, ...], authorized_ids: set[str]) -> bool:
-    from plugins.github_pr_feedback.github_pr_feedback.ci_runner import CIAuditReceipt
-    from plugins.github_pr_feedback.github_pr_feedback.controller import _local_ci_feedback_id
+    from github_pr_feedback.ci_runner import CIAuditReceipt
+    from github_pr_feedback.controller import _local_ci_feedback_id
     repository, number, feedback_id, head, _claimed_at = binding
     rows = connection.execute(
         "SELECT evidence_json FROM ci_audit_receipts WHERE repository = ? AND pr_number = ? "

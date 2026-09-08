@@ -1773,6 +1773,9 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     )
                     if owns_task:
                         if successor_scheduled:
+                            ledger.authorize_ci_completion(
+                                os.environ["HERMES_KANBAN_TASK"], receipt
+                            )
                             _complete_current_ci_task(receipt)
                         else:
                             _block_current_ci_task(receipt, handoff_blockers)

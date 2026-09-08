@@ -207,7 +207,9 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
       return
     }
 
-    if (typeof host.warmProfile !== 'function') return
+    if (typeof host.warmProfile !== 'function') {
+      return
+    }
     try {
       host.warmProfile(bot.name)
     } catch {
