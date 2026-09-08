@@ -2,6 +2,11 @@ name: Tests
 
 on:
   workflow_call:
+    inputs:
+      slice_count:
+        description: Number of parallel Python test slices
+        type: number
+        default: 8
 
 permissions:
   contents: read
@@ -12,18 +17,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Run tests
-    # One runner for the whole suite. There is no slicing. Slicing
-    # existed to spread the suite over 4-core runners. It cost a matrix job, a
-    # duration cache, a per-slice artifact and a merge job to do it.
-    #
-    # The standard hosted pool is used here because the formerly requested
-    # large-runner label is not available on this repository.
+  generate:
+    name: Generate test slices
     runs-on: ubuntu-latest
-    # Standard hosted runners have less parallel capacity than the former
-    # large-runner pool; allow the full suite to finish instead of cancelling
-    # it at the old 30-minute ceiling.
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Generate test matrix
+        id: matrix
+        run: |
+          matrix="$(python3 scripts/run_tests_parallel.py --generate-slices '${{ inputs.slice_count }}')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
+    needs: generate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.generate.outputs.matrix) }}
     timeout-minutes: 60
     steps:
       - name: Checkout code
@@ -95,15 +111,13 @@ jobs:
         # with bounded parallelism. No xdist, no shared workers, no
         # module-level state leakage between files.
         #
-        # No --files: the runner discovers the suite itself. The discovered
-        # set is identical to the list the removed matrix job used to pass in.
         run: |
           source .venv/bin/activate
-          scripts/run_tests.sh
+          scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
-          # Standard hosted runners expose four vCPUs. Keep one isolated
-          # pytest subprocess per vCPU; the former 96-worker setting was tied
-          # to the unavailable large runner and overwhelms the standard pool.
+          # Each standard runner exposes four vCPUs. Keep one isolated pytest
+          # subprocess per vCPU; wall-clock speed comes from independent
+          # slices, not oversubscribing one runner.
           HERMES_TEST_WORKERS: 4
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
