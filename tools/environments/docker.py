@@ -513,6 +513,7 @@ class DockerEnvironment(BaseEnvironment):
         persist_across_processes: bool = True,
         shm_size: str = _DEFAULT_SHM_SIZE,
         shared_container_key: str = "",
+        isolate_host_data: bool = False,
         snap_compat: bool = False):
         if cwd == "~":
             cwd = "/root"
@@ -540,7 +541,8 @@ class DockerEnvironment(BaseEnvironment):
 
         resource_args = self._resource_args(image, cpu, memory, disk, network, shm_size, extra_args)
         volume_args, writable_args = self._mount_args(volumes, host_cwd, auto_mount_cwd, task_id)
-        volume_args.extend(_readonly_skill_mount_args())
+        if not self._isolate_host_data:
+            volume_args.extend(_readonly_skill_mount_args())
         egress_label, egress_volume_args, egress_host_args, env_args, validated_extra = (
             self._egress_and_env_args(extra_args))
         volume_args.extend(egress_volume_args)
@@ -585,7 +587,8 @@ class DockerEnvironment(BaseEnvironment):
             "hermes-agent": "1",
             "hermes-task-id": task_label,
             "hermes-profile": profile_name,
-            _EGRESS_LABEL_KEY: egress_label}
+            _EGRESS_LABEL_KEY: egress_label,
+            "hermes-host-data": "isolated" if self._isolate_host_data else "ambient"}
         # Saved for container recreation on "No such container" recovery.
         self._image = image
         self._image_uses_s6_init = image_uses_s6_init
@@ -975,7 +978,8 @@ class DockerEnvironment(BaseEnvironment):
             "--filter", "label=hermes-agent=1",
             "--filter", f"label=hermes-task-id={task_label}",
             "--filter", f"label=hermes-profile={profile_label}",
-            "--filter", f"label={_EGRESS_LABEL_KEY}={egress_label}"]
+            "--filter", f"label={_EGRESS_LABEL_KEY}={egress_label}",
+            "--filter", f"label=hermes-host-data={self._labels.get('hermes-host-data', 'ambient')}"]
         result = _docker_query(
             [self._docker_exe, "ps", "-a", *filters, "--format", "{{.ID}}\t{{.State}}"], timeout=10,
             fail="docker ps probe failed: %s — will start a fresh container",

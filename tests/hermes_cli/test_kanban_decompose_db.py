@@ -101,7 +101,7 @@ def test_decompose_inherits_goal_lifecycle_to_children(kanban_home):
             goal_mode=True,
             goal_max_turns=12,
         )
-        child_ids = kb.decompose_triage_task(
+        child_ids = decompose_triage_task(
             conn,
             tid,
             root_assignee="orchestrator",
@@ -129,7 +129,7 @@ def test_decompose_inherits_forced_skills_to_children(kanban_home):
             triage=True,
             skills=["exampleproject-worktree-navigation"],
         )
-        child_ids = kb.decompose_triage_task(
+        child_ids = decompose_triage_task(
             conn,
             tid,
             root_assignee="orchestrator",
@@ -160,7 +160,7 @@ def test_decompose_preserves_project_scope_and_branch_convention(kanban_home):
             "UPDATE tasks SET project_id = 'project-1' WHERE id = ?", (tid,)
         )
         conn.commit()
-        child_ids = kb.decompose_triage_task(
+        child_ids = decompose_triage_task(
             conn,
             tid,
             root_assignee="orchestrator",
