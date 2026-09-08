@@ -141,7 +141,7 @@ change, never to rewrite a failed metric or authority flag.
 Run the LunaBot bridge tests and validate the emitted receipt:
 
 ```text
-python3 -m pytest tests/test_nvidia_signal_discovery.py -q
+python3 -m pytest <lunabot-root>/tests/test_nvidia_signal_discovery.py -q
 python3 <lunabot-root>/scripts/bridge_nvidia_signal_result.py --help
 ```
 
