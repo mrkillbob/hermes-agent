@@ -40,6 +40,7 @@ from .merge_controller import (
     MergeDecision,
     _codex_reviewed_head,
 )
+from .readiness import ReadyPullRequest, order_ready_queue
 from .policy import (
     FeedbackReceipt,
     PluginPolicy,
@@ -1697,7 +1698,7 @@ def _run_merge_scan_for_policy(
         pending_reader(merge_policy.repository) if callable(pending_reader) else ()
     )
     pending_set = set(pending_numbers)
-    numbers = (
+    candidate_numbers = (
         *pending_numbers,
         *(
             number
@@ -1705,6 +1706,35 @@ def _run_merge_scan_for_policy(
             if number in open_by_number and number not in pending_set
         ),
     )
+    ready_candidates: list[ReadyPullRequest] = []
+    for number in candidate_numbers:
+        if number in pending_set:
+            continue
+        pull_request = open_by_number.get(number)
+        if pull_request is None:
+            continue
+        try:
+            codex_clean = _codex_reviewed_head(
+                github.list_feedback(merge_policy.repository, number),
+                pull_request.head_sha,
+            )
+        except (GitHubClientError, RuntimeError):
+            codex_clean = False
+        ready_candidates.append(
+            ReadyPullRequest(
+                merge_policy.repository,
+                number,
+                pull_request.head_sha,
+                int(pull_request.updated_at.timestamp()) if pull_request.updated_at else 0,
+                codex_clean,
+                0,
+                0,
+            )
+        )
+    ordered_numbers = tuple(item.number for item in order_ready_queue(ready_candidates))
+    # Pending verification heads remain first; the remaining enrolled heads
+    # use the deterministic Codex-clean/age/risk queue ordering.
+    numbers = (*pending_numbers, *ordered_numbers)
     for number in numbers:
         pull_request = open_by_number.get(number)
         if number not in pending_set:
@@ -1783,6 +1813,15 @@ def _run_merge_scan_for_policy(
             continue
         blocker_codes = list(result.decision.blockers)
         blocked[str(number)] = blocker_codes
+        if pull_request is not None and _READY_TO_MERGE_LABEL in {
+            label.casefold() for label in pull_request.labels
+        }:
+            try:
+                github.remove_issue_label(
+                    merge_policy.repository, number, _READY_TO_MERGE_LABEL
+                )
+            except (GitHubClientError, RuntimeError):
+                degraded = True
         # Deterministic blockers are already durable in the scan result and are
         # actionable by the repair controller. A model-backed observability card
         # can only restate them, adding queue latency without changing authority.
@@ -1919,6 +1958,12 @@ def _announce_ready_to_merge(github: GitHubClient, repository: str, pull_request
         if current.head_sha.casefold() != pull_request.head_sha.casefold():
             return
         if not any(label.casefold() == _READY_TO_MERGE_LABEL for label in current.labels):
+            github.ensure_issue_label(
+                repository,
+                _READY_TO_MERGE_LABEL,
+                color="1f883d",
+                description="All merge-readiness gates passed for the exact PR head.",
+            )
             github.add_issue_labels(repository, pull_request.number, (_READY_TO_MERGE_LABEL,))
         readback = github.get_pull_request(repository, pull_request.number)
         if (readback.head_sha.casefold() != pull_request.head_sha.casefold()

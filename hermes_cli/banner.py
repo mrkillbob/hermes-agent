@@ -446,7 +446,10 @@ def check_for_updates() -> Optional[int]:
             repo_dir = hermes_home / "hermes-agent"
         if (repo_dir / ".git").exists():
             cache_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
-            cache_target = _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir)
+            cache_target = (
+                _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir)
+                or _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
+            )
 
     # Docker images have no working tree to count commits against — the
     # published image excludes `.git` (see .dockerignore) and sets no

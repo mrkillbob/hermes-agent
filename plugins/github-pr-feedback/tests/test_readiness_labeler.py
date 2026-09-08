@@ -35,6 +35,9 @@ def test_ready_handoff_labels_exact_head_before_alert_comment() -> None:
         def add_issue_labels(self, repository: str, number: int, labels: tuple[str, ...]) -> None:
             self.labels.extend(labels)
 
+        def ensure_issue_label(self, repository: str, label: str, *, color: str, description: str) -> None:
+            return None
+
         def list_feedback(self, repository: str, number: int):
             return tuple(SimpleNamespace(body=body) for body in self.comments)
 
