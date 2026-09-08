@@ -58,11 +58,18 @@ export async function ensureKanbanDispatcherReady(
   try {
     payload = await fetchJson(url, token, { timeoutMs: 5_000 })
   } catch (error) {
+    if (error instanceof Error && /(?:404|not found|disabled)/i.test(error.message)) {
+      return { status: 'disabled', ready: false, gateway_pid: null, message: error.message }
+    }
     const detail = error instanceof Error ? error.message : String(error)
     throw new DispatcherReadinessError(`dispatcher readiness could not be verified: ${detail}`)
   }
 
   let result = parseReadiness(payload)
+
+  if (result.status === 'disabled') {
+    return result as DispatcherReadiness
+  }
 
   if (result.status === 'ready' && result.ready === true) {
     return result as DispatcherReadiness

@@ -136,7 +136,11 @@ def bootstrap_worktree_environments(
                     if not source.exists():
                         continue
                     resolved_source = source.resolve(strict=True)
-                    python = resolved_source / "bin" / "python"
+                    python_candidates = (
+                        (resolved_source / "Scripts" / "python.exe", resolved_source / "bin" / "python")
+                        if os.name == "nt"
+                        else (resolved_source / "bin" / "python",)
+                    )
                     if not resolved_source.is_dir() or not _same_repository_environment(
                         source_root,
                         resolved_source,
@@ -144,7 +148,7 @@ def bootstrap_worktree_environments(
                     ):
                         continue
                     if require_python and (
-                        not python.is_file() or not os.access(python, os.X_OK)
+                        not any(python.is_file() and os.access(python, os.X_OK) for python in python_candidates)
                     ):
                         continue
                     destination.parent.mkdir(parents=True, exist_ok=True)

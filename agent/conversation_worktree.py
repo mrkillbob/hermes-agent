@@ -732,19 +732,17 @@ class ConversationWorktreeManager:
             if (
                 record.state not in {"ready", "retained"}
                 or Path(record.worktree_path).resolve() != expected_path.resolve()
-                or record.branch != expected_branch
                 or Path(record.repo_common_dir).resolve() != source_common_dir.resolve()
                 or not expected_path.is_dir()
             ):
                 return CleanupVerdict(False, ("mismatched identity",))
 
             listed = self._listed_worktree(source, expected_path)
-            if listed != f"refs/heads/{record.branch}":
-                return CleanupVerdict(False, ("mismatched identity",))
-
             actual_branch = self._git_stdout(
                 expected_path, ["branch", "--show-current"], "cleanup"
             )
+            if not actual_branch or listed != f"refs/heads/{actual_branch}":
+                return CleanupVerdict(False, ("mismatched identity",))
             actual_common = Path(
                 self._git_stdout(
                     expected_path,
@@ -759,7 +757,7 @@ class ConversationWorktreeManager:
                 "cleanup",
             )
             if (
-                actual_branch != record.branch
+                (actual_branch != record.branch and not self._exact_owner_claims_present(record))
                 or actual_common != source_common_dir.resolve()
                 or base_ancestor.returncode != 0
             ):
