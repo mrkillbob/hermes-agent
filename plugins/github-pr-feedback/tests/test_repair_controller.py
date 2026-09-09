@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import argparse
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import subprocess
 import threading
 
+import pytest
+
 from github_pr_feedback.controller import FeedbackReceipt, PreparedWorktree
+from github_pr_feedback.controller import _reconcile_stale_dispatches
 from github_pr_feedback.github_client import (
     CheckState,
     PullRequestMergeState,
@@ -39,6 +44,29 @@ def merge_state(
         merged=False,
         merge_commit_oid=None,
     )
+
+
+def test_stale_dispatch_reconciliation_accepts_merge_state_repository() -> None:
+    class Ledger:
+        def __init__(self) -> None:
+            self.repositories: list[str] = []
+
+        def pending_task_bindings_for_pr(self, repository: str, number: int):
+            self.repositories.append(repository)
+            return ()
+
+    class Kanban:
+        def task_details(self, board: str, task_id: str):
+            return None
+
+        def task_status(self, board: str, task_id: str):
+            return "blocked"
+
+    ledger = Ledger()
+    assert _reconcile_stale_dispatches(
+        ledger, Kanban(), merge_state(), board="repairs"
+    ) == 0
+    assert ledger.repositories == ["acme/widgets"]
 
 
 def policy(
@@ -326,7 +354,7 @@ def test_repair_controller_dedupes_exact_head_and_preserves_merge_authority(
     task = kanban.tasks[0]
     assert task.assignee == "pr-repair-steward"
     assert task.initial_status == "running"
-    assert task.max_runtime_seconds == 1200
+    assert task.max_runtime_seconds == 60 * 60
     assert "git merge --no-ff --no-edit" in task.instructions
     assert "Commit the resolved merge before running base-relative" in task.instructions
     assert "Do not merge the pull request" in task.instructions
@@ -823,6 +851,46 @@ def test_explicit_repair_retry_revalidates_receipt_and_recovers_failed_environme
     ledger.close()
 
 
+def test_failed_repair_retry_degrades_when_pr_is_no_longer_open(tmp_path):
+    class ClosedGitHub(GitHub):
+        def list_open_pull_requests(self, repository: str, owner: str):
+            return ()
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = RepairController(policy(tmp_path), ledger, ClosedGitHub(), Kanban(), LocalGit())
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "pr_repair", "repair:merge_conflict:target-base:" + "b" * 40, SHA
+    )
+
+    result = controller.scan(retry_receipt=receipt)
+
+    assert result.created == 0
+    assert result.skipped == {}
+    assert result.degraded is True
+    ledger.close()
+
+
+def test_failed_repair_retry_degrades_when_trigger_identity_changes(tmp_path):
+    class ChangedTriggerGitHub(GitHub):
+        def get_merge_state(self, repository: str, number: int):
+            return merge_state()
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = RepairController(
+        policy(tmp_path), ledger, ChangedTriggerGitHub(), Kanban(), LocalGit()
+    )
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "pr_repair", "repair:merge_conflict:target-base:" + "b" * 40, SHA
+    )
+
+    result = controller.scan(retry_receipt=receipt)
+
+    assert result.created == 0
+    assert result.skipped == {"no_repair_trigger": 1}
+    assert result.degraded is True
+    ledger.close()
+
+
 def test_repair_card_acquires_pinned_base_after_mutable_branch_advances(
     tmp_path: Path,
 ) -> None:
@@ -841,7 +909,7 @@ def test_repair_card_acquires_pinned_base_after_mutable_branch_advances(
         ["git", "-C", str(source), "config", "user.email", "test@example.com"],
         check=True,
     )
-    (source / "state").write_text("base A\n")
+    (source / "state").write_text("base A\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(source), "add", "state"], check=True)
     subprocess.run(
         ["git", "-C", str(source), "commit", "--quiet", "-m", "A"], check=True
@@ -859,7 +927,7 @@ def test_repair_card_acquires_pinned_base_after_mutable_branch_advances(
         ["git", "-C", str(source), "push", "--quiet", str(remote), "stable"],
         check=True,
     )
-    (source / "state").write_text("base B\n")
+    (source / "state").write_text("base B\n", encoding="utf-8")
     subprocess.run(
         ["git", "-C", str(source), "commit", "--quiet", "-am", "B"], check=True
     )
@@ -967,3 +1035,40 @@ def test_scoped_repair_rejects_changed_expected_head(tmp_path):
     assert result.skipped["head_changed"] == 1
     assert not kanban.tasks
     ledger.close()
+
+
+@pytest.mark.parametrize("skip", ["non_conflict_deferred", "branch_not_allowed"])
+def test_scoped_repair_dispatch_fails_for_terminal_target_skip(
+    tmp_path, monkeypatch, capsys, skip
+):
+    from github_pr_feedback import cli
+    from github_pr_feedback.repair_controller import RepairScanResult
+
+    configured = policy(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(cli, "_load_policy_from_context", lambda ctx: configured)
+    monkeypatch.setattr(cli, "_github_client", lambda policy: object())
+    monkeypatch.setattr(
+        "github_pr_feedback.repair_controller.RepairController.scan",
+        lambda self, **kwargs: RepairScanResult(0, {skip: 1}, False),
+    )
+    parser = argparse.ArgumentParser()
+    cli.setup_cli(None, parser)
+    args = parser.parse_args(
+        [
+            "dispatch-repair",
+            "--repository",
+            "acme/widgets",
+            "--pr-number",
+            "17",
+            "--head-sha",
+            SHA,
+        ]
+    )
+
+    assert cli.handle_cli_with_context(None, args) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "ok",
+        "created": 0,
+        "skipped": {skip: 1},
+    }

@@ -1868,11 +1868,26 @@ def test_dispatch_defers_second_worker_until_shared_directory_is_free(
             reconcile_orphans=False,
         )
         contender_task = kb.get_task(conn, contender)
+        first_run_count = conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (contender,)
+        ).fetchone()[0]
+        second_result = _hermes_cli_kanban_db_dispatch.dispatch_once(
+            conn,
+            spawn_fn=fake_spawn,
+            max_in_progress=2,
+            reconcile_orphans=False,
+        )
+        second_run_count = conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (contender,)
+        ).fetchone()[0]
 
     assert spawns == []
     assert result.workspace_collisions == [
         (contender, owner, str(shared.resolve()))
     ]
+    assert second_result.workspace_collisions == result.workspace_collisions
+    assert first_run_count == 0
+    assert second_run_count == first_run_count
     assert contender_task is not None
     assert contender_task.status == "ready"
     assert contender not in result.auto_blocked

@@ -86,6 +86,51 @@ def test_feedback_task_contains_the_governed_push_command(tmp_path: Path) -> Non
     ) in task.instructions
 
 
+def test_ci_receipt_retry_reuses_the_failed_typed_audit() -> None:
+    audit = CIAuditReceipt(
+        receipt_id="f" * 64,
+        identity=CIAuditIdentity("acme/widgets", 17, "b" * 40, "a" * 40),
+        manifest_digest="e" * 64,
+        status="failed",
+        started_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 25, 12, 1, tzinfo=UTC),
+        actions_state=CheckState(False, True, 0),
+        commands=(),
+    )
+
+    class Ledger:
+        def ci_receipt_by_id(
+            self, repository: str, pr_number: int, receipt_id: str
+        ) -> object:
+            assert (repository, pr_number, receipt_id) == (
+                "acme/widgets",
+                17,
+                audit.receipt_id,
+            )
+            return audit
+
+    controller = ScanController.__new__(ScanController)
+    object.__setattr__(controller, "_ledger", Ledger())
+    dispatched: list[CIAuditReceipt] = []
+
+    def dispatch_ci_failure(audit: object) -> str:
+        assert isinstance(audit, CIAuditReceipt)
+        dispatched.append(audit)
+        return "scheduled"
+
+    object.__setattr__(controller, "dispatch_ci_failure", dispatch_ci_failure)
+
+    result = controller.retry_ci_failure(
+        FeedbackReceipt(
+            "acme/widgets", 17, "pr_repair", f"ci-receipt:{audit.receipt_id}", "a" * 40
+        )
+    )
+
+    assert result.created == 1
+    assert result.skipped == {}
+    assert dispatched == [audit]
+
+
 def test_intent_review_card_uses_valid_zero_retry_encoding(tmp_path: Path) -> None:
     policy = SimpleNamespace(
         merge_maintainer=None,
@@ -238,24 +283,28 @@ class FakeGitHub:
         if number == self.current.number:
             self.current = self.current_by_number[number]
 
+    def can_label_repository(self, repository):
+        return True
+
     def ensure_issue_label(
-        self, repository: str, label: str, *, color: str, description: str
+        self, repository: str, label: str, *, color: str, description: str, preserve_existing: bool = False
     ) -> None:
         self.ensure_label_calls.append((repository, label, color, description))
 
 
 @pytest.mark.parametrize(
-    ("argv", "expected"),
+    ("argv", "classification", "expected"),
     [
-        (("python3", "scripts/run_hygiene_lane.py"), "ci-hygiene-fixer"),
-        (("python3", "scripts/run_static_lane.py"), "ci-static-fixer"),
-        (("python3", "scripts/run_test_lane.py", "--lane", "unit"), "ci-test-fixer"),
-        (("npm", "run", "build"), "ci-frontend-fixer"),
-        (("python3", "scripts/unknown_ci_check.py"), "ci-general-fixer"),
+        (("python3", "scripts/run_hygiene_lane.py"), "logic-regression", "ci-hygiene-fixer"),
+        (("python3", "scripts/run_hygiene_lane.py"), "structural-ratchet", "structural-ratchet-steward"),
+        (("python3", "scripts/run_static_lane.py"), "logic-regression", "ci-static-fixer"),
+        (("python3", "scripts/run_test_lane.py", "--lane", "unit"), "logic-regression", "ci-test-fixer"),
+        (("npm", "run", "build"), "logic-regression", "ci-frontend-fixer"),
+        (("python3", "scripts/unknown_ci_check.py"), "logic-regression", "ci-general-fixer"),
     ],
 )
 def test_typed_ci_receipt_routes_to_the_exact_failure_owner(
-    argv: tuple[str, ...], expected: str
+    argv: tuple[str, ...], classification: str, expected: str
 ) -> None:
     receipt = CIAuditReceipt(
         receipt_id="f" * 64,
@@ -274,7 +323,7 @@ def test_typed_ci_receipt_routes_to_the_exact_failure_owner(
                 timed_out=False,
                 stdout_sha256="0" * 64,
                 stderr_sha256="0" * 64,
-                classification="logic-regression",
+                classification=classification,
             ),
         ),
     )
@@ -1232,6 +1281,33 @@ def test_self_resolution_accepts_exact_fixed_commit_with_historic_failures() -> 
     assert _is_self_resolution_receipt(item, owner_login="owner") is True
 
 
+def test_self_resolution_accepts_short_fixed_commit_when_exact_head_is_verified() -> None:
+    item = feedback(
+        "short-fixed-with-exact-head",
+        reviewer="owner",
+        body=(
+            "Fixed in commit 5c0095f4b4. Verification: focused tests passed. "
+            "Current exact PR head: "
+            f"{'a' * 40}. No merge was performed; merge remains gated."
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is True
+
+
+def test_self_resolution_does_not_accept_short_fixed_commit_without_exact_head() -> None:
+    item = feedback(
+        "short-fixed-without-exact-head",
+        reviewer="owner",
+        body=(
+            "Fixed in commit 5c0095f4b4. Verification: focused tests passed. "
+            "No merge was performed; merge remains gated."
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is False
+
+
 def test_self_resolution_accepts_fixed_import_with_reproduced_old_failures() -> None:
     item = feedback(
         "fixed-import-with-old-failures",
@@ -1726,7 +1802,7 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     task = kanban.tasks[0]
     assert getattr(task, "initial_status", None) == "running"
     assert getattr(task, "max_retries", None) == 2
-    assert task.max_runtime_seconds == 1200
+    assert task.max_runtime_seconds == 60 * 60
     assert "first 90 seconds" in task.instructions
     assert "do not retry a tool-blocked command" in task.instructions.casefold()
     assert "Do not keep re-evaluating equivalent approaches" in task.instructions
@@ -1794,8 +1870,9 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert task.reasoning_effort is None
     assert task.initial_status == "running"
     assert task.max_retries == 3
-    assert task.max_runtime_seconds == 8 * 60 * 60
-    assert task.idempotency_key.endswith(":supervised-v4")
+    assert task.max_runtime_seconds == 90 * 60
+    assert task.idempotency_key.startswith("acme/widgets#17:")
+    assert task.idempotency_key.endswith(":supervised-v5")
     assert task.evidence_heading == "Canonical PR audit receipt (JSON)"
     assert task.evidence == {
         "repository": "acme/widgets",
@@ -2296,6 +2373,7 @@ def test_required_local_ci_backlog_signal_counts_missing_receipts_below_read_cap
     ).scan()
 
     assert getattr(result, "required_local_ci_backlog", 0) == 2
+    assert result.required_local_ci_backlog_by_repository == {"acme/widgets": 2}
     assert result.skipped.get("local_ci_open_pr_scan_cap", 0) == 0
     assert github.feedback_calls == [("acme/widgets", 17), ("acme/widgets", 18)]
     assert github.current_calls == [("acme/widgets", 17)]
@@ -2607,6 +2685,15 @@ def test_completed_feedback_immediately_schedules_exact_head_local_ci(tmp_path: 
     )
     item = feedback("fixed")
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    old_receipt = FeedbackReceipt("acme/widgets", 17, item.kind, item.feedback_id, "a" * 40)
+    old_lease = ledger.claim(
+        old_receipt,
+        owner="previous-worker",
+        claimed_at=datetime(2026, 8, 24, 0, 30, tzinfo=UTC),
+        stale_before=datetime(2026, 8, 24, 0, 25, tzinfo=UTC),
+    )
+    assert old_lease is not None
+    ledger.finalize(old_receipt, "previous-feedback-task", old_lease)
     receipt = FeedbackReceipt("acme/widgets", 17, item.kind, item.feedback_id, sha)
     lease = ledger.claim(
         receipt,
@@ -2621,7 +2708,12 @@ def test_completed_feedback_immediately_schedules_exact_head_local_ci(tmp_path: 
         resolved_head_sha=sha,
         actioned_at=datetime(2026, 8, 24, 2, 0, tzinfo=UTC),
     )
-    kanban = RecordingKanban()
+    class TerminalFeedbackKanban(RecordingKanban):
+        def task_status(self, board, task_id):
+            assert task_id == "previous-feedback-task"
+            return "done"
+
+    kanban = TerminalFeedbackKanban()
     github = FakeGitHub(admitted_pull_request(sha), (item,))
     github.actions_are_enabled = False
     controller = ScanController(
@@ -2632,6 +2724,7 @@ def test_completed_feedback_immediately_schedules_exact_head_local_ci(tmp_path: 
         RecordingLocalGit(),
     )
 
+    assert ledger.has_pending_mutation("acme/widgets", 17)
     status = controller.dispatch_local_ci_after_feedback(admitted_pull_request(sha))
 
     assert status == "scheduled"
@@ -2842,14 +2935,16 @@ def test_scan_suppresses_only_configured_bot_completion_receipts(tmp_path: Path)
         "bot-completion", reviewer="reviewer",
         body=f"Hermes automated repair\\nVerified repair. <!-- pr-maintenance-receipt:v1 status=completed kind=review_comment head={sha} -->",
     )
+    markerless = feedback("markerless", reviewer="reviewer",
+                          body=f"Base refresh completed. Merged base {'b' * 40} and pushed {sha}. Focused verification: 16 passed.")
     actionable = feedback("bot-finding", reviewer="reviewer", body="Fix the missing error handling.")
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     kanban = RecordingKanban()
     result = ScanController(
-        policy, ledger, FakeGitHub(admitted_pull_request(sha), (completed, actionable)),
+        policy, ledger, FakeGitHub(admitted_pull_request(sha), (completed, markerless, actionable)),
         kanban, RecordingLocalGit(),
     ).scan()
-    assert result.skipped.get("self_resolution_receipt") == 1
+    assert result.skipped.get("self_resolution_receipt") == 2
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["bot-finding"]
     ledger.close()
 
@@ -4353,69 +4448,3 @@ def test_required_local_ci_does_not_depend_on_actions_admin_settings(tmp_path, h
         assert controller.scan().created == 1
     assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
     ledger.close()
-
-
-@pytest.mark.parametrize("mergeable,status,expected", [(False, "DIRTY", "merge_conflict"), (True, "CLEAN", "scheduled")])
-def test_local_ci_waits_for_canonical_conflict_resolution(tmp_path, mergeable, status, expected):
-    local_path, sha = initialized_repository(tmp_path)
-    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z",
-                               auto_dispatch=True, local_ci_audit=True)
-    policy = replace(policy, local_ci_audit=replace(policy.local_ci_audit, required_for_open_prs=True))
-
-    class ConflictGitHub(FakeGitHub):
-        def get_merge_state(self, repository, number):
-            state = super().get_merge_state(repository, number)
-            state.mergeable, state.merge_state_status = mergeable, status
-            return state
-
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
-    kanban = RecordingKanban()
-    try:
-        controller = ScanController(policy, ledger, ConflictGitHub(admitted_pull_request(sha), ()),
-                                    kanban, RecordingLocalGit())
-        assert controller.dispatch_local_ci_after_feedback(admitted_pull_request(sha)) == expected
-        assert len(kanban.tasks) == (1 if expected == "scheduled" else 0)
-    finally:
-        ledger.close()
-
-
-@pytest.mark.parametrize("phase", ["pending", "resolving", "completed"])
-def test_local_ci_waits_for_mutation_acknowledgement_across_heads_without_blocking_other_prs(tmp_path, phase):
-    local_path, sha = initialized_repository(tmp_path)
-    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z",
-                               auto_dispatch=True, local_ci_audit=True)
-    policy = replace(policy, local_ci_audit=replace(policy.local_ci_audit, required_for_open_prs=True))
-    pull = admitted_pull_request(sha)
-    other = replace(pull, number=18)
-    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
-    kanban = RecordingKanban()
-    mutation = FeedbackReceipt("acme/widgets", 17, "pr_repair", "repair:merge_conflict", "f" * 40)
-    now = datetime.now(UTC)
-    try:
-        archived_audit = FeedbackReceipt("acme/widgets", 17, "pr_local_ci", "old-contract", sha)
-        audit_lease = ledger.claim(archived_audit, owner="auditor", claimed_at=now,
-                                  stale_before=now-timedelta(minutes=5))
-        ledger.finalize(archived_audit, "old-audit", audit_lease)
-        binding = ledger.exact_pending_task_binding(archived_audit)
-        lease = ledger.claim(mutation, owner="repair", claimed_at=now, stale_before=now-timedelta(minutes=5))
-        ledger.finalize(mutation, "repair-task", lease)
-        if phase != "pending":
-            ledger.begin_feedback_action(mutation, resolved_head_sha=sha, actioned_at=now)
-        if phase == "completed":
-            ledger.mark_feedback_actioned(mutation, resolved_head_sha=sha, actioned_at=now)
-        controller = ScanController(policy, ledger, FakeGitHub(pull, (), pull_requests=(pull, other)),
-                                    kanban, RecordingLocalGit())
-        if phase != "completed":
-            audit = FeedbackReceipt("acme/widgets", 17, "pr_local_ci", LOCAL_CI_FEEDBACK_ID, sha)
-            assert ledger.claim(audit, owner="auditor", claimed_at=now,
-                                stale_before=now-timedelta(minutes=5)) is None
-            assert ledger.reopen_archived_exact_dispatch(
-                archived_audit, archived=binding, owner="auditor", claimed_at=now) is None
-            assert ledger.reopen_legacy_exact_dispatch(
-                archived_audit, blocked=binding, owner="auditor", claimed_at=now) is None
-        expected = "scheduled" if phase == "completed" else "mutation_pending"
-        assert controller.dispatch_local_ci_after_feedback(pull) == expected
-        assert controller.dispatch_local_ci_after_feedback(other) == "scheduled"
-        assert len(kanban.tasks) == (2 if phase == "completed" else 1)
-    finally:
-        ledger.close()

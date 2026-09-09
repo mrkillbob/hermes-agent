@@ -377,7 +377,7 @@ def _kanban_handler(tool_name: str) -> Callable:
 def _reject_delegated_child_mutation(tool_name: str) -> None:
     """A delegate_task child shares the parent's process, so inherited HERMES_KANBAN_*
     env is not proof of ownership: it may report findings but must not mutate."""
-    if _is_delegated_child_context():
+    if _delegation_ctx("is_delegated_child_process_context", False):
         raise _Reject(
             f"{tool_name} refused: delegate_task child agents are not Kanban run owners. "
             "Return findings to the parent agent; the dispatcher worker or an explicitly "
@@ -443,23 +443,6 @@ def _worker_guard(tool_name: str, args: dict) -> str:
     tid = _require_task_id(args)
     _enforce_worker_task_ownership(tid)
     return tid
-
-
-def _enforce_governed_ci_completion(args: dict) -> None:
-    """Apply the local-CI receipt gate even when the feedback plugin is disabled.
-
-    Kanban workers run with their assignee profile, while the governed feedback
-    plugin is normally enabled only in the control profile. ``kanban_complete``
-    is the always-loaded mutation boundary, so keep the safety check here as
-    well as in the compatibility lifecycle hook.
-    """
-    if not os.environ.get("HERMES_KANBAN_TASK"):
-        return
-    from tools.kanban_ci_guard import completion_block
-
-    message = completion_block(args.get("task_id"))
-    if message:
-        raise _Reject(message)
 
 
 def _require_orchestrator_tool(tool_name: str) -> None:
@@ -585,7 +568,7 @@ def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
 _TASK_FIELDS = tuple(
     "id title body assignee status tenant priority workspace_kind workspace_path created_by "
     "created_at started_at completed_at result current_run_id model_override "
-    "provider_override".split())
+    "provider_override completion_contract last_failure_error".split())
 _TASK_SUMMARY_FIELDS = tuple(
     "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
     "created_at started_at completed_at current_run_id model_override provider_override".split())
@@ -896,7 +879,6 @@ def _handle_list(args: dict, **kw) -> str:
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
     tid = _worker_guard("kanban_complete", args)
-    _enforce_governed_ci_completion(args)
     summary = _redact_opt(args.get("summary"))
     result = _redact_opt(args.get("result"))
     metadata = args.get("metadata")
@@ -913,9 +895,14 @@ def _handle_complete(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
         # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
-        # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
+        # gate by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        from tools import kanban_ci_guard
+
+        ci_gate_rejection = kanban_ci_guard.completion_block(tid)
+        if ci_gate_rejection is not None:
+            return tool_error(ci_gate_rejection)
         verifier_rejection = _verifier_handoff_rejection(
             task, (summary or result or "").strip(), metadata,
         )
@@ -952,7 +939,9 @@ def _handle_complete(args: dict, **kw) -> str:
                 f"in-flight (no state change). Retry kanban_complete with the same "
                 f"summary/metadata and either drop these ids from created_cards, or pass "
                 f"created_cards=[] to skip the card-claim check entirely.")
-        _check(ok, f"could not complete {tid} (unknown id or already terminal)")
+        task = kb.get_task(conn, tid)
+        _check(ok, (task.last_failure_error if task else None) or
+               f"could not complete {tid} (unknown id, stale run, or already terminal)")
         run = kb.latest_run(conn, tid)
         return _ok(task_id=tid, run_id=run.id if run else None)
 
@@ -1193,12 +1182,6 @@ def _handle_create(args: dict, **kw) -> str:
     assignee = normalize_profile_name(str(assignee))
     _check(profile_exists(assignee), f"assignee profile {assignee!r} does not exist; "
            "select an installed profile from hermes kanban assignees before creating work")
-    # Prefer the request-scoped api_server origin binding over HERMES_SESSION_ID: the env
-    # var is clobbered with a subagent's internal id whenever a child agent is constructed
-    # in-process, which would stamp — and later wake — the wrong session.
-    from tools.async_delegation import _current_origin_session_id
-    session_id = (args.get("session_id") or _current_origin_session_id()
-                  or os.environ.get("HERMES_SESSION_ID"))
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
     # mutate review evidence or race its checkout). Project identity is the one safe thing
@@ -1214,13 +1197,22 @@ def _handle_create(args: dict, **kw) -> str:
         _parse_bool_arg(args, "goal_mode"))
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
+    max_retries = _opt_int(args.get("max_retries"))
+    _check(max_retries is None or max_retries >= 1,
+           f"'max_retries' must be >= 1 (got {max_retries}); use 1 to trip on the first failure.")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
-        self_tid = os.environ.get("HERMES_KANBAN_TASK")
+        from tools.async_delegation import _current_origin_session_id
+        self_tid = (os.environ.get("HERMES_KANBAN_TASK")
+                    if _is_dispatcher_owned_worker() else None)
         self_task = kb.get_task(conn, self_tid) if self_tid else None
         if self_task is not None:
             project_source_task_id = self_task.id
-            if project_id is None and workspace_kind is None and workspace_path is None:
+        # The worker/API runtime may be transient; the owning task's origin is durable.
+        session_id = (args.get("session_id") or (self_task.session_id if self_task else None)
+                      or _current_origin_session_id() or os.environ.get("HERMES_SESSION_ID"))
+        if project_id is None and workspace_kind is None and workspace_path is None:
+            if self_task is not None and self_task.project_id:
                 project_id = self_task.project_id
         new_tid = kb.create_task(
             conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
@@ -1229,11 +1221,13 @@ def _handle_create(args: dict, **kw) -> str:
             workspace_kind=str(workspace_kind if workspace_kind is not None else "scratch"),
             workspace_path=workspace_path, project_id=project_id,
             project_source_task_id=project_source_task_id, triage=triage,
+            creator_task_id=self_tid,
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
-            max_retries=_opt_int(args.get("max_retries")),
+            max_retries=max_retries,
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
+            completion_contract=args.get("completion_contract"),
             initial_status=str(args.get("initial_status") or "running"),
             created_by=os.environ.get("HERMES_PROFILE") or "worker", session_id=session_id)
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
@@ -1264,7 +1258,11 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
         except Exception:
             notifier_profile = "default"
     delivery_metadata: dict[str, Any] = {
-        k: v for k, v in (("thread_id", thread_id), ("chat_type", chat_type)) if v}
+        k: v for k, v in (
+            ("thread_id", thread_id), ("chat_type", chat_type),
+            ("scope_id", env("HERMES_SESSION_SCOPE_ID", "")),
+            ("parent_chat_id", env("HERMES_SESSION_PARENT_CHAT_ID", "")),
+        ) if v}
     if (platform.lower() == "telegram" and thread_id
             and (chat_type or "").lower() in {"dm", "direct", "private"}):
         delivery_metadata["telegram_dm_topic_reply_fallback"] = True
@@ -1296,8 +1294,13 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
         target = _resolve_notify_target()
         if target is None:
             return False  # CLI / cron / test — no persistent channel
-        from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_notify as _kbn
+        # Inheritance and explicit subscriptions already encode the delivery policy.
+        # Auto-subscribe must not turn a passive destination into an agent wake.
+        if any(sub["platform"] == target["platform"] and sub["chat_id"] == target["chat_id"]
+               and (sub["thread_id"] or "") == (target["thread_id"] or "")
+               for sub in _kbn.list_notify_subs(conn, task_id)):
+            return True
         _kbn.add_notify_sub(conn, task_id=task_id, **target)
         return True
     except Exception as _exc:

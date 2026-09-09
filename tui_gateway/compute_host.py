@@ -7,6 +7,7 @@ import argparse
 import concurrent.futures
 import contextlib
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -223,6 +224,7 @@ class ComputeHost:
                     return
                 session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
                 server._start_inflight_turn(session, inflight)
+                turn_started_at = time.time()
             self._reply("turn.started", sid, request_id, started_ns=now_ns())
             with contextlib.suppress(Exception):
                 server._ensure_session_db_row(session)
@@ -235,7 +237,10 @@ class ComputeHost:
                 request_id, sid, session, text, display_kind=frame.get("display_kind") or None)
             run_thread = session.get("_run_thread")
             if run_thread is not None and hasattr(run_thread, "join"):
-                run_thread.join()
+                while run_thread.is_alive():
+                    run_thread.join(timeout=1.0)
+                    if run_thread.is_alive() and frame.get("turn_id"):
+                        self._emit_turn_activity(sid, session, frame["turn_id"], turn_started_at)
             with session["history_lock"]:
                 meta = _history_meta(session)
                 interrupted = bool(session.get("_turn_cancel_requested"))
@@ -255,6 +260,23 @@ class ComputeHost:
                         server._clear_inflight_turn(session)
             self._reply("turn.error", sid, request_id, reason="exception", message=str(exc))
 
+    def _emit_turn_activity(self, sid: str, session: dict, turn_id: str, started_at: float) -> None:
+        # Observe the agent clock, never the host heartbeat. A reused agent's last
+        # turn must not lend its activity to a new turn that has not made progress.
+        activity_ns = None
+        try:
+            summary = session["agent"].get_activity_summary()
+            stamped_at = summary.get("last_activity_at")
+            elapsed = summary.get("seconds_since_activity")
+            if stamped_at is not None and stamped_at >= started_at and elapsed is not None and elapsed >= 0:
+                activity_ns = now_ns() - int(elapsed * 1_000_000_000)
+        except Exception:
+            logging.getLogger(__name__).debug("compute host activity unavailable sid=%s", sid, exc_info=True)
+        # perf_counter is shared across local processes; queued frames and cached
+        # samples age without requiring synchronized wall clocks in the parent.
+        self._transport.write({"jsonrpc": "2.0", "method": "compute_host.activity", "params": {
+            "session_id": sid, "turn_id": turn_id, "activity_ns": activity_ns}})
+
     def _ensure_server_session(self, server: Any, frame: dict[str, Any]) -> dict:
         sid = str(frame.get("sid") or "")
         session = server._sessions.get(sid)
@@ -265,6 +287,8 @@ class ComputeHost:
             for key in ("cwd", "profile_home"):
                 if frame.get(key):
                     session[key] = str(frame[key])
+            if isinstance(frame.get("conversation_worktree"), dict):
+                session["conversation_worktree"] = dict(frame["conversation_worktree"])
         else:
             session = self._build_server_session(server, frame, sid)
         if isinstance(frame.get("attached_images"), list):
@@ -317,7 +341,8 @@ class ComputeHost:
                 server._init_session(
                     sid, key, agent, list(history), cols=int(frame.get("cols") or 80),
                     cwd=str(frame.get("cwd") or "") or None, session_db=session_db,
-                    source=frame.get("source"))
+                    source=frame.get("source"),
+                    conversation_worktree=frame.get("conversation_worktree"))
             finally:
                 reset_transport(token)
         except Exception:
@@ -330,6 +355,7 @@ class ComputeHost:
                 "created_at": time.time(), "last_active": time.time(), "running": False,
                 "attached_images": [], "image_counter": 0,
                 "cwd": str(frame.get("cwd") or os.getcwd()), "cols": int(frame.get("cols") or 80),
+                "conversation_worktree": dict(frame.get("conversation_worktree") or {}),
                 "slash_worker": None, "show_reasoning": server._load_show_reasoning(),
                 "tool_progress_mode": server._load_tool_progress_mode(), "edit_snapshots": {},
                 "tool_started_at": {}, "model_override": frame.get("model_override"),

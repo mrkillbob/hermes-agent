@@ -1282,6 +1282,12 @@ class CLICommandsMixin:
         target_id, session_meta = resolved
         if target_id == self.session_id:
             return _cp("  Already on that session.")
+        managed_resume = getattr(self, "_conversation_worktree_manager", None) is not None
+        if managed_resume:
+            try:
+                self._restore_managed_conversation_cwd(session_id=target_id)
+            except Exception as exc:
+                return _cp(f"  Cannot resume {target_id}: conversation worktree setup failed: {exc}")
         old_session_id = self.session_id
         _end_current_session(self, "resumed_other")
         self.session_id, self._resumed, self._pending_title = target_id, True, None
@@ -1312,7 +1318,8 @@ class CLICommandsMixin:
         # -c`/`--resume`. The startup resume paths already call this; without it, the terminal/code-exec
         # tools and relative-path resolution keep operating in the wrong repo. Idempotent and a no-op when
         # the session recorded no cwd. See #38562.
-        self._restore_session_cwd(session_meta)
+        if not managed_resume:
+            self._restore_session_cwd(session_meta)
         self._restore_session_yolo(session_meta)
         self._restore_session_model(session_meta)
 
@@ -1372,17 +1379,22 @@ class CLICommandsMixin:
         branch_title = branch_name or self._session_db.get_next_title_in_lineage(
             self._session_db.get_session_title(self.session_id) or "branch")
         parent_session_id = self.session_id
-        _end_current_session(self, "branched")
-        # The stable ``_branched_from`` marker keeps the branch visible in /resume + /sessions
-        # even after the parent is re-ended with a different end_reason.
-        try:
+        def persist_branch():
             self._session_db.create_session(
                 session_id=new_session_id, source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
-                model=self.model, parent_session_id=parent_session_id,
+                model=self.model, parent_session_id=parent_session_id, cwd=os.getcwd(),
                 model_config={"max_iterations": self.max_turns, "reasoning_config": self.reasoning_config,
                               "_branched_from": parent_session_id})
-        except Exception as e:
-            return _cp(f"  Failed to create branch session: {e}")
+
+        if getattr(self, "_conversation_worktree_manager", None) is not None:
+            if not self._prepare_conversation_root(new_session_id, before_commit=persist_branch):
+                return
+        else:
+            try:
+                persist_branch()
+            except Exception as e:
+                return _cp(f"  Failed to create branch session: {e}")
+        _end_current_session(self, "branched")
         # Best-effort chunked copy (a failed copy still yields a usable branch); the api_content
         # sidecar lets the branch's first turn replay the parent's exact wire bytes (warm cache).
         with suppress(Exception):
@@ -1686,6 +1698,8 @@ class CLICommandsMixin:
                 # in last_delivery_error (last_error is None).
                 if status == "delivery_failed" and job.get("last_delivery_error"):
                     status = f"delivery_failed: {job['last_delivery_error']}"
+                elif status == "error" and job.get("last_error"):
+                    status = f"error: {job['last_error']}"
                 print(f"  Last run: {job['last_run_at']} ({status})")
             print()
 
@@ -2183,167 +2197,32 @@ class CLICommandsMixin:
 
     # ---- /goal, /loop, /subgoal -----------------------------------------------------------
     def _handle_goal_command(self, cmd: str) -> None:
-        """Dispatch /goal subcommands: set / draft / show / gate / wait / status / pause / resume / clear."""
-        arg = _command_arg(cmd)
+        from hermes_cli.goal_command import dispatch_goal_command
+        from hermes_cli.goals import last_user_message_content
+
         mgr = self._session_manager(self._get_goal_manager, "Goals")
         if mgr is None:
             return
-        lower = arg.lower()
-        verb, _, rest = arg.partition(" ")
-        verb = verb.lower()
-        rest = rest.strip()
-        if not arg or lower == "status":
-            _cp(f"  {mgr.status_line()}")
-        elif lower == "show":
-            _cp(f"  {mgr.status_line()}")
-            _cp(f"  {mgr.render_contract()}")
-        elif lower.startswith("draft"):
-            # Expand plain text into a structured completion contract so "done" is evidence-based
-            # instead of a vibe check.
-            objective = arg[len("draft"):].strip()
-            if not objective:
-                return _cp("  Usage: /goal draft <objective in plain language>")
-            self._handle_goal_draft(objective)
-        elif lower == "pause":
-            state = mgr.pause(reason="user-paused")
-            _cp(f"  ⏸ Goal paused: {state.goal}" if state else _dim_line('No goal set.'))
-        elif lower == "resume":
-            self._goal_resume(mgr)
-        elif lower in {"clear", "stop", "done"}:
-            had = mgr.has_goal()
-            mgr.clear()
-            _cp("  ✓ Goal cleared." if had else _dim_line('No active goal.'))
-        elif verb == "wait":
-            self._goal_wait(mgr, rest)
-        elif lower == "unwait":
-            _cp("  ▶ Wait barrier cleared — goal loop resumes." if mgr.stop_waiting()
-                else _dim_line('No wait barrier set.'))
-        elif verb == "gate":
-            self._goal_gate(mgr, rest)
-        else:
-            self._goal_set(mgr, arg)
+        result = dispatch_goal_command(
+            mgr, _command_arg(cmd), authorize_gate=lambda: None,
+            progress=lambda text: _cp(_dim_line(text)),
+            last_user_message=last_user_message_content(getattr(self, "conversation_history", None)),
+        )
+        for line in result.output.splitlines():
+            _cp(f"  {line}")
+        if result.prompt:
+            queued = self._kick_goal(result.prompt)
+            if not result.kickoff:
+                _cp(_dim_line('Continuing now — taking the next step.' if queued else
+                              'Send any message to kick off the next step.'))
 
     def _kick_goal(self, prompt: str) -> bool:
-        """Queue ``prompt`` as the next turn so the loop starts without a separate message."""
+        """Queue the next turn without mutating cached conversation history."""
         try:
             self._pending_input.put(prompt)
             return True
         except Exception:
             return False
-
-    def _goal_resume(self, mgr) -> None:
-        state = mgr.resume()
-        if state is None:
-            return _cp(_dim_line('No goal to resume.'))
-        _cp(f"  ▶ Goal resumed: {state.goal}")
-        # Resume must restart work, not just flip state: queue the continuation prompt the same
-        # way /goal <text> queues its kickoff.
-        # Resume must restart work, not just flip persisted state (#75362): enqueue the canonical
-        # continuation through the adapter FIFO — the same path the post-turn judge uses — so the next turn
-        # fires as soon as this reply is delivered. A real user message already queued still preempts
-        # naturally, and pause/clear's stale-continuation cleanup recognizes it.
-        # See #75362.
-        # An `exec` result is display-only — nothing would re-enter the conversation loop until the user
-        # typed another message. Return a `send` dispatch carrying the canonical continuation prompt so the
-        # client fires the next turn immediately; `display` keeps the transcript showing the concise
-        # invocation instead of the model-facing scaffolding. See #75362.
-        prompt = mgr.next_continuation_prompt()
-        if prompt and self._kick_goal(prompt):
-            _cp(_dim_line('Continuing now — taking the next step.'))
-        else:
-            _cp(_dim_line('Send any message to kick off the next step.'))
-
-    def _goal_wait(self, mgr, wait_arg: str) -> None:
-        """/goal wait <pid> [reason] — park the loop on a background process (CI / build);
-        the barrier auto-clears when the PID exits."""
-        if not wait_arg:
-            return _cp("  Usage: /goal wait <pid> [reason]")
-        wtokens = wait_arg.split(None, 1)
-        try:
-            pid = int(wtokens[0])
-        except ValueError:
-            return _cp("  /goal wait: <pid> must be an integer process id.")
-        reason = wtokens[1].strip() if len(wtokens) > 1 else ""
-        if _attempt("/goal wait", (RuntimeError, ValueError), mgr.wait_on, pid, reason=reason) is _FAILED:
-            return
-        rtxt = f" ({reason})" if reason else ""
-        _cp(f"  ⏳ Goal parked on pid {pid}{rtxt}. Loop pauses until it exits.")
-
-    def _goal_gate(self, mgr, gate_arg: str) -> None:
-        """/goal gate [list | add <command> | remove <N> | clear] — shell commands that must pass
-        before the judge may declare the goal done; a failing gate's output becomes the
-        continuation prompt."""
-        gate_lower = gate_arg.lower()
-        if not gate_arg or gate_lower == "list":
-            for line in mgr.render_gates().splitlines():
-                _cp(f"  {line}")
-        elif gate_lower.startswith("add "):
-            gate = _attempt("/goal gate add", (RuntimeError, ValueError),
-                            mgr.add_gate, gate_arg[len("add"):].strip())
-            if gate is not _FAILED:
-                _cp(f"  ⚿ Gate added: $ {gate.command} "
-                    f"({gate.max_retries} retries, {gate.timeout_seconds}s timeout). "
-                    f"It must pass before the goal can complete.")
-        elif gate_lower.startswith("remove ") or gate_lower.startswith("rm "):
-            removed = _attempt("/goal gate remove", (RuntimeError, ValueError, IndexError),
-                               lambda: mgr.remove_gate(int(gate_arg.split(None, 1)[1].strip())))
-            if removed is not _FAILED:
-                _cp(f"  ✓ Gate removed: $ {removed}")
-        elif gate_lower == "clear":
-            prev = _attempt("/goal gate clear", RuntimeError, mgr.clear_gates)
-            if prev is not _FAILED:
-                _cp(f"  ✓ Cleared {_plural(prev, 'gate')}.")
-        else:
-            _cp("  Usage: /goal gate [list | add <command> | remove <N> | clear]")
-
-    def _goal_set(self, mgr, arg: str) -> None:
-        """Set the goal from free text; inline `verify:`/`constraints:`/`boundaries:`/`stop when:`
-        lines become a completion contract, the remaining prose the headline. Kicks the loop off."""
-        from hermes_cli.goals import parse_contract
-        headline, contract = parse_contract(arg)
-        state = _attempt("Invalid goal", ValueError, mgr.set, headline or arg,
-                         contract=contract if not contract.is_empty() else None)
-        if state is _FAILED:
-            return
-        self._print_goal_set(state, "Completion contract:")
-        against = " against the contract above" if state.has_contract() else ""
-        _cp(_dim_line(f"After each turn, a judge model checks if the goal is done{against}. "
-                      "Hermes keeps working until it is, you pause/clear it, or the budget is "
-                      "exhausted. Use /goal status, /goal show, /goal pause, /goal resume, /goal clear."))
-        self._kick_goal(state.goal)
-
-    def _print_goal_set(self, state, contract_label: str) -> None:
-        _cp(f"  ⊙ Goal set ({state.max_turns}-turn budget): {state.goal}")
-        if state.has_contract():
-            _cp(_dim_line(contract_label))
-            for line in state.contract.render_block().splitlines():
-                _cp(f"    {line}")
-
-    def _handle_goal_draft(self, objective: str) -> None:
-        """Draft a structured completion contract from a plain objective and set it as the active
-        goal. Falls back to a bare goal if the aux model can't produce a contract."""
-        from hermes_cli.goals import draft_contract
-        mgr = self._session_manager(self._get_goal_manager, "Goals")
-        if mgr is None:
-            return
-        _cp(_dim_line('Drafting completion contract…'))
-        try:
-            contract = draft_contract(objective)
-        except Exception as exc:
-            import logging as _logging
-            _logging.getLogger(__name__).debug("goal draft failed: %s", exc)
-            contract = None
-        state = _attempt("Invalid goal", ValueError, mgr.set, objective, contract=contract)
-        if state is _FAILED:
-            return
-        self._print_goal_set(state, "Drafted completion contract:")
-        if state.has_contract():
-            _cp(_dim_line("Tighten any field by re-setting the goal with inline lines "
-                          "(e.g. verify: <command>), then /goal resume. Use /goal show to review."))
-        else:
-            _cp(_dim_line("Couldn't draft a contract (aux model unavailable) — running as a "
-                          "free-form goal. The per-turn judge still applies."))
-        self._kick_goal(state.goal)
 
     def _handle_loop_command(self, cmd: str) -> None:
         """Dispatch /loop — recurring in-session wakeups: ``/loop [interval] <prompt> [--times N]

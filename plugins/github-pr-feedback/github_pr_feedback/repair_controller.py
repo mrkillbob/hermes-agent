@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from .base_refresh import BaseRefreshIdentity, DeterministicBaseRefresher
 from .controller import (
+    AUTO_DISPATCH_MAX_RUNTIME_SECONDS,
     KanbanClient,
     KanbanTask,
     LocalGit,
@@ -25,6 +26,7 @@ from .controller import (
     _governed_pr_identity_command,
     _governed_pr_push_command,
     _prepare_receipt_worktree_with_overflow,
+    _reconcile_stale_dispatches,
     _receipt_idempotency_key,
     _worker_capability_preflight,
 )
@@ -85,14 +87,30 @@ def _has_active_base_refresh_binding(
     task_status = getattr(kanban, "task_status", None)
     if not callable(task_status):
         return False
-    binding = ledger.exact_pending_task_binding(receipt)
-    if binding is None:
-        return False
     try:
-        status = task_status(board, binding.task_id)
+        binding = ledger.exact_pending_task_binding(receipt)
+        bindings = (
+            (binding,)
+            if binding is not None
+            else ledger.pending_task_bindings_for_pr(
+                receipt.repository, receipt.pr_number
+            )
+        )
+        statuses = tuple(
+            task_status(board, candidate.task_id)
+            for candidate in bindings
+            if candidate.receipt.feedback_kind == "pr_repair"
+        )
     except RuntimeError:
         return False
-    return status in _ACTIVE_BASE_REFRESH_TASK_STATUSES
+        return any(
+            status in _ACTIVE_BASE_REFRESH_TASK_STATUSES
+            or (
+                status == "triage"
+                and candidate.receipt.head_sha.casefold() != receipt.head_sha.casefold()
+            )
+            for candidate, status in zip(bindings, statuses, strict=True)
+        )
 
 
 def repair_triggers(
@@ -154,7 +172,7 @@ class RepairController:
     def scan(self, *, conflicts_only: bool = False, retry_receipt: FeedbackReceipt | None = None, scoped_target: tuple[str, int, str] | None = None) -> RepairScanResult:
         configured = self._policy.repair_steward
         if configured is None:
-            return RepairScanResult(0, {}, False)
+            return RepairScanResult(0, {}, retry_receipt is not None)
         if scoped_target is not None and (scoped_target[0] not in configured.repositories or retry_receipt is not None):
             raise ValueError("scoped repair requires a configured repository and cannot retry a receipt")
         created = 0
@@ -236,6 +254,14 @@ class RepairController:
                     degraded = True
                     continue
                 pull, review, checks, checks_unavailable = snapshot
+                reconciled_stale = _reconcile_stale_dispatches(
+                    self._ledger,
+                    self._kanban,
+                    pull,
+                    board=self._policy.board or "",
+                )
+                if reconciled_stale:
+                    skipped["stale_dispatch_superseded"] += reconciled_stale
                 if checks_unavailable:
                     skipped["check_state_unavailable"] += 1
                 if pull.head_sha != listed.head_sha:
@@ -270,24 +296,23 @@ class RepairController:
                     checks,
                     base_refresh_required=base_refresh_required,
                 )
-                if scoped_target is not None and checks.actions_enabled and checks.action_required:
-                    # Exact conflict dispatch must not create a separate human
-                    # escalation. The broad scan owns that independent lane.
-                    skipped["action_required"] += 1
-                elif retry_receipt is None and checks.actions_enabled and checks.action_required:
+                if retry_receipt is None and checks.actions_enabled and checks.action_required:
+                    if conflicts_only:
+                        skipped["action_required"] += 1
+                    else:
                     # Independent of every other trigger above: no repair
                     # commit or merge can clear GitHub's own action_required
                     # conclusion, so this always gets its own escalation card
                     # rather than competing with (or being silently absorbed
                     # by) the ordinary repair path.
-                    escalation_status = self._dispatch_action_required(
-                        repository, target, pull
-                    )
-                    if escalation_status is None:
-                        created += 1
-                    elif escalation_status != "duplicate":
-                        skipped[escalation_status] += 1
-                        degraded = True
+                        escalation_status = self._dispatch_action_required(
+                            repository, target, pull
+                        )
+                        if escalation_status is None:
+                            created += 1
+                        elif escalation_status != "duplicate":
+                            skipped[escalation_status] += 1
+                            degraded = True
                 if base_refresh_required:
                     if (
                         base_refresh_slots_used
@@ -518,6 +543,12 @@ class RepairController:
                     skipped["dispatch_failed"] += 1
                     degraded = True
             refresh_executor.shutdown(wait=True)
+        if (
+            retry_receipt is not None
+            and created == 0
+            and skipped.get("base_refresh_completed", 0) == 0
+        ):
+            degraded = True
         return RepairScanResult(created, dict(skipped), degraded)
 
     def _dispatch_action_required(
@@ -758,7 +789,9 @@ def _repair_task(
             "resolved SHA, and do not "
             "omit the neutral `<!-- pr-maintenance-receipt:v1 status=completed kind=pr_repair "
             "head=<full literal resolved head SHA> -->` marker at the end of the factual reply. Do not "
-            "complete the Kanban task until this acknowledgement succeeds. No-progress rule: after "
+            "complete the Kanban task until this acknowledgement succeeds. Run the acknowledgement once "
+            "with terminal background=true, retain its process session id, and poll/wait until exit; "
+            "shared GitHub gates can exceed a 60-second foreground timeout. No-progress rule: after "
             "evaluating at most two viable resolutions, choose the smallest existing repository "
             "pattern. Within 10 minutes, either produce a tracked patch plus a focused check result, "
             "complete an already-resolved receipt with evidence, or stop with one exact blocker. "
@@ -792,5 +825,9 @@ def _repair_task(
         evidence_heading="Canonical PR repair receipt (JSON)",
         initial_status="blocked" if configured.report_only else "running",
         max_retries=1 if configured.report_only else 3,
-        max_runtime_seconds=None if configured.report_only else 1200,
+        max_runtime_seconds=(
+            None
+            if configured.report_only
+            else AUTO_DISPATCH_MAX_RUNTIME_SECONDS
+        ),
     )
