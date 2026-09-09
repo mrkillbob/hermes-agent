@@ -684,6 +684,26 @@ class GitHubClient:
         row = self._read_object(f"repos/{repository}/pulls/{number}")
         return _pull_request(row, expected_repository=repository, expected_number=number)
 
+    def can_label_repository(self, repository: str) -> bool:
+        repository = _validated_repository(repository)
+        permissions = self._read_object(f"repos/{repository}").get("permissions", {})
+        return isinstance(permissions, dict) and any(
+            permissions.get(name) is True for name in ("triage", "push", "maintain", "admin")
+        )
+
+    def get_pull_request_metadata(self, repository: str, number: int):
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        row = self._read_object(f"repos/{repository}/pulls/{number}")
+        pull = _pull_request(row, expected_repository=repository, expected_number=number)
+        files = self._read_pages(f"repos/{repository}/pulls/{number}/files?per_page=100")
+        if not isinstance(row.get("title"), str) or any(not isinstance(f.get("filename"), str) for f in files):
+            raise GitHubClientError("invalid PR metadata")
+        paths = tuple(f["filename"] for f in files)
+        if isinstance(row.get("changed_files"), int) and len(paths) != row["changed_files"]:
+            raise GitHubClientError("incomplete PR file listing", code="metadata_incomplete")
+        return pull, row["title"], paths
+
     def create_pull_request(
         self, repository: str, *, head: str, base: str, title: str, body: str
     ) -> PullRequest:
@@ -1144,8 +1164,18 @@ class GitHubClient:
             argv.extend(("--field", f"labels[]={label}"))
         self._runner.run(argv)
 
+    def remove_issue_label(self, repository: str, number: int, label: str) -> None:
+        """Remove one exact issue label after canonical readback confirms its ownership."""
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        label = _validated_label(label)
+        self._runner.run([
+            "gh", "api", f"repos/{repository}/issues/{number}/labels/{quote(label, safe='')}",
+            "--method", "DELETE",
+        ])
+
     def ensure_issue_label(
-        self, repository: str, label: str, *, color: str, description: str
+        self, repository: str, label: str, *, color: str, description: str, preserve_existing: bool = False
     ) -> None:
         """Create or update one configured label using an exact name/color.
 
@@ -1164,6 +1194,8 @@ class GitHubClient:
         label_endpoint = f"repos/{repository}/labels/{quote(label, safe='')}"
         try:
             self._read_object(label_endpoint)
+            if preserve_existing:
+                return
         except GitHubClientError as error:
             if error.code != "not_found":
                 raise

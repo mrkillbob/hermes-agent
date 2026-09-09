@@ -1148,6 +1148,16 @@ class ScanController:
         self._claim_lease = claim_lease
         self._label_batches: list[tuple[str, RepositoryTarget, tuple[PullRequest, ...]]] = []
 
+    def _admitted_label_pull_requests(
+        self, pull_requests: tuple[PullRequest, ...]
+    ) -> tuple[PullRequest, ...]:
+        """Keep label maintenance on the same admission boundary as scanning."""
+        return tuple(
+            pull_request
+            for pull_request in pull_requests
+            if self._policy.admit_pull_request(pull_request).admitted
+        )
+
     def scan(self, *, apply_labels: bool = True) -> ScanResult:
         skipped: Counter[str] = Counter()
         created = 0
@@ -1188,7 +1198,11 @@ class ScanController:
             from .pr_ordering import order_pull_requests
 
             pull_requests = order_pull_requests(pull_requests)
-            self._label_batches.append((repository, target, pull_requests))
+            label_policy = self._policy.agent_labels
+            if label_policy is not None and label_policy.applies_to(repository):
+                self._label_batches.append(
+                    (repository, target, self._admitted_label_pull_requests(pull_requests))
+                )
             required_local_ci_backlog += _required_local_ci_backlog_count(
                 self._policy,
                 self._ledger,
@@ -1453,6 +1467,17 @@ class ScanController:
             local_ci_catalogue_deferred=local_ci_catalogue_deferred,
         )
 
+    def reconcile_labels(self, repository: str) -> dict[str, object]:
+        policy = self._policy.agent_labels
+        if policy is None or not policy.applies_to(repository) or repository not in self._policy.targets:
+            raise ValueError("repository is not configured for labels")
+        target = self._policy.targets[repository]
+        pulls = self._github.list_open_pull_requests(repository, target.owner_login)
+        self._label_batches = [
+            (repository, target, self._admitted_label_pull_requests(pulls))
+        ]
+        return self.apply_agent_labels()
+
     def apply_agent_labels(self) -> dict[str, object]:
         """Run bounded label maintenance after the critical scan lanes.
 
@@ -1460,18 +1485,33 @@ class ScanController:
         side lane means a shared GitHub cooldown or label permission failure
         cannot prevent local-CI admission or merge-maintainer evaluation.
         """
+        self._ensured_agent_labels = set()
+        self._agent_label_errors = []
         label_policy = self._policy.agent_labels
         if label_policy is None or not label_policy.enabled:
             return {"status": "ok", "updated": 0, "skipped": {}}
         skipped: Counter[str] = Counter()
         updated = 0
         for repository, target, pull_requests in self._label_batches:
+            try:
+                can_label = self._github.can_label_repository(repository)
+            except GitHubClientError as error:
+                skipped["agent_label_permission_unavailable"] += 1
+                self._agent_label_errors.append({"repository": repository, "code": error.code})
+                continue
+            if not can_label:
+                skipped["agent_label_permission_denied"] += 1
+                continue
             candidates: list[tuple[PullRequest, str]] = []
             for pull_request in pull_requests:
                 desired_label = label_policy.label_for_branch(
                     pull_request.head_ref_name
                 )
-                if desired_label is None or desired_label in pull_request.labels:
+                has_metadata = any(repository in rule.repositories for rule in label_policy.metadata_rules)
+                if not has_metadata and (
+                    desired_label is None
+                    or desired_label.casefold() in {label.casefold() for label in pull_request.labels}
+                ):
                     continue
                 candidates.append((pull_request, desired_label))
             if not candidates:
@@ -1511,7 +1551,7 @@ class ScanController:
                     candidate_count=len(candidates),
                     updated_at=datetime.now(UTC),
                 )
-        return {"status": "ok", "updated": updated, "skipped": dict(skipped)}
+        return {"status": "ok", "updated": updated, "skipped": dict(skipped), "errors": self._agent_label_errors}
 
     def _apply_agent_label(
         self,
@@ -1536,32 +1576,61 @@ class ScanController:
             current = self._github.get_pull_request(repository, listed.number)
             if not current_matches(current):
                 return "agent_label_head_changed"
-            if desired_label in current.labels:
-                return None
-            mapping = next(
-                mapping
-                for mapping in label_policy.mappings
-                if mapping.label == desired_label
-            )
+            mappings = [mapping for mapping in label_policy.mappings if mapping.label == desired_label]
+            metadata_rules = tuple(rule for rule in label_policy.metadata_rules if repository in rule.repositories)
+            metadata_error = None
+            metadata_pull = current
+            if metadata_rules:
+                try:
+                    metadata_pull, title, paths = self._github.get_pull_request_metadata(repository, listed.number)
+                    if not current_matches(metadata_pull):
+                        return "agent_label_head_changed"
+                    mappings.extend(rule for rule in metadata_rules if rule.matches(repository, title, paths))
+                except GitHubClientError as error:
+                    metadata_error = error
+                except Exception as error:  # noqa: BLE001 - metadata is advisory only.
+                    metadata_error = error
+            desired = {mapping.label: mapping for mapping in mappings}
+            existing_by_fold = {label.casefold(): label for label in current.labels}
+            missing = {label: mapping for label, mapping in desired.items()
+                       if label.casefold() not in existing_by_fold}
+            owned_labels = {mapping.label.casefold() for mapping in label_policy.mappings}
+            if metadata_error is None:
+                owned_labels.update(rule.label.casefold() for rule in label_policy.metadata_rules
+                                    if repository in rule.repositories)
+            stale = tuple(existing_by_fold[fold] for fold in owned_labels
+                          if fold in existing_by_fold and fold not in {label.casefold() for label in desired})
+            if not missing and not stale:
+                return "agent_labels_unchanged"
             if label_policy.create_missing:
-                self._github.ensure_issue_label(
-                    repository,
-                    mapping.label,
-                    color=mapping.color,
-                    description=mapping.description,
-                )
-                current = self._github.get_pull_request(repository, listed.number)
-                if not current_matches(current):
-                    return "agent_label_head_changed"
-            self._github.add_issue_labels(repository, listed.number, (desired_label,))
+                for mapping in missing.values():
+                    key = (repository, mapping.label)
+                    if key not in self._ensured_agent_labels:
+                        self._github.ensure_issue_label(repository, mapping.label,
+                            color=mapping.color, description=mapping.description, preserve_existing=True)
+                        self._ensured_agent_labels.add(key)
+            current = self._github.get_pull_request(repository, listed.number)
+            if not current_matches(current):
+                return "agent_label_head_changed"
+            if missing:
+                self._github.add_issue_labels(repository, listed.number, tuple(missing))
+            remove_label = getattr(self._github, "remove_issue_label", None)
+            if stale and callable(remove_label):
+                for label in stale:
+                    remove_label(repository, listed.number, label)
             readback = self._github.get_pull_request(repository, listed.number)
             if not current_matches(readback):
                 return "agent_label_head_changed"
-            if desired_label not in readback.labels:
+            readback_folded = {label.casefold() for label in readback.labels}
+            if not {label.casefold() for label in desired}.issubset(readback_folded):
                 return "agent_label_readback_failed"
+            if metadata_error is not None:
+                raise metadata_error
         except GitHubClientError as error:
             code = getattr(error, "code", "github_error")
-            if code in {"permission_denied", "authentication", "rate_limited"}:
+            self._agent_label_errors.append({"repository": repository, "pr_number": listed.number,
+                                             "reason": str(error)[:200], "code": code})
+            if code in {"permission_denied", "authentication", "rate_limited", "metadata_incomplete"}:
                 return f"agent_label_{code}"
             return "agent_label_github_error"
         except Exception:  # noqa: BLE001 - a label write must fail closed.

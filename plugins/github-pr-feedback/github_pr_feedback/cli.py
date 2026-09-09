@@ -623,6 +623,8 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     subcommands.add_parser(
         "doctor", help="Check configuration readiness without scanning"
     )
+    labels = subcommands.add_parser("label-scan", help="Reconcile configured advisory labels on owned open PRs")
+    labels.add_argument("--repository", required=True)
     inspect = subcommands.add_parser(
         "inspect-pr", help="Read one configured PR identity through the shared GitHub gate"
     )
@@ -792,6 +794,7 @@ _CLI_ACTION_DISPATCH: dict[str, Callable[[Any, argparse.Namespace], int]] = {
     "scan": lambda ctx, _args: _scan(ctx),
     "status": lambda _ctx, _args: _status(),
     "doctor": lambda ctx, _args: _doctor(ctx),
+    "label-scan": lambda ctx, args: _label_scan(ctx, args),
     "inspect-pr": lambda ctx, args: _inspect_pr(ctx, args),
     "inspect-ci": lambda ctx, args: _inspect_ci(ctx, args),
     "submit-review": lambda ctx, args: _submit_review(ctx, args),
@@ -2807,3 +2810,20 @@ def _nearest_existing_parent_access(path: Path) -> bool:
     while not candidate.exists() and candidate != candidate.parent:
         candidate = candidate.parent
     return candidate.is_dir() and os.access(candidate, os.R_OK | os.W_OK | os.X_OK)
+
+
+def _label_scan(ctx, args):
+    try:
+        policy = _load_policy_from_context(ctx)
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            result = _controller(policy, ledger).reconcile_labels(args.repository)
+        finally:
+            ledger.close()
+    except (GitHubClientError, ValueError) as error:
+        code = getattr(error, "code", "invalid_request")
+        print(json.dumps({"status": "unavailable", "reason": code,
+                          "retryable": code in {"rate_limited", "transient", "timeout"}}, sort_keys=True))
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
