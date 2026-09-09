@@ -447,7 +447,10 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
                 f"task {task.id} has workspace_kind=worktree but board "
                 f"{board_slug!r} default_workdir {board_default!r} is not inside a git repo"
             )
-        return _anchored_worktree(repo_root, task.id, branch_name)
+        target, branch = _anchored_worktree(repo_root, task.id, branch_name)
+        from hermes_cli.worktree_environment import bootstrap_worktree_environments
+        bootstrap_worktree_environments(repo_root, target)
+        return target, branch
 
     requested = Path(task.workspace_path).expanduser()
     if not requested.is_absolute():
@@ -460,6 +463,10 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     if requested.exists() and _is_linked_worktree_checkout(requested):
         actual_branch = _git_current_branch(requested)
         if actual_branch == branch_name:
+            repo_root = _repo_root_for_worktree_target(requested.parent)
+            if repo_root is not None:
+                from hermes_cli.worktree_environment import bootstrap_worktree_environments
+                bootstrap_worktree_environments(repo_root, requested_resolved)
             return requested_resolved, actual_branch
         # The requested path is an existing checkout of a DIFFERENT task's
         # branch (decompose children inherit the root's workspace_path
@@ -471,14 +478,24 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             fallback = fallback_root / ".worktrees" / task.id
             if fallback.resolve(strict=False) != requested_resolved:
                 _ensure_git_worktree(fallback_root, fallback, branch_name)
-                return fallback.resolve(strict=False), branch_name
+                target = fallback.resolve(strict=False)
+                from hermes_cli.worktree_environment import bootstrap_worktree_environments
+                bootstrap_worktree_environments(fallback_root, target)
+                return target, branch_name
         # No repo to anchor a fallback on (or the occupied path IS this task's
         # own canonical worktree): keep the legacy reuse rather than fail dispatch.
+        repo_root = _repo_root_for_worktree_target(requested.parent)
+        if repo_root is not None:
+            from hermes_cli.worktree_environment import bootstrap_worktree_environments
+            bootstrap_worktree_environments(repo_root, requested_resolved)
         return requested_resolved, actual_branch or branch_name
 
     repo_root = _git_toplevel(requested)
     if repo_root is not None and requested_resolved == repo_root:
-        return _anchored_worktree(repo_root, task.id, branch_name)
+        target, branch = _anchored_worktree(repo_root, task.id, branch_name)
+        from hermes_cli.worktree_environment import bootstrap_worktree_environments
+        bootstrap_worktree_environments(repo_root, target)
+        return target, branch
 
     repo_root = _repo_root_for_worktree_target(requested.parent)
     if repo_root is None:
@@ -487,6 +504,8 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             "and does not point at a git repo root"
         )
     _ensure_git_worktree(repo_root, requested, branch_name)
+    from hermes_cli.worktree_environment import bootstrap_worktree_environments
+    bootstrap_worktree_environments(repo_root, requested)
     return requested, branch_name
 
 
