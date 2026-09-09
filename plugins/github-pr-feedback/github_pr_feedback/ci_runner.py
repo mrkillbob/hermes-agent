@@ -704,7 +704,15 @@ class LocalCIRunner:
         status = "passed" if len(evidence) == expected_command_count and all(
             item.returncode == 0 and not item.timed_out for item in evidence
         ) else "failed"
-        coverage_gap = hermes_coverage_gap(changed_files) if is_hermes_contract(manifest_bytes) else None
+        coverage_gap = (
+            hermes_coverage_gap(
+                changed_files,
+                hosted_coverage_available=(
+                    initial_checks.actions_enabled and initial_checks.all_green
+                ),
+            )
+            if is_hermes_contract(manifest_bytes) else None
+        )
         if coverage_gap:
             status = "failed"
         failed_commands = tuple(
@@ -815,10 +823,8 @@ def _pid_is_alive(pid: int) -> bool:
     if pid < 2:
         return False
     try:
-        if os.name == "nt":
-            from gateway.status import _pid_exists
-            return _pid_exists(pid)
-        os.kill(pid, 0)
+        from .ledger import _pid_is_alive as ledger_pid_is_alive
+        return bool(ledger_pid_is_alive(pid))
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -963,7 +969,11 @@ def _command_evidence(
     if result.timed_out or result.returncode in {126, 127}:
         classification = "environment-blocked"
     elif result.returncode != 0:
-        classification = "logic-regression"
+        classification = (
+            "structural-ratchet"
+            if "structural ratchet" in (result.stdout or "").casefold()
+            else "logic-regression"
+        )
     return CommandEvidence(
         argv=argv,
         cwd=relative_cwd,
