@@ -174,26 +174,31 @@ def _finding(
 
 
 def _failed_tool_finding(lines: list[str], threshold: int) -> Optional[WatchdogFinding]:
-    signatures: list[tuple[str, str]] = []
+    failures: dict[str, list[str]] = {}
     for line in lines:
-        exit_match = _FAILED_EXIT_RE.search(line)
-        if exit_match is None or exit_match.group(1) == "0":
-            continue
         tool_match = _TOOL_PREFIX_RE.search(line)
-        command = tool_match.group(1) if tool_match else line
+        if tool_match is None:
+            continue
+        command = tool_match.group(1)
         command = _FAILED_EXIT_RE.sub("", command)
         command = _DURATION_RE.sub("", command)
         signature = _WHITESPACE_RE.sub(" ", command).strip().casefold()
-        if signature:
-            signatures.append((signature, line))
-    counts = Counter(signature for signature, _line in signatures)
+        if not signature:
+            continue
+        exit_match = _FAILED_EXIT_RE.search(line)
+        if exit_match is None or exit_match.group(1) == "0":
+            # A later successful invocation proves that the earlier failure
+            # sequence is no longer trailing no-progress evidence.
+            failures.pop(signature, None)
+            continue
+        failures.setdefault(signature, []).append(line)
+    counts = {signature: len(evidence) for signature, evidence in failures.items()}
     if not counts:
         return None
-    signal, count = counts.most_common(1)[0]
+    signal, count = max(counts.items(), key=lambda item: item[1])
     if count < threshold:
         return None
-    evidence = [line for signature, line in signatures if signature == signal]
-    return _finding("tool_failure_loop", signal, count, evidence)
+    return _finding("tool_failure_loop", signal, count, failures[signal])
 
 
 def _provider_stall_finding(

@@ -81,6 +81,18 @@ def test_repeated_failed_tool_call_is_detected() -> None:
     assert len(finding.fingerprint) == 16
 
 
+def test_successful_retry_clears_an_older_failed_tool_sequence() -> None:
+    """A later successful retry is progress, not evidence for suspension."""
+    log = "\n".join([
+        "┊ 💻 $ rg missing.file  0.1s [exit 2]",
+        "┊ 💻 $ rg missing.file  0.1s [exit 2]",
+        "┊ 💻 $ rg missing.file  0.1s [exit 2]",
+        "┊ 💻 $ rg missing.file  0.1s",
+    ])
+
+    assert detect_log_finding(log, _config()) is None
+
+
 def test_repeated_context_compression_is_detected() -> None:
     """Ignoring compression count would allow context churn to run forever."""
     log = "\n".join([
