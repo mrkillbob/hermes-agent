@@ -323,7 +323,10 @@ def _reconcile_repairs(conn, result: WatchdogTickResult) -> None:
         if repair is None:
             result.needs_operator.append(task_id)
             continue
-        if repair.status in {"done", "archived"}:
+        if repair.status == "archived":
+            result.needs_operator.append(task_id)
+            continue
+        if repair.status == "done":
             if kb.unblock_task(conn, task_id):
                 _record_event(
                     conn,
