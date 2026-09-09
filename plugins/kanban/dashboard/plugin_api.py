@@ -564,7 +564,7 @@ def _request_review_status(conn, task_id: str, payload) -> bool:
     """Preserve completion-policy rejection reasons for dashboard callers."""
     result = kanban_db.request_review(
         conn, task_id, summary=payload.summary, metadata=payload.metadata,
-        reviewer=(payload.assignee or None), force=True, with_reason=True)
+        reviewer=(payload.assignee or None), with_reason=True)
     ok, reason = result if isinstance(result, tuple) else (result, None)
     if not ok:
         raise CompletionPolicyError(reason or "review transition refused")

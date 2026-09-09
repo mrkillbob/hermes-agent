@@ -81,9 +81,12 @@ def test_real_worker_discovery_enforces_control_home_receipt(tmp_path, monkeypat
         # from its manifest using this worker's actual opt-in configuration.
         plugins.discover_plugins(force=True)
         result = json.loads(kanban_tools._handle_complete({"task_id": tid, "summary": "Tests passed"}))
-        assert (result.get("ok") is True) is (not enabled)
+        # The control-plane receipt is enforced even when the optional worker
+        # plugin is disabled; disabling the plugin must not bypass the durable
+        # completion contract.
+        assert result.get("ok") is not True
         with kbc.connect() as connection:
-            assert (kb.get_task(connection, tid).status == "done") is (not enabled)
+            assert kb.get_task(connection, tid).status != "done"
         assert ledger._connection.execute("SELECT action_status FROM feedback_receipts").fetchone()[0] == "pending"
     finally:
         ledger.close()

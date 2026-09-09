@@ -66,7 +66,9 @@ def assignment_summary_from_handoff(content):
     marker = "[CURRENT KANBAN ASSIGNMENT]"
     if not isinstance(content, str):
         return None
-    marker_index = content.rfind(marker)
+    # The marker is a structural delimiter.  Search from the beginning so a
+    # literal marker inside the JSON body cannot redirect parsing to a suffix.
+    marker_index = content.find(marker)
     if marker_index < 0:
         return None
     try:

@@ -6,12 +6,28 @@ import yaml
 
 from hermes_cli.config import _expand_env_vars
 from hermes_cli.managed_scope import apply_managed_overlay
-from utils import env_var_enabled
 
 
 _PLUGIN_NAME = "github-pr-feedback"
 _PLUGIN_ENTRY_POINT_GROUP = "hermes_agent.plugins"
 _REQUIRED_HOOKS = frozenset({"pre_tool_call", "pre_kanban_complete"})
+
+
+def _worker_env_enabled(name: str, home: Path, project_root: Path | None) -> bool:
+    """Resolve opt-in from the worker's effective env, not the doctor process env."""
+    values = dict(__import__("os").environ)
+    for env_path in (home / ".env", (Path(project_root) / ".hermes" / ".env") if project_root else None):
+        if env_path is None:
+            continue
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key.strip()] = value.strip().strip("\"'")
+        except (OSError, UnicodeError):
+            continue
+    return values.get(name, "").strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
 def configured_assignees(policy):
@@ -71,7 +87,7 @@ def _resolved_declared_hooks(
     """
     user_plugins = home / "plugins"
     candidates: list[tuple[Path, str]] = []
-    if project_root is not None and env_var_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
+    if project_root is not None and _worker_env_enabled("HERMES_ENABLE_PROJECT_PLUGINS", home, project_root):
         candidates.append((
             Path(project_root) / ".hermes" / "plugins" / _PLUGIN_NAME,
             _PLUGIN_NAME,
