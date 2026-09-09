@@ -815,6 +815,9 @@ def _pid_is_alive(pid: int) -> bool:
     if pid < 2:
         return False
     try:
+        if os.name == "nt":
+            from gateway.status import _pid_exists
+            return _pid_exists(pid)
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
