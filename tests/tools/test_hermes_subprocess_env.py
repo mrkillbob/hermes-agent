@@ -12,6 +12,7 @@ full credential environment. Two tiers:
 """
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 from tools.environments.local import _sanitize_subprocess_env, hermes_subprocess_env
@@ -80,7 +81,8 @@ class TestStripByDefault:
 
     def test_raw_gh_cannot_fall_through_to_operator_keyring(self):
         result = _build({"GH_CONFIG_DIR": "/home/user/.config/gh"})
-        assert result["GH_CONFIG_DIR"] == os.devnull
+        assert Path(result["GH_CONFIG_DIR"]).is_dir()
+        assert result["GH_CONFIG_DIR"] != "/home/user/.config/gh"
         assert result["GIT_CONFIG_GLOBAL"] == os.devnull
         assert result["GIT_TERMINAL_PROMPT"] == "0"
 
@@ -93,7 +95,8 @@ class TestStripByDefault:
             }
         )
         assert "HERMES_GITHUB_BOT_TOKEN" not in result
-        assert result["GH_CONFIG_DIR"] == os.devnull
+        assert Path(result["GH_CONFIG_DIR"]).is_dir()
+        assert result["GH_CONFIG_DIR"] != "/home/user/.config/gh"
         assert result["GIT_CONFIG_GLOBAL"] == os.devnull
         assert result["GIT_TERMINAL_PROMPT"] == "0"
 

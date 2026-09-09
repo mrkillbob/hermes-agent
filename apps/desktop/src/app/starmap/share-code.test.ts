@@ -96,6 +96,42 @@ describe('share-code', () => {
     expect(topology(decoded)).toEqual(topology(g))
   })
 
+  it('preserves shared catalog node kinds', () => {
+    const graph = sampleGraph()
+    graph.nodes.push(
+      {
+        category: 'shared',
+        createdBy: null,
+        id: 'shared-memory:0',
+        kind: 'shared-memory',
+        label: 'Shared fact',
+        memorySource: 'profile',
+        pinned: false,
+        state: 'active',
+        timestamp: null,
+        useCount: 0
+      },
+      {
+        category: 'shared',
+        createdBy: null,
+        id: 'skill-reference:0',
+        kind: 'skill-reference',
+        label: 'Shared skill',
+        pinned: false,
+        state: 'active',
+        timestamp: null,
+        useCount: 0
+      }
+    )
+
+    const decoded = decodeShareCode(encodeShareCode(graph))
+
+    expect(decoded.nodes.slice(-2).map(node => node.kind)).toEqual([
+      'shared-memory',
+      'skill-reference'
+    ])
+  })
+
   it('drops memory prose (loadout is viz-only)', () => {
     expect(decodeShareCode(encodeShareCode(sampleGraph())).memory).toHaveLength(0)
   })

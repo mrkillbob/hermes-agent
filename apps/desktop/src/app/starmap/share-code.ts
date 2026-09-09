@@ -11,13 +11,15 @@ import type { StarmapEdge, StarmapGraph, StarmapNode } from '@/types/hermes'
 // dropped; labels are trimmed. DEFLATE then makes the repetitive label/category
 // text almost free. A 60-skill map is a few hundred chars.
 
-const VERSION = 3
+const VERSION = 4
+const LEGACY_VERSION = 3
 const PREFIX = 'HML' // "Hermes Memory Loadout" — namespaces our codes like WoW's leading bytes.
 const MAX_LABEL = 64 // trim runaway memory titles so one card can't bloat the code.
 
 const trim = (s: string): string => (s.length > MAX_LABEL ? s.slice(0, MAX_LABEL) : s)
 
-const KINDS = ['skill', 'memory'] as const
+const KINDS = ['skill', 'memory', 'shared-memory', 'skill-reference'] as const
+const LEGACY_KINDS = ['skill', 'memory'] as const
 const STATES = ['active', 'archived', 'disabled', 'draft'] as const
 const MEM_SOURCES = ['none', 'memory', 'profile'] as const
 const CREATED_BY = ['none', 'agent', 'user'] as const
@@ -29,7 +31,7 @@ const finiteTs = (v?: null | number): null | number =>
   typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.round(v)) : null
 
 function writeNode(w: BitWriter, n: StarmapNode, dict: Dict, minTs: number, span: number): void {
-  w.uint(idxOf(KINDS, n.kind), 1)
+  w.uint(idxOf(KINDS, n.kind), 2)
   w.varint(dict.id(trim(n.label || '')))
   w.varint(dict.id(n.category || ''))
   w.varint(Math.max(0, n.useCount | 0))
@@ -49,8 +51,15 @@ function writeNode(w: BitWriter, n: StarmapNode, dict: Dict, minTs: number, span
   }
 }
 
-function readNode(r: BitReader, dict: string[], i: number, minTs: number, span: number): StarmapNode {
-  const kind = KINDS[r.uint(1)] ?? 'skill'
+function readNode(
+  r: BitReader,
+  dict: string[],
+  i: number,
+  minTs: number,
+  span: number,
+  kinds: readonly StarmapNode['kind'][] = KINDS
+): StarmapNode {
+  const kind = kinds[r.uint(kinds.length > 2 ? 2 : 1)] ?? 'skill'
   const label = dict[r.varint()] ?? ''
   const category = dict[r.varint()] ?? ''
   const useCount = r.varint()
@@ -62,7 +71,7 @@ function readNode(r: BitReader, dict: string[], i: number, minTs: number, span: 
 
   // Ids are synthesized (they're never displayed); memory ids mirror the scan's
   // `memory:<source>:<index>` shape so the rest of the UI is none the wiser.
-  const isMemory = kind === 'memory'
+  const isMemory = kind === 'memory' || kind === 'shared-memory'
   const source = memSrc === 'none' ? 'memory' : memSrc
 
   return {
@@ -119,7 +128,7 @@ function writeGraph(w: BitWriter, graph: StarmapGraph): void {
   }
 }
 
-function readGraph(r: BitReader): StarmapGraph {
+function readGraph(r: BitReader, kinds: readonly StarmapNode['kind'][] = KINDS): StarmapGraph {
   const minTs = r.varint()
   const maxTs = r.varint()
   const span = maxTs - minTs
@@ -135,7 +144,7 @@ function readGraph(r: BitReader): StarmapGraph {
   const nodes: StarmapNode[] = []
 
   for (let i = 0; i < nodeCount; i += 1) {
-    nodes.push(readNode(r, dict, i, minTs, span))
+    nodes.push(readNode(r, dict, i, minTs, span, kinds))
   }
 
   const bits = indexBits(nodeCount)
@@ -177,6 +186,17 @@ const codec = createLoadout<StarmapGraph>({
   write: writeGraph
 })
 
+// Version 3 encoded only skill and memory nodes. Keep decoding those codes so
+// existing links remain usable after the four-kind schema is introduced.
+const legacyCodec = createLoadout<StarmapGraph>({
+  error: ShareCodeError,
+  noun: 'map code',
+  prefix: PREFIX,
+  read: r => readGraph(r, LEGACY_KINDS),
+  version: LEGACY_VERSION,
+  write: writeGraph
+})
+
 // Serialize a star-map graph to a short, opaque, clipboard-safe loadout string.
 export function encodeShareCode(graph: StarmapGraph): string {
   return codec.encode(graph)
@@ -184,5 +204,13 @@ export function encodeShareCode(graph: StarmapGraph): string {
 
 // Parse a loadout string back into a (viz-complete, text-synthesized) graph.
 export function decodeShareCode(code: string): StarmapGraph {
-  return codec.decode(code)
+  try {
+    return codec.decode(code)
+  } catch (error) {
+    try {
+      return legacyCodec.decode(code)
+    } catch {
+      throw error
+    }
+  }
 }

@@ -274,7 +274,11 @@ def _finalize_child_env(env: dict) -> dict:
     _apply_windows_msys_bash_env_defaults(env)
     # Prevent child tools from silently consulting the operator's GitHub
     # keyring/config when their explicit token was scrubbed.
-    env["GH_CONFIG_DIR"] = os.devnull
+    # gh expects GH_CONFIG_DIR to be a directory and will try to open
+    # config.yml beneath it. Use a private empty directory rather than a
+    # device node, which makes every gh invocation fail before auth checks.
+    gh_config_dir = Path(tempfile.mkdtemp(prefix="hermes-gh-config-"))
+    env["GH_CONFIG_DIR"] = str(gh_config_dir)
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_TERMINAL_PROMPT"] = "0"
     from agent.delegation_context import delegated_child_subprocess_env
