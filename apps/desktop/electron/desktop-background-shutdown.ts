@@ -141,7 +141,7 @@ export function stopDesktopBackgroundServices({
 
   const [gateway, ...afterDrain] = commands
 
-  return runStopCommand(spawnFn, gateway, 0, onError).then(async gatewayStopped => {
+  return runStopCommand(spawnFn, gateway, timeoutMs, onError).then(async gatewayStopped => {
     if (!gatewayStopped) {
       return false
     }
