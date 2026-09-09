@@ -323,7 +323,7 @@ class ComputeHost:
                 context_cwd_is_launch_artifact=bool(
                     frame.get("context_cwd_is_launch_artifact", False)),
                 conversation_worktree=frame.get("conversation_worktree"),
-                session_db=session_db)
+                session_db=session_db, auth_user_id=frame.get("auth_user_id"))
             if server._transfer_db_to_agent(agent, session_db):
                 owns_db = False
         finally:
@@ -366,6 +366,8 @@ class ComputeHost:
                 "transport": self._transport}
         session = server._sessions[sid]
         session["transport"] = self._transport
+        # The host pipe names no login; the record carries the one the gateway stamped at creation.
+        session["auth_user_id"] = frame.get("auth_user_id")
         session["profile_home"] = profile_home or session.get("profile_home")
         if frame.get("model_override") is not None:
             session["model_override"] = frame.get("model_override")
