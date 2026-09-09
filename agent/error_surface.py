@@ -174,7 +174,7 @@ def build_error_surface_from_result(
         # Disk-full wins outright: the fix (free space) is unrelated to the
         # provider stack, and hermes_state owns the pattern list.
         try:
-            from hermes_state import is_disk_full_error
+            from hermes_state_errors import is_disk_full_error
 
             if error_text and is_disk_full_error(error_text):
                 return _surface(LAYER_DISK, "disk_full", False, provider, model)
@@ -224,7 +224,7 @@ def build_error_surface_from_exception(
         message = str(exc) or type(exc).__name__
 
         try:
-            from hermes_state import is_disk_full_error
+            from hermes_state_errors import is_disk_full_error
 
             if is_disk_full_error(exc):
                 return _surface(LAYER_DISK, "disk_full", False, provider, model)

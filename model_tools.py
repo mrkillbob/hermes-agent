@@ -1554,7 +1554,7 @@ def handle_function_call(
         # so the *consecutive* counter resets (reads after other work are fine).
         if function_name not in _READ_SEARCH_TOOLS:
             try:
-                from tools.file_tools import notify_other_tool_call
+                from tools.file_tools_read_tracking import notify_other_tool_call
                 notify_other_tool_call(task_id or "default")
             except Exception:
                 pass  # file_tools may not be loaded yet
@@ -1569,7 +1569,7 @@ def handle_function_call(
         _dispatch_start = time.monotonic()
         _approval_tokens = None
         try:
-            from tools.approval import (
+            from tools.approval_context import (
                 reset_current_observability_context,
                 set_current_observability_context,
             )

@@ -45,7 +45,7 @@ from agent.message_sanitization import (
 )
 from agent.reasoning_summaries import separate_glued_reasoning_blocks
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
-from tools.terminal_tool import is_persistent_env
+from tools.terminal_tool_lifecycle import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
 
 logger = logging.getLogger(__name__)
@@ -2100,7 +2100,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     # before; gating on _ANTHROPIC_OUTPUT_LIMITS membership covers them all.
     _ant_max = None
     try:
-        from agent.anthropic_adapter import (
+        from agent.anthropic_credentials import (
             _get_anthropic_max_output,
             _ANTHROPIC_OUTPUT_LIMITS,
         )
@@ -4333,23 +4333,13 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             last_chunk_time["t"] = time.time()
             return True
 
-        def _relay_final_response() -> dict[str, Any]:
-            tool_calls = [tool_calls_acc[index] for index in sorted(tool_calls_acc)]
-            return {
-                "model": model_name,
-                "choices": [
-                    {
-                        "message": {
-                            "role": role,
-                            "content": "".join(content_parts) or None,
-                            "reasoning_content": "".join(reasoning_parts) or None,
-                            "tool_calls": tool_calls or None,
-                        },
-                        "finish_reason": finish_reason or "stop",
-                    }
-                ],
-                "usage": usage_obj,
-            }
+        # Relay finalizes as soon as its provider stream ends, concurrently with
+        # Hermes consuming the last SDK chunk. Build the recorded response from
+        # Relay's ordered collector callbacks so trailing usage/tool deltas are
+        # not lost to that race.
+        from agent.chat_completion_helpers_relay import RelayChatAccumulator
+
+        relay_response = RelayChatAccumulator()
 
         from agent import relay_llm
 
@@ -4360,8 +4350,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 session_id=str(getattr(agent, "session_id", "") or ""),
                 name=str(getattr(agent, "provider", "") or "provider"),
                 model_name=str(getattr(agent, "model", "") or ""),
-                finalizer=_relay_final_response,
+                finalizer=relay_response.finalize,
                 on_stream_created=_stream_created,
+                on_chunk=relay_response.observe,
                 accept_chunk=_accept_stream_chunk,
                 completed_response_predicate=lambda value: hasattr(value, "choices"),
                 metadata={
