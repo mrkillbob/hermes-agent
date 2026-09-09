@@ -21,7 +21,21 @@ _DURATION_RE = re.compile(r"\b\d+(?:\.\d+)?s\b", re.IGNORECASE)
 _TOKEN_COUNT_RE = re.compile(r"~?[\d,]+\s+tokens?", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"\s+")
 _FAILED_EXIT_RE = re.compile(r"\[exit\s+(-?\d+)\]", re.IGNORECASE)
-_TOOL_PREFIX_RE = re.compile(r"(?:^|\s)[┊|]\s*[^$\n]*\$\s*(.+)")
+# Terminal completion lines have a stable tool marker after the skin-owned
+# prefix.  Match that structure rather than treating arbitrary prose before a
+# dollar sign as a tool prefix.
+_TOOL_PREFIX_RE = re.compile(
+    r"^.*💻\s+\$\s+(.+?)\s+\d+(?:\.\d+)?s(?:\s+\[exit\s+-?\d+\])?$"
+)
+_EDIT_SUCCESS_RE = re.compile(
+    r"^.*(?:🔧\s+patch|✍️?\s+write|⚡\s+skill_man)\s+.*\d+(?:\.\d+)?s$"
+)
+_EDIT_LANDED_RE = re.compile(
+    r"^.*(?:🔧\s+patch|✍️?\s+write)\s+.*\d+(?:\.\d+)?s \[edit landed\]$"
+)
+_DIFF_MARKER_RE = re.compile(r"^┊ review diff$")
+_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @")
+_DIFF_CONTENT_RE = re.compile(r"^(?:@@\s|---\s|\+\+\+\s|[+-]|#\s+Moved:)")
 _PROVIDER_STALL_RE = re.compile(
     r"(?:waiting on .+no output yet|provider has been unresponsive|"
     r"consecutive stale attempts|auto-reconnect|"
@@ -175,7 +189,26 @@ def _finding(
 
 def _failed_tool_finding(lines: list[str], threshold: int) -> Optional[WatchdogFinding]:
     signatures: list[tuple[str, str]] = []
+    edit_pending = False
+    diff_pending = False
     for line in lines:
+        if _EDIT_LANDED_RE.fullmatch(line):
+            # The completion receipt proves the mutation landed even when the
+            # optional inline diff callbacks were disabled.
+            signatures.clear()
+            edit_pending = diff_pending = False
+        elif _EDIT_SUCCESS_RE.fullmatch(line):
+            edit_pending = bool(_EDIT_SUCCESS_RE.fullmatch(line))
+            diff_pending = False
+        elif edit_pending and _DIFF_MARKER_RE.fullmatch(line):
+            diff_pending = True
+        elif diff_pending and (
+            _DIFF_HUNK_RE.match(line) or _DIFF_CONTENT_RE.match(line)
+        ):
+            # Test-edit-test is progress. Require the renderer's actual diff,
+            # not a patch attempt, no-op result, or the worker's prose claim.
+            signatures.clear()
+            edit_pending = diff_pending = False
         exit_match = _FAILED_EXIT_RE.search(line)
         if exit_match is None or exit_match.group(1) == "0":
             continue

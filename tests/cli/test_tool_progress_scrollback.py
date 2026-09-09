@@ -95,7 +95,17 @@ class TestToolProgressScrollback:
 
         assert mock_print.call_count == 2
 
+    def test_landed_file_mutation_gets_stable_receipt(self):
+        """Successful patch completion emits progress even without an inline diff."""
+        cli = _make_cli(tool_progress="all")
+        cli._on_tool_progress("tool.started", "patch", "module.py", {"path": "module.py"})
+        with patch.object(_cli_mod, "_cprint") as mock_print:
+            cli._on_tool_progress(
+                "tool.completed", "patch", None, None,
+                duration=0.3, is_error=False, result='{"success": true}',
+            )
 
+        assert "[edit landed]" in mock_print.call_args[0][0]
 
     def test_off_mode_no_scrollback(self):
         """In 'off' mode, no stacked lines are printed."""
