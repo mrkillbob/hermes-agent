@@ -21,6 +21,7 @@ _TERMINAL_SUBCOMMANDS = frozenset(
         "retire-feedback",
         "submit-review",
         "status",
+        "inspect-ci",
     }
 )
 _TERMINAL_RESULT_KEYS = frozenset(
@@ -59,6 +60,10 @@ _TERMINAL_RESULT_KEYS = frozenset(
         "repair_status",
         "retryable",
         "command_count",
+        "failed_commands",
+        "failed_output_digests",
+        "failure_reason",
+        "ci_mode",
     }
 )
 
@@ -175,6 +180,10 @@ def _terminal_result(output: str) -> str:
                     continue
                 if value is None or isinstance(value, (bool, int)):
                     payload[str(key)] = value
+                    continue
+                if key in {"failed_commands", "failed_output_digests"} and isinstance(value, list):
+                    bounded = [item for item in value[:16] if isinstance(item, str) and len(item) <= 200]
+                    payload[str(key)] = bounded
                     continue
                 if not isinstance(value, str):
                     continue

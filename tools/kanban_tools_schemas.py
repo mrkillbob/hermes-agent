@@ -419,7 +419,11 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "exists, return that task's id instead of creating "
                 "a duplicate. Useful for retry-safe automation."
         )),
-        "max_retries": _prop("integer", "Consecutive-failure limit: 1 stops after the first failure; omit to use the dispatcher default."),
+        "max_retries": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Consecutive-failure limit: 1 stops after the first failure; omit to use the dispatcher default.",
+        },
         "max_runtime_seconds": _prop("integer", (
                 "Per-task runtime cap. When exceeded, the "
                 "dispatcher SIGTERMs the worker and re-queues the "
@@ -458,6 +462,10 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "blocks the task for human review). Use this for "
                 "open-ended cards where one shot rarely finishes the "
                 "work. Defaults to false (classic single-shot worker)."
+        )),
+        "completion_contract": _prop("string", (
+            "Declare at creation: local-only (default), OWNER/REPO for PR publication, or an exact GitHub PR URL. "
+            "PR tasks cannot complete until repository-required exact-head CI passes. On publication pass metadata.published_pr."
         )),
         "goal_max_turns": _prop("integer", (
                 "Turn budget for goal_mode workers. Caps how many "
