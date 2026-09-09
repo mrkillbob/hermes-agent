@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .ci_environment import ci_environment
+from .github_client import MergeStateStillComputingError
 
 from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands, hermes_coverage_gap, HERMES_ENV_CHECK
 
@@ -54,6 +54,10 @@ class CIValidationError(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.command_evidence = command_evidence
+
+
+class CIAuditDeferred(MergeStateStillComputingError):
+    """GitHub is still computing mergeability; retry without a test receipt."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,6 +524,12 @@ class LocalCIRunner:
             raise CIValidationError("exact-head CI audit is already running")
         try:
             receipt = self._run_claimed(identity, resolved)
+        except MergeStateStillComputingError:
+            self._ledger.finish_ci_run(
+                lease, status="completed", completed_at=_aware_now(self._now()),
+                error="mergeability_still_computing",
+            )
+            raise CIAuditDeferred("mergeability_still_computing")
         except Exception as error:
             completed_at = _aware_now(self._now())
             receipt = _failed_receipt(
@@ -661,7 +671,8 @@ class LocalCIRunner:
         if bootstrap_evidence is not None:
             evidence.append(bootstrap_evidence)
         for argv, cwd, additions in command_specs:
-            environment = ci_environment(worktree, additions)
+            environment = dict(os.environ)
+            environment.update(additions)
             result = self._commands.run(
                 argv, cwd=cwd, env=environment, timeout=_COMMAND_TIMEOUT_SECONDS
             )
@@ -751,7 +762,7 @@ class LocalCIRunner:
                 result = self._commands.run(
                     probe,
                     cwd=worktree,
-                    env=ci_environment(worktree, include_worktree_roots=False),
+                    env=dict(os.environ),
                     timeout=30,
                 )
                 actual = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
@@ -782,7 +793,7 @@ class LocalCIRunner:
         result = self._commands.run(
             argv,
             cwd=worktree,
-            env=ci_environment(worktree),
+            env=dict(os.environ),
             timeout=_BOOTSTRAP_TIMEOUT_SECONDS,
         )
         evidence = _command_evidence(argv, worktree, worktree, result)

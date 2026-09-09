@@ -13,7 +13,7 @@ import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
 
 export interface NodeMenuTarget {
   id: string
-  kind: 'memory' | 'skill'
+  kind: 'memory' | 'shared-memory' | 'skill' | 'skill-reference'
   label: string
   x: number
   y: number
@@ -53,7 +53,8 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
     setError(null)
   })
 
-  const noun = target?.kind === 'memory' ? 'memory' : 'skill'
+  const noun = target?.kind === 'memory' ? 'memory' : target?.kind === 'skill' ? 'skill' : 'shared reference'
+  const readOnlyShared = target?.kind === 'shared-memory' || target?.kind === 'skill-reference'
 
   const openEdit = async () => {
     if (!target) {
@@ -119,24 +120,30 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
             style={{ left: target.x, top: target.y }}
           >
             <div className="truncate px-2 py-1 text-[0.68rem] text-muted-foreground">{target.label}</div>
-            <button
-              className="block w-full cursor-pointer rounded-md px-2 py-1 text-left text-xs hover:bg-(--ui-control-active-background) hover:text-foreground disabled:opacity-50"
-              disabled={loading}
-              onClick={() => void openEdit()}
-              type="button"
-            >
-              Edit {noun}…
-            </button>
-            <button
-              className="block w-full cursor-pointer rounded-md px-2 py-1 text-left text-xs text-destructive hover:bg-destructive/10"
-              onClick={() => {
-                setDeleting({ id: target.id, kind: target.kind, label: target.label })
-                onClose()
-              }}
-              type="button"
-            >
-              {target.kind === 'skill' ? 'Archive skill' : 'Delete memory'}
-            </button>
+            {readOnlyShared ? (
+              <div className="px-2 py-1 text-xs text-muted-foreground">Shared catalog nodes are read-only.</div>
+            ) : (
+              <>
+                <button
+                  className="block w-full cursor-pointer rounded-md px-2 py-1 text-left text-xs hover:bg-(--ui-control-active-background) hover:text-foreground disabled:opacity-50"
+                  disabled={loading}
+                  onClick={() => void openEdit()}
+                  type="button"
+                >
+                  Edit {noun}…
+                </button>
+                <button
+                  className="block w-full cursor-pointer rounded-md px-2 py-1 text-left text-xs text-destructive hover:bg-destructive/10"
+                  onClick={() => {
+                    setDeleting({ id: target.id, kind: target.kind, label: target.label })
+                    onClose()
+                  }}
+                  type="button"
+                >
+                  {target.kind === 'skill' ? 'Archive skill' : 'Delete memory'}
+                </button>
+              </>
+            )}
           </div>
         </>
       ) : null}

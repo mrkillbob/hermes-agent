@@ -155,12 +155,13 @@ def test_auto_decompose_skips_actual_decomposition_without_spending_budget(
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_decompose as decomp
+    from hermes_cli.kanban_db_graph import decompose_triage_task
 
     with _hermes_cli_kanban_db_connect.connect() as conn:
         tid = kb.create_task(conn, title="old root", triage=True)
         if has_downstream:
             kb.create_task(conn, title="downstream consumer", parents=[tid])
-        plan = kb.decompose_triage_task(
+        plan = decompose_triage_task(
             conn, tid, root_assignee="planner", children=[{"title": "existing step"}],
         )
         with kb.write_txn(conn):

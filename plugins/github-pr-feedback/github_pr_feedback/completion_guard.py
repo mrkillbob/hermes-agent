@@ -10,7 +10,6 @@ import json
 import os
 import sqlite3
 from contextlib import closing
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 
@@ -19,11 +18,8 @@ from .controller import _local_ci_feedback_id
 from .ledger import FeedbackLedger
 
 
-def _has_receipt(connection, binding) -> bool:
-    repository, number, feedback_id, head, claimed_at = binding
-    claimed = datetime.fromisoformat(claimed_at)
-    if claimed.tzinfo is None:
-        return False
+def _has_receipt(connection, binding, authorized_ids) -> bool:
+    repository, number, feedback_id, head, _claimed_at = binding
     rows = connection.execute(
         "SELECT evidence_json FROM ci_audit_receipts WHERE repository = ? AND pr_number = ? "
         "AND head_sha = ? ORDER BY completed_at DESC",
@@ -31,23 +27,23 @@ def _has_receipt(connection, binding) -> bool:
     )
     for (payload,) in rows:
         receipt = CIAuditReceipt.from_payload(json.loads(payload))
-        if (receipt.status == "passed" and receipt.identity.repository == repository and receipt.identity.pr_number == number
+        if (receipt.status in {"passed", "failed"} and receipt.receipt_id in authorized_ids and receipt.identity.repository == repository and receipt.identity.pr_number == number
                 and receipt.identity.head_sha == head
                 and _local_ci_feedback_id(receipt.identity) == feedback_id
-                and receipt.started_at >= claimed):
+                and receipt.started_at.tzinfo is not None):
             return True
     return False
 
 
-def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
-    """Model tools need ledger evidence; deterministic audit-pr uses its own CLI transition."""
-    if tool_name != "kanban_complete":
+def guard_completion(ctx, *, tool_name: str = "", args=None, task_id=None, **_kwargs):
+    """Completion needs ledger evidence; deterministic audit-pr owns its CLI transition."""
+    if tool_name and tool_name != "kanban_complete":
         return None
     worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
     if not worker_task and ctx.get_config("enabled", default=False) is not True:
         return None
     args = args if isinstance(args, dict) else {}
-    target = str(args.get("task_id") or worker_task or "").strip()
+    target = str(args.get("task_id") or task_id or worker_task or "").strip()
     if not target:
         return None
     try:
@@ -69,7 +65,17 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
             ).fetchall()
             if not bindings:
                 return None
-            if all(_has_receipt(connection, binding) for binding in bindings):
+            if all(
+                _has_receipt(
+                    connection,
+                    binding,
+                    {row[0] for row in connection.execute(
+                        "SELECT receipt_id FROM ci_completion_authorizations WHERE task_id = ?",
+                        (target,),
+                    )},
+                )
+                for binding in bindings
+            ):
                 return None
         reason = "no typed passing durable CI receipt matches this task's exact PR head/base and dispatch"
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
@@ -82,9 +88,14 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, **_kwargs):
 
 
 def register_completion_guard(ctx) -> None:
-    # Directory-plugin hosts predating native hook support still expose the
-    # CLI registration surface.  Keep those hosts usable while enabling the
-    # guard wherever the host explicitly provides the hook boundary.
+    from tools.kanban_ci_guard import register_completion_policy
+
+    def completion_policy(task_id):
+        result = guard_completion(None, tool_name="kanban_complete", args={"task_id": task_id})
+        return result["message"] if isinstance(result, dict) and result.get("action") == "block" else None
+
+    register_completion_policy(completion_policy)
     register_hook = getattr(ctx, "register_hook", None)
     if callable(register_hook):
         register_hook("pre_tool_call", partial(guard_completion, ctx))
+        register_hook("pre_kanban_complete", partial(guard_completion, ctx))

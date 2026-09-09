@@ -399,25 +399,41 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
-def test_complete_runs_governed_ci_gate_at_kanban_boundary(monkeypatch, worker_env):
-    """The worker boundary enforces CI receipts without plugin discovery."""
+def test_complete_preserves_normal_completion_without_governed_ci_binding(
+    monkeypatch, worker_env,
+):
+    """A worker without a governed binding must reach the normal gates."""
     from tools import kanban_tools as kt
+    monkeypatch.setenv("HERMES_KANBAN_COMPLETION_GATE", "pr-local-ci-v1")
 
     monkeypatch.setattr(
         "tools.kanban_ci_guard.completion_block",
-        lambda task_id=None: "CI completion rejected by the control ledger",
+        lambda task_id=None: None,
     )
 
-    out = json.loads(kt._handle_complete({"summary": "invented CI output"}))
-    assert out["error"] == "CI completion rejected by the control ledger"
+    out = json.loads(kt._handle_complete({"summary": "ordinary worker completion"}))
+    assert out["ok"] is True
+    assert out["task_id"] == worker_env
 
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     conn = kbc.connect()
     try:
-        assert kb.latest_run(conn, worker_env).outcome is None
+        run = kb.latest_run(conn, worker_env)
+        assert run is not None
+        assert run.outcome == "completed"
     finally:
         conn.close()
+
+
+def test_missing_control_ledger_blocks_completion(monkeypatch, tmp_path):
+    from tools.kanban_ci_guard import _UNAVAILABLE_MESSAGE, completion_block
+
+    monkeypatch.setenv("HERMES_CONTROL_HOME", str(tmp_path / "missing-control"))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "audit-task")
+    monkeypatch.setenv("HERMES_KANBAN_COMPLETION_GATE", "pr-local-ci-v1")
+
+    assert completion_block() == _UNAVAILABLE_MESSAGE
 
 
 def test_verifier_cannot_complete_with_pytest_usage_failure(
