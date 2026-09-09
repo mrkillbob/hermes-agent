@@ -2298,7 +2298,7 @@ def _run_single_pr_merge_handoff(
     except (GitHubClientError, RuntimeError, ValueError):
         return {"status": "degraded", "blockers": ["merge_evidence_unavailable"]}
 
-    if result.receipt is None and merge_policy.report_only:
+    if result.receipt is None and merge_policy.report_only and not result.decision.blockers:
         return {
             "status": "report_only_ready",
             "pr_number": pr_number,
