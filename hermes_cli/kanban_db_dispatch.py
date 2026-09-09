@@ -41,6 +41,41 @@ DEFAULT_LOG_BACKUP_COUNT = 1
 # and call kanban_block/kanban_complete before max_runtime_seconds kills it.
 KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS = 30
 
+_LOCAL_CI_COMPLETION_GATE_MARKER = "hermes-completion-gate:pr-local-ci-v1"
+_LOCAL_CI_LEGACY_IDEMPOTENCY_SUFFIX = ":supervised-v4"
+
+
+def _has_local_ci_ledger_binding(task_id: str, env: Mapping[str, str]) -> bool:
+    """Recognize governed audit cards even when their body predates the gate marker."""
+    try:
+        from hermes_constants import get_default_hermes_root
+
+        control_home = (
+            env.get("HERMES_CONTROL_HOME")
+            or os.environ.get("HERMES_CONTROL_HOME")
+            or str(get_default_hermes_root())
+        )
+        ledger_path = Path(control_home) / "github-pr-feedback" / "ledger.sqlite3"
+        with contextlib.closing(
+            sqlite3.connect(ledger_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        ) as connection:
+            return connection.execute(
+                "SELECT 1 FROM feedback_receipts "
+                "WHERE task_id = ? AND feedback_kind = 'pr_local_ci' LIMIT 1",
+                (task_id,),
+            ).fetchone() is not None
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return False
+
+
+def _task_requires_local_ci_completion_gate(task: "Task", env: Mapping[str, str]) -> bool:
+    """Keep pre-marker audit cards governed while using a versioned new contract."""
+    if _LOCAL_CI_COMPLETION_GATE_MARKER in (task.body or ""):
+        return True
+    if (task.idempotency_key or "").endswith(_LOCAL_CI_LEGACY_IDEMPOTENCY_SUFFIX):
+        return True
+    return _has_local_ci_ledger_binding(task.id, env)
+
 # ---------------------------------------------------------------------------
 # Respawn guard constants
 # ---------------------------------------------------------------------------
@@ -1648,6 +1683,23 @@ def _dispatch_lane_task(
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
+    # Explicit directory workspaces can be checked before claiming.  Avoid
+    # opening a run for a contender that will only be requeued because its
+    # shared checkout is busy; the post-claim check below remains the race-safe
+    # fallback for contenders that arrive concurrently.
+    if row["workspace_kind"] in {"dir", "scratch"} and row["workspace_path"]:
+        try:
+            candidate_workspace = str(Path(row["workspace_path"]).expanduser().resolve())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            candidate_workspace = None
+        if candidate_workspace is not None:
+            for owner in conn.execute(
+                "SELECT id, workspace_path FROM tasks WHERE status = 'running' AND id != ? "
+                "AND workspace_path IS NOT NULL", (task_id,),
+            ):
+                if str(Path(owner["workspace_path"]).resolve()) == candidate_workspace:
+                    result.workspace_collisions.append((task_id, owner["id"], candidate_workspace))
+                    return False
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
     claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
     if claimed is None:
@@ -1840,7 +1892,8 @@ def _tick_spawn_budget(
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
-        "SELECT id, assignee, created_by, provider_override, model_override FROM tasks "
+        "SELECT id, assignee, created_by, provider_override, model_override, "
+        "workspace_kind, workspace_path FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -2347,6 +2400,12 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
+    # Completion policies are task-owned and generic: a governed task may opt
+    # into a named gate without importing any optional plugin in the core.
+    if _task_requires_local_ci_completion_gate(task, env):
+        env["HERMES_KANBAN_COMPLETION_GATE"] = "pr-local-ci-v1"
+    else:
+        env.pop("HERMES_KANBAN_COMPLETION_GATE", None)
     env["HERMES_KANBAN_WORKSPACE"] = workspace
     from hermes_cli.kanban_worker_environment import bind_worker_environment
 
@@ -2394,6 +2453,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # kanban_comment reads HERMES_PROFILE for its default author; `-p` alone
     # doesn't set the env var.
     env["HERMES_PROFILE"] = profile_arg
+    # This is the grant boundary: the dispatcher assigned this new worker's task.
+    from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER
+    env.pop(DELEGATED_CHILD_ENV_MARKER, None)
     # `--cli` is the highest-precedence TUI override; dropping HERMES_TUI covers
     # older hermes builds on PATH that predate the flag's precedence.
     env.pop("HERMES_TUI", None)

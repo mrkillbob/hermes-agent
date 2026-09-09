@@ -889,7 +889,7 @@ export function StarMap({
     setSelectedId(node.id)
     setMenuTarget({
       id: node.id,
-      kind: node.kind === 'memory' ? 'memory' : 'skill',
+      kind: node.kind,
       label: node.label,
       x: e.clientX,
       y: e.clientY

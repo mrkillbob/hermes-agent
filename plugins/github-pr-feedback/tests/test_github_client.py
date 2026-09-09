@@ -691,6 +691,34 @@ def test_github_client_fails_closed_if_owned_pr_query_hits_coverage_cap() -> Non
         GitHubClient(runner).list_open_pull_requests("acme/widgets", "owner")
 
 
+def test_github_client_covers_current_large_owned_pr_backlog() -> None:
+    pulls_argv = (
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        "acme/widgets",
+        "--state",
+        "open",
+        "--author",
+        "owner",
+        "--limit",
+        str(MAX_DISCOVERED_PULL_REQUESTS),
+        "--json",
+        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+    )
+    runner = RecordingRunner(
+        {
+            pulls_argv: [canonical_list_pull(number=number) for number in range(1, 330)]
+        }
+    )
+
+    pulls = GitHubClient(runner).list_open_pull_requests("acme/widgets", "owner")
+
+    assert len(pulls) == 329
+    assert pulls[-1].number == 329
+
+
 def test_github_client_reads_all_open_prs_and_exact_base_head_for_maintenance() -> None:
     pulls_argv = (
         "gh",
@@ -809,6 +837,32 @@ def test_github_client_updates_existing_label_after_exact_read() -> None:
     )
 
     assert runner.calls == [read_argv, update_argv]
+
+
+def test_github_client_preserves_canonical_case_for_existing_labels() -> None:
+    argv = ("gh", "api", "repos/acme/widgets/pulls/17")
+    payload = {
+        "number": 17,
+        "state": "open",
+        "base": {
+            "ref": "stable",
+            "sha": "b" * 40,
+            "repo": {"full_name": "acme/widgets"},
+        },
+        "head": {
+            "ref": "codex/fix",
+            "sha": "a" * 40,
+            "repo": {"full_name": "acme/widgets"},
+        },
+        "user": {"login": "owner"},
+        "labels": [{"name": "Area/CI"}],
+    }
+
+    pull_request = GitHubClient(RecordingRunner({argv: payload})).get_pull_request(
+        "acme/widgets", 17
+    )
+
+    assert pull_request.labels == ("Area/CI",)
 
 
 def test_github_client_bounds_untrusted_feedback_body_at_intake() -> None:

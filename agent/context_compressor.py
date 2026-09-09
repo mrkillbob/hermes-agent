@@ -22,10 +22,12 @@ from agent.auxiliary_client import (
     extract_content_or_reasoning,
 )
 from agent.context_engine import ContextEngine, sanitize_memory_context
+from agent.context_compressor_summary import SummaryDispatchMixin
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.micro_compaction import MicroCompactionMixin
 from agent.model_metadata import (
-    MINIMUM_CONTEXT_LENGTH, get_model_context_length, estimate_messages_tokens_rough, estimate_tokens_rough
+    MINIMUM_CONTEXT_LENGTH, get_model_context_length, estimate_messages_tokens_rough, estimate_tokens_rough,
+    strip_opaque_replay_items,
 )
 from agent.redact import redact_sensitive_text
 from agent.turn_context import drop_stale_api_content
@@ -953,10 +955,6 @@ def _collect_protected_skill_names(messages: List[Dict[str, Any]], prune_boundar
 
 
 _CHARS_PER_TOKEN = 4
-# Flat per-image token estimate (realistic ceiling; matches Claude Code's constant).
-_IMAGE_TOKEN_ESTIMATE = 1600
-# Same figure in char-budget currency.
-_IMAGE_CHAR_EQUIVALENT = _IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
 
 # Fallback handoff preserves continuity anchors only, not a transcript copy.
@@ -1071,14 +1069,18 @@ def _bullets(items: list[str], limit: int = 8) -> str:
 
 
 def _content_length_for_budget(raw_content: Any) -> int:
-    """Effective char-length of message content for budgeting: text by length plus ``_IMAGE_CHAR_EQUIVALENT`` per image."""
+    """Effective char-length of message content for budgeting: text by length plus the learned
+    per-image price (``agent.image_token_cost``, same figure the trigger estimator uses) per image."""
     if isinstance(raw_content, str):
         return len(raw_content)
     if not isinstance(raw_content, list):
         return len(str(raw_content or ""))
+    from agent.image_token_cost import current_image_token_cost
+
+    image_chars = current_image_token_cost() * _CHARS_PER_TOKEN
     # Any text-bearing part counts its text; image_url payload size is irrelevant.
     return sum(
-        (_IMAGE_CHAR_EQUIVALENT if _is_image_part(p) else len(p.get("text", "") or "")) if isinstance(p, dict) else len(str(p))
+        (image_chars if _is_image_part(p) else len(p.get("text", "") or "")) if isinstance(p, dict) else len(str(p))
         for p in raw_content
     )
 
@@ -1127,12 +1129,15 @@ def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -
     and always-replayed provider fields. Always-replayed fields are charged because the preflight estimator sees
     the full shape; a mismatched size class protects blob-heavy rows as "small" and compaction re-fires.
     ``charge_stale_thinking=False`` skips newest-turn-only thinking keys. Accounting only; never mutates."""
-    content = msg.get("content") or ""
+    # Charge the wire substitute, not both it and the clean display content.
+    sidecar = msg.get("api_content")
+    content = sidecar if isinstance(sidecar, str) and sidecar and msg.get("role") in ("user", "assistant") else msg.get("content") or ""
     text_tokens = estimate_tokens_rough(content) if isinstance(content, str) else _content_length_for_budget(content) // _CHARS_PER_TOKEN
     tokens = text_tokens + 10  # +10 for role/key overhead
     tokens += sum(estimate_tokens_rough(str(tc)) for tc in msg.get("tool_calls") or [] if isinstance(tc, dict))
     for key in _ALWAYS_REPLAYED_BUDGET_KEYS:
-        tokens += _serialized_length_for_budget(msg.get(key)) // _CHARS_PER_TOKEN
+        # Opaque ciphertext is priced only by real usage (same rule as the preflight estimator).
+        tokens += _serialized_length_for_budget(strip_opaque_replay_items(msg.get(key))) // _CHARS_PER_TOKEN
     if not charge_stale_thinking:
         return tokens
     # Wire ships at most ONE generic thinking key (reasoning_content wins);
@@ -1633,7 +1638,7 @@ Describe agent/tool work only as completed actions, state, or historical work.]"
 }
 
 
-class ContextCompressor(MicroCompactionMixin, ContextEngine):
+class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngine):
     """Default context engine: prune tool results, protect head/tail, summarize the middle
     with an LLM, and iteratively update the previous summary on later compactions."""
 
@@ -1740,6 +1745,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             self._resolved_context_length = get_model_context_length(
                 self.model, base_url=self.base_url, api_key=self.api_key,
                 config_context_length=self._config_context_length, provider=self.provider,
+                custom_providers=self.custom_providers,
             )
             # Raise-only small-context floor; must run after context_length resolves and before threshold_tokens derives.
             self.threshold_percent = self._effective_threshold_percent(self._resolved_context_length, self._base_threshold_percent)
@@ -1818,10 +1824,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._reset_session_compaction_state()
 
     def _reset_real_usage_pairing(self) -> None:
-        """Forget the real-vs-rough token pairing used by should_defer_preflight_to_real_usage()."""
+        """Forget the real-usage state read by real_usage_pending()."""
         self.last_real_prompt_tokens = self.last_compression_rough_tokens = 0
-        self.last_rough_tokens_when_real_prompt_fit = self._pending_request_rough_tokens = 0
-        self.awaiting_real_usage_after_compression = False
+        self.awaiting_real_usage_after_compression = self._provider_omits_usage = False
 
     def _reset_session_compaction_state(self) -> None:
         """Shared per-session reset for /new, /reset and session end."""
@@ -2157,9 +2162,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._tail_token_budget = None
         _ = self.tail_token_budget  # eager recompute, same timing as before
         self.max_summary_tokens = min(int(context_length * 0.05), _SUMMARY_TOKENS_CEILING)
-        # Calibration state is only valid for the model that produced it: carried to a smaller window it would let
-        # should_defer_preflight_to_real_usage() suppress a compaction the new model needs. 0 (not the -1 sentinel)
-        # means "no real usage yet -> use the rough estimate" so post-response should_compress still fires.
+        # Old usage cannot price a new model. Clear it without arming the post-compaction
+        # latch: the next response supplies usage or enables the usage-less fallback.
         self.last_prompt_tokens = self.last_completion_tokens = self.last_total_tokens = 0
         self._reset_real_usage_pairing()
         # Strikes were judged against the previous threshold; void them durably too.
@@ -2260,10 +2264,14 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         model_thresholds: dict[str, float] | None = None, threshold_tokens_cap: Any = None,
         proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1, tail_mode: str = "lean",
+        custom_providers: list | None = None,
     ):
         self.model, self.base_url, self.api_key, self.provider, self.api_mode = model, base_url, api_key, provider, api_mode
         # "lean" = small clamped tail + verbatim-user summary section; "legacy" = 0.20*window tail.
         self.tail_mode = tail_mode if tail_mode in ("legacy", "lean") else "lean"
+        # Per-model context_length overrides live in custom_providers; without them deferred
+        # resolution falls back to the hardcoded family catalog (#83324).
+        self.custom_providers = custom_providers or None
         # Per-model overrides (longest substring match wins); floor applied on top.
         self.model_thresholds = model_thresholds or {}
         # Raw config value, before override/floor; fallback when switching to a model with no override.
@@ -2355,19 +2363,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         """Pair the real prompt count with its rough estimate and judge the armed compaction verdict."""
         if self.last_prompt_tokens > 0:
             self.last_real_prompt_tokens = self.last_prompt_tokens
+            self._provider_omits_usage = False
             if self.last_prompt_tokens < self.threshold_tokens:
-                if self.awaiting_real_usage_after_compression and self.last_compression_rough_tokens > 0:
-                    self.last_rough_tokens_when_real_prompt_fit = self.last_compression_rough_tokens
-                elif self._pending_request_rough_tokens > 0:
-                    # Pair the real prompt count with the same request's rough estimate so the defer baseline syncs on
-                    # EVERY fitting response, not only after compaction; otherwise a never-compressed session has no
-                    # baseline and preflight fires on the raw rough estimate (overcounts CJK / replay blobs severalfold).
-                    self.last_rough_tokens_when_real_prompt_fit = self._pending_request_rough_tokens
                 # Any real reading below the trigger proves the prompt fits: clear the latch. The fallback streak survives.
                 self._record_ineffective_compression_verdict(0)
-            else:
-                self.last_rough_tokens_when_real_prompt_fit = 0
-            self._pending_request_rough_tokens = 0
             # Anti-thrash verdict lives HERE: effectiveness is "prompt under threshold" per the provider's real count,
             # not "messages shrank"; should_compress() runs twice per turn with mixed measures and would reset it.
             # Anti-thrashing verdict, judged HERE because this is the only place that sees the provider's
@@ -2409,33 +2408,43 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             return
         self.last_prompt_tokens = snapshot
 
-    def note_request_rough_estimate(self, rough_tokens: int) -> None:
-        """Record the rough estimate of the request about to be sent, for pairing with real usage."""
-        try:
-            self._pending_request_rough_tokens = max(0, int(rough_tokens))
-        except (TypeError, ValueError):
-            self._pending_request_rough_tokens = 0
+    def note_usage_less_response(self) -> None:
+        """A completed response carried no usage: until a real reading arrives, this provider cannot
+        adjudicate context pressure, so rough estimates decide instead of waiting forever (#2153)."""
+        self._provider_omits_usage = True
+
+    def note_native_compaction_checkpoint(self) -> None:
+        """Wait for real usage before trusting a newly checkpointed request.
+
+        Native Responses compaction replaces durable history with an opaque
+        encrypted checkpoint. Its serialized size is unrelated to the token
+        count billed by the provider, so the first rough estimate after capture
+        can jump by more than the whole context window. Reuse the one-response
+        compaction latch and discard any stale local-compression baseline; the
+        next provider response then pairs its real usage with the rough estimate
+        for the checkpointed request.
+        """
+        self.awaiting_real_usage_after_compression = True
+        self.last_compression_rough_tokens = 0
 
     def should_defer_preflight_to_real_usage(self, rough_tokens: int) -> bool:
-        """Return True when a high rough preflight estimate is known-noisy.
-        Projects real usage as ``last_real + (rough_now - rough_at_last_real)`` and fires only when the
-        projection, not the raw estimate, crosses the threshold. Not a strict upper bound for
-        chars/4-underestimated scripts (Cyrillic, Thai, Arabic); bounded by two backstops: a real
-        reading at/over threshold clears the baseline, and the overflow handler compacts reactively.
-        Callers with a smaller (raw-messages) basis can only over-defer; the pre-API pressure check
-        re-runs with the aligned basis."""
+        """True when a whole-context ROUGH estimate over threshold must wait ONE request for the
+        provider's real usage. Callers skip this for usage-anchored figures (real prompt count +
+        delta of what was appended since), which never defer. A rough figure defers right after a
+        local or native compaction (the last real reading is stale — the latch) and on any
+        transcript the anchor does not cover (first request, rewind/edit-resend, reloaded history):
+        the next response re-anchors it. It never defers once the provider has proven it omits
+        usage, or the estimate would be the only signal and compression could never fire (#2153);
+        the overflow handler compacts reactively in every case."""
         if rough_tokens < self.threshold_tokens:
             return False
-        # After compaction last_real_prompt_tokens is STALE (above threshold); defer one turn until real usage arrives.
         if self.awaiting_real_usage_after_compression:
             return True
-        if self.last_real_prompt_tokens <= 0 or self.last_real_prompt_tokens >= self.threshold_tokens:
+        # Estimate magnitude is not evidence of overflow, even past the full window.
+        # Let the provider adjudicate; its overflow error still triggers reactive recovery.
+        if self.last_real_prompt_tokens >= self.threshold_tokens:
             return False
-        baseline = self.last_rough_tokens_when_real_prompt_fit or self.last_compression_rough_tokens
-        if baseline <= 0:
-            return False
-        # No baseline ratchet here: advancing rough without a matching real reading would defer on stale data.
-        return self.last_real_prompt_tokens + max(0, rough_tokens - baseline) < self.threshold_tokens
+        return not self._provider_omits_usage
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
         """True when compression should run now (anti-thrash included; see :meth:`should_compress_info` for the reason)."""
@@ -2629,9 +2638,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     def _demote_tool_result_at(
         result: List[Dict[str, Any]], idx: int, call_id_to_tool: Dict[str, tuple[str, str]],
         min_prune_chars: int, protected_skills: Optional[set[str]] = None,
+        pressure: bool = False,
     ) -> bool:
         """Replace the tool result at ``idx`` with a 1-line summary; True if modified.
-        ``protected_skills`` (lower-cased) spares matching skill_view bodies; None (pressure pass) overrides the guard."""
+        ``protected_skills`` (lower-cased) spares matching skill_view bodies; pressure demotion still retains the
+        current worker assignment while overriding the skill guard."""
         msg = result[idx]
         if msg.get("role") != "tool":
             return False
@@ -2653,7 +2664,14 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             _skill = _json_dict(tool_args).get("name", "")
             if isinstance(_skill, str) and _skill.lower() in protected_skills:
                 return False
-        result[idx] = {**msg, "content": _summarize_tool_result(tool_name, tool_args, content)}
+        from agent.context_compressor_kanban import newest_assignment_summary
+
+        summary = newest_assignment_summary(result, idx, call_id_to_tool)
+        if summary is None:
+            summary = _summarize_tool_result(tool_name, tool_args, content)
+        if summary == content:
+            return False
+        result[idx] = {**msg, "content": summary}
         return True
 
     def _pressure_demote_tail(
@@ -2675,7 +2693,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         def _shrink_at(i: int) -> None:
             # Each helper no-ops on the other role, so both may run unconditionally.
             nonlocal demoted, pressure_hits
-            if self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars):
+            if self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars, pressure=True):
                 demoted += 1
                 pressure_hits += 1
             if self._truncate_tool_call_args_at(result, i):
@@ -2695,7 +2713,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             # Last resort: the newest body alone may exceed the soft budget; summarize it.
             if (
                 last_tool_idx is not None and last_tool_idx >= prune_boundary and _protected_region_tokens() > soft_ceiling
-            ) and self._demote_tool_result_at(result, last_tool_idx, call_id_to_tool, min_prune_chars):
+            ) and self._demote_tool_result_at(result, last_tool_idx, call_id_to_tool, min_prune_chars, pressure=True):
                 demoted += 1
                 pressure_hits += 1
         if pressure_hits and not self.quiet_mode:
@@ -3063,10 +3081,55 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         summary = _reinject_pruned_skill_markers(summary, _pruned_names)
         return self._augment_summary_lean(summary, turns_to_summarize)
 
+    @staticmethod
+    def _current_assignment_summary(
+        messages: List[Dict[str, Any]], start: int, end: int,
+    ) -> Optional[str]:
+        """Return the newest current-task Kanban projection inside a soon-to-be-dropped window."""
+        from agent.context_compressor_kanban import assignment_summary_from_handoff, newest_assignment_summary
+
+        call_id_to_tool = _tool_calls_by_id(messages)
+        for index in range(min(end, len(messages)) - 1, max(0, start) - 1, -1):
+            summary = newest_assignment_summary(messages, index, call_id_to_tool)
+            if summary is not None:
+                return summary
+            message = messages[index]
+            if message.get(COMPRESSED_SUMMARY_METADATA_KEY) or ContextCompressor._is_context_summary_message(message):
+                summary = assignment_summary_from_handoff(
+                    _content_text_for_contains(message.get("content")),
+                )
+                if summary is not None:
+                    return summary
+        return None
+
+    @staticmethod
+    def _append_current_assignment_summary(summary: str, assignment_summary: str) -> str:
+        """Carry a bounded current-task projection in the deterministic handoff."""
+        assignment_summary = _redact_compaction_text(assignment_summary)
+        if assignment_summary in summary:
+            return summary
+        return f"{summary.rstrip()}\n\n[CURRENT KANBAN ASSIGNMENT]\n{assignment_summary}"
+
     def _demote_stale_tail_tools(self, messages: List[Dict[str, Any]], tail_start: int) -> List[Dict[str, Any]]:
         """Lean mode: demote tail tool results older than the newest ``_LEAN_TAIL_KEEP_TOOL_ROUNDS`` rounds to
-        recovery stubs; skill-marker rows untouched. New list (untouched rows shared, demoted copied)."""
+        recovery stubs; the newest current-task Kanban projection is also protected. Skill-marker rows are
+        untouched. New list (untouched rows shared, demoted copied)."""
         session_id = getattr(self, "_session_id", "") or ""
+        call_id_to_tool = _tool_calls_by_id(messages)
+        from agent.context_compressor_kanban import newest_assignment_summary
+
+        current_assignment_idx = next(
+            (
+                i
+                for i in range(len(messages) - 1, tail_start - 1, -1)
+                if newest_assignment_summary(messages, i, call_id_to_tool) is not None
+            ),
+            None,
+        )
+        current_assignment_summary = (
+            newest_assignment_summary(messages, current_assignment_idx, call_id_to_tool)
+            if current_assignment_idx is not None else None
+        )
         rounds_seen = 0
         protected: set[int] = set()
         prev_idx = None
@@ -3081,7 +3144,15 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         for i in range(tail_start, len(messages)):
             msg = messages[i]
             content = msg.get("content")
-            if msg.get("role") != "tool" or i in protected or not isinstance(content, str):
+            if (
+                msg.get("role") != "tool"
+                or i in protected
+                or not isinstance(content, str)
+            ):
+                continue
+            if i == current_assignment_idx:
+                if current_assignment_summary is not None:
+                    result[i] = _rewritten(msg, current_assignment_summary)
                 continue
             if len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in content or _is_summary_stub(content):
                 continue
@@ -4627,7 +4698,22 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Lean mode demotes stale tail tool results before summary generation so stubs exist even if it aborts.
         if getattr(self, "tail_mode", "lean") == "lean":
             messages = self._demote_stale_tail_tools(messages, compress_end)
+        current_assignment_summary = self._current_assignment_summary(messages, compress_start, compress_end)
         scan = self._scan_window_handoffs(messages, compress_start, compress_end, turns_to_summarize)
+        if current_assignment_summary is None:
+            # A prior handoff can sit beyond the initial window but still be
+            # consumed by the handoff scan. Carry only those explicitly
+            # consumed rows; never search the preserved tail, whose source
+            # would otherwise be duplicated in the new summary.
+            from agent.context_compressor_kanban import assignment_summary_from_handoff
+
+            for index in getattr(scan, "summary_indices", ()):
+                message = messages[index]
+                current_assignment_summary = assignment_summary_from_handoff(
+                    _content_text_for_contains(message.get("content")),
+                )
+                if current_assignment_summary is not None:
+                    break
         turns_to_summarize = scan.turns_to_summarize
         self._record_compression_regions(
             head_messages=messages[:compress_start], middle_messages=turns_to_summarize, tail_messages=messages[compress_end:],
@@ -4661,26 +4747,12 @@ Write only the summary body. Do not include any preamble or prefix."""
             summary = self._fallback_summary_for_window(
                 telemetry, turns_to_summarize, compress_end - compress_start, feasibility_skip,
             )
+        if current_assignment_summary:
+            summary = self._append_current_assignment_summary(summary, current_assignment_summary)
+            self._previous_summary = self._strip_summary_prefix(summary)
         # Phase 4: Assemble compressed message list
         compressed = self._assemble_compressed(messages, compress_start, compress_end, scan, summary)
         return self._finalize_compressed(compressed, messages, n_messages)
-
-    def _summarize_window(
-        self, messages: List[Dict[str, Any]], turns_to_summarize: List[Dict[str, Any]], scan: "_HandoffScan",
-        focus_topic: Optional[str], memory_context: str, bypass_cooldown: bool,
-    ) -> Optional[str]:
-        """Run the summary LLM; a cancellation rolls back the handoff scan's self-heal mutation first."""
-        # Focus-topic derivation scans user turns; only pay when a summary is generated.
-        try:
-            return self._generate_summary(
-                turns_to_summarize, focus_topic=focus_topic or self._derive_auto_focus_topic(messages),
-                memory_context=memory_context, bypass_cooldown=bypass_cooldown,
-            )
-        except AuxiliaryExplicitCancellation:
-            # Cancellation is a true no-op: restore the scan's mutation before the exception escapes.
-            self._previous_summary = scan.previous_summary_before
-            self._summary_has_user_turn = scan.has_user_turn_before
-            raise
 
     def _assemble_compressed(
         self, messages: List[Dict[str, Any]], compress_start: int, compress_end: int, scan: "_HandoffScan", summary: str,

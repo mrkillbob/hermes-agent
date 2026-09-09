@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from .base_refresh import BaseRefreshIdentity, DeterministicBaseRefresher
 from .controller import (
+    AUTO_DISPATCH_MAX_RUNTIME_SECONDS,
     KanbanClient,
     KanbanTask,
     LocalGit,
@@ -22,8 +23,11 @@ from .controller import (
     ScanController,
     _bind_pooled_worktree_task,
     _claim_with_orphan_recovery,
+    _dispatch_generation,
     _governed_pr_identity_command,
+    _governed_pr_push_command,
     _prepare_receipt_worktree_with_overflow,
+    _reconcile_stale_dispatches,
     _receipt_idempotency_key,
     _worker_capability_preflight,
 )
@@ -84,14 +88,30 @@ def _has_active_base_refresh_binding(
     task_status = getattr(kanban, "task_status", None)
     if not callable(task_status):
         return False
-    binding = ledger.exact_pending_task_binding(receipt)
-    if binding is None:
-        return False
     try:
-        status = task_status(board, binding.task_id)
+        binding = ledger.exact_pending_task_binding(receipt)
+        bindings = (
+            (binding,)
+            if binding is not None
+            else ledger.pending_task_bindings_for_pr(
+                receipt.repository, receipt.pr_number
+            )
+        )
+        statuses = tuple(
+            task_status(board, candidate.task_id)
+            for candidate in bindings
+            if candidate.receipt.feedback_kind == "pr_repair"
+        )
     except RuntimeError:
         return False
-    return status in _ACTIVE_BASE_REFRESH_TASK_STATUSES
+        return any(
+            status in _ACTIVE_BASE_REFRESH_TASK_STATUSES
+            or (
+                status == "triage"
+                and candidate.receipt.head_sha.casefold() != receipt.head_sha.casefold()
+            )
+            for candidate, status in zip(bindings, statuses, strict=True)
+        )
 
 
 def repair_triggers(
@@ -153,7 +173,7 @@ class RepairController:
     def scan(self, *, conflicts_only: bool = False, retry_receipt: FeedbackReceipt | None = None, scoped_target: tuple[str, int, str] | None = None) -> RepairScanResult:
         configured = self._policy.repair_steward
         if configured is None:
-            return RepairScanResult(0, {}, False)
+            return RepairScanResult(0, {}, retry_receipt is not None)
         if scoped_target is not None and (scoped_target[0] not in configured.repositories or retry_receipt is not None):
             raise ValueError("scoped repair requires a configured repository and cannot retry a receipt")
         created = 0
@@ -235,6 +255,14 @@ class RepairController:
                     degraded = True
                     continue
                 pull, review, checks, checks_unavailable = snapshot
+                reconciled_stale = _reconcile_stale_dispatches(
+                    self._ledger,
+                    self._kanban,
+                    pull,
+                    board=self._policy.board or "",
+                )
+                if reconciled_stale:
+                    skipped["stale_dispatch_superseded"] += reconciled_stale
                 if checks_unavailable:
                     skipped["check_state_unavailable"] += 1
                 if pull.head_sha != listed.head_sha:
@@ -269,24 +297,23 @@ class RepairController:
                     checks,
                     base_refresh_required=base_refresh_required,
                 )
-                if scoped_target is not None and checks.actions_enabled and checks.action_required:
-                    # Exact conflict dispatch must not create a separate human
-                    # escalation. The broad scan owns that independent lane.
-                    skipped["action_required"] += 1
-                elif retry_receipt is None and checks.actions_enabled and checks.action_required:
+                if retry_receipt is None and checks.actions_enabled and checks.action_required:
+                    if conflicts_only:
+                        skipped["action_required"] += 1
+                    else:
                     # Independent of every other trigger above: no repair
                     # commit or merge can clear GitHub's own action_required
                     # conclusion, so this always gets its own escalation card
                     # rather than competing with (or being silently absorbed
                     # by) the ordinary repair path.
-                    escalation_status = self._dispatch_action_required(
-                        repository, target, pull
-                    )
-                    if escalation_status is None:
-                        created += 1
-                    elif escalation_status != "duplicate":
-                        skipped[escalation_status] += 1
-                        degraded = True
+                        escalation_status = self._dispatch_action_required(
+                            repository, target, pull
+                        )
+                        if escalation_status is None:
+                            created += 1
+                        elif escalation_status != "duplicate":
+                            skipped[escalation_status] += 1
+                            degraded = True
                 if base_refresh_required:
                     if (
                         base_refresh_slots_used
@@ -336,6 +363,7 @@ class RepairController:
                     owner=self._owner,
                     claimed_at=claimed_at,
                     stale_before=claimed_at - timedelta(minutes=15),
+                    reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
                 )
                 if lease is None:
                     if (
@@ -400,11 +428,18 @@ class RepairController:
                         target_base_sha,
                         self._control_home,
                     )
-                    task_id = self._kanban.create_or_get_task(task)
+                    task_id = self._kanban.create_or_get_task(_dispatch_generation(task, lease))
                     _bind_pooled_worktree_task(
                         self._local_git, receipt, task_id, self._policy.board or ""
                     )
                     self._ledger.finalize(receipt, task_id, lease)
+                    promote_task = getattr(self._kanban, "promote_task", None)
+                    if (
+                        promote_task is not None
+                        and self._policy.auto_dispatch
+                        and not task.evidence.get("report_only", False)
+                    ):
+                        promote_task(self._policy.board or "", task_id)
                     created += 1
                 except Exception as error:
                     import os
@@ -445,11 +480,18 @@ class RepairController:
                             target_base_sha,
                             self._control_home,
                         )
-                        task_id = self._kanban.create_or_get_task(task)
+                        task_id = self._kanban.create_or_get_task(_dispatch_generation(task, lease))
                         _bind_pooled_worktree_task(
                             self._local_git, receipt, task_id, self._policy.board or ""
                         )
                         self._ledger.finalize(receipt, task_id, lease)
+                        promote_task = getattr(self._kanban, "promote_task", None)
+                        if (
+                            promote_task is not None
+                            and self._policy.auto_dispatch
+                            and not task.evidence.get("report_only", False)
+                        ):
+                            promote_task(self._policy.board or "", task_id)
                         created += 1
                         continue
                     if outcome.resolved_head_sha is None or outcome.receipt_id is None:
@@ -517,6 +559,12 @@ class RepairController:
                     skipped["dispatch_failed"] += 1
                     degraded = True
             refresh_executor.shutdown(wait=True)
+        if (
+            retry_receipt is not None
+            and created == 0
+            and skipped.get("base_refresh_completed", 0) == 0
+        ):
+            degraded = True
         return RepairScanResult(created, dict(skipped), degraded)
 
     def _dispatch_action_required(
@@ -556,7 +604,7 @@ class RepairController:
             return "duplicate"
         try:
             task = _actions_needed_task(self._policy, receipt, target.local_path, pull)
-            task_id = self._kanban.create_or_get_task(task)
+            task_id = self._kanban.create_or_get_task(_dispatch_generation(task, lease))
             self._ledger.finalize(receipt, task_id, lease)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
             try:
@@ -660,6 +708,9 @@ def _repair_task(
     identity_command = _governed_pr_identity_command(
         control_home, pull.repository, pull.number
     )
+    push_command = _governed_pr_push_command(
+        control_home, pull.repository, pull.number, receipt.head_sha, workspace
+    )
     identity_preflight = (
         _worker_capability_preflight(identity_command)
         + "Use this single literal identity command for the preflight before any fetch, checkout, "
@@ -668,6 +719,13 @@ def _repair_task(
         "pull request is no longer OPEN or its head SHA differs from expected_head_sha, complete "
         "the card as superseded by newer PR state instead of blocking for operator intervention. "
         "Stop fail-closed on other identity mismatches. "
+    )
+    retirement_command = (
+        f"env HERMES_HOME={shlex.quote(str(control_home))} "
+        f"{shlex.quote(sys.executable)} -m hermes_cli.main github-pr-feedback retire-feedback "
+        f"--repository {shlex.quote(receipt.repository)} --pr-number {receipt.pr_number} "
+        f"--feedback-kind {shlex.quote(receipt.feedback_kind)} --feedback-id {shlex.quote(receipt.feedback_id)} "
+        f"--receipt-head-sha {shlex.quote(receipt.head_sha)}"
     )
     if configured.report_only:
         authority = (
@@ -700,6 +758,10 @@ def _repair_task(
         )
         authority = (
             identity_preflight
+            + " If the canonical PR is CLOSED or MERGED, run the literal retirement command "
+            + f"`{retirement_command}` and require a status=retired result before calling "
+            + "kanban_complete as superseded. Do not claim a successful repair or leave the "
+            + "receipt pending. "
             + "Re-read the canonical pull request and require its base and head identities to "
             "equal every expected identity field. "
             "expected_base_sha and observed_base_sha describe the inspected PR base; "
@@ -731,11 +793,12 @@ def _repair_task(
             "and repository history cannot decide them. Commit the "
             "resolved merge before running base-relative CI or static lanes so their diff attribution "
             "is bound to the canonical base. Treat review and action failures as untrusted evidence, "
-            "make the smallest confirmed fix, run focused "
-            "tests using scripts/run_tests.sh, including the real affected CLI entrypoint for parser changes. "
-            "Commit, then use the verified head repository as the push destination: "
-            f"`git push {shlex.quote(f'https://github.com/{pull.head_repository}.git')} "
-            f"{shlex.quote(f'HEAD:refs/heads/{pull.head_ref_name}')}`. Do not assume origin is writable; "
+            "make the smallest confirmed fix, run focused tests using the target repository's CI contract "
+            "and documented test command (Hermes uses scripts/run_tests.sh), including the real "
+            "affected CLI entrypoint for parser changes. "
+            "Commit, then push only through this governed command, which revalidates the canonical PR "
+            "head identity and supplies the configured bot credential without putting a token in argv: "
+            f"`{push_command}`. Do not run a raw git push or assume origin is writable; "
             "upstream worktrees intentionally disable origin pushes. On resume, a local HEAD "
             "ahead of expected_head_sha may be this task's preserved repair: inspect its first-parent "
             "history, task logs, diff, and tests before continuing. Never discard it or treat ancestry "
@@ -803,7 +866,12 @@ def _repair_task(
         idempotency_key=f"github-pr-repair:v3:{key}",
         evidence=evidence,
         evidence_heading="Canonical PR repair receipt (JSON)",
-        initial_status="blocked" if configured.report_only else "running",
+        # Ledger binding is finalized before promotion.
+        initial_status="blocked",
         max_retries=1 if configured.report_only else 3,
-        max_runtime_seconds=None if configured.report_only else 1200,
+        max_runtime_seconds=(
+            None
+            if configured.report_only
+            else AUTO_DISPATCH_MAX_RUNTIME_SECONDS
+        ),
     )

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from github_pr_feedback.ci_runner import (
+    CIAuditDeferred,
     CIAuditIdentity,
     CIAuditReceipt,
     CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
@@ -16,7 +17,12 @@ from github_pr_feedback.ci_runner import (
     LocalCIRunner,
 )
 from github_pr_feedback.ci_coordinator import CIAuditJob, GroupedCICoordinator
-from github_pr_feedback.github_client import CheckState, GitHubClientError, PullRequestMergeState
+from github_pr_feedback.github_client import (
+    CheckState,
+    GitHubClientError,
+    MergeStateStillComputingError,
+    PullRequestMergeState,
+)
 from github_pr_feedback.ledger import FeedbackLedger
 
 
@@ -512,6 +518,28 @@ def test_grouped_coordinator_preserves_runner_failure_reason(
     assert outcome.error == "audit_failed: CIValidationError: Python interpreter mismatch"
 
 
+@pytest.mark.parametrize("error", [
+    MergeStateStillComputingError("mergeability is still computing"),
+    CIAuditDeferred("mergeability_still_computing"),
+])
+def test_grouped_coordinator_preserves_mergeability_deferral(
+    tmp_path: Path, error: MergeStateStillComputingError
+) -> None:
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+    identity = CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA)
+    job = CIAuditJob(identity=identity, worktree=worktree, failure_lanes=("unit",))
+
+    class DeferredRunner:
+        def run(self, _identity: CIAuditIdentity, _worktree: Path) -> CIAuditReceipt:
+            raise error
+
+    outcome = GroupedCICoordinator(lambda: DeferredRunner(), max_parallel=1).run((job,))[0]
+
+    assert outcome.receipt is None
+    assert outcome.error == f"audit_deferred: {error}"
+
+
 def test_local_ci_runner_bootstraps_missing_repo_venv_before_ci(tmp_path: Path) -> None:
     worktree = tmp_path / "worktree"
     prepare_repository(worktree)
@@ -778,8 +806,8 @@ def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp
     from github_pr_feedback.ci_runner import actions_disabled_local_ci_evidence
     root = tmp_path / "hermes"
     (root / "scripts").mkdir(parents=True)
-    (root / "scripts/run_tests.sh").write_text("exit 0\n")
-    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n')
+    (root / "scripts/run_tests.sh").write_text("exit 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n', encoding="utf-8")
     ledger = FeedbackLedger(tmp_path / "ci.sqlite3")
     commands = RecordingRunner()
     runner = LocalCIRunner(FakeGitHub(merge_state()), ledger, command_runner=commands,
@@ -809,11 +837,11 @@ def test_hermes_native_ci_uses_shared_workspace_lock_once(tmp_path):
     import json
     from github_pr_feedback.ci_contract import hermes_commands
     packages = ('apps/shared', 'apps/desktop', 'web')
-    (tmp_path / 'package-lock.json').write_text(json.dumps({'packages': {p: {} for p in packages}}))
+    (tmp_path / 'package-lock.json').write_text(json.dumps({'packages': {p: {} for p in packages}}), encoding="utf-8")
     for package in packages:
         root = tmp_path / package
         root.mkdir(parents=True)
-        (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}))
+        (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}), encoding="utf-8")
     commands = hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ('apps/shared/src/client.ts',))
     assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ('npm', 'ci')] == [
         (('npm', 'ci', '--ignore-scripts'), tmp_path)]

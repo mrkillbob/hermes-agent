@@ -272,13 +272,13 @@ def _finalize_child_env(env: dict) -> dict:
     _inject_session_context_env(env)
     _strip_hermes_owned_pythonpath_and_runtime_markers(env)
     _apply_windows_msys_bash_env_defaults(env)
-    try:  # strip dispatcher-owned Kanban env from delegate_task child subprocesses
-        from agent.delegation_context import is_delegated_child_process_context, scrub_kanban_env
-        if is_delegated_child_process_context():
-            return scrub_kanban_env(env)
-    except Exception:
-        pass
-    return env
+    # Prevent child tools from silently consulting the operator's GitHub
+    # keyring/config when their explicit token was scrubbed.
+    env["GH_CONFIG_DIR"] = os.devnull
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    from agent.delegation_context import delegated_child_subprocess_env
+    return delegated_child_subprocess_env(env)
 
 
 def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
@@ -300,8 +300,11 @@ def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
     """Filter Hermes-managed secrets from a subprocess environment (background/PTY
     spawn path, search workers, computer-use driver, user-script runners)."""
-    return _scrubbed_env([(base_env or {}, False), (extra_env or {}, True)],
-                         _plugin_terminal_env_strip_keys(), lambda p: p)
+    return _scrubbed_env(
+        [(base_env or {}, False), (extra_env or {}, True)],
+        _ALWAYS_STRIP_KEYS | _plugin_terminal_env_strip_keys(),
+        lambda p: p,
+    )
 
 
 def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str]:
@@ -338,7 +341,8 @@ def build_subprocess_env(
         _apply_profile_home(env)
     if extra:
         env.update(extra)
-    return env
+    from agent.delegation_context import delegated_child_subprocess_env
+    return delegated_child_subprocess_env(env)
 
 
 # --- Shell discovery ---

@@ -2946,9 +2946,10 @@ def complete_task(
     task = get_task(conn, task_id)
     if task is None:
         return False
+    policy_summary = redact_review_value(summary or result or "")
     enforce_completion_policies(
         task_id=task_id, board=_lifecycle_board(conn, board), assignee=task.assignee,
-        summary=summary or result or "",
+        summary=policy_summary,
     )
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
     metadata = _merge_completion_prose_artifacts(
@@ -3422,21 +3423,22 @@ def request_review(
     def _ret(ok: bool, reason: Optional[str] = None):
         return (ok, reason) if with_reason else ok
 
-    from hermes_cli.kanban_completion_policy import CompletionPolicyError, enforce_completion_policies
+    from hermes_cli.kanban_completion_policy import CompletionPolicyError, enforce_review_policies
 
     task = get_task(conn, task_id)
     if task is None:
         return _ret(False, "task not found")
+    initial_state = (task.status, task.current_run_id)
+    summary = redact_review_value(summary)
+    metadata = redact_review_value(metadata)
     try:
-        enforce_completion_policies(
+        enforce_review_policies(
             task_id=task_id, board=_lifecycle_board(conn, None), assignee=task.assignee,
             summary=summary or "",
         )
     except CompletionPolicyError as exc:
         return _ret(False, str(exc))
 
-    summary = redact_review_value(summary)
-    metadata = redact_review_value(metadata)
     with write_txn(conn):
         if not _parents_satisfied(conn, task_id):
             return _ret(False, "parent dependencies are not satisfied")
@@ -3446,6 +3448,8 @@ def request_review(
         ).fetchone()
         if trow is None:
             return _ret(False, "task not found")
+        if (trow["status"], trow["current_run_id"]) != initial_state:
+            return _ret(False, "task changed while review policy was running")
         # Refuse to clear a live worker's claim without proof of ownership
         # (expected_run_id) or an explicit human override (force=True).
         if (

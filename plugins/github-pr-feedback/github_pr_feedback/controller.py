@@ -88,7 +88,7 @@ _UNRESOLVED_FINDING_LANGUAGE = re.compile(
     r"|\b(?:remaining|open|unresolved)\s+"
     r"(?:findings?|issues?|problems?|defects?|failures?)\b"
 )
-_BARE_FAILS = re.compile(r"\bfails\b")
+_BARE_FAILS = re.compile(r"\b(?:fails?|failed)\b")
 _FAILURE_LANES = (
     "run_static_lane.py",
     "run_hygiene_lane.py",
@@ -2514,8 +2514,13 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
 def _has_unresolved_action(body: str) -> bool:
     if any(marker in body for marker in _ACTION_REMAINS_MARKERS):
         return True
-    if _UNRESOLVED_FINDING_LANGUAGE.search(body) is not None:
-        return True
+    finding = _UNRESOLVED_FINDING_LANGUAGE.search(body)
+    if finding is not None:
+        before_finding = body[max(0, finding.start() - 32) : finding.start()]
+        if re.search(r"\b(?:no|without|zero)\s+(?:unresolved\s+)?$", before_finding):
+            pass
+        else:
+            return True
     bounded_action = _BOUNDED_ACTION_REMAINS.search(body)
     if bounded_action is not None:
         bounded_context = body[max(0, bounded_action.start() - 80) : bounded_action.end() + 80]
@@ -2537,6 +2542,8 @@ def _has_unresolved_action(body: str) -> bool:
         )
         context = body[clause_start + 1 : match.end()]
         after = body[match.end() :]
+        if re.search(r"\b(?:0|no|zero)\s+$", context[: -len(match.group())]):
+            continue
         factual_history = (
             any(marker in context for marker in _HISTORIC_FAILURE_CONTEXT)
             and _same_lane_passes_after_resolution(context, after)

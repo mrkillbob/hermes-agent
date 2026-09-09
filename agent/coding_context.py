@@ -5,7 +5,8 @@ frozen :class:`RuntimeMode` built from a :class:`ContextProfile` (pure data). Th
 system prompt reads ``system_prompt_parts()``; the toolset collapses ONLY under opt-in
 ``focus`` (never strips a user-enabled toolset). ``agent.coding_context``: ``auto``
 (default, prompt-only) / ``focus`` / ``on`` / ``off``. Resolved once, immutable; the
-workspace snapshot is never re-probed per turn (cache safety).
+workspace snapshot is probed once per session and replayed through
+``system_prompt_parts(workspace_block=...)`` on every later build (cache safety).
 """
 
 from __future__ import annotations
@@ -194,6 +195,50 @@ def _coding_mode(config: Optional[dict[str, Any]]) -> str:
     return _MODE_ALIASES.get(str(raw).strip().lower(), "auto")
 
 
+def guarded_prompt_enabled(
+    *,
+    platform: Optional[str] = None,
+    cwd: Optional[str | Path] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    config: Optional[dict[str, Any]] = None,
+) -> bool:
+    """Return whether the explicitly opt-in guarded coding prompt applies."""
+    if config is None:
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            config = load_config_readonly()
+        except Exception:
+            return False
+    agent_cfg = (config or {}).get("agent", {}) or {}
+    if not isinstance(agent_cfg, dict) or _coding_mode(config) != "focus":
+        return False
+    raw = agent_cfg.get("guarded_prompt_mode")
+    if not isinstance(raw, dict) or raw.get("enabled") is not True:
+        return False
+    routes = raw.get("routes")
+    if not isinstance(routes, (list, tuple)):
+        return False
+    route_keys = {
+        (
+            str(route.get("provider") or "").strip().lower(),
+            str(route.get("model") or "").strip().lower(),
+        )
+        for route in routes
+        if isinstance(route, dict)
+    }
+    pair = (str(provider or "").strip().lower(), str(model or "").strip().lower())
+    return bool(
+        pair[0]
+        and pair[1]
+        and pair in route_keys
+        and resolve_runtime_mode(
+            platform=platform, cwd=cwd, config=config, model=model
+        ).is_coding
+    )
+
+
 def _resolve_cwd(cwd: Optional[str | Path]) -> Path:
     if cwd:
         return Path(cwd).expanduser()
@@ -322,13 +367,15 @@ class RuntimeMode:
             return None
         return [self.profile.toolset, *_enabled_mcp_servers(config)]
 
-    def system_prompt_parts(self, valid_tool_names=None) -> tuple[list[str], list[str], list[str]]:
+    def system_prompt_parts(self, valid_tool_names=None, workspace_block: Optional[str] = None) -> tuple[list[str], list[str], list[str]]:
         """Return (prefix, workspace, trailing) posture blocks in the historical flat order —
         brief, snapshot, operator instructions — so prompt assembly can put a cache boundary
         before the snapshot without changing persisted bytes. The brief carries the model-family
         edit-format nudge (one cached string); ``valid_tool_names`` drops the ``todo_list``
         sentence when that tool isn't loaded; operator instructions ride their own block so
-        the brief stays byte-stable."""
+        the brief stays byte-stable. ``workspace_block`` replays a snapshot the caller already
+        pinned at session start (``""`` = no workspace) instead of re-running the git probe;
+        ``None`` probes."""
         if not self.is_coding:
             return [], [], []
         prefix: list[str] = []
@@ -340,7 +387,7 @@ class RuntimeMode:
             if family is not None:
                 brief = f"{brief}\n{_EDIT_FORMAT_GUIDANCE[family][1]}"
             prefix.append(brief)
-        workspace = build_coding_workspace_block(self.cwd)
+        workspace = build_coding_workspace_block(self.cwd) if workspace_block is None else workspace_block
         trailing = [f"Operator instructions (from config):\n{self.instructions}"] if self.instructions else []
         return prefix, [workspace] if workspace else [], trailing
 
@@ -395,11 +442,12 @@ def coding_selection(*, platform: Optional[str] = None, cwd: Optional[str | Path
 
 def coding_system_prompt_parts(
     *, platform: Optional[str] = None, cwd: Optional[str | Path] = None, config: Optional[dict[str, Any]] = None,
-    model: Optional[str] = None, valid_tool_names=None,
+    model: Optional[str] = None, valid_tool_names=None, workspace_block: Optional[str] = None,
 ) -> tuple[list[str], list[str], list[str]]:
-    """Return coding prefix, workspace snapshot, and trailing guidance."""
+    """Return coding prefix, workspace snapshot, and trailing guidance.  ``workspace_block``
+    replays the caller's pinned session-start snapshot instead of probing git again."""
     mode = resolve_runtime_mode(platform=platform, cwd=cwd, config=config, model=model)
-    return mode.system_prompt_parts(valid_tool_names=valid_tool_names)
+    return mode.system_prompt_parts(valid_tool_names=valid_tool_names, workspace_block=workspace_block)
 
 
 def coding_compact_skill_categories(*, platform: Optional[str] = None, cwd: Optional[str | Path] = None, config: Optional[dict[str, Any]] = None) -> frozenset[str]:

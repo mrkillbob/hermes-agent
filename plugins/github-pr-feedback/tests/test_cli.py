@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from github_pr_feedback import cli
 from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt
 from github_pr_feedback.cli import (
     _ci_audit_comment,
@@ -24,7 +25,7 @@ from github_pr_feedback.cli import (
     _retrigger_codex_review,
 )
 from github_pr_feedback.controller import KanbanTask
-from github_pr_feedback.github_client import CheckState, Feedback
+from github_pr_feedback.github_client import CheckState, Feedback, GitHubClientError
 from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.merge_controller import MergeDecision
 from github_pr_feedback.policy import (
@@ -35,6 +36,29 @@ from github_pr_feedback.policy import (
     codex_review_trigger_comment,
 )
 from github_pr_feedback.repair_controller import pr_repair_attribution_line
+
+
+def test_cli_action_dispatch_table_routes_inspect_ci_and_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import github_pr_feedback.cli as cli
+
+    calls: list[tuple[object, argparse.Namespace]] = []
+
+    def inspect_ci(context: object, args: argparse.Namespace) -> int:
+        calls.append((context, args))
+        return 17
+
+    monkeypatch.setattr(cli, "_inspect_ci", inspect_ci)
+    context = object()
+    args = argparse.Namespace(github_pr_feedback_action="inspect-ci")
+
+    assert cli.handle_cli_with_context(context, args) == 17
+    assert calls == [(context, args)]
+    assert cli.handle_cli_with_context(
+        context,
+        argparse.Namespace(github_pr_feedback_action="unknown"),
+    ) == 2
 
 
 def test_grouped_audit_opens_sqlite_ledger_in_worker_thread(
@@ -873,6 +897,109 @@ def test_inspect_pr_emits_canonical_identity_from_the_shared_github_client(
     }
 
 
+def test_inspect_pr_marks_generic_github_errors_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _inspect_pr
+    from github_pr_feedback.github_client import GitHubClientError
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+
+    class FakeGitHub:
+        def get_pull_request(self, _repository: str, _number: int) -> PullRequest:
+            raise GitHubClientError("temporary provider failure", code="github_error")
+
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", FakeGitHub)
+
+    exit_code = _inspect_pr(
+        RecordingContext(settings),
+        argparse.Namespace(repository="acme/widgets", pr_number=17),
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "github_error",
+        "retryable": True,
+        "status": "unavailable",
+    }
+
+
+def test_push_head_reconciles_after_post_push_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    receipt_head = "a" * 40
+    pushed_head = "b" * 40
+    initial = PullRequest(
+        number=17,
+        state="OPEN",
+        base_repository="acme/widgets",
+        head_repository="acme/widgets",
+        author_login="owner",
+        head_ref_name="codex/repair",
+        head_sha=receipt_head,
+    )
+    reconciled = replace(initial, head_sha=pushed_head)
+    responses: list[PullRequest | Exception] = [
+        initial,
+        GitHubClientError("transient read failure"),
+        reconciled,
+    ]
+    pushes: list[tuple[str, str, str]] = []
+
+    class Github:
+        def get_pull_request(self, *_args: object) -> PullRequest:
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    class Runner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def head_sha(self) -> str:
+            return pushed_head
+
+        def push_verified_head(self, repository: str, branch: str, expected: str) -> None:
+            pushes.append((repository, branch, expected))
+
+    policy = SimpleNamespace(
+        enabled=True,
+        targets={"acme/widgets": object()},
+        github_identity=SimpleNamespace(
+            expected_login="hermes-bot", token_env="HERMES_TEST_GITHUB_TOKEN"
+        ),
+    )
+    monkeypatch.setattr(cli, "_load_policy_from_context", lambda _ctx: policy)
+    monkeypatch.setattr(cli, "_github_client", lambda _policy: Github())
+    monkeypatch.setattr(cli, "GitStackRunner", Runner)
+    monkeypatch.setenv("HERMES_TEST_GITHUB_TOKEN", "test-token")
+    args = argparse.Namespace(
+        repository="acme/widgets",
+        pr_number=17,
+        head_sha=receipt_head,
+        worktree=tmp_path,
+    )
+
+    assert cli._push_head(object(), args) == 1
+    pending = json.loads(capsys.readouterr().out)
+    assert pending["status"] == "reconciliation_pending"
+    assert pending["head_sha"] == pushed_head
+    assert pushes == [("acme/widgets", "codex/repair", receipt_head)]
+
+    assert cli._push_head(object(), args) == 0
+    confirmed = json.loads(capsys.readouterr().out)
+    assert confirmed["status"] == "pushed"
+    assert confirmed["head_sha"] == pushed_head
+    assert pushes == [("acme/widgets", "codex/repair", receipt_head)]
+
+
 def test_inspect_pr_projects_requested_feedback_excerpt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1209,7 +1336,7 @@ def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
         "base_branch": "stable",
         "merge_methods": ["squash"],
         "receipt_max_age_seconds": 3600,
-        "report_only": False,
+        "report_only": True,
         "post_merge": {"enabled": False},
     }
     policy = _load_policy_from_context(RecordingContext(settings))
@@ -1347,7 +1474,7 @@ def test_merge_scan_does_not_hide_failed_receipt_behind_manifest_mismatch(
         "base_branch": "stable",
         "merge_methods": ["squash"],
         "receipt_max_age_seconds": 3600,
-        "report_only": False,
+        "report_only": True,
         "post_merge": {"enabled": False},
     }
     policy = _load_policy_from_context(RecordingContext(settings))
@@ -1503,11 +1630,11 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     )
     (profile_root / "profiles" / "repair-agent").mkdir(parents=True)
     (profile_root / "profiles" / "repair-agent" / "config.yaml").write_text(
-        "profile: repair-agent\n", encoding="utf-8"
+        "profile: repair-agent\nplugins:\n  enabled: [github-pr-feedback]\n", encoding="utf-8"
     )
     (profile_root / "profiles" / "pr-local-ci-auditor").mkdir(parents=True)
     (profile_root / "profiles" / "pr-local-ci-auditor" / "config.yaml").write_text(
-        "profile: pr-local-ci-auditor\n", encoding="utf-8"
+        "profile: pr-local-ci-auditor\nplugins:\n  enabled: [github-pr-feedback]\n", encoding="utf-8"
     )
     ledger_path = profile_root / "github-pr-feedback" / "ledger.sqlite3"
     settings = enabled_settings(repository)
@@ -1550,6 +1677,7 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     assert payload["status"] == "ready"
     assert payload["checks"] == {
         "assignee": "ok",
+        "worker_completion_policy": "ok",
         "board": "ok",
         "gh_executable": "ok",
         "github_identity": "ok",
@@ -1607,6 +1735,7 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
     assert payload["checks"]["github_identity"] == "failed"
     assert set(payload["checks"]) == {
         "assignee",
+        "worker_completion_policy",
         "board",
         "gh_executable",
         "github_identity",
@@ -2169,6 +2298,78 @@ def profile_snapshot(root: Path) -> dict[str, tuple[int, int]]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def test_merge_handoff_auto_enrolls_before_enrollment_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from github_pr_feedback.cli import _load_policy_from_context, _run_single_pr_merge_handoff
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": True,
+        "post_merge": {"enabled": False},
+        "auto_enroll_owned_prs": True,
+    }
+    policy = _load_policy_from_context(RecordingContext(settings))
+    pull = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        "a" * 40,
+        base_branch="stable",
+        base_sha="b" * 40,
+    )
+
+    class Ledger:
+        enrolled = False
+
+        def is_merge_enrolled(self, _repository: str, _pr_number: int) -> bool:
+            return self.enrolled
+
+    class GitHub:
+        def get_pull_request(self, repository: str, pr_number: int) -> PullRequest:
+            assert (repository, pr_number) == ("acme/widgets", 17)
+            return pull
+
+    admitted: list[tuple[PullRequest, ...]] = []
+
+    def enroll(policy, merge_policy, ledger: Ledger, pulls: tuple[PullRequest, ...]) -> int:
+        assert policy.merge_policy_for("acme/widgets") is merge_policy
+        admitted.append(pulls)
+        ledger.enrolled = True
+        return 1
+
+    class Controller:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run(self, number: int):
+            assert number == 17
+            return SimpleNamespace(receipt=None, decision=SimpleNamespace(blockers=()))
+
+    monkeypatch.setattr("github_pr_feedback.cli.enroll_owned_pulls", enroll)
+    monkeypatch.setattr("github_pr_feedback.cli.CanonicalMergeEvidenceSource", lambda *args: object())
+    monkeypatch.setattr("github_pr_feedback.cli.MergeController", Controller)
+
+    result = _run_single_pr_merge_handoff(
+        policy, Ledger(), 17, repository="acme/widgets", github=GitHub()
+    )
+
+    assert result["status"] == "report_only_ready"
+    assert admitted == [(pull,)]
 
 
 def test_ci_audit_handoff_completes_current_task_without_waiting_for_model(

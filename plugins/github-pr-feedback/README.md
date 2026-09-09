@@ -576,6 +576,18 @@ their pending gate. Protected terminal replay preserves the lifecycle result.
 
 Repair completion policies also gate the shared `request_review` transition. A worker must finish its durable push/reply/acknowledgement contract before handing the implementation to an independent reviewer; review and CI still remain separate requirements. Original dispatch identities remain provenance, not evidence that the published repair still has its original head.
 
+### Worker completion-policy readiness
+
+Each configured assignee profile must explicitly enable `github-pr-feedback`.
+Profiles have independent plugin opt-in lists: enabling it in the control profile
+alone does not load completion hooks in a worker. `doctor` reports
+`worker_completion_policy: failed` when a configured worker lacks this opt-in or
+explicitly disables it. Enable it through that profile's `hermes -p <profile>
+plugins enable github-pr-feedback` command before dispatch. The worker still
+uses its own model configuration; its completion hook reads the task's trusted
+control-home ledger. Real-discovery tests cover both the missing-hook failure
+and the enabled policy, rather than manually registering a test callback.
+
 ### Retire a misclassified automation receipt
 
 `retire-feedback --self-receipt` accepts the existing exact repository, PR, feedback kind/id, and receipt-head arguments. It requires an admitted OPEN PR at that head and a freshly fetched comment authored by the configured automation identity that satisfies the same high-confidence completed-work classifier used by intake. It rechecks both PR identity and comment contents before retiring only that exact ledger dispatch as superseded. External findings, actionable bot comments, missing comments, and changed heads remain pending. The default retirement command still requires verified PR closure. Neither path creates repair-success or CI evidence; after successful retirement, the exact card may be completed as non-actionable with this reason.

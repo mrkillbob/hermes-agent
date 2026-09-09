@@ -56,6 +56,10 @@ class CIValidationError(RuntimeError):
         self.command_evidence = command_evidence
 
 
+class CIAuditDeferred(MergeStateStillComputingError):
+    """GitHub is still computing mergeability; retry without a test receipt."""
+
+
 @dataclass(frozen=True, slots=True)
 class CIAuditIdentity:
     repository: str
@@ -522,10 +526,10 @@ class LocalCIRunner:
             receipt = self._run_claimed(identity, resolved)
         except MergeStateStillComputingError:
             self._ledger.finish_ci_run(
-                lease, status="failed", completed_at=_aware_now(self._now()),
+                lease, status="completed", completed_at=_aware_now(self._now()),
                 error="mergeability_still_computing",
             )
-            raise
+            raise CIAuditDeferred("mergeability_still_computing")
         except Exception as error:
             completed_at = _aware_now(self._now())
             receipt = _failed_receipt(
@@ -700,7 +704,15 @@ class LocalCIRunner:
         status = "passed" if len(evidence) == expected_command_count and all(
             item.returncode == 0 and not item.timed_out for item in evidence
         ) else "failed"
-        coverage_gap = hermes_coverage_gap(changed_files) if is_hermes_contract(manifest_bytes) else None
+        coverage_gap = (
+            hermes_coverage_gap(
+                changed_files,
+                hosted_coverage_available=(
+                    initial_checks.actions_enabled and initial_checks.all_green
+                ),
+            )
+            if is_hermes_contract(manifest_bytes) else None
+        )
         if coverage_gap:
             status = "failed"
         failed_commands = tuple(
@@ -811,7 +823,8 @@ def _pid_is_alive(pid: int) -> bool:
     if pid < 2:
         return False
     try:
-        os.kill(pid, 0)
+        from .ledger import _pid_is_alive as ledger_pid_is_alive
+        return bool(ledger_pid_is_alive(pid))
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -956,7 +969,11 @@ def _command_evidence(
     if result.timed_out or result.returncode in {126, 127}:
         classification = "environment-blocked"
     elif result.returncode != 0:
-        classification = "logic-regression"
+        classification = (
+            "structural-ratchet"
+            if "structural ratchet" in (result.stdout or "").casefold()
+            else "logic-regression"
+        )
     return CommandEvidence(
         argv=argv,
         cwd=relative_cwd,
