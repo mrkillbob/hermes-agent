@@ -22,6 +22,11 @@ def test_valid_linear_stack_round_trips(tmp_path):
     assert path.is_file()
 
 
+@pytest.mark.parametrize("branch", ["codex/fix+tests", "codex/fix@tests"])
+def test_git_valid_branch_refs_are_accepted(branch):
+    assert entry(branch, "stable").branch == branch
+
+
 @pytest.mark.parametrize(
     "entries",
     [

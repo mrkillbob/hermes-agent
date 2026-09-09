@@ -745,6 +745,12 @@ class CanonicalMergeEvidenceSource:
                 or _is_self_resolution_receipt(feedback, owner_login=target.owner_login)
                 or (
                     automation_login is not None
+                    and _is_self_resolution_receipt(
+                        feedback, owner_login=automation_login
+                    )
+                )
+                or (
+                    automation_login is not None
                     and _is_governed_approval_receipt(
                         feedback,
                         expected_login=automation_login,

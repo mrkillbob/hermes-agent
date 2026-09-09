@@ -48,7 +48,10 @@ def plan_discovery(spec, tasks, day, links=()):
 
 
 def run(hermes, *args):
-    result = subprocess.run([hermes, *args], check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    result = subprocess.run(
+        [hermes, *args], check=True, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
     return json.loads(result.stdout)
 
 

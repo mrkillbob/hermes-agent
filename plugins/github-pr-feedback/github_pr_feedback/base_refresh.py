@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping, Protocol
 
 from .ci_runner import CompletedCommand
+from .ci_environment import ci_environment
 from .github_client import PullRequestMergeState
 from .policy import codex_review_trigger_comment
 
@@ -170,8 +171,9 @@ class DeterministicBaseRefresher:
         if not self._is_clean(worktree):
             return BaseRefreshResult("handoff", "merge_result_not_clean")
 
-        environment = dict(os.environ)
-        environment["STATIC_BASE_REF"] = identity.target_base_sha
+        environment = ci_environment(
+            worktree, {"STATIC_BASE_REF": identity.target_base_sha}
+        )
         static = self._commands.run(
             (".venv/bin/python", "scripts/run_static_lane.py"),
             cwd=worktree,
