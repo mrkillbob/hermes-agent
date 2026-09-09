@@ -2528,20 +2528,6 @@ class TestConcurrentToolExecution:
         assert post_calls[0]["status"] == "ok"
         assert post_calls[0]["result"] == '{"intercepted":true}'
 
-    def test_agent_runtime_post_hook_ownership_predicate_covers_agent_tools(self, agent):
-        """Sequential and concurrent agent-level paths share post-hook ownership."""
-        from agent.agent_runtime_helpers import agent_runtime_owns_post_tool_hook
-
-        for tool_name in ("todo", "session_search", "memory", "clarify", "delegate_task"):
-            assert agent_runtime_owns_post_tool_hook(agent, tool_name) is True
-
-        agent._context_engine_tool_names = {"context_query"}
-        assert agent_runtime_owns_post_tool_hook(agent, "context_query") is True
-
-        agent._memory_manager = SimpleNamespace(has_tool=lambda name: name == "memory_extra")
-        assert agent_runtime_owns_post_tool_hook(agent, "memory_extra") is True
-        assert agent_runtime_owns_post_tool_hook(agent, "web_search") is False
-
     def test_blocked_memory_tool_does_not_reset_counter(self, agent, monkeypatch):
         """Blocked memory tool should not reset the nudge counter."""
         agent._turns_since_memory = 5
@@ -4008,7 +3994,7 @@ class TestRunConversation:
         from agent import conversation_loop as _conv_loop
 
         # Make backoff return 10.0 seconds
-        monkeypatch.setattr(_conv_loop, "jittered_backoff", lambda *a, **k: 10.0)
+        monkeypatch.setattr(_retry_utils, "jittered_backoff", lambda *a, **k: 10.0)
 
         # Trigger the interrupt on the first sleep call inside the wait loop
         original_sleep = time.sleep
@@ -4048,7 +4034,7 @@ class TestRunConversation:
 
         from agent import conversation_loop as _conv_loop
 
-        monkeypatch.setattr(_conv_loop, "jittered_backoff", lambda *a, **k: 7.5)
+        monkeypatch.setattr(_retry_utils, "jittered_backoff", lambda *a, **k: 7.5)
 
         # Fake clock: the retry loop gates on real time.time() < sleep_end, so
         # a no-op sleep alone busy-spins 7.5 wall-clock seconds. Advance a fake
@@ -5361,7 +5347,7 @@ class TestRetryExhaustion:
             patch.object(agent, "_cleanup_task_resources"),
             patch("run_agent.time", self._make_fast_time_mock()),
             patch.object(_conv_loop, "time", self._make_fast_time_mock()),
-            patch.object(_conv_loop, "jittered_backoff", lambda *a, **k: 0.0),
+            patch.object(_retry_utils, "jittered_backoff", lambda *a, **k: 0.0),
         ):
             result = agent.run_conversation("hello")
         assert result.get("completed") is False, (
@@ -5393,7 +5379,7 @@ class TestRetryExhaustion:
             patch.object(agent, "_cleanup_task_resources"),
             patch("run_agent.time", self._make_fast_time_mock()),
             patch.object(_conv_loop, "time", self._make_fast_time_mock()),
-            patch.object(_conv_loop, "jittered_backoff", lambda *a, **k: 0.0),
+            patch.object(_retry_utils, "jittered_backoff", lambda *a, **k: 0.0),
             patch("agent.relay_llm.execute", side_effect=execute),
             patch(
                 "agent.relay_llm.complete_logical_call",
@@ -6633,9 +6619,9 @@ class TestStreamingApiCall:
         import agent.conversation_loop as _conversation_loop
 
         with (
-            patch.object(_conversation_loop, "jittered_backoff", return_value=0.0),
+            patch.object(_retry_utils, "jittered_backoff", return_value=0.0),
             patch.object(
-                _conversation_loop,
+                _retry_utils,
                 "adaptive_rate_limit_backoff",
                 return_value=(0.0, None),
             ),
