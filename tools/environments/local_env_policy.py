@@ -198,7 +198,7 @@ def _plugin_terminal_env_strip_keys() -> frozenset:
 # highest-value secrets to keep from a compromised dependency. Provider keys = Tier 2.
 _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     # GitHub auth
-    "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH",
+    "GH_TOKEN", "GITHUB_TOKEN", "HERMES_GITHUB_BOT_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH",
     "GITHUB_APP_INSTALLATION_ID",
     # Gateway / messaging bot tokens and access control
     "TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN",
