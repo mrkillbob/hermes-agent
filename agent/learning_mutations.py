@@ -17,6 +17,8 @@ _MEMORY_FILES = {"memory": "MEMORY.md", "profile": "USER.md"}
 
 
 def parse_node_kind(node_id: str) -> str:
+    if node_id.startswith(("vault-memory:", "vault-skill:")):
+        return "shared"
     return "memory" if node_id.startswith("memory:") else "skill"
 
 
@@ -73,7 +75,10 @@ def _clear_skill_cache() -> None:
 
 def _dispatch(node_id: str, memory_fn: Callable, skill_fn: Callable, *args) -> dict[str, Any]:
     try:
-        return (memory_fn if parse_node_kind(node_id) == "memory" else skill_fn)(node_id, *args)
+        kind = parse_node_kind(node_id)
+        if kind == "shared":
+            return {"ok": False, "message": "shared catalog nodes are read-only"}
+        return (memory_fn if kind == "memory" else skill_fn)(node_id, *args)
     except (ValueError, IndexError) as exc:
         return {"ok": False, "message": str(exc)}
 

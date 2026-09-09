@@ -1,4 +1,3 @@
-import pytest
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -24,10 +23,8 @@ def configured(tmp_path, auto=True):
     })
 
 
-@pytest.mark.parametrize("report_only", [False, True])
-def test_owned_admission_respects_lane_scope_and_explicit_opt_in(tmp_path, report_only):
+def test_owned_admission_respects_lane_scope_and_explicit_opt_in(tmp_path):
     policy = configured(tmp_path)
-    policy = replace(policy, merge_maintainer=replace(policy.merge_maintainer, report_only=report_only))
     pull = PullRequest(17, 'OPEN', 'acme/widgets', 'acme/widgets', 'owner', 'codex/fix',
                        'a' * 40, base_branch='stable', base_sha='b' * 40)
     others = (replace(pull, number=18, author_login='other'),

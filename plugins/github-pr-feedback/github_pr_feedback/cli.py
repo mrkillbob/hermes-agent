@@ -20,6 +20,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
+from hermes_cli.github_identity import GitHubAutomationIdentity, GitHubIdentityError
+
 from .cli_audit_task import owns_current_audit_task
 from .controller import KanbanTask, LocalGitRepository, PooledLocalGitRepository, ScanController
 from .ci_coordinator import CIAuditJob, GroupedCICoordinator
@@ -31,6 +33,7 @@ from .ci_runner import (
     _required_lanes,
 )
 from .github_client import GitHubClient, GitHubClientError
+from .git_stack import GitStackError, GitStackRunner
 from .ledger import (
     FeedbackLedger,
     LedgerStateError,
@@ -448,6 +451,13 @@ class KanbanSubprocessClient:
             self.reconcile_dispatch_task(task_id, task)
         return task_id
 
+    def promote_task(self, board: str, task_id: str) -> None:
+        result = self._runner.run(
+            ["hermes", "kanban", "--board", board, "promote", task_id]
+        )
+        if result.returncode != 0:
+            raise RuntimeError("Kanban task promotion failed")
+
     def task_details(self, board: str, task_id: str) -> dict[str, object] | None:
         result = self._runner.run(
             ["hermes", "kanban", "--board", board, "show", task_id, "--json"]
@@ -621,6 +631,8 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     subcommands.add_parser(
         "doctor", help="Check configuration readiness without scanning"
     )
+    labels = subcommands.add_parser("label-scan", help="Reconcile configured advisory labels on owned open PRs")
+    labels.add_argument("--repository", required=True)
     inspect = subcommands.add_parser(
         "inspect-pr", help="Read one configured PR identity through the shared GitHub gate"
     )
@@ -646,6 +658,13 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     post_comment.add_argument("--pr-number", required=True, type=int)
     post_comment.add_argument("--head-sha", required=True)
     post_comment.add_argument("--body", required=True)
+    push_head = subcommands.add_parser(
+        "push-head", help="Push one verified pull-request head through the bot identity"
+    )
+    push_head.add_argument("--repository", required=True)
+    push_head.add_argument("--pr-number", required=True, type=int)
+    push_head.add_argument("--head-sha", required=True)
+    push_head.add_argument("--worktree", required=True, type=Path)
     retry = subcommands.add_parser(
         "retry", help="Retry one failed, immutable feedback receipt"
     )
@@ -741,6 +760,12 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
         "--repository-path", required=True, type=Path
     )
     resolve_superseded_feedback.add_argument("--test-evidence", required=True)
+    retired = subcommands.add_parser("retire-feedback", help="Retire an exact feedback dispatch after PR closure")
+    retired.add_argument("--repository", required=True)
+    retired.add_argument("--pr-number", required=True, type=int)
+    retired.add_argument("--feedback-kind", required=True)
+    retired.add_argument("--feedback-id", required=True)
+    retired.add_argument("--receipt-head-sha", required=True)
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
@@ -767,55 +792,65 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _inspect_ci(ctx: Any, args: argparse.Namespace) -> int:
+    from .cli_ci_receipt import inspect_ci
+
+    return inspect_ci(ctx, args)
+
+
+def _dispatch_repair(ctx: Any, args: argparse.Namespace) -> int:
+    from .cli_repair import dispatch_repair
+
+    return dispatch_repair(ctx, args)
+
+
+def _retire_feedback(ctx: Any, args: argparse.Namespace) -> int:
+    from .feedback_retirement import run_retirement
+
+    return run_retirement(ctx, args)
+
+
+_CLI_ACTION_DISPATCH: dict[str, Callable[[Any, argparse.Namespace], int]] = {
+    "scan": lambda ctx, _args: _scan(ctx),
+    "status": lambda _ctx, _args: _status(),
+    "doctor": lambda ctx, _args: _doctor(ctx),
+    "label-scan": lambda ctx, args: _label_scan(ctx, args),
+    "inspect-pr": lambda ctx, args: _inspect_pr(ctx, args),
+    "inspect-ci": lambda ctx, args: _inspect_ci(ctx, args),
+    "submit-review": lambda ctx, args: _submit_review(ctx, args),
+    "post-comment": lambda ctx, args: _post_comment(ctx, args),
+    "push-head": lambda ctx, args: _push_head(ctx, args),
+    "retry": lambda ctx, args: _retry(ctx, args),
+    "dispatch-repair": lambda ctx, args: _dispatch_repair(ctx, args),
+    "dispatch-feedback": lambda ctx, args: _dispatch_feedback(ctx, args),
+    "audit-pr": lambda ctx, args: _audit_pr(ctx, args),
+    "merge-scan": lambda ctx, _args: _merge_scan(ctx),
+    "merge-status": lambda _ctx, args: _merge_status(
+        details=bool(getattr(args, "details", False))
+    ),
+    "merge-enable": lambda ctx, args: _merge_enable(ctx, args),
+    "merge-disable": lambda ctx, args: _merge_disable(ctx, args),
+    "stack-create": lambda ctx, args: _stack_create(ctx, args),
+    "stack-refresh": lambda ctx, args: _stack_refresh(ctx, args),
+    "stack-merge": lambda ctx, args: _stack_merge(ctx, args),
+    "close-superseded": lambda ctx, args: _close_superseded(ctx, args),
+    "resolve-superseded-feedback": lambda ctx, args: _resolve_superseded_feedback(
+        ctx, args
+    ),
+    "retire-feedback": lambda ctx, args: _retire_feedback(ctx, args),
+    "complete-feedback": lambda ctx, args: _complete_feedback(ctx, args),
+    "complete-maintenance": lambda ctx, args: _complete_maintenance(ctx, args),
+}
+
+
 def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     action = getattr(args, "github_pr_feedback_action", None)
-    if action == "scan":
-        return _scan(ctx)
-    if action == "status":
-        return _status()
-    if action == "doctor":
-        return _doctor(ctx)
-    if action == "inspect-pr":
-        return _inspect_pr(ctx, args)
-    if action == "inspect-ci":
-        from .cli_ci_receipt import inspect_ci
-        return inspect_ci(ctx, args)
-    if action == "submit-review":
-        return _submit_review(ctx, args)
-    if action == "post-comment":
-        return _post_comment(ctx, args)
-    if action == "retry":
-        return _retry(ctx, args)
-    if action == "dispatch-repair":
-        from .cli_repair import dispatch_repair
-        return dispatch_repair(ctx, args)
-    if action == "dispatch-feedback":
-        return _dispatch_feedback(ctx, args)
-    if action == "audit-pr":
-        return _audit_pr(ctx, args)
-    if action == "merge-scan":
-        return _merge_scan(ctx)
-    if action == "merge-status":
-        return _merge_status(details=bool(getattr(args, "details", False)))
-    if action == "merge-enable":
-        return _merge_enable(ctx, args)
-    if action == "merge-disable":
-        return _merge_disable(ctx, args)
-    if action == "stack-create":
-        return _stack_create(ctx, args)
-    if action == "stack-refresh":
-        return _stack_refresh(ctx, args)
-    if action == "stack-merge":
-        return _stack_merge(ctx, args)
-    if action == "close-superseded":
-        return _close_superseded(ctx, args)
-    if action == "resolve-superseded-feedback":
-        return _resolve_superseded_feedback(ctx, args)
-    if action == "complete-feedback":
-        return _complete_feedback(ctx, args)
-    if action == "complete-maintenance":
-        return _complete_maintenance(ctx, args)
-    return 2
+    if not isinstance(action, str):
+        return 2
+    handler = _CLI_ACTION_DISPATCH.get(action)
+    if handler is None:
+        return 2
+    return handler(ctx, args)
 
 
 def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
@@ -1070,6 +1105,122 @@ def _post_comment(ctx: Any, args: argparse.Namespace) -> int:
                 "pr_number": args.pr_number,
                 "head_sha": pull_request.head_sha,
                 "poster": viewer_login,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _push_head(ctx: Any, args: argparse.Namespace) -> int:
+    """Push one exact local PR head through the configured bot credential."""
+
+    try:
+        policy = _load_policy_from_context(ctx)
+        if not policy.enabled or args.repository not in policy.targets:
+            raise ValueError("repository is not a configured target")
+        if not isinstance(args.head_sha, str) or not _FULL_SHA.fullmatch(args.head_sha):
+            raise ValueError("head_sha must be a full hexadecimal SHA")
+        settings = policy.github_identity
+        if settings is None:
+            raise GitHubClientError(
+                "Hermes GitHub automation identity is not configured",
+                code="automation_identity_not_configured",
+            )
+        github = _github_client(policy)
+        pull_request = github.get_pull_request(args.repository, args.pr_number)
+        expected_head_sha = args.head_sha.casefold()
+        runner = GitStackRunner(args.worktree)
+        if pull_request.head_sha != expected_head_sha:
+            local_head_sha = runner.head_sha()
+            if pull_request.head_sha == local_head_sha.casefold():
+                observed = pull_request
+            else:
+                print(
+                    json.dumps(
+                        {
+                            "status": "stale_head",
+                            "repository": args.repository,
+                            "pr_number": args.pr_number,
+                            "expected_head_sha": expected_head_sha,
+                            "observed_head_sha": pull_request.head_sha,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 1
+        else:
+            if str(pull_request.state or "").strip().upper() != "OPEN":
+                raise ValueError("pull request is not open")
+            git_environment = GitHubAutomationIdentity(
+                settings.expected_login, settings.token_env
+            ).git_command_environment()
+            runner = GitStackRunner(args.worktree, environment=git_environment)
+            pushed_head_sha = runner.head_sha()
+            runner.push_verified_head(
+                pull_request.head_repository,
+                pull_request.head_ref_name,
+                args.head_sha,
+            )
+            try:
+                observed = github.get_pull_request(args.repository, args.pr_number)
+            except (GitHubClientError, TypeError, ValueError) as error:
+                print(
+                    json.dumps(
+                        {
+                            "status": "reconciliation_pending",
+                            "repository": args.repository,
+                            "pr_number": args.pr_number,
+                            "head_sha": pushed_head_sha,
+                            "head_repository": pull_request.head_repository,
+                            "head_ref_name": pull_request.head_ref_name,
+                            "reason": str(error),
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 1
+            if observed.head_sha != pushed_head_sha.casefold():
+                print(
+                    json.dumps(
+                        {
+                            "status": "reconciliation_pending",
+                            "repository": args.repository,
+                            "pr_number": args.pr_number,
+                            "head_sha": pushed_head_sha,
+                            "head_repository": pull_request.head_repository,
+                            "head_ref_name": pull_request.head_ref_name,
+                            "reason": "pushed head was not confirmed on the pull request",
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 1
+        if str(observed.state or "").strip().upper() != "OPEN":
+            raise ValueError("pull request is not open")
+    except (
+        GitHubClientError,
+        GitHubIdentityError,
+        GitStackError,
+        TypeError,
+        ValueError,
+    ) as error:
+        print(
+            json.dumps(
+                {"status": "push_unavailable", "reason": str(error)},
+                sort_keys=True,
+            )
+        )
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": "pushed",
+                "repository": args.repository,
+                "pr_number": args.pr_number,
+                "head_sha": observed.head_sha,
+                "head_repository": observed.head_repository,
+                "head_ref_name": observed.head_ref_name,
             },
             sort_keys=True,
         )
@@ -1538,6 +1689,10 @@ def _run_grouped_exact_head_audit(
     ).run((job,))[0]
     if outcome.error is not None or outcome.receipt is None:
         reason = outcome.error or "no receipt returned"
+        if reason.startswith("audit_deferred:"):
+            from .github_client import MergeStateStillComputingError
+
+            raise MergeStateStillComputingError(reason.partition(":")[2].strip())
         raise CIValidationError(f"grouped exact-head CI audit was unavailable: {reason}")
     return outcome.receipt
 
@@ -1625,6 +1780,15 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
             actions_enabled_hint=actions_enabled_hint,
             required_local_ci=policy.local_ci_audit.required_for_open_prs,
         )
+    except MergeStateStillComputingError:
+        print(
+            json.dumps(
+                {"status": "audit_deferred", "reason": "mergeable_state_still_computing",
+                 "retryable": True, "retry_after_seconds": 60},
+                sort_keys=True,
+            )
+        )
+        return_code = 1
     except (CIValidationError, GitHubClientError, LedgerStateError) as error:
         print(
             json.dumps(
@@ -2574,8 +2738,10 @@ def _inspect_pr(ctx: Any, args: argparse.Namespace) -> int:
                 "feedback_kind": feedback.kind,
                 "feedback_reviewer": feedback.reviewer.login,
             }
-    except (GitHubClientError, ValueError):
-        print(json.dumps({"status": "unavailable"}, sort_keys=True))
+    except (GitHubClientError, ValueError) as error:
+        code = getattr(error, "code", "invalid_request")
+        print(json.dumps({"status": "unavailable", "reason": code,
+                          "retryable": code in {"github_error", "rate_limited", "transient", "timeout"}}, sort_keys=True))
         return 1
     print(
         json.dumps(
@@ -2588,6 +2754,7 @@ def _inspect_pr(ctx: Any, args: argparse.Namespace) -> int:
                 "head_sha": pull_request.head_sha,
                 "number": pull_request.number,
                 "repository": pull_request.base_repository,
+                "state": pull_request.state,
             },
             sort_keys=True,
         )
@@ -2676,3 +2843,20 @@ def _nearest_existing_parent_access(path: Path) -> bool:
     while not candidate.exists() and candidate != candidate.parent:
         candidate = candidate.parent
     return candidate.is_dir() and os.access(candidate, os.R_OK | os.W_OK | os.X_OK)
+
+
+def _label_scan(ctx, args):
+    try:
+        policy = _load_policy_from_context(ctx)
+        ledger = FeedbackLedger.for_current_profile()
+        try:
+            result = _controller(policy, ledger).reconcile_labels(args.repository)
+        finally:
+            ledger.close()
+    except (GitHubClientError, ValueError) as error:
+        code = getattr(error, "code", "invalid_request")
+        print(json.dumps({"status": "unavailable", "reason": code,
+                          "retryable": code in {"rate_limited", "transient", "timeout"}}, sort_keys=True))
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0

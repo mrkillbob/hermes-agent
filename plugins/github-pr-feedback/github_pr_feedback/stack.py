@@ -9,9 +9,9 @@ import tempfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from subprocess import run as _run
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _STACK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -23,13 +23,15 @@ def _require(value: object, field: str) -> str:
 
 def _branch(value: object, field: str) -> str:
     value = _require(value, field)
-    if (
-        not _BRANCH.fullmatch(value)
-        or value in {".", ".."}
-        or ".." in value
-        or value.endswith("/")
-        or "//" in value
-    ):
+    if value.startswith("-"):
+        raise ValueError(f"{field} is not a safe branch name")
+    result = _run(
+        ("git", "check-ref-format", f"refs/heads/{value}"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
         raise ValueError(f"{field} is not a safe branch name")
     return value
 
@@ -113,7 +115,7 @@ class StackStore:
     def load(self, repository: str, stack_id: str) -> StackManifest:
         path = self.path(repository, stack_id)
         try:
-            raw = json.loads(path.read_text())
+            raw = json.loads(path.read_text(encoding="utf-8"))
             return StackManifest(
                 repository=raw["repository"],
                 stack_id=raw["stack_id"],

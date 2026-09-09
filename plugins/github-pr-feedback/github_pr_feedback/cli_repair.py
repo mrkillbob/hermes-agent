@@ -34,4 +34,15 @@ def dispatch_repair(ctx, args) -> int:
         finally:
             ledger.close()
     print(json.dumps(_scan_payload(result), sort_keys=True))
-    return 1 if result.degraded else 0
+    scoped_skips = {
+        "branch_not_allowed",
+        "non_conflict_deferred",
+        "target_not_open",
+        "head_changed",
+        "no_repair_trigger",
+    }
+    # A scoped command that matched nothing must not report success: callers
+    # use its exit status to decide whether the requested repair was actually
+    # admitted and dispatched.
+    skipped_target = any(result.skipped.get(key, 0) > 0 for key in scoped_skips)
+    return 1 if result.degraded or skipped_target else 0

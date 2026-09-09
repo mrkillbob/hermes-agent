@@ -96,7 +96,15 @@ def _scan_context_content(content: str, filename: str) -> str:
 def _find_git_root(start: Path) -> Optional[Path]:
     """Nearest ancestor (or *start* itself) containing ``.git``, else None."""
     current = start.resolve()
-    return next((p for p in (current, *current.parents) if (p / ".git").exists()), None)
+    # A parent the process may not stat (locked-down /home on shared hosts) is "no .git here", not a crash.
+    return next((p for p in (current, *current.parents) if _exists_or_denied(p / ".git")), None)
+
+
+def _exists_or_denied(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
 
 
 def _find_hermes_md(cwd: Path) -> Optional[Path]:
@@ -861,13 +869,6 @@ def _tenv_read(name: str, default: str = "") -> str:
 
 _BACKEND_IMAGE_KEYS = {b: f"{b}_image" for b in ("docker", "singularity", "modal", "daytona")}
 # (config key, default) pairs forwarded to _create_environment's container_config.
-_CONTAINER_CONFIG_DEFAULTS = (
-    ("container_cpu", 1), ("container_memory", 5120), ("container_disk", 51200), ("container_persistent", True),
-    ("modal_mode", "auto"), ("docker_volumes", []), ("docker_mount_cwd_to_workspace", False),
-    ("docker_forward_env", []), ("docker_env", {}), ("docker_run_as_host_user", False), ("docker_extra_args", []),
-    ("docker_shm_size", "1g"), ("docker_persist_across_processes", True), ("docker_shared_container_key", ""),
-    ("docker_orphan_reaper", True),
-)
 # Single-line POSIX probe; `2>/dev/null` keeps a missing binary from polluting output.
 _BACKEND_PROBE_CMD = (
     "printf 'os=%s\\nkernel=%s\\nhome=%s\\ncwd=%s\\nuser=%s\\n' \"$(uname -s 2>/dev/null || echo unknown)\" "
@@ -878,31 +879,33 @@ _BACKEND_PROBE_CMD = (
 
 def _run_backend_probe(env_type: str, terminal_tool) -> str:
     """Execute the probe command inside a freshly built backend; "" when it yields nothing."""
-    from tools.terminal_tool_backends import _create_environment, _ssh_config_from_config
+    from tools.terminal_tool_backends import _container_config_from_config, _create_environment, _ssh_config_from_config
     from tools.terminal_tool_lifecycle import _cleanup_env
 
     config = terminal_tool._get_env_config()
-    # Mirrors tools/terminal_tool.py's live-command assembly (`_create_environment` is the factory).
+    # Same container_config shaper as the live terminal path: a private copy of the key table here
+    # drifted (no docker_network) and gave the probe a bridge-networked container under lockdown.
     env = _create_environment(
         env_type=env_type, image=config.get(_BACKEND_IMAGE_KEYS[env_type], "") if env_type in _BACKEND_IMAGE_KEYS else "", cwd=config.get("cwd", ""),
         timeout=config.get("timeout", 180),
         ssh_config=_ssh_config_from_config(config) if env_type == "ssh" else None,
-        container_config=({k: config.get(k, d) for k, d in _CONTAINER_CONFIG_DEFAULTS}
+        container_config=(_container_config_from_config(config)
                           if terminal_tool._is_container_backend(env_type) else None),
         task_id="prompt-backend-probe", host_cwd=config.get("host_cwd"),
+        # Only ssh honors this: an isolated ControlMaster socket and no remote dir setup / file sync /
+        # snapshot. A normal SSHEnvironment would upload the whole ~/.hermes tree just to run `uname`,
+        # and its later __del__ would sync_back() and close the master shared with the agent's own env.
+        probe_only=True,
     )
     try:
         result = env.execute(_BACKEND_PROBE_CMD, timeout=4)
     finally:
         # One-shot `uname`; without teardown the backend leaves a second idle sandbox
         # (task_id="prompt-backend-probe") running for the whole process next to the agent's own.
-        # ssh is left alone: no task-scoped sandbox, and its cleanup() closes a ControlMaster socket
-        # (keyed by user@host:port) shared with the agent's real environment; ControlPersist expires it.
-        if env_type != "ssh":
-            try:
-                _cleanup_env(env, force_remove=True)
-            except Exception:
-                logger.debug("Backend probe cleanup failed", exc_info=True)
+        try:
+            _cleanup_env(env, force_remove=True)
+        except Exception:
+            logger.debug("Backend probe cleanup failed", exc_info=True)
     if result.get("returncode") != 0:
         logger.debug("Backend probe returned non-zero: %r", result)
         return ""
@@ -1018,6 +1021,10 @@ def build_environment_hints() -> str:
     hints += [WSL_ENVIRONMENT_HINT] if is_wsl() else []
     return "\n\n".join(h for h in (*hints, _embedder_environment_hint()) if h)
 
+
+# Marks the runtime block after project prose for persisted-prompt cwd validation.
+RUNTIME_ENVIRONMENT_HEADING = "# Hermes runtime environment"
+RUNTIME_ENVIRONMENT_END = "<!-- End Hermes runtime environment -->"
 
 CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
@@ -1204,6 +1211,7 @@ def _current_session_platform_hint() -> str:
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None, available_toolsets: "set[str] | None" = None,
     compact_categories: "frozenset[str] | None" = None, skills_dir_override: "Path | None" = None,
+    compact_all_categories: bool = False,
 ) -> str:
     """Compact skill index for the system prompt.
 
@@ -1226,7 +1234,8 @@ def build_skills_system_prompt(
         if not skills_dir.exists() and not external_dirs and not project_dirs:
             return ""
         return _build_skills_system_prompt_inner(
-            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs)
+            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs,
+            compact_all_categories)
     finally:
         if _home_token is not None:
             reset_hermes_home_override(_home_token)
@@ -1288,13 +1297,15 @@ def _label_visible_entries(visible_entries: list[dict], skills_by_category: dict
 def _render_skills_index(
     skills_by_category: dict[str, list[tuple[str, str]]], category_descriptions: dict[str, str],
     compact_categories: "frozenset[str] | None", available_tools: "set[str] | None",
+    compact_all_categories: bool,
 ) -> str:
     """Render the ## Skills block; "" when there is nothing to list."""
     if not skills_by_category:
         return ""
     # Demoted categories collapse to one names-only line. NEVER drop entries — agent-created skills are the
     # model's project memory and it won't rediscover them via skills_list. Nested categories follow their parent.
-    demoted = frozenset(cat for cat in skills_by_category if cat.split("/", 1)[0] in (compact_categories or frozenset()))
+    demoted = frozenset(skills_by_category) if compact_all_categories else frozenset(
+        cat for cat in skills_by_category if cat.split("/", 1)[0] in (compact_categories or frozenset()))
     hidden_note = (
         "\n(Categories marked [names only] are outside the current coding "
         "context, so their descriptions are omitted — the skills work "
@@ -1341,7 +1352,7 @@ def _render_skills_index(
 def _build_skills_system_prompt_inner(
     skills_dir: "Path", external_dirs: "list[Path]", available_tools: "set[str] | None",
     available_toolsets: "set[str] | None", compact_categories: "frozenset[str] | None",
-    project_dirs: "list[Path] | None" = None,
+    project_dirs: "list[Path] | None" = None, compact_all_categories: bool = False,
 ) -> str:
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
@@ -1351,7 +1362,7 @@ def _build_skills_system_prompt_inner(
         str(skills_dir), tuple(str(d) for d in external_dirs), tuple(str(d) for d in project_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
-        _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
+        _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())), compact_all_categories,
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1409,7 +1420,8 @@ def _build_skills_system_prompt_inner(
         for cat, cat_desc in _read_category_descriptions(ext_dir, "Could not read external skill description %s: %s").items():
             category_descriptions.setdefault(cat, cat_desc)
 
-    result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools)
+    result = _render_skills_index(
+        skills_by_category, category_descriptions, compact_categories, available_tools, compact_all_categories)
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
@@ -1467,6 +1479,11 @@ def load_soul_md(context_length: Optional[int] = None, home_override: "Path | No
         return None
     try:
         content = (_read_text_with_timeout(soul_path) or "").strip()
+        if content:
+            # Plugin-era desktop builds appended a frozen Bot Mode roster to SOUL.md; the server
+            # now injects the live section in Bot Chat only, so the copy is dead weight everywhere.
+            from tools.bot_mode_probe import strip_legacy_protocol
+            content = strip_legacy_protocol(content).strip()
         if not content:
             return None
         return _truncate_content(_scan_context_content(content, "SOUL.md"), "SOUL.md", context_length=context_length,

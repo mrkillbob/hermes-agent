@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from github_pr_feedback import cli
 from github_pr_feedback.ci_runner import CIAuditIdentity, CIAuditReceipt
 from github_pr_feedback.cli import (
     _ci_audit_comment,
@@ -24,7 +25,7 @@ from github_pr_feedback.cli import (
     _retrigger_codex_review,
 )
 from github_pr_feedback.controller import KanbanTask
-from github_pr_feedback.github_client import CheckState, Feedback
+from github_pr_feedback.github_client import CheckState, Feedback, GitHubClientError
 from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.merge_controller import MergeDecision
 from github_pr_feedback.policy import (
@@ -35,6 +36,29 @@ from github_pr_feedback.policy import (
     codex_review_trigger_comment,
 )
 from github_pr_feedback.repair_controller import pr_repair_attribution_line
+
+
+def test_cli_action_dispatch_table_routes_inspect_ci_and_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import github_pr_feedback.cli as cli
+
+    calls: list[tuple[object, argparse.Namespace]] = []
+
+    def inspect_ci(context: object, args: argparse.Namespace) -> int:
+        calls.append((context, args))
+        return 17
+
+    monkeypatch.setattr(cli, "_inspect_ci", inspect_ci)
+    context = object()
+    args = argparse.Namespace(github_pr_feedback_action="inspect-ci")
+
+    assert cli.handle_cli_with_context(context, args) == 17
+    assert calls == [(context, args)]
+    assert cli.handle_cli_with_context(
+        context,
+        argparse.Namespace(github_pr_feedback_action="unknown"),
+    ) == 2
 
 
 def test_grouped_audit_opens_sqlite_ledger_in_worker_thread(
@@ -823,7 +847,9 @@ def test_namespaced_context_loads_assignee_rules_for_runtime_routing(
     assert policy.assignee_for("Reduce latency") == "performance-patch-steward"
 
 
+@pytest.mark.parametrize("state", ["OPEN", "CLOSED", "MERGED"])
 def test_inspect_pr_emits_canonical_identity_from_the_shared_github_client(
+    state: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -835,7 +861,7 @@ def test_inspect_pr_emits_canonical_identity_from_the_shared_github_client(
     settings = enabled_settings(repository)
     expected = PullRequest(
         17,
-        "OPEN",
+        state,
         "acme/widgets",
         "acme/widgets",
         "owner",
@@ -867,7 +893,111 @@ def test_inspect_pr_emits_canonical_identity_from_the_shared_github_client(
         "head_sha": "a" * 40,
         "number": 17,
         "repository": "acme/widgets",
+        "state": expected.state,
     }
+
+
+def test_inspect_pr_marks_generic_github_errors_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _inspect_pr
+    from github_pr_feedback.github_client import GitHubClientError
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+
+    class FakeGitHub:
+        def get_pull_request(self, _repository: str, _number: int) -> PullRequest:
+            raise GitHubClientError("temporary provider failure", code="github_error")
+
+    monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", FakeGitHub)
+
+    exit_code = _inspect_pr(
+        RecordingContext(settings),
+        argparse.Namespace(repository="acme/widgets", pr_number=17),
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "github_error",
+        "retryable": True,
+        "status": "unavailable",
+    }
+
+
+def test_push_head_reconciles_after_post_push_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    receipt_head = "a" * 40
+    pushed_head = "b" * 40
+    initial = PullRequest(
+        number=17,
+        state="OPEN",
+        base_repository="acme/widgets",
+        head_repository="acme/widgets",
+        author_login="owner",
+        head_ref_name="codex/repair",
+        head_sha=receipt_head,
+    )
+    reconciled = replace(initial, head_sha=pushed_head)
+    responses: list[PullRequest | Exception] = [
+        initial,
+        GitHubClientError("transient read failure"),
+        reconciled,
+    ]
+    pushes: list[tuple[str, str, str]] = []
+
+    class Github:
+        def get_pull_request(self, *_args: object) -> PullRequest:
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    class Runner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def head_sha(self) -> str:
+            return pushed_head
+
+        def push_verified_head(self, repository: str, branch: str, expected: str) -> None:
+            pushes.append((repository, branch, expected))
+
+    policy = SimpleNamespace(
+        enabled=True,
+        targets={"acme/widgets": object()},
+        github_identity=SimpleNamespace(
+            expected_login="hermes-bot", token_env="HERMES_TEST_GITHUB_TOKEN"
+        ),
+    )
+    monkeypatch.setattr(cli, "_load_policy_from_context", lambda _ctx: policy)
+    monkeypatch.setattr(cli, "_github_client", lambda _policy: Github())
+    monkeypatch.setattr(cli, "GitStackRunner", Runner)
+    monkeypatch.setenv("HERMES_TEST_GITHUB_TOKEN", "test-token")
+    args = argparse.Namespace(
+        repository="acme/widgets",
+        pr_number=17,
+        head_sha=receipt_head,
+        worktree=tmp_path,
+    )
+
+    assert cli._push_head(object(), args) == 1
+    pending = json.loads(capsys.readouterr().out)
+    assert pending["status"] == "reconciliation_pending"
+    assert pending["head_sha"] == pushed_head
+    assert pushes == [("acme/widgets", "codex/repair", receipt_head)]
+
+    assert cli._push_head(object(), args) == 0
+    confirmed = json.loads(capsys.readouterr().out)
+    assert confirmed["status"] == "pushed"
+    assert confirmed["head_sha"] == pushed_head
+    assert pushes == [("acme/widgets", "codex/repair", receipt_head)]
 
 
 def test_inspect_pr_projects_requested_feedback_excerpt(
