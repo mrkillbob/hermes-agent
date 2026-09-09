@@ -405,7 +405,7 @@ def _(rid, params: dict) -> dict:
     if err is not None:
         return err
     with _hermes_home_scope(profile_dir):
-        from hermes_cli.config import load_config
+        from hermes_cli.config import load_config, get_config_path, require_readable_config_before_write
         from hermes_cli.skills_config import get_disabled_skills
         cfg = load_config() or {}
         disabled = {s.lower() for s in get_disabled_skills(cfg)}
@@ -516,6 +516,25 @@ def _save_toolset_pin(cfg, enabled, save_config) -> None:
     save_config(cfg)
 
 
+def _delete_raw_config_key(path: tuple[str, ...]) -> None:
+    """Delete a user-owned raw key without serializing managed overlay values."""
+    from hermes_cli import config as config_mod
+
+    with config_mod._CONFIG_LOCK:
+        config_path = config_mod.get_config_path()
+        raw = config_mod.require_readable_config_before_write(config_path)
+        node = raw
+        for segment in path[:-1]:
+            node = node.get(segment) if isinstance(node, dict) else None
+            if not isinstance(node, dict):
+                return
+        node.pop(path[-1], None)
+        config_mod._write_user_config(config_path, raw)
+        config_mod._secure_file(config_path)
+        config_mod._RAW_CONFIG_CACHE.pop(str(config_path), None)
+        config_mod._LOAD_CONFIG_CACHE.pop(str(config_path), None)
+
+
 def _save_mcp_toggles(cfg, enabled, launch_mcp, save_config) -> None:
     wanted = _clean_names(enabled)
     mcp_cfg = cfg.get("mcp_servers") if isinstance(cfg.get("mcp_servers"), dict) else {}
@@ -553,9 +572,17 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
                 _clean_names(params["disabled_skills"]) - ESSENTIAL_SKILLS)
         if isinstance(params.get("enabled_toolsets"), list):
             wanted = sorted(_clean_names(params["enabled_toolsets"]))
-            updates[("tools", "enabled_toolsets")] = wanted
+            if wanted:
+                updates[("tools", "enabled_toolsets")] = wanted
+            else:
+                try:
+                    _delete_raw_config_key(("tools", "enabled_toolsets"))
+                    applied["toolsets"] = True
+                except Exception:
+                    applied["toolsets"] = False
         if want_mcp:
-            source_mcp = cfg.get("mcp_servers")
+            raw_cfg = require_readable_config_before_write(get_config_path())
+            source_mcp = raw_cfg.get("mcp_servers") if isinstance(raw_cfg, dict) else None
             mcp_cfg = source_mcp if isinstance(source_mcp, dict) else {}
             mcp_cfg = {name: dict(entry) if isinstance(entry, dict) else entry
                        for name, entry in mcp_cfg.items()}
