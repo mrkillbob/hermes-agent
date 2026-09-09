@@ -65,6 +65,10 @@ class ClaimLease:
     owner: str
     claimed_at: datetime
     version: int
+    # True only when a closure-retired receipt is being re-admitted.  Ordinary
+    # retries must retain their idempotency key so a lost Kanban response can
+    # safely resolve to the original card.
+    reopened: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -967,7 +971,7 @@ class FeedbackLedger:
             )
             if reopened.rowcount != 1:
                 raise LedgerStateError("exact archived dispatch changed during replacement")
-            return ClaimLease(owner, claimed_at, version)
+            return ClaimLease(owner, claimed_at, version, reopened=True)
 
     def reopen_legacy_exact_dispatch(
         self,
@@ -1026,6 +1030,77 @@ class FeedbackLedger:
             if reopened.rowcount != 1:
                 raise LedgerStateError("exact legacy dispatch changed during re-admission")
             return ClaimLease(owner, claimed_at, version)
+
+    def reopen_superseded_exact_dispatch(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        owner: str,
+        claimed_at: datetime,
+    ) -> ClaimLease | None:
+        """Re-admit an exact dispatch retired while its PR was closed.
+
+        Closure retirement deliberately leaves the receipt completed so it is
+        not reported as a successful repair.  If the PR is later reopened at
+        the same head, the controller has already revalidated that state and
+        may atomically turn this exact superseded receipt back into a claim.
+        """
+        owner = owner.strip() if isinstance(owner, str) else ""
+        if not owner:
+            raise ValueError("claim owner must be a non-empty string")
+        claimed_at = _aware_utc(claimed_at, "claimed_at")
+        with self._transaction():
+            if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
+            serialized_repair = not (
+                receipt.feedback_kind == "pr_repair"
+                and (
+                    receipt.feedback_id.startswith("report:")
+                    or receipt.feedback_id.startswith("ci-receipt:")
+                )
+            )
+            if serialized_repair:
+                active_repair = self._connection.execute(
+                    "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                    "AND head_sha = ? AND feedback_kind != 'pr_local_ci' "
+                    "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%') "
+                    "AND NOT (feedback_kind = ? AND feedback_id = ?) "
+                    "AND status IN ('claimed', 'completed') AND action_status = 'pending' LIMIT 1",
+                    (
+                        receipt.repository,
+                        receipt.pr_number,
+                        receipt.head_sha,
+                        receipt.feedback_kind,
+                        receipt.feedback_id,
+                    ),
+                ).fetchone()
+                if active_repair is not None:
+                    return None
+            row = self._connection.execute(
+                "SELECT status, action_status, lease_version, last_error FROM feedback_receipts "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ? AND last_error IN "
+                "('canonical PR CLOSED; repair superseded', "
+                "'canonical PR MERGED; repair superseded')",
+                receipt.key,
+            ).fetchone()
+            if row is None or row[0] != "completed" or row[1] != "superseded":
+                return None
+            version = int(row[2] or 0) + 1
+            reopened = self._connection.execute(
+                "UPDATE feedback_receipts SET status = 'claimed', action_status = 'pending', "
+                "task_id = NULL, actioned_head_sha = NULL, actioned_at = NULL, "
+                "last_error = NULL, attempts = attempts + 1, claim_owner = ?, claimed_at = ?, "
+                "lease_version = ? WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ? AND status = 'completed' "
+                "AND action_status = 'superseded'",
+                (owner, claimed_at.isoformat(), version, *receipt.key),
+            )
+            if reopened.rowcount != 1:
+                raise LedgerStateError("exact superseded dispatch changed during re-admission")
+            return ClaimLease(owner, claimed_at, version, reopened=True)
 
     def replace_archived_dispatches(
         self,

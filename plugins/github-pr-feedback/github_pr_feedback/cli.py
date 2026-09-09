@@ -752,6 +752,12 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
         "--repository-path", required=True, type=Path
     )
     resolve_superseded_feedback.add_argument("--test-evidence", required=True)
+    retired = subcommands.add_parser("retire-feedback", help="Retire an exact feedback dispatch after PR closure")
+    retired.add_argument("--repository", required=True)
+    retired.add_argument("--pr-number", required=True, type=int)
+    retired.add_argument("--feedback-kind", required=True)
+    retired.add_argument("--feedback-id", required=True)
+    retired.add_argument("--receipt-head-sha", required=True)
     completed = subcommands.add_parser(
         "complete-feedback",
         help="Acknowledge one dispatched feedback action after push and reply",
@@ -790,6 +796,12 @@ def _dispatch_repair(ctx: Any, args: argparse.Namespace) -> int:
     return dispatch_repair(ctx, args)
 
 
+def _retire_feedback(ctx: Any, args: argparse.Namespace) -> int:
+    from .feedback_retirement import run_retirement
+
+    return run_retirement(ctx, args)
+
+
 _CLI_ACTION_DISPATCH: dict[str, Callable[[Any, argparse.Namespace], int]] = {
     "scan": lambda ctx, _args: _scan(ctx),
     "status": lambda _ctx, _args: _status(),
@@ -817,6 +829,7 @@ _CLI_ACTION_DISPATCH: dict[str, Callable[[Any, argparse.Namespace], int]] = {
     "resolve-superseded-feedback": lambda ctx, args: _resolve_superseded_feedback(
         ctx, args
     ),
+    "retire-feedback": lambda ctx, args: _retire_feedback(ctx, args),
     "complete-feedback": lambda ctx, args: _complete_feedback(ctx, args),
     "complete-maintenance": lambda ctx, args: _complete_maintenance(ctx, args),
 }
@@ -2722,6 +2735,7 @@ def _inspect_pr(ctx: Any, args: argparse.Namespace) -> int:
                 "head_sha": pull_request.head_sha,
                 "number": pull_request.number,
                 "repository": pull_request.base_repository,
+                "state": pull_request.state,
             },
             sort_keys=True,
         )

@@ -1008,6 +1008,10 @@ def test_failed_exact_head_static_receipt_immediately_dispatches_one_typed_fixer
     assert task.evidence["ci_receipt_id"] == "f" * 64
     assert task.evidence["failed_command"]["classification"] == "logic-regression"
     assert "pr-maintenance-receipt:v1" in task.instructions
+    assert "CLOSED or MERGED" in task.instructions
+    assert "retire-feedback" in task.instructions
+    assert "--feedback-kind pr_repair" in task.instructions
+    assert "kanban_complete as superseded" in task.instructions
     assert local_git.calls[0][1].feedback_kind == "pr_repair"
     ledger.close()
 
@@ -1739,6 +1743,9 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     assert "first 90 seconds" in task.instructions
     assert "do not retry a tool-blocked command" in task.instructions.casefold()
     assert "Do not keep re-evaluating equivalent approaches" in task.instructions
+    assert "CLOSED or MERGED" in task.instructions
+    assert "kanban_complete as superseded" in task.instructions
+    assert "Do not reopen the PR" in task.instructions
     assert "commit and push" in task.instructions
     assert "publish one factual PR reply" in task.instructions
     assert "post-comment" in task.instructions

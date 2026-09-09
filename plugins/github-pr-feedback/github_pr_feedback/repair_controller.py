@@ -22,6 +22,7 @@ from .controller import (
     ScanController,
     _bind_pooled_worktree_task,
     _claim_with_orphan_recovery,
+    _dispatch_generation,
     _governed_pr_identity_command,
     _governed_pr_push_command,
     _prepare_receipt_worktree_with_overflow,
@@ -401,7 +402,7 @@ class RepairController:
                         target_base_sha,
                         self._control_home,
                     )
-                    task_id = self._kanban.create_or_get_task(task)
+                    task_id = self._kanban.create_or_get_task(_dispatch_generation(task, lease))
                     _bind_pooled_worktree_task(
                         self._local_git, receipt, task_id, self._policy.board or ""
                     )
@@ -446,7 +447,7 @@ class RepairController:
                             target_base_sha,
                             self._control_home,
                         )
-                        task_id = self._kanban.create_or_get_task(task)
+                        task_id = self._kanban.create_or_get_task(_dispatch_generation(task, lease))
                         _bind_pooled_worktree_task(
                             self._local_git, receipt, task_id, self._policy.board or ""
                         )
@@ -557,7 +558,7 @@ class RepairController:
             return "duplicate"
         try:
             task = _actions_needed_task(self._policy, receipt, target.local_path, pull)
-            task_id = self._kanban.create_or_get_task(task)
+            task_id = self._kanban.create_or_get_task(_dispatch_generation(task, lease))
             self._ledger.finalize(receipt, task_id, lease)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
             try:
@@ -673,6 +674,13 @@ def _repair_task(
         "the card as superseded by newer PR state instead of blocking for operator intervention. "
         "Stop fail-closed on other identity mismatches. "
     )
+    retirement_command = (
+        f"env HERMES_HOME={shlex.quote(str(control_home))} "
+        f"{shlex.quote(sys.executable)} -m hermes_cli.main github-pr-feedback retire-feedback "
+        f"--repository {shlex.quote(receipt.repository)} --pr-number {receipt.pr_number} "
+        f"--feedback-kind {shlex.quote(receipt.feedback_kind)} --feedback-id {shlex.quote(receipt.feedback_id)} "
+        f"--receipt-head-sha {shlex.quote(receipt.head_sha)}"
+    )
     if configured.report_only:
         authority = (
             identity_preflight
@@ -693,6 +701,10 @@ def _repair_task(
         )
         authority = (
             identity_preflight
+            + " If the canonical PR is CLOSED or MERGED, run the literal retirement command "
+            + f"`{retirement_command}` and require a status=retired result before calling "
+            + "kanban_complete as superseded. Do not claim a successful repair or leave the "
+            + "receipt pending. "
             + "Re-read the canonical pull request and require its base and head identities to "
             "equal every expected identity field. "
             "expected_base_sha and observed_base_sha describe the inspected PR base; "
