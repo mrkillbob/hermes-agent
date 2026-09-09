@@ -15,6 +15,7 @@ from github_pr_feedback.ci_runner import (
     CIValidationError,
     CompletedCommand,
     LocalCIRunner,
+    _command_evidence,
 )
 from github_pr_feedback.ci_coordinator import CIAuditJob, GroupedCICoordinator
 from github_pr_feedback.github_client import (
@@ -29,6 +30,23 @@ from github_pr_feedback.ledger import FeedbackLedger
 BASE_SHA = "b" * 40
 HEAD_SHA = "a" * 40
 NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+
+
+def test_structural_ratchet_output_is_typed_without_becoming_pass() -> None:
+    evidence = _command_evidence(
+        ("./scripts/run_static_lane.py",),
+        Path("/tmp/worktree"),
+        Path("/tmp/worktree"),
+        CompletedCommand(
+            returncode=1,
+            stdout="structural ratchet violation: signal_engine.py +23 LOC",
+            stderr="",
+            duration_ms=10,
+            timed_out=False,
+        ),
+    )
+    assert evidence.classification == "structural-ratchet"
+    assert evidence.returncode != 0
 
 
 class FakeGitHub:
@@ -800,14 +818,21 @@ def test_ci_receipt_round_trip_rejects_coerced_or_dropped_evidence(
     ledger.close()
 
 
-@pytest.mark.parametrize("changed,expected", [("agent/worker.py", "passed"), ("installer/windows.ps1", "failed")])
+@pytest.mark.parametrize(
+    "changed,expected",
+    [
+        ("agent/worker.py", "passed"),
+        ("installer/windows.ps1", "failed"),
+        ("apps/desktop/src/App.tsx", "failed"),
+    ],
+)
 def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp_path, changed, expected):
     from github_pr_feedback.ci_contract import manifest_path, HERMES_ENV_CHECK
     from github_pr_feedback.ci_runner import actions_disabled_local_ci_evidence
     root = tmp_path / "hermes"
     (root / "scripts").mkdir(parents=True)
-    (root / "scripts/run_tests.sh").write_text("exit 0\n")
-    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n')
+    (root / "scripts/run_tests.sh").write_text("exit 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n', encoding="utf-8")
     ledger = FeedbackLedger(tmp_path / "ci.sqlite3")
     commands = RecordingRunner()
     runner = LocalCIRunner(FakeGitHub(merge_state()), ledger, command_runner=commands,
@@ -826,25 +851,91 @@ def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp
     ledger.close()
 
 
+def test_hermes_native_contract_accepts_platform_change_with_hosted_coverage(tmp_path):
+    root = tmp_path / "hermes"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts/run_tests.sh").write_text("exit 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n', encoding="utf-8")
+    github = FakeGitHub(merge_state())
+    github.checks = [
+        CheckState(actions_enabled=True, all_green=True, check_count=1),
+        CheckState(actions_enabled=True, all_green=True, check_count=1),
+    ]
+    ledger = FeedbackLedger(tmp_path / "ci.sqlite3")
+    runner = LocalCIRunner(
+        github,
+        ledger,
+        command_runner=RecordingRunner(),
+        inspector=FakeInspector(changed=("apps/desktop/src/App.tsx",)),
+        python_argv=("python3",),
+        now=lambda: NOW,
+    )
+
+    receipt = runner.run(CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), root)
+
+    assert receipt.status == "passed"
+    assert receipt.failure_reason is None
+    ledger.close()
+
+
 def test_hermes_native_contract_does_not_claim_uncovered_platform_changes(tmp_path):
     from github_pr_feedback.ci_contract import hermes_commands, hermes_coverage_gap
     assert hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ("installer/windows.ps1",))
     assert hermes_coverage_gap(("installer/windows.ps1",)) is not None
+    assert hermes_coverage_gap(
+        ("installer/windows.ps1",), hosted_coverage_available=True
+    ) is None
+    assert hermes_coverage_gap(("apps/desktop/src/App.tsx",)) is not None
     assert hermes_coverage_gap(("agent/worker.py",)) is None
+
+
+def test_hermes_native_contract_runs_desktop_native_check(tmp_path):
+    import json
+
+    from github_pr_feedback.ci_contract import hermes_commands
+
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps({"packages": {"apps/desktop": {}}})
+    )
+    package = tmp_path / "apps/desktop"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "test": "vitest run",
+                    "check:test:desktop:all": "npm run test:desktop:all",
+                }
+            }
+        )
+    )
+
+    commands = hermes_commands(
+        tmp_path, BASE_SHA, HEAD_SHA, ("apps/desktop/src/App.tsx",)
+    )
+
+    assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ("npm", "ci")] == [
+        (("npm", "ci"), tmp_path)
+    ]
+    assert ("npm", "run", "check:test:desktop:all") in [
+        argv for argv, _, _ in commands
+    ]
 
 
 def test_hermes_native_ci_uses_shared_workspace_lock_once(tmp_path):
     import json
     from github_pr_feedback.ci_contract import hermes_commands
     packages = ('apps/shared', 'apps/desktop', 'web')
-    (tmp_path / 'package-lock.json').write_text(json.dumps({'packages': {p: {} for p in packages}}))
+    (tmp_path / 'package-lock.json').write_text(json.dumps({'packages': {p: {} for p in packages}}), encoding="utf-8")
     for package in packages:
         root = tmp_path / package
         root.mkdir(parents=True)
-        (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}))
+        (root / 'package.json').write_text(
+            json.dumps({'scripts': {'test': 'vitest run'}}), encoding="utf-8"
+        )
     commands = hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ('apps/shared/src/client.ts',))
     assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ('npm', 'ci')] == [
-        (('npm', 'ci', '--ignore-scripts'), tmp_path)]
+        (('npm', 'ci'), tmp_path)]
     assert {cwd for argv, cwd, _ in commands if argv == ('npm', 'run', 'test')} == {
         tmp_path / package for package in packages}
 
