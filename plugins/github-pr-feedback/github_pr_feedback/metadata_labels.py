@@ -15,7 +15,10 @@ def _pathname_glob_matches(path: str, pattern: str) -> bool:
     expression = []
     index = 0
     while index < len(pattern):
-        if pattern.startswith("**", index):
+        if pattern.startswith("**/", index):
+            expression.append("(?:[^/]+/)*")
+            index += 3
+        elif pattern.startswith("**", index):
             expression.append(".*")
             index += 2
         elif pattern[index] == "*":

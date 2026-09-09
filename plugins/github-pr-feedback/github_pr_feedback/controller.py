@@ -39,6 +39,8 @@ from .policy import (
     pr_repair_attribution_required,
 )
 
+AUTO_DISPATCH_MAX_RUNTIME_SECONDS = 60 * 60
+
 MAX_ADMISSIONS_PER_SCAN = 128
 # The subprocess boundary is globally serialized across profiles, but keeping
 # this pool small also bounds fake/in-process adapters and avoids accumulating
@@ -174,8 +176,6 @@ class KanbanClient(Protocol):
     """Create a task or return the existing task for `task.idempotency_key`."""
 
     def create_or_get_task(self, task: KanbanTask) -> str: ...
-
-    def promote_task(self, board: str, task_id: str) -> None: ...
 
     def task_status(self, board: str, task_id: str) -> str | None: ...
 
@@ -444,19 +444,73 @@ def _is_staged_auto_dispatch_task(
     """Recognize a finalized repair card that never left its staging state."""
     if details.get("status") != "blocked":
         return False
-    idempotency_key = details.get("idempotency_key")
-    if not isinstance(idempotency_key, str) or not idempotency_key.startswith(
-        "github-pr-repair:v3:"
-    ):
-        return False
     evidence = _legacy_task_evidence(details.get("body"))
     return (
         isinstance(evidence, Mapping)
         and evidence.get("repository") == receipt.repository
         and evidence.get("pr_number") == receipt.pr_number
         and evidence.get("expected_head_sha") == receipt.head_sha
-        and evidence.get("report_only") is False
+        and evidence.get("report_only") is not True
     )
+
+
+def _reconcile_stale_dispatches(
+    ledger: FeedbackLedger,
+    kanban: KanbanClient,
+    pull: PullRequest,
+    *,
+    board: str,
+) -> int:
+    """Supersede blocked receipts whose immutable PR identity is obsolete."""
+    repository = getattr(pull, "base_repository", None) or pull.repository
+    bindings_reader = getattr(ledger, "pending_task_bindings_for_pr", None)
+    task_details = getattr(kanban, "task_details", None)
+    task_status = getattr(kanban, "task_status", None)
+    if not callable(bindings_reader) or not callable(task_details) or not callable(task_status):
+        return 0
+    count = 0
+    for binding in bindings_reader(repository, pull.number):
+        if binding.receipt.head_sha.casefold() == pull.head_sha.casefold():
+            continue
+        try:
+            if task_status(board, binding.task_id) != "blocked":
+                continue
+            details = task_details(board, binding.task_id)
+        except RuntimeError:
+            continue
+        if not isinstance(details, Mapping):
+            continue
+        evidence = _legacy_task_evidence(details.get("body"))
+        if not isinstance(evidence, Mapping):
+            continue
+        expected_base = evidence.get("expected_base_sha")
+        stale_base = isinstance(expected_base, str) and expected_base.casefold() != (pull.base_sha or "").casefold()
+        events = details.get("_events")
+        reason_text = str(details.get("latest_summary", "")).casefold()
+        if isinstance(events, list):
+            reason_text += " " + " ".join(
+                str(event.get("payload", {}).get("reason", ""))
+                for event in events
+                if isinstance(event, Mapping) and isinstance(event.get("payload"), Mapping)
+            ).casefold()
+        if not stale_base and not any(marker in reason_text for marker in ("head", "identity", "drift", "exact-head")):
+            continue
+        reason = (
+            f"Superseded stale exact dispatch: canonical PR head/base is "
+            f"{pull.head_sha}/{pull.base_sha}; old receipt was "
+            f"{binding.receipt.head_sha}/{expected_base or 'unknown'}."
+        )
+        if not ledger.supersede_stale_dispatch(binding.receipt, task_id=binding.task_id, reason=reason):
+            continue
+        complete = getattr(kanban, "complete_superseded_task", None)
+        if callable(complete):
+            complete(board, binding.task_id, reason, {
+                "status": "superseded", "repository": repository,
+                "pr_number": pull.number, "old_head_sha": binding.receipt.head_sha,
+                "current_head_sha": pull.head_sha, "current_base_sha": pull.base_sha,
+            })
+        count += 1
+    return count
 
 
 def _legacy_task_evidence(body: object) -> Mapping[str, object] | None:
@@ -1437,6 +1491,7 @@ class ScanController:
                         claimed_at=claimed_at,
                         stale_before=claimed_at - self._claim_lease,
                         exact_dispatch_only=True,
+                        reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
                     )
                     if lease is None:
                         skipped["duplicate"] += 1
@@ -1647,6 +1702,8 @@ class ScanController:
             stale = tuple(existing_by_fold[fold] for fold in owned_labels
                           if fold in existing_by_fold and fold not in {label.casefold() for label in desired})
             if not missing and not stale:
+                if metadata_error is not None:
+                    raise metadata_error
                 return "agent_labels_unchanged"
             if label_policy.create_missing:
                 for mapping in missing.values():
@@ -1851,6 +1908,7 @@ class ScanController:
             claimed_at=claimed_at,
             stale_before=claimed_at - self._claim_lease,
             exact_dispatch_only=True,
+            reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
         )
         if lease is None:
             return "duplicate"
@@ -1977,6 +2035,7 @@ class ScanController:
                 claimed_at=claimed_at,
                 stale_before=claimed_at - self._claim_lease,
                 exact_dispatch_only=True,
+                reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
             )
         if lease is None:
             return "duplicate"
@@ -2103,6 +2162,7 @@ class ScanController:
             claimed_at=claimed_at,
             stale_before=claimed_at - self._claim_lease,
             exact_dispatch_only=True,
+            reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
         )
         if lease is None:
             skipped["duplicate"] += 1

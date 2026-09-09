@@ -61,7 +61,33 @@ def _control_plane_github_feedback_results(*, task_id):
                 return []
     except (OSError, sqlite3.Error, ValueError):
         return [{"action": "block", "message": "Kanban completion policy could not verify the control-plane GitHub PR feedback binding"}]
-    from github_pr_feedback.repair_completion_policy import guard_repair_completion
+    return [guard_control_plane_completion(task_id=task_id, ledger_path=ledger)]
 
-    ctx = type("ControlPlaneFeedbackContext", (), {"get_config": staticmethod(lambda key, default=None: True if key == "enabled" else default)})()
-    return [guard_repair_completion(ctx, task_id=task_id)]
+
+def guard_control_plane_completion(*, task_id, ledger_path):
+    """Enforce the durable feedback contract without importing an optional plugin.
+
+    This is deliberately a core boundary: a worker can be running with the
+    github-pr-feedback directory plugin disabled while its control-plane ledger
+    still owns the completion contract.
+    """
+    try:
+        with closing(sqlite3.connect(ledger_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
+            rows = connection.execute(
+                "SELECT status, action_status FROM feedback_receipts WHERE task_id = ? "
+                "AND feedback_kind IN ('review_comment', 'issue_comment', 'review', 'pr_repair') "
+                "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%')",
+                (task_id,),
+            ).fetchall()
+            if all(status == "completed" and action in {"completed", "superseded"}
+                   for status, action in rows):
+                return None
+        reason = "this task still has an unacknowledged feedback dispatch"
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        reason = "the task's durable feedback completion contract could not be verified"
+    return {"action": "block", "message": (
+        f"Feedback completion rejected: {reason}. Finish the authorized push and factual reply, "
+        "then run the exact governed complete-feedback command; use retire-feedback only for its "
+        "verified closed-PR case. If the contract cannot be completed, use kanban_block with the "
+        "actual blocker. A summary or local commit is not an acknowledgement."
+    )}
