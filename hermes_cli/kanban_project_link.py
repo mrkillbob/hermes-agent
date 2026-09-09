@@ -15,9 +15,8 @@ def resolve_project_link(
 
     A project-linked task is anchored to the project's primary repo as a
     worktree with a deterministic branch (slug + task id). Projects live in the
-    creator's per-profile projects.db, but the stored repo path is absolute so
-    the cross-profile dispatcher needs no projects.db access. ``project_repo``
-    is set when the worktree path must still be derived from the new task id.
+    creator's per-profile projects.db, but the stored repository anchor is
+    absolute so the cross-profile dispatcher needs no projects.db access.
     """
     project_id = (str(project_id).strip() or None) if project_id is not None else None
     if not project_id:
@@ -38,8 +37,6 @@ def resolve_project_link(
             project_id = project_obj.id
             if workspace_kind == "scratch":
                 workspace_kind = "worktree"
-            if workspace_kind != "worktree":
-                project_repo = None
     if project_obj is None and project_source_task_id:
         raise ValueError("worker project cannot be resolved from its profile or parent task")
     if project_obj is None:
@@ -48,12 +45,10 @@ def resolve_project_link(
         return None, None, None, workspace_kind
     # Canonicalise (a slug may have been passed) and anchor the worktree
     # under the project's primary repo.
+    if project_obj.primary_path:
+        project_repo = str(project_obj.primary_path)
     if workspace_kind == "scratch" and project_obj.primary_path:
         workspace_kind = "worktree"
-    if workspace_kind == "worktree" and workspace_path is None and project_obj.primary_path:
-        # Concrete path is deferred to the insert loop: a fresh
-        # ``<repo>/.worktrees/<task-id>`` keyed on the new task id.
-        project_repo = str(project_obj.primary_path)
     return project_obj.id, project_obj, project_repo, workspace_kind
 
 
@@ -70,6 +65,18 @@ def _project_from_source_task(
     from hermes_cli.kanban_db import get_task
 
     source_task = get_task(conn, source_task_id)
+    source_project_refs = (
+        {source_task.project_id, source_task.project_slug} if source_task is not None else set()
+    )
+    if source_task is not None and project_id in source_project_refs and source_task.project_repo:
+        source_path = Path(source_task.project_repo)
+        if source_path.is_absolute():
+            project_slug = _source_project_slug(_pdb, source_task, project_id)
+            if project_slug:
+                return _pdb.Project(
+                    id=source_task.project_id, slug=project_slug, name=project_slug,
+                    created_at=0, primary_path=str(source_path),
+                ), str(source_path)
     if source_task is not None and source_task.project_id:
         from hermes_cli.kanban_db import kanban_home
 
@@ -82,7 +89,7 @@ def _project_from_source_task(
                 return project, project.primary_path
     if not (
         source_task is not None
-        and source_task.project_id == project_id
+        and project_id in source_project_refs
         and source_task.workspace_kind == "worktree"
         and source_task.workspace_path
     ):
@@ -94,15 +101,7 @@ def _project_from_source_task(
         and source_path.parent.name == ".worktrees"
     ):
         return None, None
-    project_slug = None
-    if source_task.branch_name:
-        prefix, separator, leaf = source_task.branch_name.partition("/")
-        if separator and (leaf == source_task.id or leaf.startswith(f"{source_task.id}-")):
-            with contextlib.suppress(ValueError):
-                project_slug = _pdb.normalize_slug(prefix)
-    if project_slug is None:
-        with contextlib.suppress(ValueError):
-            project_slug = _pdb.normalize_slug(project_id)
+    project_slug = _source_project_slug(_pdb, source_task, project_id)
     if not project_slug:
         return None, None
     project_repo = str(source_path.parent.parent)
@@ -110,5 +109,20 @@ def _project_from_source_task(
         id=project_id, slug=project_slug, name=project_slug, created_at=0, primary_path=project_repo,
     )
     return project_obj, project_repo
+
+
+def _source_project_slug(_pdb: Any, source_task: Any, project_id: str) -> Optional[str]:
+    """Recover a stable project slug from task metadata when its DB is unavailable."""
+    if source_task.project_slug:
+        with contextlib.suppress(ValueError):
+            return _pdb.normalize_slug(source_task.project_slug)
+    if source_task.branch_name:
+        prefix, separator, leaf = source_task.branch_name.partition("/")
+        if separator and (leaf == source_task.id or leaf.startswith(f"{source_task.id}-")):
+            with contextlib.suppress(ValueError):
+                return _pdb.normalize_slug(prefix)
+    with contextlib.suppress(ValueError):
+        return _pdb.normalize_slug(project_id)
+    return None
 
 

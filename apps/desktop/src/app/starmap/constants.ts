@@ -19,7 +19,12 @@ export const AGE_GRADIENT = { mid: 0.52, midInk: 0.74, newInk: 0.95, oldInk: 0.4
 
 // Node glyph per kind — pure path geometry (the seam a future sprite/instanced
 // renderer would bake from).
-export const NODE_SHAPE: Record<StarmapNode['kind'], Shape> = { memory: 'diamond', skill: 'circle' }
+export const NODE_SHAPE: Record<StarmapNode['kind'], Shape> = {
+  memory: 'diamond',
+  skill: 'circle',
+  'shared-memory': 'hexagon',
+  'skill-reference': 'triangle'
+}
 
 // Darken the orb body so a bright primary doesn't swallow the sheen (the
 // highlight is computed from the original ink, so it still reads).

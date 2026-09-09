@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .ci_contract import manifest_path as ci_manifest_path, is_hermes_contract, hermes_commands, hermes_coverage_gap, HERMES_ENV_CHECK
+from .ci_environment import ci_environment
 
 import hashlib
 import json
@@ -13,13 +14,14 @@ import subprocess
 import tempfile
 import time
 import tomllib
+import psutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .github_client import CheckState, GitHubClient, GitHubClientError, PullRequestMergeState
-from .ledger import CIRunLease, FeedbackLedger
+from .github_client import CheckState, GitHubClient, GitHubClientError, MergeStateStillComputingError, PullRequestMergeState
+from .ledger import CIMutationPendingError, CIRunLease, FeedbackLedger
 
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -38,6 +40,13 @@ CI_MODE_STANDARD = "standard"
 CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT = "budget-exhausted-local-equivalent"
 _CI_MODES = frozenset(
     {CI_MODE_STANDARD, CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT}
+)
+_STRUCTURAL_RATCHET_MARKERS = (
+    "structural ratchet",
+    "structural-ratchet",
+    "ratchet violation",
+    "hot-file loc",
+    "hot file loc",
 )
 
 
@@ -242,7 +251,12 @@ class CIAuditReceipt:
             classification = _required_text(
                 command.get("classification"), "command classification", 32
             )
-            if classification not in {"passed", "logic-regression", "environment-blocked"}:
+            if classification not in {
+                "passed",
+                "logic-regression",
+                "structural-ratchet",
+                "environment-blocked",
+            }:
                 raise ValueError("CI receipt payload has invalid command classification")
             parsed_commands.append(
                 CommandEvidence(
@@ -400,10 +414,12 @@ class SubprocessCICommandRunner:
                 duration_ms=int((time.monotonic() - started) * 1000),
                 timed_out=False,
             )
-        from .ci_output import retain_output
+        from .ci_output import cleanup_outputs, retain_output
 
-        retain_output(result.stdout)
-        retain_output(result.stderr)
+        cleanup_outputs()
+        if result.returncode != 0 or result.timed_out:
+            retain_output(result.stdout)
+            retain_output(result.stderr)
         return result
 
 
@@ -503,21 +519,30 @@ class LocalCIRunner:
             raise CIValidationError("required CI owner files are missing")
         manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         claimed_at = _aware_now(self._now())
-        lease = self._ledger.claim_ci_run(
-            identity.repository,
-            identity.pr_number,
-            identity.base_sha,
-            identity.head_sha,
-            manifest_digest,
-            supervisor_pid=self._supervisor_pid(),
-            claimed_at=claimed_at,
-            stale_before=claimed_at - _CI_RUN_LEASE,
-            pid_is_alive=self._pid_is_alive,
-        )
+        try:
+            lease = self._ledger.claim_ci_run(
+                identity.repository,
+                identity.pr_number,
+                identity.base_sha,
+                identity.head_sha,
+                manifest_digest,
+                supervisor_pid=self._supervisor_pid(),
+                claimed_at=claimed_at,
+                stale_before=claimed_at - _CI_RUN_LEASE,
+                pid_is_alive=self._pid_is_alive,
+            )
+        except CIMutationPendingError as error:
+            raise CIValidationError("audit deferred: mutation_pending") from error
         if lease is None:
             raise CIValidationError("exact-head CI audit is already running")
         try:
             receipt = self._run_claimed(identity, resolved)
+        except MergeStateStillComputingError:
+            self._ledger.finish_ci_run(
+                lease, status="failed", completed_at=_aware_now(self._now()),
+                error="mergeability_still_computing",
+            )
+            raise
         except Exception as error:
             completed_at = _aware_now(self._now())
             receipt = _failed_receipt(
@@ -659,8 +684,7 @@ class LocalCIRunner:
         if bootstrap_evidence is not None:
             evidence.append(bootstrap_evidence)
         for argv, cwd, additions in command_specs:
-            environment = dict(os.environ)
-            environment.update(additions)
+            environment = ci_environment(worktree, additions)
             result = self._commands.run(
                 argv, cwd=cwd, env=environment, timeout=_COMMAND_TIMEOUT_SECONDS
             )
@@ -692,7 +716,16 @@ class LocalCIRunner:
         status = "passed" if len(evidence) == expected_command_count and all(
             item.returncode == 0 and not item.timed_out for item in evidence
         ) else "failed"
-        coverage_gap = hermes_coverage_gap(changed_files) if is_hermes_contract(manifest_bytes) else None
+        coverage_gap = (
+            hermes_coverage_gap(
+                changed_files,
+                hosted_coverage_available=(
+                    initial_checks.actions_enabled and initial_checks.check_count > 0
+                ),
+            )
+            if is_hermes_contract(manifest_bytes)
+            else None
+        )
         if coverage_gap:
             status = "failed"
         failed_commands = tuple(
@@ -750,7 +783,7 @@ class LocalCIRunner:
                 result = self._commands.run(
                     probe,
                     cwd=worktree,
-                    env=dict(os.environ),
+                    env=ci_environment(worktree),
                     timeout=30,
                 )
                 actual = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
@@ -781,7 +814,7 @@ class LocalCIRunner:
         result = self._commands.run(
             argv,
             cwd=worktree,
-            env=dict(os.environ),
+            env=ci_environment(worktree),
             timeout=_BOOTSTRAP_TIMEOUT_SECONDS,
         )
         evidence = _command_evidence(argv, worktree, worktree, result)
@@ -803,7 +836,8 @@ def _pid_is_alive(pid: int) -> bool:
     if pid < 2:
         return False
     try:
-        os.kill(pid, 0)
+        if not psutil.pid_exists(pid):
+            return False
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -948,7 +982,12 @@ def _command_evidence(
     if result.timed_out or result.returncode in {126, 127}:
         classification = "environment-blocked"
     elif result.returncode != 0:
-        classification = "logic-regression"
+        combined_output = f"{result.stdout}\n{result.stderr}".casefold()
+        classification = (
+            "structural-ratchet"
+            if any(marker in combined_output for marker in _STRUCTURAL_RATCHET_MARKERS)
+            else "logic-regression"
+        )
     return CommandEvidence(
         argv=argv,
         cwd=relative_cwd,
