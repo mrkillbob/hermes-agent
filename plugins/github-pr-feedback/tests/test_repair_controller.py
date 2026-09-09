@@ -379,12 +379,15 @@ def test_repair_controller_dedupes_exact_head_and_preserves_merge_authority(
     import re
     import shlex
 
-    push = re.search(r"`(git push [^`]+)`", task.instructions)
+    push = re.search(r"`(env HERMES_HOME=[^`]+ push-head [^`]+)`", task.instructions)
     assert push is not None
-    assert shlex.split(push.group(1)) == [
-        "git", "push", f"https://github.com/{task.evidence['expected_head_repository']}.git",
-        f"HEAD:refs/heads/{task.evidence['expected_head_branch']}",
+    push_args = shlex.split(push.group(1))
+    push_index = push_args.index("push-head")
+    assert push_args[push_index:push_index + 8] == [
+        "push-head", "--repository", task.evidence["expected_head_repository"],
+        "--pr-number", "17", "--head-sha", SHA, "--worktree",
     ]
+    assert "`git push" not in task.instructions
     assert task.evidence["expected_head_sha"] == SHA
     identity_command = (
         "github-pr-feedback inspect-pr --repository acme/widgets --pr-number 17"

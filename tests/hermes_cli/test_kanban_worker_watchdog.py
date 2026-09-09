@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.display import render_edit_diff_with_delta
 from hermes_cli import kanban_db as kb
 from hermes_cli import projects_db as pdb
 from hermes_cli.kanban_worker_watchdog import (
@@ -83,21 +84,53 @@ def test_repeated_failed_tool_call_is_detected() -> None:
     assert len(finding.fingerprint) == 16
 
 
-@pytest.mark.parametrize("edit", ["patch", "write_file"])
-def test_edit_and_retest_is_progress_but_unchanged_retries_still_block(edit) -> None:
-    from agent.display import render_edit_diff_with_delta
-
-    rendered = []
-    assert render_edit_diff_with_delta(
-        "patch", json.dumps({"diff": "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n"}),
-        print_fn=rendered.append,
-    )
-    label = "🔧 patch" if edit == "patch" else "✍️  write"
-    change = f"┊ {label} module.py  0.3s\n" + "\n".join(rendered)
-    failure = "┊ 💻 $ scripts/run_tests.sh tests/test_a.py  1.2s [exit 1]"
+@pytest.mark.parametrize(
+    "edit, prefix, diff, receipt",
+    [
+        ("patch", "┊", "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n", ""),
+        ("write_file", "┊", "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n", ""),
+        ("skill_manage", "┊", "--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-old\n+new\n", ""),
+        ("patch", "╎", "--- /dev/null\n+++ b/added.py\n+content", ""),
+        ("patch", "│", "# Moved: old.py -> new.py", ""),
+        ("patch", "»", "--- /dev/null\n+++ b/added.py\n+content", ""),
+        ("patch", "CUSTOM PREFIX", "# Moved: old.py -> new.py", ""),
+        ("patch", "┊", "", "[edit landed]"),
+        ("write_file", "┊", "", "[edit landed]"),
+    ],
+)
+def test_actual_edits_reset_failure_loop_but_unchanged_retries_still_block(
+    edit: str, prefix: str, diff: str, receipt: str
+) -> None:
+    label = {"patch": "🔧 patch", "write_file": "✍️  write", "skill_manage": "⚡ skill_man"}[edit]
+    if receipt:
+        change = f"{prefix} {label} module.py  0.3s {receipt}"
+    else:
+        rendered = []
+        assert render_edit_diff_with_delta(
+            "patch", json.dumps({"diff": diff}),
+            print_fn=rendered.append,
+        )
+        change = f"{prefix} {label} module.py  0.3s\n" + "\n".join(rendered)
+    failure = f"{prefix} 💻 $ scripts/run_tests.sh tests/test_a.py  1.2s [exit 1]"
     log = f"{failure}\n{change}\n{failure}\n{change}\n{failure}"
     assert detect_log_finding(log, _config()) is None
     finding = detect_log_finding(log + f"\n{failure}\n{failure}", _config())
+    assert finding is not None and finding.category == "tool_failure_loop"
+
+
+def test_prose_review_diff_does_not_count_as_rendered_diff() -> None:
+    failure = "┊ 💻 $ scripts/run_tests.sh tests/test_a.py  1.2s [exit 1]"
+    log = "\n".join([
+        failure,
+        "✍️  write_file module.py  0.3s",
+        "I should now review diff",
+        "- this is ordinary reasoning, not renderer output",
+        failure,
+        failure,
+    ])
+
+    finding = detect_log_finding(log, _config())
+
     assert finding is not None and finding.category == "tool_failure_loop"
 
 
@@ -151,8 +184,9 @@ def test_repeated_provider_stall_is_detected() -> None:
 def test_repeated_long_reasoning_without_tool_progress_is_detected() -> None:
     """Removing reasoning fingerprints would miss semantic no-progress loops."""
     paragraph = (
-        "I need to compare the same two equivalent strategies again before choosing; "
-        "both approaches preserve the same behavior and neither changes the worktree."
+        "The projected cost is $50 and the shell variable is $VAR; I still need to "
+        "compare the same two equivalent strategies again before choosing; both "
+        "approaches preserve the same behavior and neither changes the worktree."
     )
     log = f"{paragraph}\n\n{paragraph}\n\n{paragraph}"
 

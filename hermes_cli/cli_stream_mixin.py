@@ -669,6 +669,13 @@ class CLIStreamMixin:
                 try:
                     from agent.display import get_cute_tool_message
                     line = get_cute_tool_message(function_name, stored_args, duration, result=kwargs.get("result"))
+                    if function_name in {"patch", "write_file", "skill_manage"}:
+                        try:
+                            from agent.tool_result_classification import file_mutation_result_landed
+                            if file_mutation_result_landed(function_name, kwargs.get("result")):
+                                line += " [edit landed]"
+                        except Exception:
+                            pass
                     _cprint(f"  {line}")
                 except Exception:
                     pass

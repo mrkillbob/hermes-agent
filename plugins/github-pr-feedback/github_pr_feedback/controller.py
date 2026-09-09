@@ -13,7 +13,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -246,6 +246,13 @@ class ScanResult:
     local_ci_catalogue_deferred: int = 0
 
 
+def _dispatch_generation(task: KanbanTask, lease: ClaimLease) -> KanbanTask:
+    """Give a reclaimed receipt a fresh Kanban identity instead of reusing a done card."""
+    if not lease.reopened:
+        return task
+    return replace(task, idempotency_key=f"{task.idempotency_key}:dispatch-{lease.version}")
+
+
 def _bind_pooled_worktree_task(
     local_git: object, receipt: FeedbackReceipt, task_id: str, board: str
 ) -> None:
@@ -298,6 +305,13 @@ def _claim_with_orphan_recovery(
     """Claim normally, or reclaim an exact dispatch whose card is gone, archived,
     or stranded in the blocked staging state used by auto-dispatch."""
 
+    superseded = ledger.reopen_superseded_exact_dispatch(
+        receipt,
+        owner=owner,
+        claimed_at=claimed_at,
+    )
+    if superseded is not None:
+        return superseded
     lease = ledger.claim(
         receipt,
         owner=owner,
@@ -1180,6 +1194,16 @@ class ScanController:
         self._claim_lease = claim_lease
         self._label_batches: list[tuple[str, RepositoryTarget, tuple[PullRequest, ...]]] = []
 
+    def _admitted_label_pull_requests(
+        self, pull_requests: tuple[PullRequest, ...]
+    ) -> tuple[PullRequest, ...]:
+        """Keep label maintenance on the same admission boundary as scanning."""
+        return tuple(
+            pull_request
+            for pull_request in pull_requests
+            if self._policy.admit_pull_request(pull_request).admitted
+        )
+
     def scan(self, *, apply_labels: bool = True) -> ScanResult:
         skipped: Counter[str] = Counter()
         created = 0
@@ -1220,7 +1244,11 @@ class ScanController:
             from .pr_ordering import order_pull_requests
 
             pull_requests = order_pull_requests(pull_requests)
-            self._label_batches.append((repository, target, pull_requests))
+            label_policy = self._policy.agent_labels
+            if label_policy is not None and label_policy.applies_to(repository):
+                self._label_batches.append(
+                    (repository, target, self._admitted_label_pull_requests(pull_requests))
+                )
             required_local_ci_backlog += _required_local_ci_backlog_count(
                 self._policy,
                 self._ledger,
@@ -1491,9 +1519,9 @@ class ScanController:
             raise ValueError("repository is not configured for labels")
         target = self._policy.targets[repository]
         pulls = self._github.list_open_pull_requests(repository, target.owner_login)
-        self._label_batches = [(repository, target, tuple(
-            pull for pull in pulls if self._policy.admit_pull_request(pull).admitted
-        ))]
+        self._label_batches = [
+            (repository, target, self._admitted_label_pull_requests(pulls))
+        ]
         return self.apply_agent_labels()
 
     def apply_agent_labels(self) -> dict[str, object]:
@@ -1526,7 +1554,10 @@ class ScanController:
                     pull_request.head_ref_name
                 )
                 has_metadata = any(repository in rule.repositories for rule in label_policy.metadata_rules)
-                if not has_metadata and (desired_label is None or desired_label in pull_request.labels):
+                if not has_metadata and (
+                    desired_label is None
+                    or desired_label.casefold() in {label.casefold() for label in pull_request.labels}
+                ):
                     continue
                 candidates.append((pull_request, desired_label))
             if not candidates:
@@ -1591,16 +1622,31 @@ class ScanController:
             current = self._github.get_pull_request(repository, listed.number)
             if not current_matches(current):
                 return "agent_label_head_changed"
-            mappings = [mapping for mapping in label_policy.mappings
-                        if mapping.label == desired_label]
-            if any(repository in rule.repositories for rule in label_policy.metadata_rules):
-                metadata_pull, title, paths = self._github.get_pull_request_metadata(repository, listed.number)
-                if not current_matches(metadata_pull):
-                    return "agent_label_head_changed"
-                mappings.extend(rule for rule in label_policy.metadata_rules
-                                if rule.matches(repository, title, paths))
-            missing = {mapping.label: mapping for mapping in mappings if mapping.label not in current.labels}
-            if not missing:
+            mappings = [mapping for mapping in label_policy.mappings if mapping.label == desired_label]
+            metadata_rules = tuple(rule for rule in label_policy.metadata_rules if repository in rule.repositories)
+            metadata_error = None
+            metadata_pull = current
+            if metadata_rules:
+                try:
+                    metadata_pull, title, paths = self._github.get_pull_request_metadata(repository, listed.number)
+                    if not current_matches(metadata_pull):
+                        return "agent_label_head_changed"
+                    mappings.extend(rule for rule in metadata_rules if rule.matches(repository, title, paths))
+                except GitHubClientError as error:
+                    metadata_error = error
+                except Exception as error:  # noqa: BLE001 - metadata is advisory only.
+                    metadata_error = error
+            desired = {mapping.label: mapping for mapping in mappings}
+            existing_by_fold = {label.casefold(): label for label in current.labels}
+            missing = {label: mapping for label, mapping in desired.items()
+                       if label.casefold() not in existing_by_fold}
+            owned_labels = {mapping.label.casefold() for mapping in label_policy.mappings}
+            if metadata_error is None:
+                owned_labels.update(rule.label.casefold() for rule in label_policy.metadata_rules
+                                    if repository in rule.repositories)
+            stale = tuple(existing_by_fold[fold] for fold in owned_labels
+                          if fold in existing_by_fold and fold not in {label.casefold() for label in desired})
+            if not missing and not stale:
                 return "agent_labels_unchanged"
             if label_policy.create_missing:
                 for mapping in missing.values():
@@ -1612,12 +1658,20 @@ class ScanController:
             current = self._github.get_pull_request(repository, listed.number)
             if not current_matches(current):
                 return "agent_label_head_changed"
-            self._github.add_issue_labels(repository, listed.number, tuple(missing))
+            if missing:
+                self._github.add_issue_labels(repository, listed.number, tuple(missing))
+            remove_label = getattr(self._github, "remove_issue_label", None)
+            if stale and callable(remove_label):
+                for label in stale:
+                    remove_label(repository, listed.number, label)
             readback = self._github.get_pull_request(repository, listed.number)
             if not current_matches(readback):
                 return "agent_label_head_changed"
-            if not set(missing).issubset(readback.labels):
+            readback_folded = {label.casefold() for label in readback.labels}
+            if not {label.casefold() for label in desired}.issubset(readback_folded):
                 return "agent_label_readback_failed"
+            if metadata_error is not None:
+                raise metadata_error
         except GitHubClientError as error:
             code = getattr(error, "code", "github_error")
             self._agent_label_errors.append({"repository": repository, "pr_number": listed.number,
@@ -1814,14 +1868,14 @@ class ScanController:
                 receipt, lease, prepared.path, prepared.expected_sha
             )
             task_id = self._kanban.create_or_get_task(
-                _ci_failure_task(
+                _dispatch_generation(_ci_failure_task(
                     self._policy,
                     receipt,
                     audit,
                     prepared,
                     assignee=assignee,
                     control_home=self._control_home,
-                )
+                ), lease)
             )
             _bind_pooled_worktree_task(
                 self._local_git, receipt, task_id, self._policy.board or ""
@@ -1945,13 +1999,13 @@ class ScanController:
                 prepared.expected_sha,
             )
             task_id = self._kanban.create_or_get_task(
-                _local_ci_task(
+                _dispatch_generation(_local_ci_task(
                     self._policy,
                     receipt,
                     prepared,
                     control_home=self._control_home,
                     post_results=audit_policy.post_results,
-                )
+                ), lease)
             )
             _bind_pooled_worktree_task(
                 self._local_git, receipt, task_id, self._policy.board or ""
@@ -2241,7 +2295,7 @@ class ScanController:
                 prepared.expected_sha,
             )
             task_id = self._kanban.create_or_get_task(
-                _task(
+                _dispatch_generation(_task(
                     self._policy,
                     receipt,
                     prepared,
@@ -2250,7 +2304,7 @@ class ScanController:
                     assignee_override=self._typed_ci_assignee(receipt, feedback.body),
                     labels=labels,
                     internal_intent_review=internal_intent_review,
-                )
+                ), lease)
             )
             _bind_pooled_worktree_task(
                 self._local_git, receipt, task_id, self._policy.board or ""
@@ -2896,6 +2950,22 @@ def _governed_pr_identity_command(
     )
 
 
+def _governed_pr_push_command(
+    control_home: Path,
+    repository: str,
+    pr_number: int,
+    expected_head_sha: str,
+    worktree: Path,
+) -> str:
+    """Build the shared-gated, exact-head push command for workers."""
+
+    return (
+        f"{_governed_command_prefix(control_home)} push-head "
+        f"--repository {shlex.quote(repository)} --pr-number {pr_number} "
+        f"--head-sha {shlex.quote(expected_head_sha)} --worktree {shlex.quote(str(worktree))}"
+    )
+
+
 def _task(
     policy: PluginPolicy,
     receipt: FeedbackReceipt,
@@ -3203,6 +3273,14 @@ def _ci_failure_task(
                 control_home, receipt.repository, receipt.pr_number
             )
         )
+        + "If the inspected canonical PR state is CLOSED or MERGED, first run `"
+        + f"{_governed_command_prefix(control_home)} retire-feedback --repository {shlex.quote(receipt.repository)} "
+        f"--pr-number {receipt.pr_number} --feedback-kind pr_repair "
+        f"--feedback-id {shlex.quote(receipt.feedback_id)} --receipt-head-sha {receipt.head_sha}`. "
+        "Only after status=retired, call kanban_complete as superseded "
+        "with the repository, PR number, state, and observed head. Do not reopen the PR, post a "
+        "completion comment, run complete-feedback, or claim CI success for this retirement. "
+        "Unknown or unavailable state is not proof of closure. For an OPEN PR, continue below. "
         + "Then inspect this task's prior runs, the worktree HEAD, the "
         "canonical PR head, and the latest owner reply. If a verified push and factual reply "
         "already exist, do not repeat completed work: run only the affected failed lane when "

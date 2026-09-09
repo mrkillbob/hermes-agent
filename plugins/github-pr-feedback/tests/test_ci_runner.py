@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from github_pr_feedback.ci_runner import (
+    CIAuditDeferred,
     CIAuditIdentity,
     CIAuditReceipt,
     CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
@@ -16,7 +17,12 @@ from github_pr_feedback.ci_runner import (
     LocalCIRunner,
 )
 from github_pr_feedback.ci_coordinator import CIAuditJob, GroupedCICoordinator
-from github_pr_feedback.github_client import CheckState, GitHubClientError, PullRequestMergeState
+from github_pr_feedback.github_client import (
+    CheckState,
+    GitHubClientError,
+    MergeStateStillComputingError,
+    PullRequestMergeState,
+)
 from github_pr_feedback.ledger import FeedbackLedger
 
 
@@ -510,6 +516,28 @@ def test_grouped_coordinator_preserves_runner_failure_reason(
 
     assert outcome.receipt is None
     assert outcome.error == "audit_failed: CIValidationError: Python interpreter mismatch"
+
+
+@pytest.mark.parametrize("error", [
+    MergeStateStillComputingError("mergeability is still computing"),
+    CIAuditDeferred("mergeability_still_computing"),
+])
+def test_grouped_coordinator_preserves_mergeability_deferral(
+    tmp_path: Path, error: MergeStateStillComputingError
+) -> None:
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+    identity = CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA)
+    job = CIAuditJob(identity=identity, worktree=worktree, failure_lanes=("unit",))
+
+    class DeferredRunner:
+        def run(self, _identity: CIAuditIdentity, _worktree: Path) -> CIAuditReceipt:
+            raise error
+
+    outcome = GroupedCICoordinator(lambda: DeferredRunner(), max_parallel=1).run((job,))[0]
+
+    assert outcome.receipt is None
+    assert outcome.error == f"audit_deferred: {error}"
 
 
 def test_local_ci_runner_bootstraps_missing_repo_venv_before_ci(tmp_path: Path) -> None:
