@@ -13,7 +13,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -39,31 +39,7 @@ from .policy import (
     pr_repair_attribution_required,
 )
 
-AUTO_DISPATCH_MAX_RUNTIME_SECONDS = 60 * 60
-
 MAX_ADMISSIONS_PER_SCAN = 128
-LOCAL_CI_NON_ADMISSION_RESULTS = frozenset(
-    {
-        "duplicate",
-        "github_error",
-        "head_changed",
-        "local_ci_disabled",
-        "merge_conflict",
-        "mergeable_state_still_computing",
-        "mutation_pending",
-        "not_admitted",
-        "disabled",
-        "base_repository_not_allowed",
-        "head_repository_not_allowed",
-        "pull_request_not_open",
-        "author_not_allowed",
-        "branch_not_allowed",
-        "reviewer_not_allowed",
-        "retry_backoff",
-        "retry_exhausted",
-        "retry_unavailable",
-    }
-)
 # The subprocess boundary is globally serialized across profiles, but keeping
 # this pool small also bounds fake/in-process adapters and avoids accumulating
 # a long queue of already-stale snapshots behind the shared request gate.
@@ -104,9 +80,15 @@ _ACTION_REMAINS_MARKERS = (
     "unresolved",
 )
 _BOUNDED_ACTION_REMAINS = re.compile(
-    r"\b(?:still failing|still fails|needs fixing|needs repair|remaining failures?)\b"
+    r"\b(?:still failing|still fails|still reproduces?|needs fixing|needs repair|remaining failures?)\b"
 )
-_BARE_FAILS = re.compile(r"\bfails\b")
+_UNRESOLVED_FINDING_LANGUAGE = re.compile(
+    r"\b(?:findings?|issues?|problems?|defects?|failures?)\s+"
+    r"(?:(?:are|is)\s+)?(?:still\s+)?(?:remain(?:s|ed)?|open|unresolved)\b"
+    r"|\b(?:remaining|open|unresolved)\s+"
+    r"(?:findings?|issues?|problems?|defects?|failures?)\b"
+)
+_BARE_FAILS = re.compile(r"\b(?:fails?|failed)\b")
 _FAILURE_LANES = (
     "run_static_lane.py",
     "run_hygiene_lane.py",
@@ -148,11 +130,12 @@ _DEGRADED_REASONS = frozenset(
         "github_ci_state_unavailable",
         "base_state_unavailable",
         "admission_cap",
-        "ci_receipt_unavailable",
         "dispatch_failed",
         "exact_head_unavailable",
     }
 )
+
+
 class ExactHeadUnavailable(RuntimeError):
     """The canonical admitted commit is absent from the configured local repository."""
 
@@ -201,12 +184,6 @@ class KanbanClient(Protocol):
     def task_status(self, board: str, task_id: str) -> str | None: ...
 
     def task_details(self, board: str, task_id: str) -> Mapping[str, object] | None: ...
-
-    def unblock_task(self, board: str, task_id: str, reason: str) -> None: ...
-
-    def complete_superseded_task(
-        self, board: str, task_id: str, summary: str, metadata: Mapping[str, object]
-    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,9 +248,6 @@ class ScanResult:
     degraded: bool = False
     required_local_ci_backlog: int = 0
     local_ci_catalogue_deferred: int = 0
-    required_local_ci_backlog_by_repository: Mapping[str, int] = field(
-        default_factory=dict
-    )
 
 
 def _bind_pooled_worktree_task(
@@ -366,22 +340,6 @@ def _claim_with_orphan_recovery(
                     owner=owner,
                     claimed_at=claimed_at,
                 )
-            if _is_reopenable_transient_block(details, receipt):
-                reopened = ledger.reopen_legacy_exact_dispatch(
-                    receipt,
-                    blocked=binding,
-                    owner=owner,
-                    claimed_at=claimed_at,
-                )
-                if reopened is not None:
-                    unblock = getattr(kanban, "unblock_task", None)
-                    if callable(unblock):
-                        unblock(
-                            board,
-                            binding.task_id,
-                            "Requeued after canonical transient blocker cleared; exact identity revalidated.",
-                        )
-                return reopened
         if status != "archived":
             return None
     if exact_dispatch_only:
@@ -459,121 +417,6 @@ def _is_reopenable_egress_failure(
             or "provider egress blocked: LLM egress blocked: base64_payload" in reason
         )
     return False
-
-
-def _is_reopenable_transient_block(
-    details: Mapping[str, object] | None, receipt: FeedbackReceipt
-) -> bool:
-    """Recognize only identity-safe blockers that can be retried unchanged."""
-
-    if not isinstance(details, Mapping) or details.get("status") != "blocked":
-        return False
-    body = details.get("body")
-    evidence = _legacy_task_evidence(body)
-    if not isinstance(body, str) or not isinstance(evidence, Mapping):
-        return False
-    if (
-        evidence.get("repository") != receipt.repository
-        or evidence.get("pr_number") != receipt.pr_number
-        or evidence.get("expected_head_sha") != receipt.head_sha
-    ):
-        return False
-    transient_markers = (
-        "merge_conflict",
-        "merge conflict",
-        "audit_deferred",
-        "mutation_pending",
-        "mergeable_state_still_computing",
-        "base_refresh_required",
-    )
-    haystack = body.casefold()
-    events = details.get("_events")
-    if isinstance(events, list):
-        haystack += " " + " ".join(
-            str(event.get("payload", {}).get("reason", ""))
-            for event in events
-            if isinstance(event, Mapping)
-            and isinstance(event.get("payload"), Mapping)
-        ).casefold()
-    return any(marker in haystack for marker in transient_markers)
-
-
-def _reconcile_stale_dispatches(
-    ledger: FeedbackLedger,
-    kanban: KanbanClient,
-    pull: PullRequest,
-    *,
-    board: str,
-) -> int:
-    """Supersede blocked receipts whose immutable PR identity is obsolete."""
-
-    # Policy PullRequest objects expose base_repository; repair merge-state
-    # objects expose repository. Both identify the PR's base repository.
-    repository = getattr(pull, "base_repository", None) or pull.repository
-    bindings_reader = getattr(ledger, "pending_task_bindings_for_pr", None)
-    task_details = getattr(kanban, "task_details", None)
-    task_status = getattr(kanban, "task_status", None)
-    if not callable(bindings_reader) or not callable(task_details) or not callable(task_status):
-        return 0
-    count = 0
-    for binding in bindings_reader(repository, pull.number):
-        if binding.receipt.head_sha.casefold() == pull.head_sha.casefold():
-            continue
-        try:
-            if task_status(board, binding.task_id) != "blocked":
-                continue
-            details = task_details(board, binding.task_id)
-        except RuntimeError:
-            continue
-        if not isinstance(details, Mapping):
-            continue
-        evidence = _legacy_task_evidence(details.get("body"))
-        if not isinstance(evidence, Mapping):
-            continue
-        expected_base = evidence.get("expected_base_sha")
-        stale_base = isinstance(expected_base, str) and expected_base.casefold() != (
-            pull.base_sha or ""
-        ).casefold()
-        events = details.get("_events")
-        reason_text = str(details.get("latest_summary", "")).casefold()
-        if isinstance(events, list):
-            reason_text += " " + " ".join(
-                str(event.get("payload", {}).get("reason", ""))
-                for event in events
-                if isinstance(event, Mapping)
-                and isinstance(event.get("payload"), Mapping)
-            ).casefold()
-        if not stale_base and not any(
-            marker in reason_text
-            for marker in ("head", "identity", "drift", "exact-head")
-        ):
-            continue
-        reason = (
-            f"Superseded stale exact dispatch: canonical PR head/base is "
-            f"{pull.head_sha}/{pull.base_sha}; old receipt was "
-            f"{binding.receipt.head_sha}/{expected_base or 'unknown'}."
-        )
-        if not ledger.supersede_stale_dispatch(
-            binding.receipt, task_id=binding.task_id, reason=reason
-        ):
-            continue
-        complete = getattr(kanban, "complete_superseded_task", None)
-        if callable(complete):
-            complete(
-                board,
-                binding.task_id,
-                reason,
-                {
-                    "status": "superseded",
-                    "repository": repository,
-                    "pr_number": pull.number,
-                    "old_head_sha": binding.receipt.head_sha,
-                    "current_head_sha": pull.head_sha,
-                    "current_base_sha": pull.base_sha,
-                },
-            )
-        count += 1
-    return count
 
 
 def _legacy_task_evidence(body: object) -> Mapping[str, object] | None:
@@ -908,10 +751,10 @@ class WorktreePoolSlotDirty(RuntimeError):
     """A released slot still contains owned work and cannot be recycled."""
 
 
-# Longer than the longest dispatched-task max_runtime_seconds (local CI audits
-# are capped at 90 minutes), with margin. A slot must never look reclaimable
+# Longer than the longest observed dispatched-task max_runtime_seconds (local
+# CI audits run up to 8 hours), with margin. A slot must never look reclaimable
 # while its dispatched agent task could still legitimately be running.
-DEFAULT_WORKTREE_POOL_LEASE = timedelta(hours=2)
+DEFAULT_WORKTREE_POOL_LEASE = timedelta(hours=10)
 # Keep blocked/retryable cards' exact-head slots reserved while still leaving
 # enough capacity for new receipts. Slots are created lazily, so this raises
 # the concurrency ceiling without eagerly allocating additional worktrees.
@@ -1311,12 +1154,11 @@ class ScanController:
         self._claim_lease = claim_lease
         self._label_batches: list[tuple[str, RepositoryTarget, tuple[PullRequest, ...]]] = []
 
-    def scan(self, *, apply_labels: bool = True, repository_filter: str | None = None) -> ScanResult:
+    def scan(self, *, apply_labels: bool = True) -> ScanResult:
         skipped: Counter[str] = Counter()
         created = 0
         attempted = 0
         required_local_ci_backlog = 0
-        required_local_ci_backlog_by_repository: dict[str, int] = {}
         local_ci_catalogue_deferred = 0
         self._label_batches = []
         if not self._policy.enabled or self._policy.not_before is None:
@@ -1325,14 +1167,7 @@ class ScanController:
                 skipped,
                 required_local_ci_backlog=required_local_ci_backlog,
             )
-        repositories = self._policy.targets
-        if repository_filter is not None:
-            repositories = {
-                repository: target
-                for repository, target in repositories.items()
-                if repository == repository_filter
-            }
-        for repository in repositories:
+        for repository in self._policy.targets:
             target = self._policy.targets[repository]
             local_ci_dispatched = 0
             actions_enabled: bool | None = None
@@ -1360,14 +1195,12 @@ class ScanController:
 
             pull_requests = order_pull_requests(pull_requests)
             self._label_batches.append((repository, target, pull_requests))
-            repository_backlog = _required_local_ci_backlog_count(
+            required_local_ci_backlog += _required_local_ci_backlog_count(
                 self._policy,
                 self._ledger,
                 target,
                 pull_requests,
             )
-            required_local_ci_backlog += repository_backlog
-            required_local_ci_backlog_by_repository[repository] = repository_backlog
             if (
                 self._policy.local_ci_audit is not None
                 and self._policy.local_ci_audit.applies_to(repository)
@@ -1406,14 +1239,6 @@ class ScanController:
                 if not pull_request_admission.admitted:
                     skipped[pull_request_admission.reason or "not_admitted"] += 1
                     continue
-                stale_superseded = _reconcile_stale_dispatches(
-                    self._ledger,
-                    self._kanban,
-                    pull_request,
-                    board=self._policy.board or "",
-                )
-                if stale_superseded:
-                    skipped["stale_dispatch_superseded"] += stale_superseded
                 admitted_pull_requests.append(pull_request)
             need_current_for_ci = bool(
                 self._policy.local_ci_audit is not None
@@ -1613,7 +1438,12 @@ class ScanController:
                             current=current,
                             retry_failed=local_ci_receipt_status == "failed",
                         )
-                        if audit_error not in LOCAL_CI_NON_ADMISSION_RESULTS:
+                        if audit_error not in {
+                            "duplicate",
+                            "retry_backoff",
+                            "retry_exhausted",
+                            "retry_unavailable",
+                        }:
                             attempted += 1
                         if audit_error is None:
                             created += 1
@@ -1627,7 +1457,6 @@ class ScanController:
             skipped,
             required_local_ci_backlog=required_local_ci_backlog,
             local_ci_catalogue_deferred=local_ci_catalogue_deferred,
-            required_local_ci_backlog_by_repository=required_local_ci_backlog_by_repository,
         )
 
     def reconcile_labels(self, repository: str) -> dict[str, object]:
@@ -1860,7 +1689,7 @@ class ScanController:
         return self._dispatch_local_ci(current) or "scheduled"
 
     def dispatch_ci_failure(self, audit: object) -> str:
-        """Hand one authoritative CI failure receipt to its typed fixer."""
+        """Hand one authoritative logic-regression receipt to its typed fixer."""
 
         from .ci_runner import CIAuditReceipt
 
@@ -2151,37 +1980,6 @@ class ScanController:
             return _scan_result(0, skipped)
         return _scan_result(1, skipped)
 
-    def retry_ci_failure(self, receipt: FeedbackReceipt) -> ScanResult:
-        """Retry a failed local-CI dispatch through its immutable audit receipt."""
-
-        skipped: Counter[str] = Counter()
-        if (
-            receipt.feedback_kind != "pr_repair"
-            or not receipt.feedback_id.startswith("ci-receipt:")
-        ):
-            skipped["ci_receipt_unavailable"] += 1
-            return _scan_result(0, skipped)
-        receipt_id = receipt.feedback_id.removeprefix("ci-receipt:")
-        audit = self._ledger.ci_receipt_by_id(
-            receipt.repository, receipt.pr_number, receipt_id
-        )
-        from .ci_runner import CIAuditReceipt
-
-        if (
-            not isinstance(audit, CIAuditReceipt)
-            or audit.status != "failed"
-            or audit.identity.repository != receipt.repository
-            or audit.identity.pr_number != receipt.pr_number
-            or audit.identity.head_sha != receipt.head_sha
-        ):
-            skipped["ci_receipt_unavailable"] += 1
-            return _scan_result(0, skipped)
-        status = self.dispatch_ci_failure(audit)
-        if status == "scheduled":
-            return _scan_result(1, skipped)
-        skipped[status] += 1
-        return _scan_result(0, skipped)
-
     def _legacy_dispatch_is_reopenable(self, receipt: FeedbackReceipt) -> bool:
         """Check the exact pending card before bypassing completed-ledger dedupe."""
         binding = self._ledger.exact_pending_task_binding(receipt)
@@ -2458,25 +2256,13 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
     body = " ".join(feedback.body.casefold().split())
     if not body:
         return False
+    # Explicit unresolved language must veto every completion-shaped branch,
+    # including publisher receipts evaluated by the merge gate.
+    if _has_unresolved_action(body):
+        return False
     exact_fixed_commit = re.match(r"fixed in [0-9a-f]{40,64}\b", body) is not None
     if (
         exact_fixed_commit
-        and any(marker in body for marker in ("verification:", "focused gate:"))
-        and (_LANE_PASS_EVIDENCE.search(body) is not None or "now succeeds" in body)
-        and not any(marker in body for marker in _ACTION_REMAINS_MARKERS)
-        and _BOUNDED_ACTION_REMAINS.search(body) is None
-    ):
-        return True
-    short_fixed_commit = re.match(
-        r"(?:fixed|implemented) in (?:commit )?[0-9a-f]{7,39}\b", body
-    ) is not None
-    exact_head_marker = re.search(
-        r"\b(?:current\s+)?exact\s+pr\s+head\s*:?\s*`?[0-9a-f]{40,64}`?\b",
-        body,
-    ) is not None
-    if (
-        short_fixed_commit
-        and exact_head_marker
         and any(marker in body for marker in ("verification:", "focused gate:"))
         and (_LANE_PASS_EVIDENCE.search(body) is not None or "now succeeds" in body)
         and not any(marker in body for marker in _ACTION_REMAINS_MARKERS)
@@ -2574,9 +2360,7 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
     )
     if semantic_base_refresh:
         return True
-    if body.startswith(_SELF_RESOLUTION_PREFIXES) and not body.startswith(
-        ("fixed in ", "implemented in ")
-    ):
+    if body.startswith(_SELF_RESOLUTION_PREFIXES):
         return True
     if (
         body.startswith("resolved ")
@@ -2730,8 +2514,27 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
 def _has_unresolved_action(body: str) -> bool:
     if any(marker in body for marker in _ACTION_REMAINS_MARKERS):
         return True
-    if _BOUNDED_ACTION_REMAINS.search(body) is not None:
-        return True
+    finding = _UNRESOLVED_FINDING_LANGUAGE.search(body)
+    if finding is not None:
+        before_finding = body[max(0, finding.start() - 32) : finding.start()]
+        if re.search(r"\b(?:no|without|zero)\s+(?:unresolved\s+)?$", before_finding):
+            pass
+        else:
+            return True
+    bounded_action = _BOUNDED_ACTION_REMAINS.search(body)
+    if bounded_action is not None:
+        bounded_context = body[max(0, bounded_action.start() - 80) : bounded_action.end() + 80]
+        historical_reproduction = (
+            re.search(
+                r"\bpre-existing(?:\s+[\w-]+){0,4}\s+"
+                r"(?:failure|finding|issue|lane)\b",
+                bounded_context,
+            )
+            is not None
+            or "reproduced identically" in bounded_context
+        ) and _LANE_PASS_EVIDENCE.search(body[bounded_action.end() :]) is not None
+        if not historical_reproduction:
+            return True
     for match in _BARE_FAILS.finditer(body):
         clause_start = max(
             body.rfind(separator, 0, match.start())
@@ -2739,9 +2542,15 @@ def _has_unresolved_action(body: str) -> bool:
         )
         context = body[clause_start + 1 : match.end()]
         after = body[match.end() :]
+        if re.search(r"\b(?:0|no|zero)\s+$", context[: -len(match.group())]):
+            continue
         factual_history = (
             any(marker in context for marker in _HISTORIC_FAILURE_CONTEXT)
             and _same_lane_passes_after_resolution(context, after)
+        )
+        factual_history = factual_history or (
+            "pre-existing failures reproduced identically" in body
+            and ("now succeeds" in body or _LANE_PASS_EVIDENCE.search(body) is not None)
         )
         if not factual_history:
             return True
@@ -3073,22 +2882,6 @@ def _governed_pr_identity_command(
     )
 
 
-def _governed_pr_push_command(
-    control_home: Path,
-    repository: str,
-    pr_number: int,
-    expected_head_sha: str,
-    worktree: Path,
-) -> str:
-    """Build the shared-gated, exact-head push command for workers."""
-
-    return (
-        f"{_governed_command_prefix(control_home)} push-head "
-        f"--repository {shlex.quote(repository)} --pr-number {pr_number} "
-        f"--head-sha {shlex.quote(expected_head_sha)} --worktree {shlex.quote(str(worktree))}"
-    )
-
-
 def _task(
     policy: PluginPolicy,
     receipt: FeedbackReceipt,
@@ -3166,8 +2959,7 @@ def _task(
         "acknowledge the exact receipt and complete. Do not retry a tool-blocked command; use one "
         "literal repository-owned command or stop with its exact blocker. Validate the reported issue "
         "against the exact receipt worktree before editing. If confirmed, make only the bounded fix, "
-        "run focused verification, commit and push to the verified PR head branch with the governed "
-        + f"`{_governed_pr_push_command(control_home, receipt.repository, receipt.pr_number, receipt.head_sha, prepared.path)}`, and publish one "
+        "run focused verification, commit and push to the verified PR head branch, and publish one "
         "factual PR reply with the commit and test evidence only through the governed command "
         + f"`{_governed_command_prefix(control_home)} post-comment --repository "
         f"{shlex.quote(receipt.repository)} --pr-number {receipt.pr_number} --head-sha "
@@ -3184,15 +2976,8 @@ def _task(
         "The reply body must be literal UTF-8 Markdown: never Base64-encode, JSON-serialize, or "
         "otherwise encode the entire comment; Base64 is reserved for binary file transport. Do not "
         "use `gh pr review` or a raw GitHub write for this reply. "
-        "Before the initial push, re-read the canonical PR and require that its head still equals the "
-        "expected receipt SHA; otherwise stop fail-closed. Push the verified repair commit exactly once "
-        f"with `{_governed_pr_push_command(control_home, receipt.repository, receipt.pr_number, receipt.head_sha, prepared.path)}`. "
-        "If the governed push-head command returns status=reconciliation_pending after the push, treat "
-        "that as a recoverable confirmation failure, not as supersession: retain its returned head_sha, "
-        "do not retry push-head, re-read the canonical PR, and continue only if its head equals that "
-        "returned pushed head. Use that resolved head for the factual reply and complete-feedback. "
-        "For every later GitHub write, require the canonical PR head to equal the resolved head; stop "
-        "fail-closed on any other value. "
+        "Before any GitHub write, re-read the canonical PR "
+        "and require that its head still equals the expected receipt SHA; otherwise stop fail-closed. "
         "Do not merge; merge remains controlled by deterministic safety gates. After the verified "
         "push and factual reply, acknowledge this exact feedback with `"
         f"{_governed_command_prefix(control_home)} complete-feedback "
@@ -3253,9 +3038,7 @@ def _task(
         # "timed out" after doing real, near-complete work. Matches the same
         # margin fix already applied to the other kanban timeout budgets
         # this session.
-        max_runtime_seconds=(
-            AUTO_DISPATCH_MAX_RUNTIME_SECONDS if auto_dispatch else None
-        ),
+        max_runtime_seconds=1200 if auto_dispatch else None,
     )
 
 
@@ -3323,13 +3106,9 @@ def _ci_failure_assignee(receipt: object) -> str | None:
         for command in receipt.commands
         if command.returncode != 0 or command.timed_out
     )
-    if len(failed) != 1:
+    if len(failed) != 1 or failed[0].classification != "logic-regression":
         return None
     command_evidence = failed[0]
-    if command_evidence.classification == "structural-ratchet":
-        return "structural-ratchet-steward"
-    if command_evidence.classification != "logic-regression":
-        return None
     arguments = tuple(argument.casefold() for argument in command_evidence.argv)
     command = " ".join(arguments)
     executable = Path(arguments[0]).name if arguments else ""
@@ -3370,13 +3149,8 @@ def _ci_failure_task(
         for command in audit.commands
         if command.returncode != 0 or command.timed_out
     )
-    if len(failed) != 1 or failed[0].classification not in {
-        "logic-regression",
-        "structural-ratchet",
-    }:
-        raise ValueError(
-            "CI repair requires one typed logic-regression or structural-ratchet command"
-        )
+    if len(failed) != 1 or failed[0].classification != "logic-regression":
+        raise ValueError("CI repair requires one typed logic-regression command")
     command = failed[0]
     reproduction_command = shlex.join(command.argv)
     if any(Path(argument).name == "run_static_lane.py" for argument in command.argv):
@@ -3428,16 +3202,7 @@ def _ci_failure_task(
         "initially contains hashes or because code inspection is required; the terminal, read, and "
         "edit tools are available in the exact receipt worktree. Block only after an exact tool "
         "failure, identity drift, or a genuinely ambiguous broad repair, and report the literal "
-        "failed operation and error. If the typed receipt class is structural-ratchet, first compare the "
-        "implicated metric at the receipt base with the PR diff. If the metric is already present at the "
-        "receipt base and the implicated source is unchanged by this PR, classify it as pre-existing "
-        "baseline drift: update only the repository-owned canonical baseline artifact from current source "
-        "evidence, run the full structural ratchet, and record the old value, new value, source path, and "
-        "exact receipt id. Never raise a baseline to hide a PR regression, disable the check, or alter "
-        "unrelated files. If the PR introduced the increase, repair the PR instead and leave the ratchet "
-        "strict. "
-        "Leave this repair card with an explicit diagnostic handoff for the merge maintainer and publish "
-        "the governed receipt before completing it. "
+        "failed operation and error. "
         "Re-read the canonical pull request and require both its base and head to equal the receipt "
         "identities before editing and immediately before every GitHub write. Run focused "
         "verification plus the affected CI lane. Keep all required checks, tests, validation, "
@@ -3523,7 +3288,6 @@ def _local_ci_task(
         else "Do not write to GitHub. "
     )
     instructions = (
-        "<!-- hermes-completion-gate:pr-local-ci-v1 --> "
         "Audit this pull request read-only from the exact receipt worktree. "
         + _worker_capability_preflight(
             _governed_pr_identity_command(
@@ -3576,7 +3340,7 @@ def _local_ci_task(
         branch=prepared.branch,
         # Version the runner contract so an archived foreground-timeout card
         # can be recreated with supervised background execution.
-        idempotency_key=f"{_receipt_idempotency_key(receipt)}:supervised-v5",
+        idempotency_key=f"{_receipt_idempotency_key(receipt)}:supervised-v4",
         evidence=evidence,
         evidence_heading="Canonical PR audit receipt (JSON)",
         initial_status="running",
@@ -3585,9 +3349,8 @@ def _local_ci_task(
         # repository-owned lane can run even when feedback coding is gated.
         # A deterministic required lane may run for an hour. Its durable
         # exact-head CI lease prevents duplicate restarts while the real
-        # supervisor PID is alive; cap the worker at 90 minutes so a hung
-        # audit cannot consume a Codex slot for most of a day.
-        max_runtime_seconds=90 * 60,
+        # supervisor PID is alive; give the full lane sequence an 8h envelope.
+        max_runtime_seconds=8 * 60 * 60,
         # Inherit the assigned profile's benchmark-qualified model and effort.
     )
 
@@ -3611,7 +3374,6 @@ def _scan_result(
     *,
     required_local_ci_backlog: int = 0,
     local_ci_catalogue_deferred: int = 0,
-    required_local_ci_backlog_by_repository: Mapping[str, int] | None = None,
 ) -> ScanResult:
     values = dict(skipped)
     degraded = any(values.get(reason, 0) > 0 for reason in _DEGRADED_REASONS)
@@ -3621,7 +3383,4 @@ def _scan_result(
         degraded,
         required_local_ci_backlog=required_local_ci_backlog,
         local_ci_catalogue_deferred=local_ci_catalogue_deferred,
-        required_local_ci_backlog_by_repository=(
-            required_local_ci_backlog_by_repository or {}
-        ),
     )

@@ -12,11 +12,12 @@ def test_safe_path_ci_imports_only_its_explicit_worktree_helpers(tmp_path, monke
     scripts.mkdir(parents=True)
     foreign = tmp_path / 'foreign'
     foreign.mkdir()
-    (foreign / 'ci_summary.py').write_text('identity = "foreign"\n', encoding="utf-8")
-    (scripts / 'ci_summary.py').write_text('identity = "verified-worktree"\n', encoding="utf-8")
-    (repo / 'owner.py').write_text('identity = "verified-root"\n', encoding="utf-8")
+    (foreign / 'ci_summary.py').write_text('identity = "foreign"\n')
+    (scripts / 'ci_summary.py').write_text('identity = "verified-worktree"\n')
+    (repo / 'ci_summary.py').write_text('identity = "verified-root"\n')
+    (repo / 'owner.py').write_text('identity = "verified-root"\n')
     script = scripts / 'check.py'
-    script.write_text('import ci_summary, owner, json, sys\nprint(json.dumps([ci_summary.identity, owner.identity, sys.flags.safe_path]))\n', encoding="utf-8")
+    script.write_text('import ci_summary, owner, json, sys\nprint(json.dumps([ci_summary.identity, owner.identity, sys.flags.safe_path]))\n')
     monkeypatch.setenv('PYTHONSAFEPATH', '1')
     monkeypatch.setenv('PYTHONPATH', str(foreign))
     result = subprocess.run([sys.executable, '-P', str(script)], cwd=foreign,
@@ -34,3 +35,17 @@ def test_ci_import_roots_do_not_follow_scripts_symlink_outside_worktree(tmp_path
     env = ci_environment(repo, {'STATIC_BASE_REF': 'b' * 40})
     assert env['PYTHONPATH'].split(os.pathsep) == [str(repo.resolve())]
     assert env['STATIC_BASE_REF'] == 'b' * 40
+
+
+def test_ci_environment_can_remove_import_roots_for_startup_probe(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    monkeypatch.setenv('PYTHONPATH', str(tmp_path / 'foreign'))
+
+    env = ci_environment(
+        repo,
+        {'PYTHONPATH': str(tmp_path / 'caller')},
+        include_worktree_roots=False,
+    )
+
+    assert 'PYTHONPATH' not in env

@@ -136,7 +136,9 @@ def test_push_verified_head_lease_rejects_a_remote_advance(tmp_path):
     (work / "file").write_text("a\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(work), "add", "file"], check=True)
     subprocess.run(["git", "-C", str(work), "commit", "--quiet", "-m", "a"], check=True)
-    first = subprocess.check_output(["git", "-C", str(work), "rev-parse", "HEAD"], text=True).strip()
+    first = subprocess.check_output(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], text=True, encoding="utf-8"
+    ).strip()
     subprocess.run(["git", "-C", str(work), "push", "--quiet", str(remote), "HEAD:refs/heads/main"], check=True)
     (work / "file").write_text("b\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(work), "commit", "--quiet", "-am", "b"], check=True)

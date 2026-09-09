@@ -1,7 +1,33 @@
 """Configured advisory metadata derived from canonical PR titles and file paths."""
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 import re
+
+
+def _title_term_matches(term: str, title: str) -> bool:
+    """Match selector edges without requiring a word boundary around punctuation."""
+    left = r"\b" if term[:1].isalnum() or term[:1] == "_" else r"(?<!\w)"
+    right = r"\b" if term[-1:].isalnum() or term[-1:] == "_" else r"(?!\w)"
+    return re.search(left + re.escape(term) + right, title.casefold()) is not None
+
+
+def _pathname_glob_matches(path: str, pattern: str) -> bool:
+    """Shell-style pathname glob where ``*`` does not cross ``/`` and ``**`` does."""
+    expression = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            expression.append("(?:[^/]+/)*")
+            index += 3
+        elif pattern.startswith("**", index):
+            expression.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            expression.append("[^/]*")
+            index += 1
+        else:
+            expression.append(re.escape(pattern[index]))
+            index += 1
+    return re.fullmatch("".join(expression), path.casefold()) is not None
 
 
 @dataclass(frozen=True)
@@ -15,9 +41,9 @@ class MetadataLabelRule:
 
     def matches(self, repository, title, paths):
         return repository in self.repositories and (
-            any(re.search(r"\b" + re.escape(term) + r"\b", title.casefold())
+            any(_title_term_matches(term, title)
                 for term in self.title_terms)
-            or any(fnmatchcase(path.casefold(), pattern)
+            or any(_pathname_glob_matches(path, pattern)
                    for path in paths for pattern in self.path_patterns)
         )
 
@@ -40,13 +66,16 @@ def parse_metadata_rules(raw):
         label = rule["label"]
         if not isinstance(label, str) or not label.strip() or len(label) > 50 or "," in label:
             raise ValueError("invalid metadata label")
-        if label.startswith(("status/", "priority/")) or label == "ci-reviewed":
+        normalized_label = label.casefold()
+        if normalized_label.startswith(("status/", "priority/")) or normalized_label == "ci-reviewed":
             raise ValueError("evidence and authority labels cannot be inferred from text or paths")
         if not rule["repositories"] or not (rule["title_terms"] or rule["path_patterns"]):
             raise ValueError("metadata rules require explicit repositories and selectors")
         if not isinstance(rule["color"], str) or not re.fullmatch('[0-9a-fA-F]{6}',rule['color']):
             raise ValueError("invalid metadata label color")
-        if not isinstance(rule['description'], str) or not 1 <= len(rule['description']) <= 100:
+        if (not isinstance(rule['description'], str)
+                or not rule['description'].strip()
+                or len(rule['description']) > 100):
             raise ValueError("invalid metadata label description")
         result.append(MetadataLabelRule(label, tuple(rule['repositories']),
             tuple(v.casefold() for v in rule['title_terms']),

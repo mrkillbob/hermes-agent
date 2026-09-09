@@ -23,6 +23,7 @@ from .controller import (
     ScanController,
     _bind_pooled_worktree_task,
     _claim_with_orphan_recovery,
+    _dispatch_generation,
     _governed_pr_identity_command,
     _governed_pr_push_command,
     _prepare_receipt_worktree_with_overflow,
@@ -362,6 +363,7 @@ class RepairController:
                     owner=self._owner,
                     claimed_at=claimed_at,
                     stale_before=claimed_at - timedelta(minutes=15),
+                    reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
                 )
                 if lease is None:
                     if (
@@ -426,11 +428,18 @@ class RepairController:
                         target_base_sha,
                         self._control_home,
                     )
-                    task_id = self._kanban.create_or_get_task(task)
+                    task_id = self._kanban.create_or_get_task(_dispatch_generation(task, lease))
                     _bind_pooled_worktree_task(
                         self._local_git, receipt, task_id, self._policy.board or ""
                     )
                     self._ledger.finalize(receipt, task_id, lease)
+                    promote_task = getattr(self._kanban, "promote_task", None)
+                    if (
+                        promote_task is not None
+                        and self._policy.auto_dispatch
+                        and not task.evidence.get("report_only", False)
+                    ):
+                        promote_task(self._policy.board or "", task_id)
                     created += 1
                 except Exception as error:
                     import os
@@ -471,11 +480,18 @@ class RepairController:
                             target_base_sha,
                             self._control_home,
                         )
-                        task_id = self._kanban.create_or_get_task(task)
+                        task_id = self._kanban.create_or_get_task(_dispatch_generation(task, lease))
                         _bind_pooled_worktree_task(
                             self._local_git, receipt, task_id, self._policy.board or ""
                         )
                         self._ledger.finalize(receipt, task_id, lease)
+                        promote_task = getattr(self._kanban, "promote_task", None)
+                        if (
+                            promote_task is not None
+                            and self._policy.auto_dispatch
+                            and not task.evidence.get("report_only", False)
+                        ):
+                            promote_task(self._policy.board or "", task_id)
                         created += 1
                         continue
                     if outcome.resolved_head_sha is None or outcome.receipt_id is None:
@@ -588,7 +604,7 @@ class RepairController:
             return "duplicate"
         try:
             task = _actions_needed_task(self._policy, receipt, target.local_path, pull)
-            task_id = self._kanban.create_or_get_task(task)
+            task_id = self._kanban.create_or_get_task(_dispatch_generation(task, lease))
             self._ledger.finalize(receipt, task_id, lease)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
             try:
@@ -704,6 +720,13 @@ def _repair_task(
         "the card as superseded by newer PR state instead of blocking for operator intervention. "
         "Stop fail-closed on other identity mismatches. "
     )
+    retirement_command = (
+        f"env HERMES_HOME={shlex.quote(str(control_home))} "
+        f"{shlex.quote(sys.executable)} -m hermes_cli.main github-pr-feedback retire-feedback "
+        f"--repository {shlex.quote(receipt.repository)} --pr-number {receipt.pr_number} "
+        f"--feedback-kind {shlex.quote(receipt.feedback_kind)} --feedback-id {shlex.quote(receipt.feedback_id)} "
+        f"--receipt-head-sha {shlex.quote(receipt.head_sha)}"
+    )
     if configured.report_only:
         authority = (
             identity_preflight
@@ -722,8 +745,23 @@ def _repair_task(
             f"--receipt-head-sha {shlex.quote(receipt.head_sha)} "
             "--resolved-head-sha <full literal resolved head SHA>"
         )
+        self_receipt_command = (
+            f"env HERMES_HOME={shlex.quote(str(control_home))} "
+            f"{shlex.quote(sys.executable)} -P -m hermes_cli.main "
+            "github-pr-feedback retire-feedback "
+            f"--repository {shlex.quote(receipt.repository)} "
+            f"--pr-number {receipt.pr_number} "
+            f"--feedback-kind {shlex.quote(receipt.feedback_kind)} "
+            f"--feedback-id {shlex.quote(receipt.feedback_id)} "
+            f"--receipt-head-sha {shlex.quote(receipt.head_sha)} "
+            "--self-receipt"
+        )
         authority = (
             identity_preflight
+            + " If the canonical PR is CLOSED or MERGED, run the literal retirement command "
+            + f"`{retirement_command}` and require a status=retired result before calling "
+            + "kanban_complete as superseded. Do not claim a successful repair or leave the "
+            + "receipt pending. "
             + "Re-read the canonical pull request and require its base and head identities to "
             "equal every expected identity field. "
             "expected_base_sha and observed_base_sha describe the inspected PR base; "
@@ -791,6 +829,11 @@ def _repair_task(
             "head=<full literal resolved head SHA> -->` marker at the end of the factual reply. Do not "
             "complete the Kanban task until this acknowledgement succeeds. Run the acknowledgement once "
             "with terminal background=true, retain its process session id, and poll/wait until exit; "
+            "If this exact dispatch is instead a verified non-actionable self-maintenance receipt from the "
+            "configured automation identity, do not claim a repair: re-run the canonical PR and comment "
+            f"checks, then run exactly `{self_receipt_command}` to retire only this dispatch with "
+            "--self-receipt. That recovery path is not valid for an external finding, an actionable "
+            "comment, a missing comment, or a changed PR head. "
             "shared GitHub gates can exceed a 60-second foreground timeout. No-progress rule: after "
             "evaluating at most two viable resolutions, choose the smallest existing repository "
             "pattern. Within 10 minutes, either produce a tracked patch plus a focused check result, "
@@ -823,7 +866,8 @@ def _repair_task(
         idempotency_key=f"github-pr-repair:v3:{key}",
         evidence=evidence,
         evidence_heading="Canonical PR repair receipt (JSON)",
-        initial_status="blocked" if configured.report_only else "running",
+        # Ledger binding is finalized before promotion.
+        initial_status="blocked",
         max_retries=1 if configured.report_only else 3,
         max_runtime_seconds=(
             None

@@ -49,13 +49,13 @@ def _retire_dispatch(ledger, receipt, current, reason):
             "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
             "AND feedback_id = ? AND head_sha = ?", receipt.key,
         ).fetchone()
-        if not row or not row[0] or row[1] != "completed" or row[2] not in {"pending", "superseded"}:
-            raise LedgerStateError("receipt is not an exact pending dispatch")
-        if row[2] == "pending":
+        if not row or not row[0] or row[1] != "completed" or row[2] not in {"pending", "resolving", "superseded"}:
+            raise LedgerStateError("receipt is not an exact retirable dispatch")
+        if row[2] in {"pending", "resolving"}:
             ledger._connection.execute(
                 "UPDATE feedback_receipts SET action_status = 'superseded', actioned_at = ?, "
                 "last_error = ? WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
-                "AND feedback_id = ? AND head_sha = ? AND action_status = 'pending'",
+                "AND feedback_id = ? AND head_sha = ? AND action_status IN ('pending', 'resolving')",
                 (datetime.now(UTC).isoformat(), reason, *receipt.key),
             )
     return {"status": "retired", "task_id": row[0], "repository": receipt.repository,
