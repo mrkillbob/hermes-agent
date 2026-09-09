@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 
 def enroll_owned_pulls(policy, merge_policy, ledger, pulls):
-    if not merge_policy.auto_enroll_owned_prs or merge_policy.report_only:
+    if not merge_policy.auto_enroll_owned_prs:
         return 0
     enrolled = set(ledger.enrolled_merge_pr_numbers(merge_policy.repository))
     count = 0
