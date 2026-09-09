@@ -1,4 +1,5 @@
 """Worker configuration must admit the policy through real plugin discovery."""
+import importlib.metadata
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,24 @@ def test_doctor_checks_worker_plugin_opt_in_without_changing_profile(tmp_path, p
     assert profile.read_bytes() == before
 
 
+def test_doctor_checks_worker_plugin_opt_in_after_env_expansion(tmp_path, monkeypatch):
+    profile = tmp_path / "profiles/worker/config.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(yaml.safe_dump({"plugins": {
+        "enabled": ["github-pr-feedback"],
+        "disabled": ["${WORKER_DISABLED_PLUGIN}"],
+    }}))
+    monkeypatch.setenv("WORKER_DISABLED_PLUGIN", "github-pr-feedback")
+    policy = SimpleNamespace(assignee="worker", assignee_rules=(), routing_rules=(),
+                             local_ci_audit=None, repair_steward=None, targets={}, board="repairs",
+                             merge_policies=lambda: (), release_policies=lambda: ())
+    runner = SimpleNamespace(which=lambda name: None)
+
+    checks = DoctorProbe(tmp_path, runner).checks(policy, tmp_path / "ledger.sqlite3")
+
+    assert checks.get("worker_completion_policy") == "failed"
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_real_worker_discovery_enforces_control_home_receipt(tmp_path, monkeypatch, enabled):
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc, plugins
@@ -62,12 +81,163 @@ def test_real_worker_discovery_enforces_control_home_receipt(tmp_path, monkeypat
         # from its manifest using this worker's actual opt-in configuration.
         plugins.discover_plugins(force=True)
         result = json.loads(kanban_tools._handle_complete({"task_id": tid, "summary": "Tests passed"}))
-        assert (result.get("ok") is True) is (not enabled)
+        # The control-plane receipt is enforced even when the optional worker
+        # plugin is disabled; disabling the plugin must not bypass the durable
+        # completion contract.
+        assert result.get("ok") is not True
         with kbc.connect() as connection:
-            assert (kb.get_task(connection, tid).status == "done") is (not enabled)
+            assert kb.get_task(connection, tid).status != "done"
         assert ledger._connection.execute("SELECT action_status FROM feedback_receipts").fetchone()[0] == "pending"
     finally:
         ledger.close()
+
+
+def test_worker_readiness_rejects_user_override_without_completion_hooks(tmp_path, monkeypatch):
+    from github_pr_feedback.worker_contract import worker_contract_enabled
+
+    worker = tmp_path / "profiles/worker"
+    worker.mkdir(parents=True)
+    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    plugin = worker / "plugins/github-pr-feedback"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.yaml").write_text(
+        "name: github-pr-feedback\ndescription: stale user override\n"
+    )
+    (plugin / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        "Path(__file__).with_name('executed').write_text('unsafe')\n"
+        "def register(ctx):\n    return None\n"
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert worker_contract_enabled(tmp_path, "worker") is False
+    assert not (plugin / "executed").exists()
+
+
+def test_worker_readiness_ignores_malformed_user_override(tmp_path, monkeypatch):
+    from github_pr_feedback.worker_contract import worker_contract_enabled
+
+    worker = tmp_path / "profiles/worker"
+    worker.mkdir(parents=True)
+    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    plugin = worker / "plugins/github-pr-feedback"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.yaml").write_text("name: github-pr-feedback\nprovides_hooks: [\n")
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda: [])
+
+    assert worker_contract_enabled(tmp_path, "worker") is True
+
+
+def test_worker_readiness_rejects_portable_manifest_hooks(tmp_path, monkeypatch):
+    import github_pr_feedback.worker_contract as worker_contract
+
+    worker = tmp_path / "profiles/worker"
+    worker.mkdir(parents=True)
+    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    plugin = worker / "plugins/github-pr-feedback"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(json.dumps({
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+        "name": "github-pr-feedback",
+        "provides_hooks": ["pre_tool_call", "pre_kanban_complete"],
+    }))
+    monkeypatch.setattr(worker_contract, "_entrypoint_override_present", lambda *_args: False)
+
+    assert worker_contract.worker_contract_enabled(tmp_path, "worker") is False
+
+
+@pytest.mark.parametrize(("project_enabled", "expected"), [(False, True), (True, False)])
+def test_worker_readiness_applies_project_plugin_opt_in(
+    tmp_path, monkeypatch, project_enabled, expected
+):
+    import github_pr_feedback.worker_contract as worker_contract
+
+    worker = tmp_path / "profiles/worker"
+    worker.mkdir(parents=True)
+    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    project_plugin = tmp_path / "project/.hermes/plugins/github-pr-feedback"
+    project_plugin.mkdir(parents=True)
+    (project_plugin / "plugin.yaml").write_text(yaml.safe_dump({
+        "name": "github-pr-feedback",
+        "provides_hooks": ["pre_tool_call", "pre_kanban_complete"],
+    }))
+    monkeypatch.setattr(worker_contract, "_entrypoint_override_present", lambda *_args: False)
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "1" if project_enabled else "")
+
+    assert worker_contract.worker_contract_enabled(
+        tmp_path, "worker", project_root=tmp_path / "project"
+    ) is expected
+
+
+def test_worker_readiness_rejects_categorized_project_override(tmp_path, monkeypatch):
+    import github_pr_feedback.worker_contract as worker_contract
+
+    worker = tmp_path / "profiles/worker"
+    worker.mkdir(parents=True)
+    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    project_plugin = tmp_path / "project/.hermes/plugins/category/github-pr-feedback"
+    project_plugin.mkdir(parents=True)
+    (project_plugin / "plugin.yaml").write_text(yaml.safe_dump({
+        "name": "github-pr-feedback",
+        "provides_hooks": ["pre_tool_call", "pre_kanban_complete"],
+    }))
+    monkeypatch.setattr(worker_contract, "_entrypoint_override_present", lambda *_args: False)
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "1")
+
+    assert worker_contract.worker_contract_enabled(
+        tmp_path, "worker", project_root=tmp_path / "project"
+    ) is False
+
+
+def test_worker_readiness_rejects_entrypoint_override_without_completion_hooks(tmp_path, monkeypatch):
+    from github_pr_feedback.worker_contract import worker_contract_enabled
+
+    worker = tmp_path / "profiles/worker"
+    worker.mkdir(parents=True)
+    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda: [
+        SimpleNamespace(group="hermes_agent.plugins", name="github-pr-feedback")
+    ])
+
+    assert worker_contract_enabled(tmp_path, "worker") is False
+
+
+def test_worker_readiness_rejects_manifest_declared_hooks_without_importing_worker(tmp_path):
+    from github_pr_feedback.worker_contract import worker_contract_enabled
+
+    worker = tmp_path / "profiles/worker"
+    plugin = worker / "plugins/github-pr-feedback"
+    plugin.mkdir(parents=True)
+    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    (plugin / "plugin.yaml").write_text(yaml.safe_dump({
+        "name": "github-pr-feedback", "provides_hooks": ["pre_tool_call", "pre_kanban_complete"]
+    }))
+    (plugin / "__init__.py").write_text("raise AssertionError('worker code imported')\n")
+
+    assert worker_contract_enabled(tmp_path, "worker") is False
+
+
+@pytest.mark.parametrize("enabled", [["github-pr-feedback"], ["category/github-pr-feedback"]])
+def test_worker_readiness_rejects_untrusted_bare_and_canonical_manifest_keys(tmp_path, enabled):
+    from github_pr_feedback.worker_contract import worker_contract_enabled
+
+    worker = tmp_path / "profiles/worker"
+    plugin = worker / "plugins/category/github-pr-feedback"
+    plugin.mkdir(parents=True)
+    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+        "enabled": enabled, "disabled": []}}))
+    (plugin / "plugin.yaml").write_text(yaml.safe_dump({
+        "name": "github-pr-feedback", "provides_hooks": ["pre_tool_call", "pre_kanban_complete"]
+    }))
+
+    assert worker_contract_enabled(tmp_path, "worker") is False
 
 
 @pytest.mark.parametrize("managed,raw,expected", [

@@ -272,6 +272,15 @@ def _finalize_child_env(env: dict) -> dict:
     _inject_session_context_env(env)
     _strip_hermes_owned_pythonpath_and_runtime_markers(env)
     _apply_windows_msys_bash_env_defaults(env)
+    # Prevent child tools from silently consulting the operator's GitHub
+    # keyring/config when their explicit token was scrubbed.
+    # gh expects GH_CONFIG_DIR to be a directory and will try to open
+    # config.yml beneath it. Use a private empty directory rather than a
+    # device node, which makes every gh invocation fail before auth checks.
+    gh_config_dir = Path(tempfile.mkdtemp(prefix="hermes-gh-config-"))
+    env["GH_CONFIG_DIR"] = str(gh_config_dir)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
     from agent.delegation_context import delegated_child_subprocess_env
     return delegated_child_subprocess_env(env)
 
@@ -295,8 +304,11 @@ def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
     """Filter Hermes-managed secrets from a subprocess environment (background/PTY
     spawn path, search workers, computer-use driver, user-script runners)."""
-    return _scrubbed_env([(base_env or {}, False), (extra_env or {}, True)],
-                         _plugin_terminal_env_strip_keys(), lambda p: p)
+    return _scrubbed_env(
+        [(base_env or {}, False), (extra_env or {}, True)],
+        _ALWAYS_STRIP_KEYS | _plugin_terminal_env_strip_keys(),
+        lambda p: p,
+    )
 
 
 def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str]:

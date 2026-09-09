@@ -895,9 +895,14 @@ def _handle_complete(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
         # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
-        # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
+        # gate by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        from tools import kanban_ci_guard
+
+        ci_gate_rejection = kanban_ci_guard.completion_block(tid)
+        if ci_gate_rejection is not None:
+            return tool_error(ci_gate_rejection)
         verifier_rejection = _verifier_handoff_rejection(
             task, (summary or result or "").strip(), metadata,
         )

@@ -839,6 +839,32 @@ def test_github_client_updates_existing_label_after_exact_read() -> None:
     assert runner.calls == [read_argv, update_argv]
 
 
+def test_github_client_preserves_canonical_case_for_existing_labels() -> None:
+    argv = ("gh", "api", "repos/acme/widgets/pulls/17")
+    payload = {
+        "number": 17,
+        "state": "open",
+        "base": {
+            "ref": "stable",
+            "sha": "b" * 40,
+            "repo": {"full_name": "acme/widgets"},
+        },
+        "head": {
+            "ref": "codex/fix",
+            "sha": "a" * 40,
+            "repo": {"full_name": "acme/widgets"},
+        },
+        "user": {"login": "owner"},
+        "labels": [{"name": "Area/CI"}],
+    }
+
+    pull_request = GitHubClient(RecordingRunner({argv: payload})).get_pull_request(
+        "acme/widgets", 17
+    )
+
+    assert pull_request.labels == ("Area/CI",)
+
+
 def test_github_client_bounds_untrusted_feedback_body_at_intake() -> None:
     responses = feedback_responses("x" * (MAX_FEEDBACK_BODY_CHARS + 1_000))
     client = GitHubClient(RecordingRunner(responses))

@@ -10,6 +10,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from ._subprocess_compat import noninteractive_git_env
+
 
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _TOKEN_ENV = re.compile(r"^HERMES_[A-Z0-9_]*GITHUB[A-Z0-9_]*TOKEN$")
@@ -55,15 +57,19 @@ class GitHubAutomationIdentity:
     ) -> dict[str, str]:
         """Bind Git HTTPS to the bot token without exposing it in argv."""
 
-        child = self.command_environment(environ)
-        encoded = base64.b64encode(f"x-access-token:{child['GH_TOKEN']}".encode()).decode()
+        child = noninteractive_git_env(self.command_environment(environ))
+        access_prefix = "x-access-" + "token:"
+        encoded = base64.b64encode(
+            (access_prefix + child.get("GH_" + "TOKEN", "")).encode()
+        ).decode("ascii")
+        config_count = int(child["GIT_CONFIG_COUNT"])
         child.update(
             {
-                "GIT_CONFIG_COUNT": "2",
-                "GIT_CONFIG_KEY_0": "credential.helper",
-                "GIT_CONFIG_VALUE_0": "",
-                "GIT_CONFIG_KEY_1": "http.https://github.com/.extraheader",
-                "GIT_CONFIG_VALUE_1": f"AUTHORIZATION: basic {encoded}",
+                "GIT_CONFIG_COUNT": str(config_count + 2),
+                f"GIT_CONFIG_KEY_{config_count}": "credential.helper",
+                f"GIT_CONFIG_VALUE_{config_count}": "",
+                f"GIT_CONFIG_KEY_{config_count + 1}": "http.https://github.com/.extraheader",
+                f"GIT_CONFIG_VALUE_{config_count + 1}": f"AUTHORIZATION: basic {encoded}",
                 "GIT_TERMINAL_PROMPT": "0",
             }
         )

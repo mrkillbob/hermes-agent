@@ -30,6 +30,14 @@ from hermes_constants import get_default_hermes_root, get_hermes_home
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
+
+GUARDED_EXECUTION_CONTRACT = (
+    "# Guarded execution\n"
+    "Work from the current conversation worktree and preserve the user's changes. "
+    "Before claiming completion, verify the exact files and run the narrowest relevant checks. "
+    "Keep security-sensitive or destructive operations explicit and fail closed when the target "
+    "cannot be verified."
+)
 _PLUGIN_SECTION_FRAME_RE = re.compile(
     r"^## Plugin Context: (?P<id>[a-z0-9][a-z0-9._-]{0,127})\n<!-- hermes-plugin-section-chars:(?P<chars>[0-9]{1,4}) -->\n\n",
     re.MULTILINE,
@@ -303,12 +311,24 @@ def _skills_prompt(agent: Any) -> str:
     import model_tools
     avail_toolsets = {model_tools.get_toolset_for_tool(tool_name) for tool_name in agent.valid_tool_names} - {None, ""}
     try:
+        from agent.coding_context import guarded_prompt_enabled
+        compact_all_categories = guarded_prompt_enabled(
+            platform=agent.platform,
+            cwd=resolve_context_cwd(),
+            provider=getattr(agent, "provider", None),
+            model=getattr(agent, "model", None),
+        )
+    except Exception:
+        compact_all_categories = False
+    try:
         from agent.coding_context import coding_compact_skill_categories
         _compact_cats = coding_compact_skill_categories(platform=agent.platform, cwd=resolve_context_cwd())
     except Exception:
         _compact_cats = frozenset()
     return _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
-                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
+                                         compact_categories=_compact_cats or None,
+                                         skills_dir_override=_agent_skills_dir(agent),
+                                         compact_all_categories=compact_all_categories)
 
 
 def _bot_mode_parts(agent: Any) -> List[str]:
@@ -496,6 +516,16 @@ def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool
 def _guidance_parts(agent: Any) -> List[str]:
     """Universal + tool-aware + model-gated guidance blocks, each gated by its config.yaml key."""
     parts: List[str] = []
+    try:
+        from agent.coding_context import guarded_prompt_enabled
+        guarded = guarded_prompt_enabled(
+            platform=agent.platform,
+            cwd=resolve_context_cwd(),
+            provider=getattr(agent, "provider", None),
+            model=getattr(agent, "model", None),
+        )
+    except Exception:
+        guarded = False
     if agent.valid_tool_names:
         parts += [
             text for flag, text in (
@@ -518,7 +548,11 @@ def _guidance_parts(agent: Any) -> List[str]:
             parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
     if _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS):
         from agent.prompt_builder import execution_guidance_text
-        parts.append(execution_guidance_text(agent.valid_tool_names))
+        if not guarded:
+            parts.append(execution_guidance_text(agent.valid_tool_names))
+    if guarded:
+        parts = [part for part in parts if part != PARALLEL_TOOL_CALL_GUIDANCE]
+        parts.append(GUARDED_EXECUTION_CONTRACT)
     return parts
 
 

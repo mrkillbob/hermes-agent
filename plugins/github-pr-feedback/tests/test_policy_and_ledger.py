@@ -13,6 +13,7 @@ import github_pr_feedback.ledger as ledger_module
 from github_pr_feedback.ledger import (
     ClaimLease,
     FeedbackLedger,
+    LedgerStateError,
     MaintenanceCommandEvidence,
 )
 from github_pr_feedback.policy import (
@@ -1274,6 +1275,55 @@ def test_local_ci_claim_waits_for_active_exact_head_repair(tmp_path: Path) -> No
         actioned_at=datetime(2026, 8, 24, 13, 0, tzinfo=UTC),
     )
     assert claim_lease(ledger, audit, owner="ci-scanner") is not None
+    ledger.close()
+
+
+def test_repair_claim_waits_for_active_exact_head_local_ci(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    repair = receipt(feedback_kind="pr_repair", feedback_id="repair:merge_conflict")
+    claimed_at = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    audit_lease = ledger.claim_ci_run(
+        "acme/widgets",
+        17,
+        "b" * 40,
+        "a" * 40,
+        "m" * 64,
+        supervisor_pid=123,
+        claimed_at=claimed_at,
+        stale_before=claimed_at - timedelta(minutes=5),
+        pid_is_alive=lambda _pid: False,
+    )
+
+    assert audit_lease is not None
+    assert claim_lease(ledger, repair, owner="repair-scanner") is None
+
+    ledger.finish_ci_run(
+        audit_lease,
+        status="completed",
+        completed_at=datetime(2026, 8, 24, 13, 0, tzinfo=UTC),
+    )
+    assert claim_lease(ledger, repair, owner="repair-scanner") is not None
+    ledger.close()
+
+
+def test_local_ci_run_claim_waits_for_pending_mutation(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    repair = receipt(feedback_kind="pr_repair", feedback_id="repair:merge_conflict")
+    repair_lease = claim_lease(ledger, repair)
+
+    assert repair_lease is not None
+    with pytest.raises(LedgerStateError, match="PR mutation is pending"):
+        ledger.claim_ci_run(
+            repair.repository,
+            repair.pr_number,
+            "b" * 40,
+            repair.head_sha,
+            "m" * 64,
+            supervisor_pid=123,
+            claimed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+            stale_before=datetime(2026, 8, 24, 11, 55, tzinfo=UTC),
+            pid_is_alive=lambda _pid: False,
+        )
     ledger.close()
 
 

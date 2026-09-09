@@ -758,7 +758,7 @@ export interface UsageStats {
 export interface StarmapNode {
   id: string
   label: string
-  kind: 'memory' | 'skill'
+  kind: 'memory' | 'shared-memory' | 'skill' | 'skill-reference'
   memorySource?: 'memory' | 'profile'
   timestamp?: null | number
   category: string

@@ -38,6 +38,8 @@ class WriteResult:
     # True when the on-disk sha256 matched the intended content; None when the
     # backend couldn't verify (no sha256sum). A mismatch is a hard error, never a flag.
     verified: Optional[bool] = None
+    # True when the requested bytes already matched the existing file.
+    no_change: bool = False
     lint: Optional[Dict[str, Any]] = None
     # LSP semantic diagnostics, kept separate from ``lint`` (syntax) so the model
     # reads the two as independent signals. None when LSP is off/inapplicable.

@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shlex
+import threading
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -77,6 +78,98 @@ _PROTECTED_REMOTE_PROVIDERS = frozenset({
 })
 logger = logging.getLogger(__name__)
 
+_MAX_TERMINAL_REPLAY_PROJECTIONS = 32
+_MAX_TERMINAL_REPLAY_CALL_IDS = 4096
+_MAX_TERMINAL_REPLAY_PROJECTION_BYTES = 16 * 1024
+_terminal_replay_projection_lock = threading.Lock()
+_terminal_replay_projections: dict[
+    str, tuple[Callable[[Any], Sequence[str]], Callable[[str], str]]
+] = {}
+
+
+def register_terminal_replay_projection(
+    name: str,
+    *,
+    call_id_resolver: Callable[[Any], Sequence[str]],
+    result_projector: Callable[[str], str],
+) -> None:
+    """Register one bounded plugin-owned terminal result projection."""
+
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", name):
+        raise ValueError("terminal replay projection names must be lowercase kebab-case")
+    if not callable(call_id_resolver) or not callable(result_projector):
+        raise TypeError("terminal replay projections require callable handlers")
+    with _terminal_replay_projection_lock:
+        if (
+            name not in _terminal_replay_projections
+            and len(_terminal_replay_projections) >= _MAX_TERMINAL_REPLAY_PROJECTIONS
+        ):
+            raise RuntimeError("terminal replay projection registry is full")
+        _terminal_replay_projections[name] = (call_id_resolver, result_projector)
+
+
+def _registered_terminal_replay_projections(
+    value: Any,
+) -> Mapping[str, Callable[[str], str]]:
+    """Resolve exact call IDs to bounded, registered plugin projectors."""
+
+    with _terminal_replay_projection_lock:
+        registrations = tuple(_terminal_replay_projections.values())
+    owners: dict[str, tuple[Callable[[str], str], int] | None] = {}
+    for registration_index, (resolver, projector) in enumerate(registrations):
+        try:
+            call_ids = resolver(value)
+        except Exception:  # pragma: no cover - plugin boundary is fail-closed.
+            logger.warning("terminal replay projection resolver failed", exc_info=True)
+            continue
+        if isinstance(call_ids, (str, bytes)):
+            continue
+        for call_id in call_ids:
+            if not isinstance(call_id, str) or not call_id or len(call_id) > 512:
+                continue
+            for call_id_variant in tool_result_id_variants(call_id):
+                existing = owners.get(call_id_variant)
+                owner = (projector, registration_index)
+                if existing is None and call_id_variant in owners:
+                    continue
+                if existing is not None and existing[1] != registration_index:
+                    owners[call_id_variant] = None
+                else:
+                    owners[call_id_variant] = owner
+                if len(owners) >= _MAX_TERMINAL_REPLAY_CALL_IDS:
+                    return MappingProxyType(
+                        {
+                            key: candidate[0]
+                            for key, candidate in owners.items()
+                            if candidate is not None
+                        }
+                    )
+    return MappingProxyType(
+        {
+            key: candidate[0]
+            for key, candidate in owners.items()
+            if candidate is not None
+        }
+    )
+
+
+def _project_registered_terminal_result(
+    projector: Callable[[str], str], output: str
+) -> str:
+    """Apply a plugin projector while retaining the generic size boundary."""
+
+    try:
+        projected = projector(output)
+    except Exception:  # pragma: no cover - plugin boundary is fail-closed.
+        logger.warning("terminal replay projection failed", exc_info=True)
+        return _terminal_replay_result("")
+    if not isinstance(projected, str):
+        return _terminal_replay_result("")
+    projected = redact_remote_unsafe_text(projected)
+    if len(projected.encode("utf-8")) > _MAX_TERMINAL_REPLAY_PROJECTION_BYTES:
+        return _terminal_replay_result("")
+    return projected
+
 _VALIDATED_SYNTAX_TOOL_NAMES = frozenset({"terminal"})
 _REMOTE_KANBAN_PROJECTION_TOOL_NAMES = frozenset({"kanban_show"})
 _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES = frozenset({"kanban_attachments"})
@@ -118,50 +211,6 @@ _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES = frozenset(
         "read_file",
         "web_extract",
         "web_search",
-    }
-)
-_GITHUB_PR_FEEDBACK_TERMINAL_SUBCOMMANDS = frozenset(
-    {
-        "inspect-pr",
-        "complete-feedback",
-        "submit-review",
-        "status",
-    }
-)
-_GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS = frozenset(
-    {
-        "base_branch",
-        "base_sha",
-        "codex_retrigger_status",
-        "event",
-        "expected_head_sha",
-        "fallback",
-        "feedback_body_excerpt",
-        "feedback_id",
-        "feedback_is_bot",
-        "feedback_kind",
-        "feedback_reviewer",
-        "head_ref_name",
-        "head_repository",
-        "head_sha",
-        "local_ci_status",
-        "number",
-        "observed_head_sha",
-        "pr_number",
-        "pr_state",
-        "reason",
-        "repository",
-        "resolved_head_sha",
-        "review_thread_resolved",
-        "status",
-        "error_excerpt",
-        "receipt_id",
-        "manifest_digest",
-        "handoff_reason",
-        "handoff_status",
-        "repair_status",
-        "retryable",
-        "command_count",
     }
 )
 _GITHUB_LIST_TERMINAL_MAX_ROWS = 100
@@ -959,63 +1008,6 @@ def _github_list_terminal_call_limits(value: Any) -> dict[str, int]:
     return limits
 
 
-def _github_pr_feedback_terminal_call_ids(value: Any) -> frozenset[str]:
-    """Recognize governed PR-feedback terminal commands with JSON status output."""
-
-    recognized: set[str] = set()
-
-    def is_hermes_launcher_token(token: str) -> bool:
-        return Path(token).name == "hermes" or token == "<private-path>"
-
-    def command_is_pr_feedback(arguments: Any) -> bool:
-        try:
-            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
-            command = parsed.get("command") if isinstance(parsed, Mapping) else None
-            tokens = shlex.split(command) if isinstance(command, str) else []
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return False
-        for index, token in enumerate(tokens):
-            if (
-                token == "github-pr-feedback"
-                and index > 0
-                and (
-                    tokens[max(0, index - 2):index] == ["-m", "hermes_cli.main"]
-                    or is_hermes_launcher_token(tokens[index - 1])
-                )
-            ):
-                return (
-                    index + 1 < len(tokens)
-                    and tokens[index + 1] in _GITHUB_PR_FEEDBACK_TERMINAL_SUBCOMMANDS
-                )
-        return False
-
-    def visit(item: Any) -> None:
-        if isinstance(item, Mapping):
-            direct_function = item.get("function")
-            direct_name = (
-                direct_function.get("name")
-                if isinstance(direct_function, Mapping)
-                else item.get("name")
-            )
-            if item.get("type") in {"function", "function_call"} and direct_name == "terminal":
-                arguments = (
-                    direct_function.get("arguments")
-                    if isinstance(direct_function, Mapping)
-                    else item.get("arguments")
-                )
-                call_id = item.get("call_id") or item.get("id")
-                if command_is_pr_feedback(arguments) and isinstance(call_id, str):
-                    recognized.update(tool_result_id_variants(call_id))
-            for child in item.values():
-                visit(child)
-        elif isinstance(item, (list, tuple)):
-            for child in item:
-                visit(child)
-
-    visit(value)
-    return frozenset(recognized)
-
-
 def _github_api_extract_call_limits(value: Any) -> dict[str, int]:
     """Bind GitHub REST list projections to exact ``web_extract`` calls.
 
@@ -1222,7 +1214,7 @@ def _github_api_paginate_terminal_call_limits(value: Any) -> dict[str, int]:
             return None
         path = tokens[3]
         if not re.fullmatch(
-            r"/repos/[^/\s]+/[^/\s]+/(?:issues|pulls)\?state=open(?:&per_page=[1-9]\d{0,2})?",
+            r"/repos/[^/\s]+/[^/\s]+/(?:issues|pulls)\?state=open(?:&per_page=[1-9]\d{0,2})?",  # windows-footgun: ok — regex literal
             path,
         ):
             return None
@@ -2573,7 +2565,7 @@ def _typed_payload(
     rg_projection_tool_call_ids: frozenset[str] = frozenset(),
     git_diff_name_only_projection_tool_call_ids: frozenset[str] = frozenset(),
     git_review_summary_projection_tool_call_ids: frozenset[str] = frozenset(),
-    github_pr_feedback_terminal_call_ids: frozenset[str] = frozenset(),
+    terminal_replay_projections: Mapping[str, Callable[[str], str]] | None = None,
     kanban_assignees_terminal_call_ids: frozenset[str] = frozenset(),
     github_list_terminal_call_limits: Mapping[str, int] | None = None,
     github_api_extract_call_limits: Mapping[str, int] | None = None,
@@ -2762,9 +2754,15 @@ def _typed_payload(
                 or value.get("type") == "function_call_output"
             )
         )
-        is_github_pr_feedback_terminal_result = (
+        terminal_replay_projector = (
+            terminal_replay_projections.get(output_call_id)
+            if isinstance(terminal_replay_projections, Mapping)
+            and isinstance(output_call_id, str)
+            else None
+        )
+        is_terminal_replay_projection_result = (
             isinstance(output_call_id, str)
-            and output_call_id in github_pr_feedback_terminal_call_ids
+            and terminal_replay_projector is not None
             and (
                 value.get("role") == "tool"
                 or value.get("type") == "function_call_output"
@@ -2872,7 +2870,7 @@ def _typed_payload(
                 is_git_diff_name_only_projection_tool_result,
                 is_git_review_summary_projection_tool_result,
                 is_pytest_terminal_result,
-                is_github_pr_feedback_terminal_result,
+                is_terminal_replay_projection_result,
                 is_kanban_assignees_result,
                 isinstance(github_list_limit, int),
                 isinstance(github_api_extract_limit, int),
@@ -2933,7 +2931,7 @@ def _typed_payload(
                     is_git_diff_name_only_projection_tool_result,
                     is_git_review_summary_projection_tool_result,
                     is_pytest_terminal_result,
-                    is_github_pr_feedback_terminal_result,
+                    is_terminal_replay_projection_result,
                     is_kanban_assignees_result,
                     is_plain_github_list_terminal_result,
                     is_terminal_replay_result,
@@ -3121,9 +3119,11 @@ def _typed_payload(
                     _GITHUB_PLAIN_LIST_OUTPUT_REPLAY
                 )
                 continue
-            if is_structured_result and is_github_pr_feedback_terminal_result:
+            if is_structured_result and is_terminal_replay_projection_result:
                 typed[key] = GeneratedContextSegment(
-                    _github_pr_feedback_terminal_result(structured_text or "")
+                    _project_registered_terminal_result(
+                        terminal_replay_projector, structured_text or ""
+                    )
                 )
                 continue
             if is_structured_result and is_terminal_replay_result:
@@ -3284,12 +3284,12 @@ def _typed_payload(
                 typed[key] = GeneratedContextSegment(_pytest_terminal_result(item))
                 continue
             if (
-                is_github_pr_feedback_terminal_result
+                is_terminal_replay_projection_result
                 and key in {"content", "output"}
                 and isinstance(item, str)
             ):
                 typed[key] = GeneratedContextSegment(
-                    _github_pr_feedback_terminal_result(item)
+                    _project_registered_terminal_result(terminal_replay_projector, item)
                 )
                 continue
             if (
@@ -3510,7 +3510,7 @@ def _typed_payload(
                 rg_projection_tool_call_ids=rg_projection_tool_call_ids,
                 git_diff_name_only_projection_tool_call_ids=git_diff_name_only_projection_tool_call_ids,
                 git_review_summary_projection_tool_call_ids=git_review_summary_projection_tool_call_ids,
-                github_pr_feedback_terminal_call_ids=github_pr_feedback_terminal_call_ids,
+                terminal_replay_projections=terminal_replay_projections,
                 kanban_assignees_terminal_call_ids=kanban_assignees_terminal_call_ids,
                 github_list_terminal_call_limits=github_list_terminal_call_limits,
                 github_api_extract_call_limits=github_api_extract_call_limits,
@@ -3572,7 +3572,7 @@ def _typed_payload(
                 rg_projection_tool_call_ids=rg_projection_tool_call_ids,
                 git_diff_name_only_projection_tool_call_ids=git_diff_name_only_projection_tool_call_ids,
                 git_review_summary_projection_tool_call_ids=git_review_summary_projection_tool_call_ids,
-                github_pr_feedback_terminal_call_ids=github_pr_feedback_terminal_call_ids,
+                terminal_replay_projections=terminal_replay_projections,
                 kanban_assignees_terminal_call_ids=kanban_assignees_terminal_call_ids,
                 github_list_terminal_call_limits=github_list_terminal_call_limits,
                 github_api_extract_call_limits=github_api_extract_call_limits,
@@ -3749,95 +3749,6 @@ def _project_file_mutation_result(output: str) -> str:
         if safe_note:
             projection["note"] = safe_note
     return json.dumps(projection, separators=(",", ":"))
-
-
-def _github_pr_feedback_terminal_result(output: str) -> str:
-    """Replay bounded JSON status from governed PR-feedback commands."""
-
-    def safe_failure_excerpt(value: Any) -> str | None:
-        if not isinstance(value, str) or not value.strip():
-            return None
-        safe = redact_remote_unsafe_text(
-            redact_sensitive_text(value, force=True, redact_url_credentials=True)
-        )
-        encoded = safe.encode("utf-8")
-        if len(encoded) > 1200:
-            safe = encoded[:1190].decode("utf-8", errors="ignore") + "\n<truncated>"
-        return safe
-
-    exit_code = None
-    text = output
-    failure_excerpt = None
-    try:
-        parsed = json.loads(output)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        parsed = None
-    if isinstance(parsed, Mapping):
-        maybe_exit = parsed.get("exit_code")
-        if isinstance(maybe_exit, int):
-            exit_code = maybe_exit
-        for key in ("stderr", "error"):
-            failure_excerpt = safe_failure_excerpt(parsed.get(key))
-            if failure_excerpt:
-                break
-        for key in ("stdout", "output", "content"):
-            value = parsed.get(key)
-            if isinstance(value, str):
-                text = value
-                break
-    payload: dict[str, object] | None = None
-    decoder = json.JSONDecoder()
-    for line in reversed(str(text or "").splitlines() or [str(text or "")]):
-        stripped = line.strip()
-        if not stripped.startswith("{"):
-            continue
-        try:
-            candidate, _end = decoder.raw_decode(stripped)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(candidate, Mapping):
-            payload = {}
-            for key, value in candidate.items():
-                if key not in _GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS:
-                    continue
-                if key in {"receipt_id", "manifest_digest"} and (
-                    not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
-                ):
-                    continue
-                if value is None or isinstance(value, (bool, int)):
-                    payload[str(key)] = value
-                    continue
-                if not isinstance(value, str):
-                    continue
-                limit = 1800 if key == "feedback_body_excerpt" else 200
-                if len(value) <= limit:
-                    payload[str(key)] = value
-            break
-    if failure_excerpt is None and exit_code not in (None, 0) and payload is None:
-        # Terminal backends merge stderr into output. Retain only recognizable
-        # launch diagnostics, never arbitrary failed-command stdout/source.
-        diagnostics = [line for line in str(text or "").splitlines() if re.search(
-            r"(?:ModuleNotFoundError:|ImportError:|command not found|No such file or directory)",
-            line,
-        )]
-        failure_excerpt = safe_failure_excerpt("\n".join(diagnostics[:4]))
-    replay: dict[str, object] = {
-        "terminal_result": "github_pr_feedback",
-        "exit_code": exit_code,
-        "raw_output": "omitted_from_remote_replay",
-    }
-    if payload is not None:
-        replay["json"] = payload
-    if isinstance(parsed, Mapping):
-        session_id = parsed.get("session_id")
-        if isinstance(session_id, str) and re.fullmatch(r"proc_[0-9a-f]{12}", session_id):
-            replay["session_id"] = session_id
-            pid = parsed.get("pid")
-            if type(pid) is int and 0 < pid < 2**31:
-                replay["pid"] = pid
-    if failure_excerpt:
-        replay["error_excerpt"] = failure_excerpt
-    return json.dumps(replay, sort_keys=True, separators=(",", ":"))
 
 
 def _structural_literal_hashes(value: Any) -> frozenset[str]:
@@ -4264,10 +4175,10 @@ def authorize_agent_sdk_kwargs(
             if protected_kanban_remote and protected_provider_route
             else frozenset()
         ),
-        github_pr_feedback_terminal_call_ids=(
-            _github_pr_feedback_terminal_call_ids(body)
+        terminal_replay_projections=(
+            _registered_terminal_replay_projections(body)
             if protected_kanban_remote and protected_provider_route
-            else frozenset()
+            else None
         ),
         kanban_assignees_terminal_call_ids=(
             _kanban_assignees_terminal_call_ids(body)

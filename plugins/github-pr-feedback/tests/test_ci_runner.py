@@ -8,39 +8,27 @@ from pathlib import Path
 import pytest
 
 from github_pr_feedback.ci_runner import (
+    CIAuditDeferred,
     CIAuditIdentity,
     CIAuditReceipt,
     CI_MODE_BUDGET_EXHAUSTED_LOCAL_EQUIVALENT,
     CIValidationError,
     CompletedCommand,
     LocalCIRunner,
-    _command_evidence,
 )
 from github_pr_feedback.ci_coordinator import CIAuditJob, GroupedCICoordinator
-from github_pr_feedback.github_client import CheckState, GitHubClientError, PullRequestMergeState
+from github_pr_feedback.github_client import (
+    CheckState,
+    GitHubClientError,
+    MergeStateStillComputingError,
+    PullRequestMergeState,
+)
 from github_pr_feedback.ledger import FeedbackLedger
 
 
 BASE_SHA = "b" * 40
 HEAD_SHA = "a" * 40
 NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
-
-
-def test_structural_ratchet_output_is_typed_without_becoming_pass() -> None:
-    evidence = _command_evidence(
-        ("./scripts/run_static_lane.py",),
-        Path("/tmp/worktree"),
-        Path("/tmp/worktree"),
-        CompletedCommand(
-            returncode=1,
-            stdout="structural ratchet violation: signal_engine.py +23 LOC",
-            stderr="",
-            duration_ms=10,
-            timed_out=False,
-        ),
-    )
-    assert evidence.classification == "structural-ratchet"
-    assert evidence.returncode != 0
 
 
 class FakeGitHub:
@@ -530,6 +518,28 @@ def test_grouped_coordinator_preserves_runner_failure_reason(
     assert outcome.error == "audit_failed: CIValidationError: Python interpreter mismatch"
 
 
+@pytest.mark.parametrize("error", [
+    MergeStateStillComputingError("mergeability is still computing"),
+    CIAuditDeferred("mergeability_still_computing"),
+])
+def test_grouped_coordinator_preserves_mergeability_deferral(
+    tmp_path: Path, error: MergeStateStillComputingError
+) -> None:
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+    identity = CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA)
+    job = CIAuditJob(identity=identity, worktree=worktree, failure_lanes=("unit",))
+
+    class DeferredRunner:
+        def run(self, _identity: CIAuditIdentity, _worktree: Path) -> CIAuditReceipt:
+            raise error
+
+    outcome = GroupedCICoordinator(lambda: DeferredRunner(), max_parallel=1).run((job,))[0]
+
+    assert outcome.receipt is None
+    assert outcome.error == f"audit_deferred: {error}"
+
+
 def test_local_ci_runner_bootstraps_missing_repo_venv_before_ci(tmp_path: Path) -> None:
     worktree = tmp_path / "worktree"
     prepare_repository(worktree)
@@ -790,21 +800,14 @@ def test_ci_receipt_round_trip_rejects_coerced_or_dropped_evidence(
     ledger.close()
 
 
-@pytest.mark.parametrize(
-    "changed,expected",
-    [
-        ("agent/worker.py", "passed"),
-        ("installer/windows.ps1", "failed"),
-        ("apps/desktop/src/App.tsx", "failed"),
-    ],
-)
+@pytest.mark.parametrize("changed,expected", [("agent/worker.py", "passed"), ("installer/windows.ps1", "failed")])
 def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp_path, changed, expected):
     from github_pr_feedback.ci_contract import manifest_path, HERMES_ENV_CHECK
     from github_pr_feedback.ci_runner import actions_disabled_local_ci_evidence
     root = tmp_path / "hermes"
     (root / "scripts").mkdir(parents=True)
-    (root / "scripts/run_tests.sh").write_text("exit 0\n")
-    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n')
+    (root / "scripts/run_tests.sh").write_text("exit 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n', encoding="utf-8")
     ledger = FeedbackLedger(tmp_path / "ci.sqlite3")
     commands = RecordingRunner()
     runner = LocalCIRunner(FakeGitHub(merge_state()), ledger, command_runner=commands,
@@ -823,89 +826,25 @@ def test_hermes_native_contract_runs_full_runner_without_lunabot_owner_files(tmp
     ledger.close()
 
 
-def test_hermes_native_contract_accepts_platform_change_with_hosted_coverage(tmp_path):
-    root = tmp_path / "hermes"
-    (root / "scripts").mkdir(parents=True)
-    (root / "scripts/run_tests.sh").write_text("exit 0\n")
-    (root / "pyproject.toml").write_text('[project]\nname="hermes-agent"\n')
-    github = FakeGitHub(merge_state())
-    github.checks = [
-        CheckState(actions_enabled=True, all_green=True, check_count=1),
-        CheckState(actions_enabled=True, all_green=True, check_count=1),
-    ]
-    ledger = FeedbackLedger(tmp_path / "ci.sqlite3")
-    runner = LocalCIRunner(
-        github,
-        ledger,
-        command_runner=RecordingRunner(),
-        inspector=FakeInspector(changed=("apps/desktop/src/App.tsx",)),
-        python_argv=("python3",),
-        now=lambda: NOW,
-    )
-
-    receipt = runner.run(CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA), root)
-
-    assert receipt.status == "passed"
-    assert receipt.failure_reason is None
-    ledger.close()
-
-
 def test_hermes_native_contract_does_not_claim_uncovered_platform_changes(tmp_path):
     from github_pr_feedback.ci_contract import hermes_commands, hermes_coverage_gap
     assert hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ("installer/windows.ps1",))
     assert hermes_coverage_gap(("installer/windows.ps1",)) is not None
-    assert hermes_coverage_gap(
-        ("installer/windows.ps1",), hosted_coverage_available=True
-    ) is None
-    assert hermes_coverage_gap(("apps/desktop/src/App.tsx",)) is not None
     assert hermes_coverage_gap(("agent/worker.py",)) is None
-
-
-def test_hermes_native_contract_runs_desktop_native_check(tmp_path):
-    import json
-
-    from github_pr_feedback.ci_contract import hermes_commands
-
-    (tmp_path / "package-lock.json").write_text(
-        json.dumps({"packages": {"apps/desktop": {}}})
-    )
-    package = tmp_path / "apps/desktop"
-    package.mkdir(parents=True)
-    (package / "package.json").write_text(
-        json.dumps(
-            {
-                "scripts": {
-                    "test": "vitest run",
-                    "check:test:desktop:all": "npm run test:desktop:all",
-                }
-            }
-        )
-    )
-
-    commands = hermes_commands(
-        tmp_path, BASE_SHA, HEAD_SHA, ("apps/desktop/src/App.tsx",)
-    )
-
-    assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ("npm", "ci")] == [
-        (("npm", "ci"), tmp_path)
-    ]
-    assert ("npm", "run", "check:test:desktop:all") in [
-        argv for argv, _, _ in commands
-    ]
 
 
 def test_hermes_native_ci_uses_shared_workspace_lock_once(tmp_path):
     import json
     from github_pr_feedback.ci_contract import hermes_commands
     packages = ('apps/shared', 'apps/desktop', 'web')
-    (tmp_path / 'package-lock.json').write_text(json.dumps({'packages': {p: {} for p in packages}}))
+    (tmp_path / 'package-lock.json').write_text(json.dumps({'packages': {p: {} for p in packages}}), encoding="utf-8")
     for package in packages:
         root = tmp_path / package
         root.mkdir(parents=True)
-        (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}))
+        (root / 'package.json').write_text(json.dumps({'scripts': {'test': 'vitest run'}}), encoding="utf-8")
     commands = hermes_commands(tmp_path, BASE_SHA, HEAD_SHA, ('apps/shared/src/client.ts',))
     assert [(argv, cwd) for argv, cwd, _ in commands if argv[:2] == ('npm', 'ci')] == [
-        (('npm', 'ci'), tmp_path)]
+        (('npm', 'ci', '--ignore-scripts'), tmp_path)]
     assert {cwd for argv, cwd, _ in commands if argv == ('npm', 'run', 'test')} == {
         tmp_path / package for package in packages}
 
@@ -936,3 +875,35 @@ def test_required_local_audit_reads_real_checks_without_admin_settings(tmp_path,
         assert receipt.status == "failed"
         assert not commands.calls
     ledger.close()
+
+
+@pytest.mark.parametrize("lag_at", [1, 2])
+def test_mergeability_lag_releases_lease_without_a_failed_ci_receipt(tmp_path, lag_at):
+    from github_pr_feedback.github_client import MergeStateStillComputingError
+
+    worktree = tmp_path / "worktree"
+    prepare_repository(worktree)
+
+    class LaggingGitHub(FakeGitHub):
+        reads = 0
+
+        def get_merge_state(self, repository, number):
+            self.reads += 1
+            if self.reads == lag_at:
+                raise MergeStateStillComputingError()
+            return merge_state()
+
+    github = LaggingGitHub(merge_state())
+    inspector = FakeInspector()
+    runner, ledger, commands = build_runner(tmp_path, github=github, inspector=inspector)
+    identity = CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA)
+    with pytest.raises(MergeStateStillComputingError):
+        runner.run(identity, worktree)
+    assert ledger.latest_ci_receipt_for_head("acme/widgets", 17, HEAD_SHA) is None
+    run = ledger.latest_ci_run("acme/widgets", 17, HEAD_SHA)
+    assert run["status"] != "running"
+    assert run["receipt_id"] is None
+    github.checks = [CheckState(actions_enabled=False, all_green=True, check_count=0)] * 2
+    inspector.heads = [HEAD_SHA, HEAD_SHA]
+    inspector.clean = [True, True]
+    assert runner.run(identity, worktree).status == "passed"

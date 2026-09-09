@@ -461,6 +461,7 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
         # turn, after the finally-restore below.
         _apply_pending_model_switch(sid, session)
         _sync_agent_model_with_config(sid, session)
+        _sync_agent_turn_limit_with_config(session)
         _sync_agent_compression_with_config(sid, session)
     _sync_bot_capabilities(sid, session)  # Bot Chat: adopt Settings->Capabilities edits
     st.agent = agent = session["agent"]

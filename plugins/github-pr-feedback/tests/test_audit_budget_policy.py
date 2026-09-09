@@ -75,6 +75,7 @@ def test_audit_pr_passes_fresh_canonical_actions_state_to_exact_head_runner(
         required_local_ci: bool = False,
     ) -> CIAuditReceipt:
         assert force_fresh is True
+        assert required_local_ci is False
         captured.append(actions_enabled_hint)
         return CIAuditReceipt(
             receipt_id="r" * 64,

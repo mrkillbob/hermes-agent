@@ -1,7 +1,9 @@
 """Require task-bound repair acknowledgement before Kanban reports completion."""
 
 import os
+import shlex
 import sqlite3
+import sys
 from contextlib import closing
 from functools import partial
 from pathlib import Path
@@ -13,6 +15,8 @@ def guard_repair_completion(ctx, *, task_id, **_kwargs):
     worker_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
     if not worker_task and ctx.get_config("enabled", default=False) is not True:
         return None
+    root = None
+    recovery_commands = []
     try:
         if worker_task:
             from hermes_constants import get_default_hermes_root
@@ -22,24 +26,48 @@ def guard_repair_completion(ctx, *, task_id, **_kwargs):
             path = root / "github-pr-feedback" / "ledger.sqlite3"
         else:
             path = FeedbackLedger.current_profile_path()
+            root = path.parent.parent
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
             rows = connection.execute(
-                "SELECT status, action_status FROM feedback_receipts WHERE task_id = ? "
+                "SELECT repository, pr_number, feedback_kind, feedback_id, head_sha, "
+                "status, action_status FROM feedback_receipts WHERE task_id = ? "
                 "AND feedback_kind IN ('review_comment', 'issue_comment', 'review', 'pr_repair') "
                 "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%')",
                 (task_id,),
             ).fetchall()
             if all(status == "completed" and action in {"completed", "superseded"}
-                   for status, action in rows):
+                   for *_identity, status, action in rows):
                 return None
+            recovery_commands = []
+            for repository, pr_number, feedback_kind, feedback_id, head_sha, status, action in rows:
+                if status == "completed" and action == "pending":
+                    recovery_commands.append(
+                        "env HERMES_HOME="
+                        f"{shlex.quote(str(root))} {shlex.quote(sys.executable)} "
+                        "-P -m hermes_cli.main github-pr-feedback retire-feedback "
+                        f"--repository {shlex.quote(repository)} --pr-number {pr_number} "
+                        f"--feedback-kind {shlex.quote(feedback_kind)} "
+                        f"--feedback-id {shlex.quote(feedback_id)} "
+                        f"--receipt-head-sha {shlex.quote(head_sha)} --self-receipt"
+                    )
         reason = "this task still has an unacknowledged feedback dispatch"
     except (OSError, sqlite3.Error, ValueError, TypeError):
         reason = "the task's durable feedback completion contract could not be verified"
+    recovery = ""
+    if recovery_commands and root is not None:
+        recovery = (
+            " If canonical re-reads verify that a listed dispatch is only a non-actionable "
+            "self-maintenance receipt from the configured automation identity, run exactly "
+            + "; ".join(f"`{command}`" for command in recovery_commands)
+            + "; then run `kanban_complete` only after it succeeds. Do not use this recovery "
+            "for actionable or external feedback."
+        )
     return {"action": "block", "message": (
         f"Feedback completion rejected: {reason}. Finish the authorized push and factual reply, "
         "then run the exact governed complete-feedback command; use retire-feedback only for its "
-        "verified closed-PR case. If the contract cannot be completed, use kanban_block with the "
-        "actual blocker. A summary or local commit is not an acknowledgement."
+        "verified closed-PR case or the exact self-receipt recovery command below."
+        f"{recovery} If the contract cannot be completed, use kanban_block with the actual blocker. "
+        "A summary or local commit is not an acknowledgement."
     )}
 
 
@@ -47,3 +75,4 @@ def register_repair_completion_policy(ctx):
     register_hook = getattr(ctx, "register_hook", None)
     if callable(register_hook):
         register_hook("pre_kanban_complete", partial(guard_repair_completion, ctx))
+        register_hook("pre_kanban_review", partial(guard_repair_completion, ctx))
