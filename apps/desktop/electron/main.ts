@@ -1414,13 +1414,14 @@ const registryDispatchRevalidation = new RemoteRevalidationCoordinator()
 // lifecycles, so concurrent dials for one (connectionId, profile) scope
 // coalesce here — the second caller awaits the first spawn's result.
 const backendDialClaims = new BackendDialClaims()
+
 const runClaimedBackendDial = <T>(
   connectionId: string | null,
   profile: string | null | undefined,
   dial: () => Promise<T>,
   claimKey?: string
-) =>
-  runBackendDial({ claims: backendDialClaims, scopeKey: backendScopeKey }, connectionId, profile, dial, claimKey)
+) => runBackendDial({ claims: backendDialClaims, scopeKey: backendScopeKey }, connectionId, profile, dial, claimKey)
+
 // True while connection-config:apply soft-rehomes the primary — suppresses the
 // backend-exit toast so an intentional kill doesn't look like a crash.
 let softRehomeInProgress = false
@@ -14895,7 +14896,9 @@ ipcMain.handle('hermes:connection:for', async (_event, payload) => {
   let connection
 
   try {
-    connection = await runClaimedBackendDial(id, profile, () => ensureRegistryBackend(id, profile, '', { spawnPriority }))
+    connection = await runClaimedBackendDial(id, profile, () =>
+      ensureRegistryBackend(id, profile, '', { spawnPriority })
+    )
   } finally {
     clearSpawnPriority()
   }
@@ -15000,7 +15003,7 @@ function redialPoolBackendAfterResume(poolKey: string) {
   return runClaimedBackendDial(
     connectionId,
     profile,
-    () => connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile),
+    () => (connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)),
     poolKey
   )
 }
@@ -15730,9 +15733,7 @@ async function enumerateRegistryAgentSources(registry = readDesktopConnectionsRe
           // bootstrapping a second SSH tunnel / remote dashboard.
           const descriptor: any = await withEnumerationDeadline(
             Promise.resolve(
-              runClaimedBackendDial(connection.id, null, () =>
-                ensureRegistryBackend(connection.id, null)
-              )
+              runClaimedBackendDial(connection.id, null, () => ensureRegistryBackend(connection.id, null))
             )
           )
 

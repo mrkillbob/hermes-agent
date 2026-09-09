@@ -120,8 +120,11 @@ describe('backend dial routing (#90812)', () => {
   it('uses the composite registry scope for a registry backend', async () => {
     const claims = new BackendDialClaims()
     const dial = vi.fn(async () => 'registry')
-    const scopeKey = vi.fn((connectionId: string | null, profile: string | null | undefined) =>
-      `conn:${connectionId ?? 'local'}::${profile ?? 'default'}`)
+
+    const scopeKey = vi.fn(
+      (connectionId: string | null, profile: string | null | undefined) =>
+        `conn:${connectionId ?? 'local'}::${profile ?? 'default'}`
+    )
 
     await expect(runBackendDial({ claims, scopeKey }, 'office-ssh', 'work', dial)).resolves.toBe('registry')
     expect(scopeKey).toHaveBeenCalledWith('office-ssh', 'work')
@@ -131,8 +134,11 @@ describe('backend dial routing (#90812)', () => {
   it('uses the local profile scope for a local backend', async () => {
     const claims = new BackendDialClaims()
     const dial = vi.fn(async () => 'local')
-    const scopeKey = vi.fn((connectionId: string | null, profile: string | null | undefined) =>
-      `conn:${connectionId ?? 'local'}::${profile ?? 'default'}`)
+
+    const scopeKey = vi.fn(
+      (connectionId: string | null, profile: string | null | undefined) =>
+        `conn:${connectionId ?? 'local'}::${profile ?? 'default'}`
+    )
 
     await expect(runBackendDial({ claims, scopeKey }, null, 'default', dial)).resolves.toBe('local')
     expect(scopeKey).toHaveBeenCalledWith(null, 'default')
@@ -142,12 +148,15 @@ describe('backend dial routing (#90812)', () => {
   it('preserves an explicit pooled key when the parsed route would normalize it', async () => {
     const claims = new BackendDialClaims()
     const dial = vi.fn(async () => 'forced-local')
-    const scopeKey = vi.fn((connectionId: string | null, profile: string | null | undefined) =>
-      `conn:${connectionId ?? 'local'}::${profile ?? 'default'}`)
 
-    await expect(
-      runBackendDial({ claims, scopeKey }, 'local', 'work', dial, 'conn:local::work')
-    ).resolves.toBe('forced-local')
+    const scopeKey = vi.fn(
+      (connectionId: string | null, profile: string | null | undefined) =>
+        `conn:${connectionId ?? 'local'}::${profile ?? 'default'}`
+    )
+
+    await expect(runBackendDial({ claims, scopeKey }, 'local', 'work', dial, 'conn:local::work')).resolves.toBe(
+      'forced-local'
+    )
     expect(scopeKey).not.toHaveBeenCalled()
     expect(dial).toHaveBeenCalledTimes(1)
   })
