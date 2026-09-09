@@ -1336,7 +1336,7 @@ def test_merge_scan_skips_expensive_github_reads_without_exact_head_ci_receipt(
         "base_branch": "stable",
         "merge_methods": ["squash"],
         "receipt_max_age_seconds": 3600,
-        "report_only": False,
+        "report_only": True,
         "post_merge": {"enabled": False},
     }
     policy = _load_policy_from_context(RecordingContext(settings))
@@ -1474,7 +1474,7 @@ def test_merge_scan_does_not_hide_failed_receipt_behind_manifest_mismatch(
         "base_branch": "stable",
         "merge_methods": ["squash"],
         "receipt_max_age_seconds": 3600,
-        "report_only": False,
+        "report_only": True,
         "post_merge": {"enabled": False},
     }
     policy = _load_policy_from_context(RecordingContext(settings))
@@ -1630,11 +1630,11 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     )
     (profile_root / "profiles" / "repair-agent").mkdir(parents=True)
     (profile_root / "profiles" / "repair-agent" / "config.yaml").write_text(
-        "profile: repair-agent\n", encoding="utf-8"
+        "profile: repair-agent\nplugins:\n  enabled: [github-pr-feedback]\n", encoding="utf-8"
     )
     (profile_root / "profiles" / "pr-local-ci-auditor").mkdir(parents=True)
     (profile_root / "profiles" / "pr-local-ci-auditor" / "config.yaml").write_text(
-        "profile: pr-local-ci-auditor\n", encoding="utf-8"
+        "profile: pr-local-ci-auditor\nplugins:\n  enabled: [github-pr-feedback]\n", encoding="utf-8"
     )
     ledger_path = profile_root / "github-pr-feedback" / "ledger.sqlite3"
     settings = enabled_settings(repository)
@@ -1677,6 +1677,7 @@ def test_doctor_read_only_verifies_every_runtime_dependency(
     assert payload["status"] == "ready"
     assert payload["checks"] == {
         "assignee": "ok",
+        "worker_completion_policy": "ok",
         "board": "ok",
         "gh_executable": "ok",
         "github_identity": "ok",
@@ -1734,6 +1735,7 @@ def test_doctor_reports_degraded_but_still_runs_all_read_only_checks(
     assert payload["checks"]["github_identity"] == "failed"
     assert set(payload["checks"]) == {
         "assignee",
+        "worker_completion_policy",
         "board",
         "gh_executable",
         "github_identity",
@@ -2296,6 +2298,78 @@ def profile_snapshot(root: Path) -> dict[str, tuple[int, int]]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def test_merge_handoff_auto_enrolls_before_enrollment_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from github_pr_feedback.cli import _load_policy_from_context, _run_single_pr_merge_handoff
+
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    settings = enabled_settings(repository)
+    settings["merge_maintainer"] = {
+        "enabled": True,
+        "assignee": "pr-merge-maintainer",
+        "repository": "acme/widgets",
+        "author_login": "owner",
+        "base_branch": "stable",
+        "merge_methods": ["squash"],
+        "receipt_max_age_seconds": 3600,
+        "report_only": True,
+        "post_merge": {"enabled": False},
+        "auto_enroll_owned_prs": True,
+    }
+    policy = _load_policy_from_context(RecordingContext(settings))
+    pull = PullRequest(
+        17,
+        "OPEN",
+        "acme/widgets",
+        "acme/widgets",
+        "owner",
+        "codex/fix",
+        "a" * 40,
+        base_branch="stable",
+        base_sha="b" * 40,
+    )
+
+    class Ledger:
+        enrolled = False
+
+        def is_merge_enrolled(self, _repository: str, _pr_number: int) -> bool:
+            return self.enrolled
+
+    class GitHub:
+        def get_pull_request(self, repository: str, pr_number: int) -> PullRequest:
+            assert (repository, pr_number) == ("acme/widgets", 17)
+            return pull
+
+    admitted: list[tuple[PullRequest, ...]] = []
+
+    def enroll(policy, merge_policy, ledger: Ledger, pulls: tuple[PullRequest, ...]) -> int:
+        assert policy.merge_policy_for("acme/widgets") is merge_policy
+        admitted.append(pulls)
+        ledger.enrolled = True
+        return 1
+
+    class Controller:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run(self, number: int):
+            assert number == 17
+            return SimpleNamespace(receipt=None, decision=SimpleNamespace(blockers=()))
+
+    monkeypatch.setattr("github_pr_feedback.cli.enroll_owned_pulls", enroll)
+    monkeypatch.setattr("github_pr_feedback.cli.CanonicalMergeEvidenceSource", lambda *args: object())
+    monkeypatch.setattr("github_pr_feedback.cli.MergeController", Controller)
+
+    result = _run_single_pr_merge_handoff(
+        policy, Ledger(), 17, repository="acme/widgets", github=GitHub()
+    )
+
+    assert result["status"] == "report_only_ready"
+    assert admitted == [(pull,)]
 
 
 def test_ci_audit_handoff_completes_current_task_without_waiting_for_model(

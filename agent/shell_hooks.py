@@ -42,7 +42,7 @@ _DEFAULT_BLOCK_MESSAGE = "Blocked by shell hook."
 # Exit code that signals "block this action" independent of stdout (Claude Code / Cursor).
 BLOCK_EXIT_CODE = 2
 # Events whose block directive is honored downstream; exit-2 blocking and fail_closed only apply here.
-_BLOCKING_EVENTS = frozenset({"pre_tool_call", "pre_kanban_complete"})
+_BLOCKING_EVENTS = frozenset({"pre_tool_call", "pre_kanban_complete", "pre_kanban_review"})
 _TOOL_EVENTS = frozenset({"pre_tool_call", "post_tool_call"})
 _STDERR_MESSAGE_LIMIT = 400
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -346,7 +346,7 @@ def _evaluate_result(spec: ShellHookSpec, r: Dict[str, Any]) -> Optional[Dict[st
     blocking_event = spec.event in _BLOCKING_EVENTS
     # Completion is a durable safety boundary: a missing or broken policy must
     # not be converted to None and filtered out by invoke_hook().
-    fail_closed = (spec.fail_closed and blocking_event) or spec.event == "pre_kanban_complete"
+    fail_closed = (spec.fail_closed and blocking_event) or spec.event in {"pre_kanban_complete", "pre_kanban_review"}
     if r["error"]:
         logger.warning("shell hook failed (event=%s command=%s): %s", spec.event, spec.command, r["error"])
     elif r["timed_out"]:
@@ -418,6 +418,11 @@ def _parse_pre_kanban_complete(data: Dict[str, Any]) -> Optional[Dict[str, Any]]
     return data
 
 
+def _parse_pre_kanban_review(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Review policies use the same fail-closed decision dialect as completion."""
+    return _parse_pre_kanban_complete(data)
+
+
 def _parse_pre_verify(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # "continue" (Hermes) / "block" (Claude-Code Stop) both mean keep going; no message is a no-op.
     action = str(data.get("action") or data.get("decision") or "").strip().lower()
@@ -435,6 +440,7 @@ def _parse_context(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 _RESPONSE_PARSERS: Dict[str, Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = {
     "pre_tool_call": _parse_pre_tool_call,
     "pre_kanban_complete": _parse_pre_kanban_complete,
+    "pre_kanban_review": _parse_pre_kanban_review,
     "pre_verify": _parse_pre_verify,
 }
 

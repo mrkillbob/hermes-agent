@@ -5,6 +5,7 @@ from __future__ import annotations
 from .ci_contract import manifest_path as ci_manifest_path
 
 import argparse
+import os
 import fcntl
 import hashlib
 import json
@@ -23,6 +24,7 @@ from typing import Any, Callable, Iterator, Protocol
 from hermes_cli.github_identity import GitHubAutomationIdentity, GitHubIdentityError
 
 from .cli_audit_task import owns_current_audit_task
+from .worker_contract import configured_assignees, worker_contract_enabled
 from .controller import KanbanTask, LocalGitRepository, PooledLocalGitRepository, ScanController
 from .ci_coordinator import CIAuditJob, GroupedCICoordinator
 from .ci_runner import (
@@ -45,6 +47,7 @@ from .merge_controller import (
     MergeDecision,
     _codex_reviewed_head,
 )
+from .merge_admission import enroll_owned_pulls
 from .policy import (
     FeedbackReceipt,
     PluginPolicy,
@@ -265,34 +268,16 @@ class DoctorProbe:
                 hermes and self._hermes_executable_ready(hermes)
             ),
             "board": self._board_exists(policy.board or ""),
-            "assignee": all(
-                self._assignee_exists(assignee)
-                for assignee in {
-                    policy.assignee or "",
-                    *(rule.assignee for rule in policy.assignee_rules),
-                    *(rule.assignee for rule in policy.routing_rules),
-                    *(
-                        [policy.local_ci_audit.assignee]
-                        if policy.local_ci_audit is not None
-                        else []
+            "assignee": all(self._assignee_exists(name) for name in configured_assignees(policy)),
+            "worker_completion_policy": all(
+                worker_contract_enabled(
+                    self._hermes_root,
+                    name,
+                    project_root=Path(
+                        os.environ.get("HERMES_KANBAN_WORKSPACE", ".")
                     ),
-                    *(item.assignee for item in policy.merge_policies()),
-                    *(
-                        [policy.repair_steward.assignee]
-                        if policy.repair_steward is not None
-                        else []
-                    ),
-                    *(
-                        [
-                            assignee
-                            for maintenance in policy.release_policies()
-                            for assignee in (
-                                maintenance.assignee,
-                                *(lane.assignee for lane in maintenance.lanes),
-                            )
-                        ]
-                    ),
-                }
+                )
+                for name in configured_assignees(policy)
             ),
             "ledger_access": self._ledger_access(ledger_path),
             "repository_worktree": self._repositories_ready(
@@ -1853,7 +1838,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     if owns_task:
                         _block_current_ci_task(receipt, handoff_blockers)
                     handoff_blocked = True
-                elif handoff_status != "merged":
+                elif handoff_status not in {"merged", "report_only_ready"}:
                     raise RuntimeError(
                         "merge handoff did not produce a durable successor: "
                         f"{handoff_status}"
@@ -2113,6 +2098,7 @@ def _run_merge_scan_for_policy(
             "merged": [],
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
+    enroll_owned_pulls(policy, merge_policy, ledger, pull_requests)
     source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     manifest_path = ci_manifest_path(policy.targets[merge_policy.repository].local_path)
     if not manifest_path.is_file():
@@ -2277,10 +2263,13 @@ def _run_single_pr_merge_handoff(
     )
     if merge_policy is None:
         return {"status": "disabled", "blockers": ["merge_maintainer_disabled"]}
-    if not ledger.is_merge_enrolled(merge_policy.repository, pr_number):
-        return {"status": "blocked", "blockers": ["merge_pr_not_enrolled"]}
     github = github or _github_client(policy)
     kanban = kanban or KanbanSubprocessClient()
+    if merge_policy.auto_enroll_owned_prs:
+        pull_request = github.get_pull_request(merge_policy.repository, pr_number)
+        enroll_owned_pulls(policy, merge_policy, ledger, (pull_request,))
+    if not ledger.is_merge_enrolled(merge_policy.repository, pr_number):
+        return {"status": "blocked", "blockers": ["merge_pr_not_enrolled"]}
     source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     try:
         result = MergeController(
@@ -2293,6 +2282,13 @@ def _run_single_pr_merge_handoff(
     except (GitHubClientError, RuntimeError, ValueError):
         return {"status": "degraded", "blockers": ["merge_evidence_unavailable"]}
 
+    if result.receipt is None and merge_policy.report_only and not result.decision.blockers:
+        return {
+            "status": "report_only_ready",
+            "pr_number": pr_number,
+            "blockers": list(result.decision.blockers),
+            "report_only": True,
+        }
     if result.receipt is None:
         return {"status": "blocked", "blockers": list(result.decision.blockers)}
 
