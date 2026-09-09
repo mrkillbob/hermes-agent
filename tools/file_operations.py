@@ -1260,6 +1260,12 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         # this content, so these are the bytes on disk; the early rejection above
         # guarantees this cannot raise.
         content_bytes = content.encode("utf-8", "surrogateescape")
+        unchanged = False
+        try:
+            with open(path, "rb") as existing_file:
+                unchanged = existing_file.read() == content_bytes
+        except FileNotFoundError:
+            pass
         write_result = self._atomic_write(path, content)
         if write_result.exit_code != 0:
             return WriteResult(error=f"Failed to write file: {write_result.stdout}")
@@ -1275,6 +1281,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             lsp_diagnostics = self._maybe_lsp_diagnostics(path, pre_content=pre_content, post_content=content) or None
         return WriteResult(
             bytes_written=len(content_bytes), dirs_created=dirs_created, verified=content_verified,
+            no_change=unchanged,
             lint=lint_result.to_dict() if lint_result else None, lsp_diagnostics=lsp_diagnostics)
 
     # --- PATCH (replace mode) -----------------------------------------------

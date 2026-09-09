@@ -35,6 +35,7 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
 from hermes_cli.kanban_db import KANBAN_ATTACHMENT_MAX_BYTES, _collision_free_path, _safe_attachment_name
+from hermes_cli.kanban_completion_policy import CompletionPolicyError
 
 log = logging.getLogger(__name__)
 
@@ -548,20 +549,6 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
     return _set_status_direct(conn, task_id, s)
 
 
-# Status verb dispatch shared by PATCH /tasks/{id} and POST /tasks/bulk: (conn, task_id,
-# payload) -> ok. ``review`` uses request_review (never a block, so it can't trip unblock-loop
-# detection) with ``force=True``: a dashboard action is a human override of a live worker claim.
-_STATUS_HANDLERS: dict[str, Any] = {
-    "done": lambda conn, tid, p: kanban_db.complete_task(conn, tid, result=p.result, summary=p.summary, metadata=p.metadata),
-    "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
-    "scheduled": lambda conn, tid, p: kanban_db.schedule_task(conn, tid, reason=getattr(p, "block_reason", None)),
-    "review": lambda conn, tid, p: kanban_db.request_review(
-        conn, tid, summary=p.summary, metadata=p.metadata, reviewer=(p.assignee or None), force=True),
-    "ready": lambda conn, tid, p: _drag_to(conn, tid, "ready"),
-    "todo": lambda conn, tid, p: _drag_to(conn, tid, "todo"),
-    "triage": lambda conn, tid, p: _drag_to(conn, tid, "triage")}
-
-
 def _apply_status(conn, task_id: str, s: str, p, unknown_detail: str) -> bool:
     """Dispatch a status verb; raises ``_StatusRejected`` (user-facing message)
     for ``running`` or an unknown status (``unknown_detail``)."""
@@ -571,6 +558,30 @@ def _apply_status(conn, task_id: str, s: str, p, unknown_detail: str) -> bool:
     if handler is None:
         raise _StatusRejected(unknown_detail)
     return handler(conn, task_id, p)
+
+
+def _request_review_status(conn, task_id: str, payload) -> bool:
+    """Preserve completion-policy rejection reasons for dashboard callers."""
+    result = kanban_db.request_review(
+        conn, task_id, summary=payload.summary, metadata=payload.metadata,
+        reviewer=(payload.assignee or None), with_reason=True)
+    ok, reason = result if isinstance(result, tuple) else (result, None)
+    if not ok:
+        raise CompletionPolicyError(reason or "review transition refused")
+    return True
+
+
+# Status verb dispatch shared by PATCH /tasks/{id} and POST /tasks/bulk: (conn, task_id,
+# payload) -> ok. ``review`` uses request_review (never a block, so it can't trip unblock-loop
+# detection) with ``force=True``: a dashboard action is a human override of a live worker claim.
+_STATUS_HANDLERS: dict[str, Any] = {
+    "done": lambda conn, tid, p: kanban_db.complete_task(conn, tid, result=p.result, summary=p.summary, metadata=p.metadata),
+    "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
+    "scheduled": lambda conn, tid, p: kanban_db.schedule_task(conn, tid, reason=getattr(p, "block_reason", None)),
+    "review": _request_review_status,
+    "ready": lambda conn, tid, p: _drag_to(conn, tid, "ready"),
+    "todo": lambda conn, tid, p: _drag_to(conn, tid, "todo"),
+    "triage": lambda conn, tid, p: _drag_to(conn, tid, "triage")}
 
 
 def _set_priority(conn, task_id: str, priority: int, board: Optional[str]) -> None:
@@ -608,7 +619,8 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
         ok = kanban_db.archive_task(conn, task_id)
     else:
         with _map_errors(400, _StatusRejected):
-            ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
+            with _map_errors(409, CompletionPolicyError):
+                ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
         if s == "review" and ok and review_assignee_deferred and not payload.assignee:
             ok = kanban_db.assign_task(conn, task_id, None)
     if ok:
@@ -784,8 +796,11 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
         entry.update(ok=False, error="archive refused")
     if payload.status is not None and not payload.archive:
         s = payload.status
-        if not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):
-            entry.update(ok=False, error=f"transition to {s!r} refused")
+        try:
+            if not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):
+                entry.update(ok=False, error=f"transition to {s!r} refused")
+        except CompletionPolicyError as exc:
+            entry.update(ok=False, error=str(exc))
     if payload.assignee is not None:
         try:
             ok = (kanban_db.reassign_task(conn, tid, payload.assignee or None, reclaim_first=True) if payload.reclaim_first
