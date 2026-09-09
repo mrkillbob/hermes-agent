@@ -999,7 +999,7 @@ def test_failed_exact_head_static_receipt_immediately_dispatches_one_typed_fixer
     task = kanban.tasks[0]
     assert task.assignee == "ci-static-fixer"
     assert task.head_sha == head_sha
-    assert task.initial_status == "running"
+    assert task.initial_status == "blocked"
     assert task.max_runtime_seconds == 60 * 60
     assert task.max_retries == 2
     assert task.idempotency_key.endswith(":typed-fixer-v3")
@@ -1418,6 +1418,7 @@ class RecordingLocalGit:
 class RecordingKanban:
     def __init__(self) -> None:
         self.tasks: list[object] = []
+        self.promoted: list[tuple[str, str]] = []
 
     def create_task(self, task: object) -> str:
         self.tasks.append(task)
@@ -1426,6 +1427,9 @@ class RecordingKanban:
     def create_or_get_task(self, task: object) -> str:
         self.tasks.append(task)
         return f"kanban-{len(self.tasks)}"
+
+    def promote_task(self, board: str, task_id: str) -> None:
+        self.promoted.append((board, task_id))
 
 
 class FailingKanban:
@@ -1737,9 +1741,10 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
 
     assert result.created == 1
     task = kanban.tasks[0]
-    assert getattr(task, "initial_status", None) == "running"
+    assert getattr(task, "initial_status", None) == "blocked"
     assert getattr(task, "max_retries", None) == 2
     assert task.max_runtime_seconds == 1200
+    assert kanban.promoted == [("repairs", "kanban-1")]
     assert "first 90 seconds" in task.instructions
     assert "do not retry a tool-blocked command" in task.instructions.casefold()
     assert "Do not keep re-evaluating equivalent approaches" in task.instructions
@@ -1767,13 +1772,41 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     ledger.close()
 
 
-def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disabled(
+def test_auto_dispatch_disabled_keeps_admitted_repair_blocked(
     tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (feedback("actionable", body="[P1] Fix the confirmed runtime regression."),),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+    ).scan()
+
+    assert result.created == 1
+    assert kanban.tasks[0].initial_status == "blocked"
+    assert kanban.promoted == []
+    ledger.close()
+
+
+@pytest.mark.parametrize("auto_dispatch", [False, True])
+def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disabled(
+    tmp_path: Path, auto_dispatch: bool
 ) -> None:
     local_path, sha = initialized_repository(tmp_path)
     policy = configured_policy(
         local_path,
         not_before="2026-08-24T00:00:00Z",
+        auto_dispatch=auto_dispatch,
         local_ci_audit=True,
     )
     github = FakeGitHub(admitted_pull_request(sha), ())
@@ -1808,7 +1841,7 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert task.provider_override is None
     assert task.model_override is None
     assert task.reasoning_effort is None
-    assert task.initial_status == "running"
+    assert task.initial_status == "blocked"
     assert task.max_retries == 3
     assert task.max_runtime_seconds == 8 * 60 * 60
     assert task.idempotency_key.endswith(":supervised-v4")
@@ -1838,6 +1871,9 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
         task.instructions
     )
     assert f"--head-sha {sha}" in task.instructions
+    assert kanban.promoted == (
+        [("repairs", "kanban-1")] if auto_dispatch else []
+    )
     ledger.close()
 
 
