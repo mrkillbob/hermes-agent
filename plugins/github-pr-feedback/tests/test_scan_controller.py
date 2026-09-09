@@ -2909,14 +2909,16 @@ def test_scan_suppresses_only_configured_bot_completion_receipts(tmp_path: Path)
         "bot-completion", reviewer="reviewer",
         body=f"Hermes automated repair\\nVerified repair. <!-- pr-maintenance-receipt:v1 status=completed kind=review_comment head={sha} -->",
     )
+    markerless = feedback("markerless", reviewer="reviewer",
+                          body=f"Base refresh completed. Merged base {'b' * 40} and pushed {sha}. Focused verification: 16 passed.")
     actionable = feedback("bot-finding", reviewer="reviewer", body="Fix the missing error handling.")
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     kanban = RecordingKanban()
     result = ScanController(
-        policy, ledger, FakeGitHub(admitted_pull_request(sha), (completed, actionable)),
+        policy, ledger, FakeGitHub(admitted_pull_request(sha), (completed, markerless, actionable)),
         kanban, RecordingLocalGit(),
     ).scan()
-    assert result.skipped.get("self_resolution_receipt") == 1
+    assert result.skipped.get("self_resolution_receipt") == 2
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["bot-finding"]
     ledger.close()
 
@@ -3164,6 +3166,7 @@ def test_scan_keeps_owner_ci_repair_requests_and_non_owner_bot_comments(
         "Two remaining failures require action.",
         "The current static lane fails.",
         "The current static lane still fails.",
+        "The second finding still reproduces.",
     ],
 )
 def test_self_resolution_fail_opens_for_bounded_unresolved_action_language(
@@ -3178,6 +3181,29 @@ def test_self_resolution_fail_opens_for_bounded_unresolved_action_language(
             "run_static_lane.py status: pass, rc=0. No merge was performed. "
             f"{action_language}"
         ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is False
+
+
+def test_self_resolution_does_not_hide_current_reproduction_near_pre_existing_text() -> None:
+    item = feedback(
+        "mixed-current-reproduction",
+        reviewer="owner",
+        body=(
+            "Fixed in abcdef0. Verification: pre-existing setup is unchanged, "
+            "but the second finding still reproduces. Unit tests passed."
+        ),
+    )
+
+    assert _is_self_resolution_receipt(item, owner_login="owner") is False
+
+
+def test_self_resolution_rejects_a_partial_finding_receipt() -> None:
+    item = feedback(
+        "partial-finding-completion",
+        reviewer="owner",
+        body="Addressed the first finding; the second finding remains.",
     )
 
     assert _is_self_resolution_receipt(item, owner_login="owner") is False

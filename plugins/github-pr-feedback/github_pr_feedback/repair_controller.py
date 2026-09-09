@@ -745,6 +745,17 @@ def _repair_task(
             f"--receipt-head-sha {shlex.quote(receipt.head_sha)} "
             "--resolved-head-sha <full literal resolved head SHA>"
         )
+        self_receipt_command = (
+            f"env HERMES_HOME={shlex.quote(str(control_home))} "
+            f"{shlex.quote(sys.executable)} -P -m hermes_cli.main "
+            "github-pr-feedback retire-feedback "
+            f"--repository {shlex.quote(receipt.repository)} "
+            f"--pr-number {receipt.pr_number} "
+            f"--feedback-kind {shlex.quote(receipt.feedback_kind)} "
+            f"--feedback-id {shlex.quote(receipt.feedback_id)} "
+            f"--receipt-head-sha {shlex.quote(receipt.head_sha)} "
+            "--self-receipt"
+        )
         authority = (
             identity_preflight
             + " If the canonical PR is CLOSED or MERGED, run the literal retirement command "
@@ -818,6 +829,11 @@ def _repair_task(
             "head=<full literal resolved head SHA> -->` marker at the end of the factual reply. Do not "
             "complete the Kanban task until this acknowledgement succeeds. Run the acknowledgement once "
             "with terminal background=true, retain its process session id, and poll/wait until exit; "
+            "If this exact dispatch is instead a verified non-actionable self-maintenance receipt from the "
+            "configured automation identity, do not claim a repair: re-run the canonical PR and comment "
+            f"checks, then run exactly `{self_receipt_command}` to retire only this dispatch with "
+            "--self-receipt. That recovery path is not valid for an external finding, an actionable "
+            "comment, a missing comment, or a changed PR head. "
             "shared GitHub gates can exceed a 60-second foreground timeout. No-progress rule: after "
             "evaluating at most two viable resolutions, choose the smallest existing repository "
             "pattern. Within 10 minutes, either produce a tracked patch plus a focused check result, "

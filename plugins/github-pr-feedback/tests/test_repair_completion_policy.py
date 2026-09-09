@@ -1,5 +1,7 @@
 import argparse
 import json
+import shlex
+import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from importlib.util import module_from_spec, spec_from_file_location
@@ -10,6 +12,37 @@ import pytest
 
 from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.policy import FeedbackReceipt
+
+
+def test_completion_policy_provides_exact_self_receipt_recovery_command(tmp_path, monkeypatch):
+    from github_pr_feedback.repair_completion_policy import guard_repair_completion
+
+    home = tmp_path / "home"
+    (home / "github-pr-feedback").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "task-1")
+    monkeypatch.setenv("HERMES_CONTROL_HOME", str(home))
+    ledger = FeedbackLedger(home / "github-pr-feedback" / "ledger.sqlite3")
+    now = datetime.now(UTC)
+    receipt = FeedbackReceipt("acme/repo", 1, "issue_comment", "comment-1", "a" * 40)
+    claim = ledger.claim(receipt, owner="test", claimed_at=now, stale_before=now - timedelta(minutes=5))
+    assert claim is not None
+    ledger.finalize(receipt, "task-1", claim)
+    try:
+        result = guard_repair_completion(
+            type("Context", (), {"get_config": lambda self, key, default=None: True})(),
+            task_id="task-1",
+        )
+        assert result is not None
+        command = (
+            f"env HERMES_HOME={shlex.quote(str(home))} {shlex.quote(sys.executable)} "
+            "-P -m hermes_cli.main github-pr-feedback retire-feedback "
+            "--repository acme/repo --pr-number 1 --feedback-kind issue_comment "
+            "--feedback-id comment-1 --receipt-head-sha " + "a" * 40 + " --self-receipt"
+        )
+        assert result["action"] == "block"
+        assert f"`{command}`" in result["message"]
+    finally:
+        ledger.close()
 
 
 def registered_manager(monkeypatch, home):

@@ -146,3 +146,37 @@ def test_unverified_closure_leaves_pending_receipt_intact(dispatched, change):
     with pytest.raises(ValueError):
         retire_closed_feedback(policy, github, ledger, receipt)
     assert ledger.exact_pending_task_binding(receipt) is not None
+
+
+@pytest.mark.parametrize("change", ["none", "external", "actionable", "head", "edited", "missing"])
+def test_self_receipt_retirement_preserves_findings_and_races(dispatched, change):
+    from github_pr_feedback.feedback_retirement import retire_self_receipt
+    from github_pr_feedback.github_client import Feedback
+    from github_pr_feedback.policy import GitHubIdentityPolicy, Reviewer
+
+    policy, ledger, original, pull = dispatched
+    receipt = replace(original, feedback_kind="issue_comment", feedback_id="receipt-comment")
+    now = datetime.now(UTC)
+    ledger.mark_feedback_actioned(original, resolved_head_sha=original.head_sha, actioned_at=now)
+    lease = ledger.claim(receipt, owner="test", claimed_at=now, stale_before=now-timedelta(minutes=5))
+    ledger.finalize(receipt, "receipt-task", lease)
+    policy = replace(policy, github_identity=GitHubIdentityPolicy(expected_login="publisher", token_env="BOT_TOKEN"))
+    pull = replace(pull, state="OPEN")
+    body = f"Base refresh completed. Merged base {'b' * 40} and pushed {'a' * 40}. Focused verification: 16 passed."
+    item = Feedback("issue_comment", "receipt-comment", Reviewer("publisher", "OWNER"), body, now, True)
+    if change == "external":
+        item = replace(item, reviewer=Reviewer("reviewer", "OWNER"))
+    if change == "actionable":
+        item = replace(item, body="Fix the missing error handling.")
+    pulls = iter([pull, replace(pull, head_sha="c" * 40) if change == "head" else pull])
+    reads = iter([[] if change == "missing" else [item],
+                  [replace(item, body="Fix new failure.")] if change == "edited" else [item]])
+    github = SimpleNamespace(get_pull_request=lambda *_: next(pulls), list_feedback=lambda *_: next(reads))
+    if change == "none":
+        assert retire_self_receipt(policy, github, ledger, receipt)["status"] == "retired"
+        assert ledger.exact_pending_task_binding(receipt) is None
+        assert not ledger.was_actioned_on_any_head(receipt)
+    else:
+        with pytest.raises(ValueError):
+            retire_self_receipt(policy, github, ledger, receipt)
+        assert ledger.exact_pending_task_binding(receipt) is not None

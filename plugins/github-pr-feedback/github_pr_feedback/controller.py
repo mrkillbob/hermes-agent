@@ -13,7 +13,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -38,8 +38,6 @@ from .policy import (
     pr_repair_attribution_line,
     pr_repair_attribution_required,
 )
-
-AUTO_DISPATCH_MAX_RUNTIME_SECONDS = 60 * 60
 
 MAX_ADMISSIONS_PER_SCAN = 128
 # The subprocess boundary is globally serialized across profiles, but keeping
@@ -82,9 +80,15 @@ _ACTION_REMAINS_MARKERS = (
     "unresolved",
 )
 _BOUNDED_ACTION_REMAINS = re.compile(
-    r"\b(?:still failing|still fails|needs fixing|needs repair|remaining failures?)\b"
+    r"\b(?:still failing|still fails|still reproduces?|needs fixing|needs repair|remaining failures?)\b"
 )
-_BARE_FAILS = re.compile(r"\bfails\b")
+_UNRESOLVED_FINDING_LANGUAGE = re.compile(
+    r"\b(?:findings?|issues?|problems?|defects?|failures?)\s+"
+    r"(?:(?:are|is)\s+)?(?:still\s+)?(?:remain(?:s|ed)?|open|unresolved)\b"
+    r"|\b(?:remaining|open|unresolved)\s+"
+    r"(?:findings?|issues?|problems?|defects?|failures?)\b"
+)
+_BARE_FAILS = re.compile(r"\b(?:fails?|failed)\b")
 _FAILURE_LANES = (
     "run_static_lane.py",
     "run_hygiene_lane.py",
@@ -246,13 +250,6 @@ class ScanResult:
     local_ci_catalogue_deferred: int = 0
 
 
-def _dispatch_generation(task: KanbanTask, lease: ClaimLease) -> KanbanTask:
-    """Give a reclaimed receipt a fresh Kanban identity instead of reusing a done card."""
-    if not lease.reopened:
-        return task
-    return replace(task, idempotency_key=f"{task.idempotency_key}:dispatch-{lease.version}")
-
-
 def _bind_pooled_worktree_task(
     local_git: object, receipt: FeedbackReceipt, task_id: str, board: str
 ) -> None:
@@ -300,18 +297,9 @@ def _claim_with_orphan_recovery(
     claimed_at: datetime,
     stale_before: datetime,
     exact_dispatch_only: bool = False,
-    reopen_blocked_auto_dispatch: bool = False,
 ):
-    """Claim normally, or reclaim an exact dispatch whose card is gone, archived,
-    or stranded in the blocked staging state used by auto-dispatch."""
+    """Claim normally, or reclaim an exact dispatch whose card is gone/archived."""
 
-    superseded = ledger.reopen_superseded_exact_dispatch(
-        receipt,
-        owner=owner,
-        claimed_at=claimed_at,
-    )
-    if superseded is not None:
-        return superseded
     lease = ledger.claim(
         receipt,
         owner=owner,
@@ -335,23 +323,16 @@ def _claim_with_orphan_recovery(
         except RuntimeError:
             return None
         if (
-            status == "blocked"
+            exact_dispatch_only
+            and status == "blocked"
             and callable(task_details)
-            and (exact_dispatch_only or reopen_blocked_auto_dispatch)
         ):
             try:
                 details = task_details(board, binding.task_id)
             except RuntimeError:
                 return None
-            if not isinstance(details, Mapping):
-                return None
-            if (
-                _is_legacy_intake_task(details, receipt)
-                or _is_reopenable_egress_failure(details, receipt)
-                or (
-                    reopen_blocked_auto_dispatch
-                    and _is_staged_auto_dispatch_task(details, receipt)
-                )
+            if _is_legacy_intake_task(details, receipt) or _is_reopenable_egress_failure(
+                details, receipt
             ):
                 return ledger.reopen_legacy_exact_dispatch(
                     receipt,
@@ -436,81 +417,6 @@ def _is_reopenable_egress_failure(
             or "provider egress blocked: LLM egress blocked: base64_payload" in reason
         )
     return False
-
-
-def _is_staged_auto_dispatch_task(
-    details: Mapping[str, object], receipt: FeedbackReceipt
-) -> bool:
-    """Recognize a finalized repair card that never left its staging state."""
-    if details.get("status") != "blocked":
-        return False
-    evidence = _legacy_task_evidence(details.get("body"))
-    return (
-        isinstance(evidence, Mapping)
-        and evidence.get("repository") == receipt.repository
-        and evidence.get("pr_number") == receipt.pr_number
-        and evidence.get("expected_head_sha") == receipt.head_sha
-        and evidence.get("report_only") is not True
-    )
-
-
-def _reconcile_stale_dispatches(
-    ledger: FeedbackLedger,
-    kanban: KanbanClient,
-    pull: PullRequest,
-    *,
-    board: str,
-) -> int:
-    """Supersede blocked receipts whose immutable PR identity is obsolete."""
-    repository = getattr(pull, "base_repository", None) or pull.repository
-    bindings_reader = getattr(ledger, "pending_task_bindings_for_pr", None)
-    task_details = getattr(kanban, "task_details", None)
-    task_status = getattr(kanban, "task_status", None)
-    if not callable(bindings_reader) or not callable(task_details) or not callable(task_status):
-        return 0
-    count = 0
-    for binding in bindings_reader(repository, pull.number):
-        if binding.receipt.head_sha.casefold() == pull.head_sha.casefold():
-            continue
-        try:
-            if task_status(board, binding.task_id) != "blocked":
-                continue
-            details = task_details(board, binding.task_id)
-        except RuntimeError:
-            continue
-        if not isinstance(details, Mapping):
-            continue
-        evidence = _legacy_task_evidence(details.get("body"))
-        if not isinstance(evidence, Mapping):
-            continue
-        expected_base = evidence.get("expected_base_sha")
-        stale_base = isinstance(expected_base, str) and expected_base.casefold() != (pull.base_sha or "").casefold()
-        events = details.get("_events")
-        reason_text = str(details.get("latest_summary", "")).casefold()
-        if isinstance(events, list):
-            reason_text += " " + " ".join(
-                str(event.get("payload", {}).get("reason", ""))
-                for event in events
-                if isinstance(event, Mapping) and isinstance(event.get("payload"), Mapping)
-            ).casefold()
-        if not stale_base and not any(marker in reason_text for marker in ("head", "identity", "drift", "exact-head")):
-            continue
-        reason = (
-            f"Superseded stale exact dispatch: canonical PR head/base is "
-            f"{pull.head_sha}/{pull.base_sha}; old receipt was "
-            f"{binding.receipt.head_sha}/{expected_base or 'unknown'}."
-        )
-        if not ledger.supersede_stale_dispatch(binding.receipt, task_id=binding.task_id, reason=reason):
-            continue
-        complete = getattr(kanban, "complete_superseded_task", None)
-        if callable(complete):
-            complete(board, binding.task_id, reason, {
-                "status": "superseded", "repository": repository,
-                "pr_number": pull.number, "old_head_sha": binding.receipt.head_sha,
-                "current_head_sha": pull.head_sha, "current_base_sha": pull.base_sha,
-            })
-        count += 1
-    return count
 
 
 def _legacy_task_evidence(body: object) -> Mapping[str, object] | None:
@@ -1248,16 +1154,6 @@ class ScanController:
         self._claim_lease = claim_lease
         self._label_batches: list[tuple[str, RepositoryTarget, tuple[PullRequest, ...]]] = []
 
-    def _admitted_label_pull_requests(
-        self, pull_requests: tuple[PullRequest, ...]
-    ) -> tuple[PullRequest, ...]:
-        """Keep label maintenance on the same admission boundary as scanning."""
-        return tuple(
-            pull_request
-            for pull_request in pull_requests
-            if self._policy.admit_pull_request(pull_request).admitted
-        )
-
     def scan(self, *, apply_labels: bool = True) -> ScanResult:
         skipped: Counter[str] = Counter()
         created = 0
@@ -1298,11 +1194,7 @@ class ScanController:
             from .pr_ordering import order_pull_requests
 
             pull_requests = order_pull_requests(pull_requests)
-            label_policy = self._policy.agent_labels
-            if label_policy is not None and label_policy.applies_to(repository):
-                self._label_batches.append(
-                    (repository, target, self._admitted_label_pull_requests(pull_requests))
-                )
+            self._label_batches.append((repository, target, pull_requests))
             required_local_ci_backlog += _required_local_ci_backlog_count(
                 self._policy,
                 self._ledger,
@@ -1491,7 +1383,6 @@ class ScanController:
                         claimed_at=claimed_at,
                         stale_before=claimed_at - self._claim_lease,
                         exact_dispatch_only=True,
-                        reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
                     )
                     if lease is None:
                         skipped["duplicate"] += 1
@@ -1574,9 +1465,9 @@ class ScanController:
             raise ValueError("repository is not configured for labels")
         target = self._policy.targets[repository]
         pulls = self._github.list_open_pull_requests(repository, target.owner_login)
-        self._label_batches = [
-            (repository, target, self._admitted_label_pull_requests(pulls))
-        ]
+        self._label_batches = [(repository, target, tuple(
+            pull for pull in pulls if self._policy.admit_pull_request(pull).admitted
+        ))]
         return self.apply_agent_labels()
 
     def apply_agent_labels(self) -> dict[str, object]:
@@ -1609,10 +1500,7 @@ class ScanController:
                     pull_request.head_ref_name
                 )
                 has_metadata = any(repository in rule.repositories for rule in label_policy.metadata_rules)
-                if not has_metadata and (
-                    desired_label is None
-                    or desired_label.casefold() in {label.casefold() for label in pull_request.labels}
-                ):
+                if not has_metadata and (desired_label is None or desired_label in pull_request.labels):
                     continue
                 candidates.append((pull_request, desired_label))
             if not candidates:
@@ -1677,33 +1565,16 @@ class ScanController:
             current = self._github.get_pull_request(repository, listed.number)
             if not current_matches(current):
                 return "agent_label_head_changed"
-            mappings = [mapping for mapping in label_policy.mappings if mapping.label == desired_label]
-            metadata_rules = tuple(rule for rule in label_policy.metadata_rules if repository in rule.repositories)
-            metadata_error = None
-            metadata_pull = current
-            if metadata_rules:
-                try:
-                    metadata_pull, title, paths = self._github.get_pull_request_metadata(repository, listed.number)
-                    if not current_matches(metadata_pull):
-                        return "agent_label_head_changed"
-                    mappings.extend(rule for rule in metadata_rules if rule.matches(repository, title, paths))
-                except GitHubClientError as error:
-                    metadata_error = error
-                except Exception as error:  # noqa: BLE001 - metadata is advisory only.
-                    metadata_error = error
-            desired = {mapping.label: mapping for mapping in mappings}
-            existing_by_fold = {label.casefold(): label for label in current.labels}
-            missing = {label: mapping for label, mapping in desired.items()
-                       if label.casefold() not in existing_by_fold}
-            owned_labels = {mapping.label.casefold() for mapping in label_policy.mappings}
-            if metadata_error is None:
-                owned_labels.update(rule.label.casefold() for rule in label_policy.metadata_rules
-                                    if repository in rule.repositories)
-            stale = tuple(existing_by_fold[fold] for fold in owned_labels
-                          if fold in existing_by_fold and fold not in {label.casefold() for label in desired})
-            if not missing and not stale:
-                if metadata_error is not None:
-                    raise metadata_error
+            mappings = [mapping for mapping in label_policy.mappings
+                        if mapping.label == desired_label]
+            if any(repository in rule.repositories for rule in label_policy.metadata_rules):
+                metadata_pull, title, paths = self._github.get_pull_request_metadata(repository, listed.number)
+                if not current_matches(metadata_pull):
+                    return "agent_label_head_changed"
+                mappings.extend(rule for rule in label_policy.metadata_rules
+                                if rule.matches(repository, title, paths))
+            missing = {mapping.label: mapping for mapping in mappings if mapping.label not in current.labels}
+            if not missing:
                 return "agent_labels_unchanged"
             if label_policy.create_missing:
                 for mapping in missing.values():
@@ -1715,20 +1586,12 @@ class ScanController:
             current = self._github.get_pull_request(repository, listed.number)
             if not current_matches(current):
                 return "agent_label_head_changed"
-            if missing:
-                self._github.add_issue_labels(repository, listed.number, tuple(missing))
-            remove_label = getattr(self._github, "remove_issue_label", None)
-            if stale and callable(remove_label):
-                for label in stale:
-                    remove_label(repository, listed.number, label)
+            self._github.add_issue_labels(repository, listed.number, tuple(missing))
             readback = self._github.get_pull_request(repository, listed.number)
             if not current_matches(readback):
                 return "agent_label_head_changed"
-            readback_folded = {label.casefold() for label in readback.labels}
-            if not {label.casefold() for label in desired}.issubset(readback_folded):
+            if not set(missing).issubset(readback.labels):
                 return "agent_label_readback_failed"
-            if metadata_error is not None:
-                raise metadata_error
         except GitHubClientError as error:
             code = getattr(error, "code", "github_error")
             self._agent_label_errors.append({"repository": repository, "pr_number": listed.number,
@@ -1908,7 +1771,6 @@ class ScanController:
             claimed_at=claimed_at,
             stale_before=claimed_at - self._claim_lease,
             exact_dispatch_only=True,
-            reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
         )
         if lease is None:
             return "duplicate"
@@ -1926,22 +1788,19 @@ class ScanController:
                 receipt, lease, prepared.path, prepared.expected_sha
             )
             task_id = self._kanban.create_or_get_task(
-                _dispatch_generation(_ci_failure_task(
+                _ci_failure_task(
                     self._policy,
                     receipt,
                     audit,
                     prepared,
                     assignee=assignee,
                     control_home=self._control_home,
-                ), lease)
+                )
             )
             _bind_pooled_worktree_task(
                 self._local_git, receipt, task_id, self._policy.board or ""
             )
             self._ledger.finalize(receipt, task_id, lease)
-            promote_task = getattr(self._kanban, "promote_task", None)
-            if promote_task is not None and self._policy.auto_dispatch:
-                promote_task(self._policy.board or "", task_id)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
             if os.environ.get("HERMES_PR_FEEDBACK_DEBUG"):
                 print(
@@ -2035,7 +1894,6 @@ class ScanController:
                 claimed_at=claimed_at,
                 stale_before=claimed_at - self._claim_lease,
                 exact_dispatch_only=True,
-                reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
             )
         if lease is None:
             return "duplicate"
@@ -2058,21 +1916,18 @@ class ScanController:
                 prepared.expected_sha,
             )
             task_id = self._kanban.create_or_get_task(
-                _dispatch_generation(_local_ci_task(
+                _local_ci_task(
                     self._policy,
                     receipt,
                     prepared,
                     control_home=self._control_home,
                     post_results=audit_policy.post_results,
-                ), lease)
+                )
             )
             _bind_pooled_worktree_task(
                 self._local_git, receipt, task_id, self._policy.board or ""
             )
             self._ledger.finalize(receipt, task_id, lease)
-            promote_task = getattr(self._kanban, "promote_task", None)
-            if promote_task is not None and self._policy.auto_dispatch:
-                promote_task(self._policy.board or "", task_id)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
             if os.environ.get("HERMES_PR_FEEDBACK_DEBUG"):
                 print(
@@ -2162,7 +2017,6 @@ class ScanController:
             claimed_at=claimed_at,
             stale_before=claimed_at - self._claim_lease,
             exact_dispatch_only=True,
-            reopen_blocked_auto_dispatch=self._policy.auto_dispatch,
         )
         if lease is None:
             skipped["duplicate"] += 1
@@ -2255,19 +2109,11 @@ class ScanController:
         if _is_self_resolution_receipt(feedback, owner_login=owner_login):
             return "self_resolution_receipt"
         identity = self._policy.github_identity
-        if (
-            identity is not None
-            and feedback.reviewer.login.casefold() == identity.expected_login.casefold()
-            and feedback.kind in {"issue_comment", "review_comment"}
-            and len(feedback.body) < MAX_FEEDBACK_BODY_CHARS
-            and re.search(
-                r"<!--\s*pr-maintenance-receipt:v1\s+status=completed\s+"
-                r"kind=\w+\s+head=[0-9a-f]{40,64}\s*-->",
-                feedback.body,
-            ) is not None
+        if identity is not None and _is_self_resolution_receipt(
+            feedback, owner_login=identity.expected_login,
         ):
-            # Governed automation has a separate identity from the PR owner.
-            # Its completion receipts must not become new repair requests.
+            # The governed publisher is distinct from the PR owner. Apply the
+            # same bounded receipt recognition even when a legacy reply lacks its marker.
             return "self_resolution_receipt"
         return None
 
@@ -2355,7 +2201,7 @@ class ScanController:
                 prepared.expected_sha,
             )
             task_id = self._kanban.create_or_get_task(
-                _dispatch_generation(_task(
+                _task(
                     self._policy,
                     receipt,
                     prepared,
@@ -2364,15 +2210,12 @@ class ScanController:
                     assignee_override=self._typed_ci_assignee(receipt, feedback.body),
                     labels=labels,
                     internal_intent_review=internal_intent_review,
-                ), lease)
+                )
             )
             _bind_pooled_worktree_task(
                 self._local_git, receipt, task_id, self._policy.board or ""
             )
             self._ledger.finalize(receipt, task_id, lease)
-            promote_task = getattr(self._kanban, "promote_task", None)
-            if promote_task is not None and self._policy.auto_dispatch:
-                promote_task(self._policy.board or "", task_id)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
             if os.environ.get("HERMES_PR_FEEDBACK_DEBUG"):
                 print(
@@ -2412,6 +2255,10 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
         return False
     body = " ".join(feedback.body.casefold().split())
     if not body:
+        return False
+    # Explicit unresolved language must veto every completion-shaped branch,
+    # including publisher receipts evaluated by the merge gate.
+    if _has_unresolved_action(body):
         return False
     exact_fixed_commit = re.match(r"fixed in [0-9a-f]{40,64}\b", body) is not None
     if (
@@ -2667,8 +2514,27 @@ def _is_self_resolution_receipt(feedback: Feedback, *, owner_login: str) -> bool
 def _has_unresolved_action(body: str) -> bool:
     if any(marker in body for marker in _ACTION_REMAINS_MARKERS):
         return True
-    if _BOUNDED_ACTION_REMAINS.search(body) is not None:
-        return True
+    finding = _UNRESOLVED_FINDING_LANGUAGE.search(body)
+    if finding is not None:
+        before_finding = body[max(0, finding.start() - 32) : finding.start()]
+        if re.search(r"\b(?:no|without|zero)\s+(?:unresolved\s+)?$", before_finding):
+            pass
+        else:
+            return True
+    bounded_action = _BOUNDED_ACTION_REMAINS.search(body)
+    if bounded_action is not None:
+        bounded_context = body[max(0, bounded_action.start() - 80) : bounded_action.end() + 80]
+        historical_reproduction = (
+            re.search(
+                r"\bpre-existing(?:\s+[\w-]+){0,4}\s+"
+                r"(?:failure|finding|issue|lane)\b",
+                bounded_context,
+            )
+            is not None
+            or "reproduced identically" in bounded_context
+        ) and _LANE_PASS_EVIDENCE.search(body[bounded_action.end() :]) is not None
+        if not historical_reproduction:
+            return True
     for match in _BARE_FAILS.finditer(body):
         clause_start = max(
             body.rfind(separator, 0, match.start())
@@ -2676,9 +2542,15 @@ def _has_unresolved_action(body: str) -> bool:
         )
         context = body[clause_start + 1 : match.end()]
         after = body[match.end() :]
+        if re.search(r"\b(?:0|no|zero)\s+$", context[: -len(match.group())]):
+            continue
         factual_history = (
             any(marker in context for marker in _HISTORIC_FAILURE_CONTEXT)
             and _same_lane_passes_after_resolution(context, after)
+        )
+        factual_history = factual_history or (
+            "pre-existing failures reproduced identically" in body
+            and ("now succeeds" in body or _LANE_PASS_EVIDENCE.search(body) is not None)
         )
         if not factual_history:
             return True
@@ -3010,22 +2882,6 @@ def _governed_pr_identity_command(
     )
 
 
-def _governed_pr_push_command(
-    control_home: Path,
-    repository: str,
-    pr_number: int,
-    expected_head_sha: str,
-    worktree: Path,
-) -> str:
-    """Build the shared-gated, exact-head push command for workers."""
-
-    return (
-        f"{_governed_command_prefix(control_home)} push-head "
-        f"--repository {shlex.quote(repository)} --pr-number {pr_number} "
-        f"--head-sha {shlex.quote(expected_head_sha)} --worktree {shlex.quote(str(worktree))}"
-    )
-
-
 def _task(
     policy: PluginPolicy,
     receipt: FeedbackReceipt,
@@ -3175,9 +3031,7 @@ def _task(
         evidence=evidence,
         # Kanban's public create CLI calls its dispatchable default "running";
         # create_task resolves that to a ready card until a worker claims it.
-        # Bind the receipt before making the card dispatchable.  A ready card
-        # can be claimed between create_task and ledger.finalize.
-        initial_status="blocked",
+        initial_status="running" if auto_dispatch else "blocked",
         max_retries=2 if auto_dispatch else 1,
         # 900s had no real margin: three separate PR-feedback repair tasks
         # observed live (2026-08-28) landed at 901-905s and were blocked as
@@ -3333,14 +3187,6 @@ def _ci_failure_task(
                 control_home, receipt.repository, receipt.pr_number
             )
         )
-        + "If the inspected canonical PR state is CLOSED or MERGED, first run `"
-        + f"{_governed_command_prefix(control_home)} retire-feedback --repository {shlex.quote(receipt.repository)} "
-        f"--pr-number {receipt.pr_number} --feedback-kind pr_repair "
-        f"--feedback-id {shlex.quote(receipt.feedback_id)} --receipt-head-sha {receipt.head_sha}`. "
-        "Only after status=retired, call kanban_complete as superseded "
-        "with the repository, PR number, state, and observed head. Do not reopen the PR, post a "
-        "completion comment, run complete-feedback, or claim CI success for this retirement. "
-        "Unknown or unavailable state is not proof of closure. For an OPEN PR, continue below. "
         + "Then inspect this task's prior runs, the worktree HEAD, the "
         "canonical PR head, and the latest owner reply. If a verified push and factual reply "
         "already exist, do not repeat completed work: run only the affected failed lane when "
@@ -3404,8 +3250,7 @@ def _ci_failure_task(
         idempotency_key=f"{_receipt_idempotency_key(receipt)}:typed-fixer-v3",
         evidence=evidence,
         evidence_heading="Authoritative local CI failure receipt (JSON)",
-        # The ledger binding is finalized before this card is promoted.
-        initial_status="blocked",
+        initial_status="running" if policy.auto_dispatch else "blocked",
         max_retries=2 if policy.auto_dispatch else 1,
         # Static/type repairs often need one full repository-owned lane after
         # the focused fix.  Keep the exact-head lease authoritative instead of
@@ -3498,11 +3343,10 @@ def _local_ci_task(
         idempotency_key=f"{_receipt_idempotency_key(receipt)}:supervised-v4",
         evidence=evidence,
         evidence_heading="Canonical PR audit receipt (JSON)",
-        # The ledger binding is finalized before an opted-in card is promoted.
-        initial_status="blocked",
+        initial_status="running",
         max_retries=3,
-        # Auto-dispatch promotes the card after the ledger binding; otherwise
-        # the audit remains blocked for explicit operator dispatch.
+        # Local CI audits are always created dispatchable so the deterministic
+        # repository-owned lane can run even when feedback coding is gated.
         # A deterministic required lane may run for an hour. Its durable
         # exact-head CI lease prevents duplicate restarts while the real
         # supervisor PID is alive; give the full lane sequence an 8h envelope.
