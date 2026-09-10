@@ -1487,7 +1487,7 @@ def _run_merge_scan(
             for merge_policy, result in zip(merge_policies, results, strict=True)
             for number in result.get("deployment_failures", [])
         ],
-        "report_only": all(bool(result["report_only"]) for result in results),
+        "report_only": all(bool(result.get("report_only", True)) for result in results),
     }
 
 
