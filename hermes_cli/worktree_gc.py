@@ -181,15 +181,10 @@ def reclaim_worktrees(
 ) -> List[str]:
     """Remove every reap-verdict tree from a frozen audit list — never re-globs inside the
     destructive loop, so trees created by concurrent sessions after the audit are out of scope."""
+    from agent.conversation_worktree import conversation_worktree_reclaim_guard
+
     if records is None:
         records = audit_worktrees(repo_root, with_sizes=False)
-    actions: List[str] = []
-    for record in records:
-        if record.verdict not in _REAP_VERDICTS:
-            continue
-        if dry_run:
-            actions.append(f"would remove {record.name} ({record.reason})")
-            continue
 
     def reclaim_one(record: TreeRecord) -> List[str]:
         record_actions: List[str] = []
@@ -226,7 +221,7 @@ def reclaim_worktrees(
 
     actions: List[str] = []
     for record in records:
-        if record.verdict not in {"reap", "reap-archive"}:
+        if record.verdict not in _REAP_VERDICTS:
             continue
         if dry_run:
             actions.append(f"would remove {record.name} ({record.reason})")
