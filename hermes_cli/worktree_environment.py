@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -72,6 +73,26 @@ def _same_repository_environment(
         and _git_value(main_root, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
         == common_dir
     )
+
+
+def _venv_python_path(resolved_source: Path, *, _platform: str | None = None) -> Path:
+    """The interpreter entrypoint for a virtualenv rooted at *resolved_source*.
+
+    Native Windows virtualenvs use ``Scripts/python.exe`` rather than
+    ``bin/python``; POSIX (incl. WSL) always uses the ``bin/`` layout.
+
+    Checks ``sys.platform`` (matching ``venv_bin_dir()``'s own default), not ``os.name``: Python
+    3.13's ``Path.__new__`` dispatches its concrete class from ``os.name`` at call time, so a test
+    monkeypatching ``os.name`` to simulate Windows would make ``venv_bin_dir()``'s internal
+    ``Path(venv_dir)`` reconstruction try to build a ``WindowsPath`` and crash on a real POSIX host.
+
+    *_platform* pins the platform for tests; omit in production (defaults to ``sys.platform``).
+    """
+    from hermes_constants import venv_bin_dir
+    platform = _platform if _platform is not None else sys.platform
+    windows = platform == "win32"
+    python_name = "python.exe" if windows else "python"
+    return venv_bin_dir(resolved_source, windows=windows) / python_name
 
 
 def bootstrap_worktree_environments(
@@ -136,7 +157,7 @@ def bootstrap_worktree_environments(
                     if not source.exists():
                         continue
                     resolved_source = source.resolve(strict=True)
-                    python = resolved_source / "bin" / "python"
+                    python = _venv_python_path(resolved_source)
                     if not resolved_source.is_dir() or not _same_repository_environment(
                         source_root,
                         resolved_source,

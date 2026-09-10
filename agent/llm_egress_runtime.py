@@ -87,9 +87,29 @@ _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES = frozenset({"kanban_attachments"})
 # fail on otherwise harmless page identifiers or encoded-looking text.
 _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES = frozenset({"terminal", "browser_exec"})
 _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"search_files"})
+# Both catalog bridge calls return model-readable tool schemas/descriptions.
+# Protected workers must replay only the bounded local outcome; otherwise a
+# tool_describe result is treated as untrusted provider content and can trip
+# the egress firewall on harmless schema words.
+_REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES = frozenset(
+    {"tool_search", "tool_describe"}
+)
 _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file"})
 _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES = frozenset({"web_extract", "web_search"})
 _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES = frozenset({"patch", "write_file"})
+_REMOTE_KANBAN_LIFECYCLE_TOOL_NAMES = frozenset(
+    {
+        "kanban_attach",
+        "kanban_attach_url",
+        "kanban_block",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_heartbeat",
+        "kanban_link",
+        "kanban_request_changes",
+        "kanban_request_review",
+    }
+)
 _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES = frozenset(
     {
         "kanban_show",
@@ -104,6 +124,7 @@ _GITHUB_PR_FEEDBACK_TERMINAL_SUBCOMMANDS = frozenset(
     {
         "inspect-pr",
         "complete-feedback",
+        "retire-feedback",
         "submit-review",
         "status",
     }
@@ -129,11 +150,21 @@ _GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS = frozenset(
         "observed_head_sha",
         "pr_number",
         "pr_state",
+        "state",
+        "task_id",
         "reason",
         "repository",
         "resolved_head_sha",
         "review_thread_resolved",
         "status",
+        "error_excerpt",
+        "receipt_id",
+        "manifest_digest",
+        "handoff_reason",
+        "handoff_status",
+        "repair_status",
+        "retryable",
+        "command_count",
     }
 )
 _GITHUB_LIST_TERMINAL_MAX_ROWS = 100
@@ -142,6 +173,9 @@ _GITHUB_LIST_TERMINAL_MAX_OUTPUT_BYTES = 10_240
 _GIT_GREP_TERMINAL_MAX_MATCHES = 200
 _GIT_DIFF_NAME_ONLY_MAX_FILES = 200
 _GIT_REVIEW_SUMMARY_MAX_FILES = 200
+_PYTEST_DIAGNOSTIC_MAX_LINES = 32
+_PYTEST_DIAGNOSTIC_MAX_BYTES = 4096
+_FILE_MUTATION_ERROR_MAX_BYTES = 1024
 _GITHUB_API_EXTRACT_ARGUMENT_REPLAY = (
     '{"urls":["https://api.github.com/repos/<owner>/<repo>/<list>"]}'
 )
@@ -184,10 +218,26 @@ _REMOTE_KANBAN_PROJECTION_ELISION = (
     "present in your worker context; do not request or repeat the raw board "
     "record remotely. Continue with the assigned work or use a lifecycle tool."
 )
+_REMOTE_KANBAN_TASK_SPEC_VERSION = "v1"
+_REMOTE_KANBAN_TASK_TITLE_MAX_BYTES = 1024
+_REMOTE_KANBAN_TASK_BODY_MAX_BYTES = 8 * 1024
 _REMOTE_KANBAN_ATTACHMENT_ELISION = (
     "kanban_attachments completed locally; attachment metadata and contents "
     "were omitted from remote replay. Continue with the assigned work or use a lifecycle tool."
 )
+_REMOTE_KANBAN_LIFECYCLE_ELISION = (
+    "Kanban lifecycle action completed locally; its raw control-plane result "
+    "was omitted from remote replay."
+)
+
+
+def _project_bound_kanban_lifecycle(value: str) -> GeneratedContextSegment:
+    """Replay only a fixed outcome for an exact local lifecycle call."""
+
+    # Lifecycle results can include comment text, paths, opaque ids, or
+    # backend errors. The worker only needs the fact that its local action
+    # returned; exact call-id binding is enforced by the caller.
+    return GeneratedContextSegment(_REMOTE_KANBAN_LIFECYCLE_ELISION)
 
 
 def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
@@ -201,14 +251,43 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
     if not isinstance(task, dict):
         return GeneratedContextSegment(_REMOTE_KANBAN_PROJECTION_ELISION)
 
+    # Only the exact versioned producer contract may carry assignment text.
+    # Forged/unbound board-shaped JSON stays on the elision path. The producer
+    # has already capped the fields and the redaction/final scans remain
+    # mandatory before this generated context can leave the host.
+    task_spec = payload.get("protected_task_spec")
+
+    def bounded_text(item: Any, max_bytes: int) -> str:
+        text = item if isinstance(item, str) else ""
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+        suffix = "\n<truncated>"
+        budget = max(0, max_bytes - len(suffix.encode("utf-8")))
+        return encoded[:budget].decode("utf-8", errors="ignore") + suffix
+
+    projected_task: dict[str, Any] = {
+        key: task[key]
+        for key in ("status", "workspace_access")
+        if key in task
+    }
+    if (
+        isinstance(task_spec, dict)
+        and task_spec.get("version") == _REMOTE_KANBAN_TASK_SPEC_VERSION
+    ):
+        projected_task.update(
+            {
+                "title": bounded_text(
+                    task_spec.get("title"), _REMOTE_KANBAN_TASK_TITLE_MAX_BYTES
+                ),
+                "body": bounded_text(
+                    task_spec.get("body"), _REMOTE_KANBAN_TASK_BODY_MAX_BYTES
+                ),
+            }
+        )
+
     projection = {
-        "task": {
-            key: task[key]
-            for key in ("title", "body", "status", "workspace_access")
-            if key in task
-        },
-        "parents": payload.get("parents", []),
-        "children": payload.get("children", []),
+        "task": projected_task,
         "worker_instruction": (
             "Use the dispatcher-assigned current workspace. Do not invent or search "
             "for alternate worktrees; report an unresolved assignment and stop."
@@ -310,6 +389,15 @@ def _project_bound_search_files(value: str) -> GeneratedContextSegment:
         )
     )
     return GeneratedContextSegment(safe)
+
+
+def _project_bound_tool_search(value: str) -> GeneratedContextSegment:
+    """Replay only the bounded outcome of local tool catalog discovery."""
+
+    return GeneratedContextSegment(
+        "tool_search completed locally. Its catalog result was omitted from "
+        "remote replay; use the already connected terminal tool."
+    )
 
 
 def _project_web_search_replay(value: str) -> SanitizedSegment:
@@ -444,6 +532,24 @@ def provider_uses_egress_firewall(provider: Any) -> bool:
     """Return whether an exact configured provider owns a protected remote lane."""
 
     return str(provider or "").strip().lower() in _PROTECTED_REMOTE_PROVIDERS
+
+
+# Benchmark-backed per-profile model route table, installed at startup by
+# install_performance_route_table() when a route artifact is configured.
+_PERFORMANCE_ROUTE_TABLE: "Any | None" = None
+
+
+def install_performance_route_table(table: Any) -> None:
+    """Activate a compiled benchmark-backed route table for _route_for_agent.
+
+    Call once at startup with the result of
+    ``agent.model_performance_router.compile_profile_routes`` (or
+    ``hermes_cli.profile_route_compiler.compile_profile_configs``).  The table
+    is keyed by profile name then surface name; ``_route_for_agent`` consults
+    it when the agent exposes a ``performance_surface`` attribute.
+    """
+    global _PERFORMANCE_ROUTE_TABLE
+    _PERFORMANCE_ROUTE_TABLE = table
 
 
 def _exact_provider_secret_values() -> tuple[str, ...]:
@@ -723,6 +829,50 @@ def _recognized_syntax_tool_call_ids(value: Any) -> frozenset[str]:
     """Return preceding terminal calls eligible for strict syntax parsing."""
 
     return _recognized_tool_call_ids(value, _VALIDATED_SYNTAX_TOOL_NAMES)
+
+
+def _pytest_terminal_call_ids(value: Any) -> frozenset[str]:
+    """Bind bounded pytest diagnostics to exact local test calls."""
+
+    recognized: set[str] = set()
+
+    def is_pytest_command(arguments: Any) -> bool:
+        try:
+            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+            command = parsed.get("command") if isinstance(parsed, Mapping) else None
+            tokens = shlex.split(command) if isinstance(command, str) else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if "pytest" not in tokens:
+            return False
+        index = tokens.index("pytest")
+        return index == 0 or tokens[index - 1] in {"-m", "run"}
+
+    def visit(item: Any) -> None:
+        if isinstance(item, Mapping):
+            function = item.get("function")
+            name = function.get("name") if isinstance(function, Mapping) else item.get("name")
+            arguments = (
+                function.get("arguments")
+                if isinstance(function, Mapping)
+                else item.get("arguments")
+            )
+            call_id = item.get("call_id") or item.get("id")
+            if (
+                item.get("type") in {"function", "function_call"}
+                and name == "terminal"
+                and is_pytest_command(arguments)
+                and isinstance(call_id, str)
+            ):
+                recognized.update(tool_result_id_variants(call_id))
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return frozenset(recognized)
 
 
 def _scratch_read_file_tool_call_ids(value: Any) -> frozenset[str]:
@@ -2429,9 +2579,12 @@ def _typed_payload(
     sanitized_cap: int,
     field_name: str | None = None,
     syntax_tool_call_ids: frozenset[str] = frozenset(),
+    pytest_terminal_call_ids: frozenset[str] = frozenset(),
     elided_kanban_tool_call_ids: frozenset[str] = frozenset(),
     kanban_attachment_tool_call_ids: frozenset[str] = frozenset(),
+    kanban_lifecycle_tool_call_ids: frozenset[str] = frozenset(),
     search_projection_tool_call_ids: frozenset[str] = frozenset(),
+    tool_search_projection_tool_call_ids: frozenset[str] = frozenset(),
     read_file_projection_tool_call_ids: frozenset[str] = frozenset(),
     web_replay_tool_call_ids: frozenset[str] = frozenset(),
     file_mutation_replay_tool_call_ids: frozenset[str] = frozenset(),
@@ -2529,9 +2682,25 @@ def _typed_payload(
                 or value.get("type") == "function_call_output"
             )
         )
+        is_kanban_lifecycle_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in kanban_lifecycle_tool_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
         is_search_projection_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in search_projection_tool_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
+        is_tool_search_projection_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in tool_search_projection_tool_call_ids
             and (
                 value.get("role") == "tool"
                 or value.get("type") == "function_call_output"
@@ -2601,6 +2770,14 @@ def _typed_payload(
         is_git_review_summary_projection_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in git_review_summary_projection_tool_call_ids
+            and (
+                value.get("role") == "tool"
+                or value.get("type") == "function_call_output"
+            )
+        )
+        is_pytest_terminal_result = (
+            isinstance(output_call_id, str)
+            and output_call_id in pytest_terminal_call_ids
             and (
                 value.get("role") == "tool"
                 or value.get("type") == "function_call_output"
@@ -2703,7 +2880,9 @@ def _typed_payload(
                 is_recognized_tool_result,
                 is_elided_kanban_tool_result,
                 is_kanban_attachment_result,
+                is_kanban_lifecycle_result,
                 is_search_projection_tool_result,
+                is_tool_search_projection_result,
                 is_read_file_projection_tool_result,
                 is_web_replay_tool_result,
                 is_file_mutation_replay_result,
@@ -2713,6 +2892,7 @@ def _typed_payload(
                 is_rg_projection_tool_result,
                 is_git_diff_name_only_projection_tool_result,
                 is_git_review_summary_projection_tool_result,
+                is_pytest_terminal_result,
                 is_github_pr_feedback_terminal_result,
                 is_kanban_assignees_result,
                 isinstance(github_list_limit, int),
@@ -2760,7 +2940,10 @@ def _typed_payload(
                 (
                     is_recognized_tool_result,
                     is_elided_kanban_tool_result,
+                    is_kanban_attachment_result,
+                    is_kanban_lifecycle_result,
                     is_search_projection_tool_result,
+                    is_tool_search_projection_result,
                     is_read_file_projection_tool_result,
                     is_web_replay_tool_result,
                     is_file_mutation_replay_result,
@@ -2770,6 +2953,7 @@ def _typed_payload(
                     is_rg_projection_tool_result,
                     is_git_diff_name_only_projection_tool_result,
                     is_git_review_summary_projection_tool_result,
+                    is_pytest_terminal_result,
                     is_github_pr_feedback_terminal_result,
                     is_kanban_assignees_result,
                     is_plain_github_list_terminal_result,
@@ -2816,6 +3000,9 @@ def _typed_payload(
             structured_text = (
                 _structured_tool_output_text(item) if is_structured_result else None
             )
+            if is_structured_result and is_kanban_lifecycle_result:
+                typed[key] = _project_bound_kanban_lifecycle(structured_text or "")
+                continue
             if is_kanban_assignees_result and structured_text is not None:
                 projected = _project_kanban_assignees_terminal_result(structured_text)
                 if projected is not None:
@@ -2894,6 +3081,7 @@ def _typed_payload(
                 continue
             if is_structured_result and (
                 is_search_projection_tool_result
+                or is_tool_search_projection_result
                 or is_git_grep_projection_tool_result
                 or is_rg_projection_tool_result
             ):
@@ -2925,6 +3113,15 @@ def _typed_payload(
                     continue
             if (
                 is_structured_result
+                and is_pytest_terminal_result
+                and structured_text is not None
+            ):
+                typed[key] = GeneratedContextSegment(
+                    _pytest_terminal_result(structured_text)
+                )
+                continue
+            if (
+                is_structured_result
                 and is_web_replay_tool_result
                 and github_api_extract_limit is None
             ):
@@ -2932,7 +3129,8 @@ def _typed_payload(
                     typed[key] = _project_web_search_replay(structured_text)
                     continue
             if is_structured_result and is_file_mutation_replay_result:
-                typed[key] = GeneratedContextSegment(_FILE_MUTATION_REPLAY_ELISION)
+                projected = _project_file_mutation_result(structured_text or "")
+                typed[key] = GeneratedContextSegment(projected)
                 continue
             if is_structured_result and is_git_workspace_diagnostic_result:
                 typed[key] = GeneratedContextSegment(
@@ -3010,6 +3208,13 @@ def _typed_payload(
                 typed[key] = _project_bound_search_files(item)
                 continue
             if (
+                is_tool_search_projection_result
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                typed[key] = _project_bound_tool_search(item)
+                continue
+            if (
                 is_web_replay_tool_result
                 and key in {"content", "output"}
                 and isinstance(item, str)
@@ -3028,7 +3233,9 @@ def _typed_payload(
                 and key in {"content", "output"}
                 and isinstance(item, str)
             ):
-                typed[key] = GeneratedContextSegment(_FILE_MUTATION_REPLAY_ELISION)
+                typed[key] = GeneratedContextSegment(
+                    _project_file_mutation_result(item)
+                )
                 continue
             if (
                 is_kanban_assignees_result
@@ -3090,6 +3297,13 @@ def _typed_payload(
                         redact_remote_unsafe_text(projected)
                     )
                     continue
+            if (
+                is_pytest_terminal_result
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                typed[key] = GeneratedContextSegment(_pytest_terminal_result(item))
+                continue
             if (
                 is_github_pr_feedback_terminal_result
                 and key in {"content", "output"}
@@ -3170,6 +3384,13 @@ def _typed_payload(
                 and isinstance(item, str)
             ):
                 typed[key] = GeneratedContextSegment(_GITHUB_PLAIN_LIST_OUTPUT_REPLAY)
+                continue
+            if (
+                is_kanban_lifecycle_result
+                and key in {"content", "output"}
+                and isinstance(item, str)
+            ):
+                typed[key] = _project_bound_kanban_lifecycle(item)
                 continue
             if (
                 isinstance(combined_github_list_limit, int)
@@ -3283,6 +3504,7 @@ def _typed_payload(
                     field_name=key,
                     generated_context=True,
                     redact_generated_context=True,
+                    tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
                     registry=registry,
                     request_identity=request_identity,
                 )
@@ -3294,9 +3516,12 @@ def _typed_payload(
                 sanitized_cap=sanitized_cap,
                 field_name=key,
                 syntax_tool_call_ids=syntax_tool_call_ids,
+                pytest_terminal_call_ids=pytest_terminal_call_ids,
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
                 kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
+                kanban_lifecycle_tool_call_ids=kanban_lifecycle_tool_call_ids,
                 search_projection_tool_call_ids=search_projection_tool_call_ids,
+                tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
                 read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
                 web_replay_tool_call_ids=web_replay_tool_call_ids,
                 file_mutation_replay_tool_call_ids=file_mutation_replay_tool_call_ids,
@@ -3353,9 +3578,12 @@ def _typed_payload(
                 sanitized_cap=sanitized_cap,
                 field_name=field_name,
                 syntax_tool_call_ids=syntax_tool_call_ids,
+                pytest_terminal_call_ids=pytest_terminal_call_ids,
                 elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
                 kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
+                kanban_lifecycle_tool_call_ids=kanban_lifecycle_tool_call_ids,
                 search_projection_tool_call_ids=search_projection_tool_call_ids,
+                tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
                 read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
                 web_replay_tool_call_ids=web_replay_tool_call_ids,
                 file_mutation_replay_tool_call_ids=file_mutation_replay_tool_call_ids,
@@ -3436,11 +3664,131 @@ def _terminal_replay_result(output: str) -> str:
     )
 
 
+def _pytest_terminal_result(output: str) -> str:
+    """Replay bounded pytest failure facts without source or raw stdout."""
+
+    try:
+        parsed = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = None
+    exit_code = parsed.get("exit_code") if isinstance(parsed, Mapping) else None
+    raw_output = parsed.get("output") if isinstance(parsed, Mapping) else None
+    if not isinstance(raw_output, str):
+        raw_output = ""
+
+    diagnostics: list[str] = []
+    diagnostic_bytes = 0
+    for raw_line in raw_output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        summary = (
+            line.startswith(("FAILED ", "ERROR ", "E   ", "INTERNALERROR>"))
+            or line.startswith("collected ")
+            or line.startswith("!!!!!!!!!!!!!!!!")
+            or (
+                line.startswith("=")
+                and line.endswith("=")
+                and re.search(
+                    r"\b(?:passed|failed|error|errors|skipped|warnings)\b",
+                    line,
+                    re.IGNORECASE,
+                )
+                is not None
+            )
+        )
+        if not summary:
+            continue
+        safe = redact_remote_unsafe_text(
+            redact_sensitive_text(line, force=True, redact_url_credentials=True)
+        )
+        encoded = safe.encode("utf-8")
+        if not encoded or diagnostic_bytes + len(encoded) + 1 > _PYTEST_DIAGNOSTIC_MAX_BYTES:
+            break
+        diagnostics.append(safe)
+        diagnostic_bytes += len(encoded) + 1
+        if len(diagnostics) >= _PYTEST_DIAGNOSTIC_MAX_LINES:
+            break
+
+    return json.dumps(
+        {
+            "terminal_result": "pytest",
+            "exit_code": exit_code if isinstance(exit_code, int) else None,
+            "diagnostics": diagnostics,
+            "raw_output": "omitted_from_remote_replay",
+        },
+        separators=(",", ":"),
+    )
+
+
+def _project_file_mutation_result(output: str) -> str:
+    """Replay bounded mutation outcome metadata without source or diff text.
+
+    A protected worker must be able to distinguish a landed patch from a
+    validation failure. The old fixed elision hid that distinction, so a
+    worker could re-apply an already-landed edit or report a false blocker.
+    Keep only typed outcome/count fields and a short sanitized error; never
+    replay the unified diff, source, or absolute paths.
+    """
+
+    try:
+        parsed = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = None
+    if not isinstance(parsed, Mapping):
+        return _FILE_MUTATION_REPLAY_ELISION
+    projection: dict[str, Any] = {
+        "file_mutation": "completed",
+        "success": bool(parsed.get("success")),
+    }
+    if parsed.get("no_change") is True:
+        projection["no_change"] = True
+    for field in ("files_modified", "files_created", "files_deleted"):
+        values = parsed.get(field)
+        if isinstance(values, list) and values:
+            projection[field + "_count"] = len(values)
+    error = parsed.get("error")
+    if isinstance(error, str) and error.strip():
+        safe_error = redact_remote_unsafe_text(
+            redact_sensitive_text(
+                error.strip()[:_FILE_MUTATION_ERROR_MAX_BYTES],
+                force=True,
+                redact_url_credentials=True,
+            )
+        )
+        if safe_error:
+            projection["error"] = safe_error
+    note = parsed.get("note")
+    if isinstance(note, str) and note.strip():
+        safe_note = redact_remote_unsafe_text(
+            redact_sensitive_text(
+                note.strip()[:_FILE_MUTATION_ERROR_MAX_BYTES],
+                force=True,
+                redact_url_credentials=True,
+            )
+        )
+        if safe_note:
+            projection["note"] = safe_note
+    return json.dumps(projection, separators=(",", ":"))
+
+
 def _github_pr_feedback_terminal_result(output: str) -> str:
     """Replay bounded JSON status from governed PR-feedback commands."""
 
+    def safe_failure_excerpt(value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        safe = redact_remote_unsafe_text(
+            redact_sensitive_text(value, force=True, redact_url_credentials=True)
+        )
+        encoded = safe.encode("utf-8")
+        if len(encoded) > 1200:
+            safe = encoded[:1190].decode("utf-8", errors="ignore") + "\n<truncated>"
+        return safe
+
     exit_code = None
     text = output
+    failure_excerpt = None
     try:
         parsed = json.loads(output)
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -3449,6 +3797,10 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
         maybe_exit = parsed.get("exit_code")
         if isinstance(maybe_exit, int):
             exit_code = maybe_exit
+        for key in ("stderr", "error"):
+            failure_excerpt = safe_failure_excerpt(parsed.get(key))
+            if failure_excerpt:
+                break
         for key in ("stdout", "output", "content"):
             value = parsed.get(key)
             if isinstance(value, str):
@@ -3469,6 +3821,10 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
             for key, value in candidate.items():
                 if key not in _GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS:
                     continue
+                if key in {"receipt_id", "manifest_digest"} and (
+                    not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                ):
+                    continue
                 if value is None or isinstance(value, (bool, int)):
                     payload[str(key)] = value
                     continue
@@ -3478,6 +3834,14 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
                 if len(value) <= limit:
                     payload[str(key)] = value
             break
+    if failure_excerpt is None and exit_code not in (None, 0) and payload is None:
+        # Terminal backends merge stderr into output. Retain only recognizable
+        # launch diagnostics, never arbitrary failed-command stdout/source.
+        diagnostics = [line for line in str(text or "").splitlines() if re.search(
+            r"(?:ModuleNotFoundError:|ImportError:|command not found|No such file or directory)",
+            line,
+        )]
+        failure_excerpt = safe_failure_excerpt("\n".join(diagnostics[:4]))
     replay: dict[str, object] = {
         "terminal_result": "github_pr_feedback",
         "exit_code": exit_code,
@@ -3485,6 +3849,15 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
     }
     if payload is not None:
         replay["json"] = payload
+    if isinstance(parsed, Mapping):
+        session_id = parsed.get("session_id")
+        if isinstance(session_id, str) and re.fullmatch(r"proc_[0-9a-f]{12}", session_id):
+            replay["session_id"] = session_id
+            pid = parsed.get("pid")
+            if type(pid) is int and 0 < pid < 2**31:
+                replay["pid"] = pid
+    if failure_excerpt:
+        replay["error_excerpt"] = failure_excerpt
     return json.dumps(replay, sort_keys=True, separators=(",", ":"))
 
 
@@ -3571,6 +3944,23 @@ def _typed_payload_violation_locations(
 def _route_for_agent(agent: Any, route: Any | None) -> Any:
     if route is not None:
         return route
+    # Consult the benchmark-backed performance route table when available and
+    # the agent declares a surface.  Falls through to agent defaults on miss.
+    surface = str(getattr(agent, "performance_surface", "") or "")
+    if _PERFORMANCE_ROUTE_TABLE is not None and surface:
+        try:
+            from agent.model_performance_router import resolve_route
+            profile = str(getattr(agent, "profile", "") or "default")
+            privacy = str(getattr(agent, "privacy_class", "") or "sanitized")
+            return resolve_route(
+                _PERFORMANCE_ROUTE_TABLE,
+                profile=profile,
+                surface=surface,
+                privacy=privacy,
+                required_context=0,
+            )
+        except Exception:
+            pass
     provider = str(getattr(agent, "provider", "") or "")
     base_url = getattr(agent, "base_url", None)
     api_mode = getattr(agent, "api_mode", None)
@@ -3829,6 +4219,11 @@ def authorize_agent_sdk_kwargs(
             if protected_kanban_remote
             else frozenset()
         ),
+        pytest_terminal_call_ids=(
+            _pytest_terminal_call_ids(body)
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
         elided_kanban_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_PROJECTION_TOOL_NAMES)
             if protected_kanban_remote and protected_provider_route
@@ -3839,9 +4234,21 @@ def authorize_agent_sdk_kwargs(
             if protected_kanban_remote and protected_provider_route
             else frozenset()
         ),
+        kanban_lifecycle_tool_call_ids=(
+            _recognized_tool_call_ids(body, _REMOTE_KANBAN_LIFECYCLE_TOOL_NAMES)
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
         search_projection_tool_call_ids=(
             _recognized_tool_call_ids(
                 body, _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES
+            )
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
+        ),
+        tool_search_projection_tool_call_ids=(
+            _recognized_tool_call_ids(
+                body, _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES
             )
             if protected_kanban_remote and protected_provider_route
             else frozenset()
@@ -3975,9 +4382,11 @@ def authorize_agent_sdk_kwargs(
         request_id=request_id,
         policy_digest=policy_digest,
     )
-    state_dir = Path(
-        getattr(agent, "_llm_egress_state_dir", "")
-        or Path.home() / ".hermes" / "egress"
+    from hermes_constants import get_hermes_home
+
+    _configured_state_dir = getattr(agent, "_llm_egress_state_dir", "")
+    state_dir = Path(_configured_state_dir) if _configured_state_dir else (
+        Path(get_hermes_home()) / "egress"
     )
     max_serialized_bytes = int(
         getattr(agent, "_llm_egress_max_serialized_bytes", 262_144)

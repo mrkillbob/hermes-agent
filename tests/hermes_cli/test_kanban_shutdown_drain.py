@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_recovery as recovery
 
 
 @pytest.fixture
@@ -17,7 +19,7 @@ def conn(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb._INITIALIZED_PATHS.clear()
-    connection = kb.connect()
+    connection = kbc.connect()
     try:
         yield connection
     finally:
@@ -47,7 +49,7 @@ def test_pause_current_run_requeues_to_original_lane(conn, monkeypatch):
     assert claimed is not None
     assert claimed.current_run_id is not None
 
-    assert kb.pause_task(
+    assert recovery.pause_task(
         conn,
         task_id,
         expected_run_id=claimed.current_run_id,
@@ -75,7 +77,7 @@ def test_pause_current_run_rejects_stale_owner(conn):
     claimed = kb.claim_task(conn, task_id, claimer="builder:owner")
     assert claimed is not None
 
-    assert kb.pause_task(
+    assert recovery.pause_task(
         conn,
         task_id,
         expected_run_id=claimed.current_run_id,

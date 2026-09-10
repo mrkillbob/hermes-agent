@@ -28,10 +28,13 @@ from github_pr_feedback.github_client import (
 from github_pr_feedback.ledger import FeedbackLedger, LedgerStateError
 from github_pr_feedback.merge_controller import (
     CanonicalMergeEvidenceSource,
+    CIReceiptComment,
     MergeController,
     MergeSnapshot,
     _codex_clean_head,
     _codex_reviewed_head,
+    _is_ci_receipt_comment_for_head,
+    ci_receipt_comment_from_feedback,
     _is_governed_approval_receipt,
     evaluate_merge,
 )
@@ -895,6 +898,45 @@ def test_codex_reviewed_head_ignores_a_look_alike_comment_from_another_user() ->
     assert _codex_reviewed_head(feedback, HEAD_SHA) is False
 
 
+def test_worker_ci_comment_is_admitted_only_for_exact_bot_identity() -> None:
+    body = (
+        "<!-- pr-ci-receipt:v2 status=passed id="
+        + "d" * 64
+        + " head="
+        + HEAD_SHA
+        + " base="
+        + BASE_SHA
+        + " manifest="
+        + "e" * 64
+        + " completed=2026-08-25T11:59:00+00:00 ci_mode=standard -->"
+    )
+    bot_comment = Feedback(
+        "issue_comment", "1", Reviewer("worker-bot", "OWNER"), body, NOW, True
+    )
+    human_comment = replace(bot_comment, reviewer=Reviewer("worker-bot", "OWNER"), is_bot=False)
+    pull = pr_state()
+
+    accepted = ci_receipt_comment_from_feedback(
+        (bot_comment,),
+        pull,
+        expected_login="worker-bot",
+        manifest_digest="e" * 64,
+    )
+    rejected = ci_receipt_comment_from_feedback(
+        (human_comment,),
+        pull,
+        expected_login="worker-bot",
+        manifest_digest="e" * 64,
+    )
+
+    assert isinstance(accepted, CIReceiptComment)
+    assert accepted.identity.head_sha == HEAD_SHA
+    assert rejected is None
+    assert _is_ci_receipt_comment_for_head(
+        bot_comment, expected_login="worker-bot", head_sha=HEAD_SHA
+    )
+
+
 def test_codex_clean_head_true_when_review_completed_and_no_findings() -> None:
     feedback = (_codex_feedback(_codex_summary("✅ **Completed**", HEAD_SHA[:7])),)
 
@@ -904,7 +946,9 @@ def test_codex_clean_head_true_when_review_completed_and_no_findings() -> None:
 def test_codex_clean_head_false_when_actionable_finding_present() -> None:
     """A completed review + actionable finding comment is not a clean head."""
 
-    finding = _codex_feedback("You should rename this variable.", login="chatgpt-codex-connector[bot]")
+    finding = _codex_feedback(
+        "You should rename this variable.", login="chatgpt-codex-connector[bot]"
+    )
     feedback = (
         _codex_feedback(_codex_summary("✅ **Completed**", HEAD_SHA[:7])),
         finding,
