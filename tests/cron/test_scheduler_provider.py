@@ -404,7 +404,8 @@ def test_claim_fire_persists_attempt_before_fire_claimed(monkeypatch):
     monkeypatch.setattr(
         executions,
         "create_execution",
-        lambda jid, source: events.append("ledger") or {"id": "exec-1"},
+        lambda jid, source, _create=executions.create_execution:
+        events.append("ledger") or _create(jid, source=source),
     )
     monkeypatch.setattr(
         sched,
@@ -417,9 +418,9 @@ def test_claim_fire_persists_attempt_before_fire_claimed(monkeypatch):
 
     assert events == ["ledger", "claim"]
     assert claimed is not None
-    assert claimed["execution_id"] == "exec-1"
+    assert executions.get_execution(claimed["execution_id"])["status"] == "claimed"
     assert provider.fire_claimed(claimed) is True
-    assert events == ["ledger", "claim", ("run", "exec-1")]
+    assert events == ["ledger", "claim", ("run", claimed["execution_id"])]
 
 
 def test_fire_due_forwards_manual_force_to_store_claim(monkeypatch):
@@ -438,6 +439,10 @@ def test_fire_due_forwards_manual_force_to_store_claim(monkeypatch):
 
     assert InProcessCronScheduler().fire_due("j1", force=True) is True
     assert claims == [("j1", {"force": True, "return_job": True})]
+    # An off-tick run-now forwards ``manual`` so the claim does not stamp the next occurrence;
+    # the default (webhook / misfire) fire keeps the occurrence stamp.
+    assert InProcessCronScheduler().fire_due("j1", manual=True) is True
+    assert claims[-1] == ("j1", {"manual": True, "return_job": True})
 
 
 def test_fire_due_lost_claim_does_not_run(monkeypatch):
@@ -531,6 +536,23 @@ def test_heartbeat_roundtrip_and_age(tmp_path, monkeypatch):
     jobs.record_ticker_heartbeat(success=True)
     ok = jobs.get_ticker_success_age()
     assert ok is not None and 0.0 <= ok < 5.0
+
+
+def test_future_ticker_heartbeat_is_not_liveness_evidence(tmp_path, monkeypatch):
+    """A restored or skewed future marker must not keep a dead ticker alive."""
+    import time
+
+    import cron.jobs as jobs
+
+    cron_dir = tmp_path / "cron"
+    cron_dir.mkdir()
+    monkeypatch.setattr(jobs, "CRON_DIR", cron_dir)
+    monkeypatch.setattr(jobs, "TICKER_HEARTBEAT_FILE", cron_dir / "ticker_heartbeat")
+    (cron_dir / "ticker_heartbeat").write_text(
+        str(time.time() + 3600), encoding="utf-8"
+    )
+
+    assert jobs.get_ticker_heartbeat_age() is None
 
 
 # ── F8: runtime backstop — never resolve a stored pair that exfiltrates a key ──

@@ -117,11 +117,11 @@ export function trackInboundActivity(roster: RosterRow[]) {
  *  session — a group room or another tab owning the center must not be
  *  yanked away by background activity — and never mid-turn, when the
  *  activity is the turn itself, already streaming. */
-function refreshOpenBotChat(bot: RosterRow) {
+function refreshOpenBotChat(bot: RosterRow, { allowWhileBusy = false }: { allowWhileBusy?: boolean } = {}) {
   const canonicalIds = [bot.canonical_session?.id, bot.canonical_session?.resolved_id].filter(Boolean).map(String)
   const focused = String(host.state.focusedStoredSessionId?.get?.() || '')
 
-  if (!focused || !canonicalIds.includes(focused) || host.state.busy.get()) {
+  if (!focused || !canonicalIds.includes(focused) || (!allowWhileBusy && host.state.busy.get())) {
     return
   }
 
@@ -241,15 +241,22 @@ export async function openRosterBot(bot: RosterRow): Promise<boolean> {
 
   const fronted = focusExistingBotTab(bot)
 
-    if (focused) {
-      // Legacy visibility repair is profile-scoped and demand-driven: opening
-      // this bot may inspect this bot, but an idle Desktop never scans peers.
-      void reconcileBotProfileSessions(bot)
-      // Open tabs win: no source activation, no registry consult, no open. The
-      // claim carries only the fronted tab so the focus edge it fires keeps it
-      // (releaseStaleOpenBotChat) and no registry id is recorded, because none
-      // was resolved.
-      $openBotChat.set({ key, openedRegistryId: '', openedSessionId: focused })
+  if (fronted) {
+    // The canonical chat is on screen: no source activation, no registry
+    // round-trip. Both identities are recorded so the reclaim listener and
+    // the roster-activity refresh treat it exactly like a registry open.
+    $openBotChat.set({ key, openedRegistryId: fronted.registryId, openedSessionId: fronted.storedSessionId })
+    // Legacy visibility repair is profile-scoped and demand-driven: opening
+    // this bot may inspect this bot, but an idle Desktop never scans peers.
+    void reconcileBotProfileSessions(bot)
+
+    // Fronting is presentation-only: the pane keeps whatever transcript it
+    // last painted, which can predate rows the bot wrote while the user was
+    // elsewhere (another bot's turn, a cron delivery, a teammate's
+    // message_agent). Force a registry open so forceResume re-pulls the
+    // latest transcript instead of leaving a stale snapshot until the next
+    // user turn (#99393 class; #95600 only covered the not-yet-open path).
+    refreshOpenBotChat(bot, { allowWhileBusy: true })
 
     return true
   }

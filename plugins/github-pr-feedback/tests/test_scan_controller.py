@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from github_pr_feedback.controller import (
     _ci_receipt_feedback_reason,
     _is_self_resolution_receipt,
     _intent_review_task,
+    _is_reopenable_egress_failure,
     _local_ci_feedback_id,
     _select_local_ci_candidates,
     _task,
@@ -43,6 +45,7 @@ from github_pr_feedback.policy import (
     PullRequest,
     Reviewer,
     load_policy,
+    codex_review_trigger_comment,
 )
 
 
@@ -70,6 +73,42 @@ def test_intent_review_card_uses_valid_zero_retry_encoding(tmp_path: Path) -> No
     assert task.max_retries == 1
     assert task.idempotency_key.startswith("github-pr-feedback:intent-review:")
     assert "operator intent decision" in task.instructions.casefold()
+
+
+def test_reopenable_egress_failure_requires_exact_receipt_and_marker() -> None:
+    receipt = FeedbackReceipt(
+        "acme/widgets", 17, "review_comment", "comment-1", "a" * 40
+    )
+    evidence = {
+        "repository": receipt.repository,
+        "pr_number": receipt.pr_number,
+        "feedback_kind": receipt.feedback_kind,
+        "feedback_id": receipt.feedback_id,
+        "expected_head_sha": receipt.head_sha,
+    }
+    details = {
+        "status": "blocked",
+        "body": "assignment\n" + json.dumps(evidence),
+        "_events": [
+            {
+                "kind": "blocked",
+                "payload": {
+                    "reason": (
+                        "protected terminal route omitted stderr; "
+                        "raw_output=omitted_from_remote_replay"
+                    )
+                },
+            }
+        ],
+    }
+
+    assert _is_reopenable_egress_failure(details, receipt)
+    details["_events"][0]["payload"]["reason"] = (
+        "provider egress blocked: LLM egress blocked: base64_payload"
+    )
+    assert _is_reopenable_egress_failure(details, receipt)
+    details["_events"][0]["payload"]["reason"] = "operator decision required"
+    assert not _is_reopenable_egress_failure(details, receipt)
 
 
 class FakeGitHub:
@@ -114,6 +153,12 @@ class FakeGitHub:
         if number == self.current.number:
             return self.current
         return self.current_by_number[number]
+
+    def get_merge_state(self, repository: str, number: int):
+        pull = self.current if number == self.current.number else self.current_by_number[number]
+        return SimpleNamespace(repository=repository, number=number, state=pull.state,
+                               merged=False, head_sha=pull.head_sha, base_sha=pull.base_sha,
+                               mergeable=True, merge_state_status="CLEAN")
 
     def actions_enabled(self, repository: str) -> bool:
         assert repository == self.pull_request.base_repository
@@ -160,8 +205,11 @@ class FakeGitHub:
         if number == self.current.number:
             self.current = self.current_by_number[number]
 
+    def can_label_repository(self, repository):
+        return True
+
     def ensure_issue_label(
-        self, repository: str, label: str, *, color: str, description: str
+        self, repository: str, label: str, *, color: str, description: str, preserve_existing: bool = False
     ) -> None:
         self.ensure_label_calls.append((repository, label, color, description))
 
@@ -304,6 +352,45 @@ def test_scan_applies_one_exact_branch_label_and_confirms_readback(
     ]
     assert github.label_calls == [("acme/widgets", 17, ("codex",))]
     assert github.current.labels == ("codex",)
+
+
+def test_scan_rotates_label_catalogue_across_bounded_scans(tmp_path: Path) -> None:
+    local_path, head_sha = initialized_repository(tmp_path)
+    policy = configured_policy(
+        local_path,
+        not_before="2026-08-24T00:00:00Z",
+        agent_labels=True,
+    )
+    pull_requests = tuple(
+        PullRequest(
+            number,
+            "OPEN",
+            "acme/widgets",
+            "acme/widgets",
+            "owner",
+            f"codex/fix-{number}",
+            chr(96 + number) * 40,
+            updated_at=datetime(2026, 8, 26, 8, 0, tzinfo=UTC),
+        )
+        for number in (1, 2, 3)
+    )
+    github = FakeGitHub(pull_requests[0], (), pull_requests=pull_requests)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = ScanController(
+        policy,
+        ledger,
+        github,
+        RecordingKanban(),
+        RecordingLocalGit(),
+    )
+
+    controller.scan()
+    github.pull_requests = tuple(github.current_by_number.values())
+    controller.scan()
+
+    labeled_numbers = [number for _repository, number, _labels in github.label_calls]
+    assert len(labeled_numbers) == 3
+    assert sorted(labeled_numbers) == [1, 2, 3]
 
 
 def test_scan_stops_label_attempts_after_a_github_label_read_failure(
@@ -873,7 +960,7 @@ def test_failed_exact_head_static_receipt_immediately_dispatches_one_typed_fixer
     task = kanban.tasks[0]
     assert task.assignee == "ci-static-fixer"
     assert task.head_sha == head_sha
-    assert task.initial_status == "running"
+    assert task.initial_status == "blocked"
     assert task.max_runtime_seconds == 60 * 60
     assert task.max_retries == 2
     assert task.idempotency_key.endswith(":typed-fixer-v3")
@@ -1288,6 +1375,7 @@ class RecordingLocalGit:
 class RecordingKanban:
     def __init__(self) -> None:
         self.tasks: list[object] = []
+        self.promoted: list[tuple[str, str]] = []
 
     def create_task(self, task: object) -> str:
         self.tasks.append(task)
@@ -1296,6 +1384,9 @@ class RecordingKanban:
     def create_or_get_task(self, task: object) -> str:
         self.tasks.append(task)
         return f"kanban-{len(self.tasks)}"
+
+    def promote_task(self, board: str, task_id: str) -> None:
+        self.promoted.append((board, task_id))
 
 
 class FailingKanban:
@@ -1607,19 +1698,24 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
 
     assert result.created == 1
     task = kanban.tasks[0]
-    assert getattr(task, "initial_status", None) == "running"
+    assert getattr(task, "initial_status", None) == "blocked"
     assert getattr(task, "max_retries", None) == 2
     assert task.max_runtime_seconds == 1200
+    assert kanban.promoted == [("repairs", "kanban-1")]
     assert "first 90 seconds" in task.instructions
     assert "do not retry a tool-blocked command" in task.instructions.casefold()
     assert "Do not keep re-evaluating equivalent approaches" in task.instructions
+    assert "CLOSED or MERGED" in task.instructions
+    assert "kanban_complete as superseded" in task.instructions
+    assert "Do not reopen the PR" in task.instructions
     assert "commit and push" in task.instructions
-    assert "post a factual PR reply" in task.instructions
+    assert "publish one factual PR reply" in task.instructions
+    assert "post-comment" in task.instructions
     assert "Do not merge" in task.instructions
     assert "still equals the expected receipt SHA" in task.instructions
     assert "complete-feedback" in task.instructions
     assert (
-        f"env HERMES_HOME='{control_home}' {sys.executable} -m hermes_cli.main "
+        f"env HERMES_HOME='{control_home}' {sys.executable} -P -m hermes_cli.main "
         "github-pr-feedback complete-feedback"
     ) in (
         task.instructions
@@ -1633,13 +1729,41 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     ledger.close()
 
 
-def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disabled(
+def test_auto_dispatch_disabled_keeps_admitted_repair_blocked(
     tmp_path: Path,
+) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (feedback("actionable", body="[P1] Fix the confirmed runtime regression."),),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+
+    result = ScanController(
+        policy,
+        ledger,
+        github,
+        kanban,
+        RecordingLocalGit(),
+    ).scan()
+
+    assert result.created == 1
+    assert kanban.tasks[0].initial_status == "blocked"
+    assert kanban.promoted == []
+    ledger.close()
+
+
+@pytest.mark.parametrize("auto_dispatch", [False, True])
+def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disabled(
+    tmp_path: Path, auto_dispatch: bool
 ) -> None:
     local_path, sha = initialized_repository(tmp_path)
     policy = configured_policy(
         local_path,
         not_before="2026-08-24T00:00:00Z",
+        auto_dispatch=auto_dispatch,
         local_ci_audit=True,
     )
     github = FakeGitHub(admitted_pull_request(sha), ())
@@ -1671,10 +1795,10 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     task = kanban.tasks[0]
     assert task.title == "Local PR CI audit: acme/widgets#17"
     assert task.assignee == "pr-local-ci-auditor"
-    assert task.provider_override == "ollama-launch"
-    assert task.model_override == "qwen3.5:4b"
-    assert task.reasoning_effort == "none"
-    assert task.initial_status == "running"
+    assert task.provider_override is None
+    assert task.model_override is None
+    assert task.reasoning_effort is None
+    assert task.initial_status == "blocked"
     assert task.max_retries == 3
     assert task.max_runtime_seconds == 8 * 60 * 60
     assert task.idempotency_key.endswith(":supervised-v4")
@@ -1698,12 +1822,15 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert "process poll or wait" in task.instructions
     assert "do not run the audit command again" in task.instructions.casefold()
     assert (
-        f"env HERMES_HOME='{control_home}' {sys.executable} -m hermes_cli.main "
+        f"env HERMES_HOME='{control_home}' {sys.executable} -P -m hermes_cli.main "
         "github-pr-feedback audit-pr"
     ) in (
         task.instructions
     )
     assert f"--head-sha {sha}" in task.instructions
+    assert kanban.promoted == (
+        [("repairs", "kanban-1")] if auto_dispatch else []
+    )
     ledger.close()
 
 
@@ -1764,9 +1891,9 @@ def test_scan_reconciles_existing_failed_exact_head_receipt_to_typed_fixer(
     assert second.created == 0
     assert len(kanban.tasks) == 1
     assert kanban.tasks[0].assignee == "ci-static-fixer"
-    assert kanban.tasks[0].provider_override == "ollama-launch"
-    assert kanban.tasks[0].model_override == "qwen3.5:4b"
-    assert kanban.tasks[0].reasoning_effort == "none"
+    assert kanban.tasks[0].provider_override is None
+    assert kanban.tasks[0].model_override is None
+    assert kanban.tasks[0].reasoning_effort is None
     assert kanban.tasks[0].evidence["ci_receipt_id"] == "f" * 64
     assert "background terminal process" in kanban.tasks[0].instructions
     assert "process wait" in kanban.tasks[0].instructions
@@ -1837,7 +1964,7 @@ def test_scan_dispatches_local_ci_when_policy_requires_it_despite_hosted_actions
     ledger.close()
 
 
-def test_scan_dispatches_local_ci_newest_pull_request_first(tmp_path: Path) -> None:
+def test_scan_dispatches_local_ci_oldest_pull_request_first(tmp_path: Path) -> None:
     local_path, sha = initialized_repository(tmp_path)
     older = PullRequest(
         17, "OPEN", "acme/widgets", "acme/widgets", "owner", "codex/older", sha
@@ -1860,7 +1987,7 @@ def test_scan_dispatches_local_ci_newest_pull_request_first(tmp_path: Path) -> N
     assert result.created == 1
     assert result.skipped["local_ci_dispatch_cap"] == 1
     assert [task.title for task in kanban.tasks] == [
-        "Local PR CI audit: acme/widgets#18",
+        "Local PR CI audit: acme/widgets#17",
     ]
     ledger.close()
 
@@ -2179,8 +2306,8 @@ def test_required_local_ci_backlog_signal_counts_missing_receipts_below_read_cap
 
     assert getattr(result, "required_local_ci_backlog", 0) == 2
     assert result.skipped.get("local_ci_open_pr_scan_cap", 0) == 0
-    assert github.feedback_calls == [("acme/widgets", 18), ("acme/widgets", 17)]
-    assert github.current_calls == [("acme/widgets", 18)]
+    assert github.feedback_calls == [("acme/widgets", 17), ("acme/widgets", 18)]
+    assert github.current_calls == [("acme/widgets", 17)]
     ledger.close()
 
 
@@ -2286,7 +2413,7 @@ def test_required_local_ci_backlog_signal_ignores_read_cap_when_receipts_are_cur
     assert getattr(result, "required_local_ci_backlog", 0) == 0
     assert result.local_ci_catalogue_deferred == 1
     assert "local_ci_open_pr_scan_cap" not in result.skipped
-    assert github.feedback_calls == [("acme/widgets", 18)]
+    assert github.feedback_calls == [("acme/widgets", 17)]
     assert github.current_calls == []
     ledger.close()
 
@@ -2489,6 +2616,15 @@ def test_completed_feedback_immediately_schedules_exact_head_local_ci(tmp_path: 
     )
     item = feedback("fixed")
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    old_receipt = FeedbackReceipt("acme/widgets", 17, item.kind, item.feedback_id, "a" * 40)
+    old_lease = ledger.claim(
+        old_receipt,
+        owner="previous-worker",
+        claimed_at=datetime(2026, 8, 24, 0, 30, tzinfo=UTC),
+        stale_before=datetime(2026, 8, 24, 0, 25, tzinfo=UTC),
+    )
+    assert old_lease is not None
+    ledger.finalize(old_receipt, "previous-feedback-task", old_lease)
     receipt = FeedbackReceipt("acme/widgets", 17, item.kind, item.feedback_id, sha)
     lease = ledger.claim(
         receipt,
@@ -2503,7 +2639,12 @@ def test_completed_feedback_immediately_schedules_exact_head_local_ci(tmp_path: 
         resolved_head_sha=sha,
         actioned_at=datetime(2026, 8, 24, 2, 0, tzinfo=UTC),
     )
-    kanban = RecordingKanban()
+    class TerminalFeedbackKanban(RecordingKanban):
+        def task_status(self, board, task_id):
+            assert task_id == "previous-feedback-task"
+            return "done"
+
+    kanban = TerminalFeedbackKanban()
     github = FakeGitHub(admitted_pull_request(sha), (item,))
     github.actions_are_enabled = False
     controller = ScanController(
@@ -2514,6 +2655,7 @@ def test_completed_feedback_immediately_schedules_exact_head_local_ci(tmp_path: 
         RecordingLocalGit(),
     )
 
+    assert ledger.has_pending_mutation("acme/widgets", 17)
     status = controller.dispatch_local_ci_after_feedback(admitted_pull_request(sha))
 
     assert status == "scheduled"
@@ -2604,7 +2746,7 @@ def test_duplicate_local_ci_receipts_do_not_starve_a_new_head_after_comment_fixe
         def list_feedback(self, repository: str, number: int):
             return ()
 
-    github = ManyPullsGitHub(stale_pulls[0], ())
+    github = ManyPullsGitHub(stale_pulls[0], (), pull_requests=(*stale_pulls, repaired))
     github.actions_are_enabled = False
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
     claimed_at = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
@@ -2708,6 +2850,31 @@ def test_scan_suppresses_high_confidence_self_resolution_receipts(tmp_path: Path
     assert result.skipped["self_resolution_receipt"] == 3
     assert result.skipped["duplicate"] == 1
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["superseded"]
+    ledger.close()
+
+
+def test_scan_suppresses_only_configured_bot_completion_receipts(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from github_pr_feedback.policy import GitHubIdentityPolicy
+
+    local_path, sha = initialized_repository(tmp_path)
+    policy = replace(
+        configured_policy(local_path, not_before="2026-08-24T00:00:00Z"),
+        github_identity=GitHubIdentityPolicy(expected_login="reviewer", token_env="BOT_TOKEN"),
+    )
+    completed = feedback(
+        "bot-completion", reviewer="reviewer",
+        body=f"Hermes automated repair\\nVerified repair. <!-- pr-maintenance-receipt:v1 status=completed kind=review_comment head={sha} -->",
+    )
+    actionable = feedback("bot-finding", reviewer="reviewer", body="Fix the missing error handling.")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = RecordingKanban()
+    result = ScanController(
+        policy, ledger, FakeGitHub(admitted_pull_request(sha), (completed, actionable)),
+        kanban, RecordingLocalGit(),
+    ).scan()
+    assert result.skipped.get("self_resolution_receipt") == 1
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["bot-finding"]
     ledger.close()
 
 
@@ -3253,6 +3420,28 @@ def test_scan_suppresses_non_actionable_review_containers_but_keeps_inline_findi
     assert result.skipped["non_actionable_review_container"] == 2
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["inline-finding"]
     ledger.close()
+
+
+def test_scan_keeps_findings_but_does_not_dispatch_review_requests(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    trigger = codex_review_trigger_comment(sha)
+    github = FakeGitHub(
+        admitted_pull_request(sha),
+        (
+            feedback("request", body=trigger, is_bot=True),
+            feedback("old-request", body=codex_review_trigger_comment("b" * 40)),
+            replace(feedback("bare-request", body="@codex review"), kind="review"),
+            feedback("finding", body=trigger + "\n[P1] Preserve the missing fallback."),
+        ),
+    )
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+    ledger.close()
+    assert result.created == 1
+    assert result.skipped["codex_review_request"] == 3
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == ["finding"]
 
 
 def test_scan_suppresses_codexs_own_review_summary_tracker_comment(tmp_path: Path) -> None:
@@ -4163,3 +4352,163 @@ def receipt_expected_sha(ledger: FeedbackLedger, receipt: FeedbackReceipt) -> st
     ).fetchone()
     assert row is not None
     return row[0]
+
+
+@pytest.mark.parametrize("handoff", [False, True])
+def test_required_local_ci_does_not_depend_on_actions_admin_settings(tmp_path, handoff):
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z",
+                               auto_dispatch=True, local_ci_audit=True)
+    policy = replace(policy, local_ci_audit=replace(policy.local_ci_audit, required_for_open_prs=True))
+
+    class PublicReadGitHub(FakeGitHub):
+        def actions_enabled(self, repository):
+            raise AssertionError("local audit must not need administrator settings")
+        def get_check_state(self, *args, **kwargs):
+            raise AssertionError("dispatch does not need hosted check results")
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = RecordingKanban()
+    controller = ScanController(policy, ledger, PublicReadGitHub(admitted_pull_request(sha), ()),
+                                kanban, RecordingLocalGit())
+    if handoff:
+        assert controller.dispatch_local_ci_after_feedback(admitted_pull_request(sha)) == "scheduled"
+    else:
+        assert controller.scan().created == 1
+    assert [task.title for task in kanban.tasks] == ["Local PR CI audit: acme/widgets#17"]
+    ledger.close()
+
+
+@pytest.mark.parametrize("mergeable,status,expected", [(False, "DIRTY", "merge_conflict"), (True, "CLEAN", "scheduled")])
+def test_local_ci_waits_for_canonical_conflict_resolution(tmp_path, mergeable, status, expected):
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z",
+                               auto_dispatch=True, local_ci_audit=True)
+    policy = replace(policy, local_ci_audit=replace(policy.local_ci_audit, required_for_open_prs=True))
+
+    class ConflictGitHub(FakeGitHub):
+        def get_merge_state(self, repository, number):
+            state = super().get_merge_state(repository, number)
+            state.mergeable, state.merge_state_status = mergeable, status
+            return state
+
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = RecordingKanban()
+    try:
+        controller = ScanController(policy, ledger, ConflictGitHub(admitted_pull_request(sha), ()),
+                                    kanban, RecordingLocalGit())
+        assert controller.dispatch_local_ci_after_feedback(admitted_pull_request(sha)) == expected
+        assert len(kanban.tasks) == (1 if expected == "scheduled" else 0)
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("phase", ["pending", "resolving", "completed"])
+def test_local_ci_waits_for_mutation_acknowledgement_across_heads_without_blocking_other_prs(tmp_path, phase):
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z",
+                               auto_dispatch=True, local_ci_audit=True)
+    policy = replace(policy, local_ci_audit=replace(policy.local_ci_audit, required_for_open_prs=True))
+    pull = admitted_pull_request(sha)
+    other = replace(pull, number=18)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = RecordingKanban()
+    mutation = FeedbackReceipt("acme/widgets", 17, "pr_repair", "repair:merge_conflict", "f" * 40)
+    now = datetime.now(UTC)
+    try:
+        archived_audit = FeedbackReceipt("acme/widgets", 17, "pr_local_ci", "old-contract", sha)
+        audit_lease = ledger.claim(archived_audit, owner="auditor", claimed_at=now,
+                                  stale_before=now-timedelta(minutes=5))
+        ledger.finalize(archived_audit, "old-audit", audit_lease)
+        binding = ledger.exact_pending_task_binding(archived_audit)
+        lease = ledger.claim(mutation, owner="repair", claimed_at=now, stale_before=now-timedelta(minutes=5))
+        ledger.finalize(mutation, "repair-task", lease)
+        if phase != "pending":
+            ledger.begin_feedback_action(mutation, resolved_head_sha=sha, actioned_at=now)
+        if phase == "completed":
+            ledger.mark_feedback_actioned(mutation, resolved_head_sha=sha, actioned_at=now)
+        controller = ScanController(policy, ledger, FakeGitHub(pull, (), pull_requests=(pull, other)),
+                                    kanban, RecordingLocalGit())
+        if phase != "completed":
+            audit = FeedbackReceipt("acme/widgets", 17, "pr_local_ci", LOCAL_CI_FEEDBACK_ID, sha)
+            assert ledger.claim(audit, owner="auditor", claimed_at=now,
+                                stale_before=now-timedelta(minutes=5)) is None
+            assert ledger.reopen_archived_exact_dispatch(
+                archived_audit, archived=binding, owner="auditor", claimed_at=now) is None
+            assert ledger.reopen_legacy_exact_dispatch(
+                archived_audit, blocked=binding, owner="auditor", claimed_at=now) is None
+        expected = "scheduled" if phase == "completed" else "mutation_pending"
+        assert controller.dispatch_local_ci_after_feedback(pull) == expected
+        assert controller.dispatch_local_ci_after_feedback(other) == "scheduled"
+        assert len(kanban.tasks) == (2 if phase == "completed" else 1)
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("changed_head", [False, True])
+def test_metadata_labels_add_all_matching_areas_without_claiming_readiness(tmp_path, changed_head):
+    from dataclasses import replace
+    from github_pr_feedback.metadata_labels import parse_metadata_rules
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z", agent_labels=True)
+    def rule(label, terms, paths):
+        return dict(label=label, repositories=["acme/widgets"], title_terms=terms,
+                    path_patterns=paths, color="123456", description="Advisory metadata")
+    rules = parse_metadata_rules([
+        rule("type/bug", ["fix"], []), rule("area/ci", [], [".github/*"]),
+        rule("area/gui", [], ["frontend/*"]), rule("area/research", [], ["research/*"]),
+    ])
+    policy = replace(policy, agent_labels=replace(policy.agent_labels, metadata_rules=rules))
+    pull = replace(admitted_pull_request(sha), labels=("codex", "human-label"))
+    class MetadataGitHub(FakeGitHub):
+        def get_pull_request_metadata(self, repository, number):
+            current = replace(self.current, head_sha="f" * 40) if changed_head else self.current
+            return current, "fix: dashboard checks", (".github/workflows/test.yml", "frontend/app.tsx")
+    github = MetadataGitHub(pull, ())
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit())
+    controller.reconcile_labels("acme/widgets")
+    if changed_head:
+        assert github.label_calls == []
+    else:
+        assert set(github.current.labels) == {"codex", "human-label", "type/bug", "area/ci", "area/gui"}
+        before = list(github.label_calls)
+        controller.reconcile_labels("acme/widgets")
+        assert github.label_calls == before
+    ledger.close()
+
+
+def test_label_reconciliation_skips_read_only_repository_before_writes(tmp_path):
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z", agent_labels=True)
+    github = FakeGitHub(admitted_pull_request(sha), ())
+    github.can_label_repository = lambda _repository: False
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    controller = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit())
+    result = controller.reconcile_labels("acme/widgets")
+    assert result["skipped"] == {"agent_label_permission_denied": 1}
+    assert github.label_calls == []
+    assert github.ensure_label_calls == []
+    ledger.close()
+
+
+def test_incomplete_metadata_skips_only_affected_pr(tmp_path):
+    from dataclasses import replace
+    from github_pr_feedback.github_client import GitHubClientError
+    from github_pr_feedback.metadata_labels import MetadataLabelRule
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z", agent_labels=True)
+    rule = MetadataLabelRule("area/ci", ("acme/widgets",), (), (".github/*",), "123456", "CI files")
+    policy = replace(policy, agent_labels=replace(policy.agent_labels, metadata_rules=(rule,)))
+    pulls = tuple(replace(admitted_pull_request(sha), number=n) for n in (1,2))
+    class MetadataGitHub(FakeGitHub):
+        def get_pull_request_metadata(self, repository, number):
+            if number == 1:
+                raise GitHubClientError("incomplete PR file listing", code="metadata_incomplete")
+            return self.current_by_number[number], "CI update", (".github/workflows/ci.yml",)
+    github = MetadataGitHub(pulls[0], (), pull_requests=pulls)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    result = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit()).reconcile_labels("acme/widgets")
+    assert result["skipped"]["agent_label_metadata_incomplete"] == 1
+    assert [(number, set(labels)) for _,number,labels in github.label_calls] == [(2,{"codex","area/ci"})]
+    ledger.close()

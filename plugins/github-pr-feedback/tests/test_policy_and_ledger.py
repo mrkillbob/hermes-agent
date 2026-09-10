@@ -66,6 +66,23 @@ def configured_policy(tmp_path: Path):
     )
 
 
+def test_empty_branch_prefixes_admit_any_branch(tmp_path: Path) -> None:
+    repository_path = tmp_path / "widgets"
+    initialize_git_worktree(repository_path)
+    raw = enabled_raw_config(repository_path)
+    raw["repositories"][0]["branch_prefixes"] = []
+
+    policy = load_policy(raw)
+
+    admission = policy.admit(
+        admitted_pr(head_ref_name="external/contributor-branch"),
+        Reviewer("trusted-reviewer", "MEMBER"),
+        receipt(),
+    )
+
+    assert admission.admitted
+
+
 def initialize_git_worktree(path: Path) -> None:
     subprocess.run(
         ["git", "init", "--quiet", str(path)],
@@ -173,6 +190,22 @@ def test_enabled_policy_parses_release_maintenance_lane_matrix(tmp_path: Path) -
         "pytest",
         "-q",
     )
+
+
+def test_enabled_policy_parses_multiple_release_maintenance_lanes(
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "widgets"
+    initialize_git_worktree(repository_path)
+    raw = enabled_release_maintenance_config(repository_path)
+    release_policy = raw.pop("release_maintenance")
+    raw["release_maintenances"] = [release_policy]
+
+    policy = load_policy(raw)
+
+    assert policy.release_maintenance is None
+    assert [item.repository for item in policy.release_policies()] == ["acme/widgets"]
+    assert policy.release_policy_for("acme/widgets") is not None
 
 
 def test_release_maintenance_rejects_a_protected_runtime_command(tmp_path: Path) -> None:
@@ -314,6 +347,56 @@ def test_enabled_policy_parses_strict_merge_and_post_merge_settings(
     )
 
 
+def test_merge_enrollment_migrates_persists_and_is_repository_scoped(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "ledger.sqlite3"
+    legacy = sqlite3.connect(database)
+    legacy.execute("CREATE TABLE legacy_receipt (receipt_id TEXT PRIMARY KEY)")
+    legacy.close()
+
+    ledger = FeedbackLedger(database)
+    try:
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == ()
+        ledger.enroll_merge_pr(
+            "acme/widgets",
+            17,
+            enrolled_at=datetime(2026, 8, 25, tzinfo=UTC),
+            enrolled_by="operator",
+        )
+        assert ledger.is_merge_enrolled("acme/widgets", 17)
+        assert ledger.enrolled_merge_pr_numbers("acme/widgets") == (17,)
+        assert ledger.enrolled_merge_pr_numbers("other/widgets") == ()
+    finally:
+        ledger.close()
+
+    reopened = FeedbackLedger(database)
+    try:
+        assert reopened.enrolled_merge_pr_numbers("acme/widgets") == (17,)
+        reopened.unenroll_merge_pr("acme/widgets", 17)
+        assert not reopened.is_merge_enrolled("acme/widgets", 17)
+    finally:
+        reopened.close()
+
+
+def test_merge_lease_claim_fails_closed_without_current_enrollment(tmp_path: Path) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    try:
+        assert (
+            ledger.claim_merge_lease(
+                "acme/widgets",
+                17,
+                "a" * 40,
+                owner="controller",
+                claimed_at=datetime(2026, 8, 25, tzinfo=UTC),
+            )
+            is None
+        )
+        assert ledger.merge_status_counts()["claimed"] == 0
+    finally:
+        ledger.close()
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -334,6 +417,9 @@ def test_enabled_policy_parses_strict_merge_and_post_merge_settings(
             {"package_argv": "python3 tools/tb.py"}
         ),
         lambda merge: merge["post_merge"].update({"relaunch_argv": []}),
+        lambda merge: merge["post_merge"].update(
+            {"relaunch_argv": ["/usr/bin/open"]}
+        ),
     ],
 )
 def test_enabled_policy_rejects_unsafe_merge_maintainer_settings(
@@ -364,6 +450,80 @@ def test_disabled_post_merge_hook_requires_only_explicit_enabled_flag(
 
     assert policy.merge_maintainer is not None
     assert policy.merge_maintainer.post_merge is None
+
+
+def test_disabled_merge_maintainer_entry_is_ignored_in_policy_list(
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "widgets"
+    deployment_path = tmp_path / "deployment"
+    initialize_git_worktree(repository_path)
+    initialize_git_worktree(deployment_path)
+    raw = enabled_merge_config(repository_path, deployment_path)
+    raw.pop("merge_maintainer")
+    raw["merge_maintainers"] = [{"enabled": False}]
+
+    policy = load_policy(raw)
+
+    assert policy.merge_policies() == ()
+
+
+def test_budget_exhausted_substitution_requires_audit_only_required_no_post_ci(
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "widgets"
+    deployment_path = tmp_path / "deployment"
+    initialize_git_worktree(repository_path)
+    initialize_git_worktree(deployment_path)
+    raw = enabled_merge_config(repository_path, deployment_path)
+    raw["merge_maintainer"]["allow_budget_exhausted_local_ci"] = True
+    raw["local_ci_audit"] = {
+        "enabled": True,
+        "assignee": "pr-local-ci-auditor",
+        "post_results": False,
+        "audit_only": True,
+        "required_for_open_prs": True,
+        "repositories": ["acme/widgets"],
+    }
+
+    policy = load_policy(raw)
+
+    assert policy.merge_maintainer is not None
+    assert policy.merge_maintainer.allow_budget_exhausted_local_ci is True
+    assert policy.local_ci_audit is not None
+    assert policy.local_ci_audit.audit_only is True
+    assert policy.uses_budget_exhausted_local_ci("acme/widgets") is True
+    assert policy.uses_budget_exhausted_local_ci("other/widgets") is False
+
+
+@pytest.mark.parametrize(
+    "local_ci",
+    [
+        None,
+        {"enabled": True, "assignee": "auditor", "post_results": True},
+        {
+            "enabled": True,
+            "assignee": "auditor",
+            "post_results": False,
+            "audit_only": True,
+            "required_for_open_prs": False,
+        },
+    ],
+)
+def test_budget_exhausted_substitution_rejects_unsafe_local_ci_policy(
+    tmp_path: Path, local_ci: dict[str, object] | None
+) -> None:
+    repository_path = tmp_path / "widgets"
+    deployment_path = tmp_path / "deployment"
+    initialize_git_worktree(repository_path)
+    initialize_git_worktree(deployment_path)
+    raw = enabled_merge_config(repository_path, deployment_path)
+    raw["merge_maintainer"]["allow_budget_exhausted_local_ci"] = True
+    if local_ci is not None:
+        raw["local_ci_audit"] = local_ci
+
+    with pytest.raises(ValueError, match="budget-exhausted CI substitution"):
+        load_policy(raw)
 
 
 def test_policy_can_explicitly_admit_owner_and_bot_feedback_without_widening_human_reviewers(
@@ -449,6 +609,7 @@ def test_enabled_policy_parses_bounded_agent_label_mappings(tmp_path: Path) -> N
         "enabled": True,
         "max_updates_per_scan": 12,
         "create_missing": True,
+        "repositories": ["acme/widgets"],
         "mappings": [
             {
                 "branch_prefix": "codex/",
@@ -472,6 +633,8 @@ def test_enabled_policy_parses_bounded_agent_label_mappings(tmp_path: Path) -> N
     assert policy.agent_labels.label_for_branch("hermes/repair") == "hermes"
     assert policy.agent_labels.label_for_branch("feature/plain") is None
     assert policy.agent_labels.create_missing is True
+    assert policy.agent_labels.applies_to("acme/widgets") is True
+    assert policy.agent_labels.applies_to("upstream/widgets") is False
 
 
 def test_dispatched_feedback_is_not_actioned_until_explicit_exact_head_acknowledgement(
@@ -564,6 +727,130 @@ def test_enabled_config_rejects_empty_string_reviewer_list(tmp_path: Path) -> No
     raw = enabled_raw_config(repository_path)
     raw["reviewer_logins"] = ""
     raw["reviewer_associations"] = ["MEMBER"]
+
+    with pytest.raises(ValueError):
+        load_policy(raw)
+
+
+def test_github_identity_requires_an_admitted_independent_login(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    raw = enabled_raw_config(repository)
+    raw["github_identity"] = {
+        "expected_login": "trusted-reviewer",
+        "token_env": "HERMES_GITHUB_BOT_TOKEN",
+    }
+
+    policy = load_policy(raw)
+
+    assert policy.github_identity is not None
+    assert policy.github_identity.expected_login == "trusted-reviewer"
+    assert policy.github_identity.token_env == "HERMES_GITHUB_BOT_TOKEN"
+
+
+def test_actions_permissions_identity_is_explicit_and_repository_scoped(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    gh_config_dir = tmp_path / "human-gh"
+    gh_config_dir.mkdir()
+    raw = enabled_raw_config(repository)
+    raw["github_actions_permissions_identity"] = {
+        "expected_login": "acme",
+        "gh_config_dir": str(gh_config_dir),
+        "repositories": ["acme/widgets"],
+    }
+
+    policy = load_policy(raw)
+
+    identity = policy.github_actions_permissions_identity
+    assert identity is not None
+    assert identity.expected_login == "acme"
+    assert identity.gh_config_dir == gh_config_dir.resolve()
+    assert identity.repositories == frozenset({"acme/widgets"})
+
+
+@pytest.mark.parametrize(
+    "identity",
+    (
+        {
+            "expected_login": "owner",
+            "gh_config_dir": "relative/gh",
+            "repositories": ["acme/widgets"],
+        },
+        {
+            "expected_login": "stranger",
+            "gh_config_dir": "/tmp/gh",
+            "repositories": ["acme/widgets"],
+        },
+        {
+            "expected_login": "owner",
+            "gh_config_dir": "/tmp/gh",
+            "repositories": ["other/widgets"],
+        },
+        {
+            "expected_login": "owner",
+            "gh_config_dir": "/tmp/gh",
+            "repositories": [],
+        },
+    ),
+)
+def test_actions_permissions_identity_fails_closed_on_unsafe_scope(
+    tmp_path: Path, identity: dict[str, object]
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    raw = enabled_raw_config(repository)
+    raw["github_actions_permissions_identity"] = identity
+
+    with pytest.raises(ValueError):
+        load_policy(raw)
+
+
+def test_actions_permissions_identity_rejects_pr_author_who_does_not_own_namespace(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    gh_config_dir = tmp_path / "human-gh"
+    gh_config_dir.mkdir()
+    raw = enabled_raw_config(repository)
+    raw["repositories"] = [
+        {
+            "base_repository": "NousResearch/hermes-agent",
+            "head_repository": "mrkillbob/hermes-agent",
+            "local_path": str(repository),
+            "owner_login": "mrkillbob",
+            "branch_prefixes": ["codex/"],
+        }
+    ]
+    raw["github_actions_permissions_identity"] = {
+        "expected_login": "mrkillbob",
+        "gh_config_dir": str(gh_config_dir),
+        "repositories": ["NousResearch/hermes-agent"],
+    }
+
+    with pytest.raises(ValueError, match="must own every scoped target"):
+        load_policy(raw)
+
+
+@pytest.mark.parametrize(
+    "github_identity",
+    (
+        {"expected_login": "owner", "token_env": "HERMES_GITHUB_BOT_TOKEN"},
+        {"expected_login": "stranger", "token_env": "HERMES_GITHUB_BOT_TOKEN"},
+        {"expected_login": "trusted-reviewer", "token_env": "GH_TOKEN"},
+        {"expected_login": "trusted-reviewer", "token_env": "not-valid"},
+    ),
+)
+def test_github_identity_rejects_author_untrusted_or_shared_credentials(
+    tmp_path: Path, github_identity: dict[str, str]
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_worktree(repository)
+    raw = enabled_raw_config(repository)
+    raw["github_identity"] = github_identity
 
     with pytest.raises(ValueError):
         load_policy(raw)
@@ -1215,16 +1502,17 @@ def test_policy_accepts_a_linked_git_worktree(tmp_path: Path) -> None:
     assert policy.enabled is True
 
 
-def test_ledger_uses_profile_scoped_hermes_home(
+def test_ledger_uses_shared_control_home_for_profile_workers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profiles" / "pr-local-ci-auditor"))
     monkeypatch.setattr(
-        "github_pr_feedback.ledger.get_hermes_home", lambda: tmp_path / "profile"
+        "github_pr_feedback.ledger.get_default_hermes_root", lambda: tmp_path
     )
 
     ledger = FeedbackLedger.for_current_profile()
 
-    assert ledger.path == tmp_path / "profile" / "github-pr-feedback" / "ledger.sqlite3"
+    assert ledger.path == tmp_path / "github-pr-feedback" / "ledger.sqlite3"
     ledger.close()
 
 
@@ -1244,14 +1532,33 @@ def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
     calls: list[str] = []
     connect_attempts = 0
 
-    class FakeConnection:
-        def execute(self, statement: str):
-            calls.append(statement)
+    class Cursor:
+        def __init__(self, value):
+            self.value = value
+
+        def fetchone(self):
+            return (self.value,)
+
+    class Connection:
+        def __init__(self):
+            self.wal_attempts = 0
+            self.current_mode = "delete"
 
         def close(self):
-            calls.append("close")
+            pass
 
-    connection = FakeConnection()
+        def execute(self, sql):
+            if sql == "PRAGMA journal_mode":
+                return Cursor(self.current_mode)
+            if sql == "PRAGMA journal_mode=WAL":
+                self.wal_attempts += 1
+                if self.wal_attempts == 1:
+                    raise sqlite3.OperationalError("unable to open database file")
+                self.current_mode = "wal"
+                return Cursor("wal")
+            return Cursor(None)
+
+    connection = Connection()
 
     def flaky_connect(*args, **kwargs):
         nonlocal connect_attempts
@@ -1267,8 +1574,11 @@ def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
     result = ledger_module._connect_ledger(tmp_path / "ledger.sqlite3")
 
     assert result is connection
-    assert connect_attempts == 2
-    assert calls[:2] == ["PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"]
+    assert connect_attempts == 3
+    assert connection.wal_attempts == 2
+    connection.wal_attempts = 0
+    ledger_module._enable_wal_with_bounded_retry(connection)
+    assert connection.wal_attempts == 0
 
 
 def test_worktree_policy_allows_ten_seconds_for_local_git_probe(
@@ -1332,3 +1642,21 @@ def test_plugin_directory_exposes_hermes_register_entry_point() -> None:
     spec.loader.exec_module(module)
 
     assert callable(module.register)
+
+
+def test_agent_label_selection_cursor_persists_catalogue_progress(
+    tmp_path: Path,
+) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    updated_at = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+
+    assert ledger.agent_label_selection_cursor("acme/widgets") == 0
+    ledger.advance_agent_label_selection_cursor(
+        "acme/widgets",
+        cursor=3,
+        candidate_count=5,
+        updated_at=updated_at,
+    )
+
+    assert ledger.agent_label_selection_cursor("acme/widgets") == 3
+    ledger.close()
