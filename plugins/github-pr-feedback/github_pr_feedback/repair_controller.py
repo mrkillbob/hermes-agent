@@ -178,7 +178,7 @@ class RepairController:
                 skipped["github_state_unavailable"] += 1
                 degraded = True
                 continue
-            pulls = tuple(
+            all_pulls = tuple(
                 sorted(
                     pulls,
                     key=lambda pull: (
@@ -186,8 +186,23 @@ class RepairController:
                         pull.number,
                     ),
                     reverse=True,
-                )[:_MAX_REPAIR_SNAPSHOTS_PER_SCAN]
+                )
             )
+            # Rotate the bounded window with a durable per-repository cursor so
+            # older PRs are not permanently starved when more than
+            # _MAX_REPAIR_SNAPSHOTS_PER_SCAN PRs are open simultaneously.
+            if len(all_pulls) > _MAX_REPAIR_SNAPSHOTS_PER_SCAN:
+                cursor = self._ledger.repair_selection_cursor(repository) % len(all_pulls)
+                rotated = all_pulls[cursor:] + all_pulls[:cursor]
+                pulls = rotated[:_MAX_REPAIR_SNAPSHOTS_PER_SCAN]
+                self._ledger.advance_repair_selection_cursor(
+                    repository,
+                    cursor=cursor + _MAX_REPAIR_SNAPSHOTS_PER_SCAN,
+                    candidate_count=len(all_pulls),
+                    updated_at=datetime.now(UTC),
+                )
+            else:
+                pulls = all_pulls
             with ThreadPoolExecutor(max_workers=min(2, max(1, len(pulls)))) as executor:
                 snapshots = executor.map(
                     lambda listed: self._read_snapshot(repository, listed), pulls
@@ -353,7 +368,8 @@ class RepairController:
                     )
                     task_id = self._kanban.create_or_get_task(task)
                     _bind_pooled_worktree_task(
-                        self._local_git, receipt, task_id, self._policy.board or ""
+                        self._local_git, receipt, task_id, self._policy.board or "",
+                        prepared=prepared,
                     )
                     self._ledger.finalize(receipt, task_id, lease)
                     created += 1
@@ -398,7 +414,8 @@ class RepairController:
                         )
                         task_id = self._kanban.create_or_get_task(task)
                         _bind_pooled_worktree_task(
-                            self._local_git, receipt, task_id, self._policy.board or ""
+                            self._local_git, receipt, task_id, self._policy.board or "",
+                            prepared=prepared,
                         )
                         self._ledger.finalize(receipt, task_id, lease)
                         created += 1
@@ -448,8 +465,27 @@ class RepairController:
                             degraded = True
                         skipped["base_refresh_completed"] += 1
                     else:
+                        # Base refresh is ambiguous: schedule a reconciliation
+                        # retry task so the repair steward can resolve it rather
+                        # than simply marking the scan degraded.
+                        task = _repair_task(
+                            self._policy,
+                            receipt,
+                            prepared.path,
+                            prepared.branch,
+                            pull,
+                            triggers,
+                            target_base_sha,
+                            self._control_home,
+                        )
+                        task_id = self._kanban.create_or_get_task(task)
+                        _bind_pooled_worktree_task(
+                            self._local_git, receipt, task_id, self._policy.board or "",
+                            prepared=prepared,
+                        )
+                        self._ledger.finalize(receipt, task_id, lease)
+                        created += 1
                         skipped["base_refresh_reconciliation_pending"] += 1
-                        degraded = True
                 except Exception as error:
                     import os
 

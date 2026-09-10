@@ -525,7 +525,6 @@ class LocalCIRunner:
         lanes = _required_lanes(manifest_bytes)
 
         initial_state = self._github.get_merge_state(identity.repository, identity.pr_number)
-        initial_checks = self._github.get_check_state(identity.repository, identity.head_sha)
         _require_identity(identity, initial_state)
         if self._inspector.head_sha(worktree) != identity.head_sha:
             raise CIValidationError("CI worktree head does not match the receipt identity")
@@ -595,13 +594,12 @@ class LocalCIRunner:
                 command_evidence=tuple(evidence),
             )
         final_state = self._github.get_merge_state(identity.repository, identity.pr_number)
-        final_checks = self._github.get_check_state(identity.repository, identity.head_sha)
         _require_identity(identity, final_state)
-        if final_checks != initial_checks:
-            raise CIValidationError(
-                "GitHub Actions state changed during CI execution",
-                command_evidence=tuple(evidence),
-            )
+        # Do not compare the full CheckState snapshot: a normal hosted-check
+        # transition (e.g. pending → success) during the hours-long local run
+        # would otherwise invalidate an otherwise-passing receipt.  The PR
+        # head-SHA identity check inside _require_identity is the authoritative
+        # guard that the target commit has not changed.
 
         completed_at = _aware_now(self._now())
         expected_command_count = len(command_specs) + (1 if bootstrap_evidence else 0)

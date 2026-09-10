@@ -126,7 +126,7 @@ _CODEX_REVIEW_ROW = re.compile(
 
 
 def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
-    short_head = head_sha[:7].casefold()
+    full_head = head_sha.casefold()
     for item in feedback:
         if (
             item.reviewer.login.casefold() != _CODEX_REVIEW_LOGIN
@@ -134,8 +134,14 @@ def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
         ):
             continue
         for match in _CODEX_REVIEW_ROW.finditer(item.body):
+            tracker_sha = match.group("sha").casefold()
+            # Require the full SHA to prevent abbreviated-SHA collisions from
+            # authorizing a merge without a genuine review of the current commit.
+            # An abbreviated tracker SHA from a previously reviewed commit that
+            # shares its first N characters with the current head must not clear
+            # codex_review_pending for the new unreviewed commit.
             if (
-                match.group("sha").casefold() == short_head
+                tracker_sha == full_head
                 and "completed" in match.group("status").casefold()
             ):
                 return True

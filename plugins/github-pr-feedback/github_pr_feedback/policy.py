@@ -72,6 +72,25 @@ def codex_review_trigger_requested(body: str, head_sha: str) -> bool:
     return f"<!-- {_CODEX_REVIEW_TRIGGER_MARKER} head={resolved} -->" in body
 
 
+_READY_TO_MERGE_MARKER_PREFIX = "<!-- pr-ready-to-merge-receipt:v1 head="
+
+
+def is_generated_control_comment(body: str | None) -> bool:
+    """Return True when *body* is a Hermes-generated control comment.
+
+    Generated control comments (ready-to-merge markers, Codex retrigger
+    mentions) must never be admitted as self-feedback: they are posted by the
+    automation itself and do not reflect any human review decision.
+    """
+
+    if not body:
+        return False
+    return (
+        _READY_TO_MERGE_MARKER_PREFIX in body
+        or f"<!-- {_CODEX_REVIEW_TRIGGER_MARKER}" in body
+    )
+
+
 MAX_ASSIGNEE_RULES = 32
 MAX_MATCH_TERMS_PER_RULE = 32
 MAX_COMMAND_ARGUMENTS = 32
@@ -319,6 +338,11 @@ class LocalCIAuditPolicy:
     required_for_open_prs: bool = False
     max_dispatches_per_scan: int = 1
     max_open_prs_per_scan: int = 300
+    # Optional explicit model/provider for the CI worker task.  When unset the
+    # controller falls back to its compiled-in defaults so existing
+    # configurations continue to work without changes.
+    worker_model: str | None = None
+    worker_provider: str | None = None
 
     def applies_to(self, repository: str) -> bool:
         return not self.repositories or repository in self.repositories
@@ -712,6 +736,8 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
         "required_for_open_prs",
         "max_dispatches_per_scan",
         "max_open_prs_per_scan",
+        "worker_model",
+        "worker_provider",
     }
     if not required.issubset(raw) or set(raw).difference(required | optional):
         raise ValueError("local_ci_audit has missing or unknown fields")
@@ -738,6 +764,18 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
         if "repositories" in raw
         else frozenset()
     )
+    worker_model_raw = raw.get("worker_model")
+    worker_provider_raw = raw.get("worker_provider")
+    worker_model = (
+        _nonempty_string(worker_model_raw, "local_ci_audit worker_model")
+        if worker_model_raw is not None
+        else None
+    )
+    worker_provider = (
+        _nonempty_string(worker_provider_raw, "local_ci_audit worker_provider")
+        if worker_provider_raw is not None
+        else None
+    )
     if not enabled:
         return None
     return LocalCIAuditPolicy(
@@ -747,6 +785,8 @@ def _parse_local_ci_audit(raw: object) -> LocalCIAuditPolicy | None:
         required_for_open_prs=required_for_open_prs,
         max_dispatches_per_scan=max_dispatches_per_scan,
         max_open_prs_per_scan=max_open_prs_per_scan,
+        worker_model=worker_model,
+        worker_provider=worker_provider,
     )
 
 

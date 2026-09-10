@@ -358,6 +358,13 @@ class FeedbackLedger:
             )
             """)
         self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS repair_selection_cursors (
+                repository TEXT PRIMARY KEY,
+                cursor INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS worktree_pool_slots (
                 slot_id INTEGER PRIMARY KEY,
                 status TEXT NOT NULL CHECK (status IN ('leased', 'free')),
@@ -777,6 +784,37 @@ class FeedbackLedger:
         with self._transaction():
             self._connection.execute(
                 "INSERT INTO local_ci_selection_cursors(repository, cursor, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(repository) DO UPDATE SET cursor = excluded.cursor, "
+                "updated_at = excluded.updated_at",
+                (repository, next_cursor, updated.isoformat()),
+            )
+
+    def repair_selection_cursor(self, repository: str) -> int:
+        """Return the durable round-robin offset for one repository repair window."""
+
+        row = self._connection.execute(
+            "SELECT cursor FROM repair_selection_cursors WHERE repository = ?",
+            (repository,),
+        ).fetchone()
+        return max(0, int(row[0])) if row is not None else 0
+
+    def advance_repair_selection_cursor(
+        self,
+        repository: str,
+        *,
+        cursor: int,
+        candidate_count: int,
+        updated_at: datetime,
+    ) -> None:
+        """Persist the next bounded repair-window offset after one scan."""
+
+        if candidate_count < 1:
+            raise ValueError("candidate_count must be positive")
+        updated = _aware_utc(updated_at, "updated_at")
+        next_cursor = int(cursor) % candidate_count
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO repair_selection_cursors(repository, cursor, updated_at) "
                 "VALUES (?, ?, ?) ON CONFLICT(repository) DO UPDATE SET cursor = excluded.cursor, "
                 "updated_at = excluded.updated_at",
                 (repository, next_cursor, updated.isoformat()),
@@ -1497,21 +1535,39 @@ class FeedbackLedger:
                 ),
             )
 
-    def bind_worktree_slot_task(self, head_sha: str, task_id: str, board: str) -> None:
+    def bind_worktree_slot_task(
+        self,
+        head_sha: str,
+        task_id: str,
+        board: str,
+        *,
+        slot_id: int | None = None,
+    ) -> None:
         """Record which dispatched Kanban task now owns a leased slot.
 
         Best-effort by design: if the slot was already reconciled away (or a
         non-pooled LocalGit is in use and no such slot exists), this is a
         silent no-op rather than an error -- proactive release is an
         optimization over the lease timeout, not a correctness requirement.
+
+        Pass ``slot_id`` to narrow the update to the exact slot so that a
+        concurrent task holding a different pooled slot for the same head_sha
+        is not accidentally rebound to a later task's ID.
         """
 
         with self._transaction():
-            self._connection.execute(
-                "UPDATE worktree_pool_slots SET task_id = ?, board = ? "
-                "WHERE head_sha = ? AND status = 'leased'",
-                (task_id, board, head_sha),
-            )
+            if slot_id is not None:
+                self._connection.execute(
+                    "UPDATE worktree_pool_slots SET task_id = ?, board = ? "
+                    "WHERE slot_id = ? AND head_sha = ? AND status = 'leased'",
+                    (task_id, board, slot_id, head_sha),
+                )
+            else:
+                self._connection.execute(
+                    "UPDATE worktree_pool_slots SET task_id = ?, board = ? "
+                    "WHERE head_sha = ? AND status = 'leased'",
+                    (task_id, board, head_sha),
+                )
 
     def leased_worktree_slots(self) -> tuple[dict[str, object], ...]:
         """List every currently-leased slot with an attached task binding."""

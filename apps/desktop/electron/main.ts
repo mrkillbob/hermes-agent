@@ -168,7 +168,7 @@ import {
   uninstallArgsForMode
 } from './desktop-uninstall'
 import { describeDevCdpDecision, resolveDevCdpPort } from './dev-cdp'
-import { ensureKanbanDispatcherReady } from './dispatcher-readiness'
+import { DispatcherReadinessError, ensureKanbanDispatcherReady } from './dispatcher-readiness'
 import { installEmbedReferer } from './embed-referer'
 import { createEventDeduper } from './event-dedupe'
 import {
@@ -12703,7 +12703,15 @@ async function startHermes() {
     }
 
     await advanceBootProgress('backend.dispatcher', 'Verifying Kanban dispatcher readiness', 92)
-    await ensureKanbanDispatcherReady(baseUrl, authToken, fetchJson)
+    await ensureKanbanDispatcherReady(baseUrl, authToken, fetchJson).catch(err => {
+      if (err instanceof DispatcherReadinessError) {
+        // Kanban dispatcher absent or disabled — non-blocking for Desktop startup.
+        // Chat and core features remain available; Kanban-gated operations will
+        // surface their own readiness errors when actually invoked.
+        return
+      }
+      throw err
+    })
 
     updateBootProgress({
       phase: 'backend.ready',

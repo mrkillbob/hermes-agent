@@ -105,7 +105,11 @@ _MARKER_REQUIRED_FEEDBACK_KINDS = frozenset(
 
 
 def _factual_reply_is_missing(
-    github: GitHubClient, receipt: FeedbackReceipt, *, resolved_head_sha: str
+    github: GitHubClient,
+    receipt: FeedbackReceipt,
+    *,
+    resolved_head_sha: str,
+    owner_login: str | None = None,
 ) -> bool:
     """Whether no comment yet carries this exact completion's required receipt marker.
 
@@ -118,6 +122,10 @@ def _factual_reply_is_missing(
     was skipped. This independently rereads canonical PR comments the same
     way every other completion gate in this plugin rereads canonical state,
     instead of trusting the worker's self-report that it replied.
+
+    When *owner_login* is provided, only comments authored by that login are
+    accepted as valid completion receipts.  This prevents a third party from
+    posting a crafted marker comment that would bypass the gate.
     """
 
     try:
@@ -128,6 +136,10 @@ def _factual_reply_is_missing(
         match = _PR_REPAIR_RECEIPT_COMMENT.search(item.body)
         if not match or match.group(1).casefold() != resolved_head_sha.casefold():
             continue
+        if owner_login is not None:
+            reviewer_login = getattr(item.reviewer, "login", None) or ""
+            if reviewer_login.casefold() != owner_login.casefold():
+                continue
         if not pr_repair_attribution_required(receipt.repository):
             return False
         if PR_REPAIR_ATTRIBUTION_PREFIX in item.body:
@@ -585,6 +597,21 @@ def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
             )
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("maintenance command evidence is invalid") from error
+        # Validate each evidence argv against the lane's configured command so
+        # that a worker cannot submit evidence for a command it was not
+        # configured to run.
+        if args.lane != FINAL_LANE:
+            configured_lane = next(
+                (lane for lane in maintenance.lanes if lane.name == args.lane), None
+            )
+            if configured_lane is None:
+                raise ValueError("maintenance lane is not configured")
+            for ev in command_evidence:
+                ev_prefix = tuple(ev.argv[: len(configured_lane.command)])
+                if ev_prefix != configured_lane.command:
+                    raise ValueError(
+                        f"maintenance evidence argv does not match configured lane command"
+                    )
         ledger = FeedbackLedger.for_current_profile()
         try:
             ledger.record_maintenance_receipt(
@@ -929,7 +956,10 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
         )
         return 1
     if receipt.feedback_kind in _MARKER_REQUIRED_FEEDBACK_KINDS and _factual_reply_is_missing(
-        github, receipt, resolved_head_sha=str(args.resolved_head_sha)
+        github,
+        receipt,
+        resolved_head_sha=str(args.resolved_head_sha),
+        owner_login=admission.target.owner_login if admission.target is not None else None,
     ):
         print(json.dumps({"status": "factual_reply_missing"}, sort_keys=True))
         return 1
@@ -972,23 +1002,44 @@ def _complete_feedback(ctx: Any, args: argparse.Namespace) -> int:
         local_ci_status = _controller(policy, ledger).dispatch_local_ci_after_feedback(
             current
         )
-        print(
-            json.dumps(
-                {
-                    "status": "completed",
-                    "repository": receipt.repository,
-                    "pr_number": receipt.pr_number,
-                    "feedback_kind": receipt.feedback_kind,
-                    "feedback_id": receipt.feedback_id,
-                    "resolved_head_sha": str(args.resolved_head_sha).casefold(),
-                    "review_thread_resolved": review_thread_resolved,
-                    "local_ci_status": local_ci_status,
-                    "codex_retrigger_status": codex_retrigger_status,
-                },
-                sort_keys=True,
+        if codex_retrigger_status == "unavailable":
+            # Codex retrigger is temporarily unavailable; treat the completion
+            # as retryable so the caller can attempt the full flow again.
+            print(
+                json.dumps(
+                    {
+                        "status": "codex_retrigger_unavailable",
+                        "repository": receipt.repository,
+                        "pr_number": receipt.pr_number,
+                        "feedback_kind": receipt.feedback_kind,
+                        "feedback_id": receipt.feedback_id,
+                        "resolved_head_sha": str(args.resolved_head_sha).casefold(),
+                        "review_thread_resolved": review_thread_resolved,
+                        "local_ci_status": local_ci_status,
+                        "codex_retrigger_status": codex_retrigger_status,
+                    },
+                    sort_keys=True,
+                )
             )
-        )
-        return_code = 0
+            return_code = 1
+        else:
+            print(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "repository": receipt.repository,
+                        "pr_number": receipt.pr_number,
+                        "feedback_kind": receipt.feedback_kind,
+                        "feedback_id": receipt.feedback_id,
+                        "resolved_head_sha": str(args.resolved_head_sha).casefold(),
+                        "review_thread_resolved": review_thread_resolved,
+                        "local_ci_status": local_ci_status,
+                        "codex_retrigger_status": codex_retrigger_status,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return_code = 0
     finally:
         ledger.close()
     return return_code
@@ -1869,7 +1920,12 @@ def _merge_status() -> int:
     return 0
 
 
-def _review_required_task(policy: PluginPolicy, merge_policy, pull_request) -> KanbanTask:
+def _review_required_task(
+    policy: PluginPolicy,
+    merge_policy,
+    pull_request,
+    local_git: LocalGitRepository | None = None,
+) -> KanbanTask:
     """Create an exact-head review task when GitHub reports review required."""
 
     target = policy.targets[merge_policy.repository]
@@ -1878,6 +1934,21 @@ def _review_required_task(policy: PluginPolicy, merge_policy, pull_request) -> K
             "utf-8"
         )
     ).hexdigest()
+    # Materialize a verified exact-head worktree so the reviewer sees the
+    # precise commit being reviewed rather than the main clone's HEAD.
+    git = local_git or LocalGitRepository()
+    try:
+        workspace = git.prepare_maintenance_worktree(
+            target.local_path,
+            merge_policy.repository,
+            pull_request.head_sha,
+            "review-required",
+        )
+        repository_path = workspace
+    except Exception:
+        # Fall back to the main clone path if worktree preparation fails;
+        # degraded (but not broken) behaviour is better than no task at all.
+        repository_path = target.local_path
     return KanbanTask(
         title=f"Review required: {merge_policy.repository}#{pull_request.number}",
         instructions=(
@@ -1891,7 +1962,7 @@ def _review_required_task(policy: PluginPolicy, merge_policy, pull_request) -> K
         ),
         board=policy.board or "",
         assignee=_REVIEW_REQUIRED_ASSIGNEE,
-        repository_path=target.local_path,
+        repository_path=repository_path,
         head_sha=pull_request.head_sha,
         branch=pull_request.head_ref_name,
         idempotency_key=f"github-pr-review-required:{key}",

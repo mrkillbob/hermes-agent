@@ -31,6 +31,7 @@ from .policy import (
     PullRequest,
     RepositoryTarget,
     RoutingDecision,
+    is_generated_control_comment,
     pr_repair_attribution_line,
     pr_repair_attribution_required,
 )
@@ -191,6 +192,7 @@ class PreparedWorktree:
     path: Path
     branch: str
     expected_sha: str
+    slot_id: int | None = None
 
 
 class SubprocessGitRunner:
@@ -243,19 +245,27 @@ class ScanResult:
 
 
 def _bind_pooled_worktree_task(
-    local_git: object, receipt: FeedbackReceipt, task_id: str, board: str
+    local_git: object,
+    receipt: FeedbackReceipt,
+    task_id: str,
+    board: str,
+    *,
+    prepared: "PreparedWorktree | None" = None,
 ) -> None:
     """Best-effort: if local_git is a worktree pool, record which Kanban task
 
     now owns its leased slot, so reconcile_leases can release it the moment
     that task goes terminal instead of waiting out the full lease timeout.
     A plain (non-pooled) LocalGitRepository simply has no such method, so
-    this is a silent no-op for it.
+    this is a silent no-op for it.  Pass ``prepared`` so the binding is
+    narrowed to the specific pooled slot rather than every leased slot that
+    shares the same head_sha.
     """
 
     bind_task = getattr(local_git, "bind_task", None)
     if callable(bind_task):
-        bind_task(receipt, task_id, board)
+        slot_id = prepared.slot_id if prepared is not None else None
+        bind_task(receipt, task_id, board, slot_id=slot_id)
 
 
 def _prepare_receipt_worktree_with_overflow(
@@ -404,10 +414,21 @@ class LocalGitRepository:
             resolved_source == root or resolved_source.is_relative_to(root)
             for root in governed_roots
         )
+        # On Windows the interpreter lives under Scripts/python.exe; on POSIX
+        # it is bin/python.  Probe the platform-appropriate candidate so a
+        # healthy Windows .venv is not rejected here.
+        import os as _os
+
+        _venv_interpreter_candidates = (
+            (resolved_source / "Scripts" / "python.exe",
+             resolved_source / "bin" / "python")
+            if _os.name == "nt"
+            else (resolved_source / "bin" / "python",)
+        )
         if (
             not is_governed_root
             or not resolved_source.is_dir()
-            or not (resolved_source / "bin/python").is_file()
+            or not any(c.is_file() for c in _venv_interpreter_candidates)
         ):
             raise RuntimeError("project virtualenv is not a governed local environment")
         if destination.is_symlink():
@@ -709,24 +730,35 @@ class PooledLocalGitRepository:
             # immediately instead of waiting out the full lease timeout.
             self._ledger.finish_worktree_slot(lease)
             raise
-        return PreparedWorktree(workspace, _receipt_branch(receipt), receipt.head_sha)
+        return PreparedWorktree(workspace, _receipt_branch(receipt), receipt.head_sha, slot_id=lease.slot_id)
 
     def release(self, lease: WorktreeSlotLease) -> None:
         """Return a previously acquired slot to the free pool."""
 
         self._ledger.finish_worktree_slot(lease)
 
-    def bind_task(self, receipt: FeedbackReceipt, task_id: str, board: str) -> None:
+    def bind_task(
+        self,
+        receipt: FeedbackReceipt,
+        task_id: str,
+        board: str,
+        *,
+        slot_id: int | None = None,
+    ) -> None:
         """Record which dispatched Kanban task now owns this receipt's slot.
 
         Called opportunistically (duck-typed, see `getattr(local_git,
-        "bind_task", None)` at each dispatch call site) right after the
-        Kanban task is actually created, so `reconcile_leases` can release
-        the slot the moment that task finishes instead of waiting out the
-        full lease timeout.
+        "bind_task", None)`) right after the Kanban task is actually created,
+        so `reconcile_leases` can release the slot the moment that task
+        finishes instead of waiting out the full lease timeout.
+        Pass ``slot_id`` (from a ``PreparedWorktree.slot_id``) to narrow the
+        UPDATE to the exact slot and avoid accidentally rebinding a concurrent
+        task that holds a different pooled slot for the same head_sha.
         """
 
-        self._ledger.bind_worktree_slot_task(receipt.head_sha, task_id, board)
+        self._ledger.bind_worktree_slot_task(
+            receipt.head_sha, task_id, board, slot_id=slot_id
+        )
 
     def reconcile_leases(self, kanban: KanbanClient) -> int:
         """Release any leased slot whose bound Kanban task has gone terminal.
@@ -1051,19 +1083,22 @@ class ScanController:
             if actions_enabled and pull_requests:
                 # actions_enabled is only the repo-level Actions on/off toggle;
                 # it stays True through a billing lockout, where every job
-                # fails immediately without running. Sample one open PR's
-                # check state -- the lockout is account-wide, not per-PR, so
-                # one sample is representative for the whole repository this
-                # tick -- and treat a confirmed lockout the same as Actions
-                # being off, so local CI still gets dispatched below.
-                try:
-                    sample_checks = self._github.get_check_state(
-                        repository, pull_requests[0].head_sha
-                    )
-                    if sample_checks.billing_blocked:
-                        actions_enabled = False
-                except Exception:  # noqa: BLE001 - uncertain sample keeps prior gate value.
-                    pass
+                # fails immediately without running. Inspect each candidate's
+                # current check state rather than sampling a single PR: one PR
+                # may still show a historical passing run while another's
+                # current workflow already carries the billing-failure annotation.
+                # Treat a confirmed lockout on ANY candidate as account-level
+                # evidence so local CI is dispatched for affected PRs.
+                for _billing_candidate in pull_requests:
+                    try:
+                        _candidate_checks = self._github.get_check_state(
+                            repository, _billing_candidate.head_sha
+                        )
+                        if _candidate_checks.billing_blocked:
+                            actions_enabled = False
+                            break
+                    except Exception:  # noqa: BLE001 - uncertain sample keeps prior gate value.
+                        continue
             admitted_pull_requests: list[PullRequest] = []
             for pull_request in pull_requests:
                 pull_request_admission = self._policy.admit_pull_request(pull_request)
@@ -1171,6 +1206,9 @@ class ScanController:
                     )
                     if receipt_reason is not None:
                         skipped[receipt_reason] += 1
+                        continue
+                    if is_generated_control_comment(feedback.body):
+                        skipped["generated_control_comment"] += 1
                         continue
                     admission = self._policy.admit(
                         pull_request,
@@ -1522,7 +1560,8 @@ class ScanController:
                 )
             )
             _bind_pooled_worktree_task(
-                self._local_git, receipt, task_id, self._policy.board or ""
+                self._local_git, receipt, task_id, self._policy.board or "",
+                prepared=prepared,
             )
             self._ledger.finalize(receipt, task_id, lease)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
@@ -1640,7 +1679,8 @@ class ScanController:
                 )
             )
             _bind_pooled_worktree_task(
-                self._local_git, receipt, task_id, self._policy.board or ""
+                self._local_git, receipt, task_id, self._policy.board or "",
+                prepared=prepared,
             )
             self._ledger.finalize(receipt, task_id, lease)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
@@ -1868,7 +1908,8 @@ class ScanController:
                 )
             )
             _bind_pooled_worktree_task(
-                self._local_git, receipt, task_id, self._policy.board or ""
+                self._local_git, receipt, task_id, self._policy.board or "",
+                prepared=prepared,
             )
             self._ledger.finalize(receipt, task_id, lease)
         except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
@@ -2860,8 +2901,16 @@ def _ci_failure_task(
         # the focused fix.  Keep the exact-head lease authoritative instead of
         # killing valid work at the old 15-minute wall.
         max_runtime_seconds=60 * 60 if policy.auto_dispatch else None,
-        model_override=LOCAL_CI_WORKER_MODEL,
-        provider_override=LOCAL_CI_WORKER_PROVIDER,
+        model_override=(
+            policy.local_ci_audit.worker_model
+            if policy.local_ci_audit and policy.local_ci_audit.worker_model
+            else LOCAL_CI_WORKER_MODEL
+        ),
+        provider_override=(
+            policy.local_ci_audit.worker_provider
+            if policy.local_ci_audit and policy.local_ci_audit.worker_provider
+            else LOCAL_CI_WORKER_PROVIDER
+        ),
         reasoning_effort="none",
     )
 
@@ -2953,8 +3002,19 @@ def _local_ci_task(
         # exact-head CI lease prevents duplicate restarts while the real
         # supervisor PID is alive; give the full lane sequence an 8h envelope.
         max_runtime_seconds=8 * 60 * 60,
-        model_override=LOCAL_CI_WORKER_MODEL,
-        provider_override=LOCAL_CI_WORKER_PROVIDER,
+        # Prefer the operator-configured route; fall back to the compiled-in
+        # default only when the policy carries no explicit override so existing
+        # configurations continue to work without changes.
+        model_override=(
+            policy.local_ci_audit.worker_model
+            if policy.local_ci_audit and policy.local_ci_audit.worker_model
+            else LOCAL_CI_WORKER_MODEL
+        ),
+        provider_override=(
+            policy.local_ci_audit.worker_provider
+            if policy.local_ci_audit and policy.local_ci_audit.worker_provider
+            else LOCAL_CI_WORKER_PROVIDER
+        ),
         reasoning_effort="none",
     )
 
