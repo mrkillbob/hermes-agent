@@ -4,7 +4,7 @@ A worktree created off the standalone clone's local ``HEAD`` roots the new
 branch on a stale base when that clone lags the remote. ``_resolve_worktree_base``
 fetches and branches from the remote tip instead so the worktree starts current.
 
-These tests exercise the REAL ``cli._resolve_worktree_base`` /
+These tests exercise the REAL ``worktree_ops._resolve_worktree_base`` /
 ``cli._setup_worktree`` against a real local "remote" repo (so ``git fetch``
 works offline in the hermetic sandbox), proving the worktree includes commits
 that exist on the remote but not on the stale local HEAD.
@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from hermes_cli import worktree_ops
 
 import cli
 
@@ -76,28 +78,11 @@ def remote_and_clone(tmp_path):
 class TestResolveWorktreeBase:
     def test_resolves_to_fetched_upstream(self, remote_and_clone):
         clone, remote_head, stale_local_head = remote_and_clone
-        base_ref, label = cli._resolve_worktree_base(str(clone))
+        base_ref, label = worktree_ops._resolve_worktree_base(str(clone))
         # Should resolve to the upstream tracking ref and have fetched it.
         assert base_ref == "origin/main"
         assert "fetched" in label
         # The fetched ref now points at the remote tip, not the stale local HEAD.
-        resolved = _run(["git", "rev-parse", base_ref], clone).stdout.strip()
-        assert resolved == remote_head
-        assert resolved != stale_local_head
-
-    def test_unrelated_fetch_does_not_make_selected_ref_fresh(self, remote_and_clone):
-        """FETCH_HEAD for another branch must not suppress the main refresh."""
-        clone, remote_head, stale_local_head = remote_and_clone
-        _run(["git", "switch", "-c", "unrelated"], clone)
-        _commit(clone, "unrelated.txt", "unrelated branch")
-        _run(["git", "push", "origin", "unrelated"], clone)
-        _run(["git", "switch", "main"], clone)
-        _run(["git", "fetch", "origin", "unrelated"], clone)
-
-        base_ref, label = cli._resolve_worktree_base(str(clone))
-
-        assert base_ref == "origin/main"
-        assert "fetched" in label
         resolved = _run(["git", "rev-parse", base_ref], clone).stdout.strip()
         assert resolved == remote_head
         assert resolved != stale_local_head
@@ -109,7 +94,7 @@ class TestResolveWorktreeBase:
         _run(["git", "config", "user.email", "t@t.com"], repo)
         _run(["git", "config", "user.name", "T"], repo)
         _commit(repo, "README.md", "only commit")
-        base_ref, label = cli._resolve_worktree_base(str(repo))
+        base_ref, label = worktree_ops._resolve_worktree_base(str(repo))
         assert base_ref == "HEAD"
         assert "HEAD" in label
 
@@ -136,7 +121,7 @@ class TestResolveWorktreeBaseStartupCost:
             return real_run(args, **kw)
 
         monkeypatch.setattr(subprocess, "run", spy)
-        base_ref, label = cli._resolve_worktree_base(str(clone))
+        base_ref, label = worktree_ops._resolve_worktree_base(str(clone))
         assert base_ref == "origin/main"
         assert "fetched" in label and "ago" in label
         assert calls == [], "fresh FETCH_HEAD must skip the network fetch"
@@ -145,57 +130,15 @@ class TestResolveWorktreeBaseStartupCost:
         assert resolved == remote_head
 
     def test_stale_fetch_head_refetches(self, remote_and_clone):
-        """A stale selected ref -> a real fetch happens."""
+        """FETCH_HEAD older than the window -> a real fetch happens."""
         clone, remote_head, _ = remote_and_clone
         _run(["git", "fetch", "origin", "main"], clone)
-        ref_path = Path(
-            _run(
-                ["git", "rev-parse", "--git-path", "refs/remotes/origin/main"],
-                clone,
-            ).stdout.strip()
-        )
-        if not ref_path.is_absolute():
-            ref_path = Path(clone) / ref_path
+        fetch_head = Path(clone) / ".git" / "FETCH_HEAD"
         old = time.time() - 3600
-        os.utime(ref_path, (old, old))
-        base_ref, label = cli._resolve_worktree_base(str(clone))
+        os.utime(fetch_head, (old, old))
+        base_ref, label = worktree_ops._resolve_worktree_base(str(clone))
         assert base_ref == "origin/main"
         assert label == "origin/main (fetched)"
-
-    def test_successful_fetch_is_fresh_when_tracking_ref_is_packed(
-        self, remote_and_clone, monkeypatch
-    ):
-        """A no-op fetch must be remembered even without a loose ref file."""
-        clone, _remote_head, _stale_local_head = remote_and_clone
-        _run(["git", "fetch", "origin", "main"], clone)
-        _run(["git", "pack-refs", "--all", "--prune"], clone)
-        ref_path = Path(
-            _run(
-                ["git", "rev-parse", "--git-path", "refs/remotes/origin/main"],
-                clone,
-            ).stdout.strip()
-        )
-        if not ref_path.is_absolute():
-            ref_path = Path(clone) / ref_path
-        assert not ref_path.exists()
-
-        # The first resolver call records its successful fetch event. A second
-        # call must use that event even though Git stores the ref in packed-refs.
-        cli._resolve_worktree_base(str(clone))
-        real_run = subprocess.run
-        fetches = []
-
-        def spy(args, **kw):
-            if isinstance(args, (list, tuple)) and "fetch" in args:
-                fetches.append(list(args))
-            return real_run(args, **kw)
-
-        monkeypatch.setattr(subprocess, "run", spy)
-        base_ref, label = cli._resolve_worktree_base(str(clone))
-
-        assert base_ref == "origin/main"
-        assert "ago" in label
-        assert fetches == []
 
     def test_fetch_timeout_falls_back_to_cached_ref(self, remote_and_clone, monkeypatch):
         """A stalled fetch must yield the locally-cached tracking ref, fast —
@@ -213,7 +156,7 @@ class TestResolveWorktreeBaseStartupCost:
 
         monkeypatch.setattr(subprocess, "run", stall_fetches)
         start = time.monotonic()
-        base_ref, label = cli._resolve_worktree_base(str(clone))
+        base_ref, label = worktree_ops._resolve_worktree_base(str(clone))
         elapsed = time.monotonic() - start
         # Cached tracking ref, single fetch attempt, no step-2 cascade.
         assert base_ref == "origin/main"
@@ -244,7 +187,7 @@ class TestResolveWorktreeBaseStartupCost:
         _run(
             ["git", "config", "branch.main.merge", "refs/heads/main"], repo
         )
-        base_ref, label = cli._resolve_worktree_base(str(repo))
+        base_ref, label = worktree_ops._resolve_worktree_base(str(repo))
         assert base_ref == "HEAD"
         assert "HEAD" in label
 

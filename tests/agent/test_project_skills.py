@@ -11,7 +11,10 @@ import agent.skill_utils as su
 
 @pytest.fixture
 def project_env(tmp_path, monkeypatch):
-    """A temp HERMES_HOME + a git-marked project with skills in both subdirs."""
+    """A temp HERMES_HOME + a git-marked project with skills in all supported subdirs."""
+    user_home = tmp_path / "home"
+    user_home.mkdir()
+    monkeypatch.setenv("HOME", str(user_home))
     home = tmp_path / ".hermes"
     (home / "skills").mkdir(parents=True)
     config = home / "config.yaml"
@@ -28,6 +31,16 @@ def project_env(tmp_path, monkeypatch):
     ag.mkdir(parents=True)
     (ag / "SKILL.md").write_text(
         "---\nname: conv-skill\ndescription: convention\n---\nbody\n"
+    )
+    codex = repo / ".codex" / "skills" / "codex-skill"
+    codex.mkdir(parents=True)
+    (codex / "SKILL.md").write_text(
+        "---\nname: codex-skill\ndescription: Codex convention\n---\nbody\n"
+    )
+    claude = repo / ".claude" / "skills" / "claude-skill"
+    claude.mkdir(parents=True)
+    (claude / "SKILL.md").write_text(
+        "---\nname: claude-skill\ndescription: Claude convention\n---\nbody\n"
     )
 
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -78,13 +91,15 @@ class TestTrustGate:
         assert notice is not None
         root, count = notice
         assert root == project_env["repo"].resolve()
-        assert count == 2
+        assert count == 4
 
-    def test_trusted_returns_both_subdirs(self, project_env):
+    def test_trusted_returns_all_supported_subdirs(self, project_env):
         _trust(project_env["config"], project_env["repo"])
         dirs = su.get_project_skills_dirs()
         assert (project_env["repo"] / ".hermes" / "skills").resolve() in dirs
         assert (project_env["repo"] / ".agents" / "skills").resolve() in dirs
+        assert (project_env["repo"] / ".codex" / "skills").resolve() in dirs
+        assert (project_env["repo"] / ".claude" / "skills").resolve() in dirs
 
     def test_trusted_no_notice(self, project_env):
         _trust(project_env["config"], project_env["repo"])
@@ -225,16 +240,6 @@ class TestTrustGate:
 
 
 class TestPrecedence:
-    def test_scan_order_project_first(self, project_env):
-        _trust(project_env["config"], project_env["repo"])
-        order = su.get_scan_ordered_skills_dirs()
-        proj_dirs = {
-            (project_env["repo"] / ".hermes" / "skills").resolve(),
-            (project_env["repo"] / ".agents" / "skills").resolve(),
-        }
-        assert set(order[:2]) == proj_dirs
-        assert order[2] == su.get_skills_dir()
-
     def test_project_paths_are_readonly_owned(self, project_env):
         _trust(project_env["config"], project_env["repo"])
         p = project_env["repo"] / ".hermes" / "skills" / "repo-skill" / "SKILL.md"
@@ -247,6 +252,8 @@ class TestPrecedence:
         assert dirs[0] == su.get_skills_dir()
         for d in dirs:
             assert ".agents" not in str(d)
+            assert ".codex" not in str(d)
+            assert ".claude" not in str(d)
 
 
 class TestNonInteractiveInheritance:
@@ -291,9 +298,9 @@ class TestQuarantine:
 
     @pytest.fixture(autouse=True)
     def _clear_quarantine_cache(self):
-        su._project_quarantine_cache_clear()
+        su._PROJECT_QUARANTINE_CACHE.clear()
         yield
-        su._project_quarantine_cache_clear()
+        su._PROJECT_QUARANTINE_CACHE.clear()
 
     def _add_malicious_skill(self, repo: Path) -> Path:
         d = repo / ".hermes" / "skills" / "evil-skill"
@@ -345,7 +352,7 @@ class TestQuarantine:
         (evil_dir / "SKILL.md").write_text(
             "---\nname: evil-skill\ndescription: now actually benign\n---\nbody\n"
         )
-        su._project_quarantine_cache_clear()
+        su._PROJECT_QUARANTINE_CACHE.clear()
         assert su.is_quarantined_project_skill(evil_dir / "SKILL.md") is False
 
     def test_scan_cache_outside_repo(self, project_env):

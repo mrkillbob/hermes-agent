@@ -10,6 +10,7 @@ export const SESSION_ROUTE_PREFIX = '/'
 export const NEW_CHAT_ROUTE = '/'
 export const SETTINGS_ROUTE = '/settings'
 export const COMMAND_CENTER_ROUTE = '/command-center'
+export const SESSION_IMPORT_ROUTE = '/session-import'
 export const SKILLS_ROUTE = '/skills'
 export const MESSAGING_ROUTE = '/messaging'
 export const WEBHOOKS_ROUTE = '/webhooks'
@@ -18,8 +19,10 @@ export const CRON_ROUTE = '/cron'
 export const PROFILES_ROUTE = '/profiles'
 export const AGENTS_ROUTE = '/agents'
 export const STARMAP_ROUTE = '/starmap'
+export const LUNAR_CITY_ROUTE = '/lunar-city'
 
 export type AppView =
+  | 'session-import'
   | 'agents'
   | 'artifacts'
   | 'chat'
@@ -31,6 +34,7 @@ export type AppView =
   // session-title dropdown while a plugin page was showing.
   | 'extension'
   | 'messaging'
+  | 'lunar-city'
   | 'profiles'
   | 'settings'
   | 'skills'
@@ -38,6 +42,7 @@ export type AppView =
   | 'webhooks'
 
 export type AppRouteId =
+  | 'session-import'
   | 'agents'
   | 'artifacts'
   | 'command-center'
@@ -48,6 +53,7 @@ export type AppRouteId =
   | 'settings'
   | 'skills'
   | 'starmap'
+  | 'lunar-city'
   | 'webhooks'
 
 export interface AppRoute {
@@ -57,6 +63,7 @@ export interface AppRoute {
 }
 
 export const APP_ROUTES = [
+  { id: 'session-import', path: SESSION_IMPORT_ROUTE, view: 'session-import' },
   { id: 'new', path: NEW_CHAT_ROUTE, view: 'chat' },
   { id: 'settings', path: SETTINGS_ROUTE, view: 'settings' },
   { id: 'command-center', path: COMMAND_CENTER_ROUTE, view: 'command-center' },
@@ -67,7 +74,8 @@ export const APP_ROUTES = [
   { id: 'cron', path: CRON_ROUTE, view: 'cron' },
   { id: 'profiles', path: PROFILES_ROUTE, view: 'profiles' },
   { id: 'agents', path: AGENTS_ROUTE, view: 'agents' },
-  { id: 'starmap', path: STARMAP_ROUTE, view: 'starmap' }
+  { id: 'starmap', path: STARMAP_ROUTE, view: 'starmap' },
+  { id: 'lunar-city', path: LUNAR_CITY_ROUTE, view: 'lunar-city' }
 ] as const satisfies readonly AppRoute[]
 
 const APP_VIEW_BY_PATH = new Map<string, AppView>(APP_ROUTES.map(route => [route.path, route.view]))
@@ -123,6 +131,7 @@ export interface SidebarNavContribution {
 // While one is open the app's titlebar control clusters must hide so they don't
 // bleed over the overlay (they sit at a higher z-index than the overlay card).
 export const OVERLAY_VIEWS: ReadonlySet<AppView> = new Set([
+  'session-import',
   'agents',
   'command-center',
   'cron',

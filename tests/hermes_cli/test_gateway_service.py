@@ -258,6 +258,21 @@ class TestGeneratedSystemdUnits:
         unit = gateway_cli.generate_systemd_unit(system=False)
         assert "TimeoutStopSec=60" in unit
 
+    def test_restart_exit_code_is_also_declared_a_success_status(self):
+        """#104251: a planned restart (gateway/restart.py's exit 75) is force-restarted
+        via RestartForceExitStatus, but without SuccessExitStatus=75 too, systemd still
+        classifies the exit as a failure -- the unit flips to ``failed``/``Result=exit-code``
+        and any OnFailure= alert unit fires on every routine restart (hermes update,
+        hermes gateway restart, the in-app restart). SuccessExitStatus=75 keeps the same
+        force-restart behavior while letting the unit land back in ``active``/``success``,
+        so OnFailure= stays reserved for actual failures."""
+        unit = gateway_cli.generate_systemd_unit(system=False)
+        assert f"SuccessExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
+        # Must still force an actual restart on that exit code -- SuccessExitStatus alone
+        # would otherwise let the process stay stopped instead of being relaunched.
+        assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
+        assert f"RestartPreventExitStatus={GATEWAY_FATAL_CONFIG_EXIT_CODE}" in unit
+
     def test_unit_stop_budget_beats_drain_only_formula_with_real_loaders(
         self, monkeypatch
     ):
@@ -1341,7 +1356,7 @@ class TestSystemUnitHermesHome:
         monkeypatch.setattr(
             gateway_cli,
             "_system_service_identity",
-            lambda run_as_user=None: ("alice", "alice", str(target_home)),
+            lambda run_as_user=None: ("alice", "alice", str(target_home), 1001),
         )
         monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: root_hermes)
         monkeypatch.setattr(gateway_cli, "_build_service_path_dirs", lambda: [])
@@ -1376,13 +1391,31 @@ class TestSystemUnitHermesHome:
 
         assert entries == ["/opt/external-node/bin"]
 
+    def test_system_unit_orders_after_target_user_manager(self, monkeypatch, tmp_path):
+        """#104893: restart-safe workers need user@<uid>.service; the system unit must not race it at boot."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+        monkeypatch.setattr(
+            gateway_cli, "_system_service_identity",
+            lambda run_as_user=None: ("alice", "alice", str(tmp_path), 1001),
+        )
+        monkeypatch.setattr(gateway_cli, "_build_service_path_dirs", lambda: [])
+
+        system_unit = gateway_cli.generate_systemd_unit(system=True, run_as_user="alice")
+        user_unit = gateway_cli.generate_systemd_unit(system=False)
+
+        unit_section = system_unit.split("[Service]")[0]
+        assert "After=user@1001.service" in unit_section
+        assert "Wants=user@1001.service" in unit_section
+        assert "user@" not in user_unit
+
     def test_system_unit_uses_target_user_home_not_calling_user(self, monkeypatch):
         # Simulate sudo: Path.home() returns /root, target user is alice
         monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/root")))
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.setattr(
             gateway_cli, "_system_service_identity",
-            lambda run_as_user=None: ("alice", "alice", "/home/alice"),
+            lambda run_as_user=None: ("alice", "alice", "/home/alice", 1001),
         )
         monkeypatch.setattr(
             gateway_cli, "_build_user_local_paths",
@@ -1425,7 +1458,7 @@ class TestSystemUnitRefreshSyncsHermesHome:
         monkeypatch.setattr(
             gateway_cli,
             "_system_service_identity",
-            lambda run_as_user=None: ("alice", "alice", str(alice_home)),
+            lambda run_as_user=None: ("alice", "alice", str(alice_home), 1001),
         )
         monkeypatch.setattr(
             gateway_cli, "_build_user_local_paths", lambda home, existing: []
@@ -1598,7 +1631,7 @@ class TestSystemServiceIdentityRootHandling:
         root_info = pwd.getpwnam("root")
         root_group = grp.getgrgid(root_info.pw_gid).gr_name
 
-        username, group, home = gateway_cli._system_service_identity(run_as_user="root")
+        username, group, home, _uid = gateway_cli._system_service_identity(run_as_user="root")
         assert username == "root"
         assert home == root_info.pw_dir
 
@@ -1610,7 +1643,7 @@ class TestSystemServiceIdentityRootHandling:
         monkeypatch.setenv("LOGNAME", "nobody")
 
         try:
-            username, group, home = gateway_cli._system_service_identity(run_as_user=None)
+            username, group, home, _uid = gateway_cli._system_service_identity(run_as_user=None)
             assert username == "nobody"
         except ValueError as e:
             # "nobody" might not exist on all systems
@@ -1666,7 +1699,7 @@ class TestPreflightUserSystemd:
             lambda: type("P", (), {"exists": lambda self: False})(),
         )
         monkeypatch.setattr(
-            gateway_cli, "get_systemd_linger_status", lambda: (False, ""),
+            gateway_cli, "get_systemd_linger_status", lambda username=None: (False, ""),
         )
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda _: "/usr/bin/loginctl")
 
@@ -1700,7 +1733,7 @@ class TestPreflightUserSystemd:
             lambda: type("P", (), {"exists": lambda self: False})(),
         )
         monkeypatch.setattr(
-            gateway_cli, "get_systemd_linger_status", lambda: (False, ""),
+            gateway_cli, "get_systemd_linger_status", lambda username=None: (False, ""),
         )
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda _: "/usr/bin/loginctl")
 
@@ -1745,7 +1778,7 @@ class TestProfileArg:
         monkeypatch.setattr(
             gateway_cli,
             "_system_service_identity",
-            lambda run_as_user=None: ("alice", "alice", str(target_home)),
+            lambda run_as_user=None: ("alice", "alice", str(target_home), 1001),
         )
 
         unit = gateway_cli.generate_systemd_unit(system=True, run_as_user="alice")
@@ -1835,7 +1868,7 @@ class TestSystemUnitPathRemapping:
         monkeypatch.setattr(gateway_cli, "get_python_path", lambda: str(venv_bin / "python"))
         monkeypatch.setattr(
             gateway_cli, "_system_service_identity",
-            lambda run_as_user=None: ("alice", "alice", target_home),
+            lambda run_as_user=None: ("alice", "alice", target_home, 1001),
         )
 
         unit = gateway_cli.generate_systemd_unit(system=True)
