@@ -82,25 +82,6 @@ def test_build_pack_copies_only_explicit_tracked_files_and_verifies(
     assert verify_context_pack(pack, manifest_path, policy).manifest_sha256
 
 
-def test_build_pack_reads_bytes_from_claimed_commit_when_index_hides_edit(
-    source_repo: Path, tmp_path: Path, policy: PackPolicy
-) -> None:
-    """A clean-tree receipt must not admit assume-unchanged working-tree bytes."""
-    _git(source_repo, "update-index", "--assume-unchanged", "src/logic.py")
-    (source_repo / "src" / "logic.py").write_text("def answer():\n    return 999\n")
-
-    manifest = build_context_pack(
-        source_repo, ["src/logic.py"], tmp_path / "pack", tmp_path / "manifest.json", policy
-    )
-
-    assert (tmp_path / "pack" / "src" / "logic.py").read_text() == (
-        "def answer():\n    return 42\n"
-    )
-    assert manifest.files[0].sha256 == hashlib.sha256(
-        b"def answer():\n    return 42\n"
-    ).hexdigest()
-
-
 @pytest.mark.parametrize(
     "selected",
     ["../outside.py", "/tmp/outside.py", ".git/config", "src/../README.md"],
@@ -300,7 +281,7 @@ def test_admission_receipt_rejects_audit_to_launch_mutation(
 def test_ox_broker_receives_only_explicit_staging_credential(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tools.mcp_tool import _build_safe_env, _interpolate_env_vars
+    from tools.mcp_tool_config import _build_safe_env, _interpolate_env_vars
 
     config = render_ox_profile(
         tmp_path,

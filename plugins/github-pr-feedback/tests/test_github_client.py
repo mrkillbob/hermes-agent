@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from contextlib import AbstractContextManager
 
@@ -18,6 +19,44 @@ from github_pr_feedback.github_client import (
     ReviewState,
     SubprocessCommandRunner,
 )
+
+
+def test_automation_identity_replaces_scrubbed_gh_config_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """Cron's /dev/null gh sentinel must not break governed bot reads."""
+    import github_pr_feedback.github_client as github_client_module
+
+    runners = []
+
+    class FakeRunner:
+        def __init__(self, *, env_overrides=None, **_kwargs):
+            env = dict(os.environ)
+            env.update({key: value for key, value in (env_overrides or {}).items() if value is not None})
+            for key, value in (env_overrides or {}).items():
+                if value is None:
+                    env.pop(key, None)
+            self.env = env
+            runners.append(self)
+
+        def run(self, _argv):
+            return json.dumps({"login": "mrkillbobbot"})
+
+    monkeypatch.setattr(github_client_module, "SubprocessCommandRunner", FakeRunner)
+    monkeypatch.setattr(github_client_module, "get_default_hermes_root", lambda: tmp_path)
+    monkeypatch.setenv("GH_CONFIG_DIR", os.devnull)
+    monkeypatch.setenv("HERMES_GITHUB_BOT_TOKEN", "test-token")
+
+    github_client_module.GitHubClient.for_automation_identity(
+        expected_login="mrkillbobbot",
+        token_env="HERMES_GITHUB_BOT_TOKEN",
+    )
+
+    assert len(runners) == 1
+    config_dir = tmp_path / "github-pr-feedback" / "bot-gh-config"
+    assert runners[0].env["GH_CONFIG_DIR"] == str(config_dir)
+    assert config_dir.is_dir()
+    assert runners[0].env["GH_TOKEN"] == "test-token"
 
 
 class RecordingRunner:
@@ -78,157 +117,6 @@ def test_subprocess_runner_retries_one_bounded_rate_limit_failure(
     assert gate.deferrals == [1.0]
 
 
-def test_automation_identity_uses_only_dedicated_token_and_verifies_login(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runner = RecordingRunner({("gh", "api", "user"): {"login": "mrkillbobbot"}})
-    captured: list[dict[str, str | None]] = []
-
-    def runner_factory(*, env_overrides, **_kwargs):
-        captured.append(dict(env_overrides))
-        return runner
-
-    monkeypatch.setattr(
-        "github_pr_feedback.github_client.SubprocessCommandRunner", runner_factory
-    )
-
-    GitHubClient.for_automation_identity(
-        expected_login="mrkillbobbot",
-        token_env="HERMES_GITHUB_BOT_TOKEN",
-        environ={
-            "HERMES_GITHUB_BOT_TOKEN": "bot-secret",
-            "GH_TOKEN": "human-secret",
-            "GITHUB_TOKEN": "ci-secret",
-        },
-    )
-
-    assert captured == [{"GH_TOKEN": "bot-secret", "GITHUB_TOKEN": None}]
-    assert runner.calls == [("gh", "api", "user")]
-
-
-def test_actions_permissions_read_uses_separate_human_gh_profile_only(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    bot_runner = RecordingRunner(
-        {
-            ("gh", "api", "user"): {"login": "mrkillbobbot"},
-            ("gh", "api", "repos/acme/widgets"): {"private": True},
-        }
-    )
-    human_runner = RecordingRunner(
-        {
-            ("gh", "api", "user"): {"login": "mrkillbob"},
-            ("gh", "api", "repos/acme/widgets/actions/permissions"): {
-                "enabled": False
-            },
-        }
-    )
-    captured: list[dict[str, str | None]] = []
-
-    def runner_factory(*, env_overrides, **_kwargs):
-        overrides = dict(env_overrides)
-        captured.append(overrides)
-        return human_runner if "GH_CONFIG_DIR" in overrides else bot_runner
-
-    monkeypatch.setattr(
-        "github_pr_feedback.github_client.SubprocessCommandRunner", runner_factory
-    )
-
-    client = GitHubClient.for_automation_identity(
-        expected_login="mrkillbobbot",
-        token_env="HERMES_GITHUB_BOT_TOKEN",
-        actions_permissions_expected_login="mrkillbob",
-        actions_permissions_gh_config_dir=tmp_path,
-        actions_permissions_repositories=frozenset({"acme/widgets"}),
-        environ={
-            "HERMES_GITHUB_BOT_TOKEN": "bot-secret",
-            "GH_TOKEN": "human-secret-must-not-be-copied",
-            "GITHUB_TOKEN": "ci-secret-must-not-be-copied",
-        },
-    )
-
-    assert client.repository_is_private("acme/widgets") is True
-    assert client.actions_enabled("acme/widgets", refresh=True) is False
-    assert captured == [
-        {"GH_TOKEN": "bot-secret", "GITHUB_TOKEN": None},
-        {
-            "GH_CONFIG_DIR": str(tmp_path.resolve()),
-            "GH_HOST": "github.com",
-            "GH_TOKEN": None,
-            "GITHUB_TOKEN": None,
-            "GH_ENTERPRISE_TOKEN": None,
-            "GITHUB_ENTERPRISE_TOKEN": None,
-        },
-    ]
-    assert bot_runner.calls == [
-        ("gh", "api", "user"),
-        ("gh", "api", "repos/acme/widgets"),
-    ]
-    assert human_runner.calls == [
-        ("gh", "api", "user"),
-        ("gh", "api", "repos/acme/widgets/actions/permissions"),
-    ]
-
-
-def test_actions_permissions_identity_mismatch_fails_closed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    bot_runner = RecordingRunner({("gh", "api", "user"): {"login": "mrkillbobbot"}})
-    wrong_human_runner = RecordingRunner(
-        {("gh", "api", "user"): {"login": "unexpected-user"}}
-    )
-
-    def runner_factory(*, env_overrides, **_kwargs):
-        return wrong_human_runner if "GH_CONFIG_DIR" in env_overrides else bot_runner
-
-    monkeypatch.setattr(
-        "github_pr_feedback.github_client.SubprocessCommandRunner", runner_factory
-    )
-
-    with pytest.raises(GitHubClientError) as caught:
-        GitHubClient.for_automation_identity(
-            expected_login="mrkillbobbot",
-            token_env="HERMES_GITHUB_BOT_TOKEN",
-            actions_permissions_expected_login="mrkillbob",
-            actions_permissions_gh_config_dir=tmp_path,
-            actions_permissions_repositories=frozenset({"acme/widgets"}),
-            environ={"HERMES_GITHUB_BOT_TOKEN": "bot-secret"},
-        )
-
-    assert caught.value.code == "actions_permissions_identity_mismatch"
-
-
-@pytest.mark.parametrize(
-    ("environ", "code"),
-    (
-        ({"GH_TOKEN": "human-secret"}, "automation_credential_missing"),
-        (
-            {"HERMES_GITHUB_BOT_TOKEN": "bot-secret"},
-            "automation_identity_mismatch",
-        ),
-    ),
-)
-def test_automation_identity_never_falls_back_or_accepts_wrong_viewer(
-    monkeypatch: pytest.MonkeyPatch,
-    environ: dict[str, str],
-    code: str,
-) -> None:
-    runner = RecordingRunner({("gh", "api", "user"): {"login": "mrkillbob"}})
-    monkeypatch.setattr(
-        "github_pr_feedback.github_client.SubprocessCommandRunner",
-        lambda **_kwargs: runner,
-    )
-
-    with pytest.raises(GitHubClientError) as caught:
-        GitHubClient.for_automation_identity(
-            expected_login="mrkillbobbot",
-            token_env="HERMES_GITHUB_BOT_TOKEN",
-            environ=environ,
-        )
-
-    assert caught.value.code == code
-
-
 def test_request_gate_shares_secondary_limit_cooldown_across_instances(tmp_path) -> None:
     now = [100.0]
     sleeps: list[float] = []
@@ -244,6 +132,153 @@ def test_request_gate_shares_secondary_limit_cooldown_across_instances(tmp_path)
         pass
 
     assert sleeps == [30.0]
+
+
+def test_request_gate_fails_fast_when_cooldown_exceeds_wait_budget(tmp_path) -> None:
+    path = tmp_path / "github-request-gate.json"
+    path.write_text('{"cooldown_until": 1945.0}\n', encoding="utf-8")
+    sleeps: list[float] = []
+
+    with pytest.raises(GitHubClientError) as raised:
+        with GitHubRequestGate(
+            path,
+            sleeper=sleeps.append,
+            clock=lambda: 100.0,
+            max_wait_seconds=30.0,
+        ):
+            pass
+
+    assert raised.value.code == "rate_limited"
+    assert "cooldown" in str(raised.value)
+    assert sleeps == []
+
+
+def test_request_gate_spaces_shared_requests_at_a_conservative_rate(tmp_path) -> None:
+    now = [100.0]
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    path = tmp_path / "github-request-gate.json"
+    with GitHubRequestGate(path, sleeper=sleep, clock=lambda: now[0]):
+        pass
+    with GitHubRequestGate(path, sleeper=sleep, clock=lambda: now[0]):
+        pass
+
+    assert sleeps == [1.0]
+
+
+def test_request_gate_recovers_conservatively_from_nonfinite_state(tmp_path) -> None:
+    path = tmp_path / "github-request-gate.json"
+    path.write_text('{"cooldown_until": NaN}\n', encoding="utf-8")
+    sleeps: list[float] = []
+    now = [100.0]
+
+    with GitHubRequestGate(
+        path, sleeper=lambda seconds: sleeps.append(seconds), clock=lambda: now[0]
+    ):
+        pass
+
+    assert sleeps == [5.0]
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["cooldown_until"] == 105.0
+    assert all(value == value and abs(value) != float("inf") for value in stored.values())
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    (
+        "HTTP 429: Too Many Requests",
+        "HTTP 403: secondary rate limit",
+        "x-ratelimit-remaining: 0",
+    ),
+)
+def test_subprocess_runner_retries_all_github_rate_limit_shapes(
+    monkeypatch: pytest.MonkeyPatch, stderr: str
+) -> None:
+    calls: list[list[str]] = []
+    results = iter(
+        (
+            subprocess.CompletedProcess(["gh", "api", "rate_limit"], 1, "", stderr),
+            subprocess.CompletedProcess(["gh", "api", "rate_limit"], 0, "{}", ""),
+        )
+    )
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return next(results)
+
+    monkeypatch.setattr("github_pr_feedback.github_client.subprocess.run", fake_run)
+    gate = RecordingGate()
+    runner = SubprocessCommandRunner(
+        sleeper=lambda _delay: None, request_gate=gate
+    )
+
+    assert runner.run(["gh", "api", "rate_limit"]) == "{}"
+    assert len(calls) == 2
+    assert gate.deferrals == [60.0]
+
+
+def test_subprocess_runner_retries_timeout_without_rate_limit_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    results = iter(
+        (
+            subprocess.TimeoutExpired(["gh", "api", "pull"], 60),
+            subprocess.CompletedProcess(["gh", "api", "pull"], 0, "{}", ""),
+        )
+    )
+
+    def fake_run(_argv, **_kwargs):
+        result = next(results)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr("github_pr_feedback.github_client.subprocess.run", fake_run)
+    runner = SubprocessCommandRunner(
+        sleeper=sleeps.append,
+        request_gate=RecordingGate(),
+    )
+
+    assert runner.run(["gh", "api", "pull"]) == "{}"
+    assert sleeps == [1.0]
+
+
+@pytest.mark.parametrize(
+    ("stderr", "code"),
+    [
+        ("HTTP 403: Resource not accessible by integration", "permission_denied"),
+        ("HTTP 401: Bad credentials", "authentication"),
+        ("HTTP 429: Too Many Requests", "rate_limited"),
+    ],
+)
+def test_subprocess_runner_exposes_safe_failure_code_without_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    stderr: str,
+    code: str,
+) -> None:
+    monkeypatch.setattr(
+        "github_pr_feedback.github_client.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["gh", "api", "labels"], 1, "", stderr
+        ),
+    )
+    with pytest.raises(GitHubClientError) as raised:
+        SubprocessCommandRunner(
+            sleeper=lambda _delay: None,
+            request_gate=GitHubRequestGate(
+                tmp_path / "github-request-gate.json",
+                sleeper=lambda _delay: None,
+                min_interval_seconds=0,
+            ),
+        ).run(["gh", "api", "labels"])
+    assert raised.value.code == code
+    assert stderr not in str(raised.value)
 
 
 def test_subprocess_runner_does_not_retry_an_ordinary_failure(
@@ -364,13 +399,59 @@ def test_github_client_posts_bounded_issue_comment_with_fixed_argv() -> None:
         "repos/acme/widgets/issues/17/comments",
         "--method",
         "POST",
-        "--field",
+        "--raw-field",
         "body=exact-head receipt passed",
     )
     runner = RecordingRunner({argv: {"id": 1}})
 
     GitHubClient(runner).post_issue_comment(
         "acme/widgets", 17, "exact-head receipt passed"
+    )
+
+    assert runner.calls == [argv]
+
+
+def test_github_client_decodes_accidentally_base64_encoded_receipt_comment() -> None:
+    body = (
+        "Hermes automated repair (task-orchestrator)\n\n"
+        "Verification passed.\n\n"
+        "<!-- pr-maintenance-receipt:v1 status=completed kind=review_comment "
+        "head=" + "a" * 40 + " -->"
+    )
+    encoded = __import__("base64").b64encode(body.encode()).decode()
+    argv = (
+        "gh",
+        "api",
+        "repos/acme/widgets/issues/17/comments",
+        "--method",
+        "POST",
+        "--raw-field",
+        f"body={body}",
+    )
+    runner = RecordingRunner({argv: {"id": 1}})
+
+    GitHubClient(runner).post_issue_comment("acme/widgets", 17, encoded)
+
+    assert runner.calls == [argv]
+
+
+def test_github_client_posts_review_body_as_literal_raw_field() -> None:
+    body = "Hermes automated review\n\nNo blocking findings."
+    argv = (
+        "gh",
+        "api",
+        "-X",
+        "POST",
+        "repos/acme/widgets/pulls/17/reviews",
+        "--raw-field",
+        "event=COMMENT",
+        "--raw-field",
+        f"body={body}",
+    )
+    runner = RecordingRunner({argv: {"id": 1}})
+
+    GitHubClient(runner).submit_pull_request_review(
+        "acme/widgets", 17, event="COMMENT", body=body
     )
 
     assert runner.calls == [argv]
@@ -610,6 +691,34 @@ def test_github_client_fails_closed_if_owned_pr_query_hits_coverage_cap() -> Non
         GitHubClient(runner).list_open_pull_requests("acme/widgets", "owner")
 
 
+def test_github_client_covers_current_large_owned_pr_backlog() -> None:
+    pulls_argv = (
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        "acme/widgets",
+        "--state",
+        "open",
+        "--author",
+        "owner",
+        "--limit",
+        str(MAX_DISCOVERED_PULL_REQUESTS),
+        "--json",
+        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+    )
+    runner = RecordingRunner(
+        {
+            pulls_argv: [canonical_list_pull(number=number) for number in range(1, 330)]
+        }
+    )
+
+    pulls = GitHubClient(runner).list_open_pull_requests("acme/widgets", "owner")
+
+    assert len(pulls) == 329
+    assert pulls[-1].number == 329
+
+
 def test_github_client_reads_all_open_prs_and_exact_base_head_for_maintenance() -> None:
     pulls_argv = (
         "gh",
@@ -802,6 +911,19 @@ def test_github_client_gets_the_current_pull_request_with_fixed_argv() -> None:
     assert runner.calls == [argv]
 
 
+def test_github_client_rejects_pull_request_identity_mismatch() -> None:
+    argv = ("gh", "api", "repos/acme/widgets/pulls/17")
+    payload = canonical_pull()
+    payload["number"] = 99
+    with pytest.raises(GitHubClientError, match="missing required fields"):
+        GitHubClient(RecordingRunner({argv: payload})).get_pull_request("acme/widgets", 17)
+
+    payload = canonical_pull()
+    payload["base"]["sha"] = "short"
+    with pytest.raises(GitHubClientError, match="missing required fields"):
+        GitHubClient(RecordingRunner({argv: payload})).get_pull_request("acme/widgets", 17)
+
+
 def test_github_client_reads_repository_actions_enabled_with_fixed_argv() -> None:
     argv = ("gh", "api", "repos/acme/widgets/actions/permissions")
     runner = RecordingRunner({argv: {"enabled": False, "sha_pinning_required": False}})
@@ -813,6 +935,32 @@ def test_github_client_reads_repository_actions_enabled_with_fixed_argv() -> Non
     assert enabled is False
     assert cached is False
     assert runner.calls == [argv]
+
+
+def test_github_client_refreshes_actions_enabled_after_cache_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv = ("gh", "api", "repos/acme/widgets/actions/permissions")
+    responses = iter(({"enabled": False}, {"enabled": True}))
+
+    class ChangingRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, command: list[str]) -> str:
+            self.calls.append(tuple(command))
+            return json.dumps(next(responses))
+
+    now = [100.0]
+    monkeypatch.setattr("github_pr_feedback.github_client.time.monotonic", lambda: now[0])
+    runner = ChangingRunner()
+    client = GitHubClient(runner)
+
+    assert client.actions_enabled("acme/widgets") is False
+    assert client.actions_enabled("acme/widgets") is False
+    now[0] += 61.0
+    assert client.actions_enabled("acme/widgets") is True
+    assert runner.calls == [argv, argv]
 
 
 def test_github_client_reads_private_repository_and_canonical_merge_state() -> None:
@@ -878,58 +1026,6 @@ def test_github_client_preserves_canonical_pr_labels_for_worker_routing() -> Non
     pull = GitHubClient(RecordingRunner({argv: row})).get_pull_request("acme/widgets", 17)
 
     assert pull.labels == ("type/perf", "sweeper:risk-session-state")
-
-
-def test_github_client_creates_pr_with_fixed_argv() -> None:
-    argv = (
-        "gh",
-        "api",
-        "repos/acme/widgets/pulls",
-        "--method",
-        "POST",
-        "--field",
-        "head=codex/child",
-        "--field",
-        "base=codex/parent",
-        "--field",
-        "title=Child",
-        "--field",
-        "body=Body\nDetails",
-    )
-    row = canonical_pull()
-    row["number"] = 18
-    row["head"]["ref"] = "codex/child"
-    row["base"]["ref"] = "codex/parent"
-    row["title"] = "Child"
-    pull = GitHubClient(RecordingRunner({argv: row})).create_pull_request(
-        "acme/widgets", head="codex/child", base="codex/parent", title="Child", body="Body\nDetails"
-    )
-    assert pull.number == 18
-    assert pull.base_branch == "codex/parent"
-
-
-def test_github_client_updates_base_only_for_expected_head() -> None:
-    get_argv = ("gh", "api", "repos/acme/widgets/pulls/18")
-    patch_argv = (
-        "gh",
-        "api",
-        "repos/acme/widgets/pulls/18",
-        "--method",
-        "PATCH",
-        "--field",
-        "base=stable",
-    )
-    row = canonical_pull()
-    row["number"] = 18
-    updated = canonical_pull()
-    updated["number"] = 18
-    updated["base"]["ref"] = "stable"
-    runner = RecordingRunner({get_argv: row, patch_argv: updated})
-    pull = GitHubClient(runner).update_pull_request_base(
-        "acme/widgets", 18, base="stable", expected_head_sha="a" * 40
-    )
-    assert pull.base_branch == "stable"
-    assert runner.calls == [get_argv, patch_argv]
 
 
 def test_github_client_reads_review_decision_and_unresolved_threads_with_fixed_graphql_argv() -> None:
@@ -1097,61 +1193,6 @@ def test_github_client_detects_a_billing_lockout_from_check_run_annotations() ->
     assert state == CheckState(
         actions_enabled=True, all_green=False, check_count=1, billing_blocked=True
     )
-
-
-def test_github_client_actions_enabled_hint_still_reads_exact_head_billing_annotations() -> None:
-    checks_argv = (
-        "gh",
-        "api",
-        "repos/acme/widgets/commits/" + "a" * 40 + "/check-runs?per_page=100",
-    )
-    statuses_argv = (
-        "gh",
-        "api",
-        "repos/acme/widgets/commits/" + "a" * 40 + "/status?per_page=100",
-    )
-    annotations_argv = (
-        "gh",
-        "api",
-        "--paginate",
-        "--slurp",
-        "repos/acme/widgets/check-runs/98764105373/annotations",
-    )
-    runner = RecordingRunner(
-        {
-            checks_argv: {
-                "total_count": 1,
-                "check_runs": [
-                    {
-                        "id": 98764105373,
-                        "status": "completed",
-                        "conclusion": "failure",
-                        "output": {"annotations_count": 1},
-                    }
-                ],
-            },
-            statuses_argv: {"state": "failure", "statuses": []},
-            annotations_argv: [
-                [
-                    {
-                        "message": (
-                            "The job was not started because recent account payments "
-                            "have failed or your spending limit needs to be increased."
-                        )
-                    }
-                ]
-            ],
-        }
-    )
-
-    state = GitHubClient(runner).get_check_state(
-        "acme/widgets", "a" * 40, actions_enabled_hint=True
-    )
-
-    assert state == CheckState(
-        actions_enabled=True, all_green=False, check_count=1, billing_blocked=True
-    )
-    assert runner.calls == [checks_argv, statuses_argv, annotations_argv]
 
 
 def test_github_client_does_not_flag_a_genuine_test_failure_as_billing_blocked() -> None:
@@ -1426,3 +1467,12 @@ def feedback_responses(body: str) -> dict[tuple[str, ...], object]:
             "repos/acme/widgets/pulls/17/reviews?per_page=100",
         ): [[]],
     }
+
+
+@pytest.mark.parametrize("permissions,allowed", [({},False),({"pull":True},False),({"triage":True},True),({"push":True},True),({"admin":"true"},False)])
+def test_label_permission_requires_explicit_write_capability(permissions, allowed):
+    class Runner:
+        def run(self, argv):
+            assert argv == ["gh", "api", "repos/acme/widgets"]
+            return json.dumps({"permissions":permissions})
+    assert GitHubClient(Runner()).can_label_repository("acme/widgets") is allowed

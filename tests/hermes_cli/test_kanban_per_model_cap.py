@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from unittest.mock import patch
 
 import pytest
 
@@ -14,12 +15,29 @@ def kanban_with_profiles(monkeypatch):
     for profile in ("alpha", "beta", "default"):
         os.makedirs(os.path.join(test_home, "profiles", profile), exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", test_home)
-    for mod in list(sys.modules):
-        if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
-            del sys.modules[mod]
-    from hermes_cli import kanban_db
+    def is_hermes_module(name):
+        return (
+            name.startswith("hermes_cli")
+            or name.startswith("hermes_state")
+            or name == "hermes_constants"
+        )
 
-    yield kanban_db
+    saved_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if is_hermes_module(name)
+    }
+    for name in saved_modules:
+        del sys.modules[name]
+    try:
+        from hermes_cli import kanban_db
+
+        yield kanban_db
+    finally:
+        for name in list(sys.modules):
+            if is_hermes_module(name):
+                del sys.modules[name]
+        sys.modules.update(saved_modules)
 
 
 def _create_overridden(kb, conn, title, *, assignee="alpha", provider, model):
@@ -53,6 +71,32 @@ def test_same_explicit_provider_model_is_capped(kanban_with_profiles):
     assert [task_id for task_id, _who, _workspace in result.spawned] == [first]
     assert result.skipped_per_model_capped == [
         (second, "ollama-launch", "qwen3.6:27b", 1)
+    ]
+
+
+@pytest.mark.parametrize("global_cap", [None, 4])
+def test_local_provider_model_uses_safe_default_cap(kanban_with_profiles, global_cap):
+    """A global remote-friendly cap must not fan out a local model."""
+    kb = kanban_with_profiles
+    with kb.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        first = _create_overridden(
+            kb, conn, "first", provider="ollama-launch", model="devstral-small-2:24b"
+        )
+        second = _create_overridden(
+            kb, conn, "second", provider="ollama-launch", model="devstral-small-2:24b"
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: os.getpid(),
+            dry_run=True,
+            max_in_progress_per_model=global_cap,
+        )
+
+    assert [task_id for task_id, _who, _workspace in result.spawned] == [first]
+    assert result.skipped_per_model_capped == [
+        (second, "ollama-launch", "devstral-small-2:24b", 1)
     ]
 
 
@@ -209,6 +253,65 @@ model:
     ]
 
 
+def test_codex_primary_profile_is_not_miscounted_against_local_fallback(
+    kanban_with_profiles,
+):
+    """live incident, 2026-08-28 (second occurrence, same day): a profile
+    whose PRIMARY model was moved to a remote provider (openai-codex) but
+    which still lists a local model as its fallback_providers entry was
+    being resolved, with kanban.local_first left at its default (off), to
+    that local *fallback* instead of its actual remote primary -- because
+    the accounting path reused _resolve_local_first_route unconditionally,
+    and that resolver's job is to find the first local route ANYWHERE in
+    the chain (for the separate local_first substitution feature), not to
+    report what a task genuinely runs. With local_first off, no
+    substitution happens, so the task truly runs on its remote primary --
+    but the miscount made it appear to share single-concurrency Ollama
+    capacity with real local-only profiles, falsely capping unrelated
+    ready work that was never going to touch Ollama at all."""
+    kb = kanban_with_profiles
+    from pathlib import Path
+
+    root = Path(__import__("os").environ["HERMES_HOME"])
+    # Deliberately no kanban.local_first write here -- default, unset state.
+    root.joinpath("profiles", "alpha", "config.yaml").write_text(
+        """
+model:
+  provider: openai-codex
+  default: gpt-5.3-codex-spark
+fallback_providers:
+  - provider: ollama-launch
+    model: qwen3.5:4b
+""".lstrip(),
+        encoding="utf-8",
+    )
+    root.joinpath("profiles", "default", "config.yaml").write_text(
+        """
+model:
+  provider: ollama-launch
+  default: qwen3.5:4b
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    with kb.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        codex_task = kb.create_task(conn, title="codex primary", assignee="alpha")
+        local_task = kb.create_task(conn, title="genuinely local", assignee="default")
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: os.getpid(),
+            dry_run=True,
+            max_in_progress_per_model=1,
+        )
+
+    assert set(
+        task_id for task_id, _who, _workspace in result.spawned
+    ) == {codex_task, local_task}
+    assert result.skipped_per_model_capped == []
+
+
 @pytest.mark.parametrize("release", ["completed", "reclaimed"])
 def test_terminal_or_reclaimed_task_releases_model_capacity(
     kanban_with_profiles, release
@@ -236,12 +339,22 @@ def test_terminal_or_reclaimed_task_releases_model_capacity(
         if release == "completed":
             assert kb.complete_task(conn, first, result="done")
         else:
-            assert kb.reclaim_task(
-                conn,
-                first,
-                reason="test release",
-                signal_fn=lambda _pid, _claim_lock: True,
-            )
+            alive = {os.getpid(): True}
+
+            def signal_worker(pid, _signal):
+                alive[int(pid)] = False
+
+            with patch.object(
+                kb,
+                "_pid_alive",
+                side_effect=lambda pid: alive.get(int(pid), False),
+            ):
+                assert kb.reclaim_task(
+                    conn,
+                    first,
+                    reason="test release",
+                    signal_fn=signal_worker,
+                )
             conn.execute("UPDATE tasks SET priority = 1 WHERE id = ?", (second,))
 
         following = kb.dispatch_once(

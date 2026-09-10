@@ -40,7 +40,7 @@ describe('Desktop background-service shutdown', () => {
     expect(kill).not.toHaveBeenCalled()
   })
 
-  it('terminates a drain helper after the bounded shutdown deadline', async () => {
+  it('terminates a drain helper that exceeds the shutdown budget', async () => {
     vi.useFakeTimers()
     const kill = vi.fn<(signal?: NodeJS.Signals | number) => boolean>(() => true)
     const child = Object.assign(new EventEmitter(), { kill })
@@ -52,8 +52,9 @@ describe('Desktop background-service shutdown', () => {
       platform: 'linux',
       timeoutMs: 25
     })
-    await vi.advanceTimersByTimeAsync(25)
+    await vi.advanceTimersByTimeAsync(250)
     expect(kill).toHaveBeenCalledWith('SIGTERM')
+    child.emit('exit', 0, null)
     await expect(stopped).resolves.toBe(false)
     vi.useRealTimers()
   })

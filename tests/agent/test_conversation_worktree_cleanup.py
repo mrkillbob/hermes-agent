@@ -306,20 +306,6 @@ def test_cleanup_refuses_mismatched_worktree_identity(prepared_binding):
     assert binding.path.exists()
 
 
-def test_cleanup_accepts_owner_verified_named_branch_rename(prepared_binding):
-    manager, _db, source, _remote, binding, _sibling = prepared_binding
-    commit_binding(binding)
-    renamed = f"{binding.branch}-pr"
-    git(binding.path, "branch", "-m", renamed)
-    git(binding.path, "push", "origin", f"HEAD:refs/heads/{renamed}")
-    git(source, "merge", "--ff-only", renamed)
-    git(source, "push", "origin", "stable")
-
-    verdict = manager.inspect_cleanup(binding.root_session_id)
-
-    assert verdict.allowed is True
-
-
 def test_cleanup_refuses_missing_remote_evidence(prepared_binding):
     manager, _db, _source, _remote, binding, _sibling = prepared_binding
     git(binding.path, "remote", "remove", "origin")

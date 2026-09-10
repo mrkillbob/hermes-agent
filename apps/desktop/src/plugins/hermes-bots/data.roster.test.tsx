@@ -25,7 +25,7 @@ import { renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { $lastRoster, rosterRefetchInterval, useRoster } from './data'
+import { $lastRoster, ROSTER_REFETCH_INTERVAL, useRoster } from './data'
 import type { RosterRow } from './types'
 
 const { hostMock } = vi.hoisted(() => ({
@@ -113,18 +113,9 @@ afterEach(() => {
   $lastRoster.set([])
 })
 
-describe('roster refresh cadence', () => {
-  it('keeps small rosters responsive and backs off large profile fleets', () => {
-    expect(rosterRefetchInterval(undefined)).toBe(5000)
-    expect(rosterRefetchInterval({ profiles: Array.from({ length: 19 }, (_, index) => ({ name: `bot-${index}` })) })).toBe(
-      5000
-    )
-    expect(rosterRefetchInterval({ profiles: Array.from({ length: 20 }, (_, index) => ({ name: `bot-${index}` })) })).toBe(
-      30000
-    )
-    expect(rosterRefetchInterval({ profiles: Array.from({ length: 90 }, (_, index) => ({ name: `bot-${index}` })) })).toBe(
-      30000
-    )
+describe('roster refresh policy', () => {
+  it('does not poll while the Desktop is idle', () => {
+    expect(ROSTER_REFETCH_INTERVAL).toBe(false)
   })
 })
 
@@ -575,6 +566,15 @@ describe('connect-on-demand sources', () => {
 
     expect(rows.find(row => row.name === 'bob' && row.connectionId === 'spark')).toMatchObject({ remoteSource: true })
     expect(rows.filter(row => row.name === 'default')).toHaveLength(1)
+  })
+
+  it('drops cached rows omitted by a successfully enumerated source', async () => {
+    $lastRoster.set(previouslyPainted('alias'))
+    const rows = await mergedRoster(
+      { profiles: [{ name: 'default' }] },
+      localOnlyUnion([{ connectionId: 'alias', kind: 'remote', reachable: true }])
+    )
+    expect(rows.find(row => row.connectionId === 'alias')).toBeUndefined()
   })
 
   it('does not resurrect a row whose connection was removed from the registry', async () => {

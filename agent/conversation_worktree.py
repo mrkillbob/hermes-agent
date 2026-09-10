@@ -24,10 +24,10 @@ from hermes_cli._subprocess_compat import (
     noninteractive_git_env,
     windows_hide_flags,
 )
-from hermes_state import (
+from hermes_state import SessionDB
+from hermes_state_worktrees import (
     ConversationWorktreeConflict,
     ConversationWorktreeRecord,
-    SessionDB,
 )
 
 
@@ -732,25 +732,26 @@ class ConversationWorktreeManager:
             if (
                 record.state not in {"ready", "retained"}
                 or Path(record.worktree_path).resolve() != expected_path.resolve()
+                or record.branch != expected_branch
                 or Path(record.repo_common_dir).resolve() != source_common_dir.resolve()
                 or not expected_path.is_dir()
             ):
                 return CleanupVerdict(False, ("mismatched identity",))
 
+            # A conversation can legitimately rename its branch while preparing or
+            # merging a PR (mirrors the acceptance in _validated_ready_binding):
+            # accept that narrow drift only when both independent owner claims
+            # still bind the exact root, path, and common repository.
+            renamed_branch_accepted = self._exact_owner_claims_present(record)
+
+            listed = self._listed_worktree(source, expected_path)
+            if listed != f"refs/heads/{record.branch}":
+                if not listed or not listed.startswith("refs/heads/") or not renamed_branch_accepted:
+                    return CleanupVerdict(False, ("mismatched identity",))
+
             actual_branch = self._git_stdout(
                 expected_path, ["branch", "--show-current"], "cleanup"
             )
-            if record.branch != expected_branch:
-                return CleanupVerdict(False, ("mismatched identity",))
-            if actual_branch != record.branch and (
-                not actual_branch or not self._exact_owner_claims_present(record)
-            ):
-                return CleanupVerdict(False, ("mismatched identity",))
-
-            listed = self._listed_worktree(source, expected_path)
-            if listed != f"refs/heads/{actual_branch}":
-                return CleanupVerdict(False, ("mismatched identity",))
-
             actual_common = Path(
                 self._git_stdout(
                     expected_path,
@@ -765,7 +766,8 @@ class ConversationWorktreeManager:
                 "cleanup",
             )
             if (
-                actual_common != source_common_dir.resolve()
+                (actual_branch != record.branch and not (actual_branch and renamed_branch_accepted))
+                or actual_common != source_common_dir.resolve()
                 or base_ancestor.returncode != 0
             ):
                 return CleanupVerdict(False, ("mismatched identity",))

@@ -4,12 +4,15 @@ import argparse
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from github_pr_feedback.ci_runner import CIAuditReceipt
 from github_pr_feedback.github_client import CheckState, PullRequestMergeState
 
 
-def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("actions_enabled", [False, True])
+def test_audit_pr_passes_fresh_canonical_actions_state_to_exact_head_runner(
+    monkeypatch, tmp_path, actions_enabled: bool
 ) -> None:
     from github_pr_feedback.ci_runner import CIAuditIdentity
     from github_pr_feedback.cli import _audit_pr
@@ -19,7 +22,7 @@ def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     policy = SimpleNamespace(
-        local_ci_audit=SimpleNamespace(audit_only=True),
+        local_ci_audit=SimpleNamespace(audit_only=True, required_for_open_prs=False),
         targets={"acme/widgets": object()},
         uses_budget_exhausted_local_ci=lambda repository: repository == "acme/widgets",
     )
@@ -44,7 +47,18 @@ def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
         def get_merge_state(self, _repository: str, _number: int):
             return state
 
+        def get_pull_request(self, _repository: str, _number: int):
+            return state
+
+        def actions_enabled(self, repository: str, *, refresh: bool = False) -> bool:
+            assert repository == "acme/widgets"
+            assert refresh is True
+            return actions_enabled
+
     class Ledger:
+        def has_pending_mutation(self, _repository: str, _number: int) -> bool:
+            return False
+
         def close(self) -> None:
             pass
 
@@ -58,8 +72,10 @@ def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
         *,
         force_fresh: bool = False,
         actions_enabled_hint: bool | None = None,
+        required_local_ci: bool = False,
     ) -> CIAuditReceipt:
         assert force_fresh is True
+        assert required_local_ci is False
         captured.append(actions_enabled_hint)
         return CIAuditReceipt(
             receipt_id="r" * 64,
@@ -69,13 +85,15 @@ def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
             started_at=datetime(2026, 9, 3, tzinfo=UTC),
             completed_at=datetime(2026, 9, 3, tzinfo=UTC),
             actions_state=CheckState(
-                actions_enabled=True,
-                all_green=False,
-                check_count=1,
-                billing_blocked=True,
+                actions_enabled=actions_enabled,
+                all_green=not actions_enabled,
+                check_count=1 if actions_enabled else 0,
+                billing_blocked=actions_enabled,
             ),
             commands=(),
-            ci_mode="budget-exhausted-local-equivalent",
+            ci_mode=(
+                "budget-exhausted-local-equivalent" if actions_enabled else "standard"
+            ),
         )
 
     monkeypatch.setattr("github_pr_feedback.cli._load_policy_from_context", lambda _ctx: policy)
@@ -85,7 +103,6 @@ def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
     )
     monkeypatch.setattr("github_pr_feedback.cli._run_grouped_exact_head_audit", run_audit)
     monkeypatch.setattr("github_pr_feedback.cli._complete_current_ci_task", lambda _receipt: None)
-    monkeypatch.setattr("github_pr_feedback.cli._terminate_current_ci_worker", lambda: None)
 
     result = _audit_pr(
         object(),
@@ -99,4 +116,4 @@ def test_audit_pr_passes_policy_validated_actions_hint_to_exact_head_runner(
     )
 
     assert result == 0
-    assert captured == [True]
+    assert captured == [actions_enabled]

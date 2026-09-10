@@ -207,14 +207,7 @@ class GitHubStagingBroker:
         if not isinstance(result, dict):
             self._audit(operation, "invalid_shape")
             raise BrokerError("staging GitHub response shape was invalid")
-        try:
-            self._audit(operation, "ok")
-        except BrokerError:
-            # GitHub has already committed the 2xx mutation.  Do not turn an
-            # audit-path failure into an ordinary retryable error that could
-            # duplicate an issue, PR, review, or file write.
-            result = dict(result)
-            result["_hermes_audit_status"] = "committed_but_unaudited"
+        self._audit(operation, "ok")
         return result
 
     def verify_repository_boundary(self) -> None:

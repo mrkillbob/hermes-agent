@@ -262,23 +262,6 @@ def test_audit_receipt_contains_no_model_content_or_token(config: BrokerConfig) 
     assert set(row) == {"schema", "timestamp", "operation", "status", "repository_id"}
 
 
-def test_successful_write_reports_committed_but_unaudited(config: BrokerConfig, tmp_path: Path) -> None:
-    """A post-write audit failure must not invite a duplicate remote mutation."""
-    config = BrokerConfig(
-        owner=config.owner,
-        repository=config.repository,
-        token=config.token,
-        audit_path=tmp_path / "audit-directory",
-    )
-    config.audit_path.mkdir()
-    broker = _broker(config, lambda request: httpx.Response(201, json={"number": 8}))
-
-    result = broker.create_issue("title", "body")
-
-    assert result["number"] == 8
-    assert result["_hermes_audit_status"] == "committed_but_unaudited"
-
-
 def test_mcp_surface_has_no_arbitrary_http_graphql_or_shell_tool(config: BrokerConfig) -> None:
     assert ALLOWED_TOOL_NAMES == {
         "staging_branch_get",

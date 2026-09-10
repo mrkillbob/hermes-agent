@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -14,8 +15,10 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import quote
+
+from hermes_cli.github_identity import GitHubAutomationIdentity, GitHubIdentityError
 
 try:
     import fcntl
@@ -51,16 +54,39 @@ class MergeStateStillComputingError(GitHubClientError):
 
 
 MAX_FEEDBACK_BODY_CHARS = 16_384
-# Bumped from 100: a single-operator repo generating many PRs in parallel
-# (burndown-phase branches, PR-repair follow-ups) can genuinely exceed 100
-# open PRs at once, and the discovery-cap check must fail closed rather than
-# silently operate on a truncated page -- so this has to stay ahead of real
-# volume, not just today's count.
-MAX_DISCOVERED_PULL_REQUESTS = 300
+# Bounded above the current single-operator backlog (329 open LunaBot PRs as
+# of 2026-09-06). The discovery-cap check must fail closed rather than silently
+# operate on a truncated page, so keep the ceiling finite while leaving room
+# for the burst of PRs produced by the burndown workflow.
+MAX_DISCOVERED_PULL_REQUESTS = 500
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _MERGE_FLAGS = {"squash": "--squash", "rebase": "--rebase", "merge": "--merge"}
 _PROCESS_REQUEST_LOCK = threading.Lock()
+_BASE64_TEXT = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+
+
+def _automation_gh_config_dir() -> Path:
+    """Return an isolated ``gh`` config directory for bot-authenticated reads.
+
+    Cron and terminal child environments deliberately set ``GH_CONFIG_DIR`` to
+    ``/dev/null`` so a model-driven child cannot reuse the operator's GitHub
+    login.  ``gh`` still requires a directory, even when authentication is
+    supplied through ``GH_TOKEN``.  Give the governed bot client an empty,
+    Hermes-owned directory instead of inheriting the scrub sentinel or the
+    human CLI profile.
+    """
+    config_dir = get_default_hermes_root() / "github-pr-feedback" / "bot-gh-config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        config_dir.chmod(0o700)
+    except OSError:
+        # Permissions are best effort on platforms/filesystems without chmod;
+        # the directory remains isolated by path and never contains the human
+        # GitHub config.
+        pass
+    return config_dir
 
 
 class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
@@ -79,27 +105,39 @@ class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
         *,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.time,
-        min_interval_seconds: float = 0.25,
+        max_wait_seconds: float = 30.0,
+        # Keep the shared account below GitHub's primary hourly budget even
+        # when several workers and profiles are scanning continuously.
+        min_interval_seconds: float = 1.0,
     ) -> None:
         root = get_default_hermes_root() / "github-pr-feedback"
         self._path = Path(path or root / "github-request-gate.json")
         self._lock_path = self._path.with_name(self._path.name + ".lock")
         self._sleeper = sleeper
         self._clock = clock
+        self._max_wait = max(0.0, min(float(max_wait_seconds), 900.0))
         self._min_interval = max(0.0, float(min_interval_seconds))
         self._handle: Any = None
         self._lock_handle: Any = None
         self._state: dict[str, float] = {}
+        self._entry_lock = threading.Lock()
+        self._entry_lock_held = False
         self._process_lock_held = False
 
     def __enter__(self) -> "GitHubRequestGate":
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        _PROCESS_REQUEST_LOCK.acquire()
-        self._process_lock_held = True
+        # Acquire the per-gate lock before the shared process lock.  The file
+        # lock is acquired before the process lock so separate Hermes
+        # processes cannot deadlock while each holds one lock and waits for
+        # the other.
+        self._entry_lock.acquire()
+        self._entry_lock_held = True
         try:
             self._lock_handle = self._lock_path.open("a+", encoding="utf-8")
             if fcntl is not None:
                 fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX)
+            _PROCESS_REQUEST_LOCK.acquire()
+            self._process_lock_held = True
             self._handle = self._path.open("a+", encoding="utf-8")
             self._state = self._read_state()
             now = self._clock()
@@ -108,7 +146,14 @@ class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
                 self._state.get("cooldown_until", 0.0),
             )
             if ready_at > now:
-                self._sleeper(ready_at - now)
+                wait_seconds = ready_at - now
+                if wait_seconds > self._max_wait:
+                    raise GitHubClientError(
+                        "GitHub request cooldown active; retry later "
+                        f"(wait={wait_seconds:.1f}s)",
+                        code="rate_limited",
+                    )
+                self._sleeper(wait_seconds)
             return self
         except BaseException:
             if self._handle is not None:
@@ -122,6 +167,9 @@ class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
             if self._process_lock_held:
                 self._process_lock_held = False
                 _PROCESS_REQUEST_LOCK.release()
+            if self._entry_lock_held:
+                self._entry_lock_held = False
+                self._entry_lock.release()
             raise
 
     def defer(self, seconds: float) -> None:
@@ -151,6 +199,9 @@ class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
             if self._process_lock_held:
                 self._process_lock_held = False
                 _PROCESS_REQUEST_LOCK.release()
+            if self._entry_lock_held:
+                self._entry_lock_held = False
+                self._entry_lock.release()
 
     def _read_state(self) -> dict[str, float]:
         assert self._handle is not None
@@ -217,11 +268,25 @@ class SubprocessCommandRunner:
         *,
         sleeper: Callable[[float], None] = time.sleep,
         rate_limit_backoff: float = 60.0,
+        timeout_retry_backoff: float = 1.0,
         request_gate: GitHubRequestGate | None = None,
+        env_overrides: Mapping[str, str | None] | None = None,
     ) -> None:
         self._sleeper = sleeper
         self._rate_limit_backoff = max(1.0, min(float(rate_limit_backoff), 900.0))
+        self._timeout_retry_backoff = max(
+            0.0, min(float(timeout_retry_backoff), 30.0)
+        )
         self._request_gate = request_gate or GitHubRequestGate()
+        if env_overrides is None:
+            self._env = None
+        else:
+            self._env = dict(os.environ)
+            for key, value in env_overrides.items():
+                if value is None:
+                    self._env.pop(key, None)
+                else:
+                    self._env[key] = value
 
     def run(self, argv: list[str]) -> str:
         for attempt in range(2):
@@ -234,6 +299,7 @@ class SubprocessCommandRunner:
                         capture_output=True,
                         text=True,
                         timeout=60,
+                        env=self._env,
                     )
                     if completed.returncode != 0 and _is_rate_limit_failure(
                         completed.stderr
@@ -249,7 +315,7 @@ class SubprocessCommandRunner:
                 # store on the first call after a idle period and blow the 30s
                 # budget even though gh itself is healthy; one retry clears it.
                 if attempt == 0:
-                    self._sleeper(self._rate_limit_backoff)
+                    self._sleeper(self._timeout_retry_backoff)
                     continue
                 raise GitHubClientError("GitHub command failed") from error
             except OSError as error:
@@ -265,9 +331,21 @@ class SubprocessCommandRunner:
 
 def _is_rate_limit_failure(stderr: str) -> bool:
     normalized = str(stderr or "").casefold()
-    return "rate limit" in normalized and (
-        "403" in normalized or "429" in normalized or "secondary" in normalized
-    )
+    if "429" in normalized or "too many requests" in normalized:
+        return True
+    if any(
+        marker in normalized
+        for marker in (
+            "rate limit",
+            "secondary rate",
+            "abuse detection",
+            "x-ratelimit-",
+        )
+    ):
+        return True
+    # Preserve ordinary permission/authentication failures as ordinary
+    # failures; only a 403 carrying a rate-limit marker is retryable.
+    return "403" in normalized and "limit" in normalized
 
 
 def _github_failure_code(stderr: str) -> str:
@@ -310,6 +388,8 @@ class Feedback:
     body: str
     created_at: datetime
     is_bot: bool
+    review_state: str | None = None
+    reviewed_head_sha: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,9 +477,98 @@ class GitHubClient:
         "thread{id isResolved}}}"
     )
 
-    def __init__(self, runner: CommandRunner | None = None) -> None:
+    def __init__(
+        self,
+        runner: CommandRunner | None = None,
+        *,
+        actions_permissions_runner: CommandRunner | None = None,
+        actions_permissions_repositories: frozenset[str] = frozenset(),
+    ) -> None:
         self._runner = runner or SubprocessCommandRunner()
+        self._actions_permissions_runner = actions_permissions_runner
+        self._actions_permissions_repositories = actions_permissions_repositories
         self._actions_enabled_cache: dict[str, tuple[bool, float]] = {}
+
+    @classmethod
+    def for_automation_identity(
+        cls,
+        *,
+        expected_login: str,
+        token_env: str,
+        actions_permissions_expected_login: str | None = None,
+        actions_permissions_gh_config_dir: Path | None = None,
+        actions_permissions_repositories: frozenset[str] = frozenset(),
+        environ: Mapping[str, str] | None = None,
+    ) -> "GitHubClient":
+        """Build a client bound only to the configured Hermes bot credential."""
+
+        try:
+            child_env = GitHubAutomationIdentity(
+                expected_login=expected_login,
+                token_env=token_env,
+            ).command_environment(environ)
+        except GitHubIdentityError as error:
+            raise GitHubClientError(
+                "Hermes GitHub automation credential is missing",
+                code="automation_credential_missing",
+            ) from error
+        runner = SubprocessCommandRunner(
+            env_overrides={
+                "GH_TOKEN": child_env["GH_TOKEN"],
+                # Never allow a generic CI or user token to act as fallback.
+                "GITHUB_TOKEN": None,
+                # The scheduler's child scrubber uses /dev/null as a sentinel
+                # for GH_CONFIG_DIR.  Replace it with an empty bot-owned
+                # directory so gh can start without reading the operator's
+                # human profile.
+                "GH_CONFIG_DIR": str(_automation_gh_config_dir()),
+            }
+        )
+        actions_runner = None
+        actions_settings = (
+            actions_permissions_expected_login,
+            actions_permissions_gh_config_dir,
+            actions_permissions_repositories,
+        )
+        if any(value for value in actions_settings):
+            if (
+                not actions_permissions_expected_login
+                or actions_permissions_gh_config_dir is None
+                or not actions_permissions_repositories
+            ):
+                raise GitHubClientError(
+                    "GitHub Actions permissions identity is incomplete",
+                    code="actions_permissions_identity_not_configured",
+                )
+            actions_runner = SubprocessCommandRunner(
+                env_overrides={
+                    "GH_CONFIG_DIR": str(actions_permissions_gh_config_dir.resolve()),
+                    "GH_HOST": "github.com",
+                    "GH_TOKEN": None,
+                    "GITHUB_TOKEN": None,
+                    "GH_ENTERPRISE_TOKEN": None,
+                    "GITHUB_ENTERPRISE_TOKEN": None,
+                }
+            )
+        client = cls(
+            runner,
+            actions_permissions_runner=actions_runner,
+            actions_permissions_repositories=actions_permissions_repositories,
+        )
+        actual_login = client.viewer_login()
+        if actual_login.casefold() != expected_login.casefold():
+            raise GitHubClientError(
+                "Hermes GitHub automation identity does not match policy",
+                code="automation_identity_mismatch",
+            )
+        if actions_runner is not None:
+            actual_actions_login = client._viewer_login(actions_runner)
+            if actual_actions_login.casefold() != actions_permissions_expected_login.casefold():
+                raise GitHubClientError(
+                    "GitHub Actions permissions identity does not match policy",
+                    code="actions_permissions_identity_mismatch",
+                )
+        return client
 
     def list_open_pull_requests(
         self, repository: str, owner_login: str
@@ -421,6 +590,7 @@ class GitHubClient:
                 "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
             ]
         )
+
         if not isinstance(payload, list) or any(
             not isinstance(row, dict) for row in payload
         ):
@@ -432,6 +602,52 @@ class GitHubClient:
                 "GitHub owned pull request query reached its coverage cap"
             )
         return tuple(_listed_pull_request(repository, row) for row in payload)
+
+    def viewer_login(self) -> str:
+        """Return the exact login owning this client's explicit credential."""
+
+        return self._viewer_login(self._runner)
+
+    def _viewer_login(self, runner: CommandRunner) -> str:
+        payload = self._json_with_runner(runner, ["gh", "api", "user"])
+        login = payload.get("login") if isinstance(payload, dict) else None
+        if not isinstance(login, str) or not _LOGIN.fullmatch(login):
+            raise GitHubClientError(
+                "GitHub viewer login was unavailable", code="viewer_login_invalid"
+            )
+        return login
+
+    def submit_pull_request_review(
+        self,
+        repository: str,
+        number: int,
+        *,
+        event: str,
+        body: str,
+    ) -> None:
+        """Submit one bounded pull-request review using fixed argv."""
+
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        normalized_event = _required_string(event).upper()
+        if normalized_event not in {"APPROVE", "REQUEST_CHANGES", "COMMENT"}:
+            raise ValueError("review event is invalid")
+        body = _normalized_outbound_comment_body(
+            body, "review body", MAX_FEEDBACK_BODY_CHARS
+        )
+        self._runner.run(
+            [
+                "gh",
+                "api",
+                "-X",
+                "POST",
+                f"repos/{repository}/pulls/{number}/reviews",
+                "--raw-field",
+                f"event={normalized_event}",
+                "--raw-field",
+                f"body={body}",
+            ]
+        )
 
     def list_all_open_pull_requests(self, repository: str) -> tuple[PullRequest, ...]:
         """Read every open PR so maintenance never races an unmerged change."""
@@ -480,6 +696,26 @@ class GitHubClient:
         number = _positive_number(number)
         row = self._read_object(f"repos/{repository}/pulls/{number}")
         return _pull_request(row, expected_repository=repository, expected_number=number)
+
+    def can_label_repository(self, repository: str) -> bool:
+        repository = _validated_repository(repository)
+        permissions = self._read_object(f"repos/{repository}").get("permissions", {})
+        return isinstance(permissions, dict) and any(
+            permissions.get(name) is True for name in ("triage", "push", "maintain", "admin")
+        )
+
+    def get_pull_request_metadata(self, repository: str, number: int):
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        row = self._read_object(f"repos/{repository}/pulls/{number}")
+        pull = _pull_request(row, expected_repository=repository, expected_number=number)
+        files = self._read_pages(f"repos/{repository}/pulls/{number}/files?per_page=100")
+        if not isinstance(row.get("title"), str) or any(not isinstance(f.get("filename"), str) for f in files):
+            raise GitHubClientError("invalid PR metadata")
+        paths = tuple(f["filename"] for f in files)
+        if isinstance(row.get("changed_files"), int) and len(paths) != row["changed_files"]:
+            raise GitHubClientError("incomplete PR file listing", code="metadata_incomplete")
+        return pull, row["title"], paths
 
     def create_pull_request(
         self, repository: str, *, head: str, base: str, title: str, body: str
@@ -541,13 +777,20 @@ class GitHubClient:
             payload, expected_repository=repository, expected_number=number
         )
 
-    def actions_enabled(self, repository: str) -> bool:
+    def actions_enabled(self, repository: str, *, refresh: bool = False) -> bool:
         repository = _validated_repository(repository)
         now = time.monotonic()
         cached = self._actions_enabled_cache.get(repository)
-        if cached is not None and now - cached[1] < 60.0:
+        if not refresh and cached is not None and now - cached[1] < 60.0:
             return cached[0]
-        payload = self._json(["gh", "api", f"repos/{repository}/actions/permissions"])
+        runner = (
+            self._actions_permissions_runner
+            if repository in self._actions_permissions_repositories
+            else self._runner
+        )
+        payload = self._json_with_runner(
+            runner, ["gh", "api", f"repos/{repository}/actions/permissions"]
+        )
         if not isinstance(payload, dict) or not isinstance(
             payload.get("enabled"), bool
         ):
@@ -890,8 +1133,7 @@ class GitHubClient:
 
         repository = _validated_repository(repository)
         number = _positive_number(number)
-        if not isinstance(body, str) or not body.strip() or len(body) > 4000:
-            raise ValueError("comment body must contain 1 to 4000 characters")
+        body = _normalized_outbound_comment_body(body, "comment body", 4000)
         self._runner.run(
             [
                 "gh",
@@ -899,7 +1141,7 @@ class GitHubClient:
                 f"repos/{repository}/issues/{number}/comments",
                 "--method",
                 "POST",
-                "--field",
+                "--raw-field",
                 f"body={body}",
             ]
         )
@@ -936,7 +1178,7 @@ class GitHubClient:
         self._runner.run(argv)
 
     def ensure_issue_label(
-        self, repository: str, label: str, *, color: str, description: str
+        self, repository: str, label: str, *, color: str, description: str, preserve_existing: bool = False
     ) -> None:
         """Create or update one configured label using an exact name/color.
 
@@ -955,6 +1197,8 @@ class GitHubClient:
         label_endpoint = f"repos/{repository}/labels/{quote(label, safe='')}"
         try:
             self._read_object(label_endpoint)
+            if preserve_existing:
+                return
         except GitHubClientError as error:
             if error.code != "not_found":
                 raise
@@ -1133,6 +1377,15 @@ class GitHubClient:
         feedback.sort(key=lambda item: item.created_at)
         return tuple(feedback)
 
+    def list_ci_receipt_comments(self, repository: str, number: int) -> tuple[Feedback, ...]:
+        """Read issue comments, the durable transport for worker CI receipts."""
+
+        endpoint = f"repos/{repository}/issues/{number}/comments?per_page=100"
+        return tuple(
+            _feedback("issue_comment", row, timestamp_key="created_at")
+            for row in self._read_pages(endpoint)
+        )
+
     def _read_pages(self, endpoint: str) -> tuple[dict[str, Any], ...]:
         payload = self._json(["gh", "api", "--paginate", "--slurp", endpoint])
         if not isinstance(payload, list) or any(
@@ -1151,8 +1404,12 @@ class GitHubClient:
         return payload
 
     def _json(self, argv: list[str]) -> object:
+        return self._json_with_runner(self._runner, argv)
+
+    @staticmethod
+    def _json_with_runner(runner: CommandRunner, argv: list[str]) -> object:
         try:
-            return json.loads(self._runner.run(argv))
+            return json.loads(runner.run(argv))
         except (json.JSONDecodeError, TypeError) as error:
             raise GitHubClientError("GitHub response was not valid JSON") from error
 
@@ -1234,6 +1491,15 @@ def _feedback(kind: str, row: dict[str, Any], *, timestamp_key: str) -> Feedback
             body = ""
         if not isinstance(body, str):
             raise TypeError("body must be a string")
+        review_state = None
+        reviewed_head_sha = None
+        if kind == "review":
+            raw_state = row.get("state")
+            raw_head = row.get("commit_id")
+            if isinstance(raw_state, str):
+                review_state = raw_state.upper()
+            if isinstance(raw_head, str) and _SHA.fullmatch(raw_head):
+                reviewed_head_sha = raw_head.casefold()
         return Feedback(
             kind=kind,
             feedback_id=str(row["id"]),
@@ -1241,6 +1507,8 @@ def _feedback(kind: str, row: dict[str, Any], *, timestamp_key: str) -> Feedback
             body=body[:MAX_FEEDBACK_BODY_CHARS],
             created_at=_timestamp(row[timestamp_key]),
             is_bot=user.get("type") == "Bot",
+            review_state=review_state,
+            reviewed_head_sha=reviewed_head_sha,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise GitHubClientError(
@@ -1322,6 +1590,40 @@ def _bounded_text(
     if not allow_empty and not value.strip():
         raise ValueError(f"{field} must be non-empty")
     return value
+
+
+def _normalized_outbound_comment_body(
+    value: object, field: str, maximum: int
+) -> str:
+    """Return literal Markdown, recovering only an unmistakable encoded receipt.
+
+    Model-driven workers sometimes Base64-encode a whole comment while trying
+    to make a shell argument safe. That encoding is not a valid human-facing
+    GitHub comment. Decode only text that is strict Base64 and contains the
+    governed completion marker; arbitrary encoded payloads remain unchanged.
+    """
+
+    if not isinstance(value, str) or "\x00" in value:
+        raise ValueError(f"{field} is invalid or too long")
+    candidate = value
+    if (
+        len(candidate) <= maximum * 2
+        and len(candidate) % 4 == 0
+        and _BASE64_TEXT.fullmatch(candidate)
+    ):
+        try:
+            decoded = base64.b64decode(candidate, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            decoded = None
+        if (
+            isinstance(decoded, str)
+            and "pr-maintenance-receipt:v1" in decoded
+            and "\n" in decoded
+            and decoded.startswith("Hermes automated")
+            and len(decoded) <= maximum
+        ):
+            candidate = decoded
+    return _bounded_text(candidate, field, maximum, allow_newlines=True)
 
 
 def _validated_label(value: object) -> str:

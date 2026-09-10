@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -257,10 +258,7 @@ def _assert_safe_content(path: Path, data: bytes, policy: PackPolicy) -> None:
 
 
 def _validate_selected_files(
-    source_root: Path,
-    selected_paths: Iterable[str],
-    policy: PackPolicy,
-    source_commit: str,
+    source_root: Path, selected_paths: Iterable[str], policy: PackPolicy
 ) -> list[tuple[PurePosixPath, bytes]]:
     normalized = sorted(
         {_normalized_relative_path(raw, policy.excluded_segments) for raw in selected_paths},
@@ -274,25 +272,17 @@ def _validate_selected_files(
     for relative in normalized:
         rel = relative.as_posix()
         _run_git(source_root, "ls-files", "--error-unmatch", "--", rel)
-        tree_entry = _run_git(source_root, "ls-tree", source_commit, "--", rel)
-        if not tree_entry:
-            raise SecurityBoundaryError(f"selected file unavailable: {rel}")
-        mode = tree_entry.split(maxsplit=1)[0]
-        if mode == "120000":
-            raise SecurityBoundaryError(f"symlink denied: {rel}")
-        if mode != "100644" and mode != "100755":
-            raise SecurityBoundaryError(f"non-regular file denied: {rel}")
+        source = source_root / relative
         try:
-            result = subprocess.run(
-                ["git", "show", f"{source_commit}:{rel}"],
-                cwd=source_root,
-                check=True,
-                capture_output=True,
-            )
-        except (OSError, subprocess.CalledProcessError) as exc:
+            mode = source.lstat().st_mode
+        except OSError as exc:
             raise SecurityBoundaryError(f"selected file unavailable: {rel}") from exc
-        data = result.stdout
-        _assert_safe_content(source_root / relative, data, policy)
+        if stat.S_ISLNK(mode):
+            raise SecurityBoundaryError(f"symlink denied: {rel}")
+        if not stat.S_ISREG(mode):
+            raise SecurityBoundaryError(f"non-regular file denied: {rel}")
+        data = source.read_bytes()
+        _assert_safe_content(source, data, policy)
         total += len(data)
         if total > policy.max_pack_bytes:
             raise SecurityBoundaryError("total pack budget exceeded")
@@ -313,6 +303,8 @@ def build_context_pack(
     pack = Path(pack_root).resolve()
     manifest_file = Path(manifest_path).resolve()
     _assert_clean_repository(source)
+    validated = _validate_selected_files(source, selected_paths, policy)
+
     if pack.exists() or manifest_file.exists():
         raise SecurityBoundaryError("pack and manifest destinations must not already exist")
     if manifest_file == pack or pack in manifest_file.parents:
@@ -320,7 +312,6 @@ def build_context_pack(
 
     source_commit = _run_git(source, "rev-parse", "HEAD")
     source_tree = _run_git(source, "rev-parse", "HEAD^{tree}")
-    validated = _validate_selected_files(source, selected_paths, policy, source_commit)
     entries = tuple(
         ManifestFile(
             path=relative.as_posix(),
@@ -387,7 +378,7 @@ def verify_context_pack(
     actual = {
         path.relative_to(pack).as_posix()
         for path in pack.rglob("*")
-        if path.is_file() and ".git" not in path.relative_to(pack).parts
+        if (path.is_file() or path.is_symlink()) and ".git" not in path.relative_to(pack).parts
     }
     if actual != set(expected):
         raise SecurityBoundaryError("pack file inventory does not match manifest")
@@ -444,7 +435,7 @@ def verify_proposed_diff(
     actual = {
         path.relative_to(pack).as_posix()
         for path in pack.rglob("*")
-        if path.is_file() and ".git" not in path.relative_to(pack).parts
+        if (path.is_file() or path.is_symlink()) and ".git" not in path.relative_to(pack).parts
     }
     extra = actual - set(expected)
     if extra:
@@ -736,6 +727,8 @@ def audit_profile_boundary(
         reasons.append("CLI toolset selection must contain only terminal and file")
     if config.get("agent") != {"disabled_toolsets": ["bfl", "kanban"]}:
         reasons.append("agent toolset disables do not match the admitted boundary")
+    if "hooks" in config or "hooks_auto_accept" in config:
+        reasons.append("executable hooks are denied in secure-worker profiles")
     try:
         from hermes_cli.tools_config import _get_platform_tools
 

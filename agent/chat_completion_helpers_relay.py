@@ -9,10 +9,24 @@ collector-observed state only, never from the consumer loop's closures. Sibling 
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
+from agent.chat_completion_helpers import _ToolCallAccumulator
 from agent.message_content import flatten_message_text
 from agent.reasoning_summaries import separate_glued_reasoning_blocks
+
+
+def _tool_call_delta_view(tc_delta: Any) -> Any:
+    """Attribute view of a JSON tool-call delta for ``_ToolCallAccumulator.feed`` (written
+    against SDK objects). Only ``function`` is wrapped: ``feed`` passes ``extra_content``
+    (a dict) straight through ``_dump_if_model``, so a recursive view would corrupt it."""
+    if not isinstance(tc_delta, dict):
+        return tc_delta
+    function = tc_delta.get("function")
+    return SimpleNamespace(**{**tc_delta,
+        "function": SimpleNamespace(**function) if isinstance(function, dict) else function})
+
 
 class RelayChatAccumulator:
     """Rebuild a chat.completion from Relay's post-intercept chunk dicts."""
@@ -20,9 +34,7 @@ class RelayChatAccumulator:
     def __init__(self) -> None:
         self._content: list[str] = []
         self._reasoning: list[str] = []
-        self._tool_calls: dict[int, dict[str, Any]] = {}
-        self._active_slot_by_index: dict[int, int] = {}
-        self._last_id_by_index: dict[int, str] = {}
+        self._tool_calls = _ToolCallAccumulator()
         self._model = self._usage = self._finish_reason = None
         self._role = "assistant"
 
@@ -50,36 +62,13 @@ class RelayChatAccumulator:
             self._reasoning.append(separate_glued_reasoning_blocks(
                 self._reasoning[-1] if self._reasoning else "", reasoning))
         for tc_delta in delta.get("tool_calls") or []:
-            if not isinstance(tc_delta, dict):
-                continue
-            raw_index = tc_delta.get("index")
-            raw_index = raw_index if isinstance(raw_index, int) else 0
-            delta_id = tc_delta.get("id") or ""
-            slot = self._active_slot_by_index.setdefault(raw_index, raw_index)
-            if delta_id and self._last_id_by_index.get(raw_index) not in (None, delta_id):
-                slot = max(self._tool_calls, default=-1) + 1
-                self._active_slot_by_index[raw_index] = slot
-            if delta_id:
-                self._last_id_by_index[raw_index] = str(delta_id)
-            entry = self._tool_calls.setdefault(slot, {
-                "id": str(delta_id) if delta_id is not None else "",
-                "type": "function",
-                "function": {"name": "", "arguments": ""},
-                "extra_content": None,
-            })
-            if delta_id:
-                entry["id"] = str(delta_id)
-            function = tc_delta.get("function")
-            if isinstance(function, dict):
-                if function.get("name"):
-                    entry["function"]["name"] = function["name"]
-                if function.get("arguments"):
-                    entry["function"]["arguments"] += function["arguments"]
+            self._tool_calls.feed(_tool_call_delta_view(tc_delta))
 
     def finalize(self) -> dict[str, Any]:
+        acc = self._tool_calls.materialize()
         message = {"role": self._role, "content": "".join(self._content) or None,
             "reasoning_content": "".join(self._reasoning) or None,
-            "tool_calls": [self._tool_calls[i] for i in sorted(self._tool_calls)] or None}
+            "tool_calls": [acc[i] for i in sorted(acc)] or None}
         # "stop" also covers Nous Portal ``lastOne`` usage frames, which carry no finish_reason.
         return {"model": self._model, "usage": self._usage,
             "choices": [{"message": message, "finish_reason": self._finish_reason or "stop"}]}

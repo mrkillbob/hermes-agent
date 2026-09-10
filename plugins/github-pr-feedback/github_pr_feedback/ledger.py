@@ -11,17 +11,58 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .policy import FeedbackReceipt
 
-try:  # Hermes supplies the profile-aware source of truth at runtime.
-    from hermes_constants import get_hermes_home
+_SQLITE_BUSY_TIMEOUT_MS = 5_000
+_SQLITE_WAL_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
+
+
+def _enable_wal_with_bounded_retry(connection: sqlite3.Connection) -> None:
+    """Enable WAL without losing startup to a concurrent opener.
+
+    SQLite can report ``unable to open database file`` while another process
+    is changing the journal mode.  Install the busy timeout before the mode
+    change, retry only that bounded initialization step, and still fail closed
+    for a persistent or unrelated SQLite error.
+    """
+
+    connection.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+    delays = (0.0, *_SQLITE_WAL_RETRY_DELAYS)
+    last_error: sqlite3.OperationalError | None = None
+    for delay in delays:
+        if delay:
+            time.sleep(delay)
+        try:
+            current_mode = connection.execute("PRAGMA journal_mode").fetchone()
+            if current_mode and str(current_mode[0]).casefold() == "wal":
+                return
+            mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+        except sqlite3.OperationalError as error:
+            if "unable to open database file" not in str(error).casefold():
+                raise
+            last_error = error
+            continue
+        if not mode or str(mode[0]).casefold() != "wal":
+            raise sqlite3.OperationalError(
+                f"SQLite WAL initialization returned {mode!r}"
+            )
+        return
+    assert last_error is not None
+    raise last_error
+try:  # Hermes supplies the shared control-plane root at runtime.
+    from hermes_constants import get_default_hermes_root
 except ImportError:  # Standalone unit tests remain dependency-free.
 
-    def get_hermes_home() -> Path:
-        return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    def get_default_hermes_root() -> Path:
+        configured = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        return (
+            configured.parent.parent
+            if configured.parent.name == "profiles"
+            else configured
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +362,13 @@ class FeedbackLedger:
             )
             """)
         self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS merge_opt_outs (
+                repository TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                PRIMARY KEY (repository, pr_number)
+            )
+            """)
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS merge_enrollments (
                 repository TEXT NOT NULL,
                 pr_number INTEGER NOT NULL,
@@ -348,6 +396,20 @@ class FeedbackLedger:
                 updated_at TEXT NOT NULL,
                 scanned_at TEXT NOT NULL,
                 PRIMARY KEY (repository, pr_number)
+            )
+            """)
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS local_ci_selection_cursors (
+                repository TEXT PRIMARY KEY,
+                cursor INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS agent_label_selection_cursors (
+                repository TEXT PRIMARY KEY,
+                cursor INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
             )
             """)
         self._connection.execute("""
@@ -407,7 +469,11 @@ class FeedbackLedger:
 
     @classmethod
     def current_profile_path(cls) -> Path:
-        return get_hermes_home() / "github-pr-feedback" / "ledger.sqlite3"
+        # Audit workers run under their assignee profile, but their governed
+        # audit command is deliberately pinned to the shared control home.
+        # Reconciliation must read that same ledger; a profile-local path
+        # makes valid worker receipts appear as ci_receipt_missing.
+        return get_default_hermes_root() / "github-pr-feedback" / "ledger.sqlite3"
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -595,6 +661,17 @@ class FeedbackLedger:
             command_evidence=command_evidence,
         )
 
+    def has_pending_mutation(self, repository: str, pr_number: int) -> bool:
+        """A push may advance the head before its repair acknowledgement returns."""
+        return self._connection.execute(
+            "SELECT 1 FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+            "AND feedback_kind NOT IN ('pr_local_ci', 'pr_actions_needed') "
+            "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%') "
+            "AND status IN ('claimed', 'completed') "
+            "AND action_status IN ('pending', 'resolving') LIMIT 1",
+            (repository, pr_number),
+        ).fetchone() is not None
+
     def claim(
         self,
         receipt: FeedbackReceipt,
@@ -609,6 +686,10 @@ class FeedbackLedger:
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         stale_before = _aware_utc(stale_before, "stale_before")
         with self._transaction():
+            if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
             serialized_repair = not (
                 receipt.feedback_kind == "pr_repair"
                 and (
@@ -694,6 +775,118 @@ class FeedbackLedger:
             raise LedgerStateError("stored feedback receipt status is invalid")
         return str(status)
 
+    def exact_receipt_state(self, receipt: FeedbackReceipt) -> tuple[str, int] | None:
+        """Return exact dispatch status and attempts for bounded retry selection."""
+
+        row = self._connection.execute(
+            "SELECT status, attempts FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+            "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+            receipt.key,
+        ).fetchone()
+        if row is None:
+            return None
+        status = str(row[0])
+        if status not in {"claimed", "completed", "failed"}:
+            raise LedgerStateError("stored feedback receipt status is invalid")
+        return status, int(row[1] or 0)
+
+    def failed_receipt_retry_state(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        claimed_at: datetime,
+        retry_after: timedelta,
+        max_attempts: int | None,
+    ) -> str:
+        """Classify whether a failed receipt may be retried without mutating it."""
+
+        claimed_at = _aware_utc(claimed_at, "claimed_at")
+        if retry_after < timedelta(0):
+            raise ValueError("retry_after must not be negative")
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        row = self._connection.execute(
+            "SELECT status, attempts, claimed_at FROM feedback_receipts "
+            "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+            "AND feedback_id = ? AND head_sha = ?",
+            receipt.key,
+        ).fetchone()
+        if row is None or row[0] != "failed":
+            return "not_failed"
+        attempts = int(row[1] or 0)
+        if max_attempts is not None and attempts >= max_attempts:
+            return "exhausted"
+        if row[2] is not None:
+            try:
+                failed_at = datetime.fromisoformat(str(row[2])).astimezone(UTC)
+            except (TypeError, ValueError):
+                failed_at = claimed_at
+            if failed_at + retry_after > claimed_at:
+                return "backoff"
+        return "due"
+
+    def local_ci_selection_cursor(self, repository: str) -> int:
+        """Return the durable round-robin offset for one repository catalogue."""
+
+        row = self._connection.execute(
+            "SELECT cursor FROM local_ci_selection_cursors WHERE repository = ?",
+            (repository,),
+        ).fetchone()
+        return max(0, int(row[0])) if row is not None else 0
+
+    def advance_local_ci_selection_cursor(
+        self,
+        repository: str,
+        *,
+        cursor: int,
+        candidate_count: int,
+        updated_at: datetime,
+    ) -> None:
+        """Persist the next bounded catalogue offset after one scan window."""
+
+        if candidate_count < 1:
+            raise ValueError("candidate_count must be positive")
+        updated = _aware_utc(updated_at, "updated_at")
+        next_cursor = int(cursor) % candidate_count
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO local_ci_selection_cursors(repository, cursor, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(repository) DO UPDATE SET cursor = excluded.cursor, "
+                "updated_at = excluded.updated_at",
+                (repository, next_cursor, updated.isoformat()),
+            )
+
+    def agent_label_selection_cursor(self, repository: str) -> int:
+        """Return the durable offset for the advisory label catalogue."""
+
+        row = self._connection.execute(
+            "SELECT cursor FROM agent_label_selection_cursors WHERE repository = ?",
+            (repository,),
+        ).fetchone()
+        return max(0, int(row[0])) if row is not None else 0
+
+    def advance_agent_label_selection_cursor(
+        self,
+        repository: str,
+        *,
+        cursor: int,
+        candidate_count: int,
+        updated_at: datetime,
+    ) -> None:
+        """Persist progress through the bounded advisory-label catalogue."""
+
+        if candidate_count < 1:
+            raise ValueError("candidate_count must be positive")
+        updated = _aware_utc(updated_at, "updated_at")
+        next_cursor = int(cursor) % candidate_count
+        with self._transaction():
+            self._connection.execute(
+                "INSERT INTO agent_label_selection_cursors(repository, cursor, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(repository) DO UPDATE SET cursor = excluded.cursor, "
+                "updated_at = excluded.updated_at",
+                (repository, next_cursor, updated.isoformat()),
+            )
+
     def pending_task_bindings_for_head(
         self, receipt: FeedbackReceipt
     ) -> tuple[PendingTaskBinding, ...]:
@@ -741,6 +934,52 @@ class FeedbackLedger:
             return None
         return PendingTaskBinding(receipt, row[0].strip())
 
+    def pending_task_bindings_for_pr(
+        self, repository: str, pr_number: int
+    ) -> tuple[PendingTaskBinding, ...]:
+        """Return pending mutable dispatches for every observed PR identity."""
+
+        rows = self._connection.execute(
+            "SELECT feedback_kind, feedback_id, head_sha, task_id "
+            "FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+            "AND feedback_kind != 'pr_local_ci' "
+            "AND NOT (feedback_kind = 'pr_repair' AND feedback_id LIKE 'report:%') "
+            "AND status = 'completed' AND action_status = 'pending' "
+            "AND task_id IS NOT NULL ORDER BY claimed_at, head_sha, feedback_kind, feedback_id",
+            (repository, pr_number),
+        )
+        return tuple(
+            PendingTaskBinding(
+                FeedbackReceipt(repository, pr_number, str(kind), str(feedback_id), str(head_sha)),
+                str(task_id).strip(),
+            )
+            for kind, feedback_id, head_sha, task_id in rows
+            if isinstance(task_id, str) and task_id.strip()
+        )
+
+    def supersede_stale_dispatch(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        task_id: str,
+        reason: str,
+    ) -> bool:
+        """Retire a blocked dispatch after canonical PR identity changed."""
+
+        task_id = task_id.strip() if isinstance(task_id, str) else ""
+        reason = reason.strip() if isinstance(reason, str) else ""
+        if not task_id or not reason:
+            raise ValueError("task_id and reason must be non-empty")
+        with self._transaction():
+            updated = self._connection.execute(
+                "UPDATE feedback_receipts SET action_status = 'superseded', last_error = ? "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ? AND task_id = ? "
+                "AND status = 'completed' AND action_status = 'pending'",
+                (reason[:1000], *receipt.key, task_id),
+            )
+            return updated.rowcount == 1
+
     def reopen_archived_exact_dispatch(
         self,
         receipt: FeedbackReceipt,
@@ -756,6 +995,10 @@ class FeedbackLedger:
             raise ValueError("claim owner and exact archived binding must be valid")
         claimed_at = _aware_utc(claimed_at, "claimed_at")
         with self._transaction():
+            if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
             row = self._connection.execute(
                 "SELECT task_id, status, action_status, lease_version "
                 "FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
@@ -786,6 +1029,64 @@ class FeedbackLedger:
             )
             if reopened.rowcount != 1:
                 raise LedgerStateError("exact archived dispatch changed during replacement")
+            return ClaimLease(owner, claimed_at, version)
+
+    def reopen_legacy_exact_dispatch(
+        self,
+        receipt: FeedbackReceipt,
+        *,
+        blocked: PendingTaskBinding,
+        owner: str,
+        claimed_at: datetime,
+    ) -> ClaimLease | None:
+        """Re-admit an exact dispatch stranded by the old intake-only policy.
+
+        The old policy finalized a receipt when it created a deliberately
+        blocked intake card. Once autonomous dispatch is explicitly enabled,
+        that receipt becomes claimable again, but only while the exact
+        pending card binding is still present. The controller proves that the
+        card is the legacy intake shape before this CAS is attempted.
+        """
+        owner = owner.strip() if isinstance(owner, str) else ""
+        if not owner or blocked.receipt != receipt or not blocked.task_id.strip():
+            raise ValueError("claim owner and exact blocked binding must be valid")
+        claimed_at = _aware_utc(claimed_at, "claimed_at")
+        with self._transaction():
+            if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
+            row = self._connection.execute(
+                "SELECT task_id, status, action_status, lease_version "
+                "FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ?",
+                receipt.key,
+            ).fetchone()
+            if (
+                row is None
+                or row[0] != blocked.task_id
+                or row[1] != "completed"
+                or row[2] != "pending"
+            ):
+                return None
+            version = int(row[3] or 0) + 1
+            reopened = self._connection.execute(
+                "UPDATE feedback_receipts SET status = 'claimed', task_id = NULL, "
+                "last_error = NULL, attempts = attempts + 1, claim_owner = ?, "
+                "claimed_at = ?, lease_version = ? "
+                "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
+                "AND feedback_id = ? AND head_sha = ? AND status = 'completed' "
+                "AND action_status = 'pending' AND task_id = ?",
+                (
+                    owner,
+                    claimed_at.isoformat(),
+                    version,
+                    *receipt.key,
+                    blocked.task_id,
+                ),
+            )
+            if reopened.rowcount != 1:
+                raise LedgerStateError("exact legacy dispatch changed during re-admission")
             return ClaimLease(owner, claimed_at, version)
 
     def replace_archived_dispatches(
@@ -1042,6 +1343,8 @@ class FeedbackLedger:
         *,
         owner: str,
         claimed_at: datetime,
+        retry_after: timedelta = timedelta(0),
+        max_attempts: int | None = None,
     ) -> ClaimLease | None:
         """Atomically retry a receipt after an explicitly recorded dispatch failure."""
 
@@ -1049,15 +1352,33 @@ class FeedbackLedger:
         if not owner:
             raise ValueError("claim owner must be a non-empty string")
         claimed_at = _aware_utc(claimed_at, "claimed_at")
+        if retry_after < timedelta(0):
+            raise ValueError("retry_after must not be negative")
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
         with self._transaction():
+            if receipt.feedback_kind == "pr_local_ci" and self.has_pending_mutation(
+                receipt.repository, receipt.pr_number
+            ):
+                return None
             row = self._connection.execute(
-                "SELECT lease_version FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
+                "SELECT attempts, claimed_at, lease_version FROM feedback_receipts WHERE repository = ? AND pr_number = ? "
                 "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ? AND status = 'failed'",
                 receipt.key,
             ).fetchone()
             if row is None:
                 return None
-            version = int(row[0] or 0) + 1
+            attempts = int(row[0] or 0)
+            if max_attempts is not None and attempts >= max_attempts:
+                return None
+            if row[1] is not None:
+                try:
+                    failed_at = datetime.fromisoformat(str(row[1])).astimezone(UTC)
+                except (TypeError, ValueError):
+                    failed_at = claimed_at
+                if failed_at + retry_after > claimed_at:
+                    return None
+            version = int(row[2] or 0) + 1
             result = self._connection.execute(
                 "UPDATE feedback_receipts SET status = 'claimed', last_error = NULL, attempts = attempts + 1, "
                 "claim_owner = ?, claimed_at = ?, lease_version = ? "
@@ -1096,16 +1417,29 @@ class FeedbackLedger:
                     (task_id, *receipt.key),
                 )
 
-    def fail(self, receipt: FeedbackReceipt, error: str, lease: ClaimLease) -> None:
+    def fail(
+        self,
+        receipt: FeedbackReceipt,
+        error: str,
+        lease: ClaimLease,
+        *,
+        failed_at: datetime | None = None,
+    ) -> None:
         error = error.strip() if isinstance(error, str) else ""
         if not error:
             raise ValueError("error must be a non-empty string")
+        failed_at_value = (
+            _aware_utc(failed_at, "failed_at").isoformat()
+            if failed_at is not None
+            else None
+        )
         with self._transaction():
             result = self._connection.execute(
-                "UPDATE feedback_receipts SET status = 'failed', last_error = ? "
+                "UPDATE feedback_receipts SET status = 'failed', last_error = ?, "
+                "claimed_at = COALESCE(?, claimed_at) "
                 "WHERE repository = ? AND pr_number = ? AND feedback_kind = ? AND feedback_id = ? "
                 "AND head_sha = ? AND status = 'claimed' AND claim_owner = ? AND lease_version = ?",
-                (error[:1000], *receipt.key, lease.owner, lease.version),
+                (error[:1000], failed_at_value, *receipt.key, lease.owner, lease.version),
             )
             if result.rowcount != 1:
                 raise LedgerStateError("receipt lease is not held")
@@ -1442,7 +1776,14 @@ class FeedbackLedger:
                 ),
             )
 
-    def bind_worktree_slot_task(self, head_sha: str, task_id: str, board: str) -> None:
+    def bind_worktree_slot_task(
+        self,
+        head_sha: str,
+        task_id: str,
+        board: str,
+        *,
+        slot_id: int | None = None,
+    ) -> None:
         """Record which dispatched Kanban task now owns a leased slot.
 
         Best-effort by design: if the slot was already reconciled away (or a
@@ -1452,10 +1793,14 @@ class FeedbackLedger:
         """
 
         with self._transaction():
+            where = "head_sha = ? AND status = 'leased'"
+            parameters: tuple[object, ...] = (task_id, board, head_sha)
+            if slot_id is not None:
+                where += " AND slot_id = ?"
+                parameters += (slot_id,)
             self._connection.execute(
-                "UPDATE worktree_pool_slots SET task_id = ?, board = ? "
-                "WHERE head_sha = ? AND status = 'leased'",
-                (task_id, board, head_sha),
+                f"UPDATE worktree_pool_slots SET task_id = ?, board = ? WHERE {where}",
+                parameters,
             )
 
     def leased_worktree_slots(self) -> tuple[dict[str, object], ...]:
@@ -1615,8 +1960,9 @@ class FeedbackLedger:
         *,
         enrolled_at: datetime,
         enrolled_by: str,
-    ) -> None:
-        """Persist explicit operator intent for one configured pull request."""
+        automatic: bool = False,
+    ) -> bool:
+        """Enroll a configured PR; automatic admission must respect durable opt-outs."""
 
         if (
             not repository
@@ -1628,12 +1974,25 @@ class FeedbackLedger:
             raise ValueError("merge enrollment identity is invalid")
         timestamp = _aware_utc(enrolled_at, "enrolled_at")
         with self._transaction():
+            opted_out = self._connection.execute(
+                "SELECT 1 FROM merge_opt_outs WHERE repository = ? AND pr_number = ?",
+                (repository, pr_number),
+            ).fetchone()
+            if automatic and opted_out is not None:
+                return False
+            if not automatic:
+                self._connection.execute(
+                    "DELETE FROM merge_opt_outs WHERE repository = ? AND pr_number = ?",
+                    (repository, pr_number),
+                )
             self._connection.execute(
                 "INSERT INTO merge_enrollments (repository, pr_number, enrolled_at, enrolled_by) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT(repository, pr_number) DO UPDATE SET "
                 "enrolled_at = excluded.enrolled_at, enrolled_by = excluded.enrolled_by",
                 (repository, pr_number, timestamp.isoformat(), enrolled_by.strip()),
             )
+
+        return True
 
     def unenroll_merge_pr(self, repository: str, pr_number: int) -> None:
         """Remove explicit merge intent; deleting a missing enrollment is idempotent."""
@@ -1653,6 +2012,10 @@ class FeedbackLedger:
             ).fetchone()
             if in_progress is not None:
                 raise LedgerStateError("merge_in_progress")
+            self._connection.execute(
+                "INSERT OR IGNORE INTO merge_opt_outs(repository, pr_number) VALUES (?, ?)",
+                (repository, pr_number),
+            )
             self._connection.execute(
                 "DELETE FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
                 (repository, pr_number),

@@ -22,6 +22,8 @@ _TOKEN_COUNT_RE = re.compile(r"~?[\d,]+\s+tokens?", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"\s+")
 _FAILED_EXIT_RE = re.compile(r"\[exit\s+(-?\d+)\]", re.IGNORECASE)
 _TOOL_PREFIX_RE = re.compile(r"(?:^|\s)[┊|]\s*[^$\n]*\$\s*(.+)")
+_EDIT_SUCCESS_RE = re.compile(r"^┊\s+(?:🔧\s+patch|✍️?\s+write)\s+.*\d+(?:\.\d+)?s$")
+_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
 _PROVIDER_STALL_RE = re.compile(
     r"(?:waiting on .+no output yet|provider has been unresponsive|"
     r"consecutive stale attempts|auto-reconnect|"
@@ -174,31 +176,38 @@ def _finding(
 
 
 def _failed_tool_finding(lines: list[str], threshold: int) -> Optional[WatchdogFinding]:
-    failures: dict[str, list[str]] = {}
+    signatures: list[tuple[str, str]] = []
+    edit_pending = False
+    diff_pending = False
     for line in lines:
-        tool_match = _TOOL_PREFIX_RE.search(line)
-        if tool_match is None:
+        if line.startswith("┊") and line != "┊ review diff":
+            edit_pending = bool(_EDIT_SUCCESS_RE.fullmatch(line))
+            diff_pending = False
+        elif edit_pending and line == "┊ review diff":
+            diff_pending = True
+        elif diff_pending and _DIFF_HUNK_RE.match(line):
+            # Test-edit-test is progress. Require the renderer's actual diff,
+            # not a patch attempt, no-op result, or the worker's prose claim.
+            signatures.clear()
+            edit_pending = diff_pending = False
+        exit_match = _FAILED_EXIT_RE.search(line)
+        if exit_match is None or exit_match.group(1) == "0":
             continue
-        command = tool_match.group(1)
+        tool_match = _TOOL_PREFIX_RE.search(line)
+        command = tool_match.group(1) if tool_match else line
         command = _FAILED_EXIT_RE.sub("", command)
         command = _DURATION_RE.sub("", command)
         signature = _WHITESPACE_RE.sub(" ", command).strip().casefold()
-        if not signature:
-            continue
-        exit_match = _FAILED_EXIT_RE.search(line)
-        if exit_match is None or exit_match.group(1) == "0":
-            # A later successful invocation proves that the earlier failure
-            # sequence is no longer trailing no-progress evidence.
-            failures.pop(signature, None)
-            continue
-        failures.setdefault(signature, []).append(line)
-    counts = {signature: len(evidence) for signature, evidence in failures.items()}
+        if signature:
+            signatures.append((signature, line))
+    counts = Counter(signature for signature, _line in signatures)
     if not counts:
         return None
-    signal, count = max(counts.items(), key=lambda item: item[1])
+    signal, count = counts.most_common(1)[0]
     if count < threshold:
         return None
-    return _finding("tool_failure_loop", signal, count, failures[signal])
+    evidence = [line for signature, line in signatures if signature == signal]
+    return _finding("tool_failure_loop", signal, count, evidence)
 
 
 def _provider_stall_finding(
@@ -328,9 +337,6 @@ def _reconcile_repairs(conn, result: WatchdogTickResult) -> None:
         if repair is None:
             result.needs_operator.append(task_id)
             continue
-        if repair.status == "archived":
-            result.needs_operator.append(task_id)
-            continue
         if repair.status == "done":
             if kb.unblock_task(conn, task_id):
                 _record_event(
@@ -340,6 +346,12 @@ def _reconcile_repairs(conn, result: WatchdogTickResult) -> None:
                     {"repair_task_id": repair_id, "repair_status": repair.status},
                 )
                 result.restarted.append(task_id)
+            continue
+        if repair.status == "archived":
+            # An archived repair is cancellation, not completion — cancelling an
+            # unsuccessful repair must not resume the unhealthy work it was
+            # meant to fix, so this still needs an operator's attention.
+            result.needs_operator.append(task_id)
             continue
         if repair.status not in {"blocked", "triage"}:
             continue

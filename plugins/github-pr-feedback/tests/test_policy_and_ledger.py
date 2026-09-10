@@ -66,6 +66,23 @@ def configured_policy(tmp_path: Path):
     )
 
 
+def test_empty_branch_prefixes_admit_any_branch(tmp_path: Path) -> None:
+    repository_path = tmp_path / "widgets"
+    initialize_git_worktree(repository_path)
+    raw = enabled_raw_config(repository_path)
+    raw["repositories"][0]["branch_prefixes"] = []
+
+    policy = load_policy(raw)
+
+    admission = policy.admit(
+        admitted_pr(head_ref_name="external/contributor-branch"),
+        Reviewer("trusted-reviewer", "MEMBER"),
+        receipt(),
+    )
+
+    assert admission.admitted
+
+
 def initialize_git_worktree(path: Path) -> None:
     subprocess.run(
         ["git", "init", "--quiet", str(path)],
@@ -173,6 +190,22 @@ def test_enabled_policy_parses_release_maintenance_lane_matrix(tmp_path: Path) -
         "pytest",
         "-q",
     )
+
+
+def test_enabled_policy_parses_multiple_release_maintenance_lanes(
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "widgets"
+    initialize_git_worktree(repository_path)
+    raw = enabled_release_maintenance_config(repository_path)
+    release_policy = raw.pop("release_maintenance")
+    raw["release_maintenances"] = [release_policy]
+
+    policy = load_policy(raw)
+
+    assert policy.release_maintenance is None
+    assert [item.repository for item in policy.release_policies()] == ["acme/widgets"]
+    assert policy.release_policy_for("acme/widgets") is not None
 
 
 def test_release_maintenance_rejects_a_protected_runtime_command(tmp_path: Path) -> None:
@@ -417,6 +450,22 @@ def test_disabled_post_merge_hook_requires_only_explicit_enabled_flag(
 
     assert policy.merge_maintainer is not None
     assert policy.merge_maintainer.post_merge is None
+
+
+def test_disabled_merge_maintainer_entry_is_ignored_in_policy_list(
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "widgets"
+    deployment_path = tmp_path / "deployment"
+    initialize_git_worktree(repository_path)
+    initialize_git_worktree(deployment_path)
+    raw = enabled_merge_config(repository_path, deployment_path)
+    raw.pop("merge_maintainer")
+    raw["merge_maintainers"] = [{"enabled": False}]
+
+    policy = load_policy(raw)
+
+    assert policy.merge_policies() == ()
 
 
 def test_budget_exhausted_substitution_requires_audit_only_required_no_post_ci(
@@ -1453,16 +1502,17 @@ def test_policy_accepts_a_linked_git_worktree(tmp_path: Path) -> None:
     assert policy.enabled is True
 
 
-def test_ledger_uses_profile_scoped_hermes_home(
+def test_ledger_uses_shared_control_home_for_profile_workers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profiles" / "pr-local-ci-auditor"))
     monkeypatch.setattr(
-        "github_pr_feedback.ledger.get_hermes_home", lambda: tmp_path / "profile"
+        "github_pr_feedback.ledger.get_default_hermes_root", lambda: tmp_path
     )
 
     ledger = FeedbackLedger.for_current_profile()
 
-    assert ledger.path == tmp_path / "profile" / "github-pr-feedback" / "ledger.sqlite3"
+    assert ledger.path == tmp_path / "github-pr-feedback" / "ledger.sqlite3"
     ledger.close()
 
 
@@ -1482,14 +1532,33 @@ def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
     calls: list[str] = []
     connect_attempts = 0
 
-    class FakeConnection:
-        def execute(self, statement: str):
-            calls.append(statement)
+    class Cursor:
+        def __init__(self, value):
+            self.value = value
+
+        def fetchone(self):
+            return (self.value,)
+
+    class Connection:
+        def __init__(self):
+            self.wal_attempts = 0
+            self.current_mode = "delete"
 
         def close(self):
-            calls.append("close")
+            pass
 
-    connection = FakeConnection()
+        def execute(self, sql):
+            if sql == "PRAGMA journal_mode":
+                return Cursor(self.current_mode)
+            if sql == "PRAGMA journal_mode=WAL":
+                self.wal_attempts += 1
+                if self.wal_attempts == 1:
+                    raise sqlite3.OperationalError("unable to open database file")
+                self.current_mode = "wal"
+                return Cursor("wal")
+            return Cursor(None)
+
+    connection = Connection()
 
     def flaky_connect(*args, **kwargs):
         nonlocal connect_attempts
@@ -1505,8 +1574,11 @@ def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
     result = ledger_module._connect_ledger(tmp_path / "ledger.sqlite3")
 
     assert result is connection
-    assert connect_attempts == 2
-    assert calls[:2] == ["PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"]
+    assert connect_attempts == 3
+    assert connection.wal_attempts == 2
+    connection.wal_attempts = 0
+    ledger_module._enable_wal_with_bounded_retry(connection)
+    assert connection.wal_attempts == 0
 
 
 def test_worktree_policy_allows_ten_seconds_for_local_git_probe(
@@ -1570,3 +1642,21 @@ def test_plugin_directory_exposes_hermes_register_entry_point() -> None:
     spec.loader.exec_module(module)
 
     assert callable(module.register)
+
+
+def test_agent_label_selection_cursor_persists_catalogue_progress(
+    tmp_path: Path,
+) -> None:
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    updated_at = datetime(2026, 8, 26, 8, 0, tzinfo=UTC)
+
+    assert ledger.agent_label_selection_cursor("acme/widgets") == 0
+    ledger.advance_agent_label_selection_cursor(
+        "acme/widgets",
+        cursor=3,
+        candidate_count=5,
+        updated_at=updated_at,
+    )
+
+    assert ledger.agent_label_selection_cursor("acme/widgets") == 3
+    ledger.close()

@@ -68,18 +68,9 @@ def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finali
 
     monkeypatch.setattr(relay_llm.ManagedLlmStream, "_relay_finalizer", run_synchronized_relay_finalizer)
 
-    managed_stream_holder = {"stream": None}
-    run_relay_stream = relay_llm.stream
+    count_chunk = chat_completion_helpers._StreamingCall._count_chunk
 
-    def capture_managed_stream(*args, **kwargs):
-        stream = run_relay_stream(*args, **kwargs)
-        managed_stream_holder["stream"] = stream
-        return stream
-
-    monkeypatch.setattr(relay_llm, "stream", capture_managed_stream)
-    count_chunk = chat_completion_helpers._estimate_chunk_bytes
-
-    def count_chunk_after_relay_finalizes(chunk):
+    def count_chunk_after_relay_finalizes(self, diag, chunk):
         # Relay's producer is pumped by the consumer thread's OWN event loop (``ManagedLlmStream.
         # __next__`` -> ``run_until_complete``), so the finalizer can only start while that loop runs.
         # Blocking the consumer thread here and waiting for it therefore deadlocked whenever the loop
@@ -89,8 +80,7 @@ def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finali
         if finalize_before(chunk):
             import asyncio
 
-            stream = managed_stream_holder["stream"]
-            assert stream is not None
+            stream = self.managed_stream_holder["stream"]
             allow_relay_finalizer.set()
             # A schedule probe may hold the provider generator at this chunk until the consumer has
             # taken it (adverse consumer-first ordering); release it so the pump below can reach EOF.
@@ -103,9 +93,9 @@ def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finali
 
             assert stream._loop.run_until_complete(finalizer_done()), "Relay's finalizer did not finish"
             assert relay_finalizer_started.is_set()
-        return count_chunk(chunk)
+        return count_chunk(self, diag, chunk)
 
-    monkeypatch.setattr(chat_completion_helpers, "_estimate_chunk_bytes", count_chunk_after_relay_finalizes)
+    monkeypatch.setattr(chat_completion_helpers._StreamingCall, "_count_chunk", count_chunk_after_relay_finalizes)
     lease.host.retain_managed_execution(consumer)
     lease.host.relay.subscribers.register(subscriber_name, events.append)
     try:
