@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
 from datetime import datetime, timedelta
 from pathlib import Path
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, named_profile_home
 from typing import Optional, Dict, List, Any, Callable, Set, Tuple, Union, Collection
 
 logger = logging.getLogger(__name__)
@@ -559,53 +559,18 @@ def _preserve_file_ownership(path: Path, before: Optional[os.stat_result]) -> No
 
 
 def _is_named_profile_path(path: Path) -> bool:
-    """True if *path* is under ``<hermes_home>/profiles/<name>/`` (default/custom homes are not).
-    Checks the resolved path (symlinked parents) and the raw path (symlinked profile homes)."""
-    with contextlib.suppress(OSError, RuntimeError):
-        if "profiles" in path.resolve().parts:
-            return True
-    return "profiles" in path.parts
+    """True if *path* is under a real ``<hermes_home>/profiles/<name>/`` (default/custom homes
+    are not). Delegates to ``named_profile_home()``'s validated walk rather than a bare
+    ``"profiles" in path.parts`` substring check, which would false-positive on any ancestor
+    directory that merely happens to be named "profiles" (e.g. a custom HERMES_HOME under
+    ``~/my-profiles-backup/.hermes``)."""
+    return named_profile_home(path) is not None
 
 
 def _ensure_cron_dir(cron_dir: Path) -> None:
     """Create a cron directory without resurrecting a deleted profile home: a stale multiplex
     scheduler may still hold a deleted profile's path, so named profiles use ``parents=False`` and
     fail closed. Default/custom homes keep ``parents=True`` so first-run creation works."""
-    if _is_named_profile_path(cron_dir):
-        cron_dir.mkdir(exist_ok=True)
-        return
-    cron_dir.mkdir(parents=True, exist_ok=True)
-
-
-def _is_named_profile_path(path: Path) -> bool:
-    """Return True if *path* is inside a named profile home.
-
-    Named profiles live under ``<hermes_home>/profiles/<name>/``.  The
-    default profile lives at ``<hermes_home>`` directly (no ``profiles``
-    parent), as do custom ``HERMES_HOME`` paths outside ``~/.hermes``.
-
-    Checks both the resolved path (handles symlinks in the parent chain)
-    and the raw path (catches symlinked profile homes whose resolve()
-    target no longer contains ``profiles``).
-    """
-    try:
-        if "profiles" in path.resolve().parts:
-            return True
-    except (OSError, RuntimeError):
-        pass
-    return "profiles" in path.parts
-
-
-def _ensure_cron_dir(cron_dir: Path) -> None:
-    """Create a cron directory without resurrecting a deleted profile home.
-
-    Named profiles are created by the profile lifecycle, not cron.  A stale
-    multiplex scheduler may still hold a path to a deleted profile after the
-    user removes it; ``parents=False`` makes that race fail closed
-    (FileNotFoundError) instead of silently restoring the directory tree.
-    Default and custom Hermes homes keep ``parents=True`` so first-run
-    directory creation still works.
-    """
     if _is_named_profile_path(cron_dir):
         cron_dir.mkdir(exist_ok=True)
         return
