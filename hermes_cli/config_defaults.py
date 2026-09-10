@@ -45,6 +45,12 @@ DEFAULT_CONFIG = {
     # mapping, while the policy resolver can still honor a legacy desktop
     # block when no top-level policy was configured.
     "conversation_worktree": None,
+    # Cross-agent shared learning catalog (agent/learning_graph.py): off by default since it
+    # requires an operator-provisioned vault directory outside any single agent's control.
+    "learning": {
+        "vault_dir": "",
+        "shared_catalog_enabled": False,
+    },
     "session": {
         # Per-terminal `hermes -c`: each CLI session writes a breadcrumb under
         # $HERMES_HOME/terminal-sessions/<terminal-id>, so bare -c/--continue resumes THIS
