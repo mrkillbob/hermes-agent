@@ -27,7 +27,7 @@ from hermes_cli.kanban_db_graph import decompose_triage_task
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
 from hermes_cli.kanban_specify import (
-    _call_aux, _extract_json_blob, _load_triage_task, _task_prompt_fields, _title_body,
+    _call_aux, _extract_json_blob, _load_triage_task, _task_prompt_fields, _title_body, _truncate,
 )
 from hermes_cli.kanban_specify import _profile_author as _specify_author
 
@@ -271,6 +271,8 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
         if not isinstance(title, str) or not title.strip():
             return [], f"tasks[{idx}].title is missing or empty"
         body = entry.get("body")
+        if isinstance(body, str) and _PLACEHOLDER_CHILD_SCOPE_RE.search(body):
+            return [], f"tasks[{idx}].body reads as a placeholder target, not a concrete scope"
         assignee = entry.get("assignee")
         chosen = _normalize_assignee_choice(
             assignee, default_assignee=routing.default_assignee, valid_names=routing.valid_names,
@@ -294,13 +296,17 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
     return children, ""
 
 
-def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) -> DecomposeOutcome:
+def _apply_fanout(task: kb.Task, parsed: dict, routing: _Routing, author: str) -> DecomposeOutcome:
+    task_id = task.id
     raw_tasks = parsed.get("tasks") or []
     if not isinstance(raw_tasks, list) or not raw_tasks:
         return DecomposeOutcome(task_id, False, "decomposer returned fanout=true with empty tasks list")
     children, reason = _clean_children(task_id, raw_tasks, routing)
     if reason:
         return DecomposeOutcome(task_id, False, reason)
+    root_handoffs = _root_handoff_context(task_id)
+    for child in children:
+        child["body"] = _make_child_body(task, child["body"], root_handoffs=root_handoffs)
     try:
         with kbc.connect_closing() as conn:
             child_ids = decompose_triage_task(
@@ -397,6 +403,7 @@ def decompose_task(
         "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,
         user=_USER_TEMPLATE.format(
             **_task_prompt_fields(task),
+            handoffs=_root_handoff_context(task_id),
             roster=_format_roster(routing.roster),
             default_assignee=routing.default_assignee,
         ),
@@ -412,7 +419,7 @@ def decompose_task(
     audit_author = author or _profile_author()
     if not parsed.get("fanout"):
         return _apply_single(task, parsed, routing, audit_author)
-    return _apply_fanout(task_id, parsed, routing, audit_author)
+    return _apply_fanout(task, parsed, routing, audit_author)
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
