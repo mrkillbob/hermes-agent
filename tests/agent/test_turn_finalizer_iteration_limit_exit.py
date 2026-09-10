@@ -189,7 +189,9 @@ def test_pending_response_records_kanban_timeout(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-123")
     block = MagicMock(name="block_task")
     conn = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
+    task = SimpleNamespace(current_run_id=42)
+    monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
+    monkeypatch.setattr("hermes_cli.kanban_db.get_task", lambda _conn, _task_id: task)
     monkeypatch.setattr("hermes_cli.kanban_db.block_task", block)
     agent = _LimitAgent()
 
@@ -209,6 +211,7 @@ def test_pending_response_records_kanban_timeout(monkeypatch):
             "or scope before resuming"
         ),
         kind="needs_input",
+        expected_run_id=42,
     )
 
 
@@ -259,7 +262,9 @@ def test_bounded_fallback_blocks_kanban_task_when_interrupted(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-456")
     block = MagicMock(name="block_task")
     conn = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
+    task = SimpleNamespace(current_run_id=42)
+    monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
+    monkeypatch.setattr("hermes_cli.kanban_db.get_task", lambda _conn, _task_id: task)
     monkeypatch.setattr("hermes_cli.kanban_db.block_task", block)
     agent = _LimitAgent()
 
@@ -290,6 +295,7 @@ def test_bounded_fallback_blocks_kanban_task_when_interrupted(monkeypatch):
             "or scope before resuming"
         ),
         kind="needs_input",
+        expected_run_id=42,
     )
 
 
@@ -301,7 +307,9 @@ def test_bounded_fallback_blocks_kanban_task_when_failed(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-789")
     block = MagicMock(name="block_task")
     conn = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
+    task = SimpleNamespace(current_run_id=42)
+    monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
+    monkeypatch.setattr("hermes_cli.kanban_db.get_task", lambda _conn, _task_id: task)
     monkeypatch.setattr("hermes_cli.kanban_db.block_task", block)
     agent = _LimitAgent()
 
@@ -329,6 +337,7 @@ def test_bounded_fallback_blocks_kanban_task_when_failed(monkeypatch):
             "or scope before resuming"
         ),
         kind="needs_input",
+        expected_run_id=42,
     )
 
 
@@ -339,8 +348,8 @@ def test_bounded_fallback_does_not_fire_without_kanban_task(monkeypatch):
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     record = MagicMock(name="record_task_failure")
     conn = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
-    monkeypatch.setattr("hermes_cli.kanban_db._record_task_failure", record)
+    monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
+    monkeypatch.setattr("hermes_cli.kanban_db_dispatch._record_task_failure", record)
     agent = _LimitAgent()
 
     result = finalize_turn(
@@ -371,8 +380,8 @@ def test_guardrail_halt_closes_kanban_run_before_worker_exits(
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-guardrail")
     record = MagicMock(name="record_task_failure")
     conn = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
-    monkeypatch.setattr("hermes_cli.kanban_db._record_task_failure", record)
+    monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
+    monkeypatch.setattr("hermes_cli.kanban_db_dispatch._record_task_failure", record)
     agent = _LimitAgent(budget_remaining=budget_remaining)
     agent._tool_guardrail_halt_decision = SimpleNamespace(
         tool_name="terminal",
@@ -413,8 +422,8 @@ def test_bounded_fallback_does_not_fire_when_budget_not_exhausted(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-999")
     record = MagicMock(name="record_task_failure")
     conn = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
-    monkeypatch.setattr("hermes_cli.kanban_db._record_task_failure", record)
+    monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
+    monkeypatch.setattr("hermes_cli.kanban_db_dispatch._record_task_failure", record)
     agent = _LimitAgent(budget_remaining=60)
 
     # api_call_count=10, max_iterations=60 — budget NOT exhausted

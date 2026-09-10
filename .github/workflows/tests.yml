@@ -2,6 +2,11 @@ name: Tests
 
 on:
   workflow_call:
+    inputs:
+      slice_count:
+        description: Number of parallel Python test slices
+        type: number
+        default: 8
 
 permissions:
   contents: read
@@ -12,14 +17,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  generate:
+    name: Generate test slices
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Generate test matrix
+        id: matrix
+        run: |
+          matrix="$(python3 scripts/run_tests_parallel.py --generate-slices '${{ inputs.slice_count }}')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   test:
-    name: Run tests (${{ matrix.slice }})
+    name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
+    needs: generate
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        slice: ["1/4", "2/4", "3/4", "4/4"]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+      matrix: ${{ fromJSON(needs.generate.outputs.matrix) }}
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -90,32 +111,14 @@ jobs:
         # with bounded parallelism. No xdist, no shared workers, no
         # module-level state leakage between files.
         #
-        # Each hosted runner executes one balanced duration-based slice.
         run: |
           source .venv/bin/activate
-          scripts/run_tests.sh
+          scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
-          HERMES_TEST_SLICE: ${{ matrix.slice }}
-          # run_tests_parallel.py selects the worker count from the runner.
-          #
-          # Measured on this runner (96-core EPYC 7763, 377GB). Whole suite,
-          # two repetitions for each value. See run 32549672063:
-          #
-          #     workers   x cores   mean
-          #        48       0.5x    138s
-          #        96       1.0x    126s   <- fastest
-          #       144       1.5x    132s
-          #       192       2.0x    132s
-          #       240       2.5x    140s
-          #       288       3.0x    142s
-          #
-          # One worker for each core wins. The curve is shallow: 126s to 142s
-          # across a 6x range. The suite has sufficient concurrency at this
-          # size. The remaining time is the slowest files plus the setup.
-          # Workers above the core count only add contention.
-          # Let run_tests_parallel.py choose a bounded worker count from the
-          # standard runner's actual CPU allocation. A fixed count tuned for
-          # the former 96-core host oversubscribes smaller hosted runners.
+          # Each standard runner exposes four vCPUs. Keep one isolated pytest
+          # subprocess per vCPU; wall-clock speed comes from independent
+          # slices, not oversubscribing one runner.
+          HERMES_TEST_WORKERS: 4
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
