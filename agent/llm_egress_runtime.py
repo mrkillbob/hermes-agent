@@ -3060,10 +3060,12 @@ def authorize_agent_sdk_kwargs(
         request_id=request_id,
         policy_digest=policy_digest,
     )
-    state_dir = Path(
-        getattr(agent, "_llm_egress_state_dir", "")
-        or Path.home() / ".hermes" / "egress"
-    )
+    if getattr(agent, "_llm_egress_state_dir", ""):
+        state_dir = Path(agent._llm_egress_state_dir)
+    else:
+        from hermes_constants import get_hermes_home
+
+        state_dir = Path(get_hermes_home()) / "egress"
     max_serialized_bytes = int(
         getattr(agent, "_llm_egress_max_serialized_bytes", 262_144)
     )
