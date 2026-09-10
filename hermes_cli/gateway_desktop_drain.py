@@ -25,6 +25,21 @@ def desktop_profile_homes() -> tuple[Path, ...]:
     return tuple(Path(profile.path) for profile in list_profiles())
 
 
+def current_desktop_profile_home() -> tuple[Path, ...]:
+    """Return only the profile home this process is currently acting on.
+
+    Used for a scoped (non-``--all``) drain: a single Desktop window quitting
+    must not sweep up gateways for other profiles it never opened — those may
+    be independently supervised (a standalone systemd/launchd service, or a
+    different Desktop installation entirely). Resolution matches every other
+    profile-scoped ``gateway`` subcommand: ``HERMES_HOME`` (which Desktop
+    always sets explicitly when it spawns the CLI).
+    """
+    from hermes_constants import get_hermes_home
+
+    return (Path(get_hermes_home()),)
+
+
 def read_desktop_drain_snapshot(homes: Iterable[Path]) -> tuple[int, int]:
     """Count live gateway turns and board workers without mutating either."""
     from gateway.status import (
@@ -67,9 +82,20 @@ def read_desktop_drain_snapshot(homes: Iterable[Path]) -> tuple[int, int]:
 
 def drain_all_desktop_work() -> DesktopDrainSnapshot:
     """Production entry point used by ``gateway stop --all --drain``."""
+    return drain_desktop_work(desktop_profile_homes())
+
+
+def drain_desktop_work(homes: Iterable[Path]) -> DesktopDrainSnapshot:
+    """Drain and report on a specific set of profile homes.
+
+    ``drain_all_desktop_work`` (``gateway stop --all --drain``) sweeps every
+    local profile; ``gateway stop --drain`` without ``--all`` scopes this to
+    :func:`current_desktop_profile_home` so a single Desktop window quitting
+    only drains the gateway it actually owns.
+    """
     from gateway.drain_control import write_drain_request
 
-    homes = desktop_profile_homes()
+    homes = tuple(dict.fromkeys(Path(home) for home in homes))
 
     def report(current: DesktopDrainSnapshot) -> None:
         if current.idle:

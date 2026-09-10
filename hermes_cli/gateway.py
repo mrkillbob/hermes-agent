@@ -8783,19 +8783,30 @@ def _gateway_command_inner(args):
         system = getattr(args, "system", False)
 
         if getattr(args, "drain", False):
-            if not stop_all:
-                print_error("`gateway stop --drain` requires `--all` so no profile can launch duplicate work.")
-                sys.exit(2)
             from gateway.drain_control import clear_drain_request
             from hermes_cli.gateway_desktop_drain import (
+                current_desktop_profile_home,
                 desktop_profile_homes,
                 drain_all_desktop_work,
+                drain_desktop_work,
             )
 
-            drain_homes = desktop_profile_homes()
-            for drain_home in drain_homes:
-                atexit.register(clear_drain_request, home=drain_home)
-            drain_all_desktop_work()
+            # ``--all --drain``: sweep every local profile (used when the CLI
+            # genuinely needs every gateway paused, e.g. before an in-place
+            # update). Without ``--all``, scope the drain (and the stop below)
+            # to just the current profile's home — a single Desktop window
+            # quitting must not take down gateways for other profiles it never
+            # opened, which may be independently supervised.
+            if stop_all:
+                drain_homes = desktop_profile_homes()
+                for drain_home in drain_homes:
+                    atexit.register(clear_drain_request, home=drain_home)
+                drain_all_desktop_work()
+            else:
+                drain_homes = current_desktop_profile_home()
+                for drain_home in drain_homes:
+                    atexit.register(clear_drain_request, home=drain_home)
+                drain_desktop_work(drain_homes)
 
         # Phase 4: inside a container with s6, dispatch via the service
         # manager. ``--all`` iterates every registered profile gateway

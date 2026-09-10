@@ -34,6 +34,7 @@ import uuid
 import weakref
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -4194,6 +4195,54 @@ class SessionTurnLeaseLostError(RuntimeError):
     the lease row is gone. A later writer may already be persisting a
     newer turn; landing this write would interleave a stale reply.
     """
+
+
+class ConversationWorktreeConflict(RuntimeError):
+    """A ``claim_conversation_worktree`` insert lost a race to another claim.
+
+    Raised only when the ``root_session_id`` primary key already has a row —
+    i.e. a concurrent process (or an earlier crashed attempt) claimed this
+    conversation root first. The caller (``ConversationWorktreeManager``)
+    re-reads the existing record and continues from it rather than treating
+    this as fatal.
+    """
+
+
+@dataclass(frozen=True)
+class ConversationWorktreeRecord:
+    """One row of ``conversation_worktree_bindings``.
+
+    Durable identity + lifecycle state for an interactive conversation root's
+    dedicated Git worktree. ``state`` is one of ``creating``, ``ready``,
+    ``creation_failed``, ``retained``, or ``removed`` (see the CHECK
+    constraint on the table).
+    """
+
+    root_session_id: str
+    worktree_path: str
+    branch: str
+    base_commit: str
+    repo_common_dir: str
+    state: str
+    failure_phase: Optional[str] = None
+    failure_message: Optional[str] = None
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+    @classmethod
+    def _from_row(cls, row: "sqlite3.Row") -> "ConversationWorktreeRecord":
+        return cls(
+            root_session_id=row["root_session_id"],
+            worktree_path=row["worktree_path"],
+            branch=row["branch"],
+            base_commit=row["base_commit"],
+            repo_common_dir=row["repo_common_dir"],
+            state=row["state"],
+            failure_phase=row["failure_phase"],
+            failure_message=row["failure_message"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
 
 class StateDbReplacedError(RuntimeError):
@@ -8971,6 +9020,236 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         if row is None:
             return None
         return row["holder"] if isinstance(row, sqlite3.Row) else row[0]
+
+    # ------------------------------------------------------------------
+    # Conversation worktree bindings (agent/conversation_worktree.py)
+    # ------------------------------------------------------------------
+
+    def get_conversation_worktree(
+        self, root_session_id: str
+    ) -> Optional["ConversationWorktreeRecord"]:
+        """Return the durable worktree binding for ``root_session_id``, if any."""
+        if not root_session_id:
+            return None
+        with self._read_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversation_worktree_bindings WHERE root_session_id = ?",
+                (root_session_id,),
+            ).fetchone()
+        return ConversationWorktreeRecord._from_row(row) if row is not None else None
+
+    _CONVERSATION_WORKTREE_READY_SOURCE_STATES = ("creating", "creation_failed", "ready")
+
+    def claim_conversation_worktree(
+        self,
+        *,
+        root_session_id: str,
+        worktree_path: str,
+        branch: str,
+        base_commit: str,
+        repo_common_dir: str,
+    ) -> "ConversationWorktreeRecord":
+        """Atomically claim a new conversation root's worktree identity.
+
+        Inserts a ``state='creating'`` row keyed by ``root_session_id``. A
+        second claim carrying the exact same identity (worktree_path, branch,
+        base_commit, repo_common_dir) as the existing row is idempotent and
+        simply returns it — a retried caller after a crash between claim and
+        ready must not be punished. Raises
+        :class:`ConversationWorktreeConflict` only when the existing row's
+        identity actually differs, since that means a different claim (or a
+        stale, differently-identified attempt) already owns this root.
+        """
+        if not root_session_id:
+            raise ValueError("root_session_id must be non-empty")
+        now = time.time()
+        worktree_path = str(worktree_path)
+        repo_common_dir = str(repo_common_dir)
+
+        def _do(conn):
+            try:
+                conn.execute(
+                    "INSERT INTO conversation_worktree_bindings "
+                    "(root_session_id, worktree_path, branch, base_commit, "
+                    "repo_common_dir, state, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'creating', ?, ?)",
+                    (
+                        root_session_id,
+                        worktree_path,
+                        branch,
+                        base_commit,
+                        repo_common_dir,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                row = conn.execute(
+                    "SELECT * FROM conversation_worktree_bindings WHERE root_session_id = ?",
+                    (root_session_id,),
+                ).fetchone()
+                if row is None:
+                    raise ConversationWorktreeConflict(
+                        f"conversation worktree claim for {root_session_id!r} conflicted"
+                    ) from exc
+                existing = ConversationWorktreeRecord._from_row(row)
+                if (
+                    existing.worktree_path == worktree_path
+                    and existing.branch == branch
+                    and existing.base_commit == base_commit
+                    and existing.repo_common_dir == repo_common_dir
+                ):
+                    return existing
+                raise ConversationWorktreeConflict(
+                    f"conversation worktree already claimed for {root_session_id!r} "
+                    "with a different identity"
+                ) from exc
+            row = conn.execute(
+                "SELECT * FROM conversation_worktree_bindings WHERE root_session_id = ?",
+                (root_session_id,),
+            ).fetchone()
+            return ConversationWorktreeRecord._from_row(row)
+
+        return self._execute_write(_do)
+
+    def mark_conversation_worktree_ready(
+        self, root_session_id: str
+    ) -> "ConversationWorktreeRecord":
+        """Transition a claimed worktree to ``state='ready'`` and return it.
+
+        Raises :class:`ConversationWorktreeConflict` if the current state
+        cannot legitimately reach ``ready`` (e.g. an explicitly ``removed``
+        binding) — a stale caller racing an explicit cleanup must not
+        resurrect a durable record that ownership evidence and Git state no
+        longer back.
+        """
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT * FROM conversation_worktree_bindings WHERE root_session_id = ?",
+                (root_session_id,),
+            ).fetchone()
+            if row is None:
+                raise ConversationWorktreeConflict(
+                    f"conversation worktree binding vanished for {root_session_id!r}"
+                )
+            current = ConversationWorktreeRecord._from_row(row)
+            if current.state not in self._CONVERSATION_WORKTREE_READY_SOURCE_STATES:
+                raise ConversationWorktreeConflict(
+                    f"cannot transition conversation worktree {root_session_id!r} "
+                    f"from {current.state!r} to 'ready'"
+                )
+            now = time.time()
+            conn.execute(
+                "UPDATE conversation_worktree_bindings SET state = 'ready', "
+                "failure_phase = NULL, failure_message = NULL, updated_at = ? "
+                "WHERE root_session_id = ?",
+                (now, root_session_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM conversation_worktree_bindings WHERE root_session_id = ?",
+                (root_session_id,),
+            ).fetchone()
+            return ConversationWorktreeRecord._from_row(row)
+
+        return self._execute_write(_do)
+
+    def mark_conversation_worktree_failed(
+        self,
+        root_session_id: str,
+        *,
+        failure_phase: str,
+        failure_message: str,
+    ) -> "ConversationWorktreeRecord":
+        """Record why a claimed/recovering worktree could not reach ``ready``.
+
+        Transitions ``state`` to ``creation_failed`` (the manager's
+        ``_require_recoverable_record`` treats this as retryable, unlike
+        ``removed``) and returns the updated record.
+        """
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                "UPDATE conversation_worktree_bindings SET state = 'creation_failed', "
+                "failure_phase = ?, failure_message = ?, updated_at = ? "
+                "WHERE root_session_id = ?",
+                (failure_phase, failure_message, now, root_session_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM conversation_worktree_bindings WHERE root_session_id = ?",
+                (root_session_id,),
+            ).fetchone()
+            if row is None:
+                raise ConversationWorktreeConflict(
+                    f"conversation worktree binding vanished for {root_session_id!r}"
+                )
+            return ConversationWorktreeRecord._from_row(row)
+
+        return self._execute_write(_do)
+
+    def mark_conversation_worktree_removed(
+        self, root_session_id: str
+    ) -> "ConversationWorktreeRecord":
+        """Transition a binding to ``state='removed'`` after verified cleanup.
+
+        Clears any stale failure metadata from an earlier failed attempt —
+        the binding is gone, not merely broken — and returns the updated
+        record so callers (and tests) can confirm identity was preserved
+        through the transition.
+        """
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                "UPDATE conversation_worktree_bindings SET state = 'removed', "
+                "failure_phase = NULL, failure_message = NULL, updated_at = ? "
+                "WHERE root_session_id = ?",
+                (now, root_session_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM conversation_worktree_bindings WHERE root_session_id = ?",
+                (root_session_id,),
+            ).fetchone()
+            if row is None:
+                raise ConversationWorktreeConflict(
+                    f"conversation worktree binding vanished for {root_session_id!r}"
+                )
+            return ConversationWorktreeRecord._from_row(row)
+
+        return self._execute_write(_do)
+
+    def update_conversation_worktree_branch(
+        self, root_session_id: str, branch: str
+    ) -> Optional["ConversationWorktreeRecord"]:
+        """Persist an accepted branch rename back into the durable record.
+
+        A conversation may legitimately rename its branch while preparing or
+        merging a PR (see ``_validated_ready_binding``'s narrow drift
+        acceptance). Cleanup re-derives the *expected* identity from policy
+        and compares it against the record, so an accepted rename must be
+        written back here or explicit cleanup can never again match — it
+        would keep comparing the live worktree against the original branch
+        name forever. No-op (besides ``updated_at``) when the branch already
+        matches.
+        """
+        if not root_session_id or not branch:
+            return None
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                "UPDATE conversation_worktree_bindings SET branch = ?, "
+                "updated_at = ? WHERE root_session_id = ?",
+                (branch, now, root_session_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM conversation_worktree_bindings WHERE root_session_id = ?",
+                (root_session_id,),
+            ).fetchone()
+            return ConversationWorktreeRecord._from_row(row) if row is not None else None
+
+        return self._execute_write(_do)
 
     def touch_session_activity(
         self,

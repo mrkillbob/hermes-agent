@@ -399,6 +399,67 @@ def windows_detach_popen_kwargs() -> dict:
 # -----------------------------------------------------------------------------
 
 
+_GLOBAL_TRANSPORT_CONFIG_SUFFIXES = frozenset(
+    {
+        ".proxy",
+        ".proxyauthmethod",
+        ".sslverify",
+        ".sslcainfo",
+        ".sslcert",
+        ".sslkey",
+        ".sslcertpasswordprotected",
+        ".extraheader",
+        ".cookiefile",
+        ".savecookies",
+    }
+)
+
+
+def _is_allowed_global_transport_key(key: str) -> bool:
+    normalized = key.lower()
+    if normalized.startswith("url.") and normalized.endswith(
+        (".insteadof", ".pushinsteadof")
+    ):
+        return True
+    if normalized in {"credential.usehttppath", "credential.username"}:
+        return True
+    return normalized.startswith("http.") and any(
+        normalized.endswith(suffix) for suffix in _GLOBAL_TRANSPORT_CONFIG_SUFFIXES
+    )
+
+
+def _global_transport_config(env: Mapping[str, str]) -> list[tuple[str, str]]:
+    """Return user-global Git settings needed to reach remote transports.
+
+    Internal Git calls must not inherit arbitrary global configuration because
+    repository-controlled settings could otherwise select hooks, helpers, or
+    executable filters.  Transport configuration is a separate, explicit
+    allowlist: URL rewrites and HTTP proxy/TLS/auth settings are user-owned
+    routing requirements, while unrelated global options stay isolated.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "config", "--global", "--null", "--list"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=2,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+
+    entries: list[tuple[str, str]] = []
+    for raw_entry in result.stdout.split("\0"):
+        key, separator, value = raw_entry.partition("\n")
+        if separator and _is_allowed_global_transport_key(key):
+            entries.append((key, value))
+    return entries
+
+
 def noninteractive_git_env(
     base: "Mapping[str, str] | None" = None,
 ) -> dict[str, str]:
@@ -453,18 +514,10 @@ def noninteractive_git_env(
             env.pop(key, None)
     env.pop("GIT_CONFIG_COUNT", None)
 
-    devnull = os.devnull
-    env["GIT_CONFIG_GLOBAL"] = devnull
-    env["GIT_CONFIG_SYSTEM"] = devnull
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
-    env["GIT_PAGER"] = "cat"
-    env["PAGER"] = "cat"
-    env["GIT_EDITOR"] = "true"
-
     # Preserve helpers explicitly configured by the user while keeping
     # repository-controlled config from selecting an arbitrary helper. The
-    # empty entry resets lower-precedence repository values before Git applies
-    # the trusted global values replayed below.
+    # probe must run before global config is isolated, otherwise the user's
+    # trusted helpers cannot be discovered for replay below.
     trusted_helpers: list[str] = []
     try:
         helper_probe = subprocess.run(
@@ -473,15 +526,26 @@ def noninteractive_git_env(
             text=True,
             stdin=subprocess.DEVNULL,
             timeout=2,
-            env={k: v for k, v in env.items() if not k.startswith("GIT_CONFIG_")},
+            env=env,
             check=False,
         )
         if helper_probe.returncode == 0:
             trusted_helpers = [line for line in helper_probe.stdout.splitlines() if line]
     except (OSError, subprocess.TimeoutExpired):
         pass
+    transport_config = _global_transport_config(env)
+
+    devnull = os.devnull
+    env["GIT_CONFIG_GLOBAL"] = devnull
+    env["GIT_CONFIG_SYSTEM"] = devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_PAGER"] = "cat"
+    env["PAGER"] = "cat"
+    env["GIT_EDITOR"] = "true"
 
     config_overrides = {
+        # This empty entry resets repository-controlled helpers before Git
+        # applies the trusted global values replayed below.
         "credential.helper": "",
         "core.askPass": "",
         "core.fsmonitor": "false",
@@ -502,6 +566,12 @@ def noninteractive_git_env(
         for idx, helper in enumerate(trusted_helpers, offset):
             env[f"GIT_CONFIG_KEY_{idx}"] = "credential.helper"
             env[f"GIT_CONFIG_VALUE_{idx}"] = helper
+    if transport_config:
+        offset = int(env["GIT_CONFIG_COUNT"])
+        env["GIT_CONFIG_COUNT"] = str(offset + len(transport_config))
+        for idx, (key, value) in enumerate(transport_config, offset):
+            env[f"GIT_CONFIG_KEY_{idx}"] = key
+            env[f"GIT_CONFIG_VALUE_{idx}"] = value
 
     return env
 

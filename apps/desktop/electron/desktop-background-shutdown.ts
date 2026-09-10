@@ -87,10 +87,16 @@ function runStopCommand(
 }
 
 /**
- * Drain and stop every local supervised gateway before Desktop exits. The
- * drain refuses new chat/cron/Kanban work, waits for in-flight gateway turns
- * and live Kanban workers, then stops supervision. The companion launchd job
- * is unloaded only after that drain helper exits.
+ * Drain and stop the local supervised gateway for THIS Desktop instance's
+ * profile before Desktop exits. The drain refuses new chat/cron/Kanban work,
+ * waits for in-flight gateway turns and live Kanban workers, then stops
+ * supervision. The companion launchd job is unloaded only after that drain
+ * helper exits.
+ *
+ * Deliberately scoped to the current profile (no `--all`): a gateway for a
+ * different profile may be independently supervised — a standalone
+ * systemd/launchd service, or a different Desktop installation entirely —
+ * and closing one window must not take it offline.
  */
 export function stopDesktopBackgroundServices({
   resolveBackend,
@@ -101,10 +107,10 @@ export function stopDesktopBackgroundServices({
   uid = typeof process.getuid === 'function' ? process.getuid() : -1,
   onError = () => undefined
 }: StopDesktopBackgroundServicesOptions): Promise<boolean> {
-  const backend = resolveBackend(['gateway', 'stop', '--all', '--drain'])
+  const backend = resolveBackend(['gateway', 'stop', '--drain'])
 
   if (!backend?.command || backend.kind === 'bootstrap-needed') {
-    onError('No runnable local Hermes command was available for gateway stop --all --drain')
+    onError('No runnable local Hermes command was available for gateway stop --drain')
 
     return Promise.resolve(false)
   }
@@ -112,8 +118,8 @@ export function stopDesktopBackgroundServices({
   const commands: StopCommand[] = [
     {
       command: backend.command,
-      args: backend.args || ['gateway', 'stop', '--all', '--drain'],
-      label: 'gateway stop --all --drain',
+      args: backend.args || ['gateway', 'stop', '--drain'],
+      label: 'gateway stop --drain',
       options: {
         cwd: backend.root || undefined,
         env: { ...env, ...(backend.env || {}) },

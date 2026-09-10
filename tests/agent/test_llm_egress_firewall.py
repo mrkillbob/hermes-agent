@@ -144,7 +144,9 @@ def test_lan_and_unknown_are_remote_while_numeric_loopback_is_loopback():
 def test_egress_assignment_scan_ignores_code_defaults_but_catches_literals():
     assert not _is_egress_secret_assignment("token = os.getenv(\"TOKEN\")")
     assert not _is_egress_secret_assignment("def request(token: str): pass")
-    assert _is_egress_secret_assignment("token=sk_live_1234567890")
+    assert _is_egress_secret_assignment("token=sk_liv...7890")
+    assert _is_egress_secret_assignment('password = "correcthorsebatterystaple"')
+    assert _is_egress_secret_assignment("token=«redacted:sk_live_…»")
 
 
 def test_destination_classification_does_not_trust_dns_or_provider_name():
@@ -251,7 +253,7 @@ def test_source_grant_allows_pr_metadata_without_disabling_base64_detection(tmp_
 
     path = tmp_path / "pr.diff"
     source = (
-        "Q383-LIVE-RUNNER-STAGE1-CONTRACT-GAP-FREEZE\n"
+        "Q383-LIVE-RUNNER-STAGE1-CONTRACT-GAP-FREEZE-X\n"
         "--diff-filter=ACMR\n"
         "+status\n"
     )
@@ -265,6 +267,22 @@ def test_source_grant_allows_pr_metadata_without_disabling_base64_detection(tmp_
     )
 
     assert decision.allowed is True
+
+
+def test_source_grant_keeps_canonical_base64_shaped_issue_keys_visible(tmp_path):
+    path = tmp_path / "source.txt"
+    source = "ABC123-DEAD-BEEF\n"
+    path.write_text(source, encoding="utf-8")
+    grant = _source_grant(path)
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        firewall(tmp_path).preflight(
+            _typed_request(_request(source), source_grant=grant),
+            _route(),
+            grants=(grant,),
+        )
+
+    assert "base64_payload" in exc_info.value.decision.reason_codes
 
 
 def test_source_grant_allows_pr_metadata_diff_filter_at_end_of_text(tmp_path):
@@ -418,6 +436,7 @@ def test_sanitized_segment_cap_remains_independent_from_larger_aggregate_cap(tmp
     ("text", "reason"),
     [
         ("token=super-secret-value", "secret_detected"),
+        ('password = "correcthorsebatterystaple"', "secret_detected"),
         (base64.b64encode(b"encoded private detail").decode("ascii"), "base64_payload"),
         ("Read /Users/private/repository/file.py", "private_absolute_path"),
         (r"Read C:\\Users\\private\\secrets.txt", "private_absolute_path"),
