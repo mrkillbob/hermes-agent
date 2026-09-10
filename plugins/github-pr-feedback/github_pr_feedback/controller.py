@@ -1755,7 +1755,8 @@ class ScanController:
         if not isinstance(latest, CIAuditReceipt) or latest.receipt_id != audit.receipt_id:
             return "superseded_ci_receipt"
         if (
-            audit.actions_state.actions_enabled
+            not audit_policy.required_for_open_prs
+            and audit.actions_state.actions_enabled
             and not audit.actions_state.billing_blocked
             and audit.actions_state.check_count > 0
             and audit.actions_state.all_green
