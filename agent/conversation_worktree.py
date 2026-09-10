@@ -738,13 +738,28 @@ class ConversationWorktreeManager:
             ):
                 return CleanupVerdict(False, ("mismatched identity",))
 
-            listed = self._listed_worktree(source, expected_path)
-            if listed != f"refs/heads/{record.branch}":
-                return CleanupVerdict(False, ("mismatched identity",))
-
             actual_branch = self._git_stdout(
                 expected_path, ["branch", "--show-current"], "cleanup"
             )
+            # A conversation can legitimately rename its branch while preparing or merging a
+            # PR (see _validated_ready_binding, which already accepts this same narrow drift):
+            # the recorded branch is never updated in place, so both the worktree-list check
+            # and the branch-identity check below must accept either name -- but ONLY when
+            # both durable ownership claims still bind this exact root/path/common-repo,
+            # otherwise a renamed-away worktree could never be reclaimed through explicit
+            # cleanup.
+            branch_renamed = (
+                bool(actual_branch)
+                and actual_branch != record.branch
+                and self._exact_owner_claims_present(record)
+            )
+            if not branch_renamed and actual_branch != record.branch:
+                return CleanupVerdict(False, ("mismatched identity",))
+
+            listed = self._listed_worktree(source, expected_path)
+            if listed != f"refs/heads/{actual_branch if branch_renamed else record.branch}":
+                return CleanupVerdict(False, ("mismatched identity",))
+
             actual_common = Path(
                 self._git_stdout(
                     expected_path,
@@ -759,8 +774,7 @@ class ConversationWorktreeManager:
                 "cleanup",
             )
             if (
-                actual_branch != record.branch
-                or actual_common != source_common_dir.resolve()
+                actual_common != source_common_dir.resolve()
                 or base_ancestor.returncode != 0
             ):
                 return CleanupVerdict(False, ("mismatched identity",))
