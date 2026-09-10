@@ -139,7 +139,7 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
             return
         print(f"  $ {' '.join(cmd)}")
         # sudo/brew may prompt on the tty; user explicitly confirmed above
-        if subprocess.run(cmd, check=False).returncode != 0:  # noqa: S603
+        if subprocess.run(cmd, check=False).returncode != 0:  # noqa: S603  # noqa: subprocess-stdin
             print(fail_msg)
 
     print("google_meet install\n-------------------")
