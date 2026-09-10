@@ -1278,25 +1278,14 @@ def test_github_client_flags_a_check_run_waiting_on_human_approval_as_action_req
     )
 
 
-@pytest.mark.parametrize(
-    "method,flag",
-    [("squash", "--squash"), ("rebase", "--rebase"), ("merge", "--merge")],
-)
-def test_github_client_uses_only_fixed_exact_head_merge_argv(
-    method: str, flag: str
-) -> None:
+@pytest.mark.parametrize("method", ["squash", "rebase", "merge"])
+def test_github_client_uses_only_fixed_exact_head_merge_argv(method: str) -> None:
     merge_argv = (
-        "gh",
-        "pr",
-        "merge",
-        "17",
-        "--repo",
-        "acme/widgets",
-        flag,
-        "--match-head-commit",
-        "a" * 40,
+        "gh", "pr", "merge", "17", "--repo", "acme/widgets",
+        {"squash": "--squash", "rebase": "--rebase", "merge": "--merge"}[method],
+        "--match-head-commit", "a" * 40,
     )
-    runner = RecordingRunner({merge_argv: "remote output is not merge truth"})
+    runner = RecordingRunner({merge_argv: {}})
 
     result = GitHubClient(runner).merge_pull_request(
         "acme/widgets", 17, "a" * 40, method=method

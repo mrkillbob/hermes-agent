@@ -361,6 +361,21 @@ def _github_failure_code(stderr: str) -> str:
         for marker in ("403", "permission denied", "resource not accessible", "forbidden")
     ):
         return "permission_denied"
+    if "merge queue" in normalized or "requires a queue" in normalized:
+        return "merge_queue_required"
+    if any(
+        marker in normalized
+        for marker in (
+            "not mergeable",
+            "cannot be merged",
+            "base branch policy",
+            "branch protection",
+            "required status checks",
+        )
+    ):
+        return "merge_rejected"
+    if re.search(r"\b(?:405|409)\b", normalized):
+        return "merge_rejected"
     if "404" in normalized or "not found" in normalized:
         return "not_found"
     return "github_error"
@@ -1079,22 +1094,29 @@ class GitHubClient:
         repository = _validated_repository(repository)
         number = _positive_number(number)
         head_sha = _validated_sha(head_sha)
-        flag = _MERGE_FLAGS.get(method)
-        if flag is None:
+        if method not in _MERGE_FLAGS:
             raise ValueError("method must be squash, rebase, or merge")
-        self._runner.run(
-            [
-                "gh",
-                "pr",
-                "merge",
-                str(number),
-                "--repo",
-                repository,
-                flag,
-                "--match-head-commit",
-                head_sha,
-            ]
-        )
+        # Attempt an ordinary exact-head merge first. Only enroll auto-merge
+        # when GitHub explicitly says this base requires a merge queue; doing
+        # so unconditionally would create persistent asynchronous authority on
+        # repositories whose normal merge would have been governed here.
+        argv = [
+            "gh", "pr", "merge", str(number), "--repo", repository,
+            _MERGE_FLAGS[method], "--match-head-commit", head_sha,
+        ]
+        try:
+            self._runner.run(argv)
+        except GitHubClientError as error:
+            if error.code == "merge_queue_required":
+                # Queue enrollment transfers authority to GitHub while the PR
+                # waits for a merge-group run. The governed controller cannot
+                # revalidate its Hermes-only gates or cancel that enrollment,
+                # so never create a persistent queue entry here.
+                raise GitHubClientError(
+                    "GitHub requires a merge queue; no queue entry was enrolled",
+                    code="merge_queue_required",
+                ) from error
+            raise
 
     def close_pull_request_with_comment(
         self,

@@ -775,6 +775,24 @@ class FeedbackLedger:
             raise LedgerStateError("stored feedback receipt status is invalid")
         return str(status)
 
+    def quarantine_malformed_ci_receipt(self, receipt: FeedbackReceipt) -> bool:
+        """Make a completed CI dispatch retryable when its typed evidence is corrupt."""
+        if receipt.feedback_kind != "pr_local_ci":
+            raise ValueError("only local CI receipts can be quarantined")
+        with self._transaction():
+            result = self._connection.execute(
+                "UPDATE feedback_receipts SET status = 'failed', task_id = NULL, "
+                "action_status = 'pending', claim_owner = NULL, claimed_at = NULL, "
+                "last_error = ? WHERE repository = ? AND pr_number = ? "
+                "AND feedback_kind = ? AND feedback_id = ? AND head_sha = ? "
+                "AND status = 'completed'",
+                (
+                    "malformed CI audit receipt quarantined for retry",
+                    *receipt.key,
+                ),
+            )
+            return result.rowcount == 1
+
     def exact_receipt_state(self, receipt: FeedbackReceipt) -> tuple[str, int] | None:
         """Return exact dispatch status and attempts for bounded retry selection."""
 
@@ -1867,10 +1885,10 @@ class FeedbackLedger:
             return None
         try:
             receipt = CIAuditReceipt.from_payload(json.loads(row[0]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise LedgerStateError("stored CI receipt is invalid") from error
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
         if receipt.status != "passed":
-            raise LedgerStateError("stored CI receipt status is inconsistent")
+            return None
         return receipt
 
     def latest_ci_receipt(
@@ -1897,13 +1915,13 @@ class FeedbackLedger:
             return None
         try:
             return CIAuditReceipt.from_payload(json.loads(row[0]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise LedgerStateError("stored CI receipt is invalid") from error
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     def latest_ci_receipt_for_head(
-        self, repository: str, pr_number: int, head_sha: str
+        self, repository: str, pr_number: int, head_sha: str, *, base_sha: str | None = None
     ) -> object | None:
-        """Return the newest typed audit receipt for an exact PR head."""
+        """Return the newest typed audit receipt for an exact PR dispatch."""
 
         from .ci_runner import CIAuditReceipt
 
@@ -1915,9 +1933,12 @@ class FeedbackLedger:
         if row is None:
             return None
         try:
-            return CIAuditReceipt.from_payload(json.loads(row[0]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise LedgerStateError("stored CI receipt is invalid") from error
+            receipt = CIAuditReceipt.from_payload(json.loads(row[0]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if base_sha is not None and receipt.identity.base_sha != base_sha.casefold():
+            return None
+        return receipt
 
     def ci_receipt_by_id(
         self, repository: str, pr_number: int, receipt_id: str
@@ -1935,8 +1956,8 @@ class FeedbackLedger:
             return None
         try:
             return CIAuditReceipt.from_payload(json.loads(row[0]))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise LedgerStateError("stored CI receipt is invalid") from error
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     def completed_merge_receipt(self, repository: str, pr_number: int) -> object | None:
         from .merge_controller import MergeReceipt
@@ -2165,6 +2186,24 @@ class FeedbackLedger:
             else:
                 return None
         return MergeLease(repository, pr_number, head_sha, owner, claimed_at)
+
+    def release_open_unmerged_merge_lease(
+        self, lease: MergeLease, *, updated_at: datetime
+    ) -> None:
+        """Release exactly the verification lease after canonical readback."""
+
+        updated_at = _aware_utc(updated_at, "updated_at")
+        with self._transaction():
+            self._connection.execute(
+                "UPDATE merge_attempts SET status = 'failed', updated_at = ?, "
+                "last_error = 'canonical open unmerged; governed retry is safe' "
+                "WHERE repository = ? AND pr_number = ? AND head_sha = ? "
+                "AND status = 'verification_required' AND owner = ? AND claimed_at = ?",
+                (
+                    updated_at.isoformat(), lease.repository, lease.pr_number,
+                    lease.head_sha, lease.owner, lease.claimed_at.isoformat(),
+                ),
+            )
 
     def authorize_merge_write(
         self, lease: MergeLease, *, updated_at: datetime

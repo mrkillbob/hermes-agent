@@ -444,6 +444,20 @@ class MergeController:
             reconciled = self._reconcile_verified_merge(pending, snapshot)
             if reconciled is not None:
                 return reconciled
+            pull = snapshot.pull_request
+            releaseable_unmerged = (
+                pull.repository == self._policy.repository
+                and not pull.merged
+                and (
+                    (pull.state == "OPEN" and pull.head_sha != pending.head_sha)
+                    or pull.state == "CLOSED"
+                )
+            )
+            if releaseable_unmerged:
+                self._ledger.release_open_unmerged_merge_lease(
+                    pending,
+                    updated_at=self._now(),
+                )
             blocked = MergeDecision(
                 False,
                 ("merge_verification_required",),
@@ -506,7 +520,21 @@ class MergeController:
                 second_snapshot.pull_request.head_sha,
                 method=second.method,
             )
-        except GitHubClientError:
+        except GitHubClientError as error:
+            if error.code in {"merge_rejected", "merge_queue_required"}:
+                self._ledger.finish_merge_lease(
+                    lease,
+                    status="failed",
+                    updated_at=self._now(),
+                    error=str(error),
+                    expected_status="verification_required",
+                )
+                return MergeRunResult(
+                    MergeDecision(
+                        False, (error.code,), None, second.snapshot_digest
+                    ),
+                    None,
+                )
             # A transport error cannot prove that GitHub rejected the write.
             # Canonical readback below remains the only completion authority.
             pass
