@@ -33,45 +33,18 @@ def mask_builtin_annotations(text: str) -> str:
     for line in raw.splitlines(keepends=True):
         offsets.append(offsets[-1] + len(line))
     edits = []
-    defaults = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.arguments):
-            args = [*node.posonlyargs, *node.args]
-            pairs = [*zip(args[-len(node.defaults):], node.defaults)] if node.defaults else []
-            pairs += [
-                (arg, default)
-                for arg, default in zip(node.kwonlyargs, node.kw_defaults)
-                if default is not None
-            ]
-            defaults.update({id(arg): value for arg, value in pairs})
     for node in ast.walk(tree):
         if isinstance(node, ast.arg) and node.annotation is not None:
             start = offsets[node.lineno - 1] + node.col_offset + len(node.arg.encode("utf-8"))
             annotation = node.annotation
-            default = defaults.get(id(node))
-            target_start = offsets[node.lineno - 1] + node.col_offset
-            target_end = target_start + len(node.arg.encode("utf-8"))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             start = offsets[node.target.end_lineno - 1] + node.target.end_col_offset
             annotation = node.annotation
-            default = node.value
-            target_start = offsets[node.target.lineno - 1] + node.target.col_offset
-            target_end = target_start + len(node.target.id.encode("utf-8"))
         else:
             continue
         if _builtin_annotation(annotation):
             end = offsets[annotation.end_lineno - 1] + annotation.end_col_offset
             edits.append((start, end))
-            if isinstance(default, ast.Constant) and default.value is None:
-                edits.extend(
-                    (
-                        (target_start, target_end),
-                        (
-                            offsets[default.lineno - 1] + default.col_offset,
-                            offsets[default.lineno - 1] + default.col_offset + 4,
-                        ),
-                    )
-                )
     pieces = []
     cursor = 0
     for start, end in sorted(edits):

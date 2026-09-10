@@ -22,7 +22,8 @@ from gateway.config import (
     Platform,
     PlatformConfig,
 )
-from gateway.platforms.base import MessageEvent, SendResult
+from gateway.platforms.base import SendResult
+from gateway.platforms.event import MessageEvent
 from gateway.platforms.webhook import WebhookAdapter, _INSECURE_NO_AUTH
 
 
@@ -315,7 +316,7 @@ class TestGitHubCommentDelivery:
         mock_result.stderr = ""
 
         with patch(
-            "gateway.platforms.webhook.subprocess.run",
+            "gateway.platforms.webhook.run_as_github_automation",
             return_value=mock_result,
         ) as mock_run:
             result = await adapter.send(
@@ -329,10 +330,6 @@ class TestGitHubCommentDelivery:
                 "--repo", "org/repo",
                 "--body", "LGTM! The code looks great.",
             ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=30,
         )
         # Delivery info is retained after send() so interim status messages

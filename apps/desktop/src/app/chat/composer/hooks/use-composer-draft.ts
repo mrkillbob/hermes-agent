@@ -147,14 +147,22 @@ export function useComposerDraft({
 
       if (editor) {
         renderComposerContents(editor, next, { trailingCommitted: true })
-        placeCaretEnd(editor)
+
+        // Selection is document-global: a keep-alive composer in a hidden tab
+        // may repaint when its background session updates, but moving its caret
+        // here steals the selection from the visible composer without changing
+        // document.activeElement. The foreground then still looks focused while
+        // printable keydowns produce no input.
+        if (paneVisible) {
+          placeCaretEnd(editor)
+        }
       }
 
       if (focus) {
         requestMainFocus()
       }
     },
-    [requestMainFocus, setComposerText]
+    [paneVisible, requestMainFocus, setComposerText]
   )
 
   const appendExternalText = useCallback(
@@ -234,8 +242,11 @@ export function useComposerDraft({
     }
   }, [appendExternalText, inputDisabled, paintDraft, target])
 
-  const stashAt = (scope: string | null, text = draftRef.current, attachments = attachmentScope.$attachments.get()) =>
-    stashSessionDraft(scope, text, attachments)
+  const stashAt = useCallback(
+    (scope: string | null, text = draftRef.current, attachments = attachmentScope.$attachments.get()) =>
+      stashSessionDraft(scope, text, attachments),
+    [attachmentScope]
+  )
 
   const loadIntoComposer = (text: string, attachments: ComposerAttachment[]) => {
     // Diagnostic breadcrumb for #59305-class reports: identifies WHAT kind of
@@ -263,9 +274,12 @@ export function useComposerDraft({
 
     if (editorRef.current) {
       renderComposerContents(editorRef.current, '')
-      placeCaretEnd(editorRef.current)
+
+      if (paneVisible) {
+        placeCaretEnd(editorRef.current)
+      }
     }
-  }, [setComposerText])
+  }, [paneVisible, setComposerText])
 
   // Read the editor's current plain text into draftRef + composer state. This
   // closes the "queued rAF flush hasn't run yet" window so scope-swap/pagehide
@@ -346,7 +360,7 @@ export function useComposerDraft({
       unsubscribe()
       window.clearTimeout(draftPersistTimerRef.current)
     }
-  }, [composerRuntime, queueEditRef])
+  }, [composerRuntime, queueEditRef, stashAt])
 
   const insertText = (text: string) => {
     const base = draftRef.current
@@ -364,7 +378,7 @@ export function useComposerDraft({
       return false
     }
 
-    const nextDraft = insertInlineRefsIntoEditor(editor, refs)
+    const nextDraft = insertInlineRefsIntoEditor(editor, refs, { interactive: paneVisible })
 
     if (nextDraft === null) {
       return false
@@ -372,7 +386,10 @@ export function useComposerDraft({
 
     draftRef.current = nextDraft
     setComposerText(nextDraft)
-    requestMainFocus()
+
+    if (paneVisible) {
+      requestMainFocus()
+    }
 
     return true
   }
@@ -488,7 +505,7 @@ export function useComposerDraft({
       window.removeEventListener('pagehide', flushPendingDraftPersist)
       flushPendingDraftPersist()
     }
-  }, [syncDraftFromEditor])
+  }, [stashAt, syncDraftFromEditor])
 
   return {
     activeQueueSessionKeyRef,
