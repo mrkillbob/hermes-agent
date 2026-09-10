@@ -63,6 +63,17 @@ def _general(audit_reason: str) -> SpecialistRouteDecision:
     return SpecialistRouteDecision(kind=RouteKind.GENERAL, audit_reason=audit_reason)
 
 
+# Common negation markers -- "don't", "do not", "never", "won't", "shouldn't",
+# "stop", "avoid", "without", "no need to", "skip" -- that flip an otherwise
+# affirmative-looking imperative into its opposite.
+_NEGATION_RE = re.compile(
+    r"\b(?:don'?t|do\s+not|does\s?n'?t|doesn'?t|won'?t|will\s+not|"
+    r"shouldn'?t|should\s+not|can'?t|cannot|couldn'?t|wouldn'?t|"
+    r"never|stop|avoid|without|no\s+need\s+to|skip|not\s+going\s+to)\b",
+    re.IGNORECASE,
+)
+
+
 def classify_explicit_burndown_patch_request(request: str) -> Optional[SpecialistRouteDecision]:
     """Route the one unambiguous exception-burndown instruction without an LLM.
 
@@ -81,6 +92,12 @@ def classify_explicit_burndown_patch_request(request: str) -> Optional[Specialis
         or "burndown" not in normalized
         or re.search(r"\bpatch(?:es|ed|ing)?\b", normalized) is None
     ):
+        return None
+    # A negation, or a question, means this isn't the affirmative imperative the
+    # shortcut is scoped to ("Do not patch the exception burndown", "Should we
+    # patch the exception burndown?") -- leave it to the classifier rather than
+    # risk a false-positive specialist dispatch on the opposite intent.
+    if "?" in normalized or _NEGATION_RE.search(normalized):
         return None
     return SpecialistRouteDecision(
         kind=RouteKind.SPECIALIST,
