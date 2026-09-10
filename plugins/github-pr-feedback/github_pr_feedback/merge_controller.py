@@ -132,8 +132,14 @@ _CODEX_REVIEW_ROW = re.compile(
 
 
 def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
+    """Return True if Codex has posted a completed review for this exact head.
+
+    This predicate is used only for the ``codex_review_pending`` merge gate.
+    It intentionally ignores whether Codex left actionable findings — the
+    ``feedback_clear`` gate (via ``_feedback_clear``) handles that separately.
+    Use ``_codex_clean_head`` when you need both completion *and* no findings.
+    """
     short_head = head_sha[:7].casefold()
-    reviewed = False
     for item in feedback:
         if (
             item.reviewer.login.casefold() != _CODEX_REVIEW_LOGIN
@@ -145,12 +151,21 @@ def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
                 match.group("sha").casefold() == short_head
                 and "completed" in match.group("status").casefold()
             ):
-                reviewed = True
-    if not reviewed:
+                return True
+    return False
+
+
+def _codex_clean_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
+    """Return True only when Codex completed a review *and* left no actionable findings.
+
+    Used for queue-ordering priority: a PR where Codex posted an actionable
+    comment is not eligible for the clean-head fast lane even if the summary
+    row shows "completed".  The canonical ``feedback_clear`` gate remains the
+    authority for merge eligibility; this predicate only affects queue order.
+    """
+    if not _codex_reviewed_head(feedback, head_sha):
         return False
-    # A completed summary is not a clean review: actionable Codex findings
-    # arrive as separate review/issue comments. Keep those heads out of the
-    # ready queue; the canonical feedback_clear gate remains authoritative.
+    # Any non-summary comment from the Codex bot is an actionable finding.
     return not any(
         item.reviewer.login.casefold() == _CODEX_REVIEW_LOGIN
         and _CODEX_REVIEW_MARKER not in item.body

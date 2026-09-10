@@ -446,9 +446,14 @@ def check_for_updates() -> Optional[int]:
             repo_dir = hermes_home / "hermes-agent"
         if (repo_dir / ".git").exists():
             cache_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
+            # Prefer FETCH_HEAD: ``hermes update --check`` fetches
+            # upstream/main, which refreshes FETCH_HEAD but does not move
+            # origin/main in a fork checkout.  Keying the cache off
+            # FETCH_HEAD ensures a successful check invalidates stale evidence
+            # even when origin/main was not advanced.
             cache_target = (
-                _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir)
-                or _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
+                _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
+                or _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir)
             )
 
     # Docker images have no working tree to count commits against — the
@@ -477,7 +482,7 @@ def check_for_updates() -> Optional[int]:
                 and cached.get("rev") == cache_rev
                 and cached.get("target") == cache_target
                 and cached.get("ver") == VERSION
-                and (embedded_rev or (cache_rev and cache_target))
+                and (embedded_rev or cache_rev)
             ):
                 return cached.get("behind")
     except Exception:

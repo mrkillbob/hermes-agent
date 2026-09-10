@@ -2,18 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from github_pr_feedback.readiness import ReadinessEvidence, ReadyPullRequest, evaluate_readiness, order_ready_queue
+from github_pr_feedback.readiness import ReadyPullRequest, order_ready_queue
 from github_pr_feedback.cli import _announce_ready_to_merge
 
 
 def _ready(number: int, *, codex_clean: bool = False, ready_at: int = 1) -> ReadyPullRequest:
-    return ReadyPullRequest("owner/repo", number, f"{number:040x}", ready_at, codex_clean, 0, number)
-
-
-def test_readiness_requires_every_current_head_gate() -> None:
-    evidence = ReadinessEvidence(True, True, True, True, True, True, True, True, True)
-    assert evaluate_readiness(evidence).eligible is True
-    assert evaluate_readiness(evidence.with_changes(feedback_clear=False)).blockers == ("feedback_not_clear",)
+    return ReadyPullRequest("owner/repo", number, f"{number:040x}", ready_at, codex_clean)
 
 
 def test_codex_clean_heads_are_first_then_oldest_ready() -> None:

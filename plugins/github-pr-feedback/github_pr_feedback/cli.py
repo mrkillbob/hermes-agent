@@ -39,6 +39,7 @@ from .merge_controller import (
     MergeController,
     MergeDecision,
     _codex_reviewed_head,
+    _codex_clean_head,
 )
 from .readiness import ReadyPullRequest, order_ready_queue
 from .policy import (
@@ -1670,9 +1671,17 @@ def _run_merge_scan_for_policy(
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
     feedback_cache: dict[int, tuple[Feedback, ...]] = {}
+    # In report-only mode there is no second snapshot to re-read feedback, so
+    # the canonical evaluation must not consume stale ordering-prepass evidence.
+    # Pass the cache only for active merge mode where MergeController.run()
+    # performs a second snapshot with a fresh read after the prepass.
     try:
         source = CanonicalMergeEvidenceSource(
-            policy, github, ledger, merge_policy, feedback_cache=feedback_cache
+            policy,
+            github,
+            ledger,
+            merge_policy,
+            feedback_cache=None if merge_policy.report_only else feedback_cache,
         )
     except TypeError:
         # Keep lightweight test doubles and older plugin integrations usable;
@@ -1743,20 +1752,22 @@ def _run_merge_scan_for_policy(
                     if callable(reader)
                     else None
                 )
-                blocked[str(number)] = [
-                    "ci_receipt_not_passing"
-                    if exact_head_receipt is not None
-                    and exact_head_receipt.status != "passed"
-                    else "ci_receipt_missing"
-                ]
+                if exact_head_receipt is None:
+                    blocked[str(number)] = ["ci_receipt_missing"]
+                elif exact_head_receipt.status == "passed":
+                    blocked[str(number)] = ["ci_manifest_mismatch"]
+                else:
+                    blocked[str(number)] = ["ci_receipt_not_passing"]
+                _clear_ready_to_merge_label(github, merge_policy.repository, pull_request)
                 continue
             if receipt.status != "passed":
                 blocked[str(number)] = ["ci_receipt_not_passing"]
+                _clear_ready_to_merge_label(github, merge_policy.repository, pull_request)
                 continue
         try:
             feedback = github.list_feedback(merge_policy.repository, number)
             feedback_cache[number] = feedback
-            codex_clean = _codex_reviewed_head(feedback, pull_request.head_sha)
+            codex_clean = _codex_clean_head(feedback, pull_request.head_sha)
         except (GitHubClientError, RuntimeError):
             codex_clean = False
         ready_candidates.append(
@@ -1766,8 +1777,6 @@ def _run_merge_scan_for_policy(
                 pull_request.head_sha,
                 int(pull_request.updated_at.timestamp()) if pull_request.updated_at else 0,
                 codex_clean,
-                0,
-                0,
             )
         )
     ordered_numbers = tuple(item.number for item in order_ready_queue(ready_candidates))
