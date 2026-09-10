@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import re
 import signal
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
+logger = logging.getLogger(__name__)
 
 # After this many consecutive non-success attempts on a task/profile the
 # dispatcher parks the task in ``blocked`` with a reason — prevents retry storms.
@@ -133,6 +135,13 @@ class DispatchResult:
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
     Reclaim/promotion bookkeeping still ran; deferred tasks stay queued."""
+    watchdog_blocked: list[str] = field(default_factory=list)
+    """Task ids the worker-log watchdog blocked this tick (suspended for a repair)."""
+    watchdog_restarted: list[str] = field(default_factory=list)
+    """Task ids the watchdog restarted after their repair task completed."""
+    watchdog_needs_operator: list[str] = field(default_factory=list)
+    """Task ids the watchdog escalated to an operator (repair failed/archived
+    or otherwise stuck)."""
 
 
 # Bounded registry of recently-reaped worker exits, filled by the reap loop in
@@ -1651,6 +1660,28 @@ def _run_reclaim_phase(
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
+def _run_worker_watchdog_phase(
+    conn: sqlite3.Connection, result: DispatchResult, *, board: Optional[str],
+) -> None:
+    """Scan blocked-worker logs for stuck patterns, spawn repair tasks, and
+    restart/escalate per the configured policy. Runs every tick regardless of
+    spawn budget: recovery is orthogonal to whether this tick can spawn new
+    work. Never raises -- a scan failure must not abort the dispatcher tick."""
+    import hermes_cli.kanban_worker_watchdog as watchdog
+
+    try:
+        config = watchdog.load_watchdog_config()
+        if not config.enabled:
+            return
+        tick_result = watchdog.run_watchdog_tick(conn, board=board, config=config)
+    except Exception:
+        logger.exception("kanban worker watchdog tick failed")
+        return
+    result.watchdog_blocked = tick_result.blocked
+    result.watchdog_restarted = tick_result.restarted
+    result.watchdog_needs_operator = tick_result.needs_operator
+
+
 def _tick_spawn_budget(
     conn: sqlite3.Connection,
     result: DispatchResult,
@@ -1776,6 +1807,7 @@ def _dispatch_once_locked(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans,
     )
+    _run_worker_watchdog_phase(conn, result, board=board)
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )

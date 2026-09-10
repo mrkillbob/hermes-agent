@@ -1769,6 +1769,12 @@ DEFAULT_CONFIG = {
         # On boards that never archive, the notifier GC purges subscriptions for tasks done with no
         # activity for this many days so stale rows aren't scanned forever. 0 = off.
         "done_sub_retention_days": 30,
+        # Worker-log watchdog (hermes_cli/kanban_worker_watchdog.py): scans blocked workers' logs
+        # for stuck patterns (repeated tool failures, context-compression loops, silent reasoning)
+        # and spawns a repair task instead of leaving the worker stuck indefinitely.
+        "worker_watchdog": {
+            "enabled": True,
+        },
     },
     # Bot Mode cross-connection relay (tools/bot_relay.py): envelopes queued by message_agent for
     # agents on other connections wait in an on-disk outbox until the Desktop drains them.

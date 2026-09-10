@@ -323,7 +323,7 @@ def _reconcile_repairs(conn, result: WatchdogTickResult) -> None:
         if repair is None:
             result.needs_operator.append(task_id)
             continue
-        if repair.status in {"done", "archived"}:
+        if repair.status == "done":
             if kb.unblock_task(conn, task_id):
                 _record_event(
                     conn,
@@ -333,7 +333,7 @@ def _reconcile_repairs(conn, result: WatchdogTickResult) -> None:
                 )
                 result.restarted.append(task_id)
             continue
-        if repair.status not in {"blocked", "triage"}:
+        if repair.status not in {"blocked", "triage", "archived"}:
             continue
         prior = conn.execute(
             "SELECT 1 FROM task_events WHERE task_id = ? "
