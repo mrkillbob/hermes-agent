@@ -1,0 +1,72 @@
+"""Tests for repository-scoped virtualenv links in Git worktrees."""
+
+import subprocess
+from pathlib import Path
+
+from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
+
+def _git_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(path)], check=True)
+    return path
+
+
+def _fake_python(environment: Path) -> None:
+    python = environment / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+
+
+def test_bootstrap_links_the_repository_environment_into_a_worktree(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path / "hermes-agent")
+    _fake_python(repo / ".venv")
+    target = tmp_path / "worktree"
+    target.mkdir()
+
+    linked = bootstrap_worktree_environments(
+        repo, target, environment_names=(".venv",), require_python=True
+    )
+
+    assert linked == (".venv",)
+    assert (target / ".venv").is_symlink()
+    assert (target / ".venv").resolve() == (repo / ".venv").resolve()
+
+
+def test_bootstrap_rejects_an_environment_from_another_repository(
+    tmp_path: Path,
+) -> None:
+    repo = _git_repo(tmp_path / "hermes-agent")
+    foreign = _git_repo(tmp_path / "lunabot")
+    _fake_python(foreign / ".venv")
+    (repo / ".venv").symlink_to(foreign / ".venv", target_is_directory=True)
+    target = tmp_path / "worktree"
+    target.mkdir()
+
+    linked = bootstrap_worktree_environments(
+        repo, target, environment_names=(".venv",), require_python=True
+    )
+
+    assert linked == ()
+    assert not (target / ".venv").exists()
+
+
+
+
+def test_venv_python_path_recognizes_native_windows_layout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A native Windows venv exposes Scripts/python.exe, not bin/python (#PR70).
+
+    Mocks sys.platform, not os.name: Python 3.13's Path.__new__ dispatches its concrete class
+    from os.name at call time, so mocking os.name to "nt" on a real POSIX host would make
+    venv_bin_dir()'s internal Path(venv_dir) reconstruction crash trying to build a WindowsPath.
+    """
+    from hermes_cli.worktree_environment import _venv_python_path
+
+    monkeypatch.setattr("hermes_cli.worktree_environment.sys.platform", "win32")
+    assert _venv_python_path(tmp_path) == tmp_path / "Scripts" / "python.exe"
+
+    monkeypatch.setattr("hermes_cli.worktree_environment.sys.platform", "linux")
+    assert _venv_python_path(tmp_path) == tmp_path / "bin" / "python"

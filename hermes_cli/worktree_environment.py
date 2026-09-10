@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -64,6 +65,18 @@ def _same_repository_environment(source_root: Path, resolved_source: Path) -> bo
     )
 
 
+def _venv_python_path(resolved_source: Path) -> Path:
+    """The interpreter entrypoint for a virtualenv rooted at *resolved_source*.
+
+    Native Windows virtualenvs use ``Scripts/python.exe`` rather than ``bin/python``;
+    POSIX (incl. WSL) always uses the ``bin/`` layout. Checks ``sys.platform`` (matching
+    ``venv_bin_dir()``'s own default), not ``os.name``.
+    """
+    from hermes_constants import venv_bin_dir
+    python_name = "python.exe" if sys.platform == "win32" else "python"
+    return venv_bin_dir(resolved_source) / python_name
+
+
 def bootstrap_worktree_environments(
     repo_root: Path,
     target: Path,
@@ -105,7 +118,7 @@ def bootstrap_worktree_environments(
                 if not source.exists():
                     continue
                 resolved_source = source.resolve(strict=True)
-                python = resolved_source / "bin" / "python"
+                python = _venv_python_path(resolved_source)
                 if not resolved_source.is_dir() or not _same_repository_environment(
                     source_root, resolved_source
                 ):
