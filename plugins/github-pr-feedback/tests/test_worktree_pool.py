@@ -145,6 +145,31 @@ def test_pool_reuses_the_same_slot_directory_after_release(tmp_path: Path) -> No
     ledger.close()
 
 
+@pytest.mark.parametrize("filename", ["source.txt", "untracked-work.txt"])
+def test_dirty_released_slot_is_preserved_and_uses_overflow(tmp_path, filename):
+    from github_pr_feedback.ledger import WorktreeSlotLease
+
+    repo = initialized_repository(tmp_path)
+    first = commit(repo, "source.txt", "first PR")
+    second = commit(repo, "source.txt", "second PR")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    pool = PooledLocalGitRepository(ledger, tmp_path / "pool", slot_count=1, owner_pid=lambda: 4242)
+    original = pool.prepare_receipt_worktree(repo, receipt(first))
+    lease = ledger._connection.execute(
+        "SELECT slot_id, lease_version, owner_pid FROM worktree_pool_slots"
+    ).fetchone()
+    pool.release(WorktreeSlotLease(*lease))
+    (original.path / filename).write_text("preserved work", encoding="utf-8")
+
+    prepared = _prepare_receipt_worktree_with_overflow(
+        pool, repo, receipt(second), tmp_path / "overflow"
+    )
+    assert prepared.path != original.path
+    assert (original.path / filename).read_text(encoding="utf-8") == "preserved work"
+    assert (prepared.path / "source.txt").read_text(encoding="utf-8") == "second PR"
+    ledger.close()
+
+
 def test_pool_uses_distinct_slot_directories_for_distinct_repositories(
     tmp_path: Path,
 ) -> None:
@@ -309,12 +334,16 @@ def test_pool_never_removes_the_linked_venv_between_reuses(tmp_path: Path) -> No
     from github_pr_feedback.ledger import WorktreeSlotLease
 
     pool.release(WorktreeSlotLease(lease[0], lease[1], lease[2]))
-    prepared_b = pool.prepare_receipt_worktree(repo, receipt(sha_b, pr_number=2))
+    prepared_b = _prepare_receipt_worktree_with_overflow(
+        pool, repo, receipt(sha_b, pr_number=2), tmp_path / "overflow"
+    )
 
     assert venv_link.is_symlink()
     assert (venv_link / "bin" / "python").is_file()
-    assert not (prepared_b.path / "__pycache__").exists()
-    assert not (prepared_b.path / "stray_untracked.txt").exists()
+    assert (prepared_a.path / "__pycache__" / "junk.pyc").read_text(encoding="utf-8") == "x"
+    assert (prepared_a.path / "stray_untracked.txt").read_text(encoding="utf-8") == "x"
+    assert prepared_b.path != prepared_a.path
+    assert (prepared_b.path / ".venv" / "bin" / "python").is_file()
     ledger.close()
 
 
@@ -411,6 +440,42 @@ def test_reconcile_releases_a_slot_whose_task_is_done(tmp_path: Path) -> None:
 
     prepared_b = pool.prepare_receipt_worktree(repo, receipt(sha_b, pr_number=2))
     assert prepared_b.path == prepared_a.path  # reclaimed without waiting for the lease timeout
+    ledger.close()
+
+
+def test_reconcile_preserves_parent_checkout_until_review_child_finishes(tmp_path):
+    from github_pr_feedback.cli import KanbanSubprocessClient, KanbanCommandResult
+
+    repo = initialized_repository(tmp_path)
+    first = commit(repo, "source.txt", "reviewed source")
+    second = commit(repo, "source.txt", "unrelated PR")
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    pool = PooledLocalGitRepository(ledger, tmp_path / "pool", slot_count=1, owner_pid=lambda: 4242)
+    prepared = pool.prepare_receipt_worktree(repo, receipt(first))
+    pool.bind_task(receipt(first), "parent", "repairs")
+
+    class Runner:
+        child_status = "blocked"
+
+        def run(self, argv):
+            import json
+
+            task_id = argv[-2]
+            payload = {
+                "task": {"id": task_id, "status": "done" if task_id == "parent" else self.child_status},
+                "children": ["child"] if task_id == "parent" else [],
+            }
+            return KanbanCommandResult(0, json.dumps(payload), "")
+
+    runner = Runner()
+    client = KanbanSubprocessClient(runner)
+    assert pool.reconcile_leases(client) == 0
+    with pytest.raises(WorktreePoolExhausted):
+        pool.prepare_receipt_worktree(repo, receipt(second))
+    assert (prepared.path / "source.txt").read_text(encoding="utf-8") == "reviewed source"
+    runner.child_status = "done"
+    assert pool.reconcile_leases(client) == 1
+    assert pool.prepare_receipt_worktree(repo, receipt(second)).expected_sha == second
     ledger.close()
 
 
@@ -610,3 +675,37 @@ def test_pool_excludes_case_colliding_tracked_paths_on_case_insensitive_fs(
     )
     assert result.stdout == ""
     ledger.close()
+
+
+def test_worktree_selects_matching_owned_interpreter_and_preserves_unknown_link(tmp_path):
+    import sys
+    repo = initialized_repository(tmp_path)
+    workspace = initialized_repository(tmp_path / 'target')
+    current = repo / '.venv' / 'bin'
+    current.mkdir(parents=True)
+    (current / 'python').write_text('#!/bin/sh\nprintf "0.0.0\\n"\n', encoding="utf-8")
+    (current / 'python').chmod(0o755)
+    matching = repo / 'venv-preserved' / 'bin'
+    matching.mkdir(parents=True)
+    (matching / 'python').symlink_to(sys.executable)
+    (workspace / '.python-version').write_text('.'.join(map(str, sys.version_info[:3])), encoding="utf-8")
+    (workspace / '.venv').symlink_to(current.parent)
+    LocalGitRepository._link_governed_venv(repo, workspace)
+    assert (workspace / '.venv').resolve() == matching.parent
+    other = tmp_path / 'other'
+    other.mkdir()
+    (workspace / '.venv').unlink()
+    (workspace / '.venv').symlink_to(other)
+    with pytest.raises(RuntimeError, match='inconsistent'):
+        LocalGitRepository._link_governed_venv(repo, workspace)
+    assert (workspace / '.venv').resolve() == other
+
+
+def test_missing_matching_environment_does_not_link_wrong_interpreter(tmp_path):
+    repo = initialized_repository(tmp_path)
+    workspace = initialized_repository(tmp_path / 'target')
+    make_governed_venv(repo)
+    (workspace / '.python-version').write_text('0.0.0', encoding="utf-8")
+    with pytest.raises(RuntimeError, match='matches Python'):
+        LocalGitRepository._link_governed_venv(repo, workspace)
+    assert not (workspace / '.venv').is_symlink()

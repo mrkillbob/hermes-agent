@@ -221,6 +221,41 @@ def test_handoff_fail_marks_only_inflight_rows(monkeypatch):
         server._sessions.pop(sid, None)
 
 
+def test_submit_does_not_publish_worktree_before_root_lease(monkeypatch):
+    class DbContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    session = {
+        "session_key": "draft-key",
+        "source": "desktop",
+        "conversation_worktree": {},
+        "conversation_root_lease": None,
+    }
+    binding = object()
+    metadata = {"root_session_id": "draft-key", "path": "/tmp/draft"}
+
+    monkeypatch.setattr(server, "_session_db", lambda _session: DbContext())
+    monkeypatch.setattr(server, "_bind_conversation_worktree_for_new_root", lambda *args, **kwargs: binding)
+    monkeypatch.setattr(server, "_conversation_worktree_metadata", lambda _binding: metadata)
+
+    def fail_acquire(_binding, *, surface):
+        assert surface == "desktop"
+        raise RuntimeError("lease unavailable")
+
+    monkeypatch.setattr(server, "_acquire_conversation_root_lease", fail_acquire)
+
+    with pytest.raises(RuntimeError, match="lease unavailable"):
+        server._bind_conversation_worktree_on_submit(session)
+
+    assert session["conversation_worktree"] == {}
+    assert session["conversation_root_lease"] is None
+    assert "cwd" not in session
+
+
 def test_dashboard_process_isolation_config_defaults_without_default_merge(monkeypatch):
     """tui_gateway.server::_load_cfg is raw YAML, so defaults live at read site."""
     monkeypatch.setattr(server, "_load_cfg", lambda: {})
@@ -277,10 +312,17 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
 
     fake_supervisor = FakeSupervisor()
     seed_history = [{"role": "user", "content": "previous"}]
-    server._sessions["iso-sid"] = _session(history=list(seed_history))
+    server._sessions["iso-sid"] = _session(
+        history=list(seed_history), source="desktop", cwd="/original-workspace",
+        conversation_worktree={},
+    )
     server._sessions["iso-sid"]["agent"] = None
     server._sessions["iso-sid"]["agent_ready"] = threading.Event()
     parent_writes = {"ensure_session": 0, "persist_seed": 0}
+    binding = {
+        "root_session_id": "iso-sid", "path": "/certified-worktree",
+        "branch": "hermes/session/iso-sid", "base_commit": "a" * 40,
+    }
     monkeypatch.setattr(
         server,
         "_load_cfg",
@@ -300,6 +342,11 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
             "persist_seed", parent_writes["persist_seed"] + 1
         ),
     )
+    def bind_on_submit(session):
+        session["conversation_worktree"] = binding
+        session["cwd"] = binding["path"]
+
+    monkeypatch.setattr(server, "_bind_conversation_worktree_on_submit", bind_on_submit)
     monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: fake_supervisor)
 
     try:
@@ -315,8 +362,10 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
         assert fake_supervisor.frames[0]["sid"] == "iso-sid"
         assert fake_supervisor.frames[0]["text"] == "hello"
         assert fake_supervisor.frames[0]["history"] == seed_history
+        assert fake_supervisor.frames[0]["cwd"] == binding["path"]
+        assert fake_supervisor.frames[0]["conversation_worktree"] == binding
         assert server._sessions["iso-sid"]["history"] == seed_history
-        assert parent_writes == {"ensure_session": 0, "persist_seed": 0}
+        assert parent_writes == {"ensure_session": 1, "persist_seed": 1}
         assert server._sessions["iso-sid"]["running"] is True
 
         fake_supervisor.callback(
@@ -1809,10 +1858,12 @@ def test_voice_toggle_on_carries_stop_hint(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "tools.voice_mode",
-        types.SimpleNamespace(
-            check_voice_requirements=lambda: {"available": True, "details": ""},
-            voice_stop_hint=lambda: 'Say "halt" to end the voice chat.',
-        ),
+        types.SimpleNamespace(check_voice_requirements=lambda: {"available": True, "details": ""}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.voice_mode_transcript",
+        types.SimpleNamespace(voice_stop_hint=lambda: 'Say "halt" to end the voice chat.'),
     )
     monkeypatch.setenv("HERMES_VOICE", "0")
 
@@ -1824,11 +1875,8 @@ def test_voice_toggle_on_carries_stop_hint(monkeypatch):
     # Disabled stop phrases → empty hint, clients show nothing.
     monkeypatch.setitem(
         sys.modules,
-        "tools.voice_mode",
-        types.SimpleNamespace(
-            check_voice_requirements=lambda: {"available": True, "details": ""},
-            voice_stop_hint=lambda: "",
-        ),
+        "tools.voice_mode_transcript",
+        types.SimpleNamespace(voice_stop_hint=lambda: ""),
     )
     on_resp = _dispatch_sync(
         {"id": "voice-on2", "method": "voice.toggle", "params": {"action": "on"}}
@@ -3944,7 +3992,7 @@ def test_session_resume_profile_uses_profile_db_cwd(monkeypatch, tmp_path):
 
     monkeypatch.setenv("TERMINAL_CWD", str(launch_cwd))
     monkeypatch.setattr(server, "_profile_home", lambda _profile: profile_home)
-    monkeypatch.setattr("hermes_state.get_shared_session_db", lambda db_path=None: profile_db)
+    monkeypatch.setattr("hermes_state_registry.acquire", lambda db_path=None: profile_db)
     monkeypatch.setattr(server, "_get_db", lambda: launch_db)
     monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
     monkeypatch.setattr(server, "_set_session_context", lambda target: [])
@@ -4006,11 +4054,11 @@ def test_session_cwd_set_profile_session_updates_profile_db(monkeypatch, tmp_pat
 
     profile_db = ProfileDB()
 
-    import tools.terminal_tool as terminal_tool
+    import tools.terminal_tool_lifecycle as terminal_tool_lifecycle
 
-    monkeypatch.setattr("hermes_state.get_shared_session_db", lambda db_path=None: profile_db)
+    monkeypatch.setattr("hermes_state_registry.acquire", lambda db_path=None: profile_db)
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr(terminal_tool, "cleanup_vm", lambda _key: None)
+    monkeypatch.setattr(terminal_tool_lifecycle, "cleanup_vm", lambda _key: None)
     monkeypatch.setattr(server, "_register_session_cwd", lambda _session: None)
 
     session = {"session_key": target, "profile_home": str(profile_home)}
@@ -5351,27 +5399,62 @@ def test_finalize_session_closes_slash_worker(monkeypatch):
 
 
 def test_close_transport_rebinds_session_to_remaining_viewer(monkeypatch):
-    """Closing a pop-out window's transport must re-bind the session to a
-    still-open window instead of stranding it on the drop sentinel (#83716)."""
+    """Closing a pop-out window's transport must leave the session with the
+    still-open window instead of stranding it on the drop sentinel (#83716).
+
+    The rebind #83716 added is gone; multi-client fan-out subsumes it. Both
+    windows are attached to the slot at once, so the pop-out is a fan-out peer
+    rather than a viewer waiting to be promoted, and closing it detaches that
+    peer while retaining the surviving ordered mailbox. This pins the same
+    guarantee through the mechanism that replaced the rebind: the session is
+    not parked, not reaped, not handed to the orphan reaper, and the surviving
+    window keeps receiving frames.
+    """
     reap_calls = []
     monkeypatch.setattr(server, "_schedule_ws_orphan_reap", lambda sid: reap_calls.append(sid))
 
     class _LiveTransport:
-        def write(self, *a, **k):
+        def __init__(self):
+            self.frames = []
+            self.received = threading.Event()
+
+        def write(self, obj=None, *a, **k):
+            self.frames.append(obj)
+            self.received.set()
             return True
 
     main = _LiveTransport()
     popout = _LiveTransport()
-    session = _session(transport=popout, running=False)
+    session = _session(transport=None, running=False)
+    # Build the state the way production does: every window that resumes goes
+    # through _live_session_payload, which attaches it into the slot and then
+    # stamps it into the viewers registry.
+    server._attach_session_transport(session, main)
+    server._attach_session_transport(session, popout)
     session["viewers"] = {main: 100.0, popout: 200.0}
     server._sessions["multi-sid"] = session
+    assert isinstance(session["transport"], server.FanoutTransport)
 
-    reaped, detached = server._close_sessions_for_transport(popout)
+    try:
+        reaped, detached = server._close_sessions_for_transport(popout)
 
-    assert reaped == 0 and detached == 0
-    assert session["transport"] is main
-    assert "multi-sid" not in reap_calls
-    assert server._ws_session_is_orphaned(session) is False
+        assert reaped == 0 and detached == 0
+        assert server._session_transport_contains(session, main)
+        assert not server._session_transport_contains(session, popout)
+        assert "multi-sid" not in reap_calls
+        assert server._ws_session_is_orphaned(session) is False
+
+        # And it is still a working stream, not just a surviving reference.
+        server._emit("message.delta", "multi-sid", {"text": "still here"})
+        assert main.received.wait(timeout=5)
+        assert [(f.get("params") or {}).get("type") for f in main.frames] == [
+            "message.delta"
+        ]
+        assert popout.frames == []
+    finally:
+        # The fake slot must not outlive the test: _sessions is module state and
+        # later sweeps would walk it.
+        server._sessions.pop("multi-sid", None)
 
 
 def test_close_transport_detaches_when_no_viewers_remain(monkeypatch):
@@ -5397,7 +5480,15 @@ def test_close_transport_detaches_when_no_viewers_remain(monkeypatch):
 
 
 def test_close_transport_skips_dead_remaining_viewers(monkeypatch):
-    """A viewer whose socket is already dead must not win the re-bind."""
+    """A viewer whose socket is already dead must not hold the session open.
+
+    #83716's rebind refused to hand the session to a dead viewer; fan-out
+    membership keeps that filter through _transport_is_live_peer, which is what
+    decides whether anything survives the departing client. Both windows are
+    ATTACHED here, which is the state production builds — a viewer that was
+    never attached leaves the slot single-client and exercises the ordinary park
+    path instead of this one.
+    """
     reap_calls = []
     monkeypatch.setattr(server, "_schedule_ws_orphan_reap", lambda sid: reap_calls.append(sid))
 
@@ -5406,17 +5497,25 @@ def test_close_transport_skips_dead_remaining_viewers(monkeypatch):
             return True
 
     dead = _LiveTransport()
+    popout = _LiveTransport()
+    session = _session(transport=None, running=False)
+    server._attach_session_transport(session, dead)
+    server._attach_session_transport(session, popout)
+    session["viewers"] = {dead: 100.0, popout: 200.0}
+    assert isinstance(session["transport"], server.FanoutTransport)
+    # The socket goes away without a disconnect reaching the gateway; the latch
+    # _transport_is_dead reads is the only trace it leaves behind.
     dead._closed = True
-    owner = _LiveTransport()
-    session = _session(transport=owner, running=False)
-    session["viewers"] = {dead: 100.0, owner: 200.0}
     server._sessions["dead-viewer-sid"] = session
 
-    reaped, detached = server._close_sessions_for_transport(owner)
+    try:
+        reaped, detached = server._close_sessions_for_transport(popout)
 
-    assert detached == 1
-    assert session["transport"] is server._detached_ws_transport
-    assert reap_calls == ["dead-viewer-sid"]
+        assert reaped == 0 and detached == 1
+        assert session["transport"] is server._detached_ws_transport
+        assert reap_calls == ["dead-viewer-sid"]
+    finally:
+        server._sessions.pop("dead-viewer-sid", None)
 
 
 def test_live_session_payload_registers_transport_as_viewer():
@@ -5496,7 +5595,7 @@ def test_resume_rebind_cancels_pending_ws_orphan_reap(monkeypatch):
 
 
 def test_claim_or_reuse_live_winner_cancels_pending_reap(monkeypatch):
-    """A resume that reuses the live winner cancels the winner's pending reap."""
+    """The winner's pending reap is cancelled only once guarded reuse is accepted."""
     cancelled = []
 
     class _Timer:
@@ -5529,6 +5628,17 @@ def test_claim_or_reuse_live_winner_cancels_pending_reap(monkeypatch):
         )
 
         assert live == ("winner-sid", winner)
+        assert "winner-sid" in server._pending_ws_reaps
+        assert cancelled == []
+        assert winner["transport"] is server._detached_ws_transport
+
+        transport = object()
+        monkeypatch.setattr(server, "current_transport", lambda: transport)
+        ctx = server._Resume(1, {"omit_messages": True}, "stored-claim")
+        response = server._resume_reuse_live(ctx, *live)
+
+        assert response["result"]["session_id"] == "winner-sid"
+        assert winner["transport"] is transport
         assert "winner-sid" not in server._pending_ws_reaps
         assert len(cancelled) == 1
     finally:
@@ -7610,6 +7720,9 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
         }
         for index in range(1, 4)
     ]
+    # Consecutive completions share one turn (#104671); a watch_match is a turn
+    # barrier, so it is the in-flight turn behind which batch_2/batch_3 must survive.
+    events[0].update(type="watch_match", pattern="owned-1")
     isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
     for event in events:
         isolated_queue.put(event)
@@ -7952,7 +8065,7 @@ def test_ensure_session_db_row_stamps_profile_name(monkeypatch, tmp_path):
         def close(self):
             pass
 
-    monkeypatch.setattr("hermes_state.get_shared_session_db", _ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", _ProfileDB)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
 
     server._ensure_session_db_row(
@@ -9849,7 +9962,7 @@ def test_config_set_model_recovers_failed_profile_resume_after_build_completes(
         "hermes_cli.model_selection_guards.combined_selection_warning",
         lambda *args, **kwargs: None,
     )
-    monkeypatch.setattr("hermes_state.get_shared_session_db", FakeDb)
+    monkeypatch.setattr("hermes_state_registry.acquire", FakeDb)
     monkeypatch.setattr(server, "_make_agent", fake_make_agent)
     monkeypatch.setattr(server, "_transfer_db_to_agent", barrier_transfer)
     monkeypatch.setattr(
@@ -10914,7 +11027,7 @@ def test_slash_exec_r7_read_commands_use_metadata_mirror_flag_on(monkeypatch):
         "history": "live question from state db",
         "prompt": "host system prompt",
         "status": "Tokens: 140",
-        "context": "Context usage: ~80 / 1,000 tokens",
+        "context": "Context usage: 80 / 1,000 tokens",
         "tools": "terminal",
         "help": "/status",
     }
@@ -10932,6 +11045,16 @@ def test_slash_exec_r7_read_commands_use_metadata_mirror_flag_on(monkeypatch):
             assert expected in resp["result"]["output"]
             assert "stale parent mirror" not in resp["result"]["output"]
             assert "(._.)" not in resp["result"]["output"]
+        mirrored_usage = server._sessions["sid"]["_metadata_mirror"]["usage"]
+        for estimated in (True, False):
+            mirrored_usage["context_estimated"] = estimated
+            mirrored_usage["context_source"] = "local_estimate" if estimated else "provider_usage"
+            response = server.handle_request({
+                "id": "context-provenance", "method": "slash.exec",
+                "params": {"command": "context", "session_id": "sid"},
+            })
+            mark = "~" if estimated else ""
+            assert f"Context usage: {mark}80 / 1,000 tokens ({mark}8.0%)" in response["result"]["output"]
     finally:
         server._sessions.pop("sid", None)
 
@@ -11584,7 +11707,7 @@ def test_plugins_list_surfaces_loader_error(monkeypatch):
 
 def test_complete_slash_surfaces_completer_error(monkeypatch):
     with patch(
-        "hermes_cli.commands.SlashCommandCompleter",
+        "hermes_cli.commands_completion.SlashCommandCompleter",
         side_effect=Exception("no completer"),
     ):
         resp = server.handle_request(
@@ -12207,9 +12330,9 @@ def test_session_info_includes_mcp_servers(monkeypatch):
         {"name": "filesystem", "transport": "stdio", "tools": 4, "connected": True},
         {"name": "broken", "transport": "stdio", "tools": 0, "connected": False},
     ]
-    fake_mod = types.ModuleType("tools.mcp_tool")
+    fake_mod = types.ModuleType("tools.mcp_tool_discovery")
     fake_mod.get_mcp_status = lambda: fake_status
-    monkeypatch.setitem(sys.modules, "tools.mcp_tool", fake_mod)
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool_discovery", fake_mod)
 
     info = server._session_info(types.SimpleNamespace(tools=[], model="", provider="openai-codex"))
 
@@ -14677,8 +14800,10 @@ def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
     def _broken_shared(_db_path=None):
         raise RuntimeError("locking protocol")
 
-    fake_mod.get_shared_session_db = _broken_shared
     monkeypatch.setitem(sys.modules, "hermes_state", fake_mod)
+    fake_registry = types.ModuleType("hermes_state_registry")
+    fake_registry.acquire = _broken_shared
+    monkeypatch.setitem(sys.modules, "hermes_state_registry", fake_registry)
     monkeypatch.setattr(server, "_db", None)
     monkeypatch.setattr(server, "_db_error", None)
 
@@ -14700,8 +14825,10 @@ def test_ensure_session_db_row_false_when_store_unavailable(monkeypatch):
     def _broken_shared(_db_path=None):
         raise RuntimeError("utf-8 boom")
 
-    fake_mod.get_shared_session_db = _broken_shared
     monkeypatch.setitem(sys.modules, "hermes_state", fake_mod)
+    fake_registry = types.ModuleType("hermes_state_registry")
+    fake_registry.acquire = _broken_shared
+    monkeypatch.setitem(sys.modules, "hermes_state_registry", fake_registry)
     monkeypatch.setattr(server, "_db", None)
     monkeypatch.setattr(server, "_db_error", None)
 
@@ -15053,7 +15180,7 @@ def test_session_list_honors_params_profile_opens_profile_db(monkeypatch, tmp_pa
 
     monkeypatch.setattr(server, "_profile_home", lambda p: profile_home if p == "mlperf" else None)
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
 
     resp = server.handle_request(
         {
@@ -15094,7 +15221,7 @@ def test_session_most_recent_honors_params_profile(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "_profile_home", lambda p: profile_home if p == "mlperf" else None)
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB2)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB2)
 
     resp = server.handle_request(
         {
@@ -15221,7 +15348,7 @@ def test_session_delete_honors_params_profile_sessions_dir(monkeypatch, tmp_path
 
     monkeypatch.setattr(server, "_profile_home", lambda p: profile_home if p == "mlperf" else None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
 
     resp = server.handle_request(
         {
@@ -15288,7 +15415,7 @@ def test_session_title_uses_session_profile_db_not_launch(monkeypatch, tmp_path)
         "last_active": 1.0,
     }
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     try:
         set_resp = server.handle_request(
             {
@@ -15345,7 +15472,7 @@ def test_session_history_uses_session_profile_db(monkeypatch, tmp_path):
         "last_active": 1.0,
     }
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     try:
         resp = server.handle_request(
             {"id": "1", "method": "session.history", "params": {"session_id": "sid"}}
@@ -15432,7 +15559,7 @@ def test_session_status_uses_session_profile_db(monkeypatch, tmp_path):
         "last_active": 1.0,
     }
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     try:
         resp = server.handle_request(
             {"id": "1", "method": "session.status", "params": {"session_id": "sid"}}
@@ -15474,7 +15601,7 @@ def test_teardown_ends_session_in_profile_db(monkeypatch, tmp_path):
             seen["closed"] = True
 
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     session = {
         "session_key": "ml-sess",
         "profile_home": str(profile_home),
@@ -15493,6 +15620,7 @@ def test_session_branch_writes_to_parent_profile_db(monkeypatch, tmp_path):
     """session.branch must copy history into the parent's profile state.db."""
     profile_home = tmp_path / "profiles" / "mlperf"
     profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     seen: dict = {"msgs": []}
 
     class LaunchDB:
@@ -15567,7 +15695,7 @@ def test_session_branch_writes_to_parent_profile_db(monkeypatch, tmp_path):
     }
     server._sessions["parent"] = parent
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: (None, None))
 
     def _fake_make_agent(*a, **k):
@@ -15931,6 +16059,7 @@ def test_session_branch_installs_parent_profile_secret_scope(monkeypatch, tmp_pa
 
     profile_home = tmp_path / "profiles" / "mlperf"
     profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (profile_home / ".env").write_text(
         "PROXMOX_TOKEN=mlperf-secret\n", encoding="utf-8"
     )
@@ -15989,7 +16118,7 @@ def test_session_branch_installs_parent_profile_secret_scope(monkeypatch, tmp_pa
     }
     server._sessions["parent"] = parent
     monkeypatch.setattr(server, "_get_db", lambda: ProfileDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: (None, None))
 
     def _fake_make_agent(*a, **k):
@@ -16023,6 +16152,7 @@ def test_session_branch_uses_persisted_display_history_after_compaction(monkeypa
     """A live branch must copy the complete visible transcript, not the compacted model tail."""
     profile_home = tmp_path / "profiles" / "mlperf"
     profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     seen: dict = {"msgs": []}
 
     display_history = [
@@ -16106,7 +16236,7 @@ def test_session_branch_uses_persisted_display_history_after_compaction(monkeypa
     }
     server._sessions["parent"] = parent
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     monkeypatch.setattr(server, "_claim_active_session_slot", lambda *args, **kwargs: (None, None))
     monkeypatch.setattr(server, "_make_agent", lambda *args, **kwargs: FakeAgent())
     monkeypatch.setattr(server, "_set_session_context", lambda *args, **kwargs: {})
@@ -16166,7 +16296,7 @@ def test_pending_title_finalizer_uses_session_profile_db(monkeypatch, tmp_path):
             seen["closed"] = True
 
     monkeypatch.setattr(server, "_get_db", lambda: LaunchDB())
-    monkeypatch.setattr("hermes_state.get_shared_session_db", ProfileDB)
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
     session = {
         "session_key": "ml-sess",
         "pending_title": "deferred-title",
@@ -16997,6 +17127,7 @@ def test_session_most_recent_handles_db_unavailable(monkeypatch):
 
 
 def test_verification_status_returns_recorded_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_VERIFY_ON_STOP", "1")  # ledger is inert when the guard is off
     profile_home = tmp_path / "profiles" / "verify"
     profile_home.mkdir(parents=True)
     monkeypatch.setattr(server, "_profile_home", lambda p: profile_home if p == "verify" else None)
@@ -17037,6 +17168,7 @@ def test_verification_status_returns_recorded_evidence(tmp_path, monkeypatch):
 
 
 def test_verification_status_outside_workspace_is_not_applicable(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_VERIFY_ON_STOP", "1")  # ledger is inert when the guard is off
     # A cwd with no project facts (outside any code workspace) must report
     # not_applicable. Force the "no facts" precondition rather than relying on
     # tmp_path's ancestors being pristine — a stray marker file in a shared
@@ -17152,7 +17284,7 @@ def test_browser_manage_status_does_not_call_get_cdp_override(monkeypatch):
             "_get_cdp_override must not run on /browser status (network I/O)"
         )
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         resp = server.handle_request(
             {"id": "1", "method": "browser.manage", "params": {"action": "status"}}
         )
@@ -17175,7 +17307,7 @@ def test_browser_manage_connect_sets_env_and_cleans_twice(monkeypatch):
         cleanup_all_browsers=_cleanup_all,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=True)
         resp = server.handle_request(
             {
@@ -17201,7 +17333,7 @@ def test_browser_manage_connect_defaults_to_loopback(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         urls = _stub_urlopen_capture(monkeypatch, ok=True)
         resp = server.handle_request(
             {"id": "1", "method": "browser.manage", "params": {"action": "connect"}}
@@ -17231,7 +17363,7 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=False)
         with (
             patch(
@@ -17290,7 +17422,7 @@ def test_browser_manage_connect_no_session_skips_progress_events(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=False)
         with (
             patch(
@@ -17325,7 +17457,7 @@ def test_browser_manage_connect_handles_null_url(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=True)
         resp = server.handle_request(
             {
@@ -17387,7 +17519,7 @@ def test_browser_manage_connect_default_local_retries_after_launch(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
     launched = ChromeDebugLaunch(launched=True)
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         with (
             patch(
                 "hermes_cli.browser_connect.launch_chrome_debug",
@@ -17435,7 +17567,7 @@ def test_browser_manage_connect_finds_ipv6_only_browser(monkeypatch):
     import urllib.request
 
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         resp = server.handle_request(
             {"id": "1", "method": "browser.manage", "params": {"action": "connect"}}
         )
@@ -17479,7 +17611,7 @@ def test_browser_manage_connect_squatted_port_launches_on_alternate(monkeypatch)
         launch_ports.append(port)
         return ChromeDebugLaunch(launched=True)
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         with (
             patch("hermes_cli.browser_connect.launch_chrome_debug", side_effect=_launch),
             patch("hermes_cli.browser_connect.local_port_in_use", return_value=True),
@@ -17506,7 +17638,7 @@ def test_browser_manage_connect_rejects_unreachable_endpoint(monkeypatch):
         ),
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=False)
         resp = server.handle_request(
             {
@@ -17531,7 +17663,7 @@ def test_browser_manage_connect_normalizes_bare_host_port(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=True)
         resp = server.handle_request(
             {
@@ -17557,7 +17689,7 @@ def test_browser_manage_connect_strips_discovery_path(monkeypatch):
         cleanup_all_browsers=lambda: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         _stub_urlopen(monkeypatch, ok=True)
         resp = server.handle_request(
             {
@@ -17589,7 +17721,7 @@ def test_browser_manage_connect_preserves_devtools_browser_endpoint(monkeypatch)
         def __exit__(self, *a):
             return False
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         # If urlopen is reached for a concrete ws endpoint, the test
         # would still pass because _stub_urlopen returned ok=True before;
         # patch it to assert-fail so we prove the HTTP probe is skipped.
@@ -17628,7 +17760,7 @@ def test_browser_manage_connect_local_devtools_ws_preserves_path(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         with patch("socket.create_connection", return_value=_OkSocket()):
             resp = server.handle_request(
                 {
@@ -17697,7 +17829,7 @@ def test_browser_manage_connect_concrete_ws_skips_http_probe(monkeypatch):
         seen_targets.append(addr)
         return _OkSocket()
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         # urlopen would 404/ECONNREFUSED on a real hosted CDP endpoint;
         # asserting it's never called proves the probe was skipped.
         with patch(
@@ -17728,7 +17860,7 @@ def test_browser_manage_connect_concrete_ws_tcp_unreachable(monkeypatch):
     )
     concrete = "ws://offline.example/devtools/browser/missing"
 
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         with patch("socket.create_connection", side_effect=OSError("ECONNREFUSED")):
             resp = server.handle_request(
                 {
@@ -17751,7 +17883,7 @@ def test_browser_manage_disconnect_drops_env_and_cleans(monkeypatch):
         ),
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
-    with patch.dict(sys.modules, {"tools.browser_tool": fake}):
+    with patch.dict(sys.modules, {"tools.browser_tool_lifecycle": fake}):
         resp = server.handle_request(
             {"id": "1", "method": "browser.manage", "params": {"action": "disconnect"}}
         )
@@ -20131,11 +20263,15 @@ def _fake_tts_modules(monkeypatch, *, requirements=True, playback_stops=None, li
         "tools.tts_tool",
         types.SimpleNamespace(
             check_tts_requirements=lambda: requirements,
-            stream_tts_to_speaker=fake_stream,
             _get_provider=lambda cfg: "edge",
             _load_tts_config=lambda: {},
             get_env_value=lambda key, default="": default,
         ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.tts_tool_speaker",
+        types.SimpleNamespace(stream_tts_to_speaker=fake_stream),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -20705,7 +20841,7 @@ def test_prompt_submit_passes_persist_user_message_to_agent(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_prompt_submit_releases_old_history_before_heap_trim(monkeypatch):
+def test_prompt_submit_releases_old_history_before_heap_trim(monkeypatch, tmp_path):
     """The trim boundary must not retain the just-pruned history snapshots."""
     observed = {}
     cleanup_order = []
@@ -20744,7 +20880,10 @@ def test_prompt_submit_releases_old_history_before_heap_trim(monkeypatch):
         observed["run_kwargs"] = caller_locals.get("run_kwargs")
 
     session = _session(agent=_Agent())
-    session["profile_home"] = "/tmp/test-profile"
+    profile_home = tmp_path / "profiles" / "worker"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    session["profile_home"] = str(profile_home)
     session["history"] = [
         {"role": "tool", "tool_call_id": "old", "content": "x" * 20_000}
     ]
@@ -20786,7 +20925,7 @@ def test_fallback_session_info_reports_session_cwd_not_launch_dir(monkeypatch):
     wrong project for any session resumed without a built agent (#71254).
     """
     monkeypatch.setattr(server, "_default_session_cwd", lambda: "/gateway/launch/dir")
-    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda cwd: "bb/feature")
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "bb/feature")
     monkeypatch.setattr(server, "_project_info_for_cwd", lambda cwd: None)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
 
@@ -20803,7 +20942,7 @@ def test_fallback_session_info_always_emits_branch(monkeypatch):
     after switching into a non-git session.
     """
     monkeypatch.setattr(server, "_default_session_cwd", lambda: "/gateway/launch/dir")
-    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda cwd: "")
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "")
     monkeypatch.setattr(server, "_project_info_for_cwd", lambda cwd: None)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
 
@@ -22298,13 +22437,13 @@ def test_workspace_move_rehomes_running_session(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "_profile_db", _fake_db)
     monkeypatch.setattr(
-        server,
-        "_git_branch_for_cwd",
+        server.git_probe,
+        "branch",
         lambda cwd: "main",
     )
     monkeypatch.setattr(
-        server,
-        "_git_common_repo_root_for_cwd",
+        server.git_probe,
+        "common_repo_root",
         lambda cwd: str(new_cwd),
     )
 
@@ -22321,3 +22460,63 @@ def test_workspace_move_rehomes_running_session(monkeypatch, tmp_path):
     assert captured["row_update"] == (target, str(new_cwd))
     assert live["cwd"] == str(new_cwd)
     assert live.get("explicit_cwd") is True
+
+
+def test_workspace_move_rejects_managed_running_session(monkeypatch, tmp_path):
+    target = "managed-session"
+    new_cwd = tmp_path / "dest-project"
+    new_cwd.mkdir()
+    live = {
+        "session_key": target,
+        "running": False,
+        "cwd": str(tmp_path / "old-project"),
+        "conversation_worktree": {"path": str(tmp_path / "certified")},
+    }
+    server._sessions["managed-sid"] = live
+
+    res = server._methods["session.workspace.move"](
+        "rid", {"session_key": target, "cwd": str(new_cwd)}
+    )
+
+    assert res["error"]["code"] == 4018
+    assert live["cwd"] != str(new_cwd)
+
+
+def test_workspace_move_rejects_managed_stored_session(monkeypatch, tmp_path):
+    target = "managed-stored-session"
+    new_cwd = tmp_path / "dest-project"
+    new_cwd.mkdir()
+    captured = {}
+
+    class FakeDB:
+        def get_session(self, session_id):
+            return {"id": session_id}
+
+        def get_conversation_worktree(self, session_id):
+            return object() if session_id == target else None
+
+        def is_explicit_fork_child(self, _session_id):
+            return False
+
+        def update_session_cwd(self, *_args, **_kwargs):
+            captured["row_update"] = True
+
+        def close(self):
+            pass
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def _fake_db(_params):
+        yield FakeDB()
+
+    monkeypatch.setattr(server, "_profile_db", _fake_db)
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "main")
+    monkeypatch.setattr(server.git_probe, "common_repo_root", lambda cwd: str(new_cwd))
+
+    res = server._methods["session.workspace.move"](
+        "rid", {"session_key": target, "cwd": str(new_cwd)}
+    )
+
+    assert res["error"]["code"] == 4018
+    assert "row_update" not in captured

@@ -254,11 +254,21 @@ class TestToolCallLimit(unittest.TestCase):
         self.assertFalse(_tool_call_limit_reached(4, 5))
         self.assertTrue(_tool_call_limit_reached(5, 5))
 
-    def test_negative_limit_is_rejected(self):
+    def test_negative_limit_disables_it_same_as_zero(self):
+        """The documented contract (cli-config.yaml.example) is `<= 0 = unlimited`,
+        and _tool_call_limit_reached already treats every non-positive value as
+        unbounded -- the config validator must not reject exactly the values the
+        adjacent limit predicate treats as valid."""
+        from tools.code_execution_tool import _configured_max_tool_calls, _tool_call_limit_reached
+
+        self.assertEqual(_configured_max_tool_calls({"max_tool_calls": -1}), -1)
+        self.assertFalse(_tool_call_limit_reached(100_000, -1))
+
+    def test_non_integer_limit_is_rejected(self):
         from tools.code_execution_tool import _configured_max_tool_calls
 
-        with self.assertRaisesRegex(ValueError, "cannot be negative"):
-            _configured_max_tool_calls({"max_tool_calls": -1})
+        with self.assertRaisesRegex(ValueError, "must be an integer"):
+            _configured_max_tool_calls({"max_tool_calls": "unlimited"})
 
 
 @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
@@ -267,7 +277,7 @@ class TestExecuteCode(unittest.TestCase):
 
     def _run(self, code, enabled_tools=None):
         """Helper: run code with mocked handle_function_call."""
-        with patch("tools.code_execution_tool._rpc_server_loop") as mock_rpc:
+        with patch("tools.code_execution_rpc._rpc_server_loop") as mock_rpc:
             # Use real execution but mock the tool dispatcher
             pass
         # Actually run with full integration, mocking at the model_tools level
@@ -478,7 +488,7 @@ class TestStubSchemaDrift(unittest.TestCase):
         import tools.file_tools  # noqa: F401 - registers read_file, write_file, patch, search_files
         import tools.web_tools  # noqa: F401 - registers web_search, web_extract
 
-        for tool_name, (func_name, sig, doc, args_expr) in _TOOL_STUBS.items():
+        for tool_name, (sig, doc, args_expr) in _TOOL_STUBS.items():
             entry = registry._tools.get(tool_name)
             if not entry:
                 # Tool might not be registered yet (e.g., terminal uses a
@@ -888,7 +898,7 @@ class TestRpcTokenAuthorization(unittest.TestCase):
         Sends each dict in *requests* as a newline-delimited JSON message
         and returns the list of decoded JSON responses.
         """
-        from tools.code_execution_tool import _rpc_server_loop
+        from tools.code_execution_rpc import _rpc_server_loop
 
         # socketpair gives us a connected client end and a "server" end we
         # can hand to accept() by wrapping it in a tiny listener shim.
