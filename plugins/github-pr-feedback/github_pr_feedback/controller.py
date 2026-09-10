@@ -1057,7 +1057,10 @@ class PooledLocalGitRepository:
     def _configure_case_collision_sparse_checkout(
         self, workspace: Path, head_sha: str
     ) -> None:
-        """Keep case-colliding tracked paths out of case-insensitive slots."""
+        """Fail closed on a case-insensitive slot whenever the requested head contains
+        case-colliding tracked paths -- silently sparse-checking them out of the tree
+        would let a local CI run pass, and issue a merge-authorizing receipt, without
+        ever testing the colliding files' actual content."""
 
         ignore_case = self._run(
             ["git", "-C", str(workspace), "config", "--bool", "core.ignorecase"],
@@ -1077,22 +1080,11 @@ class PooledLocalGitRepository:
             if len(names_for_key) > 1
             for name in names_for_key
         )
-        patterns = ["/*", *(f"!/{name}" for name in colliding_names)]
-        self._run(
-            ["git", "-C", str(workspace), "sparse-checkout", "init", "--no-cone"]
-        )
-        self._run(
-            [
-                "git",
-                "-C",
-                str(workspace),
-                "sparse-checkout",
-                "set",
-                "--no-cone",
-                *patterns,
-            ]
-        )
-        self._run(["git", "-C", str(workspace), "sparse-checkout", "reapply"])
+        if colliding_names:
+            raise ExactHeadUnavailable(
+                "exact head contains case-colliding tracked paths on a "
+                f"case-insensitive checkout: {', '.join(colliding_names)}"
+            )
 
     def _slot_belongs_to(self, path: Path, workspace: Path) -> bool:
         """Whether ``workspace`` is a live worktree of the repository at ``path``."""
