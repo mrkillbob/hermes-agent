@@ -179,7 +179,17 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
   const gatewayLabel = bot.connectionLabel || (bot.connectionId === 'local' ? 'This device' : '')
   const showDetailsRow = Boolean(showHandle || displayPreview || fromBot)
 
-  const rowTooltip = [displayName(bot, meta), `@${handle}`, gatewayLabel, sourceStatus.label]
+  const federationLabel = bot.federation_role?.display_name || bot.federation_role?.role_id
+  const departmentLabel = bot.federation_role?.department
+
+  const rowTooltip = [
+    displayName(bot, meta),
+    federationLabel,
+    departmentLabel,
+    `@${handle}`,
+    gatewayLabel,
+    sourceStatus.label
+  ]
     .filter(Boolean)
     .join(' · ')
 
@@ -216,7 +226,7 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
         event.dataTransfer.effectAllowed = 'move'
         $draggingBot.set(rosterKey)
       }}
-      onPointerEnter={warm}
+
     >
       <div className={cn('shrink-0', !sourceStatus.available && 'grayscale opacity-60')}>
         <BotFace

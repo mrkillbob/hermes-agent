@@ -45,12 +45,6 @@ DEFAULT_CONFIG = {
     # mapping, while the policy resolver can still honor a legacy desktop
     # block when no top-level policy was configured.
     "conversation_worktree": None,
-    # Cross-agent shared learning catalog (agent/learning_graph.py): off by default since it
-    # requires an operator-provisioned vault directory outside any single agent's control.
-    "learning": {
-        "vault_dir": "",
-        "shared_catalog_enabled": False,
-    },
     "session": {
         # Per-terminal `hermes -c`: each CLI session writes a breadcrumb under
         # $HERMES_HOME/terminal-sessions/<terminal-id>, so bare -c/--continue resumes THIS
@@ -58,6 +52,10 @@ DEFAULT_CONFIG = {
         "terminal_continue": True,
     },
     "agent": {
+        # Per-profile default reasoning effort ("", "low", "medium", "high", "none"/"off" to disable
+        # thinking). "" defers to the provider/model's own default. model.reasoning_efforts overrides
+        # this per-model-name spelling.
+        "reasoning_effort": "",
         # Turn cap. null = unlimited (default; caps caused silent mid-task truncation). Positive int
         # caps; "none"/"unlimited"/"inf"/0/-1 also mean unlimited (resolve_turn_limit).
         "max_turns": None,
@@ -265,6 +263,12 @@ DEFAULT_CONFIG = {
         # timeout_s <= 0 disables; poll_s = sampling interval. Invalid values (NaN, Inf,
         # non-positive poll) warn and fall back to defaults. See agent/turn_liveness.py.
         "turn_liveness": {"timeout_s": 600.0, "poll_s": 15.0},
+        # Optional path to a benchmark-backed model performance route artifact (JSON produced by
+        # ``hermes_cli.profile_route_compiler.compile_profile_configs``). When set, the gateway
+        # compiles it at startup and installs a per-surface, per-profile model route table that
+        # ``_route_for_agent`` consults when the agent declares a ``performance_surface``.
+        # null (default) leaves the table empty so agent provider/model config stays active.
+        "performance_route_artifact": None,
     },
 
     "terminal": {
@@ -1201,6 +1205,10 @@ DEFAULT_CONFIG = {
             "info_log_min_delta_mb": 0.0,
         },
     },
+    "learning": {
+        "vault_dir": "",
+        "shared_catalog_enabled": False,
+    },
     "memory": {  # Persistent memory — bounded curated memory injected into the system prompt
         "memory_enabled": True,
         "user_profile_enabled": True,
@@ -1324,8 +1332,7 @@ DEFAULT_CONFIG = {
                     {"provider": "openai-codex", "model": "gpt-5.5"},
                     {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
                 ],
-                "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
-
+                "aggregator": {"provider": "openai-codex", "model": "gpt-5.5"},
                 "enabled": True,
             }
         },
@@ -1709,6 +1716,7 @@ DEFAULT_CONFIG = {
     # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
     # claimable task. Run ONE dispatcher per profile; two on the same kanban.db race for claims.
     "kanban": {
+        "worker_watchdog": {"enabled": True},
         # Auto-subscribe the originating gateway/TUI session to completion + block events when
         # kanban_create is called from a session with a persistent delivery channel. Disable for
         # profiles that prefer explicit kanban_notify-subscribe calls per task.
@@ -1716,6 +1724,9 @@ DEFAULT_CONFIG = {
         # Run the dispatcher inside the gateway process (~300µs per idle tick). False only if you
         # run it as a separate unit or don't want the gateway spawning workers.
         "dispatch_in_gateway": True,
+        # Explicit source refs for carried project integrations; keys are absolute repo paths.
+        # Unconfigured projects retain remote-default-branch worktree behavior.
+        "worktree_base_refs": {},
         # Auto-claim tasks in the review column and spawn the assigned profile with the bundled
         # sdlc-review skill. Disable where every review is done manually from the dashboard.
         "review_dispatch": True,
@@ -1769,12 +1780,6 @@ DEFAULT_CONFIG = {
         # On boards that never archive, the notifier GC purges subscriptions for tasks done with no
         # activity for this many days so stale rows aren't scanned forever. 0 = off.
         "done_sub_retention_days": 30,
-        # Worker-log watchdog (hermes_cli/kanban_worker_watchdog.py): scans blocked workers' logs
-        # for stuck patterns (repeated tool failures, context-compression loops, silent reasoning)
-        # and spawns a repair task instead of leaving the worker stuck indefinitely.
-        "worker_watchdog": {
-            "enabled": True,
-        },
     },
     # Bot Mode cross-connection relay (tools/bot_relay.py): envelopes queued by message_agent for
     # agents on other connections wait in an on-disk outbox until the Desktop drains them.
@@ -2359,7 +2364,7 @@ DEFAULT_CONFIG = {
         # Extra ports detection probes for an external llama-server (besides 8080).
         "detect_ports": [],
     },
-    "_config_version": 41,  # Config schema version - bump this when adding new required fields
+    "_config_version": 42,  # Config schema version - bump this when adding new required fields
 }
 
 

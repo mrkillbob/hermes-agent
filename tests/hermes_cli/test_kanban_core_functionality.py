@@ -9,6 +9,8 @@ parity across every registered verb.
 """
 
 from __future__ import annotations
+from hermes_cli import kanban_worker_process as worker_process
+from hermes_cli import kanban_db_dispatch as dispatch_impl
 
 import argparse
 import json
@@ -215,6 +217,7 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
 
 def test_notify_claim_lease_reclaims_events_after_watcher_crash(kanban_home, monkeypatch):
     """A dead watcher cannot permanently consume a terminal notification."""
+    import hermes_cli.kanban_db_notify as _hermes_cli_kanban_db_notify
     conn1 = kbc.connect()
     conn2 = kbc.connect()
     try:
@@ -266,7 +269,7 @@ def test_notify_claim_lease_reclaims_events_after_watcher_crash(kanban_home, mon
             chat_id="123",
             new_cursor=reclaimed,
         )
-        assert kbn.unseen_events_for_sub(
+        assert _hermes_cli_kanban_db_notify.unseen_events_for_sub(
             conn1,
             task_id=tid,
             platform="telegram",
@@ -341,7 +344,7 @@ def test_worker_tree_signal_uses_owned_process_group(monkeypatch):
     monkeypatch.setattr(kb.os, "killpg", lambda pgid, sig: calls.append(("group", pgid, sig)))
     monkeypatch.setattr(kb.os, "kill", lambda pid, sig: calls.append(("pid", pid, sig)))
 
-    kb._worker_tree_signal(222, 15)
+    worker_process.signal_worker_tree(222, 15)
 
     assert calls == [("group", 222, 15)]
 
@@ -358,7 +361,7 @@ def test_worker_tree_signal_signals_orphaned_group_when_leader_dead(monkeypatch)
     monkeypatch.setattr(kb.os, "killpg", lambda pgid, sig: calls.append(("group", pgid, sig)))
     monkeypatch.setattr(kb.os, "kill", lambda pid, sig: calls.append(("pid", pid, sig)))
 
-    kb._worker_tree_signal(222, 15)
+    worker_process.signal_worker_tree(222, 15)
 
     assert calls == [("group", 222, 15)]
 
@@ -371,7 +374,7 @@ def test_worker_tree_signal_never_targets_own_process_group(monkeypatch):
     monkeypatch.setattr(kb.os, "killpg", lambda pgid, sig: calls.append(("group", pgid, sig)))
     monkeypatch.setattr(kb.os, "kill", lambda pid, sig: calls.append(("pid", pid, sig)))
 
-    kb._worker_tree_signal(222, 15)
+    worker_process.signal_worker_tree(222, 15)
 
     assert calls == [("pid", 222, 15)]
 
@@ -433,6 +436,7 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
 
 def test_max_runtime_uses_dispatch_default_when_task_has_no_override(kanban_home):
     """A running task without an explicit cap still receives the dispatch cap."""
+    import hermes_cli.kanban_db_dispatch as _hermes_cli_kanban_db_dispatch
     killed = []
 
     def _signal_fn(pid, sig):
@@ -443,11 +447,11 @@ def test_max_runtime_uses_dispatch_default_when_task_has_no_override(kanban_home
     _kb._pid_alive = lambda pid: False
 
     try:
-        conn = kb.connect()
+        conn = kbc.connect()
         try:
             tid = kb.create_task(conn, title="uncapped job", assignee="worker")
             kb.claim_task(conn, tid)
-            kb._set_worker_pid(conn, tid, os.getpid())
+            dispatch_impl._set_worker_pid(conn, tid, os.getpid())
             old_started = int(time.time()) - 30
             with kb.write_txn(conn):
                 conn.execute(
@@ -460,7 +464,7 @@ def test_max_runtime_uses_dispatch_default_when_task_has_no_override(kanban_home
                     (old_started, tid),
                 )
 
-            timed_out = kb.enforce_max_runtime(
+            timed_out = _hermes_cli_kanban_db_dispatch.enforce_max_runtime(
                 conn, default_max_runtime_seconds=1, signal_fn=_signal_fn
             )
 
@@ -1541,7 +1545,7 @@ def test_protocol_violation_gets_one_finalize_retry_despite_retry_limit_one(kanb
     missed only the required terminal receipt.  Blocking it on that first
     exit suppresses the corrective context that lets the next run finalize.
     """
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn,
@@ -1562,7 +1566,7 @@ def test_protocol_violation_gets_one_finalize_retry_despite_retry_limit_one(kanb
 
 def test_worker_context_requires_terminal_kanban_receipt(kanban_home):
     """Detached workers receive a profile-independent terminal-call contract."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="bounded no-op", assignee="worker")
 

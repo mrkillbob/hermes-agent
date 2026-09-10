@@ -1040,6 +1040,11 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         self._voice_timeout_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> timeout task
         self._voice_timeout_seconds = self._load_voice_timeout()
         self._playback_timeout_seconds = self._load_playback_timeout()
+        (
+            self._voice_auto_join_channel_id,
+            self._voice_auto_join_user_ids,
+            self._voice_auto_join_text_channel_id,
+        ) = self._load_voice_auto_join_config()
         self._voice_receivers: Dict[int, VoiceReceiver] = {}  # guild_id -> VoiceReceiver
         self._voice_listen_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> listen loop
         self._voice_input_callback: Optional[Callable] = None  # set by run.py
@@ -3508,7 +3513,14 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             return
 
         if was_in_configured_channel and not is_in_configured_channel:
-            await self.leave_voice_channel(member.guild.id)
+            # Only disconnect when no other configured user remains in the channel.
+            remaining = {
+                str(getattr(m, "id", ""))
+                for m in getattr(before_channel, "members", [])
+                if str(getattr(m, "id", "")) in user_ids and str(getattr(m, "id", "")) != str(getattr(member, "id", ""))
+            }
+            if not remaining:
+                await self.leave_voice_channel(member.guild.id)
 
     async def _auto_join_configured_voice_channel_if_user_present(self) -> None:
         """Restore the configured voice session after Gateway startup."""
@@ -6125,6 +6137,12 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         # Track participation so follow-ups in this thread don't need @mention.
         if thread_id:
             self._threads.mark(thread_id)
+        # Status questions and specialist routing are answered directly, ahead of the normal
+        # agent dispatch/batch path — neither should wait out the text-batch quiet period.
+        if not recovered and await self._maybe_answer_progress_event(event):
+            return True
+        if not recovered and await self._maybe_route_specialist_event(event):
+            return True
         # Only live plain text is batched: recovery candidates are complete; coalescing would replay IDs.
         if (not recovered and msg_type == MessageType.TEXT and self._text_batch_delay_seconds > 0):
             self._enqueue_text_event(event)
