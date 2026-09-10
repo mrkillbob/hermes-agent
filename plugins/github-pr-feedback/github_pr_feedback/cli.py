@@ -552,7 +552,7 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     if action == "merge-scan":
         return _merge_scan(ctx)
     if action == "merge-handoff":
-        return _merge_scan(ctx)
+        return _merge_handoff(ctx)
     if action == "merge-status":
         return _merge_status()
     if action == "merge-enable":
@@ -1210,6 +1210,7 @@ def _audit_pr(ctx: Any, args: argparse.Namespace) -> int:
                     receipt.identity.pr_number,
                     repository=receipt.identity.repository,
                     github=github,
+                    force_report_only=False,
                 )
                 handoff_status = str(merge_handoff.get("status", ""))
                 if handoff_status == "blocked":
@@ -1410,12 +1411,34 @@ def _merge_scan(ctx: Any) -> int:
     return 1 if payload["status"] == "degraded" else 0
 
 
+def _merge_handoff(ctx: Any) -> int:
+    """Evaluate every enrolled PR across all configured lanes without merging --
+    the operator-facing handoff contract, as distinct from ``merge-scan``'s real
+    (possibly merging) automatic pass."""
+    try:
+        policy = _load_policy_from_context(ctx)
+    except ValueError:
+        print(json.dumps({"status": "invalid_configuration"}, sort_keys=True))
+        return 1
+    if not _merge_policies(policy):
+        print(json.dumps({"status": "disabled"}, sort_keys=True))
+        return 0
+    ledger = FeedbackLedger.for_current_profile()
+    try:
+        payload = _run_merge_scan(policy, ledger, force_report_only=True)
+    finally:
+        ledger.close()
+    print(json.dumps(payload, sort_keys=True))
+    return 1 if payload["status"] == "degraded" else 0
+
+
 def _run_merge_scan(
     policy: PluginPolicy,
     ledger: FeedbackLedger,
     *,
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
+    force_report_only: bool = False,
 ) -> dict[str, object]:
     merge_policies = _merge_policies(policy)
     if not merge_policies:
@@ -1428,11 +1451,13 @@ def _run_merge_scan(
         }
     if len(merge_policies) == 1:
         return _run_merge_scan_for_policy(
-            policy, merge_policies[0], ledger, github=github, kanban=kanban
+            policy, merge_policies[0], ledger, github=github, kanban=kanban,
+            force_report_only=force_report_only,
         )
     results = [
         _run_merge_scan_for_policy(
-            policy, merge_policy, ledger, github=github, kanban=kanban
+            policy, merge_policy, ledger, github=github, kanban=kanban,
+            force_report_only=force_report_only,
         )
         for merge_policy in merge_policies
     ]
@@ -1473,7 +1498,10 @@ def _run_merge_scan_for_policy(
     *,
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
+    force_report_only: bool = False,
 ) -> dict[str, object]:
+    if force_report_only:
+        merge_policy = replace(merge_policy, report_only=True)
     github = github or GitHubClient()
     kanban = kanban or KanbanSubprocessClient()
     try:
@@ -1665,8 +1693,15 @@ def _run_single_pr_merge_handoff(
     repository: str | None = None,
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
+    force_report_only: bool = True,
 ) -> dict[str, object]:
-    """Attempt one exact PR merge, then admit at most one successor repair."""
+    """Attempt one exact PR merge, then admit at most one successor repair.
+
+    ``force_report_only`` defaults to True (the operator-facing "handoff" contract:
+    evaluate and hand off without merging). The post-audit automatic-merge path
+    (``_audit_pr``) passes False so an active ``report_only: false`` lane can still
+    complete its configured automatic merge instead of always evaluating read-only.
+    """
 
     merge_policy = (
         policy.merge_policy_for(repository)
@@ -1684,7 +1719,7 @@ def _run_single_pr_merge_handoff(
     source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     try:
         result = MergeController(
-            replace(merge_policy, report_only=True),
+            replace(merge_policy, report_only=True) if force_report_only else merge_policy,
             source,
             github,
             ledger,
