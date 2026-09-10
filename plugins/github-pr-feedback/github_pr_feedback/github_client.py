@@ -1177,6 +1177,22 @@ class GitHubClient:
             argv.extend(("--field", f"labels[]={label}"))
         self._runner.run(argv)
 
+    def remove_issue_label(self, repository: str, number: int, label: str) -> None:
+        """Remove one label from an issue through the fixed REST endpoint."""
+
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        label = _validated_label(label)
+        self._runner.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repository}/issues/{number}/labels/{quote(label, safe='')}",
+                "--method",
+                "DELETE",
+            ]
+        )
+
     def ensure_issue_label(
         self, repository: str, label: str, *, color: str, description: str, preserve_existing: bool = False
     ) -> None:
