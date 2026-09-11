@@ -143,7 +143,6 @@ the plain restart. `/api/status?profile=coder` carries the same list as
 default home's `gateway_state.json`), so it stays correct when the multiplexer was
 enabled only through `GATEWAY_MULTIPLEX_PROFILES` in the default profile's
 environment, or when profiles were added after the gateway started.
-
 The multiplexer is the single inbound process; a second profile gateway would
 double-bind that profile's platforms. Pass `--force` (accepted by `run`, `start`,
 `install` and `restart`) only if you deliberately want a separate process for that
