@@ -24,7 +24,6 @@ _HERMES_CORE_TOOLS = [
     "session_search",
     "clarify",
     "execute_code", "delegate_task",
-    "inter_agent",
     "cronjob_manage",
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     "kanban_show", "kanban_list",
@@ -127,6 +126,10 @@ TOOLSETS = {
     "session_search": _ts("Search and recall past conversations with summarization", ["session_search"]),
     "project": _ts("Desktop Projects — create/switch named workspaces (GUI sessions only)", ["desktop_project"]),
     "bot_room": _ts("Verified text-only Group Chat turn capabilities"),
+    "inter_agent": _ts(
+        "Persistent messaging between agents in the same Hermes installation",
+        ["inter_agent"],
+    ),
 
     # GUI-renderer affordances, enabled per desktop-sourced SESSION by the GUI
     # gateway (tui_gateway/server.py::_load_enabled_toolsets) — never by a
@@ -150,7 +153,7 @@ TOOLSETS = {
         "first-class review (request_review — not a block), return review changes, "
         "block for human input, heartbeat during long ops, comment on threads, attach "
         "files, and (for orchestrators) list, unblock, and fan out tasks.",
-        [t for t in _HERMES_CORE_TOOLS if t.startswith("kanban_")],
+        ["inter_agent", *[t for t in _HERMES_CORE_TOOLS if t.startswith("kanban_")]],
     ),
     "discord": _ts("Discord read and participate tools (fetch messages, search members, create threads)", ["discord"]),
     "discord_admin": _ts("Discord server management (list channels/roles, pin messages, assign roles)", ["discord_admin"]),

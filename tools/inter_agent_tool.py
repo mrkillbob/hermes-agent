@@ -5,12 +5,17 @@ different conversations on the same machine. Messages persist via a
 local HTTP broker (see tools/comms/broker.py).
 """
 import json
+import os
+import secrets
 import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlencode
 
+from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
 
 TOOLSET = "inter_agent"
@@ -45,6 +50,10 @@ RECEIVE_SCHEMA = {
             "type": "integer",
             "description": "Message ID to start from (default: 0)",
         },
+        "limit": {
+            "type": "integer",
+            "description": "Maximum messages to return (default: 100)",
+        },
     },
     "required": ["to"],
 }
@@ -56,15 +65,70 @@ HISTORY_SCHEMA = {
             "type": "string",
             "description": "Filter by agent name",
         },
+        "limit": {
+            "type": "integer",
+            "description": "Maximum messages to return (default: 100)",
+        },
     },
 }
 
-BROKER_URL = "http://127.0.0.1:8765"
+_DEFAULT_HISTORY_LIMIT = 100
+
+
+def _state_path(name: str) -> Path:
+    return get_hermes_home() / name
+
+
+def _broker_token() -> str:
+    home = get_hermes_home()
+    home.mkdir(parents=True, exist_ok=True)
+    path = _state_path("inter-agent-broker.token")
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        token = secrets.token_urlsafe(32)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return path.read_text(encoding="utf-8").strip()
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(token)
+        return token
+
+
+def _broker_url() -> Optional[str]:
+    try:
+        endpoint = json.loads(
+            _state_path("inter-agent-broker.json").read_text(encoding="utf-8")
+        )
+        port = int(endpoint["port"])
+    except (
+        FileNotFoundError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        json.JSONDecodeError,
+    ):
+        return None
+    if not 1 <= port <= 65535:
+        return None
+    return f"http://127.0.0.1:{port}"
+
+
+def _request_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_broker_token()}"}
 
 
 def _broker_is_ready() -> bool:
+    base_url = _broker_url()
+    if base_url is None:
+        return False
     try:
-        with urllib.request.urlopen(f"{BROKER_URL}/health", timeout=0.25) as resp:
+        request = urllib.request.Request(
+            f"{base_url}/health", headers=_request_headers()
+        )
+        with urllib.request.urlopen(request, timeout=0.25) as resp:
             return resp.status == 200
     except Exception:
         return False
@@ -91,14 +155,20 @@ def _ensure_broker() -> None:
 def _broker_call(path: str, data: Optional[dict] = None, timeout: int = 5) -> dict:
     """Make a call to the broker."""
     _ensure_broker()
-    url = f"{BROKER_URL}{path}"
+    base_url = _broker_url()
+    if base_url is None:
+        return {"error": "broker did not publish an endpoint"}
+    url = f"{base_url}{path}"
     body = None
     if data is not None:
         body = json.dumps(data).encode()
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json"} if body else {},
+        headers={
+            **_request_headers(),
+            **({"Content-Type": "application/json"} if body else {}),
+        },
         method="POST" if body else "GET",
     )
     try:
@@ -116,19 +186,26 @@ def send_message(to: str, body: str, from_: str = "hermes-agent") -> str:
     return json.dumps({"ok": True, "id": result.get("id")})
 
 
-def receive_messages(to: str, since: int = 0) -> str:
+def receive_messages(
+    to: str, since: int = 0, limit: int = _DEFAULT_HISTORY_LIMIT
+) -> str:
     """Receive messages for an agent."""
-    result = _broker_call(f"/receive?to={to}&since={since}", timeout=30)
+    query = urlencode({"to": to, "since": since, "limit": limit})
+    result = _broker_call(f"/receive?{query}", timeout=30)
     if isinstance(result, dict) and "error" in result:
         return tool_error(f"Failed to receive: {result['error']}")
     return json.dumps(result, indent=2)
 
 
-def list_history(with_: Optional[str] = None) -> str:
+def list_history(
+    with_: Optional[str] = None, limit: int = _DEFAULT_HISTORY_LIMIT
+) -> str:
     """List message history."""
     path = "/history"
+    query = {"limit": limit}
     if with_:
-        path += f"?with_={with_}"
+        query["with_"] = with_
+    path += f"?{urlencode(query)}"
     result = _broker_call(path)
     if isinstance(result, dict) and "error" in result:
         return tool_error(f"Failed to get history: {result['error']}")
@@ -142,19 +219,21 @@ def inter_agent_tool(
     from_: Optional[str] = None,
     since: int = 0,
     with_: Optional[str] = None,
+    limit: int = _DEFAULT_HISTORY_LIMIT,
+    sender: Optional[str] = None,
     callback: Optional[Callable] = None,
 ) -> str:
     """Inter-agent messaging: send, receive, or list history."""
     if action == "send":
         if not to or not body:
             return tool_error("send requires 'to' and 'body'")
-        return send_message(to, body, from_ or "hermes-agent")
+        return send_message(to, body, from_ or sender or "hermes-agent")
     elif action == "receive":
         if not to:
             return tool_error("receive requires 'to'")
-        return receive_messages(to, since)
+        return receive_messages(to, since, limit)
     elif action == "history":
-        return list_history(with_)
+        return list_history(with_, limit)
     else:
         return tool_error(f"Unknown action: {action}")
 
@@ -163,35 +242,42 @@ registry.register(
     name="inter_agent",
     toolset=TOOLSET,
     schema={
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["send", "receive", "history"],
-                "description": "Action to perform",
+        "description": "Send persistent messages between Hermes agents.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["send", "receive", "history"],
+                    "description": "Action to perform",
+                },
+                "to": {
+                    "type": "string",
+                    "description": "Recipient agent name (for send/receive)",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Message body (for send)",
+                },
+                "from_": {
+                    "type": "string",
+                    "description": "Sender agent name (default: hermes-agent)",
+                },
+                "since": {
+                    "type": "integer",
+                    "description": "Message ID to start from (for receive)",
+                },
+                "with_": {
+                    "type": "string",
+                    "description": "Filter by agent name (for history)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum messages to return (default: 100)",
+                },
             },
-            "to": {
-                "type": "string",
-                "description": "Recipient agent name (for send/receive)",
-            },
-            "body": {
-                "type": "string",
-                "description": "Message body (for send)",
-            },
-            "from_": {
-                "type": "string",
-                "description": "Sender agent name (default: hermes-agent)",
-            },
-            "since": {
-                "type": "integer",
-                "description": "Message ID to start from (for receive)",
-            },
-            "with_": {
-                "type": "string",
-                "description": "Filter by agent name (for history)",
-            },
+            "required": ["action"],
         },
-        "required": ["action"],
     },
     handler=lambda args, **kw: inter_agent_tool(
         action=args.get("action", "send"),
@@ -200,6 +286,8 @@ registry.register(
         from_=args.get("from_"),
         since=args.get("since", 0),
         with_=args.get("with_"),
+        limit=args.get("limit", _DEFAULT_HISTORY_LIMIT),
+        sender=kw.get("session_id") or kw.get("task_id"),
         callback=kw.get("callback"),
     ),
     emoji="💬",
