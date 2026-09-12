@@ -376,6 +376,13 @@ def check_for_updates(*, passive: bool = False) -> Optional[int]:
     else:
         # No checkout and no embedded revision — status can't be determined.
         behind = _check_via_local_git(repo_dir) if repo_dir is not None else None
+        if repo_dir is not None:
+            # _check_via_local_git may have refreshed the tracking ref. Re-read
+            # the fetched target so the count and cache key describe one tip.
+            upstream_rev = (
+                _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
+                or _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir)
+            )
     # Don't cache inconclusive results: None means the check could not run (typically a failed
     # fetch), and caching it would suppress retries for the full 6-hour window (#82166).
     if behind is not None:

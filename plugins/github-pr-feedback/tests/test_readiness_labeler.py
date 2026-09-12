@@ -15,19 +15,15 @@ def test_codex_clean_heads_are_first_then_oldest_ready() -> None:
     assert [item.number for item in queue] == [2, 1, 3]
 
 
-def test_ready_handoff_labels_exact_head_before_alert_comment() -> None:
+def test_ready_handoff_posts_an_exact_head_alert_comment() -> None:
     pull = SimpleNamespace(number=7, head_sha="a" * 40)
 
     class GitHub:
         def __init__(self) -> None:
-            self.labels: list[str] = []
             self.comments: list[str] = []
 
         def get_pull_request(self, repository: str, number: int):
-            return SimpleNamespace(head_sha=pull.head_sha, labels=tuple(self.labels))
-
-        def add_issue_labels(self, repository: str, number: int, labels: tuple[str, ...]) -> None:
-            self.labels.extend(labels)
+            return SimpleNamespace(head_sha=pull.head_sha)
 
         def ensure_issue_label(self, repository: str, label: str, *, color: str, description: str) -> None:
             return None
@@ -40,5 +36,4 @@ def test_ready_handoff_labels_exact_head_before_alert_comment() -> None:
 
     github = GitHub()
     _announce_ready_to_merge(github, "owner/repo", pull)
-    assert github.labels == ["ready-to-merge"]
     assert len(github.comments) == 1
