@@ -7,6 +7,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import signal
 import subprocess
 import time
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from .ci_runner import CICommandRunner, CompletedCommand, SubprocessCICommandRunner
-from .ledger import FeedbackLedger
+from .ledger import DeploymentLease, FeedbackLedger
 from .merge_controller import MergeReceipt
 from .policy import PostMergePolicy
 
@@ -105,44 +106,32 @@ class BundleInspector(Protocol):
 class SystemProcessController:
     def census(self) -> tuple[ProcessRecord, ...]:
         try:
-            import psutil
-        except ImportError as error:
+            completed = subprocess.run(
+                ("ps", "-axo", "pid=,comm=,args="),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
             raise DeploymentError("process_census_unavailable") from error
+        if completed.returncode != 0:
+            raise DeploymentError("process_census_unavailable")
         records: list[ProcessRecord] = []
-        try:
-            for process in psutil.process_iter(["pid", "exe", "cmdline", "cwd"]):
-                try:
-                    info = process.info
-                except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                    continue
-                except psutil.AccessDenied as error:
-                    raise DeploymentError("process_census_ambiguous") from error
-                if not isinstance(info, dict):
-                    raise DeploymentError("process_census_ambiguous")
-                executable = info.get("exe")
-                argv = info.get("cmdline")
-                if not isinstance(executable, str) or not executable:
-                    raise DeploymentError("process_census_ambiguous")
-                if not isinstance(argv, list) or not argv or not all(
-                    isinstance(argument, str) for argument in argv
-                ):
-                    raise DeploymentError("process_census_ambiguous")
-                pid = info.get("pid")
-                if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
-                    raise DeploymentError("process_census_ambiguous")
-                cwd = info.get("cwd")
-                records.append(
-                    ProcessRecord(
-                        pid,
-                        Path(executable),
-                        tuple(str(argument) for argument in argv),
-                        Path(cwd) if isinstance(cwd, str) else None,
-                    )
-                )
-        except DeploymentError:
-            raise
-        except (OSError, psutil.Error) as error:
-            raise DeploymentError("process_census_unavailable") from error
+        for line in completed.stdout.splitlines():
+            parts = line.strip().split(maxsplit=2)
+            if len(parts) < 3:
+                continue
+            try:
+                pid = int(parts[0])
+                argv = tuple(shlex.split(parts[2]))
+            except ValueError as error:
+                raise DeploymentError("process_census_ambiguous") from error
+            if not argv:
+                raise DeploymentError("process_census_ambiguous")
+            executable = Path(argv[0]) if Path(argv[0]).is_absolute() else Path(parts[1])
+            records.append(ProcessRecord(pid, executable, argv, None))
         return tuple(records)
 
     def terminate(self, pid: int) -> None:
@@ -268,11 +257,27 @@ class PostMergeExecutor:
         deployed_sha: str | None = None
         relaunched = False
         bundle = (self._policy.deployment_path / self._policy.bundle_path).resolve()
+        existing = self._ledger.latest_deployment_receipt(merge.repository, merge.pr_number)
+        if (
+            isinstance(existing, DeploymentReceipt)
+            and existing.status == "completed"
+            and existing.merge_commit_oid == merge.merge_commit_oid
+        ):
+            return existing
+        lease = self._ledger.claim_deployment(
+            self._policy.deployment_path,
+            merge.repository,
+            merge.pr_number,
+            merge.merge_commit_oid,
+            owner=f"post-merge:{os.getpid()}:{id(self)}",
+            claimed_at=self._now(),
+        )
+        if lease is None:
+            raise DeploymentError("deployment_in_progress")
         try:
             pre_census = self._processes.census()
             _require_runtime_absent(pre_census, self._policy)
             deployed_sha = self._repository.prepare(merge, self._policy)
-            _require_runtime_absent(self._processes.census(), self._policy)
             package = self._commands.run(
                 self._policy.package_argv,
                 cwd=self._policy.deployment_path,
@@ -314,9 +319,10 @@ class PostMergeExecutor:
             )
             if relaunch.returncode != 0 or relaunch.timed_out:
                 raise DeploymentError("relaunch_failed")
-            relaunch_census = _wait_for_process_to_appear(
-                identity.executable_path, self._processes
+            relaunch_census = _wait_for_process_to_start(
+                self._processes, identity.executable_path
             )
+            relaunched = True
             _require_runtime_absent(
                 relaunch_census,
                 self._policy,
@@ -327,7 +333,6 @@ class PostMergeExecutor:
                 self._policy,
                 blocker="protected_runtime_appeared_after_relaunch",
             )
-            relaunched = True
         except DeploymentError as error:
             return self._record(
                 merge,
@@ -336,6 +341,7 @@ class PostMergeExecutor:
                 bundle=bundle if deployed_sha else None,
                 relaunched=relaunched,
                 blocker=str(error),
+                lease=lease,
             )
         return self._record(
             merge,
@@ -344,6 +350,7 @@ class PostMergeExecutor:
             bundle=bundle,
             relaunched=True,
             blocker=None,
+            lease=lease,
         )
 
     def _record(
@@ -355,6 +362,7 @@ class PostMergeExecutor:
         bundle: Path | None,
         relaunched: bool,
         blocker: str | None,
+        lease: DeploymentLease,
     ) -> DeploymentReceipt:
         completed_at = _aware_utc(self._now())
         identity = {
@@ -382,6 +390,7 @@ class PostMergeExecutor:
             completed_at=completed_at,
         )
         self._ledger.record_deployment_receipt(receipt)
+        self._ledger.finish_deployment(lease, receipt=receipt, updated_at=completed_at)
         return receipt
 
 
@@ -425,11 +434,26 @@ def _wait_for_process_to_appear(
     deadline = time.monotonic() + timeout
     while True:
         census = controller.census()
-        if any(record.executable.resolve() == expected for record in census):
+        if any(process.executable.resolve() == expected for process in census):
             return census
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise DeploymentError("relaunched_bundle_missing")
+        time.sleep(min(0.1, remaining))
+
+
+def _wait_for_process_to_start(
+    controller: ProcessController, executable: Path, *, timeout: float = 30.0
+) -> tuple[ProcessRecord, ...]:
+    expected = executable.resolve()
+    deadline = time.monotonic() + timeout
+    while True:
+        census = controller.census()
+        if any(process.executable.resolve() == expected for process in census):
+            return census
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DeploymentError("relaunch_start_timeout")
         time.sleep(min(0.1, remaining))
 
 

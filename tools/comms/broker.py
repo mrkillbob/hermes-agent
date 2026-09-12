@@ -61,6 +61,19 @@ def _write_endpoint(server: _BrokerServer) -> Path:
     return path
 
 
+def _restrict_database_permissions(path: Path) -> None:
+    for candidate in (
+        path,
+        Path(f"{path}-journal"),
+        Path(f"{path}-wal"),
+        Path(f"{path}-shm"),
+    ):
+        try:
+            candidate.chmod(0o600)
+        except FileNotFoundError:
+            continue
+
+
 def _limit(query: dict[str, list[str]]) -> int:
     try:
         requested = int(query.get("limit", [100])[0])
@@ -72,18 +85,29 @@ def _limit(query: dict[str, list[str]]) -> int:
 def _database() -> sqlite3.Connection:
     home = get_hermes_home()
     home.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(home / "inter-agent-messages.db", timeout=10)
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS messages ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "sender TEXT NOT NULL, recipient TEXT NOT NULL, body TEXT NOT NULL,"
-        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS messages_recipient_id_idx "
-        "ON messages (recipient, id)"
-    )
-    connection.commit()
+    path = home / "inter-agent-messages.db"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(fd)
+    _restrict_database_permissions(path)
+    connection = sqlite3.connect(path, timeout=10)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS messages ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "sender TEXT NOT NULL, recipient TEXT NOT NULL, body TEXT NOT NULL,"
+            "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS messages_recipient_id_idx "
+            "ON messages (recipient, id)"
+        )
+        connection.commit()
+    finally:
+        _restrict_database_permissions(path)
     return connection
 
 

@@ -1,8 +1,11 @@
 import json
+import os
+import stat
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from tools.comms import broker
 from tools import inter_agent_tool
@@ -101,3 +104,52 @@ def test_receive_waits_for_a_message(monkeypatch, tmp_path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_broker_uses_platform_detach_helper(monkeypatch):
+    calls = []
+    readiness = iter((False, True))
+    monkeypatch.setattr(inter_agent_tool, "_broker_is_ready", lambda: next(readiness))
+    monkeypatch.setattr(
+        inter_agent_tool,
+        "windows_detach_popen_kwargs",
+        lambda: {"creationflags": 0x08000200},
+    )
+    monkeypatch.setattr(
+        inter_agent_tool.subprocess,
+        "Popen",
+        lambda argv, **kwargs: calls.append((argv, kwargs)),
+    )
+
+    inter_agent_tool._ensure_broker()
+
+    assert calls == [
+        (
+            [inter_agent_tool.sys.executable, "-m", "tools.comms.broker"],
+            {
+                "stdin": inter_agent_tool.subprocess.DEVNULL,
+                "stdout": inter_agent_tool.subprocess.DEVNULL,
+                "stderr": inter_agent_tool.subprocess.DEVNULL,
+                "creationflags": 0x08000200,
+            },
+        )
+    ]
+
+
+def test_message_database_and_sidecars_are_owner_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(broker, "get_hermes_home", lambda: tmp_path)
+    path = tmp_path / "inter-agent-messages.db"
+    for suffix in ("-journal", "-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        fd = os.open(sidecar, os.O_WRONLY | os.O_CREAT, 0o644)
+        os.close(fd)
+    connection = broker._database()
+    connection.close()
+
+    candidates = (
+        path,
+        *(Path(f"{path}{suffix}") for suffix in ("-journal", "-wal", "-shm")),
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            assert stat.S_IMODE(candidate.stat().st_mode) == 0o600

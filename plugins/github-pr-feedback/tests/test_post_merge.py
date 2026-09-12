@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 import pytest
@@ -308,6 +311,86 @@ def test_relaunch_wait_fails_when_the_bundle_process_never_appears():
             Controller(),
             timeout=0,
         )
+
+
+def test_process_start_wait_requires_the_expected_bundle_executable():
+    process = ProcessRecord(
+        123, Path("/Applications/Hermes.app/Contents/MacOS/Hermes"), (), None
+    )
+
+    class Controller:
+        def __init__(self):
+            self.censuses = [[], [process]]
+
+        def census(self):
+            return tuple(self.censuses.pop(0))
+
+    controller = Controller()
+    _wait_for_process_to_start(controller, process.executable, timeout=0.2)
+    assert controller.censuses == []
+
+
+def test_deployment_claim_serializes_two_ledger_connections(tmp_path):
+    path = tmp_path / "ledger.sqlite3"
+    deployment_path = tmp_path / "deployment"
+    now = datetime(2026, 9, 12, tzinfo=UTC)
+    first_ledger = FeedbackLedger(path)
+    second_ledger = FeedbackLedger(path)
+    try:
+        first = first_ledger.claim_deployment(
+            deployment_path,
+            "acme/widgets",
+            82,
+            "a" * 40,
+            owner="first",
+            claimed_at=now,
+        )
+        second = second_ledger.claim_deployment(
+            deployment_path,
+            "acme/widgets",
+            82,
+            "a" * 40,
+            owner="second",
+            claimed_at=now,
+        )
+        assert first is not None
+        assert second is None
+    finally:
+        first_ledger.close()
+        second_ledger.close()
+
+
+def test_deployment_claim_reclaims_recent_owner_after_process_exit(tmp_path):
+    path = tmp_path / "ledger.sqlite3"
+    deployment_path = tmp_path / "deployment"
+    now = datetime(2026, 9, 12, tzinfo=UTC)
+    ledger = FeedbackLedger(path)
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait(timeout=5)
+    try:
+        first = ledger.claim_deployment(
+            deployment_path,
+            "acme/widgets",
+            82,
+            "a" * 40,
+            owner=f"post-merge:{exited.pid}:test",
+            claimed_at=now,
+        )
+        assert first is not None
+
+        reclaimed = ledger.claim_deployment(
+            deployment_path,
+            "acme/widgets",
+            82,
+            "a" * 40,
+            owner=f"post-merge:{os.getpid()}:test",
+            claimed_at=now,
+        )
+
+        assert reclaimed is not None
+        assert reclaimed.owner == f"post-merge:{os.getpid()}:test"
+    finally:
+        ledger.close()
 
 
 def test_process_census_preserves_executable_paths_with_spaces(monkeypatch):

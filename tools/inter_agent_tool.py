@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlencode
 
+from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
 from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
 
@@ -154,7 +155,7 @@ def _ensure_broker() -> None:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        **windows_detach_popen_kwargs(),
     )
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
