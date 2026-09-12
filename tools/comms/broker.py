@@ -79,6 +79,10 @@ def _database() -> sqlite3.Connection:
         "sender TEXT NOT NULL, recipient TEXT NOT NULL, body TEXT NOT NULL,"
         "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS messages_recipient_id_idx "
+        "ON messages (recipient, id)"
+    )
     connection.commit()
     return connection
 
