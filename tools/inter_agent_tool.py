@@ -96,12 +96,13 @@ def _broker_token() -> str:
         return token
 
 
-def _broker_url() -> Optional[str]:
+def _broker_endpoint() -> Optional[dict[str, str]]:
     try:
         endpoint = json.loads(
             _state_path("inter-agent-broker.json").read_text(encoding="utf-8")
         )
         port = int(endpoint["port"])
+        broker_id = endpoint["broker_id"]
     except (
         FileNotFoundError,
         OSError,
@@ -111,9 +112,14 @@ def _broker_url() -> Optional[str]:
         json.JSONDecodeError,
     ):
         return None
-    if not 1 <= port <= 65535:
+    if not 1 <= port <= 65535 or not isinstance(broker_id, str) or not broker_id:
         return None
-    return f"http://127.0.0.1:{port}"
+    return {"url": f"http://127.0.0.1:{port}", "broker_id": broker_id}
+
+
+def _broker_url() -> Optional[str]:
+    endpoint = _broker_endpoint()
+    return endpoint["url"] if endpoint is not None else None
 
 
 def _request_headers() -> dict[str, str]:
@@ -121,15 +127,20 @@ def _request_headers() -> dict[str, str]:
 
 
 def _broker_is_ready() -> bool:
-    base_url = _broker_url()
-    if base_url is None:
+    endpoint = _broker_endpoint()
+    if endpoint is None:
         return False
     try:
         request = urllib.request.Request(
-            f"{base_url}/health", headers=_request_headers()
+            f"{endpoint['url']}/health", headers=_request_headers()
         )
         with urllib.request.urlopen(request, timeout=0.25) as resp:
-            return resp.status == 200
+            payload = json.loads(resp.read())
+            return (
+                resp.status == 200
+                and payload.get("ok") is True
+                and payload.get("broker_id") == endpoint["broker_id"]
+            )
     except Exception:
         return False
 

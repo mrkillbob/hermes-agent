@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import secrets
 import sqlite3
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -21,6 +22,8 @@ from hermes_constants import get_hermes_home
 HOST = "127.0.0.1"
 PORT = 0
 MAX_QUERY_LIMIT = 1000
+RECEIVE_WAIT_SECONDS = 25.0
+RECEIVE_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _state_path(name: str) -> Path:
@@ -44,9 +47,16 @@ def _broker_token() -> str:
         return token
 
 
-def _write_endpoint(server: ThreadingHTTPServer) -> Path:
+class _BrokerServer(ThreadingHTTPServer):
+    broker_id: str
+
+
+def _write_endpoint(server: _BrokerServer) -> Path:
     path = _state_path("inter-agent-broker.json")
-    path.write_text(json.dumps({"port": server.server_port}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"port": server.server_port, "broker_id": server.broker_id}),
+        encoding="utf-8",
+    )
     path.chmod(0o600)
     return path
 
@@ -89,11 +99,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        if parsed.path == "/health":
-            self._write(200, {"ok": True})
-            return
         if not self._authorized():
             self._write(401, {"error": "unauthorized"})
+            return
+        if parsed.path == "/health":
+            self._write(200, {"ok": True, "broker_id": self.server.broker_id})
             return
         if parsed.path == "/receive":
             query = parse_qs(parsed.query)
@@ -104,12 +114,23 @@ class _Handler(BaseHTTPRequestHandler):
                 self._write(400, {"error": "since must be an integer"})
                 return
             limit = _limit(query)
-            with _database() as db:
-                rows = db.execute(
-                    "SELECT id, sender, recipient, body, created_at FROM messages "
-                    "WHERE recipient = ? AND id > ? ORDER BY id LIMIT ?",
-                    (recipient, since, limit),
-                ).fetchall()
+            deadline = time.monotonic() + RECEIVE_WAIT_SECONDS
+            rows = []
+            while True:
+                with _database() as db:
+                    rows = db.execute(
+                        "SELECT id, sender, recipient, body, created_at FROM messages "
+                        "WHERE recipient = ? AND id > ? ORDER BY id LIMIT ?",
+                        (recipient, since, limit),
+                    ).fetchall()
+                if rows or time.monotonic() >= deadline:
+                    break
+                time.sleep(
+                    min(
+                        RECEIVE_POLL_INTERVAL_SECONDS,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                )
             self._write(200, [
                 {"id": row[0], "from": row[1], "to": row[2], "body": row[3], "created_at": row[4]}
                 for row in rows
@@ -172,7 +193,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = ThreadingHTTPServer((HOST, PORT), _Handler)
+    server = _BrokerServer((HOST, PORT), _Handler)
+    server.broker_id = secrets.token_urlsafe(24)
     endpoint = _write_endpoint(server)
     try:
         server.serve_forever()

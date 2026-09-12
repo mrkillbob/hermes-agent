@@ -1,0 +1,103 @@
+import json
+import threading
+import time
+import urllib.error
+import urllib.request
+
+from tools.comms import broker
+from tools import inter_agent_tool
+
+
+def _request(base_url, path, token, *, data=None):
+    body = None if data is None else json.dumps(data).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base_url}{path}",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            **({"Content-Type": "application/json"} if body else {}),
+        },
+        method="POST" if body else "GET",
+    )
+    with urllib.request.urlopen(request, timeout=2) as response:
+        return response.status, json.loads(response.read())
+
+
+def _start_server(monkeypatch, tmp_path):
+    monkeypatch.setattr(broker, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(inter_agent_tool, "get_hermes_home", lambda: tmp_path)
+    token = "test-broker-token"
+    (tmp_path / "inter-agent-broker.token").write_text(token, encoding="utf-8")
+    server = broker._BrokerServer((broker.HOST, broker.PORT), broker._Handler)
+    server.broker_id = "expected-broker"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, token, f"http://{broker.HOST}:{server.server_port}"
+
+
+def test_health_requires_auth_and_matches_endpoint_identity(monkeypatch, tmp_path):
+    server, _thread, token, base_url = _start_server(monkeypatch, tmp_path)
+    try:
+        request = urllib.request.Request(f"{base_url}/health")
+        try:
+            urllib.request.urlopen(request, timeout=2)
+        except urllib.error.HTTPError as error:
+            assert error.code == 401
+        else:
+            raise AssertionError("health must require broker authentication")
+
+        endpoint = {"port": server.server_port, "broker_id": server.broker_id}
+        (tmp_path / "inter-agent-broker.json").write_text(
+            json.dumps(endpoint), encoding="utf-8"
+        )
+        assert inter_agent_tool._broker_is_ready()
+
+        endpoint["broker_id"] = "stale-broker"
+        (tmp_path / "inter-agent-broker.json").write_text(
+            json.dumps(endpoint), encoding="utf-8"
+        )
+        assert not inter_agent_tool._broker_is_ready()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_receive_waits_for_a_message(monkeypatch, tmp_path):
+    monkeypatch.setattr(broker, "RECEIVE_WAIT_SECONDS", 0.5)
+    monkeypatch.setattr(broker, "RECEIVE_POLL_INTERVAL_SECONDS", 0.01)
+    server, thread, token, base_url = _start_server(monkeypatch, tmp_path)
+    result = []
+    try:
+        def receive():
+            result.append(_request(base_url, "/receive?to=recipient", token))
+
+        receiver = threading.Thread(target=receive)
+        receiver.start()
+        time.sleep(0.05)
+        status, sent = _request(
+            base_url,
+            "/send",
+            token,
+            data={"from": "sender", "to": "recipient", "body": "hello"},
+        )
+        assert status == 200
+        receiver.join(timeout=1)
+        assert not receiver.is_alive()
+        assert result == [
+            (
+                200,
+                [
+                    {
+                        "id": sent["id"],
+                        "from": "sender",
+                        "to": "recipient",
+                        "body": "hello",
+                        "created_at": result[0][1][0]["created_at"],
+                    }
+                ],
+            )
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
