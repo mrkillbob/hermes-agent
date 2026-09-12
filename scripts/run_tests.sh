@@ -125,8 +125,7 @@ then
       bootstrap_python="$bootstrap_venv/Scripts/python.exe"
     fi
     if (cd "$REPO_ROOT" && UV_CACHE_DIR="$uv_cache_dir" "$UV_BIN" pip install \
-        --python "$bootstrap_python" -r "$requirements_file" \
-        --editable . >/dev/null) \
+        --python "$bootstrap_python" -r "$requirements_file" >/dev/null) \
         && "$bootstrap_python" -c 'import pytest' 2>/dev/null; then
     VENV="$bootstrap_venv"
     VENV_PYTHON="$bootstrap_python"

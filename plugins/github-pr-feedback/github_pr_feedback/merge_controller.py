@@ -240,7 +240,7 @@ def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
     ``feedback_clear`` gate handles that separately.
     Use ``_codex_clean_head`` when you need both completion *and* no findings.
     """
-    short_head = head_sha[:7].casefold()
+    full_head = head_sha.casefold()
     for item in feedback:
         if (
             item.reviewer.login.casefold() != _CODEX_REVIEW_LOGIN
@@ -249,7 +249,7 @@ def _codex_reviewed_head(feedback: tuple[Feedback, ...], head_sha: str) -> bool:
             continue
         for match in _CODEX_REVIEW_ROW.finditer(item.body):
             if (
-                match.group("sha").casefold() == short_head
+                full_head.startswith(match.group("sha").casefold())
                 and "completed" in match.group("status").casefold()
             ):
                 return True
