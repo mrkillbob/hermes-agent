@@ -72,7 +72,7 @@ beforeEach(() => {
   vi.stubGlobal('createImageBitmap', async () => ({ close: () => undefined }))
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
     drawImage: () => undefined
-  } as unknown as CanvasRenderingContext2D)
+  } as unknown as GPUCanvasContext)
   vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,ok')
 })
 

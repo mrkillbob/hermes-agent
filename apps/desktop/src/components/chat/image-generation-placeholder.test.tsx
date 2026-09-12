@@ -74,7 +74,7 @@ describe('DiffusionCanvas scheduling', () => {
     windowState = installWindowStateBridge()
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
       setTransform: vi.fn()
-    } as unknown as CanvasRenderingContext2D)
+    } as unknown as GPUCanvasContext)
   })
 
   afterEach(() => {
@@ -145,7 +145,7 @@ function installDrawableContext() {
     }
   )
 
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctx as unknown as GPUCanvasContext)
 
   return { clearRect }
 }

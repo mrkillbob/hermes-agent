@@ -27,6 +27,9 @@ const reactUi: TestProjectConfiguration = {
 const electronNative: TestProjectConfiguration = {
   test: {
     name: 'electron',
+    // Keep the Electron project in its own scheduling group because the UI
+    // project intentionally caps workers for jsdom memory pressure.
+    sequence: { groupOrder: 1 },
     environment: 'node',
     // `e2e/**/*.unit.test.ts` is the e2e HELPERS, not the specs: plain node
     // modules that should be provable without booting Electron. Playwright
