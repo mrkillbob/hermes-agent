@@ -1533,6 +1533,59 @@ def _scan_payload(result) -> dict[str, object]:
     return payload
 
 
+def _run_repair_scan_by_repository(
+    policy: PluginPolicy,
+    ledger: FeedbackLedger,
+    repository_backlog: dict[str, int],
+    *,
+    github: GitHubClient | None = None,
+    kanban: KanbanSubprocessClient | None = None,
+) -> dict[str, object]:
+    """Run repair intake only for repositories without a required-CI backlog."""
+
+    repair_policy = policy.repair_steward
+    if repair_policy is None:
+        return {
+            "status": "disabled",
+            "created": 0,
+            "skipped": {},
+            "deferred_repositories": [],
+        }
+    configured = set(repair_policy.repositories)
+    deferred = sorted(
+        repository
+        for repository, backlog in repository_backlog.items()
+        if repository in configured and backlog > 0
+    )
+    eligible = configured - set(deferred)
+    if not eligible:
+        return {
+            "status": "ok",
+            "created": 0,
+            "skipped": {"required_local_ci_backlog": len(deferred)}
+            if deferred
+            else {},
+            "deferred_repositories": deferred,
+        }
+    scoped_policy = replace(
+        policy,
+        repair_steward=replace(
+            repair_policy,
+            repositories=frozenset(eligible),
+        ),
+    )
+    result = RepairController(
+        scoped_policy,
+        ledger,
+        github or _github_client(policy),
+        kanban or KanbanSubprocessClient(),
+        control_home=get_default_hermes_root(),
+    ).scan()
+    payload = _scan_payload(result)
+    payload["deferred_repositories"] = deferred
+    return payload
+
+
 def _status() -> int:
     ledger = FeedbackLedger.for_current_profile()
     try:
