@@ -5,7 +5,9 @@ different conversations on the same machine. Messages persist via a
 local HTTP broker (see tools/comms/broker.py).
 """
 import json
+import subprocess
 import sys
+import time
 import urllib.request
 from typing import Callable, Optional
 
@@ -60,8 +62,35 @@ HISTORY_SCHEMA = {
 BROKER_URL = "http://127.0.0.1:8765"
 
 
+def _broker_is_ready() -> bool:
+    try:
+        with urllib.request.urlopen(f"{BROKER_URL}/health", timeout=0.25) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _ensure_broker() -> None:
+    """Start the shared loopback broker on first use, if it is not already running."""
+    if _broker_is_ready():
+        return
+    subprocess.Popen(
+        [sys.executable, "-m", "tools.comms.broker"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if _broker_is_ready():
+            return
+        time.sleep(0.05)
+
+
 def _broker_call(path: str, data: Optional[dict] = None, timeout: int = 5) -> dict:
     """Make a call to the broker."""
+    _ensure_broker()
     url = f"{BROKER_URL}{path}"
     body = None
     if data is not None:
