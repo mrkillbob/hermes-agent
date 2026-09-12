@@ -409,8 +409,10 @@ def _require_runtime_absent(
     for record in records:
         for argument in record.argv:
             candidate = Path(argument)
-            if candidate.is_absolute() and candidate.resolve() == protected:
-                raise DeploymentError(blocker)
+            if candidate.is_absolute():
+                if candidate.resolve() == protected:
+                    raise DeploymentError(blocker)
+                continue
             if candidate.name != protected_name:
                 continue
             if record.cwd is None:
