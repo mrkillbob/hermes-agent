@@ -22,7 +22,6 @@ _HERMES_CORE_TOOLS = [
     "text_to_speech",
     "todo_list", "memory",
     "session_search",
-    "inter_agent",
     "clarify",
     "execute_code", "delegate_task",
     "cronjob_manage",

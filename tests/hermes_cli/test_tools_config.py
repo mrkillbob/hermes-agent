@@ -1037,13 +1037,13 @@ _requires_recently_shipped = pytest.mark.skipif(
 )
 
 
-def test_inter_agent_toolset_is_reachable_from_default_bundle_and_picker():
-    """The general messaging toolset must be discoverable without Kanban injection."""
-    from toolsets import resolve_toolset
+def test_inter_agent_toolset_is_opt_in_and_reachable_from_picker():
+    """Messaging stays off the default schema while remaining user-selectable."""
+    from toolsets import TOOLSETS, resolve_toolset
 
-    assert "inter_agent" in resolve_toolset("hermes-cli")
+    assert "inter_agent" in TOOLSETS
+    assert "inter_agent" not in resolve_toolset("hermes-cli")
     assert "inter_agent" in _checklist_toolset_keys("cli")
-    assert "inter_agent" in _RECENTLY_SHIPPED_TOOLSETS
 
 
 def _saved_list_from_before(platform="cli"):
