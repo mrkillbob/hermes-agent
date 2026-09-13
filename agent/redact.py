@@ -528,6 +528,47 @@ def _cfg_pipe_starts_assignment(text: str, pipe_index: int) -> bool:
     return i > start and i < len(text) and text[i] == "="
 
 
+def _cfg_quote_is_field_opener(text: str, quote_index: int) -> bool:
+    """Return whether a quote follows the value marker of a pipe field."""
+    if quote_index < 2 or text[quote_index - 1] != "=":
+        return False
+    i = quote_index - 2
+    while i >= 0 and text[i] in _CFG_KEY_CHARS:
+        i -= 1
+    return i >= 0 and text[i] == "|" and i + 1 < quote_index - 1
+
+
+def _scan_cfg_adjacent_fragments(text: str, start: int) -> tuple[int, str]:
+    """Consume shell fragments immediately following a closed quoted fragment."""
+    parts: list[str] = []
+    i = start
+    while i < len(text) and not text[i].isspace() and text[i] not in "&|":
+        if text[i] in "'\"":
+            quote = text[i]
+            i += 1
+            fragment_start = i
+            while i < len(text):
+                if text[i] == "\\" and i + 1 < len(text):
+                    i += 2
+                    continue
+                if text[i] == quote:
+                    break
+                if text[i].isspace() or text[i] in "&|":
+                    break
+                i += 1
+            parts.append(text[fragment_start:i])
+            if i < len(text) and text[i] == quote:
+                i += 1
+            else:
+                break
+            continue
+        fragment_start = i
+        while i < len(text) and not text[i].isspace() and text[i] not in "&|":
+            i += 1
+        parts.append(text[fragment_start:i])
+    return i, "".join(parts)
+
+
 def _scan_cfg_value(text: str, start: int) -> tuple[int, str, str | None, bool]:
     """Scan one config value without regex backtracking.
 
@@ -544,18 +585,31 @@ def _scan_cfg_value(text: str, start: int) -> tuple[int, str, str | None, bool]:
     quote = text[start]
     value_start = start + 1
     i = value_start
+    boundary = None
+    field_quote_open = False
     while i < len(text):
         char = text[i]
         if char == "\\" and i + 1 < len(text):
             i += 2
             continue
+        if char == quote and _cfg_quote_is_field_opener(text, i):
+            field_quote_open = True
+            i += 1
+            continue
+        if char == quote and field_quote_open:
+            field_quote_open = False
+            i += 1
+            continue
         if char == quote:
-            return i + 1, text[value_start:i], quote, True
+            adjacent_end, adjacent_value = _scan_cfg_adjacent_fragments(text, i + 1)
+            return adjacent_end, text[value_start:i] + adjacent_value, quote, True
         if char.isspace() or char == "&":
             return i, text[value_start:i], quote, False
         if char == "|" and _cfg_pipe_starts_assignment(text, i):
-            return i, text[value_start:i], quote, False
+            boundary = i if boundary is None else boundary
         i += 1
+    if boundary is not None:
+        return boundary, text[value_start:boundary], quote, False
     return i, text[value_start:i], quote, False
 
 

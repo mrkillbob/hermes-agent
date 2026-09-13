@@ -270,6 +270,18 @@ class TestBareSecretEnvSuffixes:
         assert "hunter2hunter2" not in result
         assert '|b="foo"|c=3' in result
 
+    def test_dotted_config_quoted_assignment_like_pipe_is_secret_content(self):
+        text = 'app.password="first-secret|bar=second-secret"|b=2'
+        result = redact_sensitive_text(text, force=True)
+        assert "first-secret" not in result
+        assert "second-secret" not in result
+        assert result.endswith('"|b=2')
+
+    def test_shell_adjacent_fragments_are_redacted_as_one_value(self):
+        text = 'token="Abcd1234"efgh5678'
+        result = redact_sensitive_text(text, force=True)
+        assert result == 'token="***"'
+
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
 
