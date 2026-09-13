@@ -51,7 +51,7 @@ The restart is drain-first: the running gateway refuses new turns, then waits fo
   → hermes-gateway: draining (up to 1875s)...
   ⏳ still draining — 1560s left before the forced restart
      waiting on 1 active work unit(s):
-       • cron job 6ba19dab68df (minimax-code-scout) in external worker pid 573597, running 6m40s
+       • cron job 6ba19dab68df (nightly-scout) in external worker pid 573597, running 6m40s
      finish or kill the work above to release the drain now; agent.restart_after_turn_timeout in config.yaml caps this wait
 ```
 
