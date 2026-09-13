@@ -35,6 +35,16 @@ _IS_WINDOWS = platform.system() == "Windows"
 
 logger = logging.getLogger(__name__)
 
+# The foreground terminal is the operator's trusted shell. Preserve the
+# operator's Git/GitHub configuration and auth there so ordinary authenticated
+# workflows keep working; non-terminal and delegated child paths continue to
+# use the shared scrubber below.
+_LOCAL_TERMINAL_GIT_AUTH_ENV = frozenset({
+    "GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT",
+    "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_AUTH_SOCK",
+})
+
 # --- Terminal temp-cache pruning ---
 # get_temp_dir() defaults to HERMES_HOME/cache/terminal (real storage, not tmpfs), so
 # stale artifacts don't vanish on reboot: the gateway housekeeping loop prunes hourly
@@ -554,8 +564,20 @@ def _path_env_key(run_env: dict) -> str | None:
 
 def _make_run_env(env: dict) -> dict:
     """Build a run environment with a sane PATH and provider-var stripping."""
-    return _scrubbed_env([(dict(os.environ | env), True)], frozenset(),
-                         lambda p: _prepend_git_bash_dirs(_append_missing_sane_path_entries(p)))
+    source = dict(os.environ | env)
+    result = _scrubbed_env(
+        [(source, True)], frozenset(),
+        lambda p: _prepend_git_bash_dirs(_append_missing_sane_path_entries(p)),
+    )
+    # _scrubbed_env protects background/untrusted children by neutralizing the
+    # host Git config and credentials. The foreground terminal is the explicit
+    # operator-authenticated exception; restore only the narrowly scoped Git
+    # transport inputs from the caller's environment.
+    if not str(source.get("HERMES_KANBAN_TASK") or "").strip():
+        for key in _LOCAL_TERMINAL_GIT_AUTH_ENV:
+            if source.get(key) is not None:
+                result[key] = source[key]
+    return result
 
 
 # --- Hermes venv / repo-root detection (module-level, computed once) ---

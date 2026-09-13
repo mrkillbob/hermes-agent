@@ -1036,6 +1036,8 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
+    expected_run_id: Optional[int] = None,
+    expected_claim_lock: Optional[str] = None,
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
@@ -1054,11 +1056,23 @@ def _record_task_failure(
     error = error[:500]
     with _kb.write_txn(conn):
         row = conn.execute(
-            "SELECT consecutive_failures, status, max_retries, current_run_id "
+            "SELECT consecutive_failures, status, max_retries, current_run_id, claim_lock "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
             return False
+        if expected_run_id is not None and row["current_run_id"] != int(expected_run_id):
+            return False
+        if expected_claim_lock is not None and row["claim_lock"] != expected_claim_lock:
+            return False
+        fence_sql = ""
+        fence_params: tuple[object, ...] = ()
+        if expected_run_id is not None:
+            fence_sql += " AND current_run_id = ?"
+            fence_params += (int(expected_run_id),)
+        if expected_claim_lock is not None:
+            fence_sql += " AND claim_lock = ?"
+            fence_params += (expected_claim_lock,)
         retry_status = (
             _kb._retry_status_for_run(conn, task_id, row["current_run_id"])
             if release_claim
@@ -1080,14 +1094,14 @@ def _record_task_failure(
                     "UPDATE tasks SET status = ?, claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, "
                     "consecutive_failures = ?, last_failure_error = ? "
-                    "WHERE id = ? AND status = 'running'",
-                    (retry_status, failures, error, task_id),
+                    "WHERE id = ? AND status = 'running'" + fence_sql,
+                    (retry_status, failures, error, task_id, *fence_params),
                 )
             else:
                 conn.execute(
                     "UPDATE tasks SET consecutive_failures = ?, "
-                    "last_failure_error = ? WHERE id = ?",
-                    (failures, error, task_id),
+                    "last_failure_error = ? WHERE id = ?" + fence_sql,
+                    (failures, error, task_id, *fence_params),
                 )
             # Timeout/crash path's caller already emitted its own event.
             if end_run:
@@ -1109,8 +1123,8 @@ def _record_task_failure(
             + ("claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
                if release_claim else "")
             + "consecutive_failures = ?, last_failure_error = ? "
-            "WHERE id = ? AND status IN ('running', 'ready', 'review')",
-            (failures, error, task_id),
+            "WHERE id = ? AND status IN ('running', 'ready', 'review')" + fence_sql,
+            (failures, error, task_id, *fence_params),
         )
         payload = {
             "failures": failures,

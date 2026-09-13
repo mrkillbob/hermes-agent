@@ -222,6 +222,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return subprocess.run(
                 [
                     executable,
+                    "-P",
                     "-m",
                     "hermes_cli.main",
                     "--ignore-rules",
