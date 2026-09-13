@@ -2285,7 +2285,7 @@ class GatewayTurnMixin:
         try:
             from tools.mcp_tool_lifecycle import shutdown_mcp_servers
             from tools.mcp_tool_discovery import discover_mcp_tools
-            from tools.mcp_tool import _servers, _lock, _server_visible_in_scope
+            from tools.mcp_tool import _servers, _lock, _server_public_names, _server_visible_in_scope
             from tools.mcp_tool_agent import reprobe_tool_availability
             from tools.registry import registry
 
@@ -2294,7 +2294,7 @@ class GatewayTurnMixin:
             def _scoped_server_names() -> set:
                 with _lock:
                     return {
-                        name for name in _servers
+                        _server_public_names.get(name, name) for name in _servers
                         if _server_visible_in_scope(name, reload_scope)
                     }
 

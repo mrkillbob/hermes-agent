@@ -184,7 +184,8 @@ def _existing_tool_names() -> List[str]:
                 if _core._server_visible_in_scope(name, scope)
             ]
             server_names.extend(
-                name for name in _core._lazy_server_tool_names
+                _core._server_public_names.get(name, name)
+                for name in _core._lazy_server_tool_names
                 if name not in _core._servers
             )
         return sorted({

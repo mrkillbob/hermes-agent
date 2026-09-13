@@ -255,6 +255,7 @@ def _select_new_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
         # is called from multiple entry-points before the first batch finishes (#58862).
         new_servers = {}
         new_server_public_names = {}
+        selected_connection_names = {}
         for server_name, config in servers.items():
             connection_name = server_name
             existing = _core._servers.get(server_name)
@@ -282,13 +283,18 @@ def _select_new_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
                 # OAuth tokens and mTLS clients are profile-owned even when route config matches.
                 # Give this profile a real connection key so it cannot be skipped by the global name.
                 connection_name = f"{server_name}::profile::{current_scope}"
+            selected_connection_names[server_name] = connection_name
             if (connection_name not in _core._servers and connection_name not in connecting
                     and connection_name not in _core._lazy_server_configs
                     and _enabled(config) and not _connect_cooldown_active(connection_name)):
                 new_servers[connection_name] = config
                 new_server_public_names[connection_name] = server_name
-        stale_cached = [_core._servers[k] for k in servers
-                        if k in _core._servers and getattr(_core._servers[k], "session", None) is None]
+        stale_cached = [
+            server for key, server in _core._servers.items()
+            if getattr(server, "session", None) is None
+            and _core._server_public_names.get(key, key) in servers
+            and (current_scope is None or _core._server_visible_in_scope(key, current_scope))
+        ]
         _core._server_connecting.update(new_servers)
         for connection_name in new_servers:
             _core._server_scope_keys[connection_name] = current_scope
@@ -310,7 +316,8 @@ def _select_new_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
                 key for key in new_servers
                 if _core._server_public_names.get(key, key) == srv_name
             )
-            policy_keys = matching_keys if current_scope is None else {connection_name}
+            current_connection_name = selected_connection_names.get(srv_name, srv_name)
+            policy_keys = matching_keys if current_scope is None else {current_connection_name}
             if _parse_boolish(srv_cfg.get("supports_parallel_tool_calls", False), default=False):
                 if current_scope is None:
                     _core._parallel_safe_servers.add(srv_name)
@@ -617,7 +624,9 @@ def has_registered_mcp_tools() -> bool:
 def get_registered_mcp_server_names() -> set:
     """Server names that registered at least one tool (live, filtered — not config.yaml)."""
     with _core._lock:
-        names = set(_core._mcp_tool_server_names.values())
-        for scoped in getattr(_core, "_mcp_tool_server_names_by_scope", {}).values():
-            names.update(scoped.values())
-        return names
+        scope = _core._mcp_registry_scope()
+        if scope is None:
+            names = set(_core._mcp_tool_server_names.values())
+        else:
+            names = set(getattr(_core, "_mcp_tool_server_names_by_scope", {}).get(scope, {}).values())
+        return {_core._server_public_names.get(name, name) for name in names}

@@ -265,6 +265,82 @@ class TestMCPParallelSafetyProvenance:
                 mcp_tool._parallel_safe_servers.clear()
                 mcp_tool._parallel_safe_servers.update(saved_parallel)
 
+    def test_profile_policy_uses_each_server_connection_key(self, tmp_path, monkeypatch):
+        from hermes_constants import hermes_home_key
+        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool_discovery as discovery
+
+        scope = hermes_home_key(tmp_path / "worker")
+        owner_scope = hermes_home_key(tmp_path / "owner")
+        alpha_key = f"alpha::profile::{scope}"
+        beta_owner_key = f"beta::profile::{owner_scope}"
+        beta_key = f"beta::profile::{scope}"
+        monkeypatch.setattr(mcp_tool, "_servers", {alpha_key: SimpleNamespace(session=object())})
+        monkeypatch.setattr(mcp_tool, "_server_connecting", set())
+        monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {})
+        monkeypatch.setattr(mcp_tool, "_server_connect_errors", {})
+        monkeypatch.setattr(mcp_tool, "_server_connect_retry_after", {})
+        monkeypatch.setattr(mcp_tool, "_server_scope_keys", {
+            alpha_key: scope, beta_owner_key: owner_scope,
+        })
+        monkeypatch.setattr(mcp_tool, "_server_public_names", {
+            alpha_key: "alpha", beta_owner_key: "beta",
+        })
+        monkeypatch.setattr(mcp_tool, "_parallel_safe_servers", set())
+        monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: scope)
+
+        selected = discovery._select_new_servers({
+            "alpha": {"auth": "oauth", "supports_parallel_tool_calls": True},
+            "beta": {"auth": "oauth", "supports_parallel_tool_calls": False},
+        })
+
+        assert list(selected) == [beta_key]
+        assert alpha_key in mcp_tool._parallel_safe_servers
+        assert beta_key not in mcp_tool._parallel_safe_servers
+
+    def test_scoped_registered_names_are_current_profile_public_names(self, tmp_path, monkeypatch):
+        from hermes_constants import hermes_home_key
+        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool_discovery as discovery
+
+        active = hermes_home_key(tmp_path / "active")
+        other = hermes_home_key(tmp_path / "other")
+        active_key = f"shared::profile::{active}"
+        other_key = f"slack::profile::{other}"
+        monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: active)
+        monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names", {})
+        monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names_by_scope", {
+            active: {"mcp__shared__tool": active_key},
+            other: {"mcp__slack__tool": other_key},
+        })
+        monkeypatch.setattr(mcp_tool, "_server_public_names", {
+            active_key: "shared", other_key: "slack-mcp",
+        })
+
+        assert discovery.get_registered_mcp_server_names() == {"shared"}
+
+    def test_lazy_scoped_tools_use_public_registry_toolset(self, tmp_path, monkeypatch):
+        from hermes_constants import hermes_home_key
+        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool_registration as registration
+        from tools.registry import registry
+
+        scope = hermes_home_key(tmp_path / "worker")
+        private_key = f"shared::profile::{scope}"
+        tool_name = "mcp__shared__cached"
+        monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: scope)
+        monkeypatch.setattr(mcp_tool, "_servers", {})
+        monkeypatch.setattr(mcp_tool, "_server_public_names", {private_key: "shared"})
+        monkeypatch.setattr(mcp_tool, "_server_scope_keys", {private_key: scope})
+        monkeypatch.setattr(mcp_tool, "_lazy_server_tool_names", {private_key: [tool_name]})
+        monkeypatch.setattr(registry, "current_scope_key", lambda: scope)
+        registry.register(tool_name, "mcp-shared", {"name": tool_name}, lambda **_kw: None, scope=scope)
+
+        try:
+            assert registration._existing_tool_names() == [tool_name]
+        finally:
+            registry.deregister(tool_name, scope=scope)
+
 class TestMCPStatus:
     def test_status_distinguishes_configured_connecting_failed_and_disabled(
         self, monkeypatch

@@ -128,9 +128,13 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
 
     live_server = SimpleNamespace(session=object(), _config={}, _tools=[], tool_timeout=30,
                                   initialize_result=None, _registered_tool_names=[])
-    monkeypatch.setattr(mcp_tool, "_servers", {"shared": live_server})
-    monkeypatch.setattr(mcp_tool, "_server_scope_keys", {"shared": launch_scope})
-    monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {"shared": {launch_scope}}, raising=False)
+    private_key = f"shared::profile::{launch_scope}"
+    monkeypatch.setattr(mcp_tool, "_servers", {private_key: live_server})
+    monkeypatch.setattr(mcp_tool, "_server_public_names", {private_key: "shared"})
+    monkeypatch.setattr(mcp_tool, "_server_scope_keys", {private_key: launch_scope})
+    monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {
+        private_key: {launch_scope, worker_scope},
+    }, raising=False)
     monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names_by_scope", {
         worker_scope: {"mcp__shared__tool": "shared"},
     }, raising=False)
@@ -158,8 +162,8 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
 
     assert "No MCP servers connected." not in result
     assert "shared" in result
-    assert mcp_tool._server_scope_keys["shared"] == launch_scope
-    assert mcp_tool._server_tool_scopes["shared"] == {launch_scope, worker_scope}
+    assert mcp_tool._server_scope_keys[private_key] == launch_scope
+    assert mcp_tool._server_tool_scopes[private_key] == {launch_scope, worker_scope}
 
 
 def test_failed_profile_owned_connection_does_not_change_peer_parallel_policy(
