@@ -59,16 +59,26 @@ def _record_tool_trust_metadata(server_name: str, config: dict, tools: List[Any]
         hints.update({t.name: _annotation_read_only_hint(t) for t in tools if getattr(t, "name", None)})
 
 
-def _track_mcp_tool_server(tool_name: str, server_name: str) -> None:
+def _track_mcp_tool_server(tool_name: str, server_name: str, *, scope: Optional[str] = None) -> None:
     """Remember the exact raw MCP server that registered *tool_name*."""
     with _core._lock:
-        _core._mcp_tool_server_names[tool_name] = server_name
+        if scope is None:
+            _core._mcp_tool_server_names[tool_name] = server_name
+        else:
+            _core._mcp_tool_server_names_by_scope.setdefault(scope, {})[tool_name] = server_name
 
 
-def _forget_mcp_tool_server(tool_name: str) -> None:
+def _forget_mcp_tool_server(tool_name: str, *, scope: Optional[str] = None) -> None:
     """Forget MCP server provenance for a deregistered tool."""
     with _core._lock:
-        _core._mcp_tool_server_names.pop(tool_name, None)
+        if scope is None:
+            _core._mcp_tool_server_names.pop(tool_name, None)
+        else:
+            scoped = _core._mcp_tool_server_names_by_scope.get(scope)
+            if scoped is not None:
+                scoped.pop(tool_name, None)
+                if not scoped:
+                    _core._mcp_tool_server_names_by_scope.pop(scope, None)
 
 
 def _deregister_mcp_tool_all_scopes(server_name: str, tool_name: str) -> None:
@@ -81,6 +91,8 @@ def _deregister_mcp_tool_all_scopes(server_name: str, tool_name: str) -> None:
             scopes = {_core._server_registry_scope(server_name)}
     for scope in scopes:
         registry.deregister(tool_name, scope=scope)
+    for scope in scopes:
+        _forget_mcp_tool_server(tool_name, scope=scope)
     _forget_mcp_tool_server(tool_name)
     _restore_server_toolset_alias(server_name)
 
@@ -109,6 +121,7 @@ def _remove_server_scope(server_name: str, scope: str) -> None:
         public_name = _core._server_public_names.get(server_name, server_name)
     for tool_name in registry.get_tool_names_for_toolset(f"mcp-{public_name}"):
         registry.deregister(tool_name, scope=scope)
+        _forget_mcp_tool_server(tool_name, scope=scope)
     with _core._lock:
         scopes = set(_core._server_tool_scopes.get(server_name, ()))
         scopes.discard(scope)
@@ -231,7 +244,11 @@ def _tool_candidates(name: str, tools: Iterable[Any], should_register: Callable[
             continue
         _schema._scan_mcp_description(name, t.name, t.description or "")
         schema = _schema._convert_mcp_schema(name, t)
-        handler = _handlers._make_tool_handler(connection_name or name, t.name, tool_timeout)
+        connection_key = connection_name or name
+        handler = (_handlers._make_tool_handler(
+            connection_key, t.name, tool_timeout, public_server_name=name)
+                   if connection_key != name else _handlers._make_tool_handler(
+                       connection_key, t.name, tool_timeout))
         out.append(_Candidate(schema["name"], f"tool {t.name!r}", schema, handler))
     return out
 
@@ -242,8 +259,11 @@ def _utility_candidates(name: str, entries: Iterable[Any], tool_timeout, *, conn
     for raw in entries:
         schema, key = (raw.get("schema"), raw.get("handler_key")) if isinstance(raw, dict) else (None, None)
         if isinstance(schema, dict) and key in _UTILITY_HANDLER_FACTORIES and schema.get("name"):
-            out.append(_Candidate(schema["name"], f"{_UTILITY_ORIGIN_PREFIX}{key!r}", schema,
-                                  _UTILITY_HANDLER_FACTORIES[key](connection_name or name, tool_timeout)))
+            connection_key = connection_name or name
+            factory = _UTILITY_HANDLER_FACTORIES[key]
+            handler = (factory(connection_key, tool_timeout, public_server_name=name)
+                       if connection_key != name else factory(connection_key, tool_timeout))
+            out.append(_Candidate(schema["name"], f"{_UTILITY_ORIGIN_PREFIX}{key!r}", schema, handler))
     return out
 
 
@@ -318,7 +338,7 @@ def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: C
             name=c.registry_name, toolset=toolset_name, schema=c.schema, handler=c.handler, check_fn=check_fn,
             is_async=False, description=c.schema.get("description") or "", scope=scope_value)
         if registry.get_toolset_for_tool(c.registry_name) == toolset_name:
-            _track_mcp_tool_server(c.registry_name, server_key or name)
+            _track_mcp_tool_server(c.registry_name, server_key or name, scope=scope_value)
             if scope_value is not None:
                 with _core._lock:
                     _core._server_tool_scopes.setdefault(server_key or name, set()).add(scope_value)

@@ -630,6 +630,27 @@ class SessionMessagesMixin:
             "AND role = 'user' AND active = 1 AND content IS ?",
             (_scrub_surrogates(api_content), encoded_metadata, row_id, session_id, self._encode_content(content)))
 
+    def set_message_display_metadata(
+        self, session_id: str, row_id: int, content: Any, display_metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Backfill display metadata onto one known active user row without requiring an API sidecar."""
+        if not session_id or isinstance(row_id, bool) or not isinstance(row_id, int) or row_id <= 0:
+            return 0
+        return self._write_rowcount(
+            "UPDATE messages SET display_metadata = COALESCE(?, display_metadata) "
+            "WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1 AND content IS ?",
+            (self._encode_display_metadata(display_metadata), row_id, session_id, self._encode_content(content)))
+
+    def set_latest_user_display_metadata(
+        self, session_id: str, content: Any, display_metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Backfill display metadata onto the newest active user row after in-place compaction."""
+        return self._write_rowcount(
+            "UPDATE messages SET display_metadata = COALESCE(?, display_metadata) WHERE id = "
+            "(SELECT id FROM messages WHERE session_id = ? AND role = 'user' AND active = 1 "
+            "ORDER BY id DESC LIMIT 1) AND content IS ?",
+            (self._encode_display_metadata(display_metadata), session_id, self._encode_content(content)))
+
     def _dedupe_display_generations(self, rows):
         """Collapse compaction generations so each logical message appears once (the protected tail is copied
         into each generation: same role/content/timestamp, different ``active``/id); prefer the live row, then

@@ -485,6 +485,9 @@ def _reset_server_error(server_name: str) -> None:
 _parallel_safe_servers: set = set()
 # registry tool name -> raw server name (the generated name is lossy; never re-parse it).
 _mcp_tool_server_names: Dict[str, str] = {}
+# Profile overlays need independent provenance for identical public tool names. The legacy global
+# map remains for unscoped callers and older plugins.
+_mcp_tool_server_names_by_scope: Dict[str, Dict[str, str]] = {}
 
 # Dedicated event loop in a background daemon thread; _lock guards the loop handles, _servers,
 # the status maps and the PID ledgers.

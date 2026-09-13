@@ -485,6 +485,7 @@ def _run_agent(
     # ``AIAgent(...)`` raises — the one-shot exit path hard-exits via os._exit and skips finalizers.
     agent = None
     reopened_resume = False
+    fallback_created = False
     try:
         if resume_sid:
             try:
@@ -495,6 +496,7 @@ def _run_agent(
         if resume_sid and not reopened_resume:
             resume_sid, conversation_history = _create_fallback_resume_session(
                 session_db, resume_meta or {}, conversation_history)
+            fallback_created = True
         agent_session_id = resume_sid
         agent = AIAgent(
             api_key=runtime.get("api_key"),
@@ -524,7 +526,7 @@ def _run_agent(
         result = agent.run_conversation(prompt, conversation_history=conversation_history or None)
         return (result.get("final_response") or "", result)
     finally:
-        if agent is None and reopened_resume and session_db is not None:
+        if agent is None and (reopened_resume or fallback_created) and session_db is not None:
             _quietly("failed resumed session cleanup", lambda: session_db.end_session(
                 resume_sid, "oneshot_setup_failed"))
         _close_agent(agent, session_db)

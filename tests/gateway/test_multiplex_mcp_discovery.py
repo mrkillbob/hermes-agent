@@ -345,3 +345,64 @@ def test_deregister_scope_kwarg_targets_overlay_and_keeps_plugin_confinement() -
     reg._caller_module = staticmethod(lambda: "hermes_plugins.p")
     with pytest.raises(PermissionError):
         reg.deregister("anything", scope="/home/p2")
+
+
+def test_profile_owned_lazy_and_delimiter_names_keep_public_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lazy foreign connections get a private key, while configured names remain lossless."""
+    from tools import mcp_tool
+    from tools import mcp_tool_discovery as discovery
+
+    worker_scope = hermes_home_key(tmp_path / "worker")
+    owner_scope = hermes_home_key(tmp_path / "owner")
+    monkeypatch.setattr(mcp_tool, "_servers", {})
+    monkeypatch.setattr(mcp_tool, "_server_connecting", set())
+    monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {"shared": {"auth": "oauth", "lazy": True}})
+    monkeypatch.setattr(mcp_tool, "_server_scope_keys", {"shared": owner_scope})
+    monkeypatch.setattr(mcp_tool, "_server_public_names", {"shared": "shared"})
+    monkeypatch.setattr(mcp_tool, "_server_connect_errors", {})
+    monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: worker_scope)
+
+    lazy = discovery._select_new_servers({"shared": {"auth": "oauth", "lazy": True}})
+    assert list(lazy) == [f"shared::profile::{worker_scope}"]
+    assert mcp_tool._server_public_names[list(lazy)[0]] == "shared"
+
+    configured = "acme::profile::prod"
+    monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {})
+    selected = discovery._select_new_servers({configured: {"url": "https://example.invalid/mcp"}})
+    assert list(selected) == [configured]
+    assert mcp_tool._server_public_names[configured] == configured
+
+
+def test_scoped_mcp_provenance_survives_one_connection_teardown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Identical public tools retain the surviving profile's parallel-call policy."""
+    from tools import mcp_tool
+    from tools import mcp_tool_discovery as discovery
+    from tools import mcp_tool_registration as registration
+    from tools.registry import registry
+
+    first_scope = hermes_home_key(tmp_path / "first")
+    second_scope = hermes_home_key(tmp_path / "second")
+    tool_name = "mcp__shared__echo"
+    first_key = "shared"
+    second_key = "shared::profile::second"
+    monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names", {})
+    monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names_by_scope", {})
+    monkeypatch.setattr(mcp_tool, "_parallel_safe_servers", {first_key, second_key})
+    monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {first_key: {first_scope}, second_key: {second_scope}})
+    monkeypatch.setattr(mcp_tool, "_servers", {})
+    monkeypatch.setattr(mcp_tool, "_server_public_names", {first_key: "shared", second_key: "shared"})
+    monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: second_scope)
+    for scope in (first_scope, second_scope):
+        registry.register(tool_name, "mcp-shared", {"name": tool_name}, lambda **_kw: None, scope=scope)
+    registration._track_mcp_tool_server(tool_name, first_key, scope=first_scope)
+    registration._track_mcp_tool_server(tool_name, second_key, scope=second_scope)
+
+    registration._deregister_mcp_tool_all_scopes(first_key, tool_name)
+
+    assert registry.snapshot_registration(tool_name, scope=first_scope) is None
+    assert registry.snapshot_registration(tool_name, scope=second_scope) is not None
+    assert discovery.is_mcp_tool_parallel_safe(tool_name) is True

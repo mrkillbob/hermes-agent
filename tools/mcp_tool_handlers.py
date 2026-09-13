@@ -137,17 +137,19 @@ def _retry_once(server_name: str, retry_call, op_description: str, what: str):
     return result
 
 
-def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
+def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str,
+                                 *, public_server_name: Optional[str] = None):
     """OAuth recovery + one retry; None when *exc* is not an auth error. ``handle_401`` decides
     viability; if viable, signal a reconnect (fresh credentials), wait ready, retry once. Any
     failure returns the structured ``needs_reauth`` error so the model stops refreshing."""
     if not _is_auth_error(exc):
         return None
     from tools.mcp_oauth_manager import get_manager
+    auth_server_name = public_server_name or server_name
     try:
-        recovered = _loop._run_on_mcp_loop(lambda: get_manager().handle_401(server_name, None), timeout=10)
+        recovered = _loop._run_on_mcp_loop(lambda: get_manager().handle_401(auth_server_name, None), timeout=10)
     except Exception as rec_exc:
-        logger.warning("MCP OAuth '%s': recovery attempt failed: %s", server_name, rec_exc)
+        logger.warning("MCP OAuth '%s': recovery attempt failed: %s", auth_server_name, rec_exc)
         recovered = False
     if recovered:
         srv = _lookup_reconnectable_server(server_name)
@@ -159,7 +161,8 @@ def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_cal
         result = _retry_once(server_name, retry_call, op_description, "auth recovery")
         if result is not None:
             return result
-    return _strike(server_name, _NEEDS_REAUTH_MSG.format(s=server_name), needs_reauth=True, server=server_name)
+    return _strike(server_name, _NEEDS_REAUTH_MSG.format(s=auth_server_name), needs_reauth=True,
+                   server=auth_server_name)
 
 
 def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
@@ -416,7 +419,8 @@ def _render_call_tool_result(result, server_name: str) -> str:
         return json.dumps({"result": text_result}, ensure_ascii=False)
 
 
-def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
+def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float,
+                       *, public_server_name: Optional[str] = None):
     """Sync registry handler (``handler(args_dict, **kwargs) -> str``) calling an MCP tool via the background loop."""
     op = f"tools/call {tool_name}"
 
@@ -443,9 +447,12 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         def _on_failure(exc):
             _core._bump_server_error(server_name)
             logger.error("MCP tool %s/%s call failed: %s", server_name, tool_name, exc)
+        def _auth_recoverer(internal_name, exc, retry, description):
+            return _handle_auth_error_and_retry(
+                internal_name, exc, retry, description, public_server_name=public_server_name)
         return _dispatch(
             server_name, server, op, _call, tool_timeout,
-            (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry, _handle_session_expired_and_retry),
+            (_handle_stdio_child_exited_and_retry, _auth_recoverer, _handle_session_expired_and_retry),
             _on_failure, record_outcome=True)
     return _handler
 
@@ -454,7 +461,7 @@ def _make_utility_handler(op: str, log_label: str, rpc, render, required: Option
     """``(server_name, tool_timeout) -> sync handler`` for one utility tool: ``rpc(session, args,
     server_name)`` awaited under ``_rpc_lock``, ``render(result, server_name)`` -> JSON-able
     payload, ``required`` validated before any transport work."""
-    def _factory(server_name: str, tool_timeout: float):
+    def _factory(server_name: str, tool_timeout: float, *, public_server_name: Optional[str] = None):
         def _handler(args: dict, **kwargs) -> str:
             from tools import mcp_tool_discovery as _discovery  # lazy: import cycle
             server = _discovery._get_connected_server_for_call(server_name)
@@ -467,9 +474,12 @@ def _make_utility_handler(op: str, log_label: str, rpc, render, required: Option
                 async with server._rpc_lock:
                     result = await rpc(server.session, args, server_name)
                 return json.dumps(render(result, server_name), ensure_ascii=False)
+            def _auth_recoverer(internal_name, exc, retry, description):
+                return _handle_auth_error_and_retry(
+                    internal_name, exc, retry, description, public_server_name=public_server_name)
             return _dispatch(
                 server_name, server, op, _call, tool_timeout,
-                (_handle_auth_error_and_retry, _handle_session_expired_and_retry),
+                (_auth_recoverer, _handle_session_expired_and_retry),
                 lambda exc: logger.error("MCP %s/%s failed: %s", server_name, log_label, exc))
         return _handler
     return _factory

@@ -104,6 +104,25 @@ class TestPrologueRowAddressedBackfill:
         agent._session_db.set_message_api_content.assert_not_called()
         agent._session_db.set_latest_user_api_content.assert_not_called()
 
+    def test_preflushed_marker_is_persisted_without_api_sidecar(self, tmp_path):
+        """A trusted surface marker must survive when the API copy is identical or absent."""
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("s1", source="cli")
+        try:
+            agent = _RealPersistenceAgent(db, "s1")
+            staged = {"role": "user", "content": "hello"}
+            agent._pending_cli_user_message = staged
+            agent._flush_messages_to_session_db([staged], None)
+            marker = {"_hermes_surface_switch": {"surface": "desktop"}}
+            with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
+                _build(agent, persist_user_display_metadata=marker)
+
+            row = db.get_messages("s1")[0]
+            assert row["api_content"] is None
+            assert row["display_metadata"] == marker
+        finally:
+            db.close()
+
 class _RealPersistenceAgent(SessionPersistenceMixin, _FakeAgent):
     """Stand-in agent with the real SessionPersistenceMixin flush implementation."""
 

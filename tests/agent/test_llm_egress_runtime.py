@@ -3171,7 +3171,6 @@ def test_protected_kanban_redacts_nested_terminal_argument_replay(
     assert opaque_command not in replay
 
 
-@pytest.mark.macos_only
 def test_protected_kanban_elides_scratch_read_without_source_metadata(
     tmp_path, monkeypatch
 ):

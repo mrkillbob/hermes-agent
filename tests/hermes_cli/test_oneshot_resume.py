@@ -295,6 +295,46 @@ class TestRunAgentResumeRuntime:
         finally:
             db.close()
 
+    def test_run_agent_ends_fallback_when_agent_construction_fails(self, tmp_path, monkeypatch):
+        """A copied fallback must not remain resumable when no agent turn starts."""
+        import hermes_cli.oneshot as oneshot_mod
+
+        db = _db_with_session(tmp_path, "s1", messages=[("user", "remember this")])
+        db.end_session("s1", "agent_close")
+
+        def _fail_reopen(_target):
+            raise OSError("transient lock")
+
+        class _FailingAgent:
+            def __init__(self, **_kwargs):
+                raise RuntimeError("construction failed")
+
+        monkeypatch.setattr(db, "reopen_session", _fail_reopen)
+        monkeypatch.setattr(oneshot_mod, "_create_session_db_for_oneshot", lambda: db)
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "model": {"default": "ambient-model", "provider": "openrouter"},
+        })
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            lambda **_kw: {"api_key": "resolved", "base_url": None, "provider": "openrouter",
+                            "requested_provider": "openrouter", "api_mode": "chat", "credential_pool": None},
+        )
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda _cfg, _p: [])
+        monkeypatch.setattr("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
+        monkeypatch.setattr("run_agent.AIAgent", _FailingAgent)
+
+        try:
+            with pytest.raises(RuntimeError, match="construction failed"):
+                oneshot_mod._run_agent("continue", resume="s1")
+            fallback_ids = [row["id"] for row in db._read_all(
+                "SELECT id FROM sessions WHERE id LIKE 'oneshot-resume-%'")]
+            assert len(fallback_ids) == 1
+            fallback = db.get_session(fallback_ids[0])
+            assert fallback["ended_at"] is not None
+            assert fallback["end_reason"] == "oneshot_setup_failed"
+        finally:
+            db.close()
+
     def test_run_agent_explicit_model_beats_stored_runtime(self, tmp_path, monkeypatch):
         import hermes_cli.oneshot as oneshot_mod
 
