@@ -1508,7 +1508,10 @@ class GatewayStartupMixin:
             switch_kwargs = {"conversation_kind": "task"}
         # Route ownership and the task handoff must complete as one flight. Otherwise an
         # interactive message can observe the pre-handoff route between these two calls.
-        handoff = getattr(type(self.async_session_store), "get_or_create_session_and_switch", None)
+        # Inspect the wrapped synchronous store, not the facade class: the async facade exposes
+        # this method for every wrapped object, including narrow MagicMock test doubles that only
+        # implement the legacy pair of calls below.
+        handoff = getattr(type(store), "get_or_create_session_and_switch", None)
         if callable(handoff):
             switched = await self.async_session_store.get_or_create_session_and_switch(
                 dest.source, cli_session_id, **switch_kwargs

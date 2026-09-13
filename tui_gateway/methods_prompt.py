@@ -533,7 +533,8 @@ def _lock_in_submit_turn(
 
 def _session_prompt_submit_lock(session: dict):
     """Return the per-session admission lock, including legacy runtime records."""
-    with session["history_lock"]:
+    history_lock = session.setdefault("history_lock", threading.Lock())
+    with history_lock:
         return session.setdefault("prompt_submit_lock", threading.Lock())
 
 
@@ -559,12 +560,19 @@ def _validate_truncation_before_materializing(rid, sid, session, params):
 
 def _admit_prompt_submit(
     rid, sid, session, text, params, has_truncation, requested_rebind_ids,
-    hosted_task, internal_hosted_submit, transport):
+    hosted_task, internal_hosted_submit, transport, *, reattach=False):
     """Serialize admission, validation, materialization, and turn claim per session."""
     with _session_prompt_submit_lock(session):
         if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
             reason = getattr(limit_message, "reason", None)
             return _err(rid, 4090, str(limit_message), {"reason": reason} if reason else None), None
+        if reattach:
+            with _session_resume_lock:
+                if (refusal := _reattach_refusal(rid, sid, session)) is not None:
+                    return refusal, None
+                if transport is not None:
+                    _attach_session_transport(session, transport)
+                    _cancel_ws_orphan_reap(sid)
         while True:
             with session["history_lock"]:
                 if not session.get("running"):
@@ -625,21 +633,16 @@ def _(rid, params: dict) -> dict:
     turn_isolation = _session_uses_compute_host(session, _load_dashboard_process_isolation_config())
     if internal_hosted_submit and turn_isolation:
         return _err(rid, 4121, "hosted room turns do not support isolated compute workers yet")
-    # Re-bind to the current transport: streaming must stay on the active websocket even
-    # if a disconnect/fallback moved the session to stdio.
-    with _session_resume_lock:
-        if (refusal := _reattach_refusal(rid, sid, session)) is not None:
-            return refusal
-        if (t := current_transport()) is not None:
-            _attach_session_transport(session, t)
-            _cancel_ws_orphan_reap(sid)
+    # Re-bind to the current transport inside serialized admission: streaming must stay on the
+    # active websocket even if a disconnect/fallback moved the session to stdio.
+    t = current_transport()
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
     requested_rebind_ids = (
         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
         if isinstance(raw_rebind_ids, list) else None)
     err, survivor_fields = _admit_prompt_submit(
         rid, sid, session, text, params, has_truncation, requested_rebind_ids,
-        hosted_task, internal_hosted_submit, t)
+        hosted_task, internal_hosted_submit, t, reattach=True)
     if err is not None:
         return err
     if turn_isolation:
