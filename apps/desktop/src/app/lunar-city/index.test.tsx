@@ -22,6 +22,41 @@ const renderWorld = (initialLocale: Locale = 'en') => {
   )
 }
 
+const localizedSurfaceCopy = {
+  ja: {
+    setup: 'Lunar Cityワールドのセットアップ',
+    useDefaults: 'Hermesのデフォルトを使用',
+    skip: '今はスキップ',
+    scene: 'Lunar Cityシーン',
+    dispatcher: 'ディスパッチャーコンパニオン',
+    newTask: '新しいタスク'
+  },
+  ar: {
+    setup: 'إعداد عالم مدينة القمر',
+    useDefaults: 'استخدم إعدادات Hermes الافتراضية',
+    skip: 'تخطَّ الآن',
+    scene: 'مشهد مدينة القمر',
+    dispatcher: 'مساعد الموزّع',
+    newTask: 'مهمة جديدة'
+  },
+  ru: {
+    setup: 'Настройка мира Лунного города',
+    useDefaults: 'Использовать настройки Hermes',
+    skip: 'Пропустить пока',
+    scene: 'Сцена Лунного города',
+    dispatcher: 'Помощник диспетчера',
+    newTask: 'Новая задача'
+  },
+  'zh-hant': {
+    setup: '月城世界設定',
+    useDefaults: '使用 Hermes 預設設定',
+    skip: '暫時略過',
+    scene: '月城場景',
+    dispatcher: '派遣助手',
+    newTask: '新增任務'
+  }
+} as const
+
 beforeEach(() => {
   localStorage.clear()
   $worldEnabled.set(true)
@@ -33,10 +68,28 @@ afterEach(cleanup)
 describe('LunarCity', () => {
   it('renders its surface copy through the active locale', () => {
     renderWorld('ja')
-    fireEvent.click(screen.getByRole('button', { name: 'Use Hermes defaults' }))
+    fireEvent.click(screen.getByRole('button', { name: localizedSurfaceCopy.ja.useDefaults }))
 
     expect(screen.getByRole('heading', { name: 'Hermesの世界' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'Your Hermes world' })).toBeNull()
+  })
+
+  it.each(Object.entries(localizedSurfaceCopy))('renders the full Lunar City surface in %s', (locale, copy) => {
+    localStorage.clear()
+    $worldEnabled.set(true)
+    $worldOnboardingDismissed.set(false)
+    renderWorld(locale as Locale)
+
+    expect(screen.getByRole('dialog', { name: copy.setup })).toBeTruthy()
+    expect(screen.getByRole('button', { name: copy.skip })).toBeTruthy()
+    expect(screen.getByRole('button', { name: copy.useDefaults })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: copy.useDefaults }))
+
+    expect(screen.getByRole('region', { name: copy.scene })).toBeTruthy()
+    expect(screen.getByRole('region', { name: copy.dispatcher })).toBeTruthy()
+    expect(screen.getByRole('button', { name: copy.newTask })).toBeTruthy()
+    cleanup()
   })
 
   it('shows first-open onboarding with Hermes defaults', () => {
