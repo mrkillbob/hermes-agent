@@ -13,14 +13,16 @@ on:
 
 permissions:
   contents: read
-  actions: write # to trigger deploy-site.yml on schedule
 
 jobs:
   build-index:
     # Only run on the upstream repository, not on forks
     if: github.repository == 'NousResearch/hermes-agent'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Critical path (Sep 2026): clawhub walk ~14 min ∥ github taps ~8 min, then skills.sh
+    # resolve ~6 min, then a bounded 8 min owner enrichment. 15 min cancelled every
+    # scheduled run for two months and left the live index frozen.
+    timeout-minutes: 50
     environment: trusted-automation
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -31,6 +33,7 @@ jobs:
         with:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: read
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -59,6 +62,9 @@ jobs:
   trigger-deploy:
     needs: build-index
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      actions: write # trigger deploy-site.yml on schedule or manual refresh
+      contents: read # check out the local token-minting action
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: trusted-automation
@@ -75,6 +81,7 @@ jobs:
         with:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-actions: write
 
       - name: Trigger Deploy Site workflow
         env:

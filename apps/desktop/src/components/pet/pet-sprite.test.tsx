@@ -96,7 +96,7 @@ describe('PetSprite RAF scheduling', () => {
       clearRect: vi.fn(),
       drawImage,
       imageSmoothingEnabled: false
-    } as unknown as CanvasRenderingContext2D)
+    } as never)
   })
 
   afterEach(() => {
@@ -172,13 +172,13 @@ describe('PetSprite RAF scheduling', () => {
     expect(raf.request).toHaveBeenCalledTimes(2)
   })
 
-  it('suspends while unfocused, resumes on focus, and leaves no work after unmount', () => {
+  it('keeps animating while unfocused and leaves no work after unmount', () => {
     const raf = installRaf()
 
     mount.render(<PetSprite info={INFO} />)
 
     act(() => window.dispatchEvent(new Event('blur')))
-    expect(raf.pending()).toBe(0)
+    expect(raf.pending()).toBe(1)
 
     act(() => window.dispatchEvent(new Event('focus')))
     expect(raf.pending()).toBe(1)
@@ -216,7 +216,7 @@ describe('PetSprite RAF scheduling', () => {
       imageSmoothingQuality: 'low'
     } as unknown as CanvasRenderingContext2D
 
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctxMock)
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctxMock as never)
 
     mount.render(<PetSprite info={INFO} />)
     act(() => raf.runNext(0))

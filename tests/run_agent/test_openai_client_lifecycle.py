@@ -55,6 +55,13 @@ def _build_agent(shared_client=None):
     agent.provider = "openai-codex"
     agent.base_url = "https://chatgpt.com/backend-api/codex"
     agent.model = "gpt-5-codex"
+    # openai-codex is a protected-egress provider: every physical request goes through the
+    # egress firewall, which requires a request identity.
+    agent.session_id = "session-1"
+    agent._current_turn_id = "turn-1"
+    agent._current_api_request_id = "turn-1:api:1"
+    from hashlib import sha256
+    agent._llm_egress_policy_digest = sha256(b"policy").hexdigest()
     agent.log_prefix = ""
     agent.quiet_mode = True
     agent._interrupt_requested = False
@@ -80,7 +87,7 @@ def test_retry_after_api_connection_error_recreates_request_client(monkeypatch):
     first_request = FakeRequestClient(lambda **kwargs: (_ for _ in ()).throw(_connection_error()))
     second_request = FakeRequestClient(lambda **kwargs: {"ok": True})
     factory = OpenAIFactory([first_request, second_request])
-    monkeypatch.setattr(run_agent, "OpenAI", factory)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", factory)
 
     agent = _build_agent()
 
@@ -106,7 +113,7 @@ def test_stale_non_stream_close_is_single_owner(monkeypatch):
 
     request_client = FakeRequestClient(slow_responder)
     factory = OpenAIFactory([request_client])
-    monkeypatch.setattr(run_agent, "OpenAI", factory)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", factory)
 
     agent = _build_agent()
     agent._compute_non_stream_stale_timeout = lambda api_payload: 0.01
@@ -124,7 +131,7 @@ def test_closed_shared_client_is_recreated_before_request(monkeypatch):
     replacement_shared = FakeSharedClient(lambda **kwargs: {"replacement": True})
     request_client = FakeRequestClient(lambda **kwargs: {"ok": "fresh-request-client"})
     factory = OpenAIFactory([replacement_shared, request_client])
-    monkeypatch.setattr(run_agent, "OpenAI", factory)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", factory)
 
     agent = _build_agent(shared_client=stale_shared)
     result = agent._interruptible_api_call({"model": agent.model, "messages": []})
@@ -154,7 +161,7 @@ def test_concurrent_requests_do_not_break_each_other_when_one_client_closes(monk
     first_client = FakeRequestClient(first_responder)
     second_client = FakeRequestClient(second_responder)
     factory = OpenAIFactory([first_client, second_client])
-    monkeypatch.setattr(run_agent, "OpenAI", factory)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", factory)
 
     agent = _build_agent()
     results = {}
@@ -197,7 +204,7 @@ def test_streaming_call_recreates_closed_shared_client_before_request(monkeypatc
     replacement_shared = FakeSharedClient(lambda **kwargs: {"replacement": True})
     request_client = FakeRequestClient(lambda **kwargs: chunks)
     factory = OpenAIFactory([replacement_shared, request_client])
-    monkeypatch.setattr(run_agent, "OpenAI", factory)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", factory)
 
     agent = _build_agent(shared_client=stale_shared)
     agent.stream_delta_callback = lambda _delta: None

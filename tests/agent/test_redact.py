@@ -59,6 +59,13 @@ class TestKnownPrefixes:
         ]:
             assert redact_sensitive_text(benign) == benign
 
+    def test_agentmail_prefix_needs_an_opaque_key_body(self):
+        """The documented prefix alone is not enough to identify an AgentMail secret."""
+        for benign in ["schema.am_example_identifier_123", "path/to/am_monthly_report.sql"]:
+            assert redact_sensitive_text(benign) == benign
+        for key in ("am_" + "0123456789abcdef" * 2, "am_" + "Ab9" * 8, "am_org_" + "Zq7k" * 6):
+            assert key[-12:] not in redact_sensitive_text(f"leaked {key} in output"), key
+
     def test_slack_token(self):
         token = "xoxb-" + "0" * 12 + "-" + "a" * 14
         result = redact_sensitive_text(token)
@@ -99,6 +106,37 @@ class TestEnvAssignments:
         text = "HOME=/home/user"
         result = redact_sensitive_text(text)
         assert result == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'IDENTITY_TOKEN="bailu"',
+            "--override-tensor per_layer_token_embd.weight=CPU",
+            'runtime.token="local"',
+            '{"token": "CPU"}',
+            "token: CPU",
+        ],
+    )
+    def test_ambiguous_key_preserves_obviously_noncredential_value(self, text):
+        assert redact_sensitive_text(text, force=True) == text
+
+    @pytest.mark.parametrize(
+        "text, cleartext",
+        [
+            ("PASSWORD=hunter2", "hunter2"),
+            ("SECRET_TOKEN=bailu", "bailu"),
+            ("id_token=local", "local"),
+            ("CUSTOM_TOKEN=opaqueValue123456789", "opaqueValue123456789"),
+            ('{"token": "opaqueValue123456789"}', "opaqueValue123456789"),
+            ('{"key_material": "CPU"}', "CPU"),
+            ('{"bearer": "local"}', "local"),
+            ("TOKEN=" + "sk-" + "a" * 30, "a" * 20),
+        ],
+    )
+    def test_strong_key_or_credential_shaped_value_still_redacts(
+        self, text, cleartext
+    ):
+        assert cleartext not in redact_sensitive_text(text, force=True)
 
 
 
@@ -144,6 +182,123 @@ class TestBareSecretEnvSuffixes:
         assert "opaqueValue" not in result
         assert "username=bob" in result
 
+    def test_inline_machine_fields_redact_pipe_and_whitespace_delimiters(self):
+        samples = (
+            (
+                "password=opaque-secret-value-12345|b=2",
+                "password=***|b=2",
+            ),
+            (
+                "a=1|password=opaque-secret-value-12345|b=2",
+                "a=1|password=***|b=2",
+            ),
+            (
+                "status=ok password=A9f3kZq7Lm2Xw8Rt4Yv6",
+                "status=ok password=***",
+            ),
+        )
+        for text, expected in samples:
+            assert redact_sensitive_text(text, force=True) == expected
+
+    @pytest.mark.parametrize("key", ["password", "secret", "credential", "pass", "pw", "api_key"])
+    def test_whitespace_delimited_inline_credential_keywords_mask(self, key):
+        value = "hunter2hunter2"
+        result = redact_sensitive_text(f"provider {key}={value}", force=True)
+        assert f"provider {key}=" in result
+        assert value not in result
+
+    def test_opaque_whitespace_token_masks_without_force(self):
+        value = "A9f3kZq7Lm2Xw8Rt4Yv6"
+        result = redact_sensitive_text(f"provider token={value}")
+        assert value not in result
+
+    def test_dotted_config_redacts_quoted_pipes_without_swallowing_delimiter(self):
+        samples = (
+            'app.password="opaque-secret-part|still-secret-part"|b=2',
+            "app.password=opaque-secret-part|b=2",
+        )
+        for text in samples:
+            result = redact_sensitive_text(text, force=True)
+            assert "opaque-secret-part" not in result
+            assert "still-secret-part" not in result
+            assert result.endswith("|b=2")
+
+    def test_dotted_config_empty_unquoted_value_preserves_pipe_delimiter(self):
+        assert redact_sensitive_text("app.password=|b=2", force=True) == "app.password=***|b=2"
+
+        quoted = redact_sensitive_text(
+            'app.password="part-one|part-two"|b=2', force=True
+        )
+        assert "part-one" not in quoted
+        assert "part-two" not in quoted
+        assert quoted.endswith('"|b=2')
+
+    @pytest.mark.parametrize(
+        "text, suffix",
+        (
+            ('app.password="hunter2hunter2', ""),
+            ('app.password="hunter2hunter2|b=2', "|b=2"),
+        ),
+    )
+    def test_dotted_config_unterminated_quote_redacts_to_delimiter_or_end(self, text, suffix):
+        result = redact_sensitive_text(text, force=True)
+        assert "hunter2hunter2" not in result
+        if suffix:
+            assert result.endswith(suffix)
+
+    def test_dotted_config_handles_following_fields_and_multiple_quoted_pipes(self):
+        truncated = redact_sensitive_text(
+            'app.password="hunter2hunter2 b="foo"', force=True
+        )
+        assert "hunter2hunter2" not in truncated
+        assert ' b="foo"' in truncated
+
+        multi_pipe = redact_sensitive_text(
+            'app.password="first-secret|second-secret|third-secret"|b=2',
+            force=True,
+        )
+        for secret in ("first-secret", "second-secret", "third-secret"):
+            assert secret not in multi_pipe
+        assert multi_pipe.endswith('"|b=2')
+
+    def test_dotted_config_quoted_pipe_ignores_escaped_quote(self):
+        text = 'app.password="first-secret|second-\\"|third-secret"|b=2'
+        result = redact_sensitive_text(text, force=True)
+        for secret in ("first-secret", "second-", "third-secret"):
+            assert secret not in result
+        assert result.endswith('"|b=2')
+
+    def test_dotted_config_empty_unterminated_quote_preserves_pipe_delimiter(self):
+        assert redact_sensitive_text('app.password="|b=2', force=True) == 'app.password="***|b=2'
+
+    def test_dotted_config_unterminated_quote_preserves_pipe_field(self):
+        text = 'app.password="hunter2hunter2|b="foo"|c=3'
+        result = redact_sensitive_text(text, force=True)
+        assert "hunter2hunter2" not in result
+        assert '|b="foo"|c=3' in result
+
+    def test_dotted_config_quoted_assignment_like_pipe_is_secret_content(self):
+        text = 'app.password="first-secret|bar=second-secret"|b=2'
+        result = redact_sensitive_text(text, force=True)
+        assert "first-secret" not in result
+        assert "second-secret" not in result
+        assert result.endswith('"|b=2')
+
+    def test_shell_adjacent_fragments_are_redacted_as_one_value(self):
+        text = 'token="Abcd1234"efgh5678'
+        result = redact_sensitive_text(text, force=True)
+        assert result == 'token="***"'
+
+    def test_adjacent_quoted_fragments_scan_pipes_before_delimiter(self):
+        text = 'app.password="first-secret"\'second-secret|third-secret\'|b=2'
+        result = redact_sensitive_text(text, force=True)
+        for secret in ("first-secret", "second-secret", "third-secret"):
+            assert secret not in result
+        assert result.endswith('"|b=2')
+
+    def test_single_quoted_literal_preserves_backslash_terminated_quote(self):
+        text = r"app.password='abcdefgh1234\' # keep"
+        assert redact_sensitive_text(text, force=True) == "app.password='***' # keep"
 
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
@@ -253,6 +408,22 @@ class TestJsonFields:
 
 
 class TestAuthHeaders:
+
+    @pytest.mark.parametrize("file_read", [False, True])
+    def test_authorization_identifier_preserves_python_syntax(self, file_read):
+        import ast
+
+        source = "submit_authorization: SubmitAuthorizationResult | None = None\n"
+        result = redact_sensitive_text(source, force=True, file_read=file_read)
+        assert ast.dump(ast.parse(result)) == ast.dump(ast.parse(source))
+
+    @pytest.mark.parametrize("header", ["Authorization", "Proxy-Authorization"])
+    def test_actual_auth_header_still_masks_credential_in_source(self, header):
+        credential = "opaque-private-value"
+        source = f'header = "{header}: Bearer {credential}"'
+        result = redact_sensitive_text(source, force=True, file_read=True)
+        assert credential not in result
+        assert f"{header}: Bearer " in result
 
 
 
@@ -590,7 +761,7 @@ class TestFormBodyRedaction:
 
     def test_non_form_text_unchanged(self):
         """Sentences with `&` should NOT trigger form redaction."""
-        text = "I have password=foo and other things"  # contains spaces
+        text = "I have token=foo and other things"  # contains spaces
         result = redact_sensitive_text(text)
         # The space breaks the form regex; passthrough expected.
         assert "I have" in result
@@ -629,10 +800,18 @@ class TestLowercaseDottedConfigKeys:
 
     # --- carve-outs: must NOT redact ---
 
-    def test_prose_mid_sentence_password_unchanged(self):
-        # Not line-anchored, not dotted → conversational text, leave alone.
-        text = "I have password=foo and other things"
+    def test_prose_mid_sentence_ambiguous_token_unchanged(self):
+        text = "I have token=foo and other things"
         assert redact_sensitive_text(text) == text
+
+    def test_mid_sentence_strong_credential_is_redacted_without_force(self):
+        for text, cleartext in (
+            ("provider error password=hunter2hunter2", "hunter2hunter2"),
+            ("request failed secret=abc123", "abc123"),
+            ("provider error credential=abc123", "abc123"),
+            ("provider error auth=abc123", "abc123"),
+        ):
+            assert cleartext not in redact_sensitive_text(text)
 
 
 
@@ -676,6 +855,46 @@ class TestConfigKeyRedosResistance:
         result = redact_sensitive_text(text)
         assert "Sup3rS3cret!" not in result
         assert ".password=" in result
+
+    def test_long_opaque_assignment_run_completes_fast(self):
+        """Lowercase env scanning stays linear on compaction payload blobs."""
+        import time
+
+        # A serialized tool payload can contain a long opaque alphanumeric
+        # value followed by '=' without containing a secret-key suffix.  The
+        # old unanchored lowercase-env pattern retried its greedy prefix from
+        # every byte, making this quadratic while holding the GIL.
+        text = "a" * 20_000 + "=value"
+        t0 = time.perf_counter()
+        assert redact_sensitive_text(text, force=True) == text
+        assert time.perf_counter() - t0 < 2.0
+
+    def test_dotted_cfg_scan_stays_linear_with_keyword_elsewhere(self):
+        """_CFG_DOTTED_RE must stay linear once the pre-gate passes.
+
+        The ``_CFG_SECRET_WORD_RE`` pre-gate only skips secret-FREE text, so a
+        payload that contains a real secret assignment AND a long opaque
+        dotted run still reaches the backtrackable ``*`` prefix. Without the
+        run-start lookbehind the sub retries that prefix from every byte of
+        the run (quadratic while holding the GIL).
+        """
+        import time
+
+        text = "password=hunter2\n" + "a." * 15_000 + "=value"
+        t0 = time.perf_counter()
+        result = redact_sensitive_text(text, force=True)
+        assert "hunter2" not in result
+        assert time.perf_counter() - t0 < 2.0
+
+    def test_quoted_pipe_cfg_scan_stays_linear(self):
+        import time
+
+        text = 'app.password="' + "|".join(["segment"] * 30_000) + '"|b=2'
+        t0 = time.perf_counter()
+        result = redact_sensitive_text(text, force=True)
+        assert "segment|segment" not in result
+        assert result.endswith('"|b=2')
+        assert time.perf_counter() - t0 < 2.0
 
     def test_yaml_assign_redos_resistance(self):
         """_YAML_ASSIGN_RE must not backtrack excessively on long inputs."""
@@ -1051,3 +1270,97 @@ class TestMaskSecretControlStripping:
     def test_all_control_value_returns_empty_fallback(self):
         assert mask_secret("\n\x85\u200b") == ""
         assert mask_secret("\n\x85\u200b", empty="(not set)") == "(not set)"
+
+
+class TestValueAwareGatingCorpus:
+    """Issue #96607: corpus-level before/after for value-aware gating.
+
+    Redaction must mask a keyword-named assignment ONLY when the value has
+    credential shape (vendor prefix, hex/base64/high-entropy, or a strong
+    credential-specific key name). Bare technical vocabulary — ``token``,
+    ``key``, ``cpu`` — in ordinary technical prose/config must pass through
+    byte-for-byte, on every assignment family (ENV, dotted config, JSON,
+    YAML).
+    """
+
+    # Realistic technical prose. On pre-fix main every line was corrupted
+    # to ``***`` despite containing no secret.
+    TECHNICAL_CORPUS = [
+        'IDENTITY_TOKEN="bailu"',
+        "--override-tensor per_layer_token_embd.weight=CPU",
+        "MAX_TOKENS=4096",
+        "runtime.token=local",
+        "The tokenizer splits on whitespace; set max_new_tokens=256.",
+        "num_key_value_heads=8",
+        "token: CPU",
+        "llm_load_tensors: per_layer_token_embd.weight=CPU buffer",
+        "(auth=none)",
+        'token=os.getenv("TOKEN")',
+    ]
+
+    # Obviously-fake but shape-realistic secrets: every one of these must
+    # STAY masked after the gating change (fail-closed on credential shape
+    # or strong key names).
+    FAKE_SECRET_CORPUS = [
+        ("API_KEY=sk-fakefakefakefakefake1234567890abcd", "fakefake"),
+        ("GITHUB_TOKEN=ghp_FAKEfakeFAKEfake1234567890fake", "FAKEfake"),
+        ("MY_SERVICE_TOKEN=A9f3kZq7Lm2Xw8Rt4Yv6", "A9f3kZq7"),
+        ("TOKEN=6f1d2a9c8b3e4f5a6d7c8b9a0e1f2d3c", "6f1d2a9c"),
+        ("password=hunter2", "hunter2"),
+        ("db_password: hunter2", "hunter2"),
+        ("auth_token: 9f8e7d6c5b4a39281706f5e4d3c2b1a0", "9f8e7d6c"),
+        ('"token": "Zx9Qw8Er7Ty6Ui5Op4As3"', "Zx9Qw8Er"),
+        ("SESSION_TOKEN=shrt", "shrt"),
+        ("(auth=hunter2)", "hunter2"),
+        ("client_secret=abc", "abc"),
+        ("spring.datasource.password=fakePass123", "fakePass123"),
+        ("provider error secret=hunter2hunter2", "hunter2hunter2"),
+        ("provider error credential=hunter2hunter2", "hunter2hunter2"),
+        ("provider error passwd=hunter2hunter2", "hunter2hunter2"),
+        ("provider error api_key=hunter2hunter2", "hunter2hunter2"),
+        ("provider error password=hunter2hunter2", "hunter2hunter2"),
+        ("provider error: token=A9f3kZq7Lm2Xw8Rt4Yv6", "A9f3kZq7"),
+        ("metadata; password=hunter2hunter2", "hunter2hunter2"),
+    ]
+
+    def test_technical_prose_survives_intact(self):
+        for line in self.TECHNICAL_CORPUS:
+            assert redact_sensitive_text(line, force=True) == line, line
+
+    def test_technical_corpus_as_one_block_survives_intact(self):
+        # The multi-line shape a model actually reads from tool output.
+        block = "\n".join(self.TECHNICAL_CORPUS)
+        assert redact_sensitive_text(block, force=True) == block
+
+    def test_shape_realistic_fake_secrets_still_masked(self):
+        for line, cleartext in self.FAKE_SECRET_CORPUS:
+            result = redact_sensitive_text(line, force=True)
+            assert result != line, line
+            assert cleartext not in result, line
+
+    def test_mixed_block_masks_only_the_secret_lines(self):
+        # Precondition guard: both halves must actually exercise the gate.
+        secret_line = "MY_SERVICE_TOKEN=A9f3kZq7Lm2Xw8Rt4Yv6"
+        prose_line = 'IDENTITY_TOKEN="bailu"'
+        block = f"{prose_line}\n{secret_line}"
+        result = redact_sensitive_text(block, force=True)
+        assert prose_line in result
+        assert "A9f3kZq7Lm2Xw8Rt4Yv6" not in result
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("password", "supersecretvalue12345"),
+            ("secret", "supersecretvalue12345"),
+            ("credential", "supersecretvalue12345"),
+            ("pass", "supersecretvalue12345"),
+            ("pw", "supersecretvalue12345"),
+            ("api_key", "supersecretvalue12345"),
+        ],
+    )
+    def test_whitespace_delimited_credential_assignments_are_redacted(
+        self, key, value
+    ):
+        text = f"provider failed {key}={value}"
+        result = redact_sensitive_text(text, force=True)
+        assert value not in result

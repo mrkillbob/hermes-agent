@@ -36,6 +36,7 @@ def cli_instance(tmp_path, session_db):
 
     cli = MagicMock()
     cli._session_db = session_db
+    cli._conversation_worktree_manager = None
     cli.session_id = "20260403_120000_abc123"
     cli.model = "anthropic/claude-sonnet-4.6"
     cli.max_turns = 90
@@ -76,6 +77,20 @@ class TestBranchCommandCLI:
         assert cli_instance.session_id != "20260403_120000_abc123"
         new_session = session_db.get_session(cli_instance.session_id)
         assert new_session is not None
+
+    def test_failed_branch_creation_leaves_original_session_open(self, cli_instance, session_db):
+        """Branching is child-first: when create_session fails the user stays on the original
+        session, so it must not be marked ended as "branched" (#11030)."""
+        from unittest.mock import patch
+        from cli import HermesCLI
+
+        original = cli_instance.session_id
+        with patch.object(session_db, "create_session", side_effect=RuntimeError("boom")):
+            HermesCLI._handle_branch_command(cli_instance, "/branch")
+
+        assert cli_instance.session_id == original
+        row = session_db.get_session(original)
+        assert row["end_reason"] is None and row["ended_at"] is None
 
     def test_branch_copies_history(self, cli_instance, session_db):
         """Branching should copy all messages to the new session."""

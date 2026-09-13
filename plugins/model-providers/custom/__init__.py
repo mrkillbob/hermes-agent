@@ -1,92 +1,98 @@
-"""Custom / Ollama (local) provider profile.
-
-Covers any endpoint registered as provider="custom", including local
-Ollama instances and OpenAI-compatible reasoning endpoints (GLM-5.2 on
-Volcengine ARK, vLLM, llama.cpp). Key quirks:
-  - ollama_num_ctx → extra_body.options.num_ctx (local context window)
-  - reasoning_config disabled → top-level reasoning_effort="none"
-    (Ollama /v1/chat/completions ignores think=False — ollama#14820)
-    + extra_body.think = False for /api/chat and proxies
-  - reasoning_config enabled + effort → top-level reasoning_effort
-    (the native OpenAI-compatible format GLM/ARK expect; unset omits it
-    so the endpoint's server default applies)
-"""
+"""Custom / Ollama (local) provider profile: any endpoint registered as
+provider="custom" (Ollama, vLLM, llama.cpp, GLM-5.2 on ARK, …)."""
 
 from typing import Any
+from urllib.parse import urlparse
 
+from agent.reasoning_effort import OPENAI_COMPAT_WIRE_EFFORTS, clamp_effort
 from providers import register_provider
 from providers.base import ProviderProfile
+
+
+def _looks_like_ollama_endpoint(base_url: str | None) -> bool:
+    """True only for explicit Ollama signatures (port 11434 or an ``ollama`` host label).
+    ``think`` is Ollama-native; strict hosts (Mistral, Groq) 422 on it, and
+    arbitrary localhost may be llama.cpp / vLLM / LM Studio."""
+    raw = (base_url or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    try:  # urlparse raises ValueError on malformed ports ("host:99999"); treat as not-Ollama.
+        if parsed.port == 11434:
+            return True
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return bool(host) and (host == "ollama.com" or host.endswith(".ollama.com") or "ollama" in host.split("."))
 
 
 class CustomProfile(ProviderProfile):
     """Custom/Ollama local provider — think=false and num_ctx support."""
 
-    def build_api_kwargs_extras(
+    def sanitize_request_kwargs(
         self,
+        api_kwargs: dict[str, Any],
         *,
-        reasoning_config: dict | None = None,
-        ollama_num_ctx: int | None = None,
-        **ctx: Any,
+        supports_reasoning: bool = False,
+        base_url: str | None = None,
+        **context: Any,
+    ) -> dict[str, Any]:
+        """Prevent stale overrides from enabling thinking on non-thinking Ollama.
+
+        The profile hook runs before request overrides, so a persisted
+        ``extra_body`` override can otherwise reintroduce ``think`` or
+        ``reasoning`` after capability detection correctly omitted them.  A
+        non-thinking Ollama model rejects those fields with HTTP 400; remove
+        only the reasoning controls while preserving unrelated overrides.
+        """
+        if not (_looks_like_ollama_endpoint(base_url) and not supports_reasoning):
+            return api_kwargs
+
+        api_kwargs.pop("reasoning_effort", None)
+        extra_body = api_kwargs.get("extra_body")
+        if isinstance(extra_body, dict):
+            # Preserve think=False — it's an explicit disable signal, not a stale enable.
+            # Strip think=True, think=None, and the other reasoning fields.
+            if extra_body.get("think") is not False:
+                extra_body.pop("think", None)
+            for key in ("thinking", "reasoning", "enable_thinking"):
+                extra_body.pop(key, None)
+            if not extra_body:
+                api_kwargs.pop("extra_body", None)
+        return api_kwargs
+
+    def build_api_kwargs_extras(
+        self, *, reasoning_config: dict | None = None, ollama_num_ctx: int | None = None,
+        supports_reasoning: bool = True, **ctx: Any
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         extra_body: dict[str, Any] = {}
         top_level: dict[str, Any] = {}
-
-        # Ollama context window
         if ollama_num_ctx:
-            options = extra_body.get("options", {})
-            options["num_ctx"] = ollama_num_ctx
-            extra_body["options"] = options
-
-        # Reasoning / thinking control for custom OpenAI-compatible endpoints
-        # (GLM-5.2 on Volcengine ARK, vLLM, Ollama, llama.cpp, …).
-        #
-        #   - disabled  → extra_body.think = False (Ollama's thinking-off flag)
-        #   - enabled + effort set → TOP-LEVEL reasoning_effort string, the
-        #     format GLM-5.2/ARK and other OpenAI-compatible reasoning APIs
-        #     expect (GLM documents "high" and "max"; "max" is its default).
-        #   - enabled + no effort  → omit both, so the endpoint applies its own
-        #     server-side default (do NOT force a level the user didn't pick).
-        #
-        # We deliberately do NOT emit ``think=True`` on enable: it is an
-        # Ollama-only flag and thinking is already server-default-on for these
-        # backends, so forcing it risks a 400 on GLM/vLLM endpoints that don't
-        # recognize it. Mirrors the DeepSeek/Zai profile precedent.
+            extra_body["options"] = {"num_ctx": ollama_num_ctx}
+        # disabled -> top-level reasoning_effort="none" (Ollama's /v1 ignores
+        # extra_body.think) plus think=False only on Ollama URLs; enabled+effort ->
+        # top-level reasoning_effort clamped to the OpenAI-compat wire (GLM/ARK,
+        # vLLM and SGLang all top out at "max"; "ultra" verbatim 400s), except on a
+        # non-thinking Ollama model, which 400s on any reasoning_effort other than
+        # "none" -- the same non-thinking-Ollama predicate sanitize_request_kwargs()
+        # uses. Enabled without effort -> omit so the server default applies.
+        # Never emit think=True (Ollama-only flag).
+        is_ollama = _looks_like_ollama_endpoint(ctx.get("base_url"))
         if reasoning_config and isinstance(reasoning_config, dict):
-            _effort = (reasoning_config.get("effort") or "").strip().lower()
-            _enabled = reasoning_config.get("enabled", True)
-            if _effort == "none" or _enabled is False:
-                # Ollama's /v1/chat/completions silently ignores
-                # extra_body.think (only /api/chat honours it — ollama#14820)
-                # but respects the top-level reasoning_effort field, so both
-                # are needed to actually stop a thinking-capable model from
-                # reasoning (#25758). Endpoints that recognize neither simply
-                # ignore them.
+            effort = (reasoning_config.get("effort") or "").strip().lower()
+            if effort == "none" or reasoning_config.get("enabled", True) is False:
+                # See #14820.
                 top_level["reasoning_effort"] = "none"
-                extra_body["think"] = False
-            elif _effort:
-                # Clamp the internal ladder onto the widest OpenAI-compatible
-                # wire vocabulary (shared policy in agent.reasoning_effort) —
-                # GLM/ARK, vLLM and SGLang all top out at "max"; forwarding
-                # "ultra" verbatim is a guaranteed 400 (#89503).
-                from agent.reasoning_effort import (
-                    OPENAI_COMPAT_WIRE_EFFORTS,
-                    clamp_effort,
-                )
-
-                top_level["reasoning_effort"] = clamp_effort(
-                    _effort, OPENAI_COMPAT_WIRE_EFFORTS
-                )
-
+                if is_ollama:
+                    extra_body["think"] = False
+            elif effort and not (is_ollama and not supports_reasoning):
+                top_level["reasoning_effort"] = clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
         return extra_body, top_level
 
     def fetch_models(
-        self,
-        *,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        timeout: float = 8.0,
+        self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
-        """Custom/Ollama: base_url is user-configured; fetch if set."""
+        """base_url is user-configured; fetch only if set."""
         if not (base_url or self.base_url):
             return None
         return super().fetch_models(api_key=api_key, base_url=base_url, timeout=timeout)
@@ -94,21 +100,15 @@ class CustomProfile(ProviderProfile):
 
 custom = CustomProfile(
     name="custom",
-    aliases=(
-        "ollama",
-        "local",
-        "vllm",
-        "llamacpp",
-        "llama.cpp",
-        "llama-cpp",
-    ),
+    # "ollama-launch" is the managed-local-server provider string (hermes_cli/secure_worker.py,
+    # hermes_cli/kanban_worker_routing.py) for a Hermes-launched Ollama instance -- it must
+    # resolve here too, or sanitize_request_kwargs()'s think/reasoning stripping never applies
+    # to it and a non-thinking model on that route still 400s on a stale think/reasoning override.
+    aliases=("ollama", "ollama-launch", "local", "vllm", "llamacpp", "llama.cpp", "llama-cpp"),
     env_vars=(),  # No fixed key — custom endpoint
     base_url="",  # User-configured
-    # Without this, no max_tokens is sent and Ollama falls back to its internal
-    # num_predict=128, truncating responses after a few tokens (#39281). This is
-    # only a floor used when the user hasn't set model.max_tokens — they can
-    # override per-model — so we set it generously rather than lowballing it.
-    default_max_tokens=65536,
+    # An arbitrary client ceiling can exceed a local server's actual output limit.
+    # The endpoint owns its generation default.
 )
 
 register_provider(custom)

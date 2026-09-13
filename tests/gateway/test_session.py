@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from hermes_state import SessionDB
 from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
-from gateway.platforms.base import MessageEvent
+from gateway.platforms.event import MessageEvent
 from gateway.session import (
     SessionEntry,
     SessionSource,
@@ -35,6 +35,7 @@ class TestSessionSourceRoundtrip:
             user_id="99",
             user_name="alice",
             thread_id="t1",
+            _session_key_lane="discord-voice:dedicated-room",
         )
         d = source.to_dict()
         restored = SessionSource.from_dict(d)
@@ -46,6 +47,7 @@ class TestSessionSourceRoundtrip:
         assert restored.user_id == "99"
         assert restored.user_name == "alice"
         assert restored.thread_id == "t1"
+        assert restored._session_key_lane == "discord-voice:dedicated-room"
 
 
     def test_minimal_roundtrip(self):
@@ -87,6 +89,20 @@ class TestLocalCliFactory:
 
 
 class TestBuildSessionContextPrompt:
+    def test_prompt_identifies_certified_conversation_worktree(self):
+        config = GatewayConfig()
+        source = SessionSource(platform=Platform.LOCAL, chat_id="cli")
+        entry = SessionEntry(
+            session_key="local", session_id="session", created_at=datetime.now(),
+            updated_at=datetime.now(), origin=source, platform=Platform.LOCAL,
+            conversation_worktree={"worktree_path": "/repo/.worktrees/session"},
+        )
+
+        prompt = build_session_context_prompt(build_session_context(source, config, entry))
+
+        assert "certified worktree" in prompt
+        assert "/repo/.worktrees/session" in prompt
+
     def test_telegram_prompt_contains_platform_and_chat(self):
         config = GatewayConfig(
             platforms={
@@ -193,6 +209,7 @@ class TestBuildSessionContextPrompt:
         from unittest.mock import patch
         from gateway.session import _slack_tools_loaded
         import tools.mcp_tool as _mcp_tool_mod
+        from tools import mcp_tool_registration as _mcp_registration
 
         # No native slack toolset / token configured.
         with patch.dict(_os.environ, {}, clear=False):
@@ -202,14 +219,14 @@ class TestBuildSessionContextPrompt:
             # registered a real tool, via the actual tracking function used
             # by the live registration path (tools/mcp_tool.py:_track_mcp_tool_server),
             # not a mock of the capability check.
-            _mcp_tool_mod._track_mcp_tool_server("mcp-company-slack_post_message", "company-slack")
+            _mcp_registration._track_mcp_tool_server("mcp-company-slack_post_message", "company-slack")
             try:
                 assert _slack_tools_loaded() is True, (
                     "A connected MCP server with 'slack' in its name and "
                     "registered tools must be detected as Slack capability"
                 )
             finally:
-                _mcp_tool_mod._forget_mcp_tool_server("mcp-company-slack_post_message")
+                _mcp_registration._forget_mcp_tool_server("mcp-company-slack_post_message")
 
 
     def test_shared_slack_prompt_warns_against_guessed_self_mentions(self):
@@ -578,6 +595,38 @@ class TestSessionStoreLookup:
         assert store.lookup_by_session_key(entry.session_key) is entry
         assert store.lookup_by_session_key("agent:main:telegram:dm:missing") is None
         assert store.lookup_by_session_key("") is None
+
+    def test_private_voice_lane_never_recovers_peer_transcript(self, store):
+        """A same-chat fallback must not erase an intentional voice boundary."""
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="voice-text-channel",
+            chat_type="channel",
+            user_id="voice-user",
+        )
+        source._session_key_lane = "discord-voice:dedicated-room"
+        store._db = MagicMock()
+        store._db.get_compression_tip.side_effect = lambda session_id: session_id
+
+        def _find(**kwargs):
+            # Model the real DB: the old session is discoverable only through
+            # the platform/chat peer fallback, not by the new lane key.
+            if kwargs["chat_id"] is not None:
+                return {
+                    "id": "legacy-voice-session",
+                    "started_at": datetime.now().timestamp(),
+                    "last_activity_at": datetime.now().timestamp(),
+                }
+            return None
+
+        store._db.find_latest_gateway_session_for_peer.side_effect = _find
+
+        entry = store.get_or_create_session(source)
+
+        assert entry.session_id != "legacy-voice-session"
+        call = store._db.find_latest_gateway_session_for_peer.call_args
+        assert call.kwargs["chat_id"] is None
+        assert call.kwargs["chat_type"] is None
 
 
 class TestSlackWorkspaceSessionIsolation:
@@ -1474,7 +1523,7 @@ class TestGatewaySessionDbRecovery:
     def test_transcript_reroute_migrates_remaining_backlog_to_child(self):
         import threading
         from types import SimpleNamespace
-        from hermes_state import CompressionSessionClosedError
+        from hermes_state_errors import CompressionSessionClosedError
 
         class FakeDb:
             def get_compression_tip(self, session_id):
@@ -1541,14 +1590,28 @@ class TestGatewaySessionDbRecovery:
         assert "child" not in store._dirty_transcripts
 
 
-    def test_fts_corruption_error_does_not_match_false_positives(self):
-        """_is_fts_corruption_error must not match unrelated error strings
+    def test_fts_corruption_error_requires_fts_provenance(self):
+        """_is_fts_corruption_error must not treat a generic malformed-image
+        error as FTS-scoped (#97940): bare SQLITE_CORRUPT can mean canonical
+        B-tree damage. It must also not match unrelated error strings
         containing 'fts' as a substring (e.g. 'shifts', 'gifts')."""
-        assert SessionStore._is_fts_corruption_error(
+        import sqlite3
+
+        # Generic structural corruption: no FTS provenance -> fail closed.
+        assert not SessionStore._is_fts_corruption_error(
             RuntimeError("database disk image is malformed")
         )
+        assert not SessionStore._is_fts_corruption_error(
+            sqlite3.DatabaseError("database disk image is malformed")
+        )
+        # FTS-scoped errors remain eligible for the one-shot rebuild.
         assert SessionStore._is_fts_corruption_error(
             RuntimeError("no such table: messages_fts")
+        )
+        assert SessionStore._is_fts_corruption_error(
+            sqlite3.DatabaseError(
+                'fts5: corrupt structure record for table "messages_fts"'
+            )
         )
         assert not SessionStore._is_fts_corruption_error(
             RuntimeError("shifts were applied")
@@ -1642,5 +1705,3 @@ class TestGatewayRoutingTable:
         recovered = restarted.get_or_create_session(self._source())
         assert recovered.session_id == entry.session_id
         restarted._db.close()
-
-

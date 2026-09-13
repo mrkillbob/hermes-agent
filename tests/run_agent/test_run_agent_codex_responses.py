@@ -1,4 +1,8 @@
+from hashlib import sha256
+import json
+from pathlib import Path
 import sys
+import tempfile
 import types
 from types import SimpleNamespace
 
@@ -10,6 +14,7 @@ sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
 import run_agent
+from agent.conversation_loop import _CODEX_INCOMPLETE_NUDGE
 
 
 @pytest.fixture(autouse=True)
@@ -17,14 +22,13 @@ def _no_codex_backoff(monkeypatch):
     """Short-circuit retry backoff so Codex retry tests don't block on real
     wall-clock waits (5s jittered_backoff base delay + tight time.sleep loop)."""
     import time as _time
-    monkeypatch.setattr(run_agent, "jittered_backoff", lambda *a, **k: 0.0)
+    monkeypatch.setattr("agent.retry_utils.jittered_backoff", lambda *a, **k: 0.0)
     monkeypatch.setattr(_time, "sleep", lambda *_a, **_k: None)
 
 
 def _patch_agent_bootstrap(monkeypatch):
     monkeypatch.setattr(
-        run_agent,
-        "get_tool_definitions",
+        "model_tools.get_tool_definitions",
         lambda **kwargs: [
             {
                 "type": "function",
@@ -36,7 +40,7 @@ def _patch_agent_bootstrap(monkeypatch):
             }
         ],
     )
-    monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr("model_tools.check_toolset_requirements", lambda: {})
 
 
 def _build_agent(monkeypatch):
@@ -54,6 +58,10 @@ def _build_agent(monkeypatch):
     agent._cleanup_task_resources = lambda task_id: None
     agent._persist_session = lambda messages, history=None: None
     agent._save_trajectory = lambda messages, user_message, completed: None
+    agent.session_id = "session-codex-tests"
+    agent._current_turn_id = "turn-codex-tests"
+    agent._current_api_request_id = "turn-codex-tests:api:1"
+    agent._llm_egress_state_dir = Path(tempfile.mkdtemp(prefix="hermes-codex-egress-"))
     return agent
 
 
@@ -331,6 +339,99 @@ def test_build_api_kwargs_codex(monkeypatch):
     assert "extra_body" not in kwargs
 
 
+def test_build_api_kwargs_codex_carries_trusted_read_sidecar_to_authorization(
+    tmp_path, monkeypatch
+):
+    """The live builder preserves trusted read provenance until authorization."""
+
+    from agent.llm_egress_runtime import authorize_agent_sdk_kwargs
+    from agent.source_provenance_tools import (
+        attach_trusted_source_provenance_metadata,
+        source_provenance_activation,
+    )
+    from agent.tool_dispatch_helpers import make_tool_result_message
+    from tools.file_tools import read_file_tool
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _build_agent(monkeypatch)
+    agent.session_id = "session-builder-replay"
+    agent._current_turn_id = "turn-builder-replay"
+    agent._current_api_request_id = "turn-builder-replay:api:1"
+    agent._llm_egress_policy_digest = sha256(b"builder-replay-policy").hexdigest()
+    agent._llm_egress_state_dir = tmp_path / "egress"
+
+    with tempfile.TemporaryDirectory(
+        prefix="hermes-builder-replay-", dir=Path.cwd()
+    ) as source_root:
+        source = Path(source_root) / "source.py"
+        source.write_text("safe = True\n", encoding="utf-8")
+        source_argument = str(source.relative_to(Path.cwd()))
+
+        with source_provenance_activation(agent, "read_file"):
+            result = read_file_tool(
+                source_argument, task_id="codex-builder-replay-read"
+            )
+        metadata = attach_trusted_source_provenance_metadata(
+            agent, "read_file", content=result
+        )
+        tool_result = make_tool_result_message(
+            "read_file",
+            result,
+            "call_read_file_builder_replay",
+            source_provenance=metadata,
+        )
+        api_messages = [
+            {"role": "system", "content": "You are Hermes."},
+            {"role": "user", "content": "Inspect the granted source."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_read_file_builder_replay",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": source_argument}),
+                        },
+                    }
+                ],
+            },
+            tool_result,
+        ]
+
+        built = agent._build_api_kwargs(api_messages, tools_for_api=[])
+
+        sidecar = built["_hermes_source_provenance"]
+        assert len(sidecar) == 1
+        assert sidecar[0]["tool_call_id"] == "call_read_file_builder_replay"
+        assert sidecar[0]["content_sha256"] == sha256(
+            result.encode("utf-8")
+        ).hexdigest()
+        assert result not in json.dumps(sidecar)
+        converted_result = next(
+            item
+            for item in built["input"]
+            if item.get("type") == "function_call_output"
+        )
+        assert converted_result["output"] == result
+        assert "_source_provenance" not in converted_result
+        assert "_hermes_source_provenance" not in converted_result
+
+        agent._current_api_request_id = "turn-builder-replay:api:2"
+        authorized, receipt = authorize_agent_sdk_kwargs(agent, built)
+
+        authorized_result = next(
+            item
+            for item in authorized["input"]
+            if item.get("type") == "function_call_output"
+        )
+        assert authorized_result["output"] == result
+        assert "_source_provenance" not in json.dumps(authorized)
+        assert "_hermes_source_provenance" not in authorized
+        assert receipt.decision.source_grant_count == 1
+        assert receipt.decision.source_segment_count == 1
+
+
 def test_build_api_kwargs_mantle_sets_extended_prompt_cache_retention(monkeypatch):
     _patch_agent_bootstrap(monkeypatch)
     agent = run_agent.AIAgent(
@@ -511,8 +612,8 @@ def _build_xai_agent_with_slash_enum_tool(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(run_agent, "get_tool_definitions", _fake_get_tool_definitions)
-    monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr("model_tools.get_tool_definitions", _fake_get_tool_definitions)
+    monkeypatch.setattr("model_tools.check_toolset_requirements", lambda: {})
 
     agent = run_agent.AIAgent(
         model="grok-4.3",
@@ -590,6 +691,51 @@ def test_run_codex_stream_strips_relay_added_retention_at_consumer_wire(
     )
 
 
+def test_run_codex_stream_keeps_provenance_sidecar_internal(monkeypatch, tmp_path):
+    agent = _build_agent(monkeypatch)
+    agent.session_id = "session-1"
+    agent._current_turn_id = "turn-1"
+    agent._current_api_request_id = "turn-1:api:2"
+    agent._llm_egress_policy_digest = "a" * 64
+    agent._llm_egress_state_dir = tmp_path / "egress"
+    captured = {}
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeCreateStream([
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            )
+        ])
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(create=_fake_create),
+    )
+    request = {
+        **_codex_request_kwargs(),
+        "_hermes_source_provenance": [],
+    }
+
+    agent._run_codex_stream(request)
+
+    assert "_hermes_source_provenance" not in captured
+
+
+def test_codex_preflight_preserves_internal_provenance_sidecar():
+    from agent.transports.codex import ResponsesApiTransport
+
+    sidecar = [{"tool_call_id": "call_read_1", "content_sha256": "a" * 64}]
+    request = {
+        **_codex_request_kwargs(),
+        "_hermes_source_provenance": sidecar,
+    }
+
+    normalized = ResponsesApiTransport().preflight_kwargs(request)
+
+    assert normalized["_hermes_source_provenance"] is sidecar
+
+
 def test_run_codex_stream_strips_nested_request_override_retention(
     monkeypatch,
     caplog,
@@ -630,7 +776,12 @@ def test_run_codex_stream_strips_nested_request_override_retention(
     with caplog.at_level("WARNING", logger="agent.codex_runtime"):
         agent._run_codex_stream(request)
 
-    assert "extra_body" not in captured
+    # The transform bypass (#93650) re-introduces extra_body to carry the bulk
+    # payload fields; the guard's contract is that retention itself never
+    # crosses the wire boundary in either shape.
+    assert "prompt_cache_retention" not in captured
+    assert "prompt_cache_retention" not in captured.get("extra_body", {})
+    assert "input" in captured.get("extra_body", {})
     assert request["extra_body"] == {"prompt_cache_retention": "24h"}
     assert any(
         "Dropped unsupported prompt_cache_retention at consumer Codex wire boundary"
@@ -1346,7 +1497,7 @@ def test_try_refresh_codex_client_credentials_handles_xai_oauth(monkeypatch):
         "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
         _fake_resolve,
     )
-    monkeypatch.setattr(run_agent, "OpenAI", _fake_openai)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", _fake_openai)
 
     existing = _ExistingClient()
     agent.client = existing
@@ -1452,7 +1603,7 @@ def test_try_refresh_copilot_client_credentials_rebuilds_client(monkeypatch):
         "hermes_cli.copilot_auth.get_copilot_api_token",
         lambda _raw: ("tid=exchanged-ide-token", None),
     )
-    monkeypatch.setattr(run_agent, "OpenAI", _fake_openai)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", _fake_openai)
 
     agent.client = _ExistingClient()
     ok = agent._try_refresh_copilot_client_credentials()
@@ -1491,7 +1642,7 @@ def test_try_refresh_copilot_client_credentials_rebuilds_even_if_token_unchanged
         "hermes_cli.copilot_auth.get_copilot_api_token",
         lambda _raw: ("tid=fresh-exchanged", None),
     )
-    monkeypatch.setattr(run_agent, "OpenAI", _fake_openai)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", _fake_openai)
 
     ok = agent._try_refresh_copilot_client_credentials()
 
@@ -1525,7 +1676,7 @@ def test_try_refresh_copilot_client_credentials_falls_back_when_exchange_unavail
         lambda _raw: None,
     )
     monkeypatch.setattr("hermes_cli.copilot_auth.get_copilot_api_token", _boom)
-    monkeypatch.setattr(run_agent, "OpenAI", _fake_openai)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", _fake_openai)
 
     ok = agent._try_refresh_copilot_client_credentials()
 
@@ -1676,6 +1827,13 @@ def test_run_conversation_compresses_mid_turn_before_output_budget_exhaustion(mo
         _codex_tool_call_response(),
         _codex_message_response("Summary after compaction."),
     ]
+    # The usage anchor now TRUSTS provider-reported usage (#97206). The shared
+    # fixture reports a 12-token prompt, which would honestly mean there is no
+    # pressure; give this tool-heavy-turn scenario a realistic anchored history
+    # so the pressure check exercises the same decision it did pre-anchor.
+    responses[0].usage = SimpleNamespace(
+        input_tokens=18_000, output_tokens=4, total_tokens=18_004
+    )
     requests = []
     monkeypatch.setattr(
         agent,
@@ -1745,6 +1903,10 @@ def test_mid_turn_compaction_does_not_double_persist_in_place_rows(monkeypatch, 
         _codex_tool_call_response(),
         _codex_message_response("Summary after compaction."),
     ]
+    # Same anchored-usage realism as the mid-turn compaction test above.
+    responses[0].usage = SimpleNamespace(
+        input_tokens=18_000, output_tokens=4, total_tokens=18_004
+    )
     monkeypatch.setattr(
         agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0)
     )
@@ -2391,3 +2553,220 @@ def test_consume_codex_stream_leaves_unindexed_reasoning_untouched():
     )
 
     assert "".join(reasoning_streamed) == "Need to inspect files."
+
+
+def _codex_compaction_checkpoint_response(blob: str = "compaction_blob_1"):
+    """A turn that returns ONLY a server-side native-compaction checkpoint.
+
+    This is what gpt-5.6 on the Codex backend sends when it compacts a long
+    conversation: a ``compaction`` output item carrying the encrypted
+    stand-in for the pruned history, with no ``message`` and no
+    ``function_call``. It normalizes to ``finish_reason="incomplete"``, and
+    the checkpoint rides the ``codex_reasoning_items`` sidecar.
+    """
+    return SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="compaction",
+                encrypted_content=blob,
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=9, output_tokens=1, total_tokens=10),
+        status="completed",
+        model="gpt-5-codex",
+    )
+
+
+def test_codex_compaction_only_continuation_gets_nudged_before_budget_runs_out(monkeypatch):
+    """A compaction-checkpoint-only turn must not burn the retry budget on
+    byte-identical continuations.
+
+    The checkpoint lands in ``codex_reasoning_items``, so the interim looks
+    "replayable" and the old gate suppressed the continuation nudge. But a
+    checkpoint carries no answer and no new instruction, and — because a
+    replayed checkpoint makes the wire converter prune every pre-checkpoint
+    item — the continuation re-sends the same checkpoint plus the same
+    retained user messages and ends on an empty assistant turn. Every attempt
+    is then identical (the provider's prefix cache reports 99-100% on the
+    repeats) and returns the same empty response, so the turn dies with
+    "Codex response remained incomplete after 3 continuation attempts" and
+    the whole turn's work is lost.
+
+    One bare retry is still allowed. Once that has also come back incomplete,
+    every remaining attempt must carry the nudge so the request differs and
+    states what is wanted.
+    """
+    agent = _build_agent(monkeypatch)
+    responses = [
+        _codex_compaction_checkpoint_response("blob_1"),
+        _codex_compaction_checkpoint_response("blob_2"),
+        _codex_message_response("Here is the answer."),
+    ]
+    sent_message_counts: list = []
+    original_call = agent._interruptible_api_call
+
+    def _fake_call(api_kwargs):
+        sent_message_counts.append(api_kwargs)
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _fake_call)
+
+    result = agent.run_conversation("summarize the investigation")
+
+    assert result["completed"] is True
+    assert result["final_response"] == "Here is the answer."
+
+    nudges = [
+        m for m in result["messages"]
+        if m.get("role") == "user"
+        and m.get("content") == _CODEX_INCOMPLETE_NUDGE
+    ]
+    assert len(nudges) == 1, (
+        "the second continuation of a compaction-only turn must carry the "
+        "incomplete nudge so the retry is not byte-identical"
+    )
+
+
+def test_codex_first_compaction_continuation_is_still_a_bare_retry(monkeypatch):
+    """The first continuation stays bare — the model often just needs another
+    turn, and nudging it immediately would cut multi-phase work short."""
+    agent = _build_agent(monkeypatch)
+    responses = [
+        _codex_compaction_checkpoint_response("blob_1"),
+        _codex_message_response("Done."),
+    ]
+    monkeypatch.setattr(
+        agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0)
+    )
+
+    result = agent.run_conversation("short turn")
+
+    assert result["completed"] is True
+    assert not [
+        m for m in result["messages"]
+        if m.get("role") == "user"
+        and m.get("content") == _CODEX_INCOMPLETE_NUDGE
+    ]
+
+
+class _LazyCreateStream:
+    """Lazy iterable fake — events are produced during consumption, not upfront.
+
+    ``_FakeCreateStream`` materializes its events with ``list(events)`` in
+    __init__, which would run any side effect a generator encodes (such as
+    retiring the request token) before consumption starts. Retirement tests
+    need the side effect to land *between* two consumed frames.
+    """
+
+    def __init__(self, event_factory):
+        self._event_factory = event_factory
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self._event_factory())
+
+    def close(self):
+        self.closed = True
+
+
+def _retiring_stream(agent, deltas, *, retire_after):
+    """Yield ``deltas`` lazily, clearing the request token mid-stream.
+
+    The token is cleared just before yielding delta index ``retire_after``,
+    mimicking a watchdog (TTFB / stream-idle / stale-call) retiring the
+    in-flight request while the worker thread is still draining SSE frames.
+    """
+
+    def _events():
+        yield SimpleNamespace(type="response.created")
+        for index, delta in enumerate(deltas):
+            if index == retire_after:
+                agent._active_codex_stream_request_token = None
+            yield SimpleNamespace(type="response.output_text.delta", delta=delta)
+        # A retired stream never reaches a terminal frame on the wire; the
+        # connection is force-closed under it.
+
+    return _LazyCreateStream(_events)
+
+
+def test_run_codex_stream_retired_request_raises_instead_of_partial_final(monkeypatch):
+    """A retired request must not be normalized into a completed response.
+
+    ``_consume_codex_event_stream`` returns ``status=terminal_status`` which
+    defaults to ``"completed"``, and its only guard is
+    ``if not saw_terminal and not output``. A watchdog kill mid-stream leaves
+    ``saw_terminal=False`` but ``output``/text non-empty, so the partial text
+    used to come back as a ``finish_reason=stop`` response and get persisted as
+    a complete assistant turn (a long reply would just stop mid-sentence).
+
+    Retirement must surface as a retryable ``TimeoutError`` instead.
+    """
+    agent = _build_agent(monkeypatch)
+    token = object()
+    agent._active_codex_stream_request_token = token
+
+    def _fake_create(**kwargs):
+        assert kwargs.get("stream") is True
+        return _retiring_stream(
+            agent, ["1. Create ", "(6/6)", " [END-BILLING"], retire_after=2
+        )
+
+    agent.client = SimpleNamespace(responses=SimpleNamespace(create=_fake_create))
+
+    with pytest.raises(TimeoutError, match="retired"):
+        agent._run_codex_stream(_codex_request_kwargs())
+
+
+def test_run_codex_stream_without_token_keeps_partial_tolerance(monkeypatch):
+    """No token installed (non-watchdog callers) keeps the existing behavior.
+
+    ``_active_codex_stream_request_token`` is only set by
+    ``interruptible_api_call``. Auxiliary callers (compression summaries,
+    title generation) drive ``_run_codex_stream`` directly with no token and
+    must keep tolerating a stream that ends without a terminal frame.
+    """
+    agent = _build_agent(monkeypatch)
+    agent._active_codex_stream_request_token = None
+    output_item = SimpleNamespace(
+        type="message",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="no terminal frame")],
+    )
+
+    def _fake_create(**kwargs):
+        return _FakeCreateStream([
+            SimpleNamespace(type="response.created"),
+            SimpleNamespace(type="response.output_item.done", item=output_item),
+        ])
+
+    agent.client = SimpleNamespace(responses=SimpleNamespace(create=_fake_create))
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+    assert response.status == "completed"
+    assert response.output == [output_item]
+
+
+def test_run_codex_stream_retired_request_stops_firing_callbacks(monkeypatch):
+    """Deltas that arrive after retirement must not reach the UI callbacks.
+
+    The gateway caches AIAgent instances per session, so a retired worker that
+    keeps draining frames would otherwise stream tokens from an abandoned
+    attempt into the live turn's bubble alongside the retry's output.
+    """
+    agent = _build_agent(monkeypatch)
+    token = object()
+    agent._active_codex_stream_request_token = token
+
+    streamed: list[str] = []
+    monkeypatch.setattr(agent, "_fire_stream_delta", streamed.append)
+
+    def _fake_create(**kwargs):
+        return _retiring_stream(agent, ["keep", "DROPPED"], retire_after=1)
+
+    agent.client = SimpleNamespace(responses=SimpleNamespace(create=_fake_create))
+
+    with pytest.raises(TimeoutError):
+        agent._run_codex_stream(_codex_request_kwargs())
+
+    assert streamed == ["keep"]
+    assert "DROPPED" not in streamed

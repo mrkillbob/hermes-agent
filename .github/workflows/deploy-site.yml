@@ -9,6 +9,9 @@ on:
       - 'website/**'
       - 'skills/**'
       - 'optional-skills/**'
+      # Catalog entry/removal merges must republish /docs/api/plugin-catalog.json —
+      # installed clients fetch it for live catalog refresh.
+      - 'plugin-catalog/**'
       - '.github/workflows/deploy-site.yml'
   workflow_dispatch:
     inputs:
@@ -24,9 +27,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -48,6 +48,11 @@ jobs:
 
   deploy-docs:
     if: github.repository == 'NousResearch/hermes-agent'
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      pages: write
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
@@ -62,6 +67,8 @@ jobs:
         with:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-actions: read
+          permission-contents: read
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
@@ -160,6 +167,9 @@ jobs:
 
       - name: Extract skill metadata for dashboard
         run: python3 website/scripts/extract-skills.py
+
+      - name: Extract plugin catalog for the Plugins page
+        run: python3 website/scripts/extract-plugins.py
 
       - name: Regenerate per-skill docs pages + catalogs
         run: python3 website/scripts/generate-skill-docs.py

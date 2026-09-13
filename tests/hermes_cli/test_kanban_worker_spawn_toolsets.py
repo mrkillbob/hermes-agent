@@ -1,4 +1,5 @@
 from __future__ import annotations
+from hermes_cli import kanban_db_dispatch as dispatch_impl
 
 import subprocess
 
@@ -60,8 +61,9 @@ agent:
     monkeypatch.setenv("HERMES_HOME", str(root))
 
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
 
-    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["hermes"])
 
     captured = {}
 
@@ -78,7 +80,7 @@ agent:
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    pid = kb._default_spawn(_make_task(kb, assignee="elias"), str(workspace))
+    pid = kbd._default_spawn(_make_task(kb, assignee="elias"), str(workspace))
 
     assert pid == 4242
     assert captured["env"]["HERMES_HOME"] == str(profile)
@@ -102,9 +104,10 @@ def test_default_spawn_model_override_survives_real_cli_parse(monkeypatch, tmp_p
     monkeypatch.setenv("HERMES_HOME", str(root))
 
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
     from hermes_cli._parser import build_top_level_parser
 
-    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["hermes"])
     captured = {}
 
     class FakeProc:
@@ -120,7 +123,7 @@ def test_default_spawn_model_override_survives_real_cli_parse(monkeypatch, tmp_p
     workspace.mkdir()
     task = _make_task(kb, assignee="elias")
     task.model_override = "gpt-5.6-sol"
-    kb._default_spawn(task, str(workspace))
+    kbd._default_spawn(task, str(workspace))
 
     parser, _subparsers, _chat_parser = build_top_level_parser()
     # Profile selection is attached by the outer CLI bootstrap rather than
@@ -153,11 +156,53 @@ toolsets:
     monkeypatch.setenv("HERMES_HOME", str(root))
 
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
 
-    resolved = kb._resolve_worker_cli_toolsets(str(profile))
+    resolved = kbd._resolve_worker_cli_toolsets(str(profile))
 
     assert resolved is not None
     assert "terminal" in resolved
     assert "web" in resolved
-    assert "kanban" in resolved  # recovered worker lifecycle surface
+    # Opt-in is no longer inferred for ordinary chats. The dispatcher-owned
+    # worker gets lifecycle tools at schema assembly, independently of the
+    # assignee's saved chat selection.
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_spawn_tools")
+    from model_tools import get_tool_definitions
+    names = {t["function"]["name"] for t in get_tool_definitions(resolved, quiet_mode=True, skip_tool_search_assembly=True)}
+    assert "kanban_complete" in names
+    assert "kanban_list" not in names
     assert resolved != ["kanban"]
+
+
+def test_resolve_worker_cli_toolsets_expands_all_without_unrestricted_sentinel(
+    monkeypatch, tmp_path
+):
+    """Headless workers must not turn a CLI ``all`` entry into every surface.
+
+    The one-shot parser treats ``all``/``*`` as an unrestricted sentinel.  If
+    the dispatcher forwards that sentinel after resolving the CLI platform,
+    desktop-only toolsets such as ``desktop_ui`` are reintroduced and their
+    tools are sent to providers from a headless Kanban worker.
+    """
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "elias"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        "platform_toolsets:\n  cli:\n    - all\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    resolved = dispatch_impl._resolve_worker_cli_toolsets(str(profile))
+
+    assert resolved is not None
+    assert "all" not in resolved
+    assert "*" not in resolved
+    assert "terminal" in resolved
+    # ``kanban`` is a configurable opt-in, not a native toolset recovered from
+    # the ``all`` composite. Dispatcher-owned lifecycle tools are appended by
+    # model_tools when the worker is assembled.
+    assert "kanban" not in resolved
+    assert "desktop_ui" not in resolved
+    assert "project" not in resolved

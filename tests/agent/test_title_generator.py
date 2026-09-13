@@ -46,6 +46,29 @@ class TestGenerateTitle:
         assert captured_kwargs["task"] == "title_generation"
         assert captured_kwargs["timeout"] is None
 
+    def test_generate_title_disables_reasoning(self):
+        """The titling pass must explicitly disable thinking (#91927).
+
+        With the aux default reasoning_effort "" (provider default), Gemini
+        bills internal thought tokens against max_tokens=64, the JSON payload
+        never lands, and the prose fallback stores the opening fence
+        ("```json") as the title. Enforce the module's documented
+        thinking-disabled contract at the call site.
+        """
+        captured_kwargs = {}
+
+        def mock_call_llm(**kwargs):
+            captured_kwargs.update(kwargs)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = '{"title": "Reasoning Off"}'
+            return resp
+
+        with patch("agent.title_generator.call_llm", side_effect=mock_call_llm):
+            assert generate_title("question") == "Reasoning Off"
+
+        assert captured_kwargs.get("reasoning_config") == {"enabled": False}
+
 
 
     def test_strips_think_blocks(self):
@@ -228,10 +251,11 @@ class TestAutoTitleSession:
     def test_body_exception_routed_to_failure_callback(self):
         db = MagicMock()
         db.get_session_title.return_value = None
+        db.get_session_title_source.return_value = None
         seen = []
 
         boom = ImportError("stale module")
-        with patch("agent.title_generator._auto_title_session", side_effect=boom):
+        with patch("agent.title_generator.generate_title", side_effect=boom):
             auto_title_session(
                 db,
                 "sess-1",
@@ -289,6 +313,18 @@ class TestMaybeAutoTitle:
                 title_callback=None,
                 runtime_validator=None,
             )
+
+    def test_skips_hidden_kanban_worker_sessions(self, monkeypatch, tmp_path):
+        """Dispatcher-owned worker sessions need no LLM title upgrade."""
+        monkeypatch.setenv("HERMES_SESSION_SOURCE", "kanban")
+        db = SessionDB(tmp_path / "state.db")
+        db.create_session(session_id="worker-1", source="kanban")
+
+        with patch("agent.title_generator.auto_title_session") as mock_auto:
+            maybe_auto_title(db, "worker-1", "work kanban task t_12345678", [])
+
+        assert db.get_session_title("worker-1") is None
+        mock_auto.assert_not_called()
 
     def test_writes_instant_title_before_the_model_runs(self, tmp_path):
         """The derived title lands synchronously — no LLM, no waiting."""
