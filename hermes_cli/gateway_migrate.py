@@ -152,9 +152,9 @@ def _default_home() -> Path:
     return get_default_hermes_root()
 
 
-def _profile_homes() -> list[tuple[str, Path]]:
+def _profile_homes(profile_allowlist: Optional[list[str]] = None) -> list[tuple[str, Path]]:
     from hermes_cli.profiles import profiles_to_serve
-    return list(profiles_to_serve(multiplex=True))
+    return list(profiles_to_serve(multiplex=True, profile_allowlist=profile_allowlist))
 
 
 def _live_gateway_pid(home: Path) -> Optional[int]:
@@ -392,9 +392,12 @@ def build_migration_plan() -> MigrationPlan:
     """Enumerate profiles + their gateway footprint, then run every preflight check."""
     from hermes_cli.gateway_multiplex_served import recorded_served_profiles
     default_home = _default_home()
+    allowlist = None
+    with contextlib.suppress(Exception):
+        allowlist = getattr(_profile_gateway_config(default_home), "multiplex_profile_allowlist", None)
     profiles = [
         ProfileGateway(name=name, home=home, pid=_live_gateway_pid(home), service=_installed_service(home))
-        for name, home in _profile_homes()
+        for name, home in _profile_homes(allowlist)
     ]
     plan = MigrationPlan(
         default_home=default_home, profiles=profiles,
@@ -526,6 +529,49 @@ def _restart_default(plan_default: ProfileGateway, target: Optional[tuple[str, b
     return f"{verb} the default gateway (detached; no service manager was in use)"
 
 
+def _restore_default_gateway(default_home: Path, default_rec: dict) -> None:
+    """Restore exactly the default gateway footprint recorded before migration."""
+    recorded_service = default_rec.get("service")
+    desired_service = (
+        (recorded_service["kind"], bool(recorded_service.get("system")))
+        if isinstance(recorded_service, dict) and recorded_service.get("kind") else None
+    )
+    desired_pid = default_rec.get("pid")
+    current_pid = _live_gateway_pid(default_home)
+    current_service = _installed_service(default_home)
+
+    def stop_current() -> None:
+        nonlocal current_pid, current_service
+        if current_pid is not None:
+            _stop_gateway_process(default_home)
+            current_pid = None
+        if current_service is not None:
+            kind, system = current_service
+            _service_op(kind, system, "stop", default_home)
+            _service_op(kind, system, "uninstall", default_home)
+            current_service = None
+
+    if desired_service is None and desired_pid is None:
+        # Migration may have installed the secondary service manager on the default home.
+        # A default that was absent before migration must be absent after rollback too.
+        stop_current()
+        return
+
+    if desired_service is not None:
+        if current_service == desired_service:
+            _service_op(*desired_service, "restart", default_home)
+            return
+        stop_current()
+        _service_op(*desired_service, "install", default_home)
+        _service_op(*desired_service, "start", default_home)
+        return
+
+    # The recorded default was a detached gateway, not a service-managed one.
+    stop_current()
+    if not _spawn_detached_gateway(default_home):
+        raise RuntimeError("could not restore the default gateway (detached)")
+
+
 def apply_migration(plan: MigrationPlan, *, served_wait: float = _SERVED_WAIT_SECONDS) -> bool:
     """Stop/uninstall every secondary gateway, flip the flag, bring up the multiplexer, verify.
     Returns True when the multiplexer verifiably serves every profile."""
@@ -581,13 +627,11 @@ def rollback_migration(default_home: Optional[Path] = None) -> bool:
     _write_multiplex_flag(default_home, bool(manifest.get("flag_was", False)))
     print("  ✓ default: gateway.multiplex_profiles restored")
     default_rec = manifest.get("default") or {}
-    default_service = default_rec.get("service")
-    default_gw = ProfileGateway(
-        "default", default_home, pid=_live_gateway_pid(default_home),
-        service=(default_service["kind"], bool(default_service.get("system"))) if default_service else _installed_service(default_home),
-    )
-    if default_gw.has_gateway:
-        print(f"  ✓ {_restart_default(default_gw, None, default_home)}")
+    _restore_default_gateway(default_home, default_rec)
+    if default_rec.get("service") or default_rec.get("pid"):
+        print("  ✓ default: restored the gateway recorded before migration")
+    else:
+        print("  ✓ default: restored its pre-migration stopped state")
     ok = True
     for rec in manifest.get("secondaries", []):
         home = Path(rec["home"])

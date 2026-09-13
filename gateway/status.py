@@ -450,13 +450,15 @@ def _get_code_identity_fields() -> dict[str, Any]:
         return {}
 
 
-def _pid_record_belongs_to_current_profile(record: Optional[dict[str, Any]]) -> bool:
+def _pid_record_belongs_to_current_profile(
+    record: Optional[dict[str, Any]], *, expected_home: Optional[Path] = None
+) -> bool:
     """True when the record's ``hermes_home`` matches the current process (legacy records: True);
     another HERMES_HOME's record must be ignored or the default gateway assumes its identity."""
     if not isinstance(record, dict):
         return False
     record_home = record.get("hermes_home")
-    return not record_home or _same_hermes_home(record_home, _get_process_hermes_home())
+    return not record_home or _same_hermes_home(record_home, expected_home or _get_process_hermes_home())
 
 
 def _build_runtime_status_record() -> dict[str, Any]:
@@ -1457,7 +1459,8 @@ def planned_stop_marker_targets_self() -> bool:
 
 
 def get_running_pid(
-    pid_path: Optional[Path] = None, *, cleanup_stale: bool = True
+    pid_path: Optional[Path] = None, *, cleanup_stale: bool = True,
+    expected_home: Optional[Path] = None,
 ) -> Optional[int]:
     """PID of a running gateway (lock + PID file verified against the live process), or None."""
     resolved_pid_path = pid_path or _get_pid_path()
@@ -1468,12 +1471,12 @@ def get_running_pid(
         )
         for record in records:
             pid = _live_pid_from_record(record)
-            if pid is None or not _pid_record_belongs_to_current_profile(record):
+            if pid is None or not _pid_record_belongs_to_current_profile(record, expected_home=expected_home):
                 continue
-            if _record_matches_live_gateway_pid(record, pid):
+            if _record_matches_live_gateway_pid(record, pid, expected_home=expected_home):
                 return pid
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
-        return get_runtime_status_running_pid() if pid_path is None else None
+        return get_runtime_status_running_pid(expected_home=expected_home) if pid_path is None else None
     # Lock inactive: the runtime-status fallback runs BEFORE cleanup here.
     runtime_pid = get_runtime_status_running_pid() if pid_path is None else None
     if runtime_pid is None:

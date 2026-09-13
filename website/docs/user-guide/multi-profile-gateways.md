@@ -172,12 +172,11 @@ no API server is enabled); it serves three kinds of profile-prefixed paths:
   `api_server` or `webhook` itself (the dashboard refuses with `409`; an
   `API_SERVER_KEY` or `WEBHOOK_ENABLED` in the secondary's `.env` wires the
   credential without starting a listener).
-- **Every other inbound-port platform runs in shared-listener mode.** A
-  secondary that configures Twilio SMS, LINE, Teams, BlueBubbles, Microsoft
-  Graph, WhatsApp Cloud, WeCom callback or Feishu webhook mode gets its **own**
-  adapter instance built without a port; the default listener forwards
-  `/p/<profile>/<the adapter's usual path>` to it. See
-  [Inbound-port platforms under the multiplexer](#inbound-port-platforms-under-the-multiplexer).
+- **Other port-binding platforms remain standalone-only.** A secondary that
+  configures an inbound platform without a tested `/p/<profile>/` ingress is
+  rejected during multiplex startup; keep that profile on a standalone gateway
+  or disable the platform there. The adapter declaration alone does not create
+  shared-listener forwarding.
 
 Authentication follows the profile named in the URL. Unprefixed endpoints keep
 using the default listener's existing credentials.
@@ -212,62 +211,10 @@ silently dropping the unsafe profile.
 
 #### Inbound-port platforms under the multiplexer
 
-A standalone `hermes -p coder gateway run` binds coder's Twilio, LINE, Teams,
-… webhook servers on their own ports. Under the multiplexer those adapters are
-still coder's — same credentials from `profiles/coder/.env`, same
-`config.yaml`, replies sent through coder's channel — but they bind **no port**.
-The default profile's shared listener forwards `/p/coder/<path>` to them, where
-`<path>` is exactly the path the adapter would serve standalone. The request is
-verified by **coder's** adapter with **coder's** secret (Twilio auth token, LINE
-channel secret, Teams app credentials, BlueBubbles password, …) and runs under
-coder's runtime scope; the default profile's own `/path` is untouched, and a
-profile that has no adapter for a path gets `404`, never another profile's bot.
-
-| Platform | Secondary profile's callback URL on the shared listener | Verified with the named profile's |
-|---|---|---|
-| Twilio SMS (`sms`) | `https://<host>/p/<profile>/webhooks/twilio` | `TWILIO_AUTH_TOKEN` signature (`SMS_WEBHOOK_URL` must be this URL) |
-| LINE (`line`) | `https://<host>/p/<profile>/line/webhook` (media: `/p/<profile>/line/media/...`) | `LINE_CHANNEL_SECRET` |
-| Microsoft Teams (`teams`) | `https://<host>/p/<profile>/api/messages` | Bot Framework token for `TEAMS_CLIENT_ID` |
-| BlueBubbles (`bluebubbles`) | `http://<host>/p/<profile>/bluebubbles-webhook` (registered with the server automatically) | `BLUEBUBBLES_PASSWORD` |
-| Microsoft Graph (`msgraph_webhook`) | `https://<host>/p/<profile>/msgraph/webhook` | `extra.client_state` |
-| WhatsApp Cloud (`whatsapp_cloud`) | `https://<host>/p/<profile>/whatsapp/webhook` | `WHATSAPP_CLOUD_APP_SECRET` / verify token |
-| WeCom callback (`wecom_callback`) | `https://<host>/p/<profile>/wecom/callback` | the app's callback token / AES key |
-| Feishu webhook mode (`feishu`) | `https://<host>/p/<profile>/feishu/webhook` | `FEISHU_VERIFICATION_TOKEN` / `FEISHU_ENCRYPT_KEY` |
-
-`<host>` is the public hostname (tunnel, reverse proxy) in front of the default
-profile's listener; a custom `webhook_path` in the profile's config moves the
-path after `/p/<profile>` accordingly. The gateway logs the exact URL at
-startup:
-
-```
-[sms] profile 'coder' is served on the default profile's shared listener:
-http://127.0.0.1:8642/p/coder/webhooks/twilio (point the vendor's callback URL at this path ...)
-```
-
-and every status surface repeats it, so you know what to paste into the vendor
-console:
-
-```
-$ hermes -p coder gateway status
-✓ Gateway is running via the default-profile multiplexer
-  Manage it from the default profile: hermes gateway status
-
-Inbound callback URLs on the shared listener:
-  line: http://127.0.0.1:8642/p/coder/line/webhook
-  sms: http://127.0.0.1:8642/p/coder/webhooks/twilio
-```
-
-`hermes gateway status` and `hermes status` on the default profile list the same
-URLs per served profile, and the dashboard's Channels page and the Desktop
-Messaging page show them as each platform's `ingress_url` when viewing that
-profile. The default's own `api_server` and `webhook` are reported the same way
-for a served profile — as **connected** with `ingress_url`
-`http://127.0.0.1:8642/p/coder/v1` (respectively `.../p/coder/webhooks/<route>`) —
-since the profile has no adapter of its own for them; it is the default's listener
-answering under the `/p/coder/` prefix. A per-profile
-`SMS_WEBHOOK_PORT`, `LINE_PORT`, `TEAMS_PORT`, … in a secondary's `.env` is
-ignored under the multiplexer (nothing binds); it applies again the moment that
-profile runs its own standalone gateway.
+Only `api_server` and `webhook` currently have a verified shared-listener
+implementation. Other inbound-port adapters may declare future compatibility,
+but until their forwarding and profile-scoped verification is implemented they
+remain standalone-only and are blocked by the multiplexer preflight.
 
 #### 3. Per-credential platforms still need their own token per profile
 
@@ -837,7 +784,7 @@ Older clones that still carry them are flagged by `hermes profile list`.
 | Blocker | Why | Fix |
 |---|---|---|
 | Two profiles configure the same platform credential (e.g. the same `TELEGRAM_BOT_TOKEN`) | Under one process a bot token can only be polled once; the multiplexer would park the duplicate and that profile's bot would go silent | Remove the token from the second profile, or keep it in `default` and route that profile's chats with [`profile_routes`](#routing-shared-bot-chats-to-profiles-profile_routes) |
-| A secondary profile enables a port-binding platform that has **no** `/p/<profile>/` ingress on the default listener | The multiplexer skips that whole profile (see [rule 2](#2-http-inbound-platforms-are-reached-via-a-pprofile-url-prefix)) | Disable the platform in that profile (`platforms.<name>.enabled: false`), or keep the profile on a standalone gateway with `hermes -p <name> gateway start --force` |
+| A secondary profile enables a port-binding platform that has **no** verified `/p/<profile>/` ingress on the default listener | The multiplexer skips that whole profile (see [rule 2](#2-http-inbound-platforms-are-reached-via-a-pprofile-url-prefix)) | Disable the platform in that profile (`platforms.<name>.enabled: false`), or keep the profile on a standalone gateway with `hermes -p <name> gateway start --force` |
 
 The credential check reuses the gateway's own conflict detection, so its verdict
 matches what the multiplexer does at startup. Which port-binding platforms have

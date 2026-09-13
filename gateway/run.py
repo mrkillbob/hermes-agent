@@ -5098,7 +5098,7 @@ def _start_gateway_start_cron_and_housekeeping(runner):
             if profile_homes:
                 # Live enumerator: the ticker re-reads profiles/ every cycle so a profile created while
                 # the multiplexer runs gets its jobs fired without a restart (hot-serve).
-                cron_start_kwargs["profile_homes"] = lambda: _cron_tick_profile_homes(runner.config)
+                cron_start_kwargs["profile_homes"] = lambda: _multiplex_profile_homes(runner.config)
                 # Per-profile adapters so each profile's cron output goes via its own bot, not the default's.
                 cron_start_kwargs["profile_adapters"] = getattr(runner, "_profile_adapters", None)
                 # runner.adapters belongs to "default"; naming it keeps the ticker from routing a secondary's

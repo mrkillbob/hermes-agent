@@ -116,7 +116,9 @@ def test_apply_records_manifest_flips_flag_and_rollback_restores(fleet, capsys):
     fleet.ops.clear()
     assert gm.rollback_migration(fleet.root) is True
     assert _config_flag(fleet.root) is False
-    assert fleet.services == {"default": ("systemd", False), "coder": ("systemd", False), "ops": ("systemd", False)}
+    # The default had no gateway before migration, so the service temporarily
+    # transferred from the secondaries must not survive rollback.
+    assert fleet.services == {"coder": ("systemd", False), "ops": ("systemd", False)}
     assert [op for op in fleet.ops if op[0] != "default"] == [
         ("coder", "install"), ("coder", "start"), ("ops", "install"), ("ops", "start")]
     assert not (fleet.root / gm.MANIFEST_NAME).exists()
