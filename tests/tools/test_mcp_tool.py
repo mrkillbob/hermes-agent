@@ -1275,40 +1275,43 @@ class TestShutdown:
         assert validate_toolset("test") is False
 
     def test_shutdown_is_parallel(self):
-        """Multiple servers are shut down in parallel via asyncio.gather."""
+        """Multiple servers overlap while shutting down via asyncio.gather."""
         import tools.mcp_tool as mcp_mod
         from tools import mcp_tool_loop as _mcp_loop
         from tools.mcp_tool_lifecycle import shutdown_mcp_servers
         from tools.mcp_tool import _servers
-        import time
 
         _servers.clear()
 
-        # 4 servers each taking 50ms to shut down
-        delay = 0.05
+        active = 0
+        overlap = threading.Event()
+        active_lock = threading.Lock()
         for i in range(4):
             mock_server = MagicMock()
             mock_server.name = f"srv_{i}"
+
             async def slow_shutdown():
-                await asyncio.sleep(delay)
+                nonlocal active
+                with active_lock:
+                    active += 1
+                    if active > 1:
+                        overlap.set()
+                await asyncio.sleep(0.05)
+                with active_lock:
+                    active -= 1
+
             mock_server.shutdown = slow_shutdown
             _servers[f"srv_{i}"] = mock_server
 
         _mcp_loop._ensure_mcp_loop()
         try:
-            start = time.monotonic()
             shutdown_mcp_servers()
-            elapsed = time.monotonic() - start
         finally:
             mcp_mod._mcp_loop = None
             mcp_mod._mcp_thread = None
 
         assert len(_servers) == 0
-        # Parallel: ~1 delay, not 4. Margin covers scheduling jitter but stays
-        # well under the serial total.
-        assert elapsed < delay * 3, (
-            f"Shutdown took {elapsed:.3f}s, expected ~{delay}s (parallel)"
-        )
+        assert overlap.is_set(), "shutdown should await server closures concurrently"
 
 
 # ---------------------------------------------------------------------------
