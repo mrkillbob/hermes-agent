@@ -254,6 +254,22 @@ class TestBareSecretEnvSuffixes:
             assert secret not in multi_pipe
         assert multi_pipe.endswith('"|b=2')
 
+    def test_dotted_config_quoted_pipe_ignores_escaped_quote(self):
+        text = 'app.password="first-secret|second-\\"|third-secret"|b=2'
+        result = redact_sensitive_text(text, force=True)
+        for secret in ("first-secret", "second-", "third-secret"):
+            assert secret not in result
+        assert result.endswith('"|b=2')
+
+    def test_dotted_config_empty_unterminated_quote_preserves_pipe_delimiter(self):
+        assert redact_sensitive_text('app.password="|b=2', force=True) == 'app.password="***|b=2'
+
+    def test_dotted_config_unterminated_quote_preserves_pipe_field(self):
+        text = 'app.password="hunter2hunter2|b="foo"|c=3'
+        result = redact_sensitive_text(text, force=True)
+        assert "hunter2hunter2" not in result
+        assert '|b="foo"|c=3' in result
+
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
 
@@ -838,6 +854,16 @@ class TestConfigKeyRedosResistance:
         t0 = time.perf_counter()
         result = redact_sensitive_text(text, force=True)
         assert "hunter2" not in result
+        assert time.perf_counter() - t0 < 2.0
+
+    def test_quoted_pipe_cfg_scan_stays_linear(self):
+        import time
+
+        text = 'app.password="' + "|".join(["segment"] * 30_000) + '"|b=2'
+        t0 = time.perf_counter()
+        result = redact_sensitive_text(text, force=True)
+        assert "segment|segment" not in result
+        assert result.endswith('"|b=2')
         assert time.perf_counter() - t0 < 2.0
 
     def test_yaml_assign_redos_resistance(self):

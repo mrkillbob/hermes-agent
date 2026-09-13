@@ -147,16 +147,6 @@ _INLINE_SECRET_ASSIGN_RE = re.compile(
 # bare secret-word key only at line start (optionally after ``export``), so conversational ``I have
 # password=foo`` mid-sentence is left alone.
 _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
-# A pipe terminates an unquoted value, but is ordinary secret material inside a
-# quoted value (for example, ``app.password="part-one|part-two"``). Keep the
-# unquoted branch's value optional so an empty assignment does not consume its
-# delimiter; the quote capture must be absent in that branch for the conditional
-# to select the unquoted character class. An unterminated quote falls back to
-# the same delimiter/end boundary so truncated output is still redacted. The
-# fallback must not win before a later closing quote in a valid quoted value.
-# Pipes may be part of a quoted value, so search all pipe-delimited segments;
-# whitespace and ``&`` always end the truncated value immediately.
-_CFG_VALUE = r"(?:(['\"])|(?=[^'\"]|$))((?(2)[^\s&]+?|[^\s&|]*))(?(2)(?:\2|(?=\s|&|\||$)(?!\|[^\s&]*\2))|)(?=[\s&|]|$)"
 # Linear pre-gate for the _CFG_*_RE subs: no secret keyword => neither can match.
 _CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 
@@ -172,12 +162,12 @@ _CFG_DOTTED_RE = re.compile(
     rf"(?<![A-Za-z0-9_.\-])"
     rf"([A-Za-z0-9_\-]++\.[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*+"
     rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]++)"
-    rf"={_CFG_VALUE}",
+    rf"=",
     re.IGNORECASE,
 )
 # Line-anchored bare key: ``password=…`` / ``export api_key=…`` at start of line.
 _CFG_ANCHORED_RE = re.compile(
-    rf"(^[ \t]*(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)={_CFG_VALUE}",
+    rf"(^[ \t]*(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)=",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -526,6 +516,70 @@ def _mask_token_nonreusable(token: str) -> str:
     return f"«redacted:{label}…»" if label else "«redacted-secret»"
 
 
+_CFG_KEY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+
+
+def _cfg_pipe_starts_assignment(text: str, pipe_index: int) -> bool:
+    """Return whether a pipe begins the next compact ``key=value`` field."""
+    i = pipe_index + 1
+    start = i
+    while i < len(text) and text[i] in _CFG_KEY_CHARS:
+        i += 1
+    return i > start and i < len(text) and text[i] == "="
+
+
+def _scan_cfg_value(text: str, start: int) -> tuple[int, str, str | None, bool]:
+    """Scan one config value without regex backtracking.
+
+    Unquoted values stop at any shell/form delimiter. Quoted values may contain
+    pipes and escaped quotes; an unterminated quote stops at whitespace, ``&``,
+    a compact pipe-delimited assignment, or end-of-input.
+    """
+    if start >= len(text) or text[start] not in "'\"":
+        i = start
+        while i < len(text) and not text[i].isspace() and text[i] not in "&|":
+            i += 1
+        return i, text[start:i], None, False
+
+    quote = text[start]
+    value_start = start + 1
+    i = value_start
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and i + 1 < len(text):
+            i += 2
+            continue
+        if char == quote:
+            return i + 1, text[value_start:i], quote, True
+        if char.isspace() or char == "&":
+            return i, text[value_start:i], quote, False
+        if char == "|" and _cfg_pipe_starts_assignment(text, i):
+            return i, text[value_start:i], quote, False
+        i += 1
+    return i, text[value_start:i], quote, False
+
+
+def _redact_config_assignments(text: str, pattern: "re.Pattern[str]") -> str:
+    """Redact matches from a key regex using the linear config-value scanner."""
+    pieces: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        if match.start() < cursor:
+            continue
+        value_end, value, quote, closed = _scan_cfg_value(text, match.end())
+        key = match.group(1)
+        pieces.append(text[cursor:match.start()])
+        if _should_redact_assignment(key, value, check_keyword=True):
+            quote_text = quote or ""
+            closing_quote = quote_text if closed else ""
+            pieces.append(f"{match.group(0)}{quote_text}{_mask_token(value)}{closing_quote}")
+        else:
+            pieces.append(text[match.start():value_end])
+        cursor = value_end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _assignment_sub(render, *, check_keyword: bool):
     """re.sub callback: keep the match unless the key/value pair (groups[0], groups[-1]) needs redaction."""
     def _sub(m):
@@ -565,18 +619,18 @@ def _redact_assignments(text: str, *, force: bool = False) -> str:
                 return f"{match.group(1)}{match.group(2)}{match.group(3)}***"
 
             text = _INLINE_SECRET_ASSIGN_RE.sub(_redact_inline_assignment, text)
-        # The keyword pre-gate is exact and matters: _CFG_DOTTED_RE backtracks
-        # quadratically on long unbroken [A-Za-z0-9_.\-] runs.
+        # The keyword pre-gate is exact and keeps the config-key scan off text
+        # that cannot contain a sensitive assignment.
         # Lowercase/dotted config keys (issue #16413). Skip URLs entirely — web-URL query params are
         # intentionally passed through (see note near the bottom of this function); _DB_CONNSTR_RE still
         # guards connection-string passwords. Extra gate: every _CFG_*_RE match requires a secret keyword in
         # the key, so a text without any secret keyword cannot match — skipping is exact. This matters
-        # because _CFG_DOTTED_RE backtracks quadratically on long unbroken [A-Za-z0-9_.\-] runs (e.g.
-        # base64/hex blobs in compaction payloads); the linear keyword scan prevents that pathological path
-        # on secret-free text.
+        # because long compaction payloads commonly contain unbroken dotted
+        # runs. Values are scanned separately so quoted pipes cannot trigger
+        # regex backtracking or consume following fields.
         if "://" not in text and _CFG_SECRET_WORD_RE.search(text):
-            text = _CFG_DOTTED_RE.sub(_redact_env, text)
-            text = _CFG_ANCHORED_RE.sub(_redact_env, text)
+            text = _redact_config_assignments(text, _CFG_DOTTED_RE)
+            text = _redact_config_assignments(text, _CFG_ANCHORED_RE)
 
     if ":" in text and '"' in text:
         text = _JSON_FIELD_RE.sub(
