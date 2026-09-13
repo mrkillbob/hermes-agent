@@ -289,6 +289,10 @@ class TestBareSecretEnvSuffixes:
             assert secret not in result
         assert result.endswith('"|b=2')
 
+    def test_single_quoted_literal_preserves_backslash_terminated_quote(self):
+        text = r"app.password='abcdefgh1234\' # keep"
+        assert redact_sensitive_text(text, force=True) == "app.password='***' # keep"
+
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
 

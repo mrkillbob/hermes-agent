@@ -553,7 +553,7 @@ def _scan_cfg_adjacent_fragments(text: str, start: int) -> tuple[int, str]:
             i += 1
             fragment_start = i
             while i < len(text):
-                if text[i] == "\\" and i + 1 < len(text):
+                if quote == '"' and text[i] == "\\" and i + 1 < len(text):
                     i += 2
                     continue
                 if text[i] == quote:
@@ -592,7 +592,7 @@ def _scan_cfg_value(text: str, start: int) -> tuple[int, str, str | None, bool]:
     field_quote_open = False
     while i < len(text):
         char = text[i]
-        if char == "\\" and i + 1 < len(text):
+        if quote == '"' and char == "\\" and i + 1 < len(text):
             i += 2
             continue
         if char == quote and _cfg_quote_is_field_opener(text, i):
