@@ -194,6 +194,7 @@ export function bindApi(
     close?.()
 
     const since = slug ? kanbanEventsSince(slug) : undefined
+
     const path = slug
       ? `/events?board=${encodeURIComponent(slug)}${since !== undefined ? `&since=${since}` : ''}`
       : '/events'
