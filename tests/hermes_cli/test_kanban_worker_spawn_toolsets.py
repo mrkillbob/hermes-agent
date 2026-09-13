@@ -200,5 +200,9 @@ def test_resolve_worker_cli_toolsets_expands_all_without_unrestricted_sentinel(
     assert "all" not in resolved
     assert "*" not in resolved
     assert "terminal" in resolved
+    # ``kanban`` is a configurable opt-in, not a native toolset recovered from
+    # the ``all`` composite. Dispatcher-owned lifecycle tools are appended by
+    # model_tools when the worker is assembled.
+    assert "kanban" not in resolved
     assert "desktop_ui" not in resolved
     assert "project" not in resolved
