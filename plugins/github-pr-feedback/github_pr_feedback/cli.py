@@ -38,6 +38,7 @@ from .github_client import GitHubClient, GitHubClientError
 from .ledger import (
     FeedbackLedger,
     LedgerStateError,
+    MaintenanceCommandEvidence,
     parse_maintenance_command_evidence,
 )
 from .merge_controller import (
@@ -849,6 +850,25 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     return 2
 
 
+def _validate_maintenance_command_evidence(
+    maintenance: ReleaseMaintenancePolicy,
+    lane_name: str,
+    command_evidence: tuple[MaintenanceCommandEvidence, ...],
+) -> None:
+    if lane_name == FINAL_LANE:
+        expected_commands = tuple(lane.command for lane in maintenance.lanes)
+    else:
+        configured_lane = next(
+            (lane for lane in maintenance.lanes if lane.name == lane_name), None
+        )
+        if configured_lane is None:
+            raise ValueError("maintenance lane is not configured")
+        expected_commands = (configured_lane.command,)
+    actual_commands = tuple(evidence.argv for evidence in command_evidence)
+    if actual_commands != expected_commands:
+        raise ValueError("maintenance evidence argv does not match configured lane command")
+
+
 def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
     try:
         policy = _load_policy_from_context(ctx)
@@ -868,21 +888,9 @@ def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
             )
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("maintenance command evidence is invalid") from error
-        # Validate each evidence argv against the lane's configured command so
-        # that a worker cannot submit evidence for a command it was not
-        # configured to run.
-        if args.lane != FINAL_LANE:
-            configured_lane = next(
-                (lane for lane in maintenance.lanes if lane.name == args.lane), None
-            )
-            if configured_lane is None:
-                raise ValueError("maintenance lane is not configured")
-            for ev in command_evidence:
-                ev_prefix = tuple(ev.argv[: len(configured_lane.command)])
-                if ev_prefix != configured_lane.command:
-                    raise ValueError(
-                        f"maintenance evidence argv does not match configured lane command"
-                    )
+        _validate_maintenance_command_evidence(
+            maintenance, args.lane, command_evidence
+        )
         ledger = FeedbackLedger.for_current_profile()
         try:
             ledger.record_maintenance_receipt(
@@ -1155,16 +1163,13 @@ def _scan(ctx: Any) -> int:
             # Conflicts must be repairable while CI is pending; otherwise the
             # backlog can never clear. Keep this pass bounded and conflict-only.
             # Merge/release retain their own independent exact-head gates.
-            required_ci_backlog = result.required_local_ci_backlog > 0
+            repository_backlog = dict(
+                getattr(result, "required_local_ci_backlog_by_repository", {})
+            )
             if policy.repair_steward is not None:
-                repair = RepairController(
-                    policy,
-                    ledger,
-                    _github_client(policy),
-                    KanbanSubprocessClient(),
-                    control_home=get_default_hermes_root(),
-                ).scan(conflicts_only=required_ci_backlog)
-                repair_payload = _scan_payload(repair)
+                repair_payload = _run_repair_scan_by_repository(
+                    policy, ledger, repository_backlog
+                )
             if policy.merge_policies():
                 merge_payload = _run_merge_scan(policy, ledger)
             release_policies = (
@@ -1176,20 +1181,25 @@ def _scan(ctx: Any) -> int:
                     else ()
                 )
             )
-            if release_policies and not required_ci_backlog:
+            eligible_release_policies = [
+                maintenance
+                for maintenance in release_policies
+                if repository_backlog.get(maintenance.repository, 0) == 0
+            ]
+            if eligible_release_policies:
                 maintenance_results = [
                     _run_release_maintenance_scan(
                         policy, ledger, maintenance=maintenance
                     )
-                    for maintenance in release_policies
+                    for maintenance in eligible_release_policies
                 ]
                 maintenance_payload = (
                     maintenance_results[0]
-                    if len(maintenance_results) == 1
+                    if len(eligible_release_policies) == 1
                     else {
                         maintenance.repository: result
                         for maintenance, result in zip(
-                            release_policies, maintenance_results
+                            eligible_release_policies, maintenance_results
                         )
                     }
                 )
@@ -1527,6 +1537,11 @@ def _scan_payload(result) -> dict[str, object]:
     backlog = getattr(result, "required_local_ci_backlog", 0)
     if backlog > 0:
         payload["required_local_ci_backlog"] = backlog
+    backlog_by_repository = dict(
+        getattr(result, "required_local_ci_backlog_by_repository", {})
+    )
+    if backlog_by_repository:
+        payload["required_local_ci_backlog_by_repository"] = backlog_by_repository
     catalogue_deferred = getattr(result, "local_ci_catalogue_deferred", 0)
     if catalogue_deferred > 0:
         payload["local_ci_catalogue_deferred"] = catalogue_deferred

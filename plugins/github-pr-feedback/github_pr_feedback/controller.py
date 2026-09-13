@@ -13,7 +13,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -246,6 +246,9 @@ class ScanResult:
     degraded: bool = False
     required_local_ci_backlog: int = 0
     local_ci_catalogue_deferred: int = 0
+    required_local_ci_backlog_by_repository: Mapping[str, int] = field(
+        default_factory=dict
+    )
 
 
 def _dispatch_generation(task: KanbanTask, lease: ClaimLease) -> KanbanTask:
@@ -1205,6 +1208,7 @@ class ScanController:
         created = 0
         attempted = 0
         required_local_ci_backlog = 0
+        required_local_ci_backlog_by_repository: dict[str, int] = {}
         local_ci_catalogue_deferred = 0
         self._label_batches = []
         if not self._policy.enabled or self._policy.not_before is None:
@@ -1212,6 +1216,7 @@ class ScanController:
                 created,
                 skipped,
                 required_local_ci_backlog=required_local_ci_backlog,
+                required_local_ci_backlog_by_repository=required_local_ci_backlog_by_repository,
             )
         for repository in self._policy.targets:
             target = self._policy.targets[repository]
@@ -1241,12 +1246,14 @@ class ScanController:
 
             pull_requests = order_pull_requests(pull_requests)
             self._label_batches.append((repository, target, pull_requests))
-            required_local_ci_backlog += _required_local_ci_backlog_count(
+            repository_backlog = _required_local_ci_backlog_count(
                 self._policy,
                 self._ledger,
                 target,
                 pull_requests,
             )
+            required_local_ci_backlog += repository_backlog
+            required_local_ci_backlog_by_repository[repository] = repository_backlog
             if (
                 self._policy.local_ci_audit is not None
                 and self._policy.local_ci_audit.applies_to(repository)
@@ -1502,6 +1509,7 @@ class ScanController:
             created,
             skipped,
             required_local_ci_backlog=required_local_ci_backlog,
+            required_local_ci_backlog_by_repository=required_local_ci_backlog_by_repository,
             local_ci_catalogue_deferred=local_ci_catalogue_deferred,
         )
 
@@ -3412,6 +3420,7 @@ def _scan_result(
     skipped: Mapping[str, int],
     *,
     required_local_ci_backlog: int = 0,
+    required_local_ci_backlog_by_repository: Mapping[str, int] | None = None,
     local_ci_catalogue_deferred: int = 0,
 ) -> ScanResult:
     values = dict(skipped)
@@ -3421,5 +3430,8 @@ def _scan_result(
         values,
         degraded,
         required_local_ci_backlog=required_local_ci_backlog,
+        required_local_ci_backlog_by_repository=dict(
+            required_local_ci_backlog_by_repository or {}
+        ),
         local_ci_catalogue_deferred=local_ci_catalogue_deferred,
     )
