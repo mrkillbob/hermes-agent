@@ -273,7 +273,29 @@ class PostMergeExecutor:
             claimed_at=self._now(),
         )
         if lease is None:
-            raise DeploymentError("deployment_in_progress")
+            latest = self._ledger.latest_deployment_receipt(
+                merge.repository, merge.pr_number
+            )
+            if (
+                isinstance(latest, DeploymentReceipt)
+                and latest.status == "completed"
+                and latest.merge_commit_oid == merge.merge_commit_oid
+            ):
+                return latest
+            return DeploymentReceipt(
+                receipt_id=hashlib.sha256(
+                    f"{merge.repository}:{merge.pr_number}:{merge.merge_commit_oid}:in_progress".encode()
+                ).hexdigest(),
+                repository=merge.repository,
+                pr_number=merge.pr_number,
+                merge_commit_oid=merge.merge_commit_oid,
+                status="in_progress",
+                deployed_sha=None,
+                bundle_path=None,
+                relaunched=False,
+                blocker="deployment_in_progress",
+                completed_at=_aware_utc(self._now()),
+            )
         try:
             pre_census = self._processes.census()
             _require_runtime_absent(pre_census, self._policy)

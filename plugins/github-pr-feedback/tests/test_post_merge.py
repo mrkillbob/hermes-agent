@@ -393,6 +393,19 @@ def test_deployment_claim_reclaims_recent_owner_after_process_exit(tmp_path):
         ledger.close()
 
 
+def test_deployment_claim_contention_is_reported_as_in_progress(tmp_path):
+    policy = _post_merge_policy(tmp_path)
+    ledger = Mock()
+    ledger.claim_deployment.return_value = None
+    ledger.latest_deployment_receipt.return_value = None
+
+    result = PostMergeExecutor(policy, ledger).run(_merge_receipt("a" * 40))
+
+    assert result.status == "in_progress"
+    assert result.blocker == "deployment_in_progress"
+    ledger.record_deployment_receipt.assert_not_called()
+
+
 def test_process_census_preserves_executable_paths_with_spaces(monkeypatch):
     import sys
 

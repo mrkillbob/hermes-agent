@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 
 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
 from hermes_constants import get_hermes_home
+from tools.comms import BROKER_PROTOCOL_VERSION
 from tools.registry import registry, tool_error
 
 TOOLSET = "inter_agent"
@@ -88,16 +89,22 @@ def _broker_token() -> str:
     home.mkdir(parents=True, exist_ok=True)
     path = _state_path("inter-agent-broker.token")
     try:
-        return path.read_text(encoding="utf-8").strip()
+        token = path.read_text(encoding="utf-8").strip()
+        if token:
+            return token
     except FileNotFoundError:
-        token = secrets.token_urlsafe(32)
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return path.read_text(encoding="utf-8").strip()
+        pass
+    token = secrets.token_urlsafe(32)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(token)
-        return token
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return token
 
 
 def _broker_endpoint() -> Optional[dict[str, str]]:
@@ -144,6 +151,7 @@ def _broker_is_ready() -> bool:
                 resp.status == 200
                 and payload.get("ok") is True
                 and payload.get("broker_id") == endpoint["broker_id"]
+                and payload.get("protocol_version") == BROKER_PROTOCOL_VERSION
             )
     except Exception:
         return False

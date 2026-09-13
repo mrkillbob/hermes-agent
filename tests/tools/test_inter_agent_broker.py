@@ -65,6 +65,31 @@ def test_health_requires_auth_and_matches_endpoint_identity(monkeypatch, tmp_pat
         server.server_close()
 
 
+def test_broker_readiness_rejects_an_old_protocol(monkeypatch, tmp_path):
+    server, _thread, _token, _base_url = _start_server(monkeypatch, tmp_path)
+    try:
+        (tmp_path / "inter-agent-broker.json").write_text(
+            json.dumps({"port": server.server_port, "broker_id": server.broker_id}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(inter_agent_tool, "BROKER_PROTOCOL_VERSION", 2)
+        assert not inter_agent_tool._broker_is_ready()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_empty_broker_token_file_is_repaired_atomically(monkeypatch, tmp_path):
+    monkeypatch.setattr(inter_agent_tool, "get_hermes_home", lambda: tmp_path)
+    path = tmp_path / "inter-agent-broker.token"
+    path.write_text("\n", encoding="utf-8")
+
+    token = inter_agent_tool._broker_token()
+
+    assert token
+    assert path.read_text(encoding="utf-8") == token
+
+
 def test_receive_waits_for_a_message(monkeypatch, tmp_path):
     monkeypatch.setattr(broker, "RECEIVE_WAIT_SECONDS", 0.5)
     monkeypatch.setattr(broker, "RECEIVE_POLL_INTERVAL_SECONDS", 0.01)

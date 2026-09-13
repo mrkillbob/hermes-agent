@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from hermes_constants import get_hermes_home
+from tools.comms import BROKER_PROTOCOL_VERSION
 
 HOST = "127.0.0.1"
 PORT = 0
@@ -35,16 +36,22 @@ def _broker_token() -> str:
     home.mkdir(parents=True, exist_ok=True)
     path = _state_path("inter-agent-broker.token")
     try:
-        return path.read_text(encoding="utf-8").strip()
+        token = path.read_text(encoding="utf-8").strip()
+        if token:
+            return token
     except FileNotFoundError:
-        token = secrets.token_urlsafe(32)
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return path.read_text(encoding="utf-8").strip()
+        pass
+    token = secrets.token_urlsafe(32)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(token)
-        return token
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return token
 
 
 class _BrokerServer(ThreadingHTTPServer):
@@ -54,7 +61,12 @@ class _BrokerServer(ThreadingHTTPServer):
 def _write_endpoint(server: _BrokerServer) -> Path:
     path = _state_path("inter-agent-broker.json")
     path.write_text(
-        json.dumps({"port": server.server_port, "broker_id": server.broker_id}),
+        json.dumps({
+            "port": server.server_port,
+            "broker_id": server.broker_id,
+            "protocol_version": BROKER_PROTOCOL_VERSION,
+            "pid": os.getpid(),
+        }),
         encoding="utf-8",
     )
     path.chmod(0o600)
@@ -145,7 +157,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._write(401, {"error": "unauthorized"})
             return
         if parsed.path == "/health":
-            self._write(200, {"ok": True, "broker_id": self.server.broker_id})
+            self._write(
+                200,
+                {
+                    "ok": True,
+                    "broker_id": self.server.broker_id,
+                    "protocol_version": BROKER_PROTOCOL_VERSION,
+                },
+            )
             return
         if parsed.path == "/receive":
             query = parse_qs(parsed.query)
