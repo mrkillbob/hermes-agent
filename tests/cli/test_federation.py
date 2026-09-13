@@ -281,6 +281,28 @@ def test_seed_groups_rejects_incomplete_profile(tmp_path: Path) -> None:
     assert "writer" in result["failed"][0]["error"]
 
 
+def test_seed_refresh_repairs_incomplete_profile_and_clears_artifacts(tmp_path: Path) -> None:
+    manifest = load_manifest(MANIFEST)
+    profile_dir = tmp_path / "profiles" / "writer"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / ".federation_seed_incomplete").write_text("incomplete\n")
+    (profile_dir.parent / ".writer.federation_seed.lock").write_text("")
+
+    result = seed_federation(
+        manifest,
+        role_ids=["writer"],
+        existing_profiles={"writer"},
+        apply=True,
+        refresh_existing=True,
+        profile_dir_for=lambda name: profile_dir,
+    )
+
+    assert result["failed"] == []
+    assert result["refreshed_existing"] == ["writer"]
+    assert not (profile_dir / ".federation_seed_incomplete").exists()
+    assert not (profile_dir.parent / ".writer.federation_seed.lock").exists()
+
+
 def test_seed_does_not_refresh_owned_profile_without_explicit_opt_in(tmp_path: Path) -> None:
     manifest = load_manifest(MANIFEST)
     profile_dir = tmp_path / "profiles" / "writer"

@@ -722,8 +722,14 @@ def seed_federation(
                 continue
             profile_dir = Path(profile_dir_for(role.id))
             identity_path = profile_dir / "federation_role.json"
+            incomplete = (
+                (profile_dir / _FEDERATION_SEED_MARKER).is_file()
+                or _federation_seed_reservation(profile_dir).exists()
+            )
             if not refresh_existing:
                 continue
+            if incomplete:
+                _mark_incomplete_federation_profile(profile_dir)
             try:
                 had_identity = identity_path.is_file()
                 # Snapshot current on-disk content so we can roll back if skill
@@ -759,7 +765,12 @@ def seed_federation(
                     result["skills_skipped"][role.id] = skill_result["skipped"]
                 if not had_identity:
                     result["refreshed_existing"].append(role.id)
+                if incomplete:
+                    (profile_dir / _FEDERATION_SEED_MARKER).unlink(missing_ok=True)
+                    _remove_federation_seed_reservation(profile_dir)
             except Exception as exc:
+                if incomplete:
+                    _mark_incomplete_federation_profile(profile_dir)
                 result["failed"].append({"role_id": role.id, "error": str(exc)})
     return result
 
