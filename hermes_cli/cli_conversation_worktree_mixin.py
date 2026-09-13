@@ -159,6 +159,13 @@ class CLIConversationWorktreeMixin:
                 binding = self._conversation_worktree_manager.resolve_existing_session(
                     root_session_id
                 )
+                if binding is None:
+                    from agent.conversation_worktree import ConversationWorktreeError
+
+                    raise ConversationWorktreeError(
+                        f"no ready conversation worktree for CLI root {root_session_id}",
+                        phase="recovery",
+                    )
             else:
                 # A new CLI session is only a draft until its first prompt.  Do not
                 # create a retained manager-owned worktree for a process that exits
@@ -195,7 +202,7 @@ class CLIConversationWorktreeMixin:
 
     def _restore_managed_conversation_cwd(self, *, session_id=None):
         managed_binding = getattr(self, "_conversation_worktree_binding", None)
-        if managed_binding is not None:
+        if getattr(self, "_conversation_worktree_manager", None) is not None:
             # Persisted cwd from an older session row is subordinate to the
             # durable manager binding. Resolve from the current session id so
             # an in-process /resume targets the selected conversation's root,
