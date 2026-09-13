@@ -3897,9 +3897,13 @@ class GatewayRunner(
         return "restarting" if self._restart_requested else "shutting down"
 
     def _update_runtime_status(self, gateway_state: Optional[str] = None, exit_reason: Optional[str] = None) -> None:
+        # ``active_work`` names each unit only while draining — that is when an observer (``hermes
+        # update``) needs to know WHAT holds the gateway open; a per-turn write would be wasted I/O.
+        active_work = self._describe_active_work() if gateway_state == "draining" else None
         _write_runtime_status_quiet(
             gateway_state=gateway_state, exit_reason=exit_reason,
-            restart_requested=self._restart_requested, active_agents=self._active_work_count())
+            restart_requested=self._restart_requested, active_agents=self._active_work_count(),
+            active_work=active_work)
 
     def _persist_active_agents(self) -> None:
         """Persist the live in-flight agent count to ``gateway_state.json`` at every turn boundary.

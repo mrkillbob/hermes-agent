@@ -496,6 +496,9 @@ _running_fire_owners: dict[str, dict[object, tuple[Optional[str], Path]]] = {}
 # Shutdown must not misclassify these as ownerless in-process runs: the tool
 # process sweep cannot reach the worker's transient scope.
 _restart_safe_waiter_job_ids: set[str] = set()
+# job_id -> pid of the restart-safe external worker executing it (absent for in-process runs), so a
+# drain observer can name the process holding the gateway open.
+_running_worker_pids: dict[str, int] = {}
 _running_lock = threading.Lock()
 
 # Per in-flight id: time.time() claim instant + the future owning its release (``_FUTURE_PENDING``
@@ -564,6 +567,18 @@ def get_running_job_ids() -> "frozenset[str]":
         return frozenset(_running_job_ids | _running_fire_owners.keys())
 
 
+def get_running_job_details() -> list[dict]:
+    """Per in-flight job: ``{"job_id", "elapsed_s", "worker_pid"}`` (``worker_pid`` None for in-process
+    runs). The drain wait publishes this so ``hermes update`` can say WHICH job it is waiting on."""
+    now = time.time()
+    with _running_lock:
+        return [
+            {"job_id": jid, "elapsed_s": round(now - _running_since[jid], 1) if jid in _running_since else None,
+             "worker_pid": _running_worker_pids.get(jid)}
+            for jid in sorted(_running_job_ids | _running_fire_owners.keys())
+        ]
+
+
 def try_register_running_job(job_id: str) -> bool:
     """Atomically add ``job_id`` to the in-flight set; False (caller must skip) if already mid-run.
     Single dedupe owner for ticker + manual runs (the fire claim's 300s TTL is outlived by real
@@ -593,6 +608,7 @@ def release_running_job(job_id: str) -> None:
         _running_job_ids.discard(job_id)
         _running_since.pop(job_id, None)
         _running_futures.pop(job_id, None)
+        _running_worker_pids.pop(job_id, None)
 
 
 def _inflight_min_allowance_minutes() -> float:
@@ -3222,6 +3238,8 @@ def _launch_external_cron_worker(job: dict) -> bool:
                 acknowledgement.get("pid"),
                 execution_id,
             )
+            with _running_lock, contextlib.suppress(TypeError, ValueError):
+                _running_worker_pids[job_id] = int(acknowledgement.get("pid") or process.pid)
             return _wait_for_external_cron_worker(
                 process,
                 execution_id=execution_id,
