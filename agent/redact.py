@@ -124,7 +124,7 @@ _ENV_ASSIGN_LOWER_RE = re.compile(
 # provider payloads, where a line-start anchor is unavailable. Require a
 # structural delimiter before the key so prose, dotted technical settings,
 # relative URLs, and form bodies remain available to their dedicated passes.
-_INLINE_SECRET_KEY_NAMES = r"(?:token|secret|password|passwd|credential|auth|api[_-]?key)"
+_INLINE_SECRET_KEY_NAMES = r"(?:token|secret|password|passwd|pass|pw|credential|auth|api[_-]?key)"
 _INLINE_SECRET_ASSIGN_RE = re.compile(
     rf"(^|[{{[(,;:|]\s*|\s+(?={_INLINE_SECRET_KEY_NAMES}\s*=)|[\"'])"
     rf"({_INLINE_SECRET_KEY_NAMES})"
@@ -541,12 +541,6 @@ def _redact_assignments(text: str, *, force: bool = False) -> str:
             # params; the lowercase one would (issue #77484).
             text = _ENV_ASSIGN_LOWER_RE.sub(_redact_env, text)
             def _redact_inline_assignment(match):
-                if (
-                    match.group(1).isspace()
-                    and match.group(2).casefold() == "token"
-                    and not force
-                ):
-                    return match.group(0)
                 should_redact = (
                     _should_redact_inline_assignment(match.group(2), match.group(4))
                     if match.group(1).isspace()
