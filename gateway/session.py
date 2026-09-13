@@ -437,7 +437,9 @@ def build_session_context_prompt(context: SessionContext, *, redact_pii: bool = 
     worktree = getattr(context, "conversation_worktree", None) or {}
     worktree_path = worktree.get("worktree_path") or worktree.get("path")
     if worktree_path:
-        safe_path = _format_untrusted_prompt_value(worktree_path)
+        # The path was produced by the certified worktree manager. Keep it
+        # lossless so the model receives the actual executable workspace.
+        safe_path = json.dumps(str(worktree_path), ensure_ascii=False)
         lines += [
             "",
             "**Conversation workspace:** This conversation is isolated in the certified worktree "
@@ -1277,6 +1279,24 @@ class SessionStore(
         metadata = entry.conversation_worktree or {}
         root_session_id = str(metadata.get("root_session_id") or "")
         if not root_session_id:
+            return
+        manager = self._conversation_worktree_manager(entry.session_key)
+        remover = getattr(manager, "remove_after_explicit_request", None) if manager is not None else None
+        if callable(remover):
+            try:
+                result = remover(root_session_id, active_session_bound=False)
+                if getattr(result, "removed", False):
+                    return
+                logger.warning(
+                    "Could not remove unpublished conversation worktree %s before retirement",
+                    root_session_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to remove unpublished conversation worktree %s",
+                    root_session_id,
+                    exc_info=True,
+                )
             return
         db = self._db_for_key(entry.session_key)
         marker = getattr(db, "mark_conversation_worktree_removed", None) if db is not None else None

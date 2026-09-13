@@ -7,6 +7,7 @@ manager's durable root identity.
 
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +27,7 @@ from gateway.session import (
     SessionStore,
     build_session_context,
     build_session_key,
+    build_session_context_prompt,
 )
 from gateway.slash_commands import GatewaySlashCommandsMixin
 
@@ -459,6 +461,40 @@ def test_explicit_fork_creation_failed_root_uses_recoverable_binding(store, mana
 
     assert resumed is not None
     assert resumed.conversation_worktree["root_session_id"] == "fork-child"
+
+
+def test_unpublished_candidate_is_physically_removed_before_ledger_retirement(store, source, monkeypatch):
+    """A losing candidate must remove its checkout before any ledger state change."""
+    remover = MagicMock(return_value=SimpleNamespace(removed=True))
+    db = MagicMock()
+    entry = SessionEntry(
+        session_key=build_session_key(source), session_id="candidate", created_at=datetime.now(),
+        updated_at=datetime.now(), origin=source, platform=source.platform, chat_type=source.chat_type,
+        conversation_worktree={"root_session_id": "candidate", "path": "/tmp/candidate"},
+    )
+    store._db = db
+    monkeypatch.setattr(store, "_conversation_worktree_manager", lambda _key=None: SimpleNamespace(
+        remove_after_explicit_request=remover
+    ))
+
+    store._retire_unpublished_conversation_worktree(entry)
+
+    remover.assert_called_once_with("candidate", active_session_bound=False)
+    db.mark_conversation_worktree_removed.assert_not_called()
+
+
+def test_certified_worktree_prompt_keeps_long_path_lossless(source):
+    long_path = "/repo/" + ("nested/" * 45) + "worktree"
+    entry = SessionEntry(
+        session_key="key", session_id="sid", created_at=datetime.now(), updated_at=datetime.now(),
+        origin=source, platform=source.platform, chat_type=source.chat_type,
+        conversation_worktree={"path": long_path},
+    )
+
+    prompt = build_session_context_prompt(build_session_context(source, GatewayConfig(), entry))
+
+    assert json.dumps(long_path) in prompt
+    assert "..." not in prompt.split("**Conversation workspace:**", 1)[1]
 
 
 def _enable_production_policy(monkeypatch, tmp_path) -> None:
