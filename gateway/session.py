@@ -744,6 +744,7 @@ def build_session_key(
 class _SessionFlight:
     def __init__(self) -> None:
         self.event = threading.Event()
+        self.closed = False
         self.result: Optional["SessionEntry"] = None
         self.error: Optional[BaseException] = None
         self.post_actions: list[tuple[Callable[["SessionEntry"], "SessionEntry"], threading.Event, list]] = []
@@ -943,7 +944,7 @@ class SessionStore(
             if _post_action is not None:
                 action_waiter = (threading.Event(), [])
                 with inflight_lock:
-                    if not slot.event.is_set():
+                    if not slot.closed:
                         slot.post_actions.append((_post_action, *action_waiter))
                     else:
                         action_waiter = None
@@ -979,6 +980,12 @@ class SessionStore(
                     actions = slot.post_actions
                     slot.post_actions = []
                 if not actions:
+                    # Close acceptance under the same lock as the empty check. A late handoff must
+                    # start a new flight instead of waiting on an action the owner can no longer drain.
+                    with inflight_lock:
+                        if slot.post_actions:
+                            continue
+                        slot.closed = True
                     break
                 for action, event, error in actions:
                     try:
@@ -1579,21 +1586,28 @@ class SessionStore(
             else:
                 manager = self._conversation_worktree_manager(session_key)
                 db = self._db_for_key(session_key)
-                if (
-                    conversation_kind == "interactive"
-                    and manager is not None
-                    and db is not None
-                    and db.is_explicit_fork_child(target_session_id)
-                ):
-                    _, binding = self._resolve_conversation_worktree_lineage(
+                if conversation_kind == "interactive" and manager is not None and db is not None:
+                    _root_session_id, binding = self._resolve_conversation_worktree_lineage(
                         manager, target_session_id
                     )
-                    if binding is None:
+                    if binding is None and db.is_explicit_fork_child(target_session_id):
                         binding = manager.bind_new_root_session(
                             target_session_id, conversation_kind="interactive"
                         )
                     if binding is not None:
                         self._apply_conversation_worktree_binding(candidate, binding)
+                    elif (row := db.get_session(target_session_id)) is not None:
+                        # A pre-isolation row is historical rather than a new root. Preserve its
+                        # recorded workspace, but never silently fall back to the profile checkout.
+                        historical_cwd = str(row.get("cwd") or "").strip()
+                        if not historical_cwd or not os.path.isdir(historical_cwd):
+                            from agent.conversation_worktree import ConversationWorktreeError
+
+                            raise ConversationWorktreeError(
+                                "historical session has no usable recorded workspace",
+                                phase="resume",
+                            )
+                        candidate.cwd = historical_cwd
                 else:
                     self._resolve_conversation_worktree_for_existing_entry(
                         candidate, conversation_kind

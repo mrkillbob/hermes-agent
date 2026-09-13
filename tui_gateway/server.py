@@ -575,6 +575,8 @@ def _bind_conversation_worktree_on_submit(session: dict) -> None:
     key = str(session.get("session_key") or "")
     if not key:
         return
+    prior_cwd = session.get("cwd")
+    prior_explicit_cwd = bool(session.get("explicit_cwd"))
     with _session_db(session) as db:
         binding = _bind_conversation_worktree_for_new_root(
             key, profile_home=session.get("profile_home"), db=db)
@@ -596,6 +598,13 @@ def _bind_conversation_worktree_on_submit(session: dict) -> None:
                     common_root, replace_git_meta=True)
             except Exception:
                 _remove_failed_conversation_worktree(session, binding, db)
+                # The checkout is gone; leave the live draft retryable instead of making its
+                # deleted binding truthy and routing the next submit into a dead directory.
+                session["conversation_worktree"] = {}
+                session["cwd"] = prior_cwd
+                session["explicit_cwd"] = prior_explicit_cwd
+                session.pop("conversation_root_lease", None)
+                _register_session_cwd(session)
                 raise
 
 

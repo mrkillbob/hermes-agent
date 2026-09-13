@@ -270,9 +270,11 @@ def _seed_branch_row(record: dict, key: str, parent_session_id: str, history: li
                             source=source, cwd=record["cwd"],
                             profile_name=profile_name_for_home(profile_home) or _current_profile_name(), compensate=True)
             record["pending_title"] = None
+            return True
     except Exception:
         logger.warning("seeded-branch persistence failed for %s; falling back to lazy row creation", key,
                        exc_info=True)
+    return False
 
 
 def _create_overrides(params: dict) -> tuple:
@@ -348,10 +350,11 @@ def _(rid, params: dict) -> dict:
     # reports lost it) and the title lands in the parent's lineage instead of falling back to a
     # message-preview name. Title mirrors the TUI /branch naming.
     if parent_session_id and history:
-        # A seeded branch is durable immediately; bind before its first DB write so a
-        # restart cannot observe a branch transcript without its isolated root.
+        # Create the durable child first so the binding's Git metadata update targets an existing
+        # row. If persistence is unavailable, retain the lazy fallback and bind on first submit.
+        seeded = _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
         try:
-            if source in {"desktop", "tui"}:
+            if seeded and source in {"desktop", "tui"}:
                 _bind_conversation_worktree_on_submit(_sessions[sid])
         except Exception:
             # Binding can create a lease and then fail while recording metadata.
@@ -361,7 +364,6 @@ def _(rid, params: dict) -> dict:
             if failed is not None:
                 _teardown_session(failed, end_reason="branch_create_failed")
             raise
-        _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
     # Worktree creation remains lazy, but preserve the existing agent pre-warm so
     # ordinary session.create latency and the ready-event contract are unchanged.
@@ -2055,8 +2057,15 @@ def _(rid, params: dict, session: dict) -> dict:
 
 @method("session.close")
 def _(rid, params: dict) -> dict:
-    with _session_resume_lock:  # lock only the ownership claim; finalization must not block resumes
-        session = _pop_session_by_id(params.get("session_id", ""))
+    sid = params.get("session_id", "")
+    with _sessions_lock:
+        candidate = _sessions.get(sid)
+    if candidate is None:
+        return _ok(rid, {"closed": False})
+    # Prompt admission claims active/root leases and persists the draft. Take its lock first so close
+    # cannot pop a session between those steps; then take the resume lock in the same order as prompt.submit.
+    with _session_prompt_submit_lock(candidate), _session_resume_lock:
+        session = _pop_session_by_id(sid)
     return _ok(rid, {"closed": _teardown_popped_session(session, end_reason="tui_close")})
 
 

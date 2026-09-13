@@ -16056,6 +16056,11 @@ def test_session_create_seeded_branch_binding_failure_rolls_back_runtime(monkeyp
     """A failed root bind must remove the registered child and release its lease."""
     lease = Mock()
 
+    # The production path persists the seeded child before attempting the
+    # worktree bind. Keep this test focused on bind rollback rather than the
+    # best-effort seed-row fallback.
+    monkeypatch.setattr(server, "_seed_branch_row", lambda *_args: True)
+
     def fail_bind(session):
         session["conversation_root_lease"] = lease
         raise RuntimeError("worktree lease metadata failed")
@@ -19159,17 +19164,21 @@ def test_slash_exec_concurrent_first_use_spawns_single_worker(monkeypatch):
 def test_session_close_rpc_claims_then_tears_down(monkeypatch):
     seen = []
     claimed = {"session_key": "k"}
+    server._sessions["s9"] = claimed
     monkeypatch.setattr(server, "_pop_session_by_id", lambda sid: seen.append(sid) or claimed)
     monkeypatch.setattr(
         server,
         "_teardown_popped_session",
         lambda session, *, end_reason: seen.append((session, end_reason)) or True,
     )
-    resp = server.handle_request(
-        {"id": "1", "method": "session.close", "params": {"session_id": "s9"}}
-    )
-    assert resp["result"] == {"closed": True}
-    assert seen == ["s9", (claimed, "tui_close")]
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "session.close", "params": {"session_id": "s9"}}
+        )
+        assert resp["result"] == {"closed": True}
+        assert seen == ["s9", (claimed, "tui_close")]
+    finally:
+        server._sessions.pop("s9", None)
 
 
 def test_close_sessions_for_transport_closes_flagged_repoints_rest(monkeypatch):

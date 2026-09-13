@@ -47,6 +47,8 @@ def _ensure_active_session_slot(sid: str, session: dict) -> str | None:
     """Claim this session's cap slot on its first real turn; None when ok. session.create/resume deliberately
     do NOT claim: tile paints, reconnect-resumes and abandoned drafts would hold invisible slots (no DB row)
     that starve the messaging gateway sharing the cap. Anything holding a slot must be user-visible."""
+    if session.get("_closing"):
+        return "session is closing; retry resume"
     if session.get("active_session_lease") is not None:
         return None
     lease, limit_message = _claim_active_session_slot(
