@@ -26,7 +26,17 @@ def live_default_gateway_pid() -> Optional[int]:
     token = set_hermes_home_override(str(default_root))
     os.environ["HERMES_HOME"] = str(default_root)
     try:
-        return get_running_pid(default_root / "gateway.pid", cleanup_stale=False)
+        pid = get_running_pid(default_root / "gateway.pid", cleanup_stale=False)
+        if pid is not None:
+            return pid
+        # Pre-multiplex Hermes versions wrote only gateway.pid and had no lock file. Keep
+        # the historical probe during upgrade; current records use the strict path above.
+        from gateway.status import _pid_exists, _pid_from_record, _read_pid_record
+        if (default_root / "gateway.lock").exists():
+            return None
+        record = _read_pid_record(default_root / "gateway.pid")
+        pid = _pid_from_record(record) if record else None
+        return pid if pid and _pid_exists(pid) else None
     except Exception:
         logger.debug("default gateway identity probe failed", exc_info=True)
         return None

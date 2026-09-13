@@ -1964,6 +1964,19 @@ def _profile_suffix() -> str:
     return _profile_name_from_home(home, default) or hashlib.sha256(str(home).encode()).hexdigest()[:8]
 
 
+def _current_profile_name() -> str:
+    """Return the profile name represented by this process's ``HERMES_HOME``.
+
+    This facade seam is used by pooled dashboard requests when resolving an unscoped
+    request to the backend's profile.
+    """
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        return get_active_profile_name() or "default"
+    except Exception:
+        return _profile_suffix() or "default"
+
+
 def _profile_arg(hermes_home: str | None = None, default_root: str | Path | None = None) -> str:
     """``--profile <name>`` for ``<root>/profiles/<name>``, else "". *hermes_home*/*default_root* let a
     sudo/root process generate a unit for another user (the defaults would refer to root)."""

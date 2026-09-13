@@ -33,6 +33,15 @@ class _ScopedCandidateKey(str):
         return value
 
 
+class _CandidateServerMap(dict):
+    """Candidate map with lossless scoped keys and public-name membership."""
+
+    def __contains__(self, key) -> bool:
+        if super().__contains__(key):
+            return True
+        return any(_candidate_public_name(candidate) == key for candidate in self)
+
+
 def _candidate_public_name(key) -> str:
     return getattr(key, "public_name", _key_name(key))
 
@@ -154,9 +163,11 @@ def _note_connect_success(name: str) -> None:
 def _adopt_server(name: str, server: _core.MCPServerTask) -> None:
     """Publish *server* into ``_servers`` under the connecting scope's key (under ``_lock``)."""
     with _core._lock:
-        key = _server_key(name)
+        public_name = _candidate_public_name(name)
+        key = _server_key(public_name)
         _core._servers[key] = server
         _core._server_scope_keys[key] = _core._mcp_registry_scope()
+        _core._server_public_names[key] = public_name
 
 
 def _ensure_lazy_server_connected(server_name: str) -> bool:
@@ -274,11 +285,11 @@ def _select_new_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
             k: _ScopedCandidateKey(k, keys[k]) if current_scope is not None else keys[k]
             for k in servers
         }
-        new_servers = {
+        new_servers = _CandidateServerMap({
             candidate_keys[k]: v for k, v in servers.items()
             if keys[k] not in _core._servers and keys[k] not in _core._server_connecting
             and keys[k] not in _core._lazy_server_configs
-            and _enabled(v) and not _connect_cooldown_active(k)}
+            and _enabled(v) and not _connect_cooldown_active(k)})
         stale_cached = [_core._servers[keys[k]] for k in servers
                         if keys[k] in _core._servers and getattr(_core._servers[keys[k]], "session", None) is None]
         for candidate in new_servers:
