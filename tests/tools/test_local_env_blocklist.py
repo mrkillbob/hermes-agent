@@ -1814,8 +1814,8 @@ class TestHermesInternalDynamicSecrets:
         }, clear=True):
             run_env = _make_run_env({})
 
-        assert "GH_CONFIG_DIR" not in run_env
-        assert "GIT_CONFIG_GLOBAL" not in run_env
+        assert run_env["GH_CONFIG_DIR"] == os.devnull
+        assert run_env["GIT_CONFIG_GLOBAL"] == os.devnull
         assert "GH_TOKEN" not in run_env
 
     def test_gateway_relay_static_names_in_blocklist(self):
