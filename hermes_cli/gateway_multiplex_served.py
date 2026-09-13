@@ -17,12 +17,25 @@ logger = logging.getLogger(__name__)
 
 
 def live_default_gateway_pid() -> Optional[int]:
-    """PID of the default profile's gateway when its pid record names a live process, else None."""
-    from hermes_constants import get_default_hermes_root
-    from gateway.status import _pid_exists, _pid_from_record, _read_pid_record
-    rec = _read_pid_record(get_default_hermes_root() / "gateway.pid")
-    pid = _pid_from_record(rec) if rec else None
-    return pid if pid and _pid_exists(pid) else None
+    """PID of the default gateway only when its lock, identity, and live command all validate."""
+    from hermes_constants import get_default_hermes_root, reset_hermes_home_override, set_hermes_home_override
+    from gateway.status import get_running_pid
+    import os
+    default_root = get_default_hermes_root()
+    previous = os.environ.get("HERMES_HOME")
+    token = set_hermes_home_override(str(default_root))
+    os.environ["HERMES_HOME"] = str(default_root)
+    try:
+        return get_running_pid(default_root / "gateway.pid", cleanup_stale=False)
+    except Exception:
+        logger.debug("default gateway identity probe failed", exc_info=True)
+        return None
+    finally:
+        reset_hermes_home_override(token)
+        if previous is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = previous
 
 
 def recorded_served_profiles(default_root: Optional[Path] = None) -> Optional[list[str]]:

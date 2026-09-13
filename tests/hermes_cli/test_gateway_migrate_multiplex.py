@@ -64,6 +64,9 @@ def fleet(tmp_path, monkeypatch):
     monkeypatch.setattr(gm, "_service_op", _service_op)
     monkeypatch.setattr(gm, "_stop_gateway_process", lambda home: state.pids.pop(_name(home), None))
     monkeypatch.setattr(gm, "_host_supports_migration", lambda: None)
+    # The live identity probe is tested separately; this fixture models a verified running gateway.
+    from hermes_cli import gateway_multiplex_served
+    monkeypatch.setattr(gateway_multiplex_served, "live_default_gateway_pid", lambda: os.getpid())
     state.root = root
     return state
 
@@ -119,17 +122,12 @@ def test_apply_records_manifest_flips_flag_and_rollback_restores(fleet, capsys):
     assert not (fleet.root / gm.MANIFEST_NAME).exists()
 
 
-def test_secondary_port_binder_is_notice_with_ingress_and_blocker_without(fleet, monkeypatch):
-    """The verdict follows the adapter's ``serves_profile_prefix`` declaration, not a hardcoded list."""
+def test_secondary_port_binder_is_blocked_before_migration(fleet):
+    """Every enabled secondary port binder is blocked until runtime consumes its prefixed config."""
     (fleet.root / "profiles/ops/.env").write_text(
         "DISCORD_BOT_TOKEN=ops-discord-333333\nAPI_SERVER_KEY=ops-api-key-abcdef\n", encoding="utf-8")
     (fleet.root / "profiles/ops/config.yaml").write_text(
         "platforms:\n  api_server:\n    enabled: true\n    extra:\n      port: 9999\n", encoding="utf-8")
-    plan = gm.build_migration_plan()
-    assert not plan.blocked, plan.blockers
-    assert any("api_server" in n and "/p/ops/" in n for n in plan.notices), plan.notices
-
-    monkeypatch.setattr(gm, "platform_serves_profile_prefix", lambda value: False)
     plan = gm.build_migration_plan()
     assert plan.blocked and "api_server" in plan.blockers[0] and "/p/ops/" in plan.blockers[0]
 

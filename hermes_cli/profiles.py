@@ -748,6 +748,28 @@ def _resolve_clone_source(clone_from: Optional[str]) -> Path:
     return source_dir
 
 
+def _refuse_clone_channels_from_live_multiplexer(source_dir: Path, source_label: str) -> None:
+    """Reject a cross-surface channel clone when the live multiplexer already serves its source."""
+    from hermes_cli.gateway_multiplex_served import live_default_gateway_pid, recorded_served_profiles
+    from hermes_cli.profile_channels import channel_platforms_configured
+    if live_default_gateway_pid() is None:
+        return
+    served = recorded_served_profiles()
+    if served is None:
+        return
+    source_name = normalize_profile_name(source_label)
+    if source_name not in {normalize_profile_name(name) for name in served}:
+        return
+    platforms = channel_platforms_configured(source_dir)
+    if platforms:
+        raise ValueError(
+            f"--clone-channels would copy {', '.join(platforms)} from '{source_label}', which the running "
+            "multiplexed gateway already serves: the bot can only belong to one profile, so the copy would be "
+            "parked as a duplicate credential. Clone without --clone-channels and give the new profile its own bot "
+            "(hermes -p <name> setup), or route its chats with gateway.profile_routes instead."
+        )
+
+
 def _seed_file_if_missing(path: Path, text: str, mode: Optional[int] = None) -> None:
     """Best-effort: write *text* to *path* unless it already exists; never raises."""
     if path.exists():
@@ -776,6 +798,14 @@ def _clone_all_into(source_dir: Path, profile_dir: Path, canon: str) -> None:
     """--clone-all: full copytree minus infrastructure/history, then strip runtime files
     and cloned single-use OAuth grants."""
     shutil.copytree(source_dir, profile_dir, symlinks=True, ignore=_clone_all_copytree_ignore(source_dir))
+    env_path = profile_dir / ".env"
+    if env_path.is_symlink():
+        # copytree(..., symlinks=True) preserves a managed source link. Materialize the clone before
+        # channel stripping so write_text cannot follow the link back into the source profile.
+        data = env_path.read_bytes()
+        env_path.unlink()
+        env_path.write_bytes(data)
+        os.chmod(str(env_path), 0o600)
     for stale in _CLONE_ALL_STRIP:
         (profile_dir / stale).unlink(missing_ok=True)
     # auth.json / .anthropic_oauth.json copied verbatim fork single-use OAuth grants
@@ -846,6 +876,10 @@ def create_profile(
     source_dir = None
     if clone_from is not None or clone_all or clone_config:
         source_dir = _resolve_clone_source(clone_from)
+        if clone_channels:
+            _refuse_clone_channels_from_live_multiplexer(
+                source_dir, clone_from or get_active_profile_name()
+            )
     if clone_all and source_dir:
         _clone_all_into(source_dir, profile_dir, canon)
     else:
@@ -1025,7 +1059,13 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
     except Exception:
         current_user = None
     pids: list[int] = []
-    for proc in psutil.process_iter(["pid", "name", "username", "cmdline"]):
+    try:
+        processes = list(psutil.process_iter(["pid", "name", "username", "cmdline"]))
+    except Exception:
+        # Process enumeration itself can be denied on macOS hardened hosts. The caller
+        # can still remove the profile after the best-effort backend cleanup.
+        return []
+    for proc in processes:
         try:
             info = proc.info
             pid = info.get("pid")

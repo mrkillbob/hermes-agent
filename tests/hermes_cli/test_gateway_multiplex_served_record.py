@@ -32,6 +32,8 @@ def served_root(tmp_path, monkeypatch):
     monkeypatch.delenv("GATEWAY_MULTIPLEX_PROFILES", raising=False)
     import hermes_constants
     monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None)
+    from hermes_cli import gateway_multiplex_served
+    monkeypatch.setattr(gateway_multiplex_served, "live_default_gateway_pid", lambda: os.getpid())
     return root
 
 

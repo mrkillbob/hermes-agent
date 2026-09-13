@@ -78,6 +78,10 @@ class MigrationPlan:
 
     @property
     def already_multiplexed(self) -> bool:
+        # The flag can be left behind by a partially applied migration. Standalone secondary
+        # gateways still have to be stopped/uninstalled before this fleet is complete.
+        if self.standalone_secondaries:
+            return False
         return self.multiplex_flag_on or bool(self.live_served and len(self.live_served) > 1)
 
     @property
@@ -204,7 +208,10 @@ def _spawn_detached_gateway(home: Path) -> bool:
 
 def _read_multiplex_flag(default_home: Path) -> bool:
     from gateway.config import _env_multiplex_profiles_override
-    env = _env_multiplex_profiles_override()
+    from agent.secret_scope import load_env_file
+    scoped_env = dict(os.environ)
+    scoped_env.update(load_env_file(default_home / ".env"))
+    env = _env_multiplex_profiles_override(scoped_env)
     if env is not None:
         return env
     cfg_path = default_home / "config.yaml"
@@ -356,19 +363,12 @@ def _check_secondary_port_binders(plan: MigrationPlan, configs: dict[str, object
         for platform, platform_config in cfg.platforms.items():
             if not platform_config.enabled or not platform_binds_port(platform.value, platform_config.extra):
                 continue
-            if platform_serves_profile_prefix(platform.value):
-                plan.notices.append(
-                    f"Profile '{profile.name}': {platform.value} moves onto the default listener at "
-                    f"{_listener_url(default_cfg, platform.value, profile.name)} (its key/secret is "
-                    f"unchanged; update clients that call the old per-profile port)."
-                )
-            else:
-                plan.blockers.append(
-                    f"Profile '{profile.name}' enables {platform.value}, which binds its own port and has no "
-                    f"/p/{profile.name}/ ingress on the default listener yet; the multiplexer would skip "
-                    f"the whole profile. Disable it there (platforms.{platform.value}.enabled: false) or "
-                    f"keep '{profile.name}' on a standalone gateway (hermes -p {profile.name} gateway start --force)."
-                )
+            plan.blockers.append(
+                f"Profile '{profile.name}' enables {platform.value}, which still binds its own port; "
+                f"the multiplexer would skip the whole profile even though its adapter may declare a "
+                f"/p/{profile.name}/ ingress. Disable it there (platforms.{platform.value}.enabled: false) "
+                f"or keep '{profile.name}' on a standalone gateway (hermes -p {profile.name} gateway start --force)."
+            )
 
 
 _PREFLIGHT_CHECKS: tuple[Callable[[MigrationPlan, dict[str, object]], None], ...] = (
@@ -541,6 +541,8 @@ def apply_migration(plan: MigrationPlan, *, served_wait: float = _SERVED_WAIT_SE
         "default": plan.default.to_dict(),
         "secondaries": [p.to_dict() for p in plan.standalone_secondaries],
     }
+    # The complete rollback record must exist before the first stop/uninstall/kill/config mutation.
+    _write_manifest(plan.default_home, manifest)
     for p in plan.standalone_secondaries:
         if p.service is not None:
             kind, system = p.service
@@ -550,10 +552,7 @@ def apply_migration(plan: MigrationPlan, *, served_wait: float = _SERVED_WAIT_SE
         if p.pid is not None:
             _stop_gateway_process(p.home)
             print(f"  ✓ {p.name}: stopped standalone gateway (pid {p.pid})")
-        # Record progressively so a crash mid-way still leaves a usable rollback manifest.
-        _write_manifest(plan.default_home, manifest)
     _write_multiplex_flag(plan.default_home, True)
-    _write_manifest(plan.default_home, manifest)
     print(f"  ✓ default: gateway.multiplex_profiles: true ({plan.default_home / 'config.yaml'})")
     print(f"  ✓ {_restart_default(plan.default, plan.target_service_kind(), plan.default_home)}")
 
