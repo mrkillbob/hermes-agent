@@ -498,6 +498,47 @@ class TestMCPStatus:
                 mcp_tool._server_connect_failures.clear()
                 mcp_tool._server_connect_failures.update(saved_failures)
 
+    def test_scoped_shutdown_evicts_lazy_overlay_before_clearing_ownership(self, tmp_path, monkeypatch):
+        """A removed profile-owned lazy server cannot survive ownership teardown."""
+        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool_lifecycle, mcp_tool_loop
+        from tools.mcp_schema_cache import config_fingerprint
+        from tools.registry import registry
+
+        scope = f"profile:{tmp_path / 'work'}"
+        peer_scope = f"profile:{tmp_path / 'peer'}"
+        key = f"shared::profile::{scope}"
+        peer_key = f"shared::profile::{peer_scope}"
+        tool_name = "mcp__shared__cached_shutdown_invariant"
+        config = {"auth": "oauth", "lazy": True, "url": "https://example.test/mcp"}
+
+        monkeypatch.setattr(mcp_tool_loop, "_stop_mcp_loop", lambda **_kwargs: None)
+        monkeypatch.setattr(mcp_tool, "_servers", {})
+        monkeypatch.setattr(mcp_tool, "_server_scope_keys", {key: scope, peer_key: peer_scope})
+        monkeypatch.setattr(mcp_tool, "_server_public_names", {key: "shared", peer_key: "shared"})
+        monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {key: {scope}, peer_key: {peer_scope}})
+        monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {key: config})
+        monkeypatch.setattr(mcp_tool, "_lazy_server_fingerprints", {key: config_fingerprint(config)})
+        monkeypatch.setattr(mcp_tool, "_lazy_server_tool_names", {key: [tool_name]})
+        monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names_by_scope", {
+            scope: {tool_name: key},
+        })
+        registry.register(
+            tool_name, "mcp-shared", {"name": tool_name}, lambda **_kwargs: None, scope=scope,
+        )
+
+        try:
+            mcp_tool_lifecycle.shutdown_mcp_servers(scope=scope)
+
+            assert registry.snapshot_registration(tool_name, scope=scope) is None
+            assert key not in mcp_tool._lazy_server_configs
+            assert key not in mcp_tool._lazy_server_fingerprints
+            assert key not in mcp_tool._lazy_server_tool_names
+            assert mcp_tool._server_scope_keys == {peer_key: peer_scope}
+            assert mcp_tool._server_public_names == {peer_key: "shared"}
+        finally:
+            registry.deregister(tool_name, scope=scope)
+
 
 
 class TestLifecycleConfig:

@@ -124,7 +124,7 @@ def _restore_server_toolset_alias(server_name: str) -> None:
         registry.register_toolset_alias(public_name, f"mcp-{public_name}")
 
 
-def _remove_server_scope(server_name: str, scope: str) -> None:
+def _remove_server_scope(server_name: str, scope: Optional[str]) -> None:
     """Remove one profile's MCP overlay for a shared live connection."""
     from tools.registry import registry
 
@@ -151,6 +151,15 @@ def _remove_server_scope(server_name: str, scope: str) -> None:
         else:
             _core._server_tool_scopes.pop(server_name, None)
     _restore_server_toolset_alias(server_name)
+
+
+def _evict_lazy_server(server_name: str, scope: Optional[str]) -> None:
+    """Deregister a cached lazy overlay before dropping its ownership ledger."""
+    _remove_server_scope(server_name, scope)
+    with _core._lock:
+        _core._lazy_server_configs.pop(server_name, None)
+        _core._lazy_server_fingerprints.pop(server_name, None)
+        _core._lazy_server_tool_names.pop(server_name, None)
 
 
 def _select_utility_schemas(server_name: str, server: "MCPServerTask", config: dict) -> List[dict]:
