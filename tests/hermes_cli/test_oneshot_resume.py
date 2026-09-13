@@ -215,8 +215,8 @@ class TestRunAgentResumeRuntime:
         finally:
             db.close()
 
-    def test_run_agent_continues_when_resume_reopen_is_transiently_unavailable(self, tmp_path, monkeypatch):
-        """A readable transcript still runs when reopening its ended row fails transiently."""
+    def test_run_agent_continues_without_writing_closed_row_when_reopen_fails(self, tmp_path, monkeypatch):
+        """A readable transcript still runs without targeting its closed row."""
         import hermes_cli.oneshot as oneshot_mod
 
         db = _db_with_session(tmp_path, "s1", messages=[("user", "remember this")])
@@ -259,12 +259,16 @@ class TestRunAgentResumeRuntime:
         try:
             text, result = oneshot_mod._run_agent("continue", resume="s1")
             assert text == "ok" and result["final_response"] == "ok"
-            assert captured["session_id"] == "s1"
+            assert captured["session_id"] is None
             assert [(message["role"], message["content"]) for message in captured["history"]] == [
                 ("user", "remember this"),
             ]
             row = db.get_session("s1")
             assert row["ended_at"] is not None and row["end_reason"] == "agent_close"
+            stored, _display = db.get_resume_conversations("s1")
+            assert [(message["role"], message["content"]) for message in stored] == [
+                ("user", "remember this"),
+            ]
         finally:
             db.close()
 

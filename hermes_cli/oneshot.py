@@ -459,6 +459,9 @@ def _run_agent(
                 reopened_resume = True
             except Exception:
                 logging.debug("reopen_session failed for resumed one-shot session %s", resume_sid, exc_info=True)
+        # If the ended row could not be reopened, run the loaded transcript best-effort but let
+        # AIAgent create a fresh durable row; never append this turn to the still-closed target.
+        agent_session_id = resume_sid if reopened_resume else None
         agent = AIAgent(
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
@@ -470,7 +473,7 @@ def _run_agent(
             quiet_mode=True,
             platform="cli",
             session_db=session_db,
-            session_id=resume_sid,
+            session_id=agent_session_id,
             credential_pool=runtime.get("credential_pool"),
             fallback_model=get_fallback_chain(cfg) or None,
             ephemeral_system_prompt=skills_prompt,
