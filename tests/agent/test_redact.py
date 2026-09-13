@@ -637,7 +637,7 @@ class TestFormBodyRedaction:
 
     def test_non_form_text_unchanged(self):
         """Sentences with `&` should NOT trigger form redaction."""
-        text = "I have password=foo and other things"  # contains spaces
+        text = "I have token=foo and other things"  # contains spaces
         result = redact_sensitive_text(text)
         # The space breaks the form regex; passthrough expected.
         assert "I have" in result
@@ -676,10 +676,18 @@ class TestLowercaseDottedConfigKeys:
 
     # --- carve-outs: must NOT redact ---
 
-    def test_prose_mid_sentence_password_unchanged(self):
-        # Not line-anchored, not dotted → conversational text, leave alone.
-        text = "I have password=foo and other things"
+    def test_prose_mid_sentence_ambiguous_token_unchanged(self):
+        text = "I have token=foo and other things"
         assert redact_sensitive_text(text) == text
+
+    def test_mid_sentence_strong_credential_is_redacted_without_force(self):
+        for text, cleartext in (
+            ("provider error password=hunter2hunter2", "hunter2hunter2"),
+            ("request failed secret=abc123", "abc123"),
+            ("provider error credential=abc123", "abc123"),
+            ("provider error auth=abc123", "abc123"),
+        ):
+            assert cleartext not in redact_sensitive_text(text)
 
 
 

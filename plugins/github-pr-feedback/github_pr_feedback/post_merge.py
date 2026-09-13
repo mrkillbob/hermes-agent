@@ -303,8 +303,11 @@ class PostMergeExecutor:
             if relaunch.returncode != 0 or relaunch.timed_out:
                 raise DeploymentError("relaunch_failed")
             relaunched = True
+            relaunch_census = _wait_for_process_to_appear(
+                identity.executable_path, self._processes
+            )
             _require_runtime_absent(
-                self._processes.census(),
+                relaunch_census,
                 self._policy,
                 blocker="protected_runtime_appeared_after_relaunch",
             )
@@ -395,6 +398,21 @@ def _wait_for_processes_to_exit(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise DeploymentError("verified_application_quit_timeout")
+        time.sleep(min(0.1, remaining))
+
+
+def _wait_for_process_to_appear(
+    executable: Path, controller: ProcessController, *, timeout: float = 30.0
+) -> tuple[ProcessRecord, ...]:
+    expected = executable.resolve()
+    deadline = time.monotonic() + timeout
+    while True:
+        census = controller.census()
+        if any(process.executable.resolve() == expected for process in census):
+            return census
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DeploymentError("relaunched_bundle_missing")
         time.sleep(min(0.1, remaining))
 
 

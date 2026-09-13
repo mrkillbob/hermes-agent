@@ -529,7 +529,11 @@ def _redact_assignments(text: str, *, force: bool = False) -> str:
             # params; the lowercase one would (issue #77484).
             text = _ENV_ASSIGN_LOWER_RE.sub(_redact_env, text)
             def _redact_inline_assignment(match):
-                if match.group(1).isspace() and not force:
+                if (
+                    match.group(1).isspace()
+                    and match.group(2).casefold() == "token"
+                    and not force
+                ):
                     return match.group(0)
                 if not _should_redact_assignment(
                     match.group(2), match.group(4), check_keyword=True

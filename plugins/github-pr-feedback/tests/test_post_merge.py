@@ -15,6 +15,7 @@ from github_pr_feedback.post_merge import (
     ProcessRecord,
     _require_package_provenance,
     _require_runtime_absent,
+    _wait_for_process_to_appear,
     _wait_for_processes_to_exit,
 )
 from github_pr_feedback.policy import PostMergePolicy
@@ -83,7 +84,7 @@ def test_post_merge_rechecks_runtime_before_shutdown_and_waits_for_verified_proc
         None,
     )
     processes = Mock()
-    processes.census.side_effect = [(), (application,), (), ()]
+    processes.census.side_effect = [(), (application,), (), (application,)]
     repository = Mock()
     repository.prepare.return_value = merge_sha
     commands = Mock()
@@ -184,7 +185,7 @@ def test_post_merge_executor_passes_processes_before_controller_to_shutdown_wait
 
     class Processes:
         def __init__(self):
-            self.censuses = [(), (process,), ()]
+            self.censuses = [(), (process,), (), (process,)]
             self.terminated = []
 
         def census(self):
@@ -247,3 +248,16 @@ def test_absolute_nonmatching_runtime_argument_is_not_ambiguous(tmp_path):
         (ProcessRecord(123, Path("/usr/bin/python"), ("/other/project/main.py",), None),),
         policy,
     )
+
+
+def test_relaunch_wait_fails_when_the_bundle_process_never_appears():
+    class Controller:
+        def census(self):
+            return ()
+
+    with pytest.raises(DeploymentError, match="relaunched_bundle_missing"):
+        _wait_for_process_to_appear(
+            Path("/Applications/Hermes.app/Contents/MacOS/Hermes"),
+            Controller(),
+            timeout=0,
+        )
