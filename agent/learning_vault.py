@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -91,7 +92,8 @@ def _catalog_files(vault: Path) -> Iterable[Path]:
     for root in _catalog_roots(vault):
         if not root.exists():
             continue
-        for path in sorted(root.rglob("*.md")):
+        remaining = MAX_CATALOG_FILES - seen
+        for path in sorted(islice(root.rglob("*.md"), remaining)):
             if seen >= MAX_CATALOG_FILES:
                 return
             seen += 1

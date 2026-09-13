@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import agent.learning_vault as learning_vault
 from agent.learning_vault import read_vault_learning
 
 
@@ -132,3 +133,21 @@ def test_missing_vault_returns_bounded_diagnostic(tmp_path: Path) -> None:
     assert [diagnostic.reason_code for diagnostic in diagnostics] == [
         "vault_unavailable"
     ]
+
+
+def test_catalog_file_cap_stops_traversal_before_materializing_more_files(monkeypatch, tmp_path):
+    class BoundedRoot:
+        def exists(self):
+            return True
+
+        def rglob(self, pattern):
+            assert pattern == "*.md"
+            for index in range(3):
+                if index >= 2:
+                    raise AssertionError("catalog traversal exceeded the file cap")
+                yield tmp_path / f"note-{index}.md"
+
+    monkeypatch.setattr(learning_vault, "MAX_CATALOG_FILES", 2)
+    monkeypatch.setattr(learning_vault, "_catalog_roots", lambda _vault: (BoundedRoot(),))
+
+    assert len(list(learning_vault._catalog_files(tmp_path))) == 2
