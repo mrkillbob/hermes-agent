@@ -9,8 +9,10 @@ import os
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlencode
@@ -74,6 +76,7 @@ HISTORY_SCHEMA = {
 }
 
 _DEFAULT_HISTORY_LIMIT = 100
+_BROKER_STARTUP_THREAD_LOCK = threading.Lock()
 
 
 def _state_path(name: str) -> Path:
@@ -146,22 +149,59 @@ def _broker_is_ready() -> bool:
         return False
 
 
+@contextmanager
+def _broker_startup_lock():
+    """Serialize broker publication across threads and Hermes processes."""
+    with _BROKER_STARTUP_THREAD_LOCK:
+        home = get_hermes_home()
+        home.mkdir(parents=True, exist_ok=True)
+        path = _state_path("inter-agent-broker.startup.lock")
+        with path.open("a+b") as handle:
+            if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+                import msvcrt
+
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _ensure_broker() -> None:
     """Start the shared loopback broker on first use, if it is not already running."""
-    if _broker_is_ready():
-        return
-    subprocess.Popen(
-        [sys.executable, "-m", "tools.comms.broker"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **windows_detach_popen_kwargs(),
-    )
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
+    with _broker_startup_lock():
         if _broker_is_ready():
             return
-        time.sleep(0.05)
+        process = subprocess.Popen(
+            [sys.executable, "-m", "tools.comms.broker"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **windows_detach_popen_kwargs(),
+        )
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if _broker_is_ready():
+                return
+            time.sleep(0.05)
+        process.terminate()
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
 def _broker_call(path: str, data: Optional[dict] = None, timeout: int = 5) -> dict:

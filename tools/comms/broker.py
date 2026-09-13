@@ -61,6 +61,20 @@ def _write_endpoint(server: _BrokerServer) -> Path:
     return path
 
 
+def _remove_endpoint_if_owned(path: Path, broker_id: str) -> None:
+    """Remove the endpoint only when it still names this broker instance."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+        return
+    if payload.get("broker_id") != broker_id:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _restrict_database_permissions(path: Path) -> None:
     for candidate in (
         path,
@@ -228,10 +242,7 @@ def main() -> None:
         server.serve_forever()
     finally:
         server.server_close()
-        try:
-            endpoint.unlink()
-        except FileNotFoundError:
-            pass
+        _remove_endpoint_if_owned(endpoint, server.broker_id)
 
 
 if __name__ == "__main__":

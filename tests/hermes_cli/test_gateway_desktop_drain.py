@@ -41,3 +41,27 @@ def test_wait_for_desktop_drain_refreshes_markers_during_long_work():
     )
 
     assert marks == [Path("/profiles/default"), Path("/profiles/default")]
+
+
+def test_drain_all_desktop_work_scopes_single_profile_to_current_home(monkeypatch, tmp_path):
+    import hermes_constants
+    import hermes_cli.gateway_desktop_drain as drain
+
+    other_home = tmp_path / "other"
+    current_home = tmp_path / "current"
+    seen = []
+    monkeypatch.setattr(
+        drain,
+        "desktop_profile_homes",
+        lambda: (current_home, other_home),
+    )
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: current_home)
+    monkeypatch.setattr(
+        drain,
+        "wait_for_desktop_drain",
+        lambda **kwargs: seen.append(tuple(kwargs["homes"])) or drain.DesktopDrainSnapshot(0, 0),
+    )
+
+    drain.drain_all_desktop_work(all_profiles=False)
+
+    assert seen == [(current_home,)]

@@ -66,11 +66,16 @@ def read_desktop_drain_snapshot(homes: Iterable[Path]) -> tuple[int, int]:
     return gateway_agents, kanban_workers
 
 
-def drain_all_desktop_work() -> DesktopDrainSnapshot:
-    """Production entry point used by ``gateway stop --all --drain``."""
+def drain_all_desktop_work(*, all_profiles: bool = True) -> DesktopDrainSnapshot:
+    """Drain the selected profile homes before stopping gateway-owned work."""
     from gateway.drain_control import write_drain_request
 
-    homes = desktop_profile_homes()
+    if all_profiles:
+        homes = desktop_profile_homes()
+    else:
+        from hermes_constants import get_hermes_home
+
+        homes = (get_hermes_home(),)
 
     def report(current: DesktopDrainSnapshot) -> None:
         if current.idle:

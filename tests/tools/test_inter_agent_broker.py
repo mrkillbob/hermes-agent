@@ -136,6 +136,48 @@ def test_broker_uses_platform_detach_helper(monkeypatch):
     ]
 
 
+def test_concurrent_first_use_starts_only_one_broker(monkeypatch):
+    calls = []
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    def fake_ready():
+        return release_first.is_set()
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if len(calls) == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        return object()
+
+    monkeypatch.setattr(inter_agent_tool, "_broker_is_ready", fake_ready)
+    monkeypatch.setattr(inter_agent_tool.subprocess, "Popen", fake_popen)
+
+    workers = [threading.Thread(target=inter_agent_tool._ensure_broker) for _ in range(2)]
+    workers[0].start()
+    assert first_started.wait(timeout=2)
+    workers[1].start()
+    release_first.set()
+    for worker in workers:
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+
+    assert len(calls) == 1
+
+
+def test_broker_shutdown_does_not_remove_replaced_endpoint(monkeypatch, tmp_path):
+    monkeypatch.setattr(broker, "get_hermes_home", lambda: tmp_path)
+    endpoint = tmp_path / "inter-agent-broker.json"
+    endpoint.write_text(
+        json.dumps({"port": 1234, "broker_id": "replacement"}), encoding="utf-8"
+    )
+
+    broker._remove_endpoint_if_owned(endpoint, "original")
+
+    assert endpoint.exists()
+
+
 def test_message_database_and_sidecars_are_owner_only(monkeypatch, tmp_path):
     monkeypatch.setattr(broker, "get_hermes_home", lambda: tmp_path)
     path = tmp_path / "inter-agent-messages.db"
