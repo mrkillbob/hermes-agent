@@ -127,10 +127,13 @@ class SystemProcessController:
                     isinstance(argument, str) for argument in argv
                 ):
                     raise DeploymentError("process_census_ambiguous")
+                pid = info.get("pid")
+                if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+                    raise DeploymentError("process_census_ambiguous")
                 cwd = info.get("cwd")
                 records.append(
                     ProcessRecord(
-                        int(info["pid"]),
+                        pid,
                         Path(executable),
                         tuple(str(argument) for argument in argv),
                         Path(cwd) if isinstance(cwd, str) else None,
@@ -319,6 +322,11 @@ class PostMergeExecutor:
                 self._policy,
                 blocker="protected_runtime_appeared_after_relaunch",
             )
+            _require_runtime_absent(
+                self._processes.census(),
+                self._policy,
+                blocker="protected_runtime_appeared_after_relaunch",
+            )
             relaunched = True
         except DeploymentError as error:
             return self._record(
@@ -436,8 +444,10 @@ def _require_runtime_absent(
     for record in records:
         for argument in record.argv:
             candidate = Path(argument)
-            if candidate.is_absolute() and candidate.resolve() == protected:
-                raise DeploymentError(blocker)
+            if candidate.is_absolute():
+                if candidate.resolve() == protected:
+                    raise DeploymentError(blocker)
+                continue
             if candidate.name != protected_name:
                 continue
             if record.cwd is None:

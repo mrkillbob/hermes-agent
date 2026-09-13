@@ -70,6 +70,7 @@ from .release_maintenance import (
     MaintenanceGitHub,
     MaintenanceWorkspaces,
     ReleaseMaintenanceController,
+    maintenance_worktree_path,
 )
 from .post_merge import PostMergeExecutor
 
@@ -854,6 +855,9 @@ def _validate_maintenance_command_evidence(
     maintenance: ReleaseMaintenancePolicy,
     lane_name: str,
     command_evidence: tuple[MaintenanceCommandEvidence, ...],
+    *,
+    worktree_root: Path | None = None,
+    head_sha: str | None = None,
 ) -> None:
     if lane_name == FINAL_LANE:
         expected_commands = tuple(lane.command for lane in maintenance.lanes)
@@ -867,6 +871,34 @@ def _validate_maintenance_command_evidence(
     actual_commands = tuple(evidence.argv for evidence in command_evidence)
     if actual_commands != expected_commands:
         raise ValueError("maintenance evidence argv does not match configured lane command")
+    if worktree_root is None or head_sha is None:
+        raise ValueError("maintenance evidence worktree identity is unavailable")
+    if lane_name == FINAL_LANE:
+        expected_worktrees = {
+            maintenance_worktree_path(
+                worktree_root, maintenance.repository, head_sha, FINAL_LANE
+            )
+        }
+    else:
+        expected_worktrees = {
+            maintenance_worktree_path(
+                worktree_root,
+                maintenance.repository,
+                head_sha,
+                f"audit-{lane_name}",
+            ),
+            maintenance_worktree_path(
+                worktree_root,
+                maintenance.repository,
+                head_sha,
+                f"repair-{lane_name}",
+            ),
+        }
+    if any(
+        Path(evidence.cwd).resolve(strict=False) not in expected_worktrees
+        for evidence in command_evidence
+    ):
+        raise ValueError("maintenance evidence cwd does not match exact worktree")
 
 
 def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
@@ -888,11 +920,15 @@ def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
             )
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("maintenance command evidence is invalid") from error
-        _validate_maintenance_command_evidence(
-            maintenance, args.lane, command_evidence
-        )
         ledger = FeedbackLedger.for_current_profile()
         try:
+            _validate_maintenance_command_evidence(
+                maintenance,
+                args.lane,
+                command_evidence,
+                worktree_root=ledger.path.parent / "maintenance-worktrees",
+                head_sha=args.head_sha.casefold(),
+            )
             ledger.record_maintenance_receipt(
                 repository=args.repository,
                 head_sha=args.head_sha.casefold(),
@@ -1556,7 +1592,7 @@ def _run_repair_scan_by_repository(
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
 ) -> dict[str, object]:
-    """Run repair intake only for repositories without a required-CI backlog."""
+    """Run conflict repair for deferred repositories and normal repair elsewhere."""
 
     repair_policy = policy.repair_steward
     if repair_policy is None:
@@ -1573,30 +1609,40 @@ def _run_repair_scan_by_repository(
         if repository in configured and backlog > 0
     )
     eligible = configured - set(deferred)
-    if not eligible:
-        return {
-            "status": "ok",
-            "created": 0,
-            "skipped": {"required_local_ci_backlog": len(deferred)}
-            if deferred
-            else {},
-            "deferred_repositories": deferred,
-        }
-    scoped_policy = replace(
-        policy,
-        repair_steward=replace(
-            repair_policy,
-            repositories=frozenset(eligible),
-        ),
-    )
-    result = RepairController(
-        scoped_policy,
-        ledger,
-        github or _github_client(policy),
-        kanban or KanbanSubprocessClient(),
-        control_home=get_default_hermes_root(),
-    ).scan()
-    payload = _scan_payload(result)
+    created = 0
+    degraded = False
+    skipped: dict[str, int] = {}
+    for repositories, conflicts_only in (
+        (set(deferred), True),
+        (eligible, False),
+    ):
+        if not repositories:
+            continue
+        scoped_policy = replace(
+            policy,
+            repair_steward=replace(
+                repair_policy,
+                repositories=frozenset(repositories),
+            ),
+        )
+        result = RepairController(
+            scoped_policy,
+            ledger,
+            github or _github_client(policy),
+            kanban or KanbanSubprocessClient(),
+            control_home=get_default_hermes_root(),
+        ).scan(conflicts_only=conflicts_only)
+        created += result.created
+        degraded = degraded or result.degraded
+        for reason, count in result.skipped.items():
+            skipped[reason] = skipped.get(reason, 0) + count
+    if deferred:
+        skipped["required_local_ci_backlog"] = len(deferred)
+    payload = {
+        "status": "degraded" if degraded else "ok",
+        "created": created,
+        "skipped": skipped,
+    }
     payload["deferred_repositories"] = deferred
     return payload
 

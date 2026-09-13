@@ -97,7 +97,7 @@ def test_post_merge_rechecks_runtime_before_shutdown_and_waits_for_verified_proc
         None,
     )
     processes = Mock()
-    processes.census.side_effect = [(), (), (application,), (), (application,)]
+    processes.census.side_effect = [(), (), (application,), (), (application,), ()]
     repository = Mock()
     repository.prepare.return_value = merge_sha
     commands = Mock()
@@ -150,6 +150,40 @@ def test_post_merge_rechecks_runtime_before_shutdown_and_waits_for_verified_proc
     blocked_commands.run.assert_not_called()
 
 
+def test_post_merge_rechecks_protected_runtime_after_relaunch():
+    policy = _post_merge_policy(Path("/deployment"))
+    merge_sha = "a" * 40
+    application = ProcessRecord(
+        123, Path("/deployment/Example.app/Contents/MacOS/Example"), (), None
+    )
+    protected = ProcessRecord(
+        456, Path("/usr/bin/python"), ("runtime.py",), Path("/deployment")
+    )
+    processes = Mock()
+    processes.census.side_effect = [(), (), (), (application,), (protected,)]
+    repository = Mock()
+    repository.prepare.return_value = merge_sha
+    commands = Mock()
+    commands.run.side_effect = [
+        CompletedCommand(0, '{"source_sha": "' + merge_sha + '"}', "", 1, False),
+        CompletedCommand(0, "", "", 1, False),
+    ]
+    bundles = Mock()
+    bundles.inspect.return_value = BundleIdentity("com.example.app", application.executable)
+
+    receipt = PostMergeExecutor(
+        policy,
+        Mock(),
+        processes=processes,
+        repository=repository,
+        command_runner=commands,
+        bundle_inspector=bundles,
+    ).run(_merge_receipt(merge_sha))
+
+    assert receipt.status == "failed"
+    assert receipt.blocker == "protected_runtime_appeared_after_relaunch"
+
+
 def test_post_merge_rejects_an_advanced_remote_base_before_fast_forward():
     root = Path("/deployment")
     policy = _post_merge_policy(root)
@@ -198,7 +232,7 @@ def test_post_merge_executor_passes_processes_before_controller_to_shutdown_wait
 
     class Processes:
         def __init__(self):
-            self.censuses = [(), (process,), (), (process,)]
+            self.censuses = [(), (), (process,), (), (process,), ()]
             self.terminated = []
 
         def census(self):

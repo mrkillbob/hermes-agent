@@ -522,13 +522,14 @@ def test_repair_scan_keeps_unblocked_repositories_eligible() -> None:
             report_only=True,
         ),
     )
-    seen: list[frozenset[str]] = []
+    seen: list[tuple[frozenset[str], bool]] = []
 
     class Repair:
         def __init__(self, serial_policy, *_args: object, **_kwargs: object) -> None:
-            seen.append(serial_policy.repair_steward.repositories)
+            self.repositories = serial_policy.repair_steward.repositories
 
-        def scan(self):
+        def scan(self, *, conflicts_only=False):
+            seen.append((self.repositories, conflicts_only))
             return SimpleNamespace(created=1, skipped={}, degraded=False)
 
     class Github:
@@ -554,8 +555,11 @@ def test_repair_scan_keeps_unblocked_repositories_eligible() -> None:
         cli.GitHubClient = original_github
         cli.KanbanSubprocessClient = original_kanban
 
-    assert seen == [frozenset({"acme/eligible"})]
-    assert payload["created"] == 1
+    assert seen == [
+        (frozenset({"acme/blocked"}), True),
+        (frozenset({"acme/eligible"}), False),
+    ]
+    assert payload["created"] == 2
     assert payload["deferred_repositories"] == ["acme/blocked"]
 
 
@@ -1268,6 +1272,8 @@ def test_complete_maintenance_cli_records_only_a_configured_exact_head_lane(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from github_pr_feedback.release_maintenance import maintenance_worktree_path
+
     repository = tmp_path / "repository"
     subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
     settings = enabled_settings(repository)
@@ -1310,7 +1316,14 @@ def test_complete_maintenance_cli_records_only_a_configured_exact_head_lane(
                 [
                     {
                         "argv": ["python3", "-m", "pytest", "-q"],
-                        "cwd": str(repository),
+                        "cwd": str(
+                            maintenance_worktree_path(
+                                tmp_path / "profile" / "github-pr-feedback" / "maintenance-worktrees",
+                                "acme/widgets",
+                                "a" * 40,
+                                "audit-unit-tests",
+                            )
+                        ),
                         "returncode": 0,
                         "duration_ms": 125,
                         "timed_out": False,
@@ -1337,6 +1350,7 @@ def test_complete_maintenance_cli_records_only_a_configured_exact_head_lane(
 def test_maintenance_command_evidence_requires_exact_configured_argv() -> None:
     from github_pr_feedback.cli import _validate_maintenance_command_evidence
     from github_pr_feedback.policy import ReleaseMaintenanceLane, ReleaseMaintenancePolicy
+    from github_pr_feedback.release_maintenance import maintenance_worktree_path
 
     maintenance = ReleaseMaintenancePolicy(
         assignee="steward",
@@ -1362,16 +1376,42 @@ def test_maintenance_command_evidence_requires_exact_configured_argv() -> None:
             stderr_sha256="b" * 64,
         )
 
+    worktree_root = Path("/tmp/maintenance-worktrees")
+    exact_cwd = maintenance_worktree_path(
+        worktree_root, "acme/widgets", "a" * 40, "audit-unit-tests"
+    )
     _validate_maintenance_command_evidence(
         maintenance,
         "unit-tests",
-        (evidence(("python3", "-m", "pytest", "-q")),),
+        (
+            MaintenanceCommandEvidence(
+                argv=("python3", "-m", "pytest", "-q"),
+                cwd=str(exact_cwd),
+                returncode=0,
+                duration_ms=1,
+                timed_out=False,
+                stdout_sha256="a" * 64,
+                stderr_sha256="b" * 64,
+            ),
+        ),
+        worktree_root=worktree_root,
+        head_sha="a" * 40,
     )
     with pytest.raises(ValueError, match="does not match"):
         _validate_maintenance_command_evidence(
             maintenance,
             "unit-tests",
             (evidence(("python3", "-m", "pytest", "-q", "--maxfail=1")),),
+            worktree_root=worktree_root,
+            head_sha="a" * 40,
+        )
+    with pytest.raises(ValueError, match="exact worktree"):
+        _validate_maintenance_command_evidence(
+            maintenance,
+            "unit-tests",
+            (evidence(("python3", "-m", "pytest", "-q")),),
+            worktree_root=worktree_root,
+            head_sha="a" * 40,
         )
 
 
