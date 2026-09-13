@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlencode
 
-from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
+from hermes_cli._subprocess_compat import (
+    windows_detach_flags_without_breakaway,
+    windows_detach_popen_kwargs,
+)
 from hermes_constants import get_hermes_home
 from tools.comms import BROKER_PROTOCOL_VERSION
 from tools.registry import registry, tool_error
@@ -78,6 +81,21 @@ HISTORY_SCHEMA = {
 
 _DEFAULT_HISTORY_LIMIT = 100
 _BROKER_STARTUP_THREAD_LOCK = threading.Lock()
+
+
+def _broker_process_argv() -> list[str]:
+    """Launch the broker from the verified Hermes runtime, not the caller's cwd."""
+
+    return [sys.executable, "-P", "-m", "tools.comms.broker"]
+
+
+def _broker_process_env() -> dict[str, str]:
+    """Allow imports only from this runtime's package root and site packages."""
+
+    env = dict(os.environ)
+    env["PYTHONSAFEPATH"] = "1"
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    return env
 
 
 def _state_path(name: str) -> Path:
@@ -192,13 +210,27 @@ def _ensure_broker() -> None:
     with _broker_startup_lock():
         if _broker_is_ready():
             return
-        process = subprocess.Popen(
-            [sys.executable, "-m", "tools.comms.broker"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **windows_detach_popen_kwargs(),
-        )
+        argv = _broker_process_argv()
+        popen_kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "env": _broker_process_env(),
+        }
+        try:
+            process = subprocess.Popen(
+                argv,
+                **popen_kwargs,
+                **windows_detach_popen_kwargs(),
+            )
+        except OSError:
+            if os.name != "nt":
+                raise
+            process = subprocess.Popen(
+                argv,
+                **popen_kwargs,
+                creationflags=windows_detach_flags_without_breakaway(),
+            )
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             if _broker_is_ready():

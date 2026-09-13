@@ -7,6 +7,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from tools.comms import broker
 from tools import inter_agent_tool
 
@@ -150,15 +152,48 @@ def test_broker_uses_platform_detach_helper(monkeypatch):
 
     assert calls == [
         (
-            [inter_agent_tool.sys.executable, "-m", "tools.comms.broker"],
+            [inter_agent_tool.sys.executable, "-P", "-m", "tools.comms.broker"],
             {
                 "stdin": inter_agent_tool.subprocess.DEVNULL,
                 "stdout": inter_agent_tool.subprocess.DEVNULL,
                 "stderr": inter_agent_tool.subprocess.DEVNULL,
+                "env": inter_agent_tool._broker_process_env(),
                 "creationflags": 0x08000200,
             },
         )
     ]
+
+
+@pytest.mark.windows_only
+def test_broker_retries_without_breakaway_when_job_rejects_spawn(monkeypatch):
+    calls = []
+    readiness = iter((False, False, True))
+
+    monkeypatch.setattr(inter_agent_tool, "_broker_is_ready", lambda: next(readiness))
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if len(calls) == 1:
+            raise OSError(5, "Access is denied")
+        return object()
+
+    monkeypatch.setattr(inter_agent_tool.subprocess, "Popen", fake_popen)
+
+    inter_agent_tool._ensure_broker()
+
+    assert len(calls) == 2
+    (argv1, kwargs1), (argv2, kwargs2) = calls
+    assert argv1 == argv2 == [
+        inter_agent_tool.sys.executable,
+        "-P",
+        "-m",
+        "tools.comms.broker",
+    ]
+    assert kwargs1["env"] == kwargs2["env"] == inter_agent_tool._broker_process_env()
+    assert kwargs1["creationflags"] == inter_agent_tool.windows_detach_popen_kwargs()[
+        "creationflags"
+    ]
+    assert kwargs2["creationflags"] == inter_agent_tool.windows_detach_flags_without_breakaway()
 
 
 def test_concurrent_first_use_starts_only_one_broker(monkeypatch):

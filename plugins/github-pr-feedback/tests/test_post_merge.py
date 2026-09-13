@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from github_pr_feedback.ci_runner import CompletedCommand
+from github_pr_feedback.ledger import FeedbackLedger
 from github_pr_feedback.merge_controller import MergeReceipt
 from github_pr_feedback.post_merge import (
     BundleIdentity,
@@ -20,6 +21,7 @@ from github_pr_feedback.post_merge import (
     _require_package_provenance,
     _require_runtime_absent,
     _wait_for_process_to_appear,
+    _wait_for_process_to_start,
     _wait_for_processes_to_exit,
 )
 from github_pr_feedback.policy import PostMergePolicy
@@ -51,13 +53,17 @@ def test_process_shutdown_wait_rechecks_the_current_census():
     assert controller.censuses == []
 
 
-def test_process_census_reports_malformed_ps_rows_as_deployment_errors(monkeypatch):
-    monkeypatch.setattr(
-        "github_pr_feedback.post_merge.subprocess.run",
-        lambda *_args, **_kwargs: type(
-            "Completed", (), {"returncode": 0, "stdout": "123 /usr/bin/example foo'\n"}
-        )(),
+def test_process_census_reports_malformed_rows_as_deployment_errors(monkeypatch):
+    fake_psutil = SimpleNamespace(
+        process_iter=lambda _attrs: iter(
+            [SimpleNamespace(info={"pid": 123, "exe": "/usr/bin/example", "cmdline": []})]
+        ),
+        NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+        ZombieProcess=type("ZombieProcess", (Exception,), {}),
+        AccessDenied=type("AccessDenied", (Exception,), {}),
+        Error=Exception,
     )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
 
     with pytest.raises(DeploymentError, match="process_census_ambiguous"):
         SystemProcessController().census()
@@ -268,7 +274,7 @@ def test_post_merge_executor_passes_processes_before_controller_to_shutdown_wait
 
     monkeypatch.setattr("github_pr_feedback.post_merge._wait_for_processes_to_exit", wait)
     processes = Processes()
-    ledger = SimpleNamespace(record_deployment_receipt=lambda _receipt: None)
+    ledger = Mock()
     receipt = PostMergeExecutor(
         policy,
         ledger,
@@ -373,7 +379,7 @@ def test_deployment_claim_reclaims_recent_owner_after_process_exit(tmp_path):
             "acme/widgets",
             82,
             "a" * 40,
-            owner=f"post-merge:{exited.pid}:test",
+            owner=f"post-merge:{exited.pid}:1",
             claimed_at=now,
         )
         assert first is not None
@@ -383,12 +389,12 @@ def test_deployment_claim_reclaims_recent_owner_after_process_exit(tmp_path):
             "acme/widgets",
             82,
             "a" * 40,
-            owner=f"post-merge:{os.getpid()}:test",
+            owner=f"post-merge:{os.getpid()}:1",
             claimed_at=now,
         )
 
         assert reclaimed is not None
-        assert reclaimed.owner == f"post-merge:{os.getpid()}:test"
+        assert reclaimed.owner == f"post-merge:{os.getpid()}:1"
     finally:
         ledger.close()
 
