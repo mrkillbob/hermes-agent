@@ -278,6 +278,38 @@ def test_subprocess_runner_exposes_safe_failure_code_without_output(
             ),
         ).run(["gh", "api", "labels"])
     assert raised.value.code == code
+
+
+@pytest.mark.parametrize(
+    ("argv", "stderr", "code"),
+    [
+        (["gh", "pr", "merge", "17"], "HTTP 409: merge conflict", "merge_rejected"),
+        (["gh", "api", "repos/acme/widgets/labels/409"], "HTTP 409: conflict", "github_error"),
+    ],
+)
+def test_merge_status_markers_are_scoped_to_merge_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    argv: list[str],
+    stderr: str,
+    code: str,
+) -> None:
+    monkeypatch.setattr(
+        "github_pr_feedback.github_client.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            argv, 1, "", stderr
+        ),
+    )
+    with pytest.raises(GitHubClientError) as raised:
+        SubprocessCommandRunner(
+            sleeper=lambda _delay: None,
+            request_gate=GitHubRequestGate(
+                tmp_path / "github-request-gate.json",
+                sleeper=lambda _delay: None,
+                min_interval_seconds=0,
+            ),
+        ).run(argv)
+    assert raised.value.code == code
     assert stderr not in str(raised.value)
 
 
@@ -1278,25 +1310,14 @@ def test_github_client_flags_a_check_run_waiting_on_human_approval_as_action_req
     )
 
 
-@pytest.mark.parametrize(
-    "method,flag",
-    [("squash", "--squash"), ("rebase", "--rebase"), ("merge", "--merge")],
-)
-def test_github_client_uses_only_fixed_exact_head_merge_argv(
-    method: str, flag: str
-) -> None:
+@pytest.mark.parametrize("method", ["squash", "rebase", "merge"])
+def test_github_client_uses_only_fixed_exact_head_merge_argv(method: str) -> None:
     merge_argv = (
-        "gh",
-        "pr",
-        "merge",
-        "17",
-        "--repo",
-        "acme/widgets",
-        flag,
-        "--match-head-commit",
-        "a" * 40,
+        "gh", "pr", "merge", "17", "--repo", "acme/widgets",
+        {"squash": "--squash", "rebase": "--rebase", "merge": "--merge"}[method],
+        "--match-head-commit", "a" * 40,
     )
-    runner = RecordingRunner({merge_argv: "remote output is not merge truth"})
+    runner = RecordingRunner({merge_argv: {}})
 
     result = GitHubClient(runner).merge_pull_request(
         "acme/widgets", 17, "a" * 40, method=method
