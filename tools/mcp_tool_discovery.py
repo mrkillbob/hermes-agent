@@ -223,8 +223,14 @@ async def _discover_and_register_server(name: str, config: dict) -> List[str]:
         _core._server_connecting.discard(name)
         _core._server_connect_errors.pop(name, None)
     _adopt_server(name, server)
-    registered_names = _registration._register_server_tools(
-        public_name, server, config, connection_name=name)
+    if public_name == name:
+        # Preserve the established registration call contract for ordinary servers.  The
+        # connection key is only an additional concern when profile-owned sessions share a
+        # configured public name.
+        registered_names = _registration._register_server_tools(public_name, server, config)
+    else:
+        registered_names = _registration._register_server_tools(
+            public_name, server, config, connection_name=name)
     server._registered_tool_names = list(registered_names)
     logger.info("MCP server '%s' (%s): registered %d tool(s): %s", name,
                 "HTTP" if "url" in config else "stdio", len(registered_names), ", ".join(registered_names))
@@ -265,16 +271,28 @@ def _select_new_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
                 if "::profile::" in connection_name else connection_name
             )
             _core._server_connect_errors.pop(connection_name, None)
-        # Track which servers opt-in to parallel tool calls (idempotent).
+        # Track the configured raw names for compatibility with the public policy ledger, and
+        # also track each matching internal connection key so profile-owned sessions retain
+        # independent policy when two profiles use the same configured name.
         for srv_name, srv_cfg in servers.items():
+            matching_keys = {
+                key for key, public_name in _core._server_public_names.items()
+                if public_name == srv_name
+            }
+            matching_keys.update(
+                key for key in _core._servers
+                if key == srv_name or _core._server_public_names.get(key) == srv_name
+            )
+            matching_keys.update(
+                key for key in new_servers
+                if _core._server_public_names.get(key, key) == srv_name
+            )
             if _parse_boolish(srv_cfg.get("supports_parallel_tool_calls", False), default=False):
-                for connection_name in new_servers:
-                    if _core._server_public_names.get(connection_name) == srv_name:
-                        _core._parallel_safe_servers.add(connection_name)
+                _core._parallel_safe_servers.add(srv_name)
+                _core._parallel_safe_servers.update(matching_keys)
             else:
-                for connection_name in new_servers:
-                    if _core._server_public_names.get(connection_name) == srv_name:
-                        _core._parallel_safe_servers.discard(connection_name)
+                _core._parallel_safe_servers.discard(srv_name)
+                _core._parallel_safe_servers.difference_update(matching_keys)
     for srv in stale_cached:
         _loop._signal_reconnect(srv)
     return new_servers

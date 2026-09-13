@@ -144,8 +144,12 @@ class MCPServerHealthMixin:
             # Re-register; a raw name can become ambiguous after normalization without changing
             # its normalized name, so also drop old entries the final registration no longer owns.
             self._tools = new_mcp_tools
-            registered_names = _registration._register_server_tools(
-                self.name, self, self._config, connection_name=self._registry_key)
+            if self._registry_key == self.name:
+                registered_names = _registration._register_server_tools(
+                    self.name, self, self._config)
+            else:
+                registered_names = _registration._register_server_tools(
+                    self.name, self, self._config, connection_name=self._registry_key)
             self._deregister_owned(old_tool_names - set(registered_names))
             self._registered_tool_names = registered_names
             new_tool_names = set(registered_names)
