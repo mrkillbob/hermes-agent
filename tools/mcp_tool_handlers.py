@@ -77,19 +77,20 @@ def _check_circuit_breaker(server_name: str) -> Optional[str]:
                       f"this tool yet — use alternative approaches or ask the user to check the MCP server.")
 
 
-def _acquire_call_server(server_name: str, tool_timeout: float):
+def _acquire_call_server(server_name: str, tool_timeout: float, *, public_server_name: Optional[str] = None):
     """``(server, None)`` when a call may be dispatched, else ``(None, error)``. No session: a
     reconnect may be completing, so wait briefly before a breaker strike; still down -> ask the
     server task to rebuild (probing a dead transport would re-arm the breaker forever)."""
     from tools import mcp_tool_discovery as _discovery  # lazy: discovery -> registration -> handlers cycle
-    not_connected = tool_error(f"MCP server '{server_name}' is not connected")
+    display_name = public_server_name or _core._server_public_names.get(server_name, server_name)
+    not_connected = tool_error(f"MCP server '{display_name}' is not connected")
     server = _discovery._get_connected_server_for_call(server_name)
     wait = min(5.0, float(tool_timeout or 5.0))
     if server and (server.session or _loop._wait_for_server_session_ready(server, timeout=wait)):
         return server, None
     _core._bump_server_error(server_name)
     if server and _loop._signal_reconnect(server):
-        return None, tool_error(f"MCP server '{server_name}' transport is down; reconnect requested. Do NOT retry this "
+        return None, tool_error(f"MCP server '{display_name}' transport is down; reconnect requested. Do NOT retry this "
                                 f"tool immediately — give it a few seconds to come back.")
     return None, not_connected
 
@@ -421,7 +422,7 @@ def _render_call_tool_result(result, server_name: str) -> str:
         return json.dumps({"result": text_result}, ensure_ascii=False)
 
 
-def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
+def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float, *, public_server_name: Optional[str] = None):
     """Sync registry handler (``handler(args_dict, **kwargs) -> str``) calling an MCP tool via the background loop."""
     op = f"tools/call {tool_name}"
 
@@ -430,7 +431,9 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         error = _trust_gate_check(server_name, tool_name) or _check_circuit_breaker(server_name)
         if error is not None:
             return error
-        server, error = _acquire_call_server(server_name, tool_timeout)
+        server, error = _acquire_call_server(
+            server_name, tool_timeout, public_server_name=public_server_name,
+        )
         if server is None:
             return error
 
@@ -459,12 +462,13 @@ def _make_utility_handler(op: str, log_label: str, rpc, render, required: Option
     """``(server_name, tool_timeout) -> sync handler`` for one utility tool: ``rpc(session, args,
     server_name)`` awaited under ``_rpc_lock``, ``render(result, server_name)`` -> JSON-able
     payload, ``required`` validated before any transport work."""
-    def _factory(server_name: str, tool_timeout: float):
+    def _factory(server_name: str, tool_timeout: float, *, public_server_name: Optional[str] = None):
         def _handler(args: dict, **kwargs) -> str:
             from tools import mcp_tool_discovery as _discovery  # lazy: import cycle
             server = _discovery._get_connected_server_for_call(server_name)
             if not server or not server.session:
-                return tool_error(f"MCP server '{server_name}' is not connected")
+                display_name = public_server_name or _core._server_public_names.get(server_name, server_name)
+                return tool_error(f"MCP server '{display_name}' is not connected")
             if required and not args.get(required):
                 return tool_error(f"Missing required parameter '{required}'")
 

@@ -496,6 +496,10 @@ def _reset_server_error(server_name: str) -> None:
 _parallel_safe_servers: set = set()
 # registry tool name -> raw server name (the generated name is lossy; never re-parse it).
 _mcp_tool_server_names: Dict[str, str] = {}
+# Connection-key metadata is kept separately from the public registry names. Scoped keys must
+# never leak into tool errors, reload summaries, or profile-local discovery results.
+_server_public_names: Dict[Any, str] = {}
+_mcp_tool_server_names_by_scope: Dict[Optional[str], Dict[str, Any]] = {}
 
 # Dedicated event loop in a background daemon thread; _lock guards the loop handles, _servers,
 # the status maps and the PID ledgers.

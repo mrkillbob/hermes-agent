@@ -64,6 +64,14 @@ def _resolve_server_key(
 
     def resolve_unlocked() -> ServerKey:
         own = _server_key(name, scope, current=False)
+        # Older in-process callers may expose a human-readable scoped key. Prefer its
+        # explicit provenance metadata rather than parsing the key (server names may contain
+        # the delimiter), while keeping the tuple key for new connections.
+        if scope is not None:
+            for key in set(_core._servers) | set(_core._lazy_server_configs) | set(_core._server_scope_keys):
+                if (_core._server_scope_keys.get(key) == scope
+                        and _core._server_public_names.get(key) == name):
+                    return key
         if scope is None or own in _core._servers or own in _core._lazy_server_configs:
             return own
         for key, scopes in tuple(_core._server_tool_scopes.items()):
