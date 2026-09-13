@@ -61,9 +61,20 @@ export interface JsonRpcRequestChannelOptions {
   onEvent?: (event: GatewayEvent) => void
   requestIdPrefix?: string
   requestTimeoutMs?: number
+  /**
+   * What resets the heartbeat deadline. `'response'` (default): only a
+   * `gateway.ping` pong or a response to one of our requests — a backend
+   * whose request loop is wedged but still streams deltas is dead for the
+   * caller and must be dropped (the Ink TUI's original contract).
+   * `'any-inbound'`: every frame, notifications included (the desktop/web
+   * WebSocket client's original contract).
+   */
+  heartbeatLiveness?: HeartbeatLiveness
   /** `setTimeout`/`setInterval` handles are `unref`'d when the runtime supports it (Node) so a pending call cannot pin the process. */
   unrefTimers?: boolean
 }
+
+export type HeartbeatLiveness = 'any-inbound' | 'response'
 
 interface PendingCall {
   reject: (error: Error) => void
@@ -79,6 +90,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000
 // heartbeat that the TUI gateway explicitly answers.
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000
 export const DEFAULT_HEARTBEAT_DEADLINE_MS = 45_000
+const MAX_OUTSTANDING_PINGS = 8
 
 // Hoisted decoder: attach mode can drive high-frequency binary frames (tool
 // deltas, reasoning streams) and a fresh TextDecoder per message is avoidable
@@ -116,7 +128,8 @@ export class JsonRpcRequestChannel {
   private transport: JsonRpcTransport | null = null
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private heartbeatSequence = 0
-  private lastInboundAt = 0
+  private readonly outstandingPings = new Set<string>()
+  private lastLivenessAt = 0
   private readonly options: Required<Omit<JsonRpcRequestChannelOptions, 'onEvent' | 'onHeartbeatFailure'>> &
     Pick<JsonRpcRequestChannelOptions, 'onEvent' | 'onHeartbeatFailure'>
 
@@ -125,6 +138,7 @@ export class JsonRpcRequestChannel {
       createRequestId: options.createRequestId ?? ((nextId: number) => `${options.requestIdPrefix ?? 'r'}${nextId}`),
       heartbeatDeadlineMs: options.heartbeatDeadlineMs ?? DEFAULT_HEARTBEAT_DEADLINE_MS,
       heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+      heartbeatLiveness: options.heartbeatLiveness ?? 'response',
       onEvent: options.onEvent,
       onHeartbeatFailure: options.onHeartbeatFailure,
       requestIdPrefix: options.requestIdPrefix ?? 'r',
@@ -145,7 +159,7 @@ export class JsonRpcRequestChannel {
   attach(transport: JsonRpcTransport): void {
     this.stopHeartbeat()
     this.transport = transport
-    this.lastInboundAt = Date.now()
+    this.lastLivenessAt = Date.now()
   }
 
   /** Drop the transport and fail every in-flight call with `error`. */
@@ -244,11 +258,9 @@ export class JsonRpcRequestChannel {
    * Route one inbound frame: a response settles its pending call, an
    * `event` notification reaches `onEvent`. Returns the decoded frame so the
    * owner can act on it too (mirror it, record seq, …) or `null` when the
-   * text was not JSON.
+   * text was not JSON or not a JSON object (`null`, a scalar).
    */
   handleFrame(text: string): JsonRpcFrame | null {
-    this.lastInboundAt = Date.now()
-
     let frame: JsonRpcFrame
 
     try {
@@ -257,10 +269,25 @@ export class JsonRpcRequestChannel {
       return null
     }
 
+    if (!frame || typeof frame !== 'object') {
+      return null
+    }
+
+    if (this.options.heartbeatLiveness === 'any-inbound') {
+      this.lastLivenessAt = Date.now()
+    }
+
     if (frame.id !== undefined && frame.id !== null) {
+      if (typeof frame.id === 'string' && this.outstandingPings.delete(frame.id)) {
+        this.lastLivenessAt = Date.now()
+
+        return frame
+      }
+
       const call = this.pending.get(frame.id)
 
       if (call) {
+        this.lastLivenessAt = Date.now()
         this.clearPending(frame.id)
 
         if (frame.error) {
@@ -283,12 +310,12 @@ export class JsonRpcRequestChannel {
   /**
    * Begin the `gateway.ping` keepalive on the bound transport. Only call when
    * `gateway.ready.heartbeat` advertised support — an older backend would
-   * answer with -32601 and never count as alive. Any inbound frame counts as
-   * liveness; only a full deadline of silence drops the transport.
+   * answer with -32601 and never count as alive. What counts as liveness is
+   * `heartbeatLiveness`; a full deadline without it drops the transport.
    */
   startHeartbeat(): void {
     this.stopHeartbeat()
-    this.lastInboundAt = Date.now()
+    this.lastLivenessAt = Date.now()
 
     const transport = this.transport
 
@@ -301,16 +328,24 @@ export class JsonRpcRequestChannel {
         return
       }
 
-      if (Date.now() - this.lastInboundAt >= this.options.heartbeatDeadlineMs) {
+      if (Date.now() - this.lastLivenessAt >= this.options.heartbeatDeadlineMs) {
         this.failHeartbeat(new Error('WebSocket heartbeat acknowledgement timed out'))
 
         return
       }
 
+      const id = `heartbeat-${++this.heartbeatSequence}`
+      this.outstandingPings.add(id)
+
+      // In 'any-inbound' mode a backend that streams but never pongs keeps
+      // the transport alive indefinitely; forget stale ping ids so the set
+      // cannot grow with it.
+      if (this.outstandingPings.size > MAX_OUTSTANDING_PINGS) {
+        this.outstandingPings.delete(this.outstandingPings.values().next().value as string)
+      }
+
       try {
-        transport.send(
-          JSON.stringify({ jsonrpc: '2.0', id: `heartbeat-${++this.heartbeatSequence}`, method: 'gateway.ping', params: {} })
-        )
+        transport.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'gateway.ping', params: {} }))
       } catch (error) {
         this.failHeartbeat(error instanceof Error ? error : new Error(String(error)))
       }
@@ -322,6 +357,8 @@ export class JsonRpcRequestChannel {
   }
 
   stopHeartbeat(): void {
+    this.outstandingPings.clear()
+
     if (this.heartbeatTimer !== null) {
       clearInterval(this.heartbeatTimer)
       this.heartbeatTimer = null

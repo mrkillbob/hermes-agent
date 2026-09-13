@@ -147,6 +147,9 @@ export class JsonRpcGatewayClient {
       createRequestId: this.options.createRequestId,
       heartbeatDeadlineMs: this.options.heartbeatDeadlineMs,
       heartbeatIntervalMs: this.options.heartbeatIntervalMs,
+      // Desktop/web have always counted any inbound frame as liveness; the
+      // TUI (stdio/attach owner) keeps its stricter pong-based contract.
+      heartbeatLiveness: 'any-inbound',
       onEvent: event => this.handleEvent(event),
       onHeartbeatFailure: error => this.invalidate(error.message),
       requestTimeoutMs: this.options.requestTimeoutMs
@@ -249,8 +252,10 @@ export class JsonRpcGatewayClient {
       // A server that closes during the handshake (auth gate, 4401/4403)
       // may never fire `error`; without this the caller waits out the
       // connect timeout for a verdict the socket already delivered. The
-      // permanent close listener above has already moved the generation to
-      // 'closed' (unless onSocketClose intercepted), so only settle here.
+      // permanent close listener above normally already dropped the socket
+      // and moved the generation to 'closed'; the branch below only runs
+      // when `onSocketClose` intercepted that transition and left the
+      // half-open socket bound.
       const onClose = () => {
         if (settled) {
           return
