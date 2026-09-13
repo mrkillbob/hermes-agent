@@ -177,11 +177,21 @@ class TestBareSecretEnvSuffixes:
 
     def test_inline_machine_fields_redact_pipe_and_whitespace_delimiters(self):
         samples = (
-            ("status=ok|token=opaque-secret-value-12345", "opaque-secret-value-12345"),
-            ("status=ok password=A9f3kZq7Lm2Xw8Rt4Yv6", "A9f3kZq7Lm2Xw8Rt4Yv6"),
+            (
+                "password=opaque-secret-value-12345|b=2",
+                "password=***|b=2",
+            ),
+            (
+                "a=1|password=opaque-secret-value-12345|b=2",
+                "a=1|password=***|b=2",
+            ),
+            (
+                "status=ok password=A9f3kZq7Lm2Xw8Rt4Yv6",
+                "status=ok password=***",
+            ),
         )
-        for text, cleartext in samples:
-            assert cleartext not in redact_sensitive_text(text, force=True)
+        for text, expected in samples:
+            assert redact_sensitive_text(text, force=True) == expected
 
 
 class TestControlCharSplitTokens:

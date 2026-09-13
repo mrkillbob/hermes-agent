@@ -12,7 +12,6 @@ import sys
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,7 +39,6 @@ from github_pr_feedback.repair_controller import pr_repair_attribution_line
 
 def test_single_merge_handoff_uses_deployment_executor_on_every_path(monkeypatch):
     import github_pr_feedback.cli as cli
-    from github_pr_feedback import post_merge
 
     merge_policy = SimpleNamespace(repository="acme/widgets", post_merge=object())
     policy = SimpleNamespace(
@@ -83,8 +81,7 @@ def test_single_merge_handoff_uses_deployment_executor_on_every_path(monkeypatch
         def run(self, _pr_number):
             return SimpleNamespace(receipt=merge, decision=SimpleNamespace(blockers=()))
 
-    monkeypatch.setattr(post_merge, "PostMergeExecutor", Executor)
-    cli = importlib.reload(cli)
+    monkeypatch.setattr(cli, "PostMergeExecutor", Executor)
     monkeypatch.setattr(cli, "CanonicalMergeEvidenceSource", lambda *_args: object())
     monkeypatch.setattr(cli, "MergeController", MergeController)
 
@@ -807,7 +804,7 @@ def test_retry_deployment_recovers_completed_merge_without_receipt_and_holds_sca
     monkeypatch.setattr(cli, "_load_policy_from_context", lambda _ctx: policy)
     monkeypatch.setattr(cli, "_exclusive_scan_lock", lambda: Lock())
     monkeypatch.setattr(cli.FeedbackLedger, "for_current_profile", lambda: Ledger())
-    monkeypatch.setattr("github_pr_feedback.post_merge.PostMergeExecutor", Executor)
+    monkeypatch.setattr("github_pr_feedback.cli.PostMergeExecutor", Executor)
 
     assert _retry_deployment(
         None, SimpleNamespace(repository="acme/widgets", pr_number=17)
