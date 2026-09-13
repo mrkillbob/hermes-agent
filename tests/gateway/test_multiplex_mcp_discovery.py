@@ -198,6 +198,7 @@ def test_scope_visibility_rejects_profile_owned_auth_connection_even_when_config
     must continue to reuse its own connection, while a peer scope must connect independently.
     """
     from tools import mcp_tool
+    from tools import mcp_tool_discovery as _mcp_discovery
     from tools import mcp_tool_registration as _mcp_registration
 
     worker_scope = hermes_home_key(tmp_path / "worker")
@@ -205,6 +206,7 @@ def test_scope_visibility_rejects_profile_owned_auth_connection_even_when_config
     live_config = {"url": "https://shared.example/mcp", **auth_config}
     live_server = SimpleNamespace(session=object(), _config=live_config, _tools=[], tool_timeout=30)
     monkeypatch.setattr(mcp_tool, "_servers", {"shared": live_server})
+    monkeypatch.setattr(mcp_tool, "_server_public_names", {"shared": "shared"})
     monkeypatch.setattr(mcp_tool, "_server_scope_keys", {"shared": launch_scope})
     monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {"shared": {launch_scope}}, raising=False)
     monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: worker_scope)
@@ -215,7 +217,9 @@ def test_scope_visibility_rejects_profile_owned_auth_connection_even_when_config
     assert not _mcp_registration._connection_reusable_in_scope(
         "shared", live_server, live_config, worker_scope
     )
-    assert _mcp_registration.register_connected_into_current_scope({"shared": live_config}) == 0
+    selected = _mcp_discovery._select_new_servers({"shared": live_config})
+    assert list(selected.values()) == [live_config]
+    assert list(selected) == [f"shared::profile::{worker_scope}"]
     assert mcp_tool._server_tool_scopes["shared"] == {launch_scope}
 
 

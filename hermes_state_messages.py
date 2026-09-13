@@ -597,7 +597,8 @@ class SessionMessagesMixin:
             (_scrub_surrogates(api_content), session_id, self._encode_content(content)))
 
     def set_message_api_content(
-        self, session_id: str, row_id: int, content: Any, api_content: str
+        self, session_id: str, row_id: int, content: Any, api_content: str,
+        display_metadata: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Backfill the ``api_content`` sidecar onto ONE known durable row.
 
@@ -612,16 +613,22 @@ class SessionMessagesMixin:
         The crash persist then marker-skips that message, so this is the only
         way the stamped bytes reach the store.
 
+        When ``display_metadata`` is supplied, it is written in the same row-addressed
+        transaction. This matters for trusted display-only markers staged after a close
+        or preflight flush already materialized the row.
+
         ``active = 1`` and the ``content`` match stay as defensive guards: a
         row the compaction archived, or one a racing rewrite changed, is left
         untouched.
         """
         if not session_id or isinstance(row_id, bool) or not isinstance(row_id, int) or row_id <= 0:
             return 0
+        encoded_metadata = self._encode_display_metadata(display_metadata)
         return self._write_rowcount(
-            "UPDATE messages SET api_content = ? WHERE id = ? AND session_id = ? "
+            "UPDATE messages SET api_content = ?, display_metadata = COALESCE(?, display_metadata) "
+            "WHERE id = ? AND session_id = ? "
             "AND role = 'user' AND active = 1 AND content IS ?",
-            (_scrub_surrogates(api_content), row_id, session_id, self._encode_content(content)))
+            (_scrub_surrogates(api_content), encoded_metadata, row_id, session_id, self._encode_content(content)))
 
     def _dedupe_display_generations(self, rows):
         """Collapse compaction generations so each logical message appears once (the protected tail is copied

@@ -119,6 +119,7 @@ def shutdown_mcp_servers(*, scope: Optional[str] = None):
         for name in selected_status:
             _core._server_connect_errors.pop(name, None)
             _core._server_scope_keys.pop(name, None)
+            _core._server_public_names.pop(name, None)
             _core._server_tool_scopes.pop(name, None)
 
     # Fast path: nothing to shut down. The connect-cooldown maps can still be populated here — a server that
@@ -135,6 +136,7 @@ def shutdown_mcp_servers(*, scope: Optional[str] = None):
                 for name in selected:
                     _core._servers.pop(name, None)
                     _core._server_scope_keys.pop(name, None)
+                    _core._server_public_names.pop(name, None)
                 clear_selected_status()
                 _clear_connect_cooldowns(None if scope is None else selected_status)
 

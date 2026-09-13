@@ -821,7 +821,10 @@ def _stamp_api_content_sidecar(
             return
         try:
             if isinstance(_row_id, int):
-                _db.set_message_api_content(agent.session_id, _row_id, durable_content, _api_content)
+                _db.set_message_api_content(
+                    agent.session_id, _row_id, durable_content, _api_content,
+                    display_metadata=_turn_user_msg.get("display_metadata"),
+                )
             else:
                 # Compacted copies carry no row id; positional is safe only because
                 # archive_and_compact just made this message the newest active user row.

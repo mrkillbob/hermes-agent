@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
@@ -398,6 +399,38 @@ def _apply_stored_session_runtime(
     return choice
 
 
+def _create_fallback_resume_session(session_db, resume_meta: dict, history: list) -> tuple[str, list]:
+    """Copy a loaded transcript into a new durable session when the ended target cannot reopen.
+
+    The fallback is a new session rather than an append to the still-closed target. Reloading the
+    copied rows after insertion is important: ``get_resume_conversations`` supplies the new row ids
+    and persistence markers, so the next turn does not either lose history or append it twice.
+    """
+    fallback_id = f"oneshot-resume-{uuid.uuid4().hex}"
+    model_config = resume_meta.get("model_config")
+    if isinstance(model_config, str):
+        try:
+            model_config = json.loads(model_config)
+        except (TypeError, ValueError):
+            model_config = None
+    session_db.create_session(
+        fallback_id,
+        source=resume_meta.get("source") or "cli",
+        model=resume_meta.get("model"),
+        model_config=model_config if isinstance(model_config, dict) else None,
+        system_prompt=resume_meta.get("_system_prompt_resolved") or resume_meta.get("system_prompt"),
+        display_name=resume_meta.get("display_name"),
+    )
+    rows = [
+        {key: value for key, value in message.items()
+         if key not in {"_row_id", "_db_persisted", "message_id"}}
+        for message in history if isinstance(message, dict)
+    ]
+    session_db.append_messages_batch(fallback_id, rows)
+    restored, _display = session_db.get_resume_conversations(fallback_id)
+    return fallback_id, restored
+
+
 def _run_agent(
     prompt: str,
     model: Optional[str] = None,
@@ -459,9 +492,10 @@ def _run_agent(
                 reopened_resume = True
             except Exception:
                 logging.debug("reopen_session failed for resumed one-shot session %s", resume_sid, exc_info=True)
-        # If the ended row could not be reopened, run the loaded transcript best-effort but let
-        # AIAgent create a fresh durable row; never append this turn to the still-closed target.
-        agent_session_id = resume_sid if reopened_resume else None
+        if resume_sid and not reopened_resume:
+            resume_sid, conversation_history = _create_fallback_resume_session(
+                session_db, resume_meta or {}, conversation_history)
+        agent_session_id = resume_sid
         agent = AIAgent(
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),

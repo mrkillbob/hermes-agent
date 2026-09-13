@@ -17,10 +17,29 @@ import pytest
 from hermes_state import SessionDB
 from hermes_cli.oneshot import (
     _apply_stored_session_runtime,
+    _create_fallback_resume_session,
     _load_resume_target,
     _ModelChoice,
     run_oneshot,
 )
+
+
+def test_reopen_failure_fallback_copies_history_into_new_durable_session(tmp_path):
+    db = _db_with_session(tmp_path, "s1", messages=[("user", "remember this"), ("assistant", "I do")])
+    try:
+        sid, restored = _create_fallback_resume_session(
+            db, {"source": "cli", "model": "stored-model"}, db.get_resume_conversations("s1")[0]
+        )
+
+        assert sid != "s1"
+        assert [(message["role"], message["content"]) for message in restored] == [
+            ("user", "remember this"), ("assistant", "I do")
+        ]
+        assert [(message["role"], message["content"]) for message in db.get_resume_conversations(sid)[0]] == [
+            ("user", "remember this"), ("assistant", "I do")
+        ]
+    finally:
+        db.close()
 
 
 def _db_with_session(tmp_path, sid, *, messages=()):
@@ -215,8 +234,8 @@ class TestRunAgentResumeRuntime:
         finally:
             db.close()
 
-    def test_run_agent_continues_without_writing_closed_row_when_reopen_fails(self, tmp_path, monkeypatch):
-        """A readable transcript still runs without targeting its closed row."""
+    def test_run_agent_continues_with_history_when_reopen_fails(self, tmp_path, monkeypatch):
+        """A readable transcript runs in a new durable session without targeting its closed row."""
         import hermes_cli.oneshot as oneshot_mod
 
         db = _db_with_session(tmp_path, "s1", messages=[("user", "remember this")])
@@ -259,7 +278,7 @@ class TestRunAgentResumeRuntime:
         try:
             text, result = oneshot_mod._run_agent("continue", resume="s1")
             assert text == "ok" and result["final_response"] == "ok"
-            assert captured["session_id"] is None
+            assert captured["session_id"].startswith("oneshot-resume-")
             assert [(message["role"], message["content"]) for message in captured["history"]] == [
                 ("user", "remember this"),
             ]
@@ -267,6 +286,10 @@ class TestRunAgentResumeRuntime:
             assert row["ended_at"] is not None and row["end_reason"] == "agent_close"
             stored, _display = db.get_resume_conversations("s1")
             assert [(message["role"], message["content"]) for message in stored] == [
+                ("user", "remember this"),
+            ]
+            fallback, _display = db.get_resume_conversations(captured["session_id"])
+            assert [(message["role"], message["content"]) for message in fallback] == [
                 ("user", "remember this"),
             ]
         finally:

@@ -91,20 +91,23 @@ def _restore_server_toolset_alias(server_name: str) -> None:
 
     with _core._lock:
         server = _core._servers.get(server_name)
+        public_name = _core._server_public_names.get(server_name, server_name)
         scopes = set(_core._server_tool_scopes.get(server_name, ()))
         tool_names = list(getattr(server, "_registered_tool_names", ()) if server is not None else ())
     if any(
         registry.snapshot_registration(tool_name, scope=scope) is not None
         for scope in scopes for tool_name in tool_names
     ):
-        registry.register_toolset_alias(server_name, f"mcp-{server_name}")
+        registry.register_toolset_alias(public_name, f"mcp-{public_name}")
 
 
 def _remove_server_scope(server_name: str, scope: str) -> None:
     """Remove one profile's MCP overlay for a shared live connection."""
     from tools.registry import registry
 
-    for tool_name in registry.get_tool_names_for_toolset(f"mcp-{server_name}"):
+    with _core._lock:
+        public_name = _core._server_public_names.get(server_name, server_name)
+    for tool_name in registry.get_tool_names_for_toolset(f"mcp-{public_name}"):
         registry.deregister(tool_name, scope=scope)
     with _core._lock:
         scopes = set(_core._server_tool_scopes.get(server_name, ()))
@@ -153,7 +156,7 @@ def _existing_tool_names() -> List[str]:
 
         with _core._lock:
             server_names = [
-                name for name in _core._servers
+                _core._server_public_names.get(name, name) for name in _core._servers
                 if _core._server_visible_in_scope(name, scope)
             ]
             server_names.extend(
@@ -218,7 +221,7 @@ class _Candidate:
 
 
 def _tool_candidates(name: str, tools: Iterable[Any], should_register: Callable[[str], bool],
-                     tool_timeout) -> List[_Candidate]:
+                     tool_timeout, *, connection_name: Optional[str] = None) -> List[_Candidate]:
     """Native tools (live SDK objects or cache stand-ins) -> candidates. The injection scan runs on
     BOTH paths: the cache file is user-writable JSON."""
     out: List[_Candidate] = []
@@ -228,19 +231,19 @@ def _tool_candidates(name: str, tools: Iterable[Any], should_register: Callable[
             continue
         _schema._scan_mcp_description(name, t.name, t.description or "")
         schema = _schema._convert_mcp_schema(name, t)
-        handler = _handlers._make_tool_handler(name, t.name, tool_timeout)
+        handler = _handlers._make_tool_handler(connection_name or name, t.name, tool_timeout)
         out.append(_Candidate(schema["name"], f"tool {t.name!r}", schema, handler))
     return out
 
 
-def _utility_candidates(name: str, entries: Iterable[Any], tool_timeout) -> List[_Candidate]:
+def _utility_candidates(name: str, entries: Iterable[Any], tool_timeout, *, connection_name: Optional[str] = None) -> List[_Candidate]:
     """``{schema, handler_key}`` rows (live selection or cache) -> candidates; malformed rows dropped."""
     out: List[_Candidate] = []
     for raw in entries:
         schema, key = (raw.get("schema"), raw.get("handler_key")) if isinstance(raw, dict) else (None, None)
         if isinstance(schema, dict) and key in _UTILITY_HANDLER_FACTORIES and schema.get("name"):
             out.append(_Candidate(schema["name"], f"{_UTILITY_ORIGIN_PREFIX}{key!r}", schema,
-                                  _UTILITY_HANDLER_FACTORIES[key](name, tool_timeout)))
+                                  _UTILITY_HANDLER_FACTORIES[key](connection_name or name, tool_timeout)))
     return out
 
 
@@ -288,7 +291,8 @@ def _resolve_name_collisions(name: str, candidates: List[_Candidate]) -> List[_C
 
 
 def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: Callable,
-                         scope: Callable[[], Optional[str]], lazy: bool) -> List[str]:
+                         scope: Callable[[], Optional[str]], lazy: bool,
+                         server_key: Optional[str] = None) -> List[str]:
     """Register candidates under toolset ``mcp-{name}``; returns the names that landed. The
     ownership pre-check is advisory (servers connect in parallel): ``registry.register()`` is
     the atomic gate and its verdict is re-read after every call."""
@@ -314,10 +318,10 @@ def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: C
             name=c.registry_name, toolset=toolset_name, schema=c.schema, handler=c.handler, check_fn=check_fn,
             is_async=False, description=c.schema.get("description") or "", scope=scope_value)
         if registry.get_toolset_for_tool(c.registry_name) == toolset_name:
-            _track_mcp_tool_server(c.registry_name, name)
+            _track_mcp_tool_server(c.registry_name, server_key or name)
             if scope_value is not None:
                 with _core._lock:
-                    _core._server_tool_scopes.setdefault(name, set()).add(scope_value)
+                    _core._server_tool_scopes.setdefault(server_key or name, set()).add(scope_value)
             registered.append(c.registry_name)
         elif not lazy:
             logger.error("MCP server '%s': registration of %s as '%s' was rejected by the registry; "
@@ -357,17 +361,24 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
         logger.debug("MCP schema cache write failed for '%s': %s", name, exc)
 
 
-def _register_server_tools(name: str, server: "MCPServerTask", config: dict) -> List[str]:
+def _register_server_tools(
+    name: str, server: "MCPServerTask", config: dict, *, connection_name: Optional[str] = None
+) -> List[str]:
     """Register a connected server's tools plus utilities (initial discovery and list_changed
     refresh); returns the names. Toolset aliases derive from the live registry, not
     ``toolsets.TOOLSETS``; lossy normalization collisions (``read-file``/``read_file``) fail closed."""
+    connection_name = connection_name or name
     should_register = _make_tool_filter(name, config)
-    _record_tool_trust_metadata(name, config, server._tools)
-    candidates = _tool_candidates(name, server._tools, should_register, server.tool_timeout)
-    candidates += _utility_candidates(name, _select_utility_schemas(name, server, config), server.tool_timeout)
+    _record_tool_trust_metadata(connection_name, config, server._tools)
+    candidates = _tool_candidates(name, server._tools, should_register, server.tool_timeout,
+                                  connection_name=connection_name)
+    candidates += _utility_candidates(name, _select_utility_schemas(name, server, config), server.tool_timeout,
+                                      connection_name=connection_name)
     registered = _register_candidates(
         name, _resolve_name_collisions(name, candidates),
-        check_fn=_make_check_fn(name), scope=lambda: _core._server_registry_scope(name), lazy=False)
+        check_fn=_make_check_fn(connection_name or name),
+        scope=lambda: _core._server_registry_scope(connection_name or name), lazy=False,
+        server_key=connection_name)
     if registered:
         _write_schema_cache(name, server, config, should_register)
     return registered
@@ -449,7 +460,7 @@ def _register_connected_into_current_scope(servers: dict) -> int:
             if scope not in scopes:
                 continue
             server = _core._servers.get(name)
-            config = servers.get(name)
+            config = servers.get(_core._server_public_names.get(name, name))
             if (config is None or not _server_enabled(config) or server is None
                     or getattr(server, "session", None) is None
                     or not _connection_reusable_in_scope(name, server, config, scope)):
@@ -462,21 +473,30 @@ def _register_connected_into_current_scope(servers: dict) -> int:
         if not _server_enabled(config):
             continue
         with _core._lock:
-            server = _core._servers.get(name)
+            connection_name = next(
+                (key for key, public_name in _core._server_public_names.items()
+                 if public_name == name and _core._server_visible_in_scope(key, scope)),
+                name if name in _core._servers else None,
+            )
+            server = _core._servers.get(connection_name) if connection_name else None
         if (server is None or getattr(server, "session", None) is None
-                or not _connection_reusable_in_scope(name, server, config, scope)):
+                or not _connection_reusable_in_scope(connection_name or name, server, config, scope)):
             continue
         # Visibility for this profile: the owner keeps teardown, this scope sees the connection.
         with _core._lock:
-            _core._server_tool_scopes.setdefault(name, set()).add(scope)
+            _core._server_tool_scopes.setdefault(connection_name or name, set()).add(scope)
         if registry.get_tool_names_for_toolset(f"mcp-{name}"):
             continue
-        candidates = _tool_candidates(name, server._tools, _make_tool_filter(name, config), server.tool_timeout)
+        candidates = _tool_candidates(
+            name, server._tools, _make_tool_filter(name, config), server.tool_timeout,
+            connection_name=connection_name or name)
         candidates += _utility_candidates(
-            name, _select_utility_schemas(name, server, config), server.tool_timeout)
+            name, _select_utility_schemas(name, server, config), server.tool_timeout,
+            connection_name=connection_name or name)
         names = _register_candidates(
             name, _resolve_name_collisions(name, candidates),
-            check_fn=_make_check_fn(name), scope=lambda: scope, lazy=False)
+            check_fn=_make_check_fn(connection_name or name), scope=lambda: scope, lazy=False,
+            server_key=connection_name or name)
         if names:
             registered_servers += 1
             with _core._lock:
@@ -485,7 +505,9 @@ def _register_connected_into_current_scope(servers: dict) -> int:
     return registered_servers
 
 
-def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]:
+def _register_from_cache_sync(
+    name: str, config: dict, entry: dict, *, public_name: Optional[str] = None
+) -> List[str]:
     """Lazy startup: register from a cached manifest with no child process (first real call goes
     through ``_ensure_lazy_server_connected``). Trust metadata is recorded first so the
     call-time gate is identical for live and cached registrations.
@@ -494,13 +516,17 @@ def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]
     call routes through ``_get_connected_server_for_call`` → ``_ensure_lazy_server_connected``.
     """
     from tools.mcp_schema_cache import config_fingerprint, tools_from_cache_entry, utility_tools_from_cache_entry
+    public_name = public_name or _core._server_public_names.get(name, name)
     tool_timeout = _resolve_tool_timeout(config)
     cached_tools = _cached_tools(tools_from_cache_entry(entry))
     _record_tool_trust_metadata(name, config, cached_tools)
-    candidates = _tool_candidates(name, cached_tools, _make_tool_filter(name, config), tool_timeout)
-    candidates += _utility_candidates(name, utility_tools_from_cache_entry(entry), tool_timeout)
+    candidates = _tool_candidates(public_name, cached_tools, _make_tool_filter(public_name, config), tool_timeout,
+                                  connection_name=name)
+    candidates += _utility_candidates(public_name, utility_tools_from_cache_entry(entry), tool_timeout,
+                                      connection_name=name)
     registered = _register_candidates(
-        name, candidates, check_fn=_make_check_fn(name), scope=_core._mcp_registry_scope, lazy=True)
+        public_name, candidates, check_fn=_make_check_fn(name), scope=_core._mcp_registry_scope, lazy=True,
+        server_key=name)
     if registered:
         with _core._lock:
             _core._lazy_server_configs[name] = dict(config)

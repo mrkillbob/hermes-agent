@@ -52,10 +52,14 @@ class TestSetMessageApiContent:
             rows = db.get_messages("s1")
             turn_1_id, turn_2_id = rows[0]["id"], rows[2]["id"]
 
-            assert db.set_message_api_content("s1", turn_2_id, "ok", "ok\n\nTURN-2") == 1
+            marker = {"_hermes_surface_switch": {"surface": "tui"}}
+            assert db.set_message_api_content(
+                "s1", turn_2_id, "ok", "ok\n\nTURN-2", display_metadata=marker
+            ) == 1
             rows = {r["id"]: r for r in db.get_messages("s1")}
             assert rows[turn_1_id]["api_content"] == "ok\n\nTURN-1"
             assert rows[turn_2_id]["api_content"] == "ok\n\nTURN-2"
+            assert rows[turn_2_id]["display_metadata"] == marker
 
         finally:
             db.close()
