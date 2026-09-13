@@ -11,9 +11,9 @@ import contextlib
 import os
 import shutil
 import sys
-import uuid
 
 from hermes_constants import get_hermes_home
+from hermes_state_ids import new_session_id
 from pathlib import Path
 from rich.console import Console
 from rich.markup import escape as _escape
