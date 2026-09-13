@@ -738,6 +738,12 @@ def _merge_gateway_notes(
         else None
     )
     if isinstance(_gw_turn_content, list):
+        if _surface_note and _surface_metadata and isinstance(user_msg, dict):
+            # The note is part of the live multimodal envelope, but a preflushed row contains
+            # the envelope before this append. Preserve that durable projection for the row-ID
+            # guard in _stamp_api_content_sidecar; the private key is never sent or persisted.
+            from agent.session_persistence import _durable_content
+            user_msg["_surface_switch_durable_content"] = _durable_content(_gw_turn_content)
         append_notes_to_multimodal_content(_gw_turn_content, _turn_notes)
         return plugin_user_context
     return (
@@ -797,6 +803,7 @@ def _stamp_api_content_sidecar(
         agent, _turn_user_msg, live_content,
         compose_user_api_content(live_content or "", ext_prefetch_cache, plugin_user_context),
     )
+    row_match_content = _turn_user_msg.get("_surface_switch_durable_content", durable_content)
     display_metadata = _turn_user_msg.get("display_metadata")
     has_api_backfill = _api_content is not None and _api_content != durable_content
     if has_api_backfill:
@@ -830,7 +837,7 @@ def _stamp_api_content_sidecar(
                 )
             elif isinstance(_row_id, int) and display_metadata:
                 _db.set_message_display_metadata(
-                    agent.session_id, _row_id, durable_content, display_metadata)
+                    agent.session_id, _row_id, row_match_content, display_metadata)
             else:
                 # Compacted copies carry no row id; positional is safe only because
                 # archive_and_compact just made this message the newest active user row.
@@ -843,7 +850,7 @@ def _stamp_api_content_sidecar(
                         _db.set_latest_user_api_content(agent.session_id, durable_content, _api_content)
                 elif display_metadata:
                     _db.set_latest_user_display_metadata(
-                        agent.session_id, durable_content, display_metadata)
+                        agent.session_id, row_match_content, display_metadata)
         except Exception:
             logger.warning("api_content backfill failed for session=%s", agent.session_id or "none", exc_info=True)
 

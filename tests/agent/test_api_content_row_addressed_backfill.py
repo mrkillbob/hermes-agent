@@ -25,7 +25,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.session_persistence import SessionPersistenceMixin
-from agent.turn_context import _stamp_api_content_sidecar, compose_user_api_content
+from agent.turn_context import (
+    _merge_gateway_notes, _stamp_api_content_sidecar, compose_user_api_content,
+)
 from hermes_state import SessionDB
 from tests.agent.test_api_content_sidecar import _FakeAgent, _build
 
@@ -134,6 +136,32 @@ class TestPrologueRowAddressedBackfill:
             row = db.get_messages("s1")[0]
             assert row["api_content"] is None
             assert row["display_metadata"] == marker
+        finally:
+            db.close()
+
+    def test_preflushed_multimodal_surface_marker_uses_pre_note_row_content(self, tmp_path):
+        """A surface note appended to live list content must not defeat the row guard."""
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("s1", source="cli")
+        try:
+            agent = _RealPersistenceAgent(db, "s1")
+            content = [
+                {"type": "text", "text": "look at this"},
+                {"type": "image_url", "image_url": {"url": "https://x/img.png"}},
+            ]
+            staged = {"role": "user", "content": content}
+            agent._flush_messages_to_session_db([staged], None)
+            live = {"role": "user", "content": content, "_row_id": staged["_row_id"]}
+            agent._surface_switch_note = "[System: switched]"
+            marker = {
+                "_hermes_surface_switch": {"surface": "desktop"},
+            }
+            agent._surface_switch_metadata = marker
+
+            _merge_gateway_notes(agent, [live], 0, "")
+            _stamp_api_content_sidecar(agent, [live], 0, "", "", preflight_compressed=False)
+
+            assert db.get_messages("s1")[0]["display_metadata"] == marker
         finally:
             db.close()
 
