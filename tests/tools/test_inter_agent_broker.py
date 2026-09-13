@@ -374,6 +374,7 @@ def test_broker_state_removes_inherited_windows_acl(tmp_path):
 @pytest.mark.windows_only
 def test_broker_write_sidecars_have_private_acl(monkeypatch, tmp_path):
     monkeypatch.setattr(broker, "get_default_hermes_root", lambda: tmp_path)
+    database = tmp_path / "inter-agent-messages.db"
     connection = broker._database()
     try:
         connection.execute("PRAGMA journal_mode=WAL")
@@ -381,8 +382,7 @@ def test_broker_write_sidecars_have_private_acl(monkeypatch, tmp_path):
             "INSERT INTO messages(sender, recipient, body) VALUES (?, ?, ?)",
             ("sender", "recipient", "body"),
         )
-        connection.commit()
-        database = tmp_path / "inter-agent-messages.db"
+        broker._commit_database(connection, database)
         for candidate in (database, Path(f"{database}-wal"), Path(f"{database}-shm")):
             if candidate.exists():
                 acl = subprocess.run(
@@ -391,7 +391,9 @@ def test_broker_write_sidecars_have_private_acl(monkeypatch, tmp_path):
                     text=True,
                     check=True,
                 ).stdout
-                assert "(I)" not in acl
+                assert "BUILTIN\\Users" not in acl
+                assert "Everyone" not in acl
+                assert "Authenticated Users" not in acl
     finally:
         connection.close()
 

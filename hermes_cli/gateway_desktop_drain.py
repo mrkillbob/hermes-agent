@@ -25,7 +25,9 @@ def desktop_profile_homes() -> tuple[Path, ...]:
     return tuple(Path(profile.path) for profile in list_profiles())
 
 
-def read_desktop_drain_snapshot(homes: Iterable[Path]) -> tuple[int, int]:
+def read_desktop_drain_snapshot(
+    homes: Iterable[Path], *, filter_workers_by_profile: bool = True
+) -> tuple[int, int]:
     """Count live gateway turns and board workers without mutating either."""
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from gateway.status import (
@@ -37,10 +39,14 @@ def read_desktop_drain_snapshot(homes: Iterable[Path]) -> tuple[int, int]:
     from hermes_constants import profile_name_for_home
 
     profile_homes = tuple(Path(home) for home in homes)
-    profile_names = frozenset(
-        profile_name
-        for home in profile_homes
-        if (profile_name := profile_name_for_home(home)) is not None
+    profile_names = (
+        frozenset(
+            profile_name
+            for home in profile_homes
+            if (profile_name := profile_name_for_home(home)) is not None
+        )
+        if filter_workers_by_profile
+        else None
     )
 
     gateway_agents = 0
@@ -70,7 +76,7 @@ def read_desktop_drain_snapshot(homes: Iterable[Path]) -> tuple[int, int]:
             kanban_workers += sum(
                 1
                 for row in rows
-                if row["assignee"] in profile_names
+                if (profile_names is None or row["assignee"] in profile_names)
                 and kb._pid_alive(row["worker_pid"])
             )
         finally:
@@ -102,7 +108,9 @@ def drain_all_desktop_work(*, all_profiles: bool = True) -> DesktopDrainSnapshot
 
     return wait_for_desktop_drain(
         homes=homes,
-        snapshot=lambda: read_desktop_drain_snapshot(homes),
+        snapshot=lambda: read_desktop_drain_snapshot(
+            homes, filter_workers_by_profile=not all_profiles
+        ),
         write_marker=lambda home: write_drain_request(
             home=home,
             principal="desktop-close",

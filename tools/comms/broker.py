@@ -36,11 +36,13 @@ def _state_path(name: str) -> Path:
     return get_default_hermes_root() / name
 
 
-def _secure_state_permissions(path: Path, *, directory: bool = False) -> None:
+def _secure_state_permissions(
+    path: Path, *, directory: bool = False, force: bool = False
+) -> None:
     """Keep broker state owner-only, including inherited Windows ACLs."""
     path.chmod(0o700 if directory else 0o600)
     cache_key = (path, directory)
-    if os.name != "nt" or cache_key in _WINDOWS_ACL_SECURED:
+    if os.name != "nt" or (not force and cache_key in _WINDOWS_ACL_SECURED):
         return
     account = getpass.getuser()
     if not account:
@@ -118,7 +120,7 @@ def _remove_endpoint_if_owned(path: Path, broker_id: str) -> None:
         pass
 
 
-def _restrict_database_permissions(path: Path) -> None:
+def _restrict_database_permissions(path: Path, *, force: bool = False) -> None:
     for candidate in (
         path,
         Path(f"{path}-journal"),
@@ -126,7 +128,7 @@ def _restrict_database_permissions(path: Path) -> None:
         Path(f"{path}-shm"),
     ):
         try:
-            _secure_state_permissions(candidate)
+            _secure_state_permissions(candidate, force=force)
         except FileNotFoundError:
             continue
 
@@ -137,6 +139,11 @@ def _limit(query: dict[str, list[str]]) -> int:
     except (TypeError, ValueError):
         requested = 100
     return max(1, min(requested, MAX_QUERY_LIMIT))
+
+
+def _commit_database(connection: sqlite3.Connection, path: Path) -> None:
+    connection.commit()
+    _restrict_database_permissions(path, force=True)
 
 
 def _database() -> sqlite3.Connection:
@@ -167,7 +174,7 @@ def _database() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS messages_sender_id_idx "
             "ON messages (sender, id)"
         )
-        connection.commit()
+        _commit_database(connection, path)
     finally:
         _restrict_database_permissions(path)
     return connection
@@ -282,7 +289,7 @@ class _Handler(BaseHTTPRequestHandler):
                 (sender, recipient, body),
             )
             message_id = cursor.lastrowid
-            db.commit()
+            _commit_database(db, _state_path("inter-agent-messages.db"))
         self._write(200, {"id": message_id})
 
     def log_message(self, _format: str, *_args: object) -> None:

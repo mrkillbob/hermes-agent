@@ -117,3 +117,36 @@ def test_read_desktop_drain_snapshot_filters_shared_board_workers_by_profile(
 
     assert result == (0, 1)
     assert any("assignee" in query for query in queries)
+
+
+def test_all_profile_snapshot_keeps_live_workers_for_deleted_profiles(
+    monkeypatch, tmp_path
+):
+    import hermes_cli.gateway_desktop_drain as drain
+    from hermes_cli import kanban_db as kb
+    import hermes_cli.kanban_db_connect as kbc
+
+    current_home = tmp_path / "current"
+    db_path = tmp_path / "kanban.db"
+    db_path.touch()
+
+    class Connection:
+        def execute(self, _query):
+            return self
+
+        def fetchall(self):
+            return [{"assignee": "deleted-profile", "worker_pid": 303}]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("gateway.status.read_runtime_status", lambda **_kwargs: None)
+    monkeypatch.setattr("gateway.status.runtime_status_pid_is_live", lambda _runtime: False)
+    monkeypatch.setattr(kb, "list_boards", lambda include_archived=False: [{"slug": "default"}])
+    monkeypatch.setattr(kb, "kanban_db_path", lambda board=None: db_path)
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(kbc, "connect", lambda board=None: Connection())
+
+    assert drain.read_desktop_drain_snapshot(
+        (current_home,), filter_workers_by_profile=False
+    ) == (0, 1)
