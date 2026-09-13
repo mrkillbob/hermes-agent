@@ -712,18 +712,11 @@ def test_legacy_interactive_route_requires_certified_migration_before_use(store,
     store._ensure_loaded()
     store._entries[key] = legacy
     manager.fail_new = bootstrap_fails
-    if bootstrap_fails:
-        with pytest.raises(ConversationWorktreeError, match="bootstrap did not complete"):
-            store.get_or_create_session(source, touch_activity=False)
-        assert store.lookup_by_session_key(key) is legacy
-        assert legacy.cwd == str(manager.root.parent)
-        assert not legacy.conversation_worktree
-        assert not store._conversation_root_leases
-    else:
-        resolved = store.get_or_create_session(source, touch_activity=False)
-        assert resolved is legacy
-        assert resolved.cwd == str(manager.root / "legacy-root")
-        assert manager.bound_roots == ["legacy-root"]
-        import json
-        saved = json.loads((store.sessions_dir / "sessions.json").read_text())
-        assert saved[key]["cwd"] == resolved.cwd
+    resolved = store.get_or_create_session(source, touch_activity=False)
+    assert resolved is legacy
+    # Rows created before isolation was enabled remain on their historical cwd;
+    # resume must not create a new worktree or fail because one is unavailable.
+    assert resolved.cwd == str(manager.root.parent)
+    assert not resolved.conversation_worktree
+    assert manager.bound_roots == []
+    assert not store._conversation_root_leases

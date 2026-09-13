@@ -320,6 +320,7 @@ class ComputeHost:
                 platform_override=frame.get("source"),
                 context_cwd_is_launch_artifact=bool(
                     frame.get("context_cwd_is_launch_artifact", False)),
+                conversation_worktree=frame.get("conversation_worktree"),
                 session_db=session_db)
             if server._transfer_db_to_agent(agent, session_db):
                 owns_db = False

@@ -1282,7 +1282,10 @@ class CLICommandsMixin:
         target_id, session_meta = resolved
         if target_id == self.session_id:
             return _cp("  Already on that session.")
-        managed_resume = getattr(self, "_conversation_worktree_manager", None) is not None
+        managed_resume = (
+            getattr(self, "_conversation_worktree_manager", None) is not None
+            and getattr(self, "_conversation_worktree_binding", None) is not None
+        )
         if managed_resume:
             try:
                 self._restore_managed_conversation_cwd(session_id=target_id)
@@ -1486,6 +1489,9 @@ class CLICommandsMixin:
     def _worktree_new(self, repo_root: str, rest: str) -> None:
         import cli as _cli
         from hermes_cli.config import load_config
+        if getattr(self, "_conversation_worktree_manager", None) is not None:
+            _cp("  /worktree new is unavailable while conversation isolation is active; use /new or /branch.")
+            return
         try:
             sync_base = bool(load_config().get("worktree_sync", True))
         except Exception:

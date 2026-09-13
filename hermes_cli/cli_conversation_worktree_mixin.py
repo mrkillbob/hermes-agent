@@ -115,6 +115,26 @@ class CLIConversationWorktreeMixin:
             surface=surface,
         )
 
+    def _release_conversation_root_lease(self, lease, *, context: str) -> bool:
+        if lease is None:
+            return True
+        try:
+            lease.release()
+        except Exception:
+            pending = getattr(self, "_failed_conversation_root_leases", [])
+            if all(existing is not lease for existing in pending):
+                pending.append(lease)
+            self._failed_conversation_root_leases = pending
+            logger.warning("Failed to release CLI conversation root lease (%s)", context, exc_info=True)
+            return False
+        return True
+
+    def _retry_failed_conversation_root_leases(self) -> None:
+        pending = list(getattr(self, "_failed_conversation_root_leases", []))
+        self._failed_conversation_root_leases = []
+        for lease in pending:
+            self._release_conversation_root_lease(lease, context="retry")
+
     def _initialize_conversation_worktree(self, config, resume, manage_conversation_worktree):
         self._conversation_worktree_manager = (
             _build_cli_conversation_worktree_manager(config, self._session_db)
@@ -124,6 +144,7 @@ class CLIConversationWorktreeMixin:
         self._conversation_worktree_binding = None
         self._conversation_worktree_prompt_note = ""
         self._conversation_root_lease = None
+        self._failed_conversation_root_leases = []
         if self._conversation_worktree_manager is not None:
             if resume:
                 try:
@@ -138,13 +159,6 @@ class CLIConversationWorktreeMixin:
                 binding = self._conversation_worktree_manager.resolve_existing_session(
                     root_session_id
                 )
-                if binding is None:
-                    from agent.conversation_worktree import ConversationWorktreeError
-
-                    raise ConversationWorktreeError(
-                        f"no ready conversation worktree for CLI root {root_session_id}",
-                        phase="recovery",
-                    )
             else:
                 # A new CLI session is only a draft until its first prompt.  Do not
                 # create a retained manager-owned worktree for a process that exits
@@ -213,15 +227,12 @@ class CLIConversationWorktreeMixin:
             try:
                 self._apply_conversation_worktree_binding(managed_binding)
             except Exception:
-                next_root_lease.release()
+                self._release_conversation_root_lease(next_root_lease, context="resume apply")
                 raise
             prior_root_lease = getattr(self, "_conversation_root_lease", None)
             self._conversation_root_lease = next_root_lease
             if prior_root_lease is not None:
-                try:
-                    prior_root_lease.release()
-                except Exception:
-                    logger.debug("Failed to release prior root lease", exc_info=True)
+                self._release_conversation_root_lease(prior_root_lease, context="resume swap")
             return True
 
         return False
@@ -254,15 +265,12 @@ class CLIConversationWorktreeMixin:
                         new_worktree_binding, before_commit=before_commit
                     )
                 except Exception:
-                    new_root_lease.release()
+                    self._release_conversation_root_lease(new_root_lease, context="new apply")
                     raise
                 prior_root_lease = getattr(self, "_conversation_root_lease", None)
                 self._conversation_root_lease = new_root_lease
                 if prior_root_lease is not None:
-                    try:
-                        prior_root_lease.release()
-                    except Exception:
-                        logger.debug("Failed to release prior root lease", exc_info=True)
+                    self._release_conversation_root_lease(prior_root_lease, context="new swap")
             except Exception as exc:
                 _cprint(
                     f"  Cannot start new session {new_session_id}: "

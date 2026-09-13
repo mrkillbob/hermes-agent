@@ -40,6 +40,27 @@ from tui_gateway.transport import (FanoutTransport, StdioTransport, Transport, b
 
 logger = logging.getLogger(__name__)
 
+_failed_conversation_root_leases: list[object] = []
+_failed_conversation_root_leases_lock = threading.Lock()
+
+
+def _remember_failed_conversation_root_lease(lease) -> None:
+    with _failed_conversation_root_leases_lock:
+        if all(existing is not lease for existing in _failed_conversation_root_leases):
+            _failed_conversation_root_leases.append(lease)
+
+
+def _retry_failed_conversation_root_leases() -> None:
+    with _failed_conversation_root_leases_lock:
+        pending = list(_failed_conversation_root_leases)
+        _failed_conversation_root_leases.clear()
+    for lease in pending:
+        try:
+            lease.release()
+        except Exception:
+            _remember_failed_conversation_root_lease(lease)
+            logger.warning("Failed to retry TUI conversation root lease release", exc_info=True)
+
 _hermes_home = get_hermes_home()
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env")
 
@@ -173,6 +194,7 @@ _LONG_HANDLERS = frozenset({
     "setup.runtime_check", "setup.status", "voice.toggle", "voice.record", "voice.tts", "wake.start",
     "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
     "session.resume", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
+    "prompt.submit",
     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
 })
 
@@ -516,9 +538,10 @@ def _bind_conversation_worktree_on_submit(session: dict) -> None:
         session["explicit_cwd"] = True
         _register_session_cwd(session)
         if db is not None:
+            common_root = git_probe.common_repo_root(metadata["path"]) or str(binding.repo_common_dir)
             db.update_session_cwd(
                 key, metadata["path"], metadata.get("branch", ""),
-                str(binding.repo_common_dir), replace_git_meta=True)
+                common_root, replace_git_meta=True)
 
 
 def _resolve_conversation_worktree_for_resume(session_id: str, *, profile_home=None, db=None):
@@ -2662,8 +2685,10 @@ def _conversation_worktree_prewarm_pending(session: dict) -> bool:
         from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
         return bool(resolve_conversation_worktree_policy(_load_cfg()).enabled)
     except Exception:
-        # The submit path owns policy errors and will report them with the binding failure.
-        return False
+        # Do not prewarm an agent when policy resolution itself failed: construction
+        # would otherwise run outside the submit error surface and strand the draft.
+        logger.warning("conversation worktree prewarm policy check failed", exc_info=True)
+        return True
     finally:
         if home_token is not None:
             reset_hermes_home_override(home_token)

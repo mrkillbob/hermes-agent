@@ -265,9 +265,18 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     with contextlib.suppress(Exception):
         if worker := session.get("slash_worker"):
             worker.close()
-    with contextlib.suppress(Exception):
-        if root_lease := session.pop("conversation_root_lease", None):
+    _retry_failed_conversation_root_leases()
+    root_lease = session.get("conversation_root_lease")
+    if root_lease is not None:
+        try:
             root_lease.release()
+        except Exception:
+            # Keep the handle for the next teardown; popping it here would make a
+            # transient registry failure permanently unrepairable in this process.
+            _remember_failed_conversation_root_lease(root_lease)
+            logger.warning("Failed to release TUI conversation root lease", exc_info=True)
+        else:
+            session.pop("conversation_root_lease", None)
 
 
 # End reasons where the BACKEND reclaimed a session the client never asked to close (else its next prompt fails

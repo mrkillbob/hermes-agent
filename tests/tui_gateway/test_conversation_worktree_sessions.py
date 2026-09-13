@@ -278,13 +278,19 @@ def test_resume_failure_releases_candidate_without_registering(monkeypatch, tmp_
             monkeypatch.setattr(server, "_init_session", fail_init)
         response = server._methods["session.resume"]("resume-fail", {
             "session_id": "branch", "source": "desktop", "eager_build": failure == "init"})
+        if failure == "missing":
+            # Historical rows predate isolation; resume preserves their recorded
+            # session instead of manufacturing a new binding or failing closed.
+            assert "error" not in response, response
+            record = server._sessions[response["result"]["session_id"]]
+            assert record["conversation_worktree"] == {}
+            acquire.assert_not_called()
+            assert [call.args[0] for call in manager.resolve_existing_session.call_args_list] == ["branch"]
+            return
         assert "error" in response
         assert server._sessions == {}
         if failure in {"history", "init"}:
             lease.release.assert_called_once_with()
-        elif failure == "missing":
-            acquire.assert_not_called()
-            assert [call.args[0] for call in manager.resolve_existing_session.call_args_list] == ["branch"]
     finally:
         db.close()
 

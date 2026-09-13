@@ -600,11 +600,18 @@ def _(rid, params: dict) -> dict:
     requested_rebind_ids = (
         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
         if isinstance(raw_rebind_ids, list) else None)
+    # Materialize the first-use binding before a destructive transcript cut.  If binding or
+    # persistence fails, the original history remains intact and the client can retry.
+    persisted_before_turn = False
+    if has_truncation:
+        if (err := _persist_session_row_for_submit(rid, session)) is not None:
+            return err
+        persisted_before_turn = True
     err, survivor_fields = _lock_in_submit_turn(
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task)
     if err is not None:
         return err
-    if (err := _persist_session_row_for_submit(rid, session)) is not None:
+    if not persisted_before_turn and (err := _persist_session_row_for_submit(rid, session)) is not None:
         return err
     if turn_isolation:
         isolated_response = _submit_prompt_to_compute_host(

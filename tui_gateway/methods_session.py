@@ -347,6 +347,10 @@ def _(rid, params: dict) -> dict:
     # reports lost it) and the title lands in the parent's lineage instead of falling back to a
     # message-preview name. Title mirrors the TUI /branch naming.
     if parent_session_id and history:
+        # A seeded branch is durable immediately; bind before its first DB write so a
+        # restart cannot observe a branch transcript without its isolated root.
+        if source in {"desktop", "tui"}:
+            _bind_conversation_worktree_on_submit(_sessions[sid])
         _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
     # Worktree creation remains lazy, but preserve the existing agent pre-warm so
@@ -834,8 +838,6 @@ def _(rid, params: dict) -> dict:
                 manager, _, _ = _conversation_worktree_manager(profile_home=ctx.profile_home, db=ctx.db)
                 binding = (_resolve_conversation_worktree_for_resume(
                     ctx.target, profile_home=ctx.profile_home, db=ctx.db) if manager is not None else None)
-                if manager is not None and binding is None:
-                    raise RuntimeError("no ready conversation worktree for resumed session")
                 if binding is not None:
                     ctx.conversation_worktree = _conversation_worktree_metadata(binding)
                     ctx.conversation_root_lease = _acquire_conversation_root_lease(
@@ -2051,7 +2053,9 @@ def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list
     try:
         with _profile_build_scope(parent_home):
             agent = _make_agent_in_context(new_sid, new_key, session_db=branch_db, platform_override=source,
-                                           context_cwd_is_launch_artifact=_context_cwd_is_launch_artifact(session),
+                                           context_cwd_is_launch_artifact=(
+                                               False if conversation_worktree
+                                               else _context_cwd_is_launch_artifact(session)),
                                            conversation_worktree=conversation_worktree)
             _init_session(new_sid, new_key, agent, list(history), cols=session.get("cols", 80),
                           cwd=branch_cwd, session_db=branch_db, source=source, profile_home=parent_home,
