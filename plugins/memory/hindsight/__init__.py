@@ -235,8 +235,9 @@ def _load_config() -> dict:
     """$HERMES_HOME/hindsight/config.json (profile-scoped), else ~/.hindsight/config.json
     (legacy, shared), else environment variables."""
     for path in (get_hermes_home() / "hindsight" / "config.json", Path.home() / ".hindsight" / "config.json"):
-        if path.exists():
-            return read_json_or_empty(path)
+        # A corrupt (or empty) file falls through to the next source, as before the dedup.
+        if path.exists() and (data := read_json_or_empty(path)):
+            return data
     # Mode, bank (the data partition), endpoint and retain shaping are per-profile .env values like
     # the key beside them: read through the secret scope so a multiplexed secondary never inherits
     # the default profile's bank/mode. Tuning knobs (timeouts, budget) stay process-global.
