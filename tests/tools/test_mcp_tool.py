@@ -539,6 +539,45 @@ class TestMCPStatus:
         finally:
             registry.deregister(tool_name, scope=scope)
 
+    def test_scoped_shutdown_removes_only_adopted_profile_overlay(self, tmp_path, monkeypatch):
+        """A peer reload removes its overlay without orphaning the shared owner connection."""
+        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool_lifecycle, mcp_tool_loop
+        from tools.registry import registry
+
+        owner_scope = f"profile:{tmp_path / 'owner'}"
+        request_scope = f"profile:{tmp_path / 'request'}"
+        key = "shared"
+        tool_name = "mcp__shared__adopted_shutdown_invariant"
+        server = SimpleNamespace(session=object(), _registered_tool_names=[tool_name])
+
+        monkeypatch.setattr(mcp_tool_loop, "_stop_mcp_loop", lambda **_kwargs: None)
+        monkeypatch.setattr(mcp_tool, "_servers", {key: server})
+        monkeypatch.setattr(mcp_tool, "_server_scope_keys", {key: owner_scope})
+        monkeypatch.setattr(mcp_tool, "_server_public_names", {key: "shared"})
+        monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {key: {owner_scope, request_scope}})
+        monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names_by_scope", {
+            request_scope: {tool_name: key},
+        })
+        monkeypatch.setattr(mcp_tool, "_server_connecting", set())
+        monkeypatch.setattr(mcp_tool, "_server_connect_errors", {})
+        monkeypatch.setattr(mcp_tool, "_server_connect_retry_after", {})
+        monkeypatch.setattr(mcp_tool, "_server_connect_failures", {})
+        registry.register(
+            tool_name, "mcp-shared", {"name": tool_name}, lambda **_kwargs: None, scope=request_scope,
+        )
+
+        try:
+            mcp_tool_lifecycle.shutdown_mcp_servers(scope=request_scope)
+
+            assert registry.snapshot_registration(tool_name, scope=request_scope) is None
+            assert mcp_tool._servers[key] is server
+            assert mcp_tool._server_scope_keys == {key: owner_scope}
+            assert mcp_tool._server_public_names == {key: "shared"}
+            assert mcp_tool._server_tool_scopes == {key: {owner_scope}}
+        finally:
+            registry.deregister(tool_name, scope=request_scope)
+
 
 
 class TestLifecycleConfig:

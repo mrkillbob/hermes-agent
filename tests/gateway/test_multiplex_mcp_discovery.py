@@ -166,6 +166,61 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
     assert mcp_tool._server_tool_scopes[private_key] == {launch_scope, worker_scope}
 
 
+@pytest.mark.asyncio
+async def test_reload_mcp_reports_scoped_lazy_tools_as_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lazy schema-cache tools count as available without a live transport task."""
+    from gateway.run import GatewayRunner
+    from tools import mcp_tool
+    from tools import mcp_tool_discovery as _mcp_discovery
+    from tools import mcp_tool_lifecycle as _mcp_lifecycle
+
+    worker_home = tmp_path / "profiles" / "worker"
+    worker_home.mkdir(parents=True)
+    worker_scope = hermes_home_key(worker_home)
+    private_key = f"shared::profile::{worker_scope}"
+    tool_name = "mcp__shared__lazy_reload_invariant"
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(multiplex_profiles=True)
+    runner._resolve_profile_home_for_source = MagicMock(return_value=worker_home)
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner._async_session_store = SimpleNamespace(
+        get_or_create_session=MagicMock(side_effect=RuntimeError("skip transcript")),
+    )
+
+    monkeypatch.setattr(mcp_tool, "_servers", {})
+    monkeypatch.setattr(mcp_tool, "_server_scope_keys", {private_key: worker_scope})
+    monkeypatch.setattr(mcp_tool, "_server_public_names", {private_key: "shared"})
+    monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {private_key: {worker_scope}})
+    monkeypatch.setattr(mcp_tool, "_lazy_server_tool_names", {private_key: [tool_name]})
+    monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names_by_scope", {})
+    monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: worker_scope)
+
+    def fake_discover() -> list[str]:
+        mcp_tool._mcp_tool_server_names_by_scope[worker_scope] = {tool_name: private_key}
+        return [tool_name]
+
+    monkeypatch.setattr(_mcp_lifecycle, "shutdown_mcp_servers", lambda **_kwargs: None)
+    monkeypatch.setattr(_mcp_discovery, "discover_mcp_tools", fake_discover)
+
+    event = MessageEvent(
+        text="/reload-mcp", message_id="m1",
+        source=SessionSource(
+            platform=Platform.TELEGRAM, user_id="u1", chat_id="c1",
+            chat_type="dm", profile="worker",
+        ),
+    )
+    result = await runner._execute_mcp_reload(event)
+
+    assert "No MCP tools available" not in result
+    assert "1 tool(s) available" in result
+    assert "1 server(s)" in result
+    assert "shared" in result
+
+
 def test_failed_profile_owned_connection_does_not_change_peer_parallel_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -118,6 +118,11 @@ def shutdown_mcp_servers(*, scope: Optional[str] = None):
                       or scope in _core._server_tool_scopes.get(name, ()))
             }
         )
+        selected_names = set(selected)
+        adopted = {
+            name for name in selected_status - selected_names
+            if name in _core._servers and scope in _core._server_tool_scopes.get(name, ())
+        }
 
     lazy_selected = [name for name in selected_status if name in _core._lazy_server_configs]
 
@@ -131,10 +136,17 @@ def shutdown_mcp_servers(*, scope: Optional[str] = None):
     def clear_selected_status():
         _core._server_connecting.difference_update(selected_status)
         for name in selected_status:
+            if name in adopted:
+                continue
             _core._server_connect_errors.pop(name, None)
             _core._server_scope_keys.pop(name, None)
             _core._server_public_names.pop(name, None)
             _core._server_tool_scopes.pop(name, None)
+
+    if adopted:
+        from tools import mcp_tool_registration as _registration
+        for name in adopted:
+            _registration._remove_server_scope(name, scope)
 
     # Lazy entries have no shutdown coroutine, but their scoped registry overlay is still
     # live. Evict them before any server teardown clears the ownership maps they use.
