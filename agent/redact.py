@@ -151,8 +151,10 @@ _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|
 # quoted value (for example, ``app.password="part-one|part-two"``). Keep the
 # unquoted branch's value optional so an empty assignment does not consume its
 # delimiter; the quote capture must be absent in that branch for the conditional
-# to select the unquoted character class.
-_CFG_VALUE = r"(?:(['\"])|(?=[^'\"]|$))((?(2)[^\s&]+?|[^\s&|]*))(?(2)\2|)(?=[\s&|]|$)"
+# to select the unquoted character class. An unterminated quote falls back to
+# the same delimiter/end boundary so truncated output is still redacted. The
+# fallback must not win before a later closing quote in a valid quoted value.
+_CFG_VALUE = r"(?:(['\"])|(?=[^'\"]|$))((?(2)[^\s&]+?|[^\s&|]*))(?(2)(?:\2|(?=[\s&|]|$)(?![\s&|]+[^\s&|]*\2))|)(?=[\s&|]|$)"
 # Linear pre-gate for the _CFG_*_RE subs: no secret keyword => neither can match.
 _CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 

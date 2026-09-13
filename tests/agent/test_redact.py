@@ -226,6 +226,19 @@ class TestBareSecretEnvSuffixes:
         assert "part-two" not in quoted
         assert quoted.endswith('"|b=2')
 
+    @pytest.mark.parametrize(
+        "text, suffix",
+        (
+            ('app.password="hunter2hunter2', ""),
+            ('app.password="hunter2hunter2|b=2', "|b=2"),
+        ),
+    )
+    def test_dotted_config_unterminated_quote_redacts_to_delimiter_or_end(self, text, suffix):
+        result = redact_sensitive_text(text, force=True)
+        assert "hunter2hunter2" not in result
+        if suffix:
+            assert result.endswith(suffix)
+
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
 
