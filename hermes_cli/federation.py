@@ -638,8 +638,6 @@ def seed_federation(
 
         profile_dir_for = get_profile_dir
     for role in planned:
-        expected_profile_dir = Path(profile_dir_for(role.id))
-        profile_existed_before = expected_profile_dir.exists()
         try:
             profile_dir = create_profile(
                 name=role.id,
@@ -655,11 +653,11 @@ def seed_federation(
                 result["skills_skipped"][role.id] = skill_result["skipped"]
             result["created"].append(role.id)
         except Exception as exc:
-            if not profile_existed_before and expected_profile_dir.is_dir() and not expected_profile_dir.is_symlink():
-                try:
-                    shutil.rmtree(expected_profile_dir)
-                except OSError:
-                    pass
+            # Do not remove a path merely because this invocation observed it
+            # as absent. Another seeder can win the mkdir race after that
+            # snapshot; deleting the directory here would destroy its profile
+            # and secrets. A partial profile is recoverable and must be
+            # repaired explicitly.
             result["failed"].append({"role_id": role.id, "error": str(exc)})
 
     if apply:

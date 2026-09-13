@@ -1470,6 +1470,18 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     Boards are matched by resolved DB path, so ``HERMES_KANBAN_DB`` (pins every
     board to one file) yields 0. Fails open per board.
     """
+    return len(running_task_rows_other_boards(board))
+
+
+def running_task_rows_other_boards(board: Optional[str] = None) -> list[dict[str, Any]]:
+    """Return running-task snapshots from every active board except ``board``.
+
+    Board-local SQLite files are independent scheduler domains, but model and
+    workspace capacity are host resources. Copy rows while each connection is
+    open so callers can apply those guards without retaining connections.
+    A broken board fails open independently and cannot prevent healthy boards
+    from dispatching.
+    """
     try:
         current_path = str(_kb.kanban_db_path(board=board).expanduser().resolve())
     except Exception:
@@ -1477,8 +1489,8 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     try:
         boards = _kb.list_boards(include_archived=False)
     except Exception:
-        return 0
-    total = 0
+        return []
+    rows: list[dict[str, Any]] = []
     for meta in boards:
         slug = meta.get("slug") or _kb.DEFAULT_BOARD
         try:
@@ -1490,13 +1502,15 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
                 continue
             other = _kbc.connect(board=slug)
             try:
-                total += count_running_tasks(other)
+                rows.extend(dict(row) for row in other.execute(
+                    "SELECT * FROM tasks WHERE status = 'running'"
+                ).fetchall())
             finally:
                 with contextlib.suppress(Exception):
                     other.close()
         except Exception:
             continue
-    return total
+    return rows
 
 
 def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
@@ -1611,6 +1625,7 @@ def _dispatch_lane_task(
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
     capacity,
+    other_running_rows: list[dict[str, Any]],
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
@@ -1680,10 +1695,16 @@ def _dispatch_lane_task(
             result.auto_blocked.append(claimed.id)
         return False
     physical_workspace = str(Path(workspace).resolve())
-    for owner in conn.execute(
+    owners = list(conn.execute(
         "SELECT id, workspace_path FROM tasks WHERE status = 'running' AND id != ? "
         "AND workspace_path IS NOT NULL", (claimed.id,),
-    ):
+    ))
+    owners.extend(
+        {"id": owner["id"], "workspace_path": owner.get("workspace_path")}
+        for owner in other_running_rows
+        if owner.get("workspace_path") is not None
+    )
+    for owner in owners:
         if str(Path(owner["workspace_path"]).resolve()) == physical_workspace:
             result.workspace_collisions.append((claimed.id, owner["id"], physical_workspace))
             # Contention is a scheduling delay, not a failed worker attempt.
@@ -1923,6 +1944,7 @@ def _dispatch_once_locked(
     )
     if not may_spawn:
         return result
+    other_running_rows = running_task_rows_other_boards(board)
 
     ready_rows = _lane_rows(conn, "ready")
     # Review rows are enumerated up front so the budget split can see whether
@@ -1958,12 +1980,14 @@ def _dispatch_once_locked(
     capacity = WorkerCapacity(
         conn, model_cap=max_in_progress_per_model,
         model_caps=max_in_progress_by_model, profile_caps=max_in_progress_by_profile,
+        other_running_rows=other_running_rows,
     )
     lane_kwargs: dict[str, Any] = dict(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
         capacity=capacity,
+        other_running_rows=other_running_rows,
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0

@@ -69,6 +69,11 @@ const TERMINAL_NOTIFY = new Map<string, { titleKey: string; toast: ToastKind }>(
 const seenEventIdByBoard = new Map<string, number>()
 const baselinePending = new Set<string>()
 
+/** Return the last accepted event id for a board, when its cursor is known. */
+export function kanbanEventsSince(slug: string): number | undefined {
+  return seenEventIdByBoard.get(slug)
+}
+
 let rest: Rest | null = null
 let translate: PluginTranslate | null = null
 let osDoor: PluginOs | null = null

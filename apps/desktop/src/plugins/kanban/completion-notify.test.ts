@@ -21,6 +21,7 @@ interface OsDoor {
 }
 interface Mod {
   bindCompletionNotify(r: Rest, t?: Translate, os?: OsDoor): void
+  kanbanEventsSince(slug: string): number | undefined
   onKanbanEventsFrame(slug: string, events?: CompletionEvent[]): Promise<boolean>
 }
 
@@ -103,6 +104,10 @@ describe('authoritative baseline', () => {
 
     expect(fired).toBe(true)
     expect(hostMock.notify).toHaveBeenCalledTimes(1)
+
+    // Reconnecting subscribers can pass the accepted high-water mark to the
+    // server, so an event missed between socket frames is replayed safely.
+    expect(m.kanbanEventsSince('smoke')).toBe(101)
 
     // Same event delivered again (duplicate frame) must not re-notify.
     const again = await m.onKanbanEventsFrame('smoke', [ev(101, 'completed', { summary: 'Done' })])

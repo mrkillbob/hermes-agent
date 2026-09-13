@@ -202,6 +202,64 @@ def test_max_in_progress_partial_budget_across_boards(
     assert len(res.spawned) == 1
 
 
+def test_model_capacity_counts_running_workers_on_other_boards(
+    kanban_home, all_assignees_spawnable,
+):
+    """A model cap is host-wide even when boards use separate databases."""
+    kb.create_board("second")
+    with kbc.connect(board="second") as conn:
+        busy = kb.create_task(
+            conn, title="busy", assignee="alice", provider_override="local",
+            model_override="shared-model",
+        )
+        assert kb.claim_task(conn, busy) is not None
+
+    spawns: list = []
+    with kbc.connect() as conn:
+        waiting = kb.create_task(
+            conn, title="waiting", assignee="bob", provider_override="local",
+            model_override="shared-model",
+        )
+        res = kbd.dispatch_once(
+            conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=5,
+            max_in_progress_per_model=1,
+        )
+
+    assert not spawns
+    assert res.skipped_per_model_capped == [(waiting, "local", "shared-model", 1)]
+
+
+def test_workspace_ownership_counts_running_workers_on_other_boards(
+    kanban_home, all_assignees_spawnable, tmp_path,
+):
+    """A physical checkout cannot be concurrently owned by different boards."""
+    kb.create_board("second")
+    shared = tmp_path / "shared-checkout"
+    shared.mkdir()
+    with kbc.connect(board="second") as conn:
+        owner = kb.create_task(
+            conn, title="other board owner", assignee="alice",
+            workspace_kind="dir", workspace_path=str(shared),
+        )
+        assert kb.claim_task(conn, owner) is not None
+
+    spawns: list = []
+    with kbc.connect() as conn:
+        contender = kb.create_task(
+            conn, title="current board contender", assignee="bob",
+            workspace_kind="dir", workspace_path=str(shared),
+        )
+        res = kbd.dispatch_once(
+            conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=5,
+            reconcile_orphans=False,
+        )
+        task = kb.get_task(conn, contender)
+
+    assert not spawns
+    assert res.workspace_collisions == [(contender, owner, str(shared.resolve()))]
+    assert task is not None and task.status == "ready"
+
+
 def test_count_running_tasks_other_boards_fails_open(
     kanban_home, monkeypatch,
 ):

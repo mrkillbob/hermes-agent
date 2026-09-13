@@ -237,7 +237,7 @@ def test_write_role_config_persists_toolsets_without_a_model_policy(tmp_path: Pa
     assert config["toolsets"] == ["kanban", "file"]
 
 
-def test_seed_cleans_up_partial_new_profile_after_failure(tmp_path: Path) -> None:
+def test_seed_preserves_partial_profile_after_setup_failure(tmp_path: Path) -> None:
     manifest = load_manifest(MANIFEST)
     profile_dir = tmp_path / "profiles" / "writer"
     profile_dir.parent.mkdir()
@@ -256,7 +256,10 @@ def test_seed_cleans_up_partial_new_profile_after_failure(tmp_path: Path) -> Non
     )
 
     assert result["failed"]
-    assert not profile_dir.exists()
+    # The directory may belong to a concurrent seeder after the initial
+    # existence check; failed setup must never delete another invocation's
+    # profile or credentials.
+    assert profile_dir.exists()
 
 
 def test_seed_does_not_refresh_owned_profile_without_explicit_opt_in(tmp_path: Path) -> None:

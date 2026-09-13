@@ -19,7 +19,12 @@ import {
 } from '@hermes/plugin-sdk'
 
 // Native completion notification.
-import { bindCompletionNotify, type CompletionEvent, onKanbanEventsFrame } from './completion-notify'
+import {
+  bindCompletionNotify,
+  type CompletionEvent,
+  kanbanEventsSince,
+  onKanbanEventsFrame
+} from './completion-notify'
 import type {
   BoardExportResult,
   BoardImportResult,
@@ -187,7 +192,13 @@ export function bindApi(
 
   const open = (slug: string) => {
     close?.()
-    close = socket(slug ? `/events?board=${encodeURIComponent(slug)}` : '/events', data =>
+
+    const since = slug ? kanbanEventsSince(slug) : undefined
+    const path = slug
+      ? `/events?board=${encodeURIComponent(slug)}${since !== undefined ? `&since=${since}` : ''}`
+      : '/events'
+
+    close = socket(path, data =>
       onEventsFrame(slug, data, scheduleBoardRefresh)
     )
   }
