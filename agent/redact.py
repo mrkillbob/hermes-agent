@@ -539,7 +539,12 @@ def _cfg_quote_is_field_opener(text: str, quote_index: int) -> bool:
 
 
 def _scan_cfg_adjacent_fragments(text: str, start: int) -> tuple[int, str]:
-    """Consume shell fragments immediately following a closed quoted fragment."""
+    """Consume shell fragments immediately following a closed quoted fragment.
+
+    Delimiters are meaningful only between fragments: quoted fragments must be
+    scanned through their matching quote, including whitespace, ``&``, and
+    pipes that are part of the credential.
+    """
     parts: list[str] = []
     i = start
     while i < len(text) and not text[i].isspace() and text[i] not in "&|":
@@ -552,8 +557,6 @@ def _scan_cfg_adjacent_fragments(text: str, start: int) -> tuple[int, str]:
                     i += 2
                     continue
                 if text[i] == quote:
-                    break
-                if text[i].isspace() or text[i] in "&|":
                     break
                 i += 1
             parts.append(text[fragment_start:i])

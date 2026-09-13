@@ -282,6 +282,13 @@ class TestBareSecretEnvSuffixes:
         result = redact_sensitive_text(text, force=True)
         assert result == 'token="***"'
 
+    def test_adjacent_quoted_fragments_scan_pipes_before_delimiter(self):
+        text = 'app.password="first-secret"\'second-secret|third-secret\'|b=2'
+        result = redact_sensitive_text(text, force=True)
+        for secret in ("first-secret", "second-secret", "third-secret"):
+            assert secret not in result
+        assert result.endswith('"|b=2')
+
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
 
