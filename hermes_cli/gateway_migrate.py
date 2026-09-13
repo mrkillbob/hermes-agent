@@ -639,7 +639,8 @@ def apply_migration(plan: MigrationPlan, *, served_wait: float = _SERVED_WAIT_SE
         "default": plan.default.to_dict(),
         "secondaries": [p.to_dict() for p in plan.standalone_secondaries],
     }
-    # The complete rollback record must exist before the first stop/uninstall/kill/config mutation.
+    # Recovery metadata must exist before the first destructive operation; the manifest never
+    # changes afterwards, so this is the only write it needs.
     _write_manifest(plan.default_home, manifest)
     for p in plan.standalone_secondaries:
         if p.service is not None:
