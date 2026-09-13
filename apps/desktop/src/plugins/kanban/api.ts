@@ -11,14 +11,13 @@
 
 import {
   atom,
+  host,
   type PluginOs,
   type PluginRestOptions,
   type PluginStorage,
   type PluginTranslate,
   queryClient
 } from '@hermes/plugin-sdk'
-
-import { getApiRequestConnection, getApiRequestProfile } from '@/api/client'
 
 // Native completion notification.
 import {
@@ -114,7 +113,7 @@ export function applyHeartbeatEvents(board: KanbanBoard, events: CompletionEvent
 /** One live `task_events` frame → cache-local heartbeat updates plus one
  *  coalesced refresh for events that can actually change board state. */
 function activeSourceKey(): string {
-  return `${getApiRequestConnection() ?? 'local'}::${getApiRequestProfile() ?? 'default'}`
+  return `${host.state.connectionId.get() ?? 'local'}::${host.state.profile.get() || 'default'}`
 }
 
 function onEventsFrame(slug: string, data: unknown, scheduleBoardRefresh: () => void): void {

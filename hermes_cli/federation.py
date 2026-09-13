@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+import psutil
+
 
 _SOURCE_MANIFEST_PATH = (
     Path(__file__).resolve().parents[1] / "configs" / "federation" / "roles.json"
@@ -57,15 +59,7 @@ def _federation_seed_reservation_is_stale(profile_dir: Path) -> bool:
     if isinstance(pid, int) and not isinstance(pid, bool):
         if pid <= 0:
             return True
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        except OSError:
-            return time.time() - stat.st_mtime >= _FEDERATION_SEED_RESERVATION_STALE_SECONDS
-        return False
+        return not psutil.pid_exists(pid)
 
     return time.time() - stat.st_mtime >= _FEDERATION_SEED_RESERVATION_STALE_SECONDS
 
