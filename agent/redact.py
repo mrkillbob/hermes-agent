@@ -288,7 +288,10 @@ def _should_redact_inline_assignment(key: str, value: str) -> bool:
         key.casefold() == "auth" and value.casefold() == "none"
     ):
         return False
-    return _looks_like_opaque_credential(value)
+    return (
+        _has_word_bounded_keyword(key, _STRONG_KEY_KEYWORD_RE)
+        or _looks_like_opaque_credential(value)
+    )
 
 
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
