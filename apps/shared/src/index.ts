@@ -89,14 +89,25 @@ export {
   type WakeDetectedPayload
 } from './gateway-events'
 export {
-  type ConnectionState,
-  type GatewayClientOptions,
+  DEFAULT_HEARTBEAT_DEADLINE_MS,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
   type GatewayRequestId,
-  isGatewayWebSocketUrl,
+  JSON_RPC_METHOD_NOT_FOUND,
+  jsonRpcErrorFromFrame,
   type JsonRpcErrorPayload,
   type JsonRpcFrame,
-  JsonRpcGatewayClient,
   JsonRpcGatewayError,
+  JsonRpcRequestChannel,
+  type JsonRpcRequestChannelOptions,
+  type JsonRpcTransport,
+  wireFrameText
+} from './json-rpc-channel'
+export {
+  type ConnectionState,
+  type GatewayClientOptions,
+  GatewayEventHub,
+  isGatewayWebSocketUrl,
+  JsonRpcGatewayClient,
   type WebSocketLike
 } from './json-rpc-gateway'
 export { skillInvocationText } from './skill-scaffold'
