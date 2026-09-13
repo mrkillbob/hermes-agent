@@ -148,8 +148,11 @@ _INLINE_SECRET_ASSIGN_RE = re.compile(
 # password=foo`` mid-sentence is left alone.
 _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
 # A pipe terminates an unquoted value, but is ordinary secret material inside a
-# quoted value (for example, ``app.password="part-one|part-two"``).
-_CFG_VALUE = r"(['\"]?)((?(2)[^\s&]+?|[^\s&|]+?))\2(?=[\s&|]|$)"
+# quoted value (for example, ``app.password="part-one|part-two"``). Keep the
+# unquoted branch's value optional so an empty assignment does not consume its
+# delimiter; the quote capture must be absent in that branch for the conditional
+# to select the unquoted character class.
+_CFG_VALUE = r"(?:(['\"])|(?=[^'\"]|$))((?(2)[^\s&]+?|[^\s&|]*))(?(2)\2|)(?=[\s&|]|$)"
 # Linear pre-gate for the _CFG_*_RE subs: no secret keyword => neither can match.
 _CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 
@@ -534,7 +537,10 @@ def _redact_assignments(text: str, *, force: bool = False) -> str:
     that would match ``token=``/``key=`` URL params skip ``://`` text (web-URL query
     params are intentionally passed through, see redact_sensitive_text)."""
     if "=" in text:
-        _redact_env = _assignment_sub(lambda g: f"{g[0]}={g[1]}{_mask_token(g[2])}{g[1]}", check_keyword=True)
+        _redact_env = _assignment_sub(
+            lambda g: f"{g[0]}={g[1] or ''}{_mask_token(g[2])}{g[1] or ''}",
+            check_keyword=True,
+        )
         text = _ENV_ASSIGN_RE.sub(_redact_env, text)
         if "://" not in text:  # lowercase names would match URL params
             # Skip URLs — the query string may contain ``token=``/``key=`` params that are intentionally

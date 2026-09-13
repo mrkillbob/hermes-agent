@@ -216,6 +216,16 @@ class TestBareSecretEnvSuffixes:
             assert "still-secret-part" not in result
             assert result.endswith("|b=2")
 
+    def test_dotted_config_empty_unquoted_value_preserves_pipe_delimiter(self):
+        assert redact_sensitive_text("app.password=|b=2", force=True) == "app.password=***|b=2"
+
+        quoted = redact_sensitive_text(
+            'app.password="part-one|part-two"|b=2', force=True
+        )
+        assert "part-one" not in quoted
+        assert "part-two" not in quoted
+        assert quoted.endswith('"|b=2')
+
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
 
