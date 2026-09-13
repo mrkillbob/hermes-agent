@@ -847,6 +847,9 @@ class SessionStore(
         )
         self._conversation_root_leases: Dict[str, Any] = {}
         self._conversation_root_leases_lock = threading.Lock()
+        self._failed_conversation_root_leases: set[str] = set()
+        self._conversation_root_lease_retry_lock = threading.Lock()
+        self._conversation_root_lease_retry_timer: Optional[threading.Timer] = None
         self._write_sessions_json = bool(getattr(config, "write_sessions_json", True))
 
         # SQLite handles are cached per path and resolved through ``_db`` per call, never bound
@@ -1240,6 +1243,30 @@ class SessionStore(
         entry.conversation_worktree = metadata
         return lease_acquired or changed
 
+    def _schedule_conversation_root_lease_retry(self) -> None:
+        """Retry failed root-lease releases independently of a future route transition."""
+        retry_lock = self._lazy("_conversation_root_lease_retry_lock", threading.Lock)
+        with retry_lock:
+            timer = getattr(self, "_conversation_root_lease_retry_timer", None)
+            if timer is not None and timer.is_alive():
+                return
+            timer = threading.Timer(1.0, self._retry_failed_conversation_root_leases)
+            timer.daemon = True
+            self._conversation_root_lease_retry_timer = timer
+            timer.start()
+
+    def _retry_failed_conversation_root_leases(self) -> None:
+        retry_lock = self._lazy("_conversation_root_lease_retry_lock", threading.Lock)
+        with retry_lock:
+            self._conversation_root_lease_retry_timer = None
+        leases_lock = self._conversation_root_leases_lock
+        with leases_lock:
+            failed = self._lazy("_failed_conversation_root_leases", set)
+            roots = set(failed)
+            failed.difference_update(roots)
+        for root_session_id in roots:
+            self.release_conversation_root_lease(root_session_id)
+
     def _bind_conversation_worktree_for_new_entry(
         self, entry: SessionEntry, conversation_kind: str,
     ) -> None:
@@ -1338,9 +1365,12 @@ class SessionStore(
             except Exception:
                 logger.warning("Failed to release gateway conversation root lease %s", root_session_id,
                                exc_info=True)
+                self._lazy("_failed_conversation_root_leases", set).add(root_session_id)
+                self._schedule_conversation_root_lease_retry()
                 return False
             if self._conversation_root_leases.get(root_session_id) is lease:
                 self._conversation_root_leases.pop(root_session_id, None)
+            self._failed_conversation_root_leases.discard(root_session_id)
         return True
 
     def _retire_unpublished_conversation_worktree(self, entry: SessionEntry) -> None:
@@ -1387,6 +1417,9 @@ class SessionStore(
             except Exception as exc:
                 # One damaged registry must not strand the other roots. Keep
                 # the failed lease registered so a later close can retry it.
+                with self._conversation_root_leases_lock:
+                    self._lazy("_failed_conversation_root_leases", set).add(root_session_id)
+                self._schedule_conversation_root_lease_retry()
                 if first_error is None:
                     first_error = exc
             else:

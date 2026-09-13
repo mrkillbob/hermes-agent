@@ -560,7 +560,7 @@ def _validate_truncation_before_materializing(rid, sid, session, params):
 
 def _admit_prompt_submit(
     rid, sid, session, text, params, has_truncation, requested_rebind_ids,
-    hosted_task, internal_hosted_submit, transport, *, reattach=False):
+    hosted_task, internal_hosted_submit, transport, *, reattach=False, client_surface=""):
     """Serialize admission, validation, materialization, and turn claim per session."""
     with _session_prompt_submit_lock(session):
         if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
@@ -594,6 +594,9 @@ def _admit_prompt_submit(
             return err, None
         if (err := _persist_session_row_for_submit(rid, session)) is not None:
             return err, None
+        # Record the surface only after this request owns the turn. A rejected busy
+        # request must not overwrite the surface used by the in-flight turn.
+        session["client_surface"] = client_surface
         return None, survivor_fields
 
 
@@ -623,8 +626,6 @@ def _(rid, params: dict) -> dict:
         if internal_hosted_submit else _legacy_group_fence_error(rid, session, params))
     if err is not None:
         return err
-    # Rewritten every submit: a session alternates app window / HUD; stale "hud" misinforms.
-    session["client_surface"] = "hud" if params.get("surface") == "hud" else ""
     has_truncation = any(params.get(k) is not None for k in _TRUNCATION_PARAMS)
     if has_truncation and isinstance(text, str):
         # A rewind replays what the transcript shows: re-expand a skill invocation or
@@ -642,7 +643,8 @@ def _(rid, params: dict) -> dict:
         if isinstance(raw_rebind_ids, list) else None)
     err, survivor_fields = _admit_prompt_submit(
         rid, sid, session, text, params, has_truncation, requested_rebind_ids,
-        hosted_task, internal_hosted_submit, t, reattach=True)
+        hosted_task, internal_hosted_submit, t, reattach=True,
+        client_surface="hud" if params.get("surface") == "hud" else "")
     if err is not None:
         return err
     if turn_isolation:

@@ -867,6 +867,35 @@ def test_gateway_teardown_releases_other_roots_and_retains_failed_lease_for_retr
     assert not store._conversation_root_leases
 
 
+def test_failed_gateway_root_lease_release_schedules_retry(store, manager, source, monkeypatch):
+    first = store.get_or_create_session(source)
+    lease = store._conversation_root_leases[first.session_id]
+    lease.release = MagicMock(side_effect=[RuntimeError("registry busy"), None])
+    scheduled = []
+    with store._lock:
+        store._entries.clear()
+
+    class _Timer:
+        def __init__(self, _delay, target):
+            self.target = target
+
+        def is_alive(self):
+            return False
+
+        def start(self):
+            scheduled.append(self.target)
+
+    monkeypatch.setattr("gateway.session.threading.Timer", _Timer)
+
+    assert store.release_conversation_root_lease(first.session_id) is False
+    assert len(scheduled) == 1
+
+    scheduled[0]()
+
+    assert lease.release.call_count == 2
+    assert first.session_id not in store._conversation_root_leases
+
+
 @pytest.mark.parametrize("bootstrap_fails", [False, True])
 def test_legacy_interactive_route_requires_certified_migration_before_use(store, manager, source, bootstrap_fails):
     key = build_session_key(source)
