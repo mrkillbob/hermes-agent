@@ -34,10 +34,18 @@ def read_desktop_drain_snapshot(homes: Iterable[Path]) -> tuple[int, int]:
         runtime_status_pid_is_live,
     )
     from hermes_cli import kanban_db as kb
+    from hermes_constants import profile_name_for_home
+
+    profile_homes = tuple(Path(home) for home in homes)
+    profile_names = frozenset(
+        profile_name
+        for home in profile_homes
+        if (profile_name := profile_name_for_home(home)) is not None
+    )
 
     gateway_agents = 0
-    for home in homes:
-        runtime = read_runtime_status(path=Path(home) / "gateway_state.json")
+    for home in profile_homes:
+        runtime = read_runtime_status(path=home / "gateway_state.json")
         if runtime_status_pid_is_live(runtime):
             gateway_agents += parse_active_agents((runtime or {}).get("active_agents"))
 
@@ -56,10 +64,15 @@ def read_desktop_drain_snapshot(homes: Iterable[Path]) -> tuple[int, int]:
         conn = _hermes_cli_kanban_db_connect.connect(board=slug)
         try:
             rows = conn.execute(
-                "SELECT worker_pid FROM tasks WHERE status = 'running' "
+                "SELECT assignee, worker_pid FROM tasks WHERE status = 'running' "
                 "AND worker_pid IS NOT NULL"
             ).fetchall()
-            kanban_workers += sum(1 for row in rows if kb._pid_alive(row[0]))
+            kanban_workers += sum(
+                1
+                for row in rows
+                if row["assignee"] in profile_names
+                and kb._pid_alive(row["worker_pid"])
+            )
         finally:
             conn.close()
 

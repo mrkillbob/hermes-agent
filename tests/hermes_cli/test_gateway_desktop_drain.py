@@ -65,3 +65,55 @@ def test_drain_all_desktop_work_scopes_single_profile_to_current_home(monkeypatc
     drain.drain_all_desktop_work(all_profiles=False)
 
     assert seen == [(current_home,)]
+
+
+def test_read_desktop_drain_snapshot_filters_shared_board_workers_by_profile(
+    monkeypatch, tmp_path
+):
+    import hermes_constants
+    import hermes_cli.gateway_desktop_drain as drain
+    from hermes_cli import kanban_db as kb
+    import hermes_cli.kanban_db_connect as kbc
+
+    current_home = tmp_path / "current"
+    other_home = tmp_path / "other"
+    db_path = tmp_path / "kanban.db"
+    db_path.touch()
+    queries = []
+
+    class Connection:
+        def execute(self, query):
+            queries.append(query)
+            return self
+
+        def fetchall(self):
+            return [
+                {"assignee": "current", "worker_pid": 101},
+                {"assignee": "other", "worker_pid": 202},
+            ]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        hermes_constants,
+        "profile_name_for_home",
+        lambda home: "current" if Path(home) == current_home else "other",
+    )
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "gateway.status.runtime_status_pid_is_live",
+        lambda _runtime: False,
+    )
+    monkeypatch.setattr(kb, "list_boards", lambda include_archived=False: [{"slug": "default"}])
+    monkeypatch.setattr(kb, "kanban_db_path", lambda board=None: db_path)
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(kbc, "connect", lambda board=None: Connection())
+
+    result = drain.read_desktop_drain_snapshot((current_home,))
+
+    assert result == (0, 1)
+    assert any("assignee" in query for query in queries)

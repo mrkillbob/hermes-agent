@@ -400,6 +400,35 @@ def test_scan_keeps_merge_maintainer_moving_during_required_ci_backlog(
     assert payload["merge"]["status"] == "ok"
 
 
+def test_scan_passes_per_repository_ci_backlog_to_repair_lane(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = SimpleNamespace(
+        created=0,
+        skipped={},
+        degraded=False,
+        required_local_ci_backlog=1,
+        required_local_ci_backlog_by_repository={"org/blocked": 1, "org/ready": 0},
+    )
+    observed = []
+
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_repair_scan_by_repository",
+        lambda _policy, _ledger, backlog, **_kwargs: (
+            observed.append(dict(backlog))
+            or {"status": "ok", "created": 0, "skipped": {}}
+        ),
+    )
+
+    returncode, _order, _payload = _run_scan_with_primary_result(
+        monkeypatch, capsys, result
+    )
+
+    assert returncode == 0
+    assert observed == [{"org/blocked": 1, "org/ready": 0}]
+
+
 def test_scan_runs_label_side_lane_after_merge_maintainer(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
