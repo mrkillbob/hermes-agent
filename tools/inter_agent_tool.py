@@ -25,6 +25,7 @@ from hermes_cli._subprocess_compat import (
 )
 from hermes_constants import get_default_hermes_root, get_hermes_home, profile_name_for_home
 from tools.comms import BROKER_PROTOCOL_VERSION
+from tools.comms.broker import _secure_state_permissions
 from tools.registry import registry, tool_error
 
 TOOLSET = "inter_agent"
@@ -131,7 +132,7 @@ def _broker_token() -> str:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(token)
         os.replace(temporary, path)
-        path.chmod(0o600)
+        _secure_state_permissions(path)
     finally:
         temporary.unlink(missing_ok=True)
     return token

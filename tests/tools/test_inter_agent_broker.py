@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+import subprocess
 import threading
 import time
 import urllib.error
@@ -355,6 +356,19 @@ def test_message_database_and_sidecars_are_owner_only(monkeypatch, tmp_path):
     for candidate in candidates:
         if candidate.exists():
             assert stat.S_IMODE(candidate.stat().st_mode) == 0o600
+
+
+@pytest.mark.windows_only
+def test_broker_state_removes_inherited_windows_acl(tmp_path):
+    path = tmp_path / "inter-agent-broker.token"
+    path.write_text("secret", encoding="utf-8")
+
+    broker._secure_state_permissions(path)
+
+    acl = subprocess.run(
+        ["icacls", str(path)], capture_output=True, text=True, check=True
+    ).stdout
+    assert "(I)" not in acl
 
 
 def test_history_query_has_sender_and_recipient_indexes(monkeypatch, tmp_path):

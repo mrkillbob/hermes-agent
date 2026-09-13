@@ -7,12 +7,14 @@ control home so profile-local workers can interoperate.
 
 from __future__ import annotations
 
+import getpass
 import json
 import hmac
 import os
 from pathlib import Path
 import secrets
 import sqlite3
+import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -27,10 +29,30 @@ PORT = 0
 MAX_QUERY_LIMIT = 1000
 RECEIVE_WAIT_SECONDS = 25.0
 RECEIVE_POLL_INTERVAL_SECONDS = 0.1
+_WINDOWS_ACL_SECURED: set[Path] = set()
 
 
 def _state_path(name: str) -> Path:
     return get_default_hermes_root() / name
+
+
+def _secure_state_permissions(path: Path) -> None:
+    """Keep broker state owner-only, including inherited Windows ACLs."""
+    path.chmod(0o600)
+    if os.name != "nt" or path in _WINDOWS_ACL_SECURED:
+        return
+    account = getpass.getuser()
+    if not account:
+        raise PermissionError(f"unable to identify broker state owner: {path}")
+    result = subprocess.run(
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{account}:F"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise PermissionError(f"unable to secure broker state ACL: {path}")
+    _WINDOWS_ACL_SECURED.add(path)
 
 
 def _broker_token() -> str:
@@ -40,6 +62,7 @@ def _broker_token() -> str:
     try:
         token = path.read_text(encoding="utf-8").strip()
         if token:
+            _secure_state_permissions(path)
             return token
     except FileNotFoundError:
         pass
@@ -50,7 +73,7 @@ def _broker_token() -> str:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(token)
         os.replace(temporary, path)
-        path.chmod(0o600)
+        _secure_state_permissions(path)
     finally:
         temporary.unlink(missing_ok=True)
     return token
@@ -74,7 +97,7 @@ def _write_endpoint(server: _BrokerServer) -> Path:
         }),
         encoding="utf-8",
     )
-    path.chmod(0o600)
+    _secure_state_permissions(path)
     return path
 
 
@@ -100,7 +123,7 @@ def _restrict_database_permissions(path: Path) -> None:
         Path(f"{path}-shm"),
     ):
         try:
-            candidate.chmod(0o600)
+            _secure_state_permissions(candidate)
         except FileNotFoundError:
             continue
 

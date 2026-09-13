@@ -23,6 +23,7 @@ from github_pr_feedback.post_merge import (
     _require_package_provenance,
     _require_runtime_absent,
     _wait_for_process_to_appear,
+    _wait_for_process_to_remain_running,
     _wait_for_process_to_start,
     _wait_for_processes_to_exit,
 )
@@ -98,7 +99,8 @@ def _post_merge_policy(deployment_path: Path) -> PostMergePolicy:
     )
 
 
-def test_post_merge_rechecks_runtime_before_shutdown_and_waits_for_verified_process():
+def test_post_merge_rechecks_runtime_before_shutdown_and_waits_for_verified_process(monkeypatch):
+    monkeypatch.setattr("github_pr_feedback.post_merge.RELAUNCH_STABILITY_SECONDS", 0.0)
     policy = _post_merge_policy(Path("/deployment"))
     merge_sha = "a" * 40
     application = ProcessRecord(
@@ -161,7 +163,8 @@ def test_post_merge_rechecks_runtime_before_shutdown_and_waits_for_verified_proc
     blocked_commands.run.assert_not_called()
 
 
-def test_post_merge_rechecks_protected_runtime_after_relaunch():
+def test_post_merge_rechecks_protected_runtime_after_relaunch(monkeypatch):
+    monkeypatch.setattr("github_pr_feedback.post_merge.RELAUNCH_STABILITY_SECONDS", 0.0)
     policy = _post_merge_policy(Path("/deployment"))
     merge_sha = "a" * 40
     application = ProcessRecord(
@@ -216,6 +219,7 @@ def test_post_merge_rejects_an_advanced_remote_base_before_fast_forward():
 
 
 def test_post_merge_executor_passes_processes_before_controller_to_shutdown_wait(monkeypatch, tmp_path):
+    monkeypatch.setattr("github_pr_feedback.post_merge.RELAUNCH_STABILITY_SECONDS", 0.0)
     bundle = tmp_path / "Hermes.app"
     executable = bundle / "Contents" / "MacOS" / "Hermes"
     process = ProcessRecord(123, executable, (str(executable),), None)
@@ -336,6 +340,24 @@ def test_process_start_wait_requires_the_expected_bundle_executable():
     controller = Controller()
     _wait_for_process_to_start(controller, process.executable, timeout=0.2)
     assert controller.censuses == []
+
+
+def test_relaunch_wait_rejects_a_bundle_that_exits_during_stability_window():
+    process = ProcessRecord(
+        123, Path("/Applications/Hermes.app/Contents/MacOS/Hermes"), (), None
+    )
+
+    class Controller:
+        def __init__(self):
+            self.censuses = [[process], []]
+
+        def census(self):
+            return tuple(self.censuses.pop(0)) if self.censuses else ()
+
+    with pytest.raises(DeploymentError, match="relaunched_bundle_unstable"):
+        _wait_for_process_to_remain_running(
+            Controller(), process.executable, timeout=0.05, stable_for=0.01
+        )
 
 
 def test_deployment_claim_serializes_two_ledger_connections(tmp_path):
