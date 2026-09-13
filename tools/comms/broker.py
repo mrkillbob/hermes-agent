@@ -17,6 +17,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import psutil
+
 from hermes_constants import get_hermes_home
 from tools.comms import BROKER_PROTOCOL_VERSION
 
@@ -66,6 +68,9 @@ def _write_endpoint(server: _BrokerServer) -> Path:
             "broker_id": server.broker_id,
             "protocol_version": BROKER_PROTOCOL_VERSION,
             "pid": os.getpid(),
+            "pid_start_time_us": int(
+                round(psutil.Process(os.getpid()).create_time() * 1_000_000)
+            ),
         }),
         encoding="utf-8",
     )
@@ -130,6 +135,10 @@ def _database() -> sqlite3.Connection:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS messages_recipient_id_idx "
             "ON messages (recipient, id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS messages_sender_id_idx "
+            "ON messages (sender, id)"
         )
         connection.commit()
     finally:

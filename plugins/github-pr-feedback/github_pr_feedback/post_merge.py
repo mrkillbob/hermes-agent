@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from .ci_runner import CICommandRunner, CompletedCommand, SubprocessCICommandRunner
-from .ledger import DeploymentLease, FeedbackLedger
+from .ledger import DeploymentLease, FeedbackLedger, deployment_owner
 from .merge_controller import MergeReceipt
 from .policy import PostMergePolicy
 
@@ -280,7 +280,7 @@ class PostMergeExecutor:
             merge.repository,
             merge.pr_number,
             merge.merge_commit_oid,
-            owner=f"post-merge:{os.getpid()}:{id(self)}",
+            owner=deployment_owner(id(self)),
             claimed_at=self._now(),
         )
         if lease is None:

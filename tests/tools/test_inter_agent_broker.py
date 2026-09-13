@@ -82,6 +82,46 @@ def test_broker_readiness_rejects_an_old_protocol(monkeypatch, tmp_path):
         server.server_close()
 
 
+def test_ensure_broker_retires_rejected_owned_process(monkeypatch, tmp_path):
+    monkeypatch.setattr(inter_agent_tool, "get_hermes_home", lambda: tmp_path)
+    (tmp_path / "inter-agent-broker.token").write_text(
+        "test-broker-token", encoding="utf-8"
+    )
+    (tmp_path / "inter-agent-broker.json").write_text(
+        json.dumps(
+            {
+                "port": 12345,
+                "broker_id": "old-broker",
+                "protocol_version": 0,
+                "pid": 4242,
+            }
+        ),
+        encoding="utf-8",
+    )
+    retired = []
+
+    class Process:
+        def cmdline(self):
+            return ["python", "-m", "tools.comms.broker"]
+
+        def terminate(self):
+            retired.append("terminate")
+
+        def wait(self, timeout=None):
+            retired.append(("wait", timeout))
+
+    monkeypatch.setattr(inter_agent_tool.psutil, "Process", lambda _pid: Process())
+    readiness = iter((False, True))
+    monkeypatch.setattr(inter_agent_tool, "_broker_is_ready", lambda: next(readiness))
+    monkeypatch.setattr(
+        inter_agent_tool.subprocess, "Popen", lambda *_a, **_k: object()
+    )
+
+    inter_agent_tool._ensure_broker()
+
+    assert retired == ["terminate", ("wait", 0.5)]
+
+
 def test_empty_broker_token_file_is_repaired_atomically(monkeypatch, tmp_path):
     monkeypatch.setattr(inter_agent_tool, "get_hermes_home", lambda: tmp_path)
     path = tmp_path / "inter-agent-broker.token"
@@ -304,3 +344,22 @@ def test_message_database_and_sidecars_are_owner_only(monkeypatch, tmp_path):
     for candidate in candidates:
         if candidate.exists():
             assert stat.S_IMODE(candidate.stat().st_mode) == 0o600
+
+
+def test_history_query_has_sender_and_recipient_indexes(monkeypatch, tmp_path):
+    monkeypatch.setattr(broker, "get_hermes_home", lambda: tmp_path)
+    connection = broker._database()
+    try:
+        details = {
+            row[3]
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT id FROM messages "
+                "WHERE sender = ? OR recipient = ? ORDER BY id DESC LIMIT ?",
+                ("peer", "peer", 100),
+            )
+        }
+    finally:
+        connection.close()
+
+    assert any("messages_sender_id_idx" in detail for detail in details)
+    assert any("messages_recipient_id_idx" in detail for detail in details)

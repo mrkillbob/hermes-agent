@@ -5,11 +5,13 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 import pytest
+import psutil
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from github_pr_feedback.ci_runner import CompletedCommand
 from github_pr_feedback.ledger import FeedbackLedger
+from github_pr_feedback import ledger as ledger_module
 from github_pr_feedback.merge_controller import MergeReceipt
 from github_pr_feedback.post_merge import (
     BundleIdentity,
@@ -372,6 +374,7 @@ def test_deployment_claim_reclaims_recent_owner_after_process_exit(tmp_path):
     now = datetime(2026, 9, 12, tzinfo=UTC)
     ledger = FeedbackLedger(path)
     exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited_start_time_us = int(round(psutil.Process(exited.pid).create_time() * 1_000_000))
     exited.wait(timeout=5)
     try:
         first = ledger.claim_deployment(
@@ -379,7 +382,7 @@ def test_deployment_claim_reclaims_recent_owner_after_process_exit(tmp_path):
             "acme/widgets",
             82,
             "a" * 40,
-            owner=f"post-merge:{exited.pid}:1",
+            owner=f"post-merge:{exited.pid}:{exited_start_time_us}:1",
             claimed_at=now,
         )
         assert first is not None
@@ -389,14 +392,25 @@ def test_deployment_claim_reclaims_recent_owner_after_process_exit(tmp_path):
             "acme/widgets",
             82,
             "a" * 40,
-            owner=f"post-merge:{os.getpid()}:1",
+            owner=ledger_module.deployment_owner(1),
             claimed_at=now,
         )
 
         assert reclaimed is not None
-        assert reclaimed.owner == f"post-merge:{os.getpid()}:1"
+        assert reclaimed.owner == ledger_module.deployment_owner(1)
     finally:
         ledger.close()
+
+
+def test_deployment_owner_identity_rejects_pid_reuse(monkeypatch):
+    class Process:
+        def create_time(self):
+            return 123.457
+
+    monkeypatch.setattr(ledger_module.psutil, "Process", lambda _pid: Process())
+    owner = "post-merge:4242:123456000:1"
+
+    assert not ledger_module._deployment_owner_is_alive(owner)
 
 
 def test_deployment_claim_contention_is_reported_as_in_progress(tmp_path):

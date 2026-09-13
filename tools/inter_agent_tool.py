@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlencode
 
+import psutil
+
 from hermes_cli._subprocess_compat import (
     windows_detach_flags_without_breakaway,
     windows_detach_popen_kwargs,
@@ -135,7 +137,7 @@ def _broker_token() -> str:
     return token
 
 
-def _broker_endpoint() -> Optional[dict[str, str]]:
+def _broker_endpoint() -> Optional[dict[str, object]]:
     try:
         endpoint = json.loads(
             _state_path("inter-agent-broker.json").read_text(encoding="utf-8")
@@ -151,9 +153,20 @@ def _broker_endpoint() -> Optional[dict[str, str]]:
         json.JSONDecodeError,
     ):
         return None
-    if not 1 <= port <= 65535 or not isinstance(broker_id, str) or not broker_id:
+    pid = endpoint.get("pid")
+    if (
+        not 1 <= port <= 65535
+        or not isinstance(broker_id, str)
+        or not broker_id
+        or (pid is not None and (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0))
+    ):
         return None
-    return {"url": f"http://127.0.0.1:{port}", "broker_id": broker_id}
+    return {
+        "url": f"http://127.0.0.1:{port}",
+        "broker_id": broker_id,
+        "pid": pid,
+        "pid_start_time_us": endpoint.get("pid_start_time_us"),
+    }
 
 
 def _broker_url() -> Optional[str]:
@@ -183,6 +196,34 @@ def _broker_is_ready() -> bool:
             )
     except Exception:
         return False
+
+
+def _retire_rejected_broker(endpoint: dict[str, object]) -> None:
+    """Stop the broker named by an endpoint before replacing a rejected one."""
+
+    pid = endpoint.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return
+    try:
+        process = psutil.Process(pid)
+        command_line = process.cmdline()
+        if "tools.comms.broker" not in command_line:
+            return
+        expected_start = endpoint.get("pid_start_time_us")
+        if expected_start is not None:
+            if isinstance(expected_start, bool) or not isinstance(expected_start, int):
+                return
+            actual_start = int(round(process.create_time() * 1_000_000))
+            if actual_start != expected_start:
+                return
+        process.terminate()
+        try:
+            process.wait(timeout=0.5)
+        except psutil.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=0.5)
+    except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, OSError, ValueError):
+        return
 
 
 @contextmanager
@@ -220,6 +261,9 @@ def _ensure_broker() -> None:
     with _broker_startup_lock():
         if _broker_is_ready():
             return
+        endpoint = _broker_endpoint()
+        if endpoint is not None:
+            _retire_rejected_broker(endpoint)
         argv = _broker_process_argv()
         popen_kwargs = {
             "stdin": subprocess.DEVNULL,

@@ -176,7 +176,23 @@ class MaintenanceCommandEvidence:
 
 
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
-_DEPLOYMENT_OWNER = re.compile(r"^post-merge:(?P<pid>[1-9][0-9]*):[1-9][0-9]*$")
+_DEPLOYMENT_OWNER = re.compile(
+    r"^post-merge:(?P<pid>[1-9][0-9]*):(?P<start_time_us>[1-9][0-9]*):[1-9][0-9]*$"
+)
+
+
+def deployment_owner(nonce: int) -> str:
+    """Build a deployment lease owner with a PID and process start identity."""
+
+    if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce <= 0:
+        raise ValueError("deployment owner nonce must be a positive integer")
+    try:
+        start_time_us = int(round(psutil.Process(os.getpid()).create_time() * 1_000_000))
+    except (OSError, ValueError, psutil.Error):
+        return f"post-merge-unknown:{os.getpid()}:{nonce}"
+    if start_time_us <= 0:
+        return f"post-merge-unknown:{os.getpid()}:{nonce}"
+    return f"post-merge:{os.getpid()}:{start_time_us}:{nonce}"
 
 
 def _deployment_owner_is_alive(owner: str) -> bool:
@@ -189,7 +205,16 @@ def _deployment_owner_is_alive(owner: str) -> bool:
     match = _DEPLOYMENT_OWNER.fullmatch(owner)
     if match is None:
         return True
-    return bool(psutil.pid_exists(int(match.group("pid"))))
+    pid = int(match.group("pid"))
+    expected_start_time_us = int(match.group("start_time_us"))
+    try:
+        process = psutil.Process(pid)
+        actual_start_time_us = int(round(process.create_time() * 1_000_000))
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    except (psutil.AccessDenied, OSError, ValueError, psutil.Error):
+        return True
+    return actual_start_time_us == expected_start_time_us
 
 
 def parse_maintenance_command_evidence(
