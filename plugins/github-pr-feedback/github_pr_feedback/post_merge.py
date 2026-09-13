@@ -481,21 +481,6 @@ def _wait_for_process_to_appear(
         time.sleep(min(0.1, remaining))
 
 
-def _wait_for_process_to_start(
-    controller: ProcessController, executable: Path, *, timeout: float = 30.0
-) -> tuple[ProcessRecord, ...]:
-    expected = executable.resolve()
-    deadline = time.monotonic() + timeout
-    while True:
-        census = controller.census()
-        if any(process.executable.resolve() == expected for process in census):
-            return census
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise DeploymentError("relaunch_start_timeout")
-        time.sleep(min(0.1, remaining))
-
-
 def _wait_for_process_to_remain_running(
     controller: ProcessController,
     executable: Path,

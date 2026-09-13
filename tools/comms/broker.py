@@ -29,35 +29,38 @@ PORT = 0
 MAX_QUERY_LIMIT = 1000
 RECEIVE_WAIT_SECONDS = 25.0
 RECEIVE_POLL_INTERVAL_SECONDS = 0.1
-_WINDOWS_ACL_SECURED: set[Path] = set()
+_WINDOWS_ACL_SECURED: set[tuple[Path, bool]] = set()
 
 
 def _state_path(name: str) -> Path:
     return get_default_hermes_root() / name
 
 
-def _secure_state_permissions(path: Path) -> None:
+def _secure_state_permissions(path: Path, *, directory: bool = False) -> None:
     """Keep broker state owner-only, including inherited Windows ACLs."""
-    path.chmod(0o600)
-    if os.name != "nt" or path in _WINDOWS_ACL_SECURED:
+    path.chmod(0o700 if directory else 0o600)
+    cache_key = (path, directory)
+    if os.name != "nt" or cache_key in _WINDOWS_ACL_SECURED:
         return
     account = getpass.getuser()
     if not account:
         raise PermissionError(f"unable to identify broker state owner: {path}")
+    permissions = "(OI)(CI)F" if directory else "F"
     result = subprocess.run(
-        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{account}:F"],
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{account}:{permissions}"],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode != 0:
         raise PermissionError(f"unable to secure broker state ACL: {path}")
-    _WINDOWS_ACL_SECURED.add(path)
+    _WINDOWS_ACL_SECURED.add(cache_key)
 
 
 def _broker_token() -> str:
     home = get_default_hermes_root()
     home.mkdir(parents=True, exist_ok=True)
+    _secure_state_permissions(home, directory=True)
     path = _state_path("inter-agent-broker.token")
     try:
         token = path.read_text(encoding="utf-8").strip()
@@ -139,6 +142,7 @@ def _limit(query: dict[str, list[str]]) -> int:
 def _database() -> sqlite3.Connection:
     home = get_default_hermes_root()
     home.mkdir(parents=True, exist_ok=True)
+    _secure_state_permissions(home, directory=True)
     path = home / "inter-agent-messages.db"
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

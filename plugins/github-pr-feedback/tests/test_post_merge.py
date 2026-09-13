@@ -24,7 +24,6 @@ from github_pr_feedback.post_merge import (
     _require_runtime_absent,
     _wait_for_process_to_appear,
     _wait_for_process_to_remain_running,
-    _wait_for_process_to_start,
     _wait_for_processes_to_exit,
 )
 from github_pr_feedback.policy import PostMergePolicy
@@ -323,23 +322,6 @@ def test_relaunch_wait_fails_when_the_bundle_process_never_appears():
             Controller(),
             timeout=0,
         )
-
-
-def test_process_start_wait_requires_the_expected_bundle_executable():
-    process = ProcessRecord(
-        123, Path("/Applications/Hermes.app/Contents/MacOS/Hermes"), (), None
-    )
-
-    class Controller:
-        def __init__(self):
-            self.censuses = [[], [process]]
-
-        def census(self):
-            return tuple(self.censuses.pop(0))
-
-    controller = Controller()
-    _wait_for_process_to_start(controller, process.executable, timeout=0.2)
-    assert controller.censuses == []
 
 
 def test_relaunch_wait_rejects_a_bundle_that_exits_during_stability_window():

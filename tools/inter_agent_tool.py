@@ -118,6 +118,7 @@ def _state_path(name: str) -> Path:
 def _broker_token() -> str:
     home = get_default_hermes_root()
     home.mkdir(parents=True, exist_ok=True)
+    _secure_state_permissions(home, directory=True)
     path = _state_path("inter-agent-broker.token")
     try:
         token = path.read_text(encoding="utf-8").strip()
