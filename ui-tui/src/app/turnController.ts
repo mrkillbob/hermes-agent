@@ -796,7 +796,6 @@ class TurnController {
   recordToolComplete(
     toolId: string,
     fallbackName?: string,
-    error?: string,
     summary?: string,
     duration?: number,
     todos?: unknown,
@@ -807,38 +806,26 @@ class TurnController {
     }
 
     this.recordTodos(todos)
-    const line = this.completeTool(toolId, fallbackName, error, summary, duration, resultText)
+    const line = this.completeTool(toolId, fallbackName, summary, duration, resultText)
 
     this.pendingSegmentTools = [...this.pendingSegmentTools, line]
     this.flushPendingToolsIntoLastSegment()
     this.publishToolState()
   }
 
-  recordInlineDiffToolComplete(
-    diffText: string,
-    toolId: string,
-    fallbackName?: string,
-    error?: string,
-    duration?: number,
-    resultText?: string
-  ) {
+  recordInlineDiffToolComplete(diffText: string, toolId: string, fallbackName?: string, duration?: number, resultText?: string) {
     if (this.interrupted) {
       return
     }
 
     this.flushStreamingSegment()
-    this.pushInlineDiffSegment(diffText, [this.completeTool(toolId, fallbackName, error, '', duration, resultText)])
+    this.pushInlineDiffSegment(diffText, [this.completeTool(toolId, fallbackName, '', duration, resultText)])
     this.publishToolState()
   }
 
-  private completeTool(
-    toolId: string,
-    fallbackName?: string,
-    error?: string,
-    summary?: string,
-    duration?: number,
-    resultText?: string
-  ) {
+  // `tool.complete` carries no error flag on the wire (tui_gateway/tool_progress.py::_on_tool_complete);
+  // a failed tool surfaces through its result text, so every trail line renders as non-error.
+  private completeTool(toolId: string, fallbackName?: string, summary?: string, duration?: number, resultText?: string) {
     const done = this.activeTools.find(tool => tool.id === toolId)
     const name = done?.name ?? fallbackName ?? 'tool'
     const label = toolTrailLabel(name)
@@ -849,18 +836,12 @@ class TurnController {
         ? buildVerboseToolTrailLine(
             name,
             done?.context || '',
-            Boolean(error),
+            false,
             duration ?? fallbackDuration,
             done?.verboseArgs,
-            error || resultText || summary || ''
+            resultText || summary || ''
           )
-        : buildToolTrailLine(
-            name,
-            done?.context || '',
-            Boolean(error),
-            error || summary || '',
-            duration ?? fallbackDuration
-          )
+        : buildToolTrailLine(name, done?.context || '', false, summary || '', duration ?? fallbackDuration)
 
     this.activeTools = this.activeTools.filter(tool => tool.id !== toolId)
 
@@ -1044,14 +1025,12 @@ class TurnController {
       const next: SubagentProgress = {
         ...base,
         apiCalls: p.api_calls ?? base.apiCalls,
-        costUsd: p.cost_usd ?? base.costUsd,
         delegationId: p.delegation_id ?? base.delegationId,
         depth: p.depth ?? base.depth,
         filesRead: p.files_read ?? base.filesRead,
         filesWritten: p.files_written ?? base.filesWritten,
         goal: p.goal || base.goal,
         inputTokens: p.input_tokens ?? base.inputTokens,
-        iteration: p.iteration ?? base.iteration,
         model: p.model ?? base.model,
         outputTail,
         outputTokens: p.output_tokens ?? base.outputTokens,

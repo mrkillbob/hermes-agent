@@ -1239,7 +1239,6 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             inlineDiffText,
             ev.payload.tool_id,
             ev.payload.name,
-            ev.payload.error,
             ev.payload.duration_s,
             resultText
           )
@@ -1247,7 +1246,6 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           turnController.recordToolComplete(
             ev.payload.tool_id,
             ev.payload.name,
-            ev.payload.error,
             ev.payload.summary,
             ev.payload.duration_s,
             ev.payload.todos,

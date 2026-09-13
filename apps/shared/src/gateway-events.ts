@@ -64,7 +64,8 @@ export type SubagentStatus = 'completed' | 'error' | 'failed' | 'interrupted' | 
 /** `tui_gateway/tool_progress.py::_progress_subagent` — every `subagent.*` frame. */
 export interface SubagentEventPayload {
   api_calls?: number
-  cost_usd?: number
+  /** The child's own gateway session id — the key a watch window mirrors. */
+  child_session_id?: string
   /** Batch (delegation) id this subagent belongs to — distinguishes
    *  interleaved `[n/N]` progress from concurrent or nested fan-outs. */
   delegation_id?: string
@@ -74,7 +75,6 @@ export interface SubagentEventPayload {
   files_written?: string[]
   goal: string
   input_tokens?: number
-  iteration?: number
   model?: string
   output_tail?: { is_error?: boolean; preview?: string; tool?: string }[]
   output_tokens?: number
@@ -115,7 +115,7 @@ export interface MessageCompletePayload {
   /** `status: "error"` — the failure message (`text` may be streamed output). */
   error?: string
   error_surface?: ErrorSurface
-  failure_reason?: string
+  failure_reason?: string | null
   /** `status: "error"` — `text` is streamed partial output to keep, not the error string. */
   partial?: boolean
   reasoning?: string
@@ -142,6 +142,8 @@ export interface ToolStartPayload {
   /** Mirrored child tool rows carry a short preview instead of args. */
   preview?: string
   tool_id: string
+  /** Not on the wire (`_on_tool_start` never sets it): the todo snapshot rides `tool.complete` /
+   *  `todo.updated`. Kept because the TUI handler reads it and its fixtures exercise that path. */
   todos?: unknown[]
 }
 
@@ -149,7 +151,6 @@ export interface ToolStartPayload {
 export interface ToolCompletePayload {
   args?: Record<string, unknown>
   duration_s?: number
-  error?: string
   inline_diff?: string
   name?: string
   /** Parsed JSON when the tool returned JSON, else the raw string. */
