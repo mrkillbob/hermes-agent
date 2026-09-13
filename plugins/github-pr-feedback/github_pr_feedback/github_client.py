@@ -1094,13 +1094,25 @@ class GitHubClient:
         return False
 
     def merge_pull_request(
-        self, repository: str, number: int, head_sha: str, *, method: str
+        self,
+        repository: str,
+        number: int,
+        head_sha: str,
+        *,
+        method: str,
+        base_branch: str,
     ) -> None:
         repository = _validated_repository(repository)
         number = _positive_number(number)
         head_sha = _validated_sha(head_sha)
+        base_branch = _required_branch(base_branch)
         if method not in _MERGE_FLAGS:
             raise ValueError("method must be squash, rebase, or merge")
+        if self.requires_merge_queue(repository, base_branch):
+            raise GitHubClientError(
+                "GitHub base branch requires a merge queue; no queue entry was enrolled",
+                code="merge_queue_required",
+            )
         # Attempt an ordinary exact-head merge first. Only enroll auto-merge
         # when GitHub explicitly says this base requires a merge queue; doing
         # so unconditionally would create persistent asynchronous authority on
@@ -1122,6 +1134,25 @@ class GitHubClient:
                     code="merge_queue_required",
                 ) from error
             raise
+
+    def requires_merge_queue(self, repository: str, base_branch: str) -> bool:
+        """Return whether GitHub rules require PRs into ``base_branch`` to queue."""
+
+        repository = _validated_repository(repository)
+        base_branch = _required_branch(base_branch)
+        payload = self._json(
+            [
+                "gh",
+                "api",
+                f"repos/{repository}/rules/branches/{quote(base_branch, safe='')}",
+            ]
+        )
+        if not isinstance(payload, list) or any(
+            not isinstance(rule, dict) or not isinstance(rule.get("type"), str)
+            for rule in payload
+        ):
+            raise GitHubClientError("GitHub branch rules had an invalid shape")
+        return any(rule["type"].casefold() == "merge_queue" for rule in payload)
 
     def close_pull_request_with_comment(
         self,

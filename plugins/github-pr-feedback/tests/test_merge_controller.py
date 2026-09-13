@@ -400,7 +400,13 @@ class RecordingGitHub:
         self.merge_calls: list[tuple[str, int, str, str]] = []
 
     def merge_pull_request(
-        self, repository: str, number: int, head_sha: str, *, method: str
+        self,
+        repository: str,
+        number: int,
+        head_sha: str,
+        *,
+        method: str,
+        base_branch: str,
     ) -> None:
         self.merge_calls.append((repository, number, head_sha, method))
         if self.before_merge_return is not None:
@@ -413,6 +419,34 @@ class RecordingGitHub:
         if isinstance(readback, Exception):
             raise readback
         return readback
+
+
+def test_merge_queue_failure_is_durable_across_scheduled_scans(tmp_path: Path) -> None:
+    snapshot = eligible_snapshot()
+    github = RecordingGitHub(
+        [],
+        merge_error=GitHubClientError(
+            "merge queue required", code="merge_queue_required"
+        ),
+    )
+    ledger = enrolled_ledger(tmp_path)
+    controller = MergeController(
+        policy(),
+        SnapshotSource([snapshot, snapshot, snapshot, snapshot]),
+        github,
+        ledger,
+        owner="test",
+        now=lambda: NOW,
+    )
+
+    first = controller.run(17)
+    second = controller.run(17)
+
+    assert first.decision.blockers == ("merge_queue_required",)
+    assert second.decision.blockers == ("merge_queue_required",)
+    assert len(github.merge_calls) == 1
+    assert ledger.merge_queue_required_merge_attempt("acme/widgets", 17)
+    ledger.close()
 
 
 def test_audit_produced_actions_disabled_receipt_is_merge_eligible(

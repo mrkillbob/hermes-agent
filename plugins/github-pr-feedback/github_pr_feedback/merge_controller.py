@@ -496,6 +496,11 @@ class MergeController:
                 _snapshot_digest(snapshot, snapshot.ci_receipt),
             )
             return MergeRunResult(blocked, None)
+        if self._ledger.merge_queue_required_merge_attempt(
+            self._policy.repository, number
+        ):
+            blocked = MergeDecision(False, ("merge_queue_required",), None, "")
+            return MergeRunResult(blocked, None)
         first_snapshot = self._source.snapshot(number)
         first = evaluate_merge(self._policy, first_snapshot, now=self._now())
         if not first.eligible or self._policy.report_only:
@@ -550,6 +555,7 @@ class MergeController:
                 number,
                 second_snapshot.pull_request.head_sha,
                 method=second.method,
+                base_branch=second_snapshot.pull_request.base_branch,
             )
         except GitHubClientError as error:
             if error.code in {"merge_rejected", "merge_queue_required"}:
@@ -557,7 +563,7 @@ class MergeController:
                     lease,
                     status="failed",
                     updated_at=self._now(),
-                    error=str(error),
+                    error=error.code if error.code == "merge_queue_required" else str(error),
                     expected_status="verification_required",
                 )
                 return MergeRunResult(

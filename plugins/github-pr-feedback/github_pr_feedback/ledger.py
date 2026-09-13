@@ -2024,6 +2024,11 @@ class FeedbackLedger:
                     "DELETE FROM merge_opt_outs WHERE repository = ? AND pr_number = ?",
                     (repository, pr_number),
                 )
+                self._connection.execute(
+                    "DELETE FROM merge_attempts WHERE repository = ? AND pr_number = ? "
+                    "AND status = 'failed' AND last_error = 'merge_queue_required'",
+                    (repository, pr_number),
+                )
             self._connection.execute(
                 "INSERT INTO merge_enrollments (repository, pr_number, enrolled_at, enrolled_by) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT(repository, pr_number) DO UPDATE SET "
@@ -2063,6 +2068,16 @@ class FeedbackLedger:
     def is_merge_enrolled(self, repository: str, pr_number: int) -> bool:
         row = self._connection.execute(
             "SELECT 1 FROM merge_enrollments WHERE repository = ? AND pr_number = ?",
+            (repository, pr_number),
+        ).fetchone()
+        return row is not None
+
+    def merge_queue_required_merge_attempt(self, repository: str, pr_number: int) -> bool:
+        """Return whether a merge-queue policy durably blocked this PR."""
+
+        row = self._connection.execute(
+            "SELECT 1 FROM merge_attempts WHERE repository = ? AND pr_number = ? "
+            "AND status = 'failed' AND last_error = 'merge_queue_required' LIMIT 1",
             (repository, pr_number),
         ).fetchone()
         return row is not None
@@ -2169,7 +2184,7 @@ class FeedbackLedger:
             if completed is not None:
                 return None
             existing = self._connection.execute(
-                "SELECT status FROM merge_attempts WHERE repository = ? AND pr_number = ? "
+                "SELECT status, last_error FROM merge_attempts WHERE repository = ? AND pr_number = ? "
                 "AND head_sha = ?",
                 (repository, pr_number, head_sha),
             ).fetchone()
@@ -2201,6 +2216,8 @@ class FeedbackLedger:
                         head_sha,
                     ),
                 )
+            elif existing[0] == "failed" and existing[1] == "merge_queue_required":
+                return None
             else:
                 return None
         return MergeLease(repository, pr_number, head_sha, owner, claimed_at)
