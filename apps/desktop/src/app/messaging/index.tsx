@@ -149,27 +149,6 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
   const platformIds = useMemo(() => platforms?.map(p => p.id) ?? [], [platforms])
   const [selectedId, setSelectedId] = useRouteEnumParam('platform', platformIds, platformIds[0] ?? '')
 
-  const restartGatewayNow = useCallback(async () => {
-    // runGatewayRestart never rejects: it toasts the failure and settles the
-    // statusbar indicator; the banner stays if the restart did not complete.
-    const ok = await runGatewayRestart()
-
-    if (ok) {
-      setRestartNeeded(false)
-      window.setTimeout(() => void refreshPlatformsRef.current(true), 4000)
-    }
-  }, [])
-
-  // A multiplexed named profile is re-served from its new config at once (`hot_served`): no restart
-  // banner; re-read status once the adapter had a moment to connect. Anything else needs a restart.
-  const settleAfterUpdate = useCallback((hotServed: boolean | undefined) => {
-    if (hotServed) {
-      window.setTimeout(() => void refreshPlatformsRef.current(true), 4000)
-      return
-    }
-
-    setRestartNeeded(true)
-  }, [])
   const refreshPlatforms = useCallback(
     async (silent = false) => {
       if (!silent) {
@@ -190,6 +169,18 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
       }
     },
     [m, scopeProfile]
+  )
+
+  // A multiplexed named profile is re-served from its new config at once (`hot_served`): no restart
+  // banner; re-read status once the adapter had a moment to connect. Anything else keeps the restart
+  // action on the success toast.
+  const settleAfterUpdate = useCallback(
+    (hotServed: boolean | undefined) => {
+      if (hotServed) {
+        window.setTimeout(() => void refreshPlatforms(true), 4000)
+      }
+    },
+    [refreshPlatforms]
   )
 
   // Pairing has its own signal. platforms.changed tracks connect/disconnect
@@ -335,7 +326,7 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
       notify({
         kind: 'success',
         title: enabled ? m.platformEnabled(platform.name) : m.platformDisabled(platform.name),
-        message: result.hot_served ? m.appliedLive : m.restartToApply
+        message: result.hot_served ? m.appliedLive : m.restartToApply,
         action: result.hot_served ? undefined : restartGatewayAction
       })
     } catch (err) {
@@ -362,7 +353,7 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
       notify({
         kind: 'success',
         title: m.setupSaved(platform.name),
-        message: result.hot_served ? m.connectingLive : m.restartToReconnect
+        message: result.hot_served ? m.connectingLive : m.restartToReconnect,
         action: result.hot_served ? undefined : restartGatewayAction
       })
     } catch (err) {
