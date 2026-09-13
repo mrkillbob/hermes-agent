@@ -89,9 +89,10 @@ def _load_config() -> dict:
     file_cfg = read_json_or_empty(get_hermes_home() / "mem0.json")
     config.update({k: v for k, v in file_cfg.items() if v is not None and v != ""})
     # MEM0_API_KEY authenticates the Platform and self-hosted HTTP backends; pure OSS mode builds its
-    # backend from the local ``oss`` config and has no platform credential to resolve. Decide after
-    # mem0.json overrode the env fallback so a scope-less multiplex caller can load an OSS config
-    # without weakening fail-closed reads for credentialed modes.
+    # backend from the local ``oss`` config and has no platform credential to resolve, so a profile
+    # scope WITHOUT the key must still load an OSS config (#99121 as it stands today: the caller is
+    # scoped, the scope is just empty). Decided after mem0.json overrode the env defaults because
+    # the file may be what selects ``oss``. Scope-less callers already raised above.
     if config.get("mode", "platform") == "oss":
         config.setdefault("api_key", "")
     elif not config.get("api_key"):
