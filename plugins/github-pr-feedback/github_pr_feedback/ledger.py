@@ -2202,6 +2202,8 @@ class FeedbackLedger:
                         claimed_at.isoformat(),
                     ),
                 )
+            elif existing[0] == "failed" and existing[1] == "merge_queue_required":
+                return None
             elif existing[0] == "failed":
                 self._connection.execute(
                     "UPDATE merge_attempts SET status = 'claimed', owner = ?, claimed_at = ?, "
@@ -2216,8 +2218,6 @@ class FeedbackLedger:
                         head_sha,
                     ),
                 )
-            elif existing[0] == "failed" and existing[1] == "merge_queue_required":
-                return None
             else:
                 return None
         return MergeLease(repository, pr_number, head_sha, owner, claimed_at)

@@ -20,10 +20,13 @@ from github_pr_feedback.ci_runner import (
 from github_pr_feedback.github_client import (
     CheckState,
     Feedback,
+    GitHubClient,
     GitHubClientError,
+    GitHubRequestGate,
     PullRequestMergeState,
     RepositoryMergePolicy,
     ReviewState,
+    SubprocessCommandRunner,
 )
 from github_pr_feedback.ledger import FeedbackLedger, LedgerStateError
 from github_pr_feedback.merge_controller import (
@@ -446,6 +449,56 @@ def test_merge_queue_failure_is_durable_across_scheduled_scans(tmp_path: Path) -
     assert second.decision.blockers == ("merge_queue_required",)
     assert len(github.merge_calls) == 1
     assert ledger.merge_queue_required_merge_attempt("acme/widgets", 17)
+    ledger.close()
+
+
+def test_merge_queue_preflight_failure_releases_retryable_lease(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    args_log = tmp_path / "gh-args.log"
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$GH_ARGS_LOG\"\n"
+        "printf '%s\\n' 'HTTP 403: permission denied' >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o700)
+    github = GitHubClient(
+        SubprocessCommandRunner(
+            request_gate=GitHubRequestGate(
+                tmp_path / "github-request-gate.json",
+                min_interval_seconds=0,
+            ),
+            env_overrides={
+                "GH_ARGS_LOG": str(args_log),
+                "HERMES_HOME": str(tmp_path / "hermes"),
+                "PATH": str(bin_dir),
+            },
+        )
+    )
+    snapshot = eligible_snapshot()
+    ledger = enrolled_ledger(tmp_path)
+    controller = MergeController(
+        policy(),
+        SnapshotSource([snapshot, snapshot, snapshot, snapshot]),
+        github,
+        ledger,
+        owner="test",
+        now=lambda: NOW,
+    )
+
+    first = controller.run(17)
+    second = controller.run(17)
+
+    assert first.decision.blockers == ("merge_queue_preflight_failed",)
+    assert second.decision.blockers == ("merge_queue_preflight_failed",)
+    assert ledger.verification_required_merge_numbers("acme/widgets") == ()
+    assert args_log.read_text(encoding="utf-8").splitlines() == [
+        "api repos/acme/widgets/rules/branches/stable",
+        "api repos/acme/widgets/rules/branches/stable",
+    ]
     ledger.close()
 
 

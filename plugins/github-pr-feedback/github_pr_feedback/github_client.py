@@ -1140,13 +1140,22 @@ class GitHubClient:
 
         repository = _validated_repository(repository)
         base_branch = _required_branch(base_branch)
-        payload = self._json(
-            [
-                "gh",
-                "api",
-                f"repos/{repository}/rules/branches/{quote(base_branch, safe='')}",
-            ]
-        )
+        try:
+            payload = self._json(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repository}/rules/branches/{quote(base_branch, safe='')}",
+                ]
+            )
+        except GitHubClientError as error:
+            # This read happens before the merge write.  Preserve that fact so
+            # the controller can release the lease for a governed retry rather
+            # than treating the attempt as an ambiguous write.
+            raise GitHubClientError(
+                "GitHub merge-queue preflight was unavailable",
+                code="merge_queue_preflight_failed",
+            ) from error
         if not isinstance(payload, list) or any(
             not isinstance(rule, dict) or not isinstance(rule.get("type"), str)
             for rule in payload

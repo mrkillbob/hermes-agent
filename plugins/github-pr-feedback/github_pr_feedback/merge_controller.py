@@ -558,6 +558,20 @@ class MergeController:
                 base_branch=second_snapshot.pull_request.base_branch,
             )
         except GitHubClientError as error:
+            if error.code == "merge_queue_preflight_failed":
+                self._ledger.finish_merge_lease(
+                    lease,
+                    status="failed",
+                    updated_at=self._now(),
+                    error=error.code,
+                    expected_status="verification_required",
+                )
+                return MergeRunResult(
+                    MergeDecision(
+                        False, (error.code,), None, second.snapshot_digest
+                    ),
+                    None,
+                )
             if error.code in {"merge_rejected", "merge_queue_required"}:
                 self._ledger.finish_merge_lease(
                     lease,
