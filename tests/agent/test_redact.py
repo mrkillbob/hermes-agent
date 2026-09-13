@@ -205,6 +205,17 @@ class TestBareSecretEnvSuffixes:
         result = redact_sensitive_text(f"provider token={value}")
         assert value not in result
 
+    def test_dotted_config_redacts_quoted_pipes_without_swallowing_delimiter(self):
+        samples = (
+            'app.password="opaque-secret-part|still-secret-part"|b=2',
+            "app.password=opaque-secret-part|b=2",
+        )
+        for text in samples:
+            result = redact_sensitive_text(text, force=True)
+            assert "opaque-secret-part" not in result
+            assert "still-secret-part" not in result
+            assert result.endswith("|b=2")
+
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
 

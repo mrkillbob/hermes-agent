@@ -147,7 +147,9 @@ _INLINE_SECRET_ASSIGN_RE = re.compile(
 # bare secret-word key only at line start (optionally after ``export``), so conversational ``I have
 # password=foo`` mid-sentence is left alone.
 _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
-_CFG_VALUE = r"(['\"]?)([^\s&|]+?)\2(?=[\s&|]|$)"
+# A pipe terminates an unquoted value, but is ordinary secret material inside a
+# quoted value (for example, ``app.password="part-one|part-two"``).
+_CFG_VALUE = r"(['\"]?)((?(2)[^\s&]+?|[^\s&|]+?))\2(?=[\s&|]|$)"
 # Linear pre-gate for the _CFG_*_RE subs: no secret keyword => neither can match.
 _CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 
