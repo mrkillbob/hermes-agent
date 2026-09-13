@@ -194,8 +194,8 @@ def test_failed_seeded_binding_removes_ready_worktree_before_error(monkeypatch, 
             raise RuntimeError("metadata write failed")
 
     class _Manager:
-        def remove_after_explicit_request(self, root, *, active_session_bound):
-            removed.append((root, active_session_bound))
+        def remove_after_explicit_request(self, root, *, active_session_bound, retain_for_retry):
+            removed.append((root, active_session_bound, retain_for_retry))
             return MagicMock(removed=True)
 
     session = {
@@ -211,7 +211,7 @@ def test_failed_seeded_binding_removes_ready_worktree_before_error(monkeypatch, 
     with pytest.raises(RuntimeError, match="metadata write failed"):
         server._bind_conversation_worktree_on_submit(session)
 
-    assert removed == [("seeded-failure", False)]
+    assert removed == [("seeded-failure", False, True)]
     lease.release.assert_called_once_with()
 
 

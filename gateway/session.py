@@ -747,7 +747,9 @@ class _SessionFlight:
         self.closed = False
         self.result: Optional["SessionEntry"] = None
         self.error: Optional[BaseException] = None
-        self.post_actions: list[tuple[Callable[["SessionEntry"], "SessionEntry"], threading.Event, list]] = []
+        self.post_actions: list[
+            tuple[Callable[["SessionEntry"], "SessionEntry"], threading.Event, list, list]
+        ] = []
 
 
 @dataclass
@@ -945,7 +947,7 @@ class SessionStore(
         if not owner:
             action_waiter = None
             if _post_action is not None:
-                action_waiter = (threading.Event(), [])
+                action_waiter = (threading.Event(), [], [])
                 with inflight_lock:
                     if not slot.closed:
                         slot.post_actions.append((_post_action, *action_waiter))
@@ -963,21 +965,26 @@ class SessionStore(
                 action_waiter[0].wait()
                 if action_waiter[1]:
                     raise action_waiter[1][0]
-                assert slot.result is not None
+                assert action_waiter[2]
+                result = action_waiter[2][0]
+            else:
+                result = None
             assert slot.result is not None
             if conversation_kind == "interactive":
-                self._upgrade_route_for_interactive(slot.result)
+                self._upgrade_route_for_interactive(result or slot.result)
             if touch_activity:
-                self.update_session(slot.result.session_key)
-            return slot.result
+                self.update_session((result or slot.result).session_key)
+            return result or slot.result
 
         try:
             slot.result = self._get_or_create_session_impl(
                 source, force_new=force_new, touch_activity=touch_activity,
                 conversation_kind=conversation_kind,
             )
+            owner_result = slot.result
             if _post_action is not None:
-                slot.result = _post_action(slot.result)
+                owner_result = _post_action(slot.result)
+                slot.result = owner_result
             while True:
                 with inflight_lock:
                     actions = slot.post_actions
@@ -990,15 +997,17 @@ class SessionStore(
                             continue
                         slot.closed = True
                     break
-                for action, event, error in actions:
+                for action, event, error, result_holder in actions:
                     try:
                         assert slot.result is not None
-                        slot.result = action(slot.result)
+                        action_result = action(slot.result)
+                        result_holder.append(action_result)
+                        slot.result = action_result
                     except BaseException as exc:
                         error.append(exc)
                     finally:
                         event.set()
-            return slot.result
+            return owner_result if _post_action is not None else slot.result
         except BaseException as exc:
             slot.error = exc
             raise

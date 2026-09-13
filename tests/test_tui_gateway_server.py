@@ -5335,6 +5335,30 @@ def test_ws_orphan_reap_releases_resume_lock_before_slow_teardown(monkeypatch):
     assert not thread.is_alive()
 
 
+def test_automatic_teardown_waits_for_prompt_admission(monkeypatch):
+    """A reaper cannot pop a session while its prompt is materializing."""
+    session = _session(running=False)
+    sid = "prompt-teardown-race"
+    server._sessions[sid] = session
+    claimed = threading.Event()
+    monkeypatch.setattr(
+        server,
+        "_teardown_popped_session",
+        lambda popped, *, end_reason: claimed.set() or True,
+    )
+
+    with server._session_prompt_submit_lock(session):
+        worker = threading.Thread(target=lambda: server._close_session_by_id(sid))
+        worker.start()
+        assert not claimed.wait(timeout=0.05)
+        assert server._sessions[sid] is session
+
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    assert claimed.is_set()
+    assert sid not in server._sessions
+
+
 def test_ws_orphan_reap_reschedules_while_mid_turn_then_reaps(monkeypatch):
     """A detached session that is still running must keep the reap timer (#85578)."""
     callbacks = []

@@ -483,7 +483,11 @@ def _remove_failed_conversation_worktree(session: dict, binding, db) -> None:
         )
         remover = getattr(manager, "remove_after_explicit_request", None)
         if callable(remover):
-            result = remover(str(binding.root_session_id), active_session_bound=False)
+            result = remover(
+                str(binding.root_session_id),
+                active_session_bound=False,
+                retain_for_retry=True,
+            )
             if not getattr(result, "removed", False):
                 logger.warning(
                     "Failed to remove failed seeded conversation worktree %s",
@@ -2708,14 +2712,17 @@ def _claim_or_reuse_live(sid: str, session_key: str, record: dict, lease) -> tup
         # A PRIOR runtime for this stored id may still be sentinel-parked with a reap Timer armed; cancel +
         # finalize it quietly so the reap doesn't broadcast session.reclaimed (storm).
         _cancel_ws_orphan_reap(sid)
-        stale = _claim_parked_runtimes(session_key, keep_sid=sid, profile_home=profile_home)
+    # The parked-runtime claim is itself teardown. It must acquire prompt admission before the resume lock,
+    # so do it after releasing the resume lock rather than inverting prompt.submit's lock order.
+    stale = _claim_parked_runtimes(session_key, keep_sid=sid, profile_home=profile_home)
     _finalize_superseded_runtimes(stale)  # slow finalization stays OUTSIDE _session_resume_lock
     return None
 
 
 def _claim_parked_runtimes(session_key: str, *, keep_sid: str, profile_home=_ANY_PROFILE) -> list[tuple[str, dict]]:
     """Claim sentinel-parked stale runtimes of ``session_key`` for supersession: cancel their orphan-reap
-    Timer and pop them here (under the caller's _session_resume_lock); the caller finalizes after release."""
+    Timer and pop them here; prompt admission and resume both remain serialized while each stale runtime is claimed.
+    The caller finalizes after release."""
     stale: list[tuple[str, dict]] = []
     with _sessions_lock:
         candidates = [
@@ -2723,10 +2730,17 @@ def _claim_parked_runtimes(session_key: str, *, keep_sid: str, profile_home=_ANY
             if old_sid != keep_sid and not old.get("_finalized")
             and _session_lookup_key(old, fallback=old_sid) == session_key
             and _live_profile_matches(old, profile_home) and old.get("transport") is _detached_ws_transport]
-    for old_sid, _old in candidates:
-        _cancel_ws_orphan_reap(old_sid)
-        if (popped := _pop_session_by_id(old_sid)) is not None:
-            stale.append((old_sid, popped))
+    for old_sid, old in candidates:
+        with _session_prompt_submit_lock(old), _session_resume_lock, _sessions_lock:
+            current = _sessions.get(old_sid)
+            if (current is not old or current.get("_finalized")
+                    or _session_lookup_key(current, fallback=old_sid) != session_key
+                    or not _live_profile_matches(current, profile_home)
+                    or current.get("transport") is not _detached_ws_transport):
+                continue
+            _cancel_ws_orphan_reap(old_sid)
+            if (popped := _pop_session_by_id(old_sid)) is not None:
+                stale.append((old_sid, popped))
     return stale
 
 
@@ -2836,13 +2850,7 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
             session["agent_ready"].set()
             _emit("session.resume_progress", sid, {"message": message, "phase": "history", "status": "failed"})
             _emit("error", sid, {"message": message})
-            with _sessions_lock:
-                discarded = _sessions.pop(sid, None) if _sessions.get(sid) is session else None
-            if (lease := (discarded or {}).get("active_session_lease")) is not None:
-                lease.release()
-            root_lease = (discarded or {}).get("conversation_root_lease")
-            if root_lease is not None:
-                root_lease.release()
+            _close_session_by_id(sid, end_reason="resume_failed")
         finally:
             if close_db and hasattr(db, "close"):
                 try:

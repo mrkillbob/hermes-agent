@@ -359,10 +359,7 @@ def _(rid, params: dict) -> dict:
         except Exception:
             # Binding can create a lease and then fail while recording metadata.
             # Never leave an unreachable live draft (or its lease) in the registry.
-            with _sessions_lock:
-                failed = _sessions.pop(sid, None)
-            if failed is not None:
-                _teardown_session(failed, end_reason="branch_create_failed")
+            _close_session_by_id(sid, end_reason="branch_create_failed")
             raise
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
     # Worktree creation remains lazy, but preserve the existing agent pre-warm so
@@ -783,6 +780,7 @@ def _resume_eager(ctx: _Resume) -> dict:
                 conversation_worktree=ctx.conversation_worktree, **stored_runtime_overrides)
         except Exception as e:
             return _err(ctx.rid, 5000, f"resume failed: {e}")
+    resume_error = None
     with _session_resume_lock:
         live = _find_live_session_by_key(ctx.target, ctx.profile_home)
         if live is not None:
@@ -814,13 +812,18 @@ def _resume_eager(ctx: _Resume) -> dict:
         except Exception as e:
             # _init_session registers _sessions[sid] BEFORE its first db read; left in place the fast path
             # would serve that dead session forever.
-            if ctx.owns_db or ctx.conversation_worktree:
-                with _sessions_lock:
-                    _sessions.pop(sid, None)
+            resume_error = e
+        if resume_error is None:
+            session = _sessions.get(sid) or {}
+    if resume_error is not None:
+        if ctx.owns_db or ctx.conversation_worktree:
+            if _close_session_by_id(sid, end_reason="resume_failed"):
+                # The live record owned the lease; prevent the outer scope from releasing it twice.
+                ctx.conversation_root_lease = None
+            else:
                 with contextlib.suppress(Exception):
                     agent.close()
-            return _err(ctx.rid, 5000, f"resume failed: {e}")
-        session = _sessions.get(sid) or {}
+        return _err(ctx.rid, 5000, f"resume failed: {resume_error}")
     return _resume_response(
         ctx, sid, session, info=_session_info(agent, session), display=display_history, count_source=raw_history,
         started_at=float(session.get("created_at") or time.time()),
@@ -2168,11 +2171,7 @@ def _(rid, params: dict, session: dict) -> dict:
                                     conversation_worktree=conversation_worktree,
                                     conversation_root_lease=conversation_root_lease)
     except Exception as e:
-        with _sessions_lock:
-            failed = _sessions.pop(new_sid, None)
-        if failed is not None:
-            _finalize_session(failed)
-        elif conversation_root_lease is not None:
+        if not _close_session_by_id(new_sid, end_reason="branch_create_failed") and conversation_root_lease is not None:
             conversation_root_lease.release()
         return _err(rid, 5000, f"agent init failed on branch: {e}")
     return _ok(rid, {"session_id": new_sid, "stored_session_id": new_key, "title": title, "parent": old_key,

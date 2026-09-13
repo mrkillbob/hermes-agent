@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -458,6 +459,61 @@ def test_handoff_switch_completes_before_shared_flight_releases(store, manager, 
     assert results["handoff"] is results["interactive"]
     assert results["interactive"].session_id == "cli-session"
     assert manager.bound_roots == ["cli-session"]
+
+
+def test_concurrent_handoffs_return_their_own_switch_results(store, source, monkeypatch):
+    """Each queued handoff receives its own post-action result, not the last route."""
+    task_entered = threading.Event()
+    release_task = threading.Event()
+    first_switch_entered = threading.Event()
+    release_first_switch = threading.Event()
+    original = store._get_or_create_session_impl
+
+    def delayed(source_arg, *, force_new=False, touch_activity=True, conversation_kind="interactive"):
+        if conversation_kind == "task":
+            task_entered.set()
+            assert release_task.wait(2)
+        return original(
+            source_arg, force_new=force_new, touch_activity=touch_activity,
+            conversation_kind=conversation_kind,
+        )
+
+    def fake_switch(key, target, **_kwargs):
+        entry = store.lookup_by_session_key(key)
+        assert entry is not None
+        if target == "cli-a":
+            first_switch_entered.set()
+            assert release_first_switch.wait(2)
+        return dataclass_replace(entry, session_id=target)
+
+    monkeypatch.setattr(store, "_get_or_create_session_impl", delayed)
+    monkeypatch.setattr(store, "switch_session", fake_switch)
+    results = {}
+    first = threading.Thread(target=lambda: results.setdefault(
+        "first", store.get_or_create_session_and_switch(source, "cli-a")))
+    second = threading.Thread(target=lambda: results.setdefault(
+        "second", store.get_or_create_session_and_switch(source, "cli-b")))
+    first.start()
+    assert task_entered.wait(2)
+    second.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with store._inflight_lock:
+            slot = next(iter(store._inflight_sessions.values()))
+            if len(slot.post_actions) == 1:
+                break
+        time.sleep(0.01)
+    else:
+        pytest.fail("second handoff did not join the in-flight route")
+    release_task.set()
+    assert first_switch_entered.wait(2)
+    release_first_switch.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert results["first"].session_id == "cli-a"
+    assert results["second"].session_id == "cli-b"
 
 
 def test_explicit_fork_creation_failed_root_uses_recoverable_binding(store, manager, source, monkeypatch):
