@@ -38,7 +38,7 @@ def two_profiles(tmp_path, monkeypatch):
     ledgers = ("_servers", "_server_scope_keys", "_server_tool_scopes", "_server_connecting",
                "_server_connect_errors", "_server_connect_retry_after", "_server_connect_failures",
                "_server_error_counts", "_server_breaker_opened_at", "_lazy_server_configs",
-               "_mcp_tool_server_names", "_orphaned_adopters")
+               "_mcp_tool_server_names", "_orphaned_adopters", "_parallel_safe_servers")
     saved = {n: type(getattr(core, n))(getattr(core, n)) for n in ledgers}
     for n in ledgers:
         getattr(core, n).clear()
@@ -132,3 +132,56 @@ def test_owner_reload_reregisters_profiles_that_adopted_its_connection(two_profi
     two_profiles("b")
     assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
     assert disc.get_mcp_status({"x": cfg})[0]["status"] == "connected"
+
+
+def test_deregister_preserves_provenance_for_surviving_same_named_connection(two_profiles):
+    import tools.mcp_tool as core
+    from tools import mcp_tool_discovery as disc
+    from tools import mcp_tool_registration as reg
+    from tools.registry import registry
+
+    cfg_a = {"url": "https://mcp.example/x", "headers": {"Authorization": "Bearer A"}}
+    cfg_b = {"url": "https://mcp.example/x", "headers": {"Authorization": "Bearer B"}}
+
+    scope_a = two_profiles("a")
+    srv_a = _server("x", cfg_a)
+    disc._adopt_server("x", srv_a)
+    srv_a._registered_tool_names = reg._register_server_tools("x", srv_a, cfg_a)
+
+    scope_b = two_profiles("b")
+    srv_b = _server("x", cfg_b)
+    disc._adopt_server("x", srv_b)
+    srv_b._registered_tool_names = reg._register_server_tools("x", srv_b, cfg_b)
+
+    two_profiles("a")
+    reg._deregister_mcp_tool_all_scopes(srv_a, "mcp__x__t")
+
+    assert registry.snapshot_registration("mcp__x__t", scope=scope_a) is None
+    assert registry.snapshot_registration("mcp__x__t", scope=scope_b) is not None
+    assert disc.has_registered_mcp_tools() is True
+    assert disc.get_registered_mcp_server_names() == {"x"}
+
+
+def test_parallel_policy_is_scoped_to_same_named_connections(two_profiles):
+    from tools import mcp_tool_discovery as disc
+    from tools import mcp_tool_registration as reg
+
+    cfg_a = {"url": "https://mcp.example/x", "supports_parallel_tool_calls": False}
+    cfg_b = {"url": "https://mcp.example/x", "supports_parallel_tool_calls": True}
+
+    two_profiles("a")
+    srv_a = _server("x", cfg_a)
+    disc._adopt_server("x", srv_a)
+    srv_a._registered_tool_names = reg._register_server_tools("x", srv_a, cfg_a)
+    disc._select_new_servers({"x": cfg_a})
+
+    two_profiles("b")
+    srv_b = _server("x", cfg_b)
+    disc._adopt_server("x", srv_b)
+    srv_b._registered_tool_names = reg._register_server_tools("x", srv_b, cfg_b)
+    disc._select_new_servers({"x": cfg_b})
+
+    two_profiles("a")
+    assert disc.is_mcp_tool_parallel_safe("mcp__x__t") is False
+    two_profiles("b")
+    assert disc.is_mcp_tool_parallel_safe("mcp__x__t") is True

@@ -75,21 +75,25 @@ _CONNECTION_EXTERNAL_ENV_KEY = "_hermes_external_secret_env"
 
 
 def _external_secret_env() -> dict[str, str]:
-    """Return external-secret values for the active profile without borrowing another scope."""
+    """Return external-secret values from the active profile's immutable home snapshot."""
     try:
         from agent.secret_scope import current_secret_scope, is_multiplex_active
-        from hermes_cli.env_loader import get_secret_source
+        from hermes_cli.env_loader import get_secret_source, get_secret_source_values
+        from hermes_constants import get_hermes_home
     except Exception:  # pragma: no cover - early bootstrap/import fallback
         return {}
 
+    home_values = get_secret_source_values(get_hermes_home())
     scope = current_secret_scope()
     if scope is not None:
         return {
-            key: value for key, value in scope.items()
-            if get_secret_source(key) and isinstance(value, str)
+            key: value for key, value in home_values.items()
+            if isinstance(value, str) and scope.get(key) == value
         }
     if is_multiplex_active():
         return {}
+    if home_values:
+        return {key: value for key, value in home_values.items() if isinstance(value, str)}
     return {
         key: value for key, value in os.environ.items()
         if get_secret_source(key)

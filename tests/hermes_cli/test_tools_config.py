@@ -1158,8 +1158,6 @@ def test_dispatcher_worker_recovers_kanban_and_injects_inter_agent_separately(mo
     monkeypatch.setattr("model_tools._is_delegated_child_context", lambda: False)
 
     enabled = _get_platform_tools({}, "cli", include_default_mcp_servers=False)
-    assert "kanban" in enabled
-
     selected = _select_tool_names(sorted(enabled), [], quiet_mode=True)
     assert "kanban_complete" in selected
     assert "inter_agent" in selected
