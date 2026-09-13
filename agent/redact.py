@@ -126,7 +126,7 @@ _ENV_ASSIGN_LOWER_RE = re.compile(
 # relative URLs, and form bodies remain available to their dedicated passes.
 _INLINE_SECRET_KEY_NAMES = r"(?:token|secret|password|passwd|credential|auth|api[_-]?key)"
 _INLINE_SECRET_ASSIGN_RE = re.compile(
-    rf"(^|[{{[(,;:]\s*|\s+(?={_INLINE_SECRET_KEY_NAMES}\s*=)|[\"'])"
+    rf"(^|[{{[(,;:|]\s*|\s+(?={_INLINE_SECRET_KEY_NAMES}\s*=)|[\"'])"
     rf"({_INLINE_SECRET_KEY_NAMES})"
     r"(\s*=\s*)(?!<redacted(?:-[^>]+)?>)"
     r"((?:'[^']*'|\"[^\"]*\"|os\.(?:getenv|environ)\([^)]*\)|process\.env(?:\.[A-Za-z_]\w*|\[[^]]+\])|\$ENV\{[^}]+\}|[^\s,;&\"')\]}]+))",

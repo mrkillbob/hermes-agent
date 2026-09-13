@@ -175,6 +175,14 @@ class TestBareSecretEnvSuffixes:
         assert "opaqueValue" not in result
         assert "username=bob" in result
 
+    def test_inline_machine_fields_redact_pipe_and_whitespace_delimiters(self):
+        samples = (
+            ("status=ok|token=opaque-secret-value-12345", "opaque-secret-value-12345"),
+            ("status=ok password=A9f3kZq7Lm2Xw8Rt4Yv6", "A9f3kZq7Lm2Xw8Rt4Yv6"),
+        )
+        for text, cleartext in samples:
+            assert cleartext not in redact_sensitive_text(text, force=True)
+
 
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
