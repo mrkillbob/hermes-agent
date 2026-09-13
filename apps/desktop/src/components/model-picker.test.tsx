@@ -1,3 +1,4 @@
+import type { ModelOptionsResponse } from '@hermes/shared'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import type { ReactElement } from 'react'
@@ -7,7 +8,7 @@ import { I18nProvider } from '@/i18n'
 import { $localModelsEnabled } from '@/store/local-models-flag'
 import { $localRuntimeJobs } from '@/store/local-runtime-jobs'
 import { stubMenuDomApis, stubResizeObserver } from '@/test/jsdom'
-import type { LocalRuntimeJob, ModelOptionsResponse } from '@/types/hermes'
+import type { LocalRuntimeJob } from '@/types/hermes'
 
 import { ModelPickerDialog } from './model-picker'
 

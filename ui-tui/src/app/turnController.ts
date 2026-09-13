@@ -1,3 +1,5 @@
+import type { MessageCompletePayload, SubagentEventPayload } from '@hermes/shared/gateway-events'
+
 import {
   REASONING_PULSE_MS,
   STREAM_BATCH_MS,
@@ -5,7 +7,7 @@ import {
   STREAM_SCROLL_BATCH_MS,
   STREAM_TYPING_BATCH_MS
 } from '../config/timing.js'
-import type { SessionInterruptResponse, SubagentEventPayload } from '../gatewayTypes.js'
+import type { SessionInterruptResponse } from '../gatewayTypes.js'
 import { appendToolShelfMessage, isToolShelfMessage } from '../lib/liveProgress.js'
 import { hasReasoningTag, splitReasoning } from '../lib/reasoning.js'
 import {
@@ -136,7 +138,6 @@ class TurnController {
   private reasoningTimer: Timer = null
   private streamTimer: Timer = null
   private streamDelay = STREAM_IDLE_BATCH_MS
-  private toolProgressTimer: Timer = null
 
   // ── Credits notice machinery (Strategy B) ───────────────────────────
   //
@@ -568,12 +569,7 @@ class TurnController {
     this.flushPendingNotice()
   }
 
-  recordMessageComplete(payload: {
-    rendered?: string
-    reasoning?: string
-    response_previewed?: boolean
-    text?: string
-  }) {
+  recordMessageComplete(payload: MessageCompletePayload) {
     this.closeReasoningSegment()
 
     // Ink renders markdown via <Md>; the gateway's Rich-rendered ANSI
@@ -885,29 +881,6 @@ class TurnController {
       tools: this.activeTools,
       turnTrail: this.turnTools
     })
-  }
-
-  recordToolProgress(toolName: string, preview: string) {
-    if (this.interrupted) {
-      return
-    }
-
-    const index = this.activeTools.findIndex(tool => tool.name === toolName)
-
-    if (index < 0) {
-      return
-    }
-
-    this.activeTools = this.activeTools.map((tool, i) => (i === index ? { ...tool, context: preview } : tool))
-
-    if (this.toolProgressTimer) {
-      return
-    }
-
-    this.toolProgressTimer = setTimeout(() => {
-      this.toolProgressTimer = null
-      patchTurnState({ tools: [...this.activeTools] })
-    }, STREAM_BATCH_MS)
   }
 
   recordToolStart(toolId: string, name: string, context: string, verboseArgs?: string) {

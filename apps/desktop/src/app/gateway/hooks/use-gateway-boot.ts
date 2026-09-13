@@ -1,9 +1,4 @@
-import {
-  isGatewayReauthRequired,
-  isGatewayWebSocketUrl,
-  JsonRpcGatewayError,
-  resolveGatewayWsUrl
-} from '@hermes/shared'
+import { type GatewayEvent, isGatewayReauthRequired, isGatewayWebSocketUrl, JsonRpcGatewayError, resolveGatewayWsUrl } from '@hermes/shared'
 import { useEffect, useRef } from 'react'
 
 import { shouldApplyPostBootProgressError } from '@/components/boot-failure-reauth'
@@ -88,7 +83,6 @@ import {
   resetTileRuntimeBindings
 } from '@/store/session-states'
 import { windowProfileOverride } from '@/store/windows'
-import type { RpcEvent } from '@/types/hermes'
 
 import { stashGatewaySurvivor, survivorIsStale, takeGatewaySurvivor } from './gateway-hmr-survivor'
 
@@ -147,7 +141,7 @@ export function primaryRuntimeConnectionId(connection: Pick<HermesConnection, 'c
 
 interface GatewayBootOptions {
   beforeConnectionSwitch: () => void
-  handleGatewayEvent: (event: RpcEvent) => void
+  handleGatewayEvent: (event: GatewayEvent) => void
   onConnectionReady: (
     connection: Awaited<ReturnType<NonNullable<typeof window.hermesDesktop>['getConnection']>> | null
   ) => void

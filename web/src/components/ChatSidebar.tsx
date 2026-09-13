@@ -194,13 +194,16 @@ export function ChatSidebar({
     });
     const offState = gw.onState(setState);
 
-    const offSessionInfo = gw.on<SessionInfo>("session.info", (ev) => {
-      if (ev.payload) {
-        setInfo((prev) => ({ ...prev, ...ev.payload }));
+    const offSessionInfo = gw.on("session.info", (ev) => {
+      // session.info is surface-specific on the wire; narrow to the fields this sidebar reads.
+      const payload = ev.payload as SessionInfo | undefined;
+
+      if (payload) {
+        setInfo((prev) => ({ ...prev, ...payload }));
       }
     });
 
-    const offError = gw.on<{ message?: string }>("error", (ev) => {
+    const offError = gw.on("error", (ev) => {
       const message = ev.payload?.message;
 
       if (message) {

@@ -1,5 +1,6 @@
-import { getGlobalModelOptions, type HermesGateway, type ModelOptionsResponse } from '@/hermes'
-import type { ModelOptionProvider } from '@/types/hermes'
+import type { ModelOptionProvider, ModelOptionsResponse } from '@hermes/shared'
+
+import { getGlobalModelOptions, type HermesGateway } from '@/hermes'
 
 type CatalogProviderIdentity = Pick<ModelOptionProvider, 'aliases' | 'name' | 'slug'>
 

@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline'
 
 import { WebSocket as UndiciWebSocket } from 'undici'
 
-import type { GatewayEvent } from './gatewayTypes.js'
+import type { AnyGatewayEvent } from './gatewayTypes.js'
 import { CircularBuffer } from './lib/circularBuffer.js'
 import { recordParentLifecycle } from './lib/parentLog.js'
 
@@ -80,9 +80,9 @@ const resolvePython = (root: string) => {
   return hit || (process.platform === 'win32' ? 'python' : 'python3')
 }
 
-const asGatewayEvent = (value: unknown): GatewayEvent | null =>
+const asGatewayEvent = (value: unknown): AnyGatewayEvent | null =>
   value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { type?: unknown }).type === 'string'
-    ? (value as GatewayEvent)
+    ? (value as AnyGatewayEvent)
     : null
 
 // Hoisted decoder: attach mode can drive high-frequency binary frames
@@ -153,7 +153,7 @@ export class GatewayClient extends EventEmitter {
   private reqId = 0
   private logs = new CircularBuffer<string>(MAX_GATEWAY_LOG_LINES)
   private pending = new Map<string, Pending>()
-  private bufferedEvents = new CircularBuffer<GatewayEvent>(MAX_BUFFERED_EVENTS)
+  private bufferedEvents = new CircularBuffer<AnyGatewayEvent>(MAX_BUFFERED_EVENTS)
   private pendingExit: number | null | undefined
   private ready = false
   private readyTimer: ReturnType<typeof setTimeout> | null = null
@@ -178,7 +178,7 @@ export class GatewayClient extends EventEmitter {
     this.setMaxListeners(0)
   }
 
-  private publish(ev: GatewayEvent) {
+  private publish(ev: AnyGatewayEvent) {
     if (ev.type === 'gateway.ready') {
       this.ready = true
 
@@ -442,7 +442,7 @@ export class GatewayClient extends EventEmitter {
     }
   }
 
-  publishLocalEvent(ev: GatewayEvent) {
+  publishLocalEvent(ev: AnyGatewayEvent) {
     const frame = JSON.stringify({ jsonrpc: '2.0', method: 'event', params: ev })
 
     this.mirrorEventToSidecar(frame)

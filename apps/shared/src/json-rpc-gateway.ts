@@ -1,39 +1,6 @@
-export type GatewayEventName =
-  | 'gateway.ready'
-  | 'session.info'
-  | 'session.usage'
-  | 'message.start'
-  | 'message.delta'
-  | 'message.interim'
-  | 'message.complete'
-  | 'thinking.delta'
-  | 'reasoning.delta'
-  | 'reasoning.available'
-  | 'status.update'
-  | 'tool.start'
-  | 'tool.progress'
-  | 'tool.complete'
-  | 'tool.generating'
-  | 'todo.updated'
-  | 'clarify.request'
-  | 'approval.request'
-  | 'sudo.request'
-  | 'secret.request'
-  | 'background.complete'
-  | 'error'
-  | 'skin.changed'
-  | (string & {})
+import type { GatewayEvent, GatewayEventName } from './gateway-events.js'
 
-export interface GatewayEvent<P = unknown> {
-  payload?: P
-  /** Renderer-side source tag added by the Desktop gateway registry. */
-  profile?: string
-  /** Registry connection whose socket delivered the event (renderer-side tag;
-   * absent for the local/legacy primary path). */
-  connectionId?: string
-  session_id?: string
-  type: GatewayEventName
-}
+export type { GatewayEvent, GatewayEventName } from './gateway-events.js'
 
 export type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error'
 export type GatewayRequestId = number | string
@@ -89,6 +56,8 @@ export interface GatewayClientOptions {
 }
 
 const ANY = '*'
+
+const isGatewayReady = (event: GatewayEvent): event is GatewayEvent<'gateway.ready'> => event.type === 'gateway.ready'
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000
 // Replay fetch after reconnect: bounded so a wedged backend can't hold the
 // guard open; generous enough for a 512-frame ring to drain.
@@ -314,7 +283,7 @@ export class JsonRpcGatewayClient {
     this.invalidateSocket(socket, new Error(message))
   }
 
-  on<P = unknown>(type: GatewayEventName, handler: (event: GatewayEvent<P>) => void): () => void {
+  on<K extends GatewayEventName>(type: K, handler: (event: GatewayEvent<K>) => void): () => void {
     let handlers = this.eventHandlers.get(type)
 
     if (!handlers) {
@@ -328,7 +297,8 @@ export class JsonRpcGatewayClient {
   }
 
   onAny(handler: (event: GatewayEvent) => void): () => void {
-    return this.on(ANY as GatewayEventName, handler)
+    // ANY is a client-side wildcard, not a wire name; it never reaches the typed map.
+    return this.on(ANY as GatewayEventName, handler as (event: GatewayEvent<GatewayEventName>) => void)
   }
 
   onEvent(handler: (event: GatewayEvent) => void): () => void {
@@ -464,8 +434,8 @@ export class JsonRpcGatewayClient {
     }
 
     if (frame.method === 'event' && frame.params?.type) {
-      if (frame.params.type === 'gateway.ready') {
-        if (this.gatewayReadyAdvertisesHeartbeat(frame.params.payload)) {
+      if (isGatewayReady(frame.params)) {
+        if (frame.params.payload?.heartbeat === true) {
           const socket = this.socket
 
           if (socket) {
@@ -473,7 +443,7 @@ export class JsonRpcGatewayClient {
           }
         }
 
-        const epoch = (frame.params.payload as { replay_epoch?: unknown } | undefined)?.replay_epoch
+        const epoch = frame.params.payload?.replay_epoch
 
         if (typeof epoch === 'string' && epoch) {
           this.adoptReplayEpoch(epoch)
@@ -481,7 +451,7 @@ export class JsonRpcGatewayClient {
       }
 
       const sid = frame.params.session_id
-      const seqValue = (frame.params as { seq?: unknown }).seq
+      const seqValue = frame.params.seq
 
       if (this.replayHold && sid && typeof seqValue === 'number' && this.replayHold.has(sid)) {
         // Replay in flight for this session: park the frame; flushReplayHold
@@ -502,7 +472,7 @@ export class JsonRpcGatewayClient {
    */
   private recordSeq(event: GatewayEvent): void {
     const sid = event.session_id
-    const seq = (event as { seq?: unknown }).seq
+    const seq = event.seq
 
     if (!sid || typeof seq !== 'number' || !Number.isFinite(seq)) {
       return
@@ -600,7 +570,7 @@ export class JsonRpcGatewayClient {
    */
   private dispatchIfNewer(event: GatewayEvent): void {
     const sid = event.session_id
-    const seq = (event as { seq?: unknown }).seq
+    const seq = event.seq
 
     if (sid && typeof seq === 'number' && Number.isFinite(seq)) {
       const prev = this.lastSeenSeq.get(sid) ?? 0
@@ -646,10 +616,6 @@ export class JsonRpcGatewayClient {
         this.dispatchIfNewer(event)
       }
     }
-  }
-
-  private gatewayReadyAdvertisesHeartbeat(payload: unknown): boolean {
-    return Boolean(payload && typeof payload === 'object' && (payload as { heartbeat?: unknown }).heartbeat === true)
   }
 
   private startHeartbeat(socket: WebSocketLike): void {
