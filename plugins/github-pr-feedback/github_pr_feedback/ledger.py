@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import psutil
+
 from .policy import FeedbackReceipt
 
 _SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -187,15 +189,7 @@ def _deployment_owner_is_alive(owner: str) -> bool:
     match = _DEPLOYMENT_OWNER.fullmatch(owner)
     if match is None:
         return True
-    try:
-        os.kill(int(match.group("pid")), 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return bool(psutil.pid_exists(int(match.group("pid"))))
 
 
 def parse_maintenance_command_evidence(
