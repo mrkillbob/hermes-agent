@@ -154,7 +154,7 @@ def test_run_uses_python_safe_path_before_loading_hermes_module(
         receipt=str(tmp_path / "admission.json"), config=str(config),
     )
     assert secure_worker_cli.cmd_run(args) == 0
-    assert calls[0][1:4] == ["-P", "-m", "hermes_cli.main"]
+    assert calls[0][1:5] == ["-E", "-P", "-m", "hermes_cli.main"]
 
 
 def test_attest_requires_explicit_privacy_confirmation(tmp_path: Path) -> None:

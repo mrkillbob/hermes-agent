@@ -172,14 +172,23 @@ def _resume_panel_colors() -> tuple:
         return tuple(default for _, default in _RESUME_SKIN_COLORS)
 
 
-def _remote_kanban_private_work(provider: str | None) -> bool:
+def _remote_kanban_private_work(
+    provider: str | None,
+    fallback_model: list[dict] | None = None,
+) -> bool:
     """Return whether this CLI is a protected-remote Kanban worker."""
 
     if not str(os.environ.get("HERMES_KANBAN_TASK") or "").strip():
         return False
     from agent.llm_egress_runtime import provider_uses_egress_firewall
 
-    return provider_uses_egress_firewall(provider)
+    if provider_uses_egress_firewall(provider):
+        return True
+    return any(
+        isinstance(route, dict)
+        and provider_uses_egress_firewall(route.get("provider"))
+        for route in (fallback_model or [])
+    )
 
 
 def _remote_kanban_toolsets(_configured: list[str] | None) -> list[str]:
@@ -536,7 +545,7 @@ class CLIAgentSetupMixin:
                 if getattr(self, "_single_query_mode", False)
                 else self._clarify_callback)
             enabled_toolsets = self.enabled_toolsets
-            if _remote_kanban_private_work(runtime.get("provider")):
+            if _remote_kanban_private_work(runtime.get("provider"), self._fallback_model):
                 enabled_toolsets = _remote_kanban_toolsets(self.enabled_toolsets)
             self.agent = AIAgent(
                 model=effective_model, api_key=runtime.get("api_key"),

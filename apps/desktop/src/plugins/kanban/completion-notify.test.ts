@@ -185,6 +185,23 @@ describe('authoritative baseline', () => {
     expect(hostMock.notify).toHaveBeenCalledTimes(1)
   })
 
+  it('rebinds the cursor when the backend or profile changes', async () => {
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never)
+    await m.onKanbanEventsFrame('smoke', [ev(101, 'completed')])
+    expect(hostMock.notify).toHaveBeenCalledTimes(1)
+
+    // The same renderer instance can reconnect to another source whose event
+    // ids overlap. Rebinding must discard the old source's high-water mark.
+    const nextRest = makeRest(() => 200)
+    m.bindCompletionNotify(nextRest as never)
+    const fired = await m.onKanbanEventsFrame('smoke', [ev(150, 'completed')])
+
+    expect(fired).toBe(false)
+    expect(hostMock.notify).toHaveBeenCalledTimes(1)
+    expect(nextRest).toHaveBeenCalledWith('/board?board=smoke')
+  })
+
   it('baseline failure is fail-closed: unknown baseline suppresses, later success binds', async () => {
     let failBoard = true
 

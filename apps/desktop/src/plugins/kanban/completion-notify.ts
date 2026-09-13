@@ -103,6 +103,10 @@ function t(key: string, ...args: unknown[]): string {
 }
 
 export function bindCompletionNotify(r: Rest, pluginTranslate?: PluginTranslate, os?: PluginOs): void {
+  // A plugin instance can be rebound to a different backend/profile without a
+  // renderer restart. Event ids are only meaningful within that source.
+  seenEventIdByBoard.clear()
+  baselinePending.clear()
   rest = r
   translate = pluginTranslate ?? null
   osDoor = os ?? null

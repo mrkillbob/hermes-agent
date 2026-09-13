@@ -562,6 +562,35 @@ def _path_env_key(run_env: dict) -> str | None:
     return next((k for k in run_env if k.upper() == "PATH"), None) if _IS_WINDOWS else "PATH"
 
 
+def _trusted_local_terminal_session() -> bool:
+    """Return whether this LocalEnvironment call is a human-attended CLI terminal.
+
+    ``LocalEnvironment`` is also used by gateways, cron, API sessions, and
+    delegated agents. Their absence of a Kanban marker is not proof that the
+    operator intended to expose the host's Git credentials.
+    """
+    try:
+        from agent.delegation_context import is_delegated_child_process_context
+        from tools.approval_context import (
+            _is_cron_approval_context,
+            _is_gateway_approval_context,
+            _is_interactive_cli,
+            _is_single_query_approval_context,
+            _is_unattended_platform_approval_context,
+        )
+        return (
+            _is_interactive_cli()
+            and not os.environ.get("HERMES_KANBAN_TASK")
+            and not _is_gateway_approval_context()
+            and not _is_cron_approval_context()
+            and not _is_single_query_approval_context()
+            and not _is_unattended_platform_approval_context()
+            and not is_delegated_child_process_context()
+        )
+    except Exception:
+        return False
+
+
 def _make_run_env(env: dict) -> dict:
     """Build a run environment with a sane PATH and provider-var stripping."""
     source = dict(os.environ | env)
@@ -570,13 +599,17 @@ def _make_run_env(env: dict) -> dict:
         lambda p: _prepend_git_bash_dirs(_append_missing_sane_path_entries(p)),
     )
     # _scrubbed_env protects background/untrusted children by neutralizing the
-    # host Git config and credentials. The foreground terminal is the explicit
-    # operator-authenticated exception; restore only the narrowly scoped Git
-    # transport inputs from the caller's environment.
-    if not str(source.get("HERMES_KANBAN_TASK") or "").strip():
+    # host Git config and credentials. Only a human-attended CLI terminal gets
+    # the explicit operator-authenticated exception; gateway, cron, single-query,
+    # and delegated sessions must remain fenced even when TASK is absent.
+    if _trusted_local_terminal_session():
         for key in _LOCAL_TERMINAL_GIT_AUTH_ENV:
             if source.get(key) is not None:
                 result[key] = source[key]
+            elif key in {"GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL"}:
+                # Let gh/git use their normal HOME-scoped defaults in the trusted
+                # terminal. The scrubber's /dev/null values must not leak into it.
+                result.pop(key, None)
     return result
 
 

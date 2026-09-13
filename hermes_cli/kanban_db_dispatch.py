@@ -1550,13 +1550,12 @@ def dispatch_once(
     max_in_progress_by_profile: Optional[dict] = None,
     reconcile_orphans: bool = True,
 ) -> DispatchResult:
-    """Run one dispatcher tick under the board's single-writer lock.
+    """Run one dispatcher tick under host admission and board writer locks.
 
-    Wraps :func:`_dispatch_once_locked` in the non-blocking :func:`_dispatch_tick_lock`
-    so two dispatchers on one ``kanban.db`` never race a write tick on WAL
-    frames. The loser returns an empty ``DispatchResult`` with
-    ``skipped_locked=True`` and writes nothing; the lock is keyed on the
-    resolved DB path so unrelated boards tick in parallel.
+    The host lock makes the cross-board running-task snapshot and claim decision
+    one critical section; the board lock remains the per-database single-writer
+    guard. A contended dispatcher returns an empty ``DispatchResult`` with
+    ``skipped_locked=True`` and writes nothing.
     """
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
@@ -1580,17 +1579,20 @@ def dispatch_once(
     try:
         db_path = _kb.kanban_db_path(board=board)
     except Exception:
-        # Must not lose the tick — fall through to an unguarded dispatch.
-        result = _locked_tick()
-        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
-        return result
-    with _kbc._dispatch_tick_lock(db_path) as held:
-        if not held:
+        db_path = None
+    with _kbc._dispatch_host_admission_lock() as host_held:
+        if not host_held:
             result = DispatchResult(skipped_locked=True)
-        else:
+        elif db_path is None:
             result = _locked_tick()
-            # Still under the dispatch lock: periodic PASSIVE WAL checkpoint.
-            _kbc._maybe_checkpoint_wal(conn, db_path)
+        else:
+            with _kbc._dispatch_tick_lock(db_path) as held:
+                if not held:
+                    result = DispatchResult(skipped_locked=True)
+                else:
+                    result = _locked_tick()
+                    # Still under both locks: periodic PASSIVE WAL checkpoint.
+                    _kbc._maybe_checkpoint_wal(conn, db_path)
     # Lock released. Fire the tick observer strictly OUTSIDE the critical
     # section: a slow subscriber must never stall a sibling dispatcher's tick.
     _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
@@ -1975,6 +1977,10 @@ def _dispatch_once_locked(
             "GROUP BY assignee"
         ):
             per_profile_running[prow["assignee"]] = int(prow["n"])
+        for other_row in other_running_rows:
+            assignee = other_row.get("assignee")
+            if assignee:
+                per_profile_running[assignee] = per_profile_running.get(assignee, 0) + 1
     from hermes_cli.kanban_worker_capacity import WorkerCapacity
 
     capacity = WorkerCapacity(

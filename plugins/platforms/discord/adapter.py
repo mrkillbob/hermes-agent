@@ -4977,7 +4977,10 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
 
             for profile, value in raw.items():
                 if profile not in SPECIALIST_PROFILES or not isinstance(value, dict):
-                    return None
+                    # Any malformed declaration invalidates the whole registry;
+                    # returning None would be interpreted as "no registry" and
+                    # let arbitrary specialist profiles through.
+                    return CapabilityRegistry(board=settings["board"], configured_profiles={})
                 declarations[profile] = CapabilitySignature(
                     domain=value["domain"],
                     actions=tokens(value["actions"]),

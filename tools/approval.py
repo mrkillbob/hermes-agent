@@ -969,11 +969,11 @@ def _kanban_pull_request_creation(command: str) -> bool:
                 if executable == "curl" and any(
                     token in {
                         "-d", "--data", "--data-raw", "--data-binary",
-                        "--data-urlencode", "--json",
+                        "--data-ascii", "--data-urlencode", "--json",
                     }
                     or token.startswith((
                         "--data=", "--data-raw=", "--data-binary=",
-                        "--data-urlencode=", "--json=", "-d=",
+                        "--data-ascii=", "--data-urlencode=", "--json=", "-d=",
                     ))
                     or (token.startswith("-d") and token != "-d")
                     for token in lowered

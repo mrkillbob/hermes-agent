@@ -50,8 +50,9 @@ def _run_with_env(extra_os_env=None, self_env=None):
     captured = {}
     test_environ = {
         "PATH": "/usr/bin:/bin",
-        "HOME": "/home/user",
-        "USER": "testuser",
+            "HOME": "/home/user",
+            "USER": "testuser",
+            "HERMES_INTERACTIVE": "1",
     }
     if extra_os_env:
         test_environ.update(extra_os_env)
@@ -1793,6 +1794,7 @@ class TestHermesInternalDynamicSecrets:
             "GIT_CONFIG_GLOBAL": "/home/operator/.gitconfig",
             "GH_TOKEN": "ghp-operator-token",
             "GIT_TERMINAL_PROMPT": "1",
+            "HERMES_INTERACTIVE": "1",
         }, clear=True):
             run_env = _make_run_env({})
 
@@ -1800,6 +1802,35 @@ class TestHermesInternalDynamicSecrets:
         assert run_env["GIT_CONFIG_GLOBAL"] == "/home/operator/.gitconfig"
         assert run_env["GH_TOKEN"] == "ghp-operator-token"
         assert run_env["GIT_TERMINAL_PROMPT"] == "1"
+
+    def test_make_run_env_trusted_terminal_uses_home_git_defaults(self):
+        from tools.environments.local import _make_run_env
+
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/home/operator",
+            "HERMES_INTERACTIVE": "1",
+        }, clear=True):
+            run_env = _make_run_env({})
+
+        assert run_env.get("GH_CONFIG_DIR") != os.devnull
+        assert run_env.get("GIT_CONFIG_GLOBAL") != os.devnull
+
+    def test_make_run_env_gateway_does_not_restore_operator_git_auth(self):
+        from tools.environments.local import _make_run_env
+
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/home/operator",
+            "HERMES_INTERACTIVE": "1",
+            "HERMES_SESSION_PLATFORM": "discord",
+            "GH_CONFIG_DIR": "/home/operator/.config/gh",
+            "GH_TOKEN": "ghp-operator-token",
+        }, clear=True):
+            run_env = _make_run_env({})
+
+        assert run_env["GH_CONFIG_DIR"] == os.devnull
+        assert "GH_TOKEN" not in run_env
 
     def test_protected_kanban_terminal_scrubs_operator_git_auth(self):
         """Protected workers retain the credential boundary despite using a terminal."""

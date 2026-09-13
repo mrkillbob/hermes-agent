@@ -260,6 +260,25 @@ def test_seed_preserves_partial_profile_after_setup_failure(tmp_path: Path) -> N
     # existence check; failed setup must never delete another invocation's
     # profile or credentials.
     assert profile_dir.exists()
+    assert (profile_dir / ".federation_seed_incomplete").is_file()
+
+
+def test_seed_groups_rejects_incomplete_profile(tmp_path: Path) -> None:
+    manifest = load_manifest(MANIFEST)
+    profile_dir = tmp_path / "profiles" / "writer"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / ".federation_seed_incomplete").write_text("incomplete\n")
+    default = tmp_path / "default"
+    default.mkdir()
+
+    result = seed_federation_groups(
+        manifest,
+        apply=True,
+        profile_dir_for=lambda name: default if name == "default" else profile_dir,
+    )
+
+    assert result["failed"]
+    assert "writer" in result["failed"][0]["error"]
 
 
 def test_seed_does_not_refresh_owned_profile_without_explicit_opt_in(tmp_path: Path) -> None:

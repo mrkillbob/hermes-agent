@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import time
@@ -22,6 +23,40 @@ _AUTHORITIES = frozenset({"advisory", "operator_gated", "write_scoped"})
 _REASONING_EFFORTS = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
+_FEDERATION_SEED_MARKER = ".federation_seed_incomplete"
+_FEDERATION_SEED_RESERVATION_SUFFIX = ".federation_seed.lock"
+
+
+def _federation_seed_reservation(profile_dir: Path) -> Path:
+    """Return the per-profile-parent reservation used during profile creation."""
+    return profile_dir.parent / f".{profile_dir.name}{_FEDERATION_SEED_RESERVATION_SUFFIX}"
+
+
+def _claim_federation_seed_reservation(profile_dir: Path) -> bool:
+    """Atomically claim ownership before calling the profile creator."""
+    try:
+        profile_dir.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            _federation_seed_reservation(profile_dir),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        os.close(fd)
+        return True
+    except (FileExistsError, OSError):
+        return False
+
+
+def _remove_federation_seed_reservation(profile_dir: Path) -> None:
+    _federation_seed_reservation(profile_dir).unlink(missing_ok=True)
+
+
+def _mark_incomplete_federation_profile(profile_dir: Path) -> None:
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / _FEDERATION_SEED_MARKER).write_text(
+        "Federation profile setup did not complete; repair explicitly before group seeding.\n",
+        encoding="utf-8",
+    )
 
 
 @dataclass(frozen=True)
@@ -638,26 +673,44 @@ def seed_federation(
 
         profile_dir_for = get_profile_dir
     for role in planned:
+        expected_profile_dir = Path(profile_dir_for(role.id))
+        if not _claim_federation_seed_reservation(expected_profile_dir):
+            result["failed"].append(
+                {"role_id": role.id, "error": "profile creation is already in progress"}
+            )
+            continue
+        incomplete_marker: Path | None = None
         try:
             profile_dir = create_profile(
                 name=role.id,
                 no_alias=not create_alias,
                 description=role.description,
             )
-            _write_role_config(Path(profile_dir), role, manifest)
-            _write_role_identity(Path(profile_dir), role, manifest)
-            skill_result = _sync_role_skills(Path(profile_dir), role)
+            profile_dir = Path(profile_dir)
+            incomplete_marker = profile_dir / _FEDERATION_SEED_MARKER
+            incomplete_marker.write_text(
+                "Federation profile setup in progress; repair explicitly if this marker remains.\n",
+                encoding="utf-8",
+            )
+            _write_role_config(profile_dir, role, manifest)
+            _write_role_identity(profile_dir, role, manifest)
+            skill_result = _sync_role_skills(profile_dir, role)
             if skill_result["installed"]:
                 result["skills_installed"][role.id] = skill_result["installed"]
             if skill_result["skipped"]:
                 result["skills_skipped"][role.id] = skill_result["skipped"]
             result["created"].append(role.id)
+            incomplete_marker.unlink(missing_ok=True)
+            _remove_federation_seed_reservation(expected_profile_dir)
         except Exception as exc:
-            # Do not remove a path merely because this invocation observed it
-            # as absent. Another seeder can win the mkdir race after that
-            # snapshot; deleting the directory here would destroy its profile
-            # and secrets. A partial profile is recoverable and must be
-            # repaired explicitly.
+            # This invocation owns the reservation, so a directory left by a
+            # failing creator is known to be our partial profile. Mark it so a
+            # concurrent group seeder cannot treat the bare directory as valid;
+            # never remove the directory or its credentials.
+            if expected_profile_dir.is_dir():
+                _mark_incomplete_federation_profile(expected_profile_dir)
+            else:
+                _remove_federation_seed_reservation(expected_profile_dir)
             result["failed"].append({"role_id": role.id, "error": str(exc)})
 
     if apply:
@@ -770,7 +823,15 @@ def seed_federation_groups(
     planned: list[dict[str, Any]] = []
     missing_profiles: list[str] = []
     for group in manifest.groups:
-        missing = [role_id for role_id in group.roles if not profile_dir_for(role_id).is_dir()]
+        missing = [
+            role_id
+            for role_id in group.roles
+            if (
+                not profile_dir_for(role_id).is_dir()
+                or (Path(profile_dir_for(role_id)) / _FEDERATION_SEED_MARKER).is_file()
+                or _federation_seed_reservation(Path(profile_dir_for(role_id))).exists()
+            )
+        ]
         if missing:
             missing_profiles.extend(missing)
         planned.append(

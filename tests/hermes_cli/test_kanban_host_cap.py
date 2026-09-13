@@ -156,6 +156,30 @@ def test_max_in_progress_counts_other_boards(
     assert res.host_capacity_saturated is True
 
 
+def test_max_in_progress_per_profile_counts_other_boards(
+    kanban_home, all_assignees_spawnable,
+):
+    """A profile's per-profile cap applies to workers on every board."""
+    kb.create_board("second")
+    with kbc.connect(board="second") as conn:
+        running_id = kb.create_task(conn, title="busy", assignee="alice")
+        assert kb.claim_task(conn, running_id) is not None
+
+    spawns: list = []
+    with kbc.connect() as conn:
+        kb.create_task(conn, title="waiting", assignee="alice")
+        res = kbd.dispatch_once(
+            conn,
+            spawn_fn=_fake_spawn_factory(spawns),
+            max_in_progress_per_profile=1,
+        )
+
+    assert not spawns
+    assert not res.spawned
+    assert len(res.skipped_per_profile_capped) == 1
+    assert res.skipped_per_profile_capped[0][1:] == ("alice", 1)
+
+
 def test_host_capacity_is_reported_when_board_cap_is_checked_first(
     kanban_home, all_assignees_spawnable,
 ):
