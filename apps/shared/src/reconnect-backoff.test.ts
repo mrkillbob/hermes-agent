@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { reconnectBackoffDelayMs } from './reconnect-backoff'
+import { reconnectBackoffDelayMs } from './reconnect-backoff.js'
 
 describe('reconnectBackoffDelayMs', () => {
   it('increases the delay ceiling across consecutive failed attempts', () => {
@@ -85,6 +85,20 @@ describe('reconnectBackoffDelayMs', () => {
     try {
       expect(reconnectBackoffDelayMs(0)).toBe(300)
       expect(reconnectBackoffDelayMs(100)).toBe(15_000)
+    } finally {
+      randomSpy.mockRestore()
+    }
+  })
+
+  it('jitter: false returns the exact ceiling — the ladder web prints in its banner', () => {
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.1)
+
+    try {
+      expect([0, 1, 2, 3].map(a => reconnectBackoffDelayMs(a, { baseDelayMs: 1000, capMs: 30_000, jitter: false }))).toEqual(
+        [1000, 2000, 4000, 8000]
+      )
+      expect(reconnectBackoffDelayMs(99, { baseDelayMs: 1000, capMs: 30_000, jitter: false })).toBe(30_000)
+      expect(reconnectBackoffDelayMs(10_000, { jitter: false })).toBeLessThanOrEqual(15_000)
     } finally {
       randomSpy.mockRestore()
     }
