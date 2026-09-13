@@ -1401,6 +1401,13 @@ export const ja = defineLocale({
     emptyTitle: 'まだ学習はありません',
     emptyDesc: 'Hermes がスキルやメモリを蓄積すると、ここに表示されます。'
   },
+  lunarCity: {
+    heading: 'Hermesの世界',
+    disabled: 'ワールドは無効です',
+    disabledHint: '設定 → プラグインでワールドを有効にすると、Lunar City を再び利用できます。',
+    label: 'Lunar City',
+    worldAriaLabel: 'Lunar City ワールド'
+  },
   agents: {
     extendedTranscript: '詳細な実行ログ',
     transcriptTruncated: '最新の 16 KiB を表示',

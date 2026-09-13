@@ -3,17 +3,17 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { I18nProvider } from '@/i18n'
+import { I18nProvider, type Locale } from '@/i18n'
 import { $worldEnabled, $worldOnboardingDismissed, WORLD_ONBOARDING_DISMISSED_STORAGE_KEY } from '@/store/lunar-city'
 
 import { LunarCity } from './index'
 
-const renderWorld = () => {
+const renderWorld = (initialLocale: Locale = 'en') => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <I18nProvider configClient={null}>
+      <I18nProvider configClient={null} initialLocale={initialLocale}>
         <MemoryRouter>
           <LunarCity />
         </MemoryRouter>
@@ -31,6 +31,14 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('LunarCity', () => {
+  it('renders its surface copy through the active locale', () => {
+    renderWorld('ja')
+    fireEvent.click(screen.getByRole('button', { name: 'Use Hermes defaults' }))
+
+    expect(screen.getByRole('heading', { name: 'Hermesの世界' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Your Hermes world' })).toBeNull()
+  })
+
   it('shows first-open onboarding with Hermes defaults', () => {
     renderWorld()
 
