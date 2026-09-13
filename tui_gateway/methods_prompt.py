@@ -531,6 +531,61 @@ def _lock_in_submit_turn(
     return None, fields
 
 
+def _session_prompt_submit_lock(session: dict):
+    """Return the per-session admission lock, including legacy runtime records."""
+    with session["history_lock"]:
+        return session.setdefault("prompt_submit_lock", threading.Lock())
+
+
+def _validate_truncation_before_materializing(rid, sid, session, params):
+    """Run destructive-rewind validation against a detached history snapshot."""
+    history = _history_without_ephemeral_scaffolding(session.get("history", []))
+    # Row-id healing is allowed during the actual cut, but a rejected submit must
+    # not mutate a live draft while it is still unpersisted.
+    snapshot = [dict(message) if isinstance(message, dict) else message for message in history]
+    _ordinal, cut_index, err = _resolve_truncation_ordinal(
+        rid, sid, session, params, snapshot)
+    if err is not None:
+        return err
+    from agent.context_compressor import history_before_user_originated_turn
+    truncated, _ = history_before_user_originated_turn(snapshot, cut_index)
+    if not truncated and snapshot and not is_truthy_value(params.get("confirm_empty_truncate")):
+        return _err(
+            rid, 4028,
+            "truncation would erase the entire session transcript; "
+            "resubmit with confirm_empty_truncate=true if this is intended")
+    return None
+
+
+def _admit_prompt_submit(
+    rid, sid, session, text, params, has_truncation, requested_rebind_ids,
+    hosted_task, internal_hosted_submit, transport):
+    """Serialize admission, validation, materialization, and turn claim per session."""
+    with _session_prompt_submit_lock(session):
+        while True:
+            with session["history_lock"]:
+                if not session.get("running"):
+                    break
+                if internal_hosted_submit:
+                    return _err(rid, 4091, "hosted room member session is busy"), None
+                busy_transport = transport or session.get("transport")
+            busy_response = _handle_busy_submit(
+                rid, sid, session, text, busy_transport, queued=bool(params.get("queued")))
+            if busy_response is not None:
+                return busy_response, None
+        if has_truncation:
+            if (err := _validate_truncation_before_materializing(
+                    rid, sid, session, params)) is not None:
+                return err, None
+        err, survivor_fields = _lock_in_submit_turn(
+            rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task)
+        if err is not None:
+            return err, None
+        if (err := _persist_session_row_for_submit(rid, session)) is not None:
+            return err, None
+        return None, survivor_fields
+
+
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
@@ -580,38 +635,14 @@ def _(rid, params: dict) -> dict:
         if (t := current_transport()) is not None:
             _attach_session_transport(session, t)
             _cancel_ws_orphan_reap(sid)
-    # Claim the turn against a possibly-running session (busy/queued reply, else fall
-    # through once ``running`` is observed False).  The provider interrupt happens after
-    # history_lock is released (a non-interruptible tool may hold it); if the old turn
-    # finished between the two acquisitions, retry the claim rather than strand this
-    # prompt in a queue whose drain already ran.
-    while True:
-        with session["history_lock"]:
-            if not session.get("running"):
-                break
-            if internal_hosted_submit:
-                return _err(rid, 4091, "hosted room member session is busy")
-            busy_transport = t or session.get("transport")
-        busy_response = _handle_busy_submit(
-            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")))
-        if busy_response is not None:
-            return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
     requested_rebind_ids = (
         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
         if isinstance(raw_rebind_ids, list) else None)
-    # Materialize the first-use binding before a destructive transcript cut.  If binding or
-    # persistence fails, the original history remains intact and the client can retry.
-    persisted_before_turn = False
-    if has_truncation:
-        if (err := _persist_session_row_for_submit(rid, session)) is not None:
-            return err
-        persisted_before_turn = True
-    err, survivor_fields = _lock_in_submit_turn(
-        rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task)
+    err, survivor_fields = _admit_prompt_submit(
+        rid, sid, session, text, params, has_truncation, requested_rebind_ids,
+        hosted_task, internal_hosted_submit, t)
     if err is not None:
-        return err
-    if not persisted_before_turn and (err := _persist_session_row_for_submit(rid, session)) is not None:
         return err
     if turn_isolation:
         isolated_response = _submit_prompt_to_compute_host(

@@ -320,7 +320,8 @@ def _(rid, params: dict) -> dict:
             "conversation_worktree": conversation_worktree,
             "conversation_root_lease": conversation_root_lease,
             "explicit_cwd": explicit_cwd,
-            "history": history, "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
+            "history": history, "history_lock": threading.Lock(), "prompt_submit_lock": threading.Lock(),
+            "history_version": 0, "image_counter": 0,
             "cwd": raw_cwd if conversation_worktree else _completion_cwd(params), "inflight_turn": None, "last_active": now,
             "model_override": session_model_override,
             "create_reasoning_override": create_reasoning_override,
@@ -349,8 +350,17 @@ def _(rid, params: dict) -> dict:
     if parent_session_id and history:
         # A seeded branch is durable immediately; bind before its first DB write so a
         # restart cannot observe a branch transcript without its isolated root.
-        if source in {"desktop", "tui"}:
-            _bind_conversation_worktree_on_submit(_sessions[sid])
+        try:
+            if source in {"desktop", "tui"}:
+                _bind_conversation_worktree_on_submit(_sessions[sid])
+        except Exception:
+            # Binding can create a lease and then fail while recording metadata.
+            # Never leave an unreachable live draft (or its lease) in the registry.
+            with _sessions_lock:
+                failed = _sessions.pop(sid, None)
+            if failed is not None:
+                _teardown_session(failed, end_reason="branch_create_failed")
+            raise
         _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
     # Worktree creation remains lazy, but preserve the existing agent pre-warm so
@@ -461,6 +471,7 @@ class _Resume:
         self.rid, self.params, self.target = rid, params, target
         self.db, self.owns_db, self.found, self.profile_resume_cwd = None, False, None, ""
         self.conversation_worktree = {}
+        self.conversation_worktree_historical = False
         self.conversation_root_lease = None
         self.cols = _int_param(params, "cols", 80)
         # ``profile`` (app-global remote mode): resume from another local profile's state.db.
@@ -487,6 +498,7 @@ class _Resume:
             close_on_disconnect=_flag(self.params, "close_on_disconnect"),
             profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd), **extra)
         record.update(conversation_worktree=self.conversation_worktree,
+                      conversation_worktree_historical=self.conversation_worktree_historical,
                       conversation_root_lease=self.conversation_root_lease)
         return record
 
@@ -779,6 +791,7 @@ def _resume_eager(ctx: _Resume) -> dict:
                 _init_session(sid, ctx.target, agent, history, cols=ctx.cols, cwd=ctx.profile_resume_cwd,
                               session_db=ctx.db, source=source, explicit_cwd=bool(ctx.profile_resume_cwd),
                               conversation_worktree=ctx.conversation_worktree,
+                              conversation_worktree_historical=ctx.conversation_worktree_historical,
                               conversation_root_lease=ctx.conversation_root_lease)
                 # Ownership TRANSFER: the agent holds the handle for life (AIAgent.close() releases it). The
                 # owns_db drop is UNCONDITIONAL — the session is registered against the handle, so the finally
@@ -843,6 +856,11 @@ def _(rid, params: dict) -> dict:
                     ctx.conversation_root_lease = _acquire_conversation_root_lease(
                         binding, surface=_resolve_session_source(_str_param(params, "source") or None))
                     ctx.profile_resume_cwd = ctx.conversation_worktree["path"]
+                elif manager is not None and ctx.profile_resume_cwd:
+                    # Rows written before isolation was enabled are historical:
+                    # preserve their recorded workspace, but never turn the first
+                    # resumed submit into a new root claim.
+                    ctx.conversation_worktree_historical = True
             except Exception as exc:
                 return _err(rid, 5000, f"conversation worktree setup failed: {exc}")
         if ctx.lazy:

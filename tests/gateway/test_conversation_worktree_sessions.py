@@ -7,6 +7,7 @@ manager's durable root identity.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -374,6 +375,90 @@ def test_task_gateway_source_never_allocates_conversation_worktree(store, manage
     assert entry.cwd is None
     assert entry.conversation_worktree == {}
     assert manager.bound_roots == []
+
+
+def test_task_and_interactive_calls_share_flight_and_upgrade_one_route(
+    store, manager, source, monkeypatch
+):
+    """A task-first race must not publish a competing interactive root."""
+    task_entered = threading.Event()
+    release_task = threading.Event()
+    original = store._get_or_create_session_impl
+
+    def delayed(source_arg, *, force_new=False, touch_activity=True, conversation_kind="interactive"):
+        if conversation_kind == "task":
+            task_entered.set()
+            assert release_task.wait(2)
+        return original(
+            source_arg, force_new=force_new, touch_activity=touch_activity,
+            conversation_kind=conversation_kind,
+        )
+
+    monkeypatch.setattr(store, "_get_or_create_session_impl", delayed)
+    results = {}
+    task_thread = threading.Thread(target=lambda: results.setdefault(
+        "task", store.get_or_create_session(source, conversation_kind="task")))
+    interactive_thread = threading.Thread(target=lambda: results.setdefault(
+        "interactive", store.get_or_create_session(source, conversation_kind="interactive")))
+    task_thread.start()
+    assert task_entered.wait(2)
+    interactive_thread.start()
+    release_task.set()
+    task_thread.join(timeout=2)
+    interactive_thread.join(timeout=2)
+
+    assert results["task"] is results["interactive"]
+    assert results["interactive"].conversation_worktree["root_session_id"] == results["task"].session_id
+    assert manager.bound_roots == [results["task"].session_id]
+    late_interactive = store.get_or_create_session(source, conversation_kind="interactive")
+    assert late_interactive is results["task"]
+    assert manager.bound_roots == [results["task"].session_id]
+
+
+def test_explicit_fork_creation_failed_root_uses_recoverable_binding(store, manager, source, monkeypatch):
+    """Explicit fork resume must retry a recoverable creation_failed root."""
+    session_key = build_session_key(source)
+    old = SessionEntry(
+        session_key=session_key, session_id="old", created_at=datetime.now(), updated_at=datetime.now(),
+        origin=source, platform=source.platform, chat_type=source.chat_type,
+    )
+    store._entries[session_key] = old
+    store._loaded = True
+    store._save = lambda: None
+
+    class _Db:
+        def is_explicit_fork_child(self, session_id):
+            return session_id == "fork-child"
+
+        def get_conversation_worktree(self, session_id):
+            return SimpleNamespace(state="creation_failed") if session_id == "fork-child" else None
+
+        def get_session(self, _session_id):
+            return {}
+
+    class _RecoveringManager:
+        def resolve_existing_session(self, _session_id):
+            raise ConversationWorktreeError("bootstrap interrupted", phase="bootstrap")
+
+        def bind_new_root_session(self, session_id, *, conversation_kind):
+            assert conversation_kind == "interactive"
+            return ConversationWorktreeBinding(
+                root_session_id=session_id, path=manager.root / session_id,
+                branch=f"hermes/session/{session_id}", base_commit="a" * 40,
+                repo_common_dir=manager.root,
+            )
+
+    recovering = _RecoveringManager()
+    store._db = _Db()
+    monkeypatch.setattr(store, "_conversation_worktree_manager", lambda _key=None: recovering)
+    monkeypatch.setattr(store, "_promote_session_reset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(store, "_reopen_session_row", lambda *args, **kwargs: None)
+    monkeypatch.setattr(store, "_record_gateway_session_peer", lambda *args, **kwargs: None)
+
+    resumed = store.switch_session(session_key, "fork-child")
+
+    assert resumed is not None
+    assert resumed.conversation_worktree["root_session_id"] == "fork-child"
 
 
 def _enable_production_policy(monkeypatch, tmp_path) -> None:

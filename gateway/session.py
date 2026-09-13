@@ -818,7 +818,8 @@ class SessionStore(
         self._persisted_routing_generation = 0
         self._fast_persisted_entries: Dict[str, tuple[int, str]] = {}
         self._inflight_lock = threading.Lock()
-        self._inflight_sessions: Dict[tuple[str, str], _SessionFlight] = {}
+        self._inflight_sessions: Dict[str, _SessionFlight] = {}
+        self._interactive_worktree_upgrade_lock = threading.Lock()
         # An unscoped legacy Slack key is claimed once per process (two workspaces must not both
         # revive one session).
         self._legacy_slack_claim_lock = threading.Lock()
@@ -915,7 +916,10 @@ class SessionStore(
         concurrent ``force_new``) share the owner's result so only one transition and SQLite row is
         created. ``touch_activity=False`` (internal events) preserves the user-activity clock."""
         session_key = self._generate_session_key(source)
-        flight_key = (session_key, conversation_kind)
+        # Conversation kind changes the work performed after routing ownership is
+        # established, not the routing identity itself.  A task handoff and an
+        # interactive message for one channel must never publish competing roots.
+        flight_key = session_key
         inflight_lock = self._lazy("_inflight_lock", threading.Lock)
         self._lazy("_inflight_sessions", dict)
 
@@ -930,6 +934,8 @@ class SessionStore(
             if slot.error is not None:
                 raise slot.error
             assert slot.result is not None
+            if conversation_kind == "interactive":
+                self._upgrade_route_for_interactive(slot.result)
             if touch_activity:
                 self.update_session(slot.result.session_key)
             return slot.result
@@ -988,6 +994,9 @@ class SessionStore(
                 workspace_changed = self._resolve_conversation_worktree_for_existing_entry(
                     decision.entry, conversation_kind
                 )
+                if conversation_kind == "interactive" and decision.entry.cwd is None:
+                    self._upgrade_route_for_interactive(decision.entry)
+                    workspace_changed = workspace_changed or bool(decision.entry.conversation_worktree)
                 decision.needs_save = decision.needs_save or workspace_changed
             if decision.needs_save:
                 if decision.metadata_only_save:
@@ -1111,6 +1120,22 @@ class SessionStore(
     def _conversation_worktree_manager(self, session_key: Optional[str] = None):
         db = self._db_for_key(session_key) if session_key else self._db
         return self._conversation_worktree_manager_factory(db)
+
+    def conversation_worktree_isolation_enabled(self, session_key: Optional[str] = None) -> bool:
+        """Expose the resolved policy state to handoff compatibility checks."""
+        return self._conversation_worktree_manager(session_key) is not None
+
+    def _upgrade_route_for_interactive(self, entry: SessionEntry) -> None:
+        """Apply interactive-only workspace setup after a shared task flight wins."""
+        if entry.conversation_worktree or not self._supports_conversation_worktree(entry.origin):
+            return
+        upgrade_lock = self._lazy("_interactive_worktree_upgrade_lock", threading.Lock)
+        with upgrade_lock:
+            if entry.conversation_worktree:
+                return
+            self._bind_conversation_worktree_for_new_entry(entry, conversation_kind="interactive")
+            if entry.conversation_worktree:
+                self._save_entry(entry.session_key)
 
     @staticmethod
     def _binding_metadata(binding) -> Dict[str, str]:
@@ -1479,7 +1504,9 @@ class SessionStore(
                     and db is not None
                     and db.is_explicit_fork_child(target_session_id)
                 ):
-                    binding = manager.resolve_existing_session(target_session_id)
+                    _, binding = self._resolve_conversation_worktree_lineage(
+                        manager, target_session_id
+                    )
                     if binding is None:
                         binding = manager.bind_new_root_session(
                             target_session_id, conversation_kind="interactive"

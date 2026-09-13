@@ -1495,8 +1495,16 @@ class GatewayStartupMixin:
             await asyncio.to_thread(resolver, cli_session_id, row.get("cwd"))
             switch_kwargs = {"conversation_kind": "task", "persisted_cwd": row.get("cwd")}
         elif callable(resolver):
-            # Older handoff rows may not have a persisted cwd.  Policy-disabled
-            # handoffs must still complete, and there is no workspace to validate.
+            # A legacy row without cwd is compatible only when isolation is
+            # disabled.  Under the enabled policy, completing the switch would
+            # run the synthetic turn from the gateway's fallback cwd.
+            policy_probe = getattr(store, "conversation_worktree_isolation_enabled", None)
+            if callable(policy_probe) and await asyncio.to_thread(policy_probe, session_key) is True:
+                raise RuntimeError(
+                    "cannot hand off a CLI session without a persisted verified workspace"
+                )
+            # Policy-disabled handoffs must still complete, and there is no
+            # workspace to validate.
             switch_kwargs = {"conversation_kind": "task"}
         # Ensure a session_store entry exists for this key; switch_session then re-points it.
         await self.async_session_store.get_or_create_session(

@@ -4748,6 +4748,77 @@ def _session(agent=None, **extra):
     }
 
 
+def test_prompt_submit_admission_is_serialized_per_session(monkeypatch):
+    """Concurrent RPC workers must let only one submit claim a session turn."""
+    session = _session()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    claimed: list[str] = []
+    busy: list[str] = []
+
+    def fake_lock(rid, sid, current, text, *args):
+        claimed.append(text)
+        if len(claimed) == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+        with current["history_lock"]:
+            current["running"] = True
+        return None, {}
+
+    monkeypatch.setattr(server, "_lock_in_submit_turn", fake_lock)
+    monkeypatch.setattr(server, "_persist_session_row_for_submit", lambda *args: None)
+    monkeypatch.setattr(
+        server, "_handle_busy_submit",
+        lambda rid, sid, current, text, transport, *, queued: busy.append(current["session_key"])
+        or {"error": {"code": 4099, "message": "busy"}},
+    )
+
+    replies = []
+    first = threading.Thread(target=lambda: replies.append(server._admit_prompt_submit(
+        "1", "sid", session, "first", {}, False, None, None, False, None)))
+    second = threading.Thread(target=lambda: replies.append(server._admit_prompt_submit(
+        "2", "sid", session, "second", {}, False, None, None, False, None)))
+    first.start()
+    assert first_entered.wait(2)
+    second.start()
+    time.sleep(0.05)
+    assert second.is_alive(), "second submit bypassed the per-session admission lock"
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert claimed == ["first"]
+    assert busy == ["session-key"]
+    assert replies[0][0] is None
+    assert replies[1][0]["error"]["code"] == 4099
+
+
+def test_prompt_submit_validates_truncation_before_materializing_draft(monkeypatch):
+    """Rejected rewind targets must not create a durable draft row/worktree."""
+    session = _session(history=[{"role": "user", "content": "only turn"}], source="desktop")
+    server._sessions["truncate-draft"] = session
+    materialized = []
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda current: materialized.append(current))
+    monkeypatch.setattr(server, "_bind_conversation_worktree_on_submit", lambda *_a: pytest.fail(
+        "invalid truncation must not bind a draft worktree"))
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_a: None)
+
+    try:
+        response = server.handle_request({
+            "id": "truncate",
+            "method": "prompt.submit",
+            "params": {
+                "session_id": "truncate-draft", "text": "retry",
+                "truncate_before_user_ordinal": 99, "confirm_truncate": True,
+            },
+        })
+        assert response["error"]["code"] == 4018
+        assert materialized == []
+        assert session["running"] is False
+    finally:
+        server._sessions.pop("truncate-draft", None)
+
+
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
     calls = {"hooks": []}
 
@@ -15933,6 +16004,30 @@ def test_session_create_seed_failure_after_row_compensates(monkeypatch):
     assert server._sessions[runtime_sid]["pending_title"] == "My Branch"
 
     server._sessions.pop(runtime_sid, None)
+
+
+def test_session_create_seeded_branch_binding_failure_rolls_back_runtime(monkeypatch):
+    """A failed root bind must remove the registered child and release its lease."""
+    lease = Mock()
+
+    def fail_bind(session):
+        session["conversation_root_lease"] = lease
+        raise RuntimeError("worktree lease metadata failed")
+
+    monkeypatch.setattr(server, "_bind_conversation_worktree_on_submit", fail_bind)
+    monkeypatch.setattr(server, "_schedule_agent_build", lambda *_a: None)
+
+    with pytest.raises(RuntimeError, match="worktree lease metadata failed"):
+        server.handle_request({
+            "id": "1", "method": "session.create",
+            "params": {
+                "source": "desktop", "parent_session_id": "parent-1",
+                "messages": [{"role": "user", "content": "seed"}],
+            },
+        })
+
+    assert not server._sessions
+    lease.release.assert_called_once_with()
 
 
 def test_session_create_seed_disk_full_keeps_row_for_retry(monkeypatch):

@@ -161,6 +161,28 @@ def test_session_create_does_not_bind_worktree_for_a_draft(monkeypatch):
     assert server._sessions
 
 
+def test_historical_resume_marks_unmanaged_and_never_binds_on_first_submit(monkeypatch):
+    from tui_gateway.methods_session import _Resume
+
+    ctx = _Resume("resume", {"source": "desktop"}, "legacy-session")
+    ctx.conversation_worktree_historical = True
+    record = ctx.record("desktop", "/legacy-workspace", [])
+
+    calls = []
+    monkeypatch.setattr(server, "_bind_conversation_worktree_for_new_root", lambda *a, **k: calls.append(a))
+    session = {
+        "source": "desktop", "session_key": "legacy-session",
+        "conversation_worktree": {},
+        "conversation_worktree_historical": record["conversation_worktree_historical"],
+    }
+
+    server._bind_conversation_worktree_on_submit(session)
+
+    assert record["conversation_worktree_historical"] is True
+    assert calls == []
+    assert session["conversation_worktree"] == {}
+
+
 def test_resume_resolves_existing_binding_without_creation(monkeypatch):
     root = "root-existing"
     continuation = "compressed-tip"

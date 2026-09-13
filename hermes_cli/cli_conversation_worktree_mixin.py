@@ -142,6 +142,7 @@ class CLIConversationWorktreeMixin:
             else None
         )
         self._conversation_worktree_binding = None
+        self._conversation_worktree_historical = False
         self._conversation_worktree_prompt_note = ""
         self._conversation_root_lease = None
         self._failed_conversation_root_leases = []
@@ -160,12 +161,20 @@ class CLIConversationWorktreeMixin:
                     root_session_id
                 )
                 if binding is None:
-                    from agent.conversation_worktree import ConversationWorktreeError
+                    # Rows created before managed isolation was enabled have a
+                    # recorded cwd but no durable binding. Preserve that legacy
+                    # workspace; never claim a new root on the first resumed turn.
+                    row = self._session_db.get_session(root_session_id) or {}
+                    recorded_cwd = str(row.get("cwd") or "").strip()
+                    if recorded_cwd and os.path.isdir(os.path.expanduser(recorded_cwd)):
+                        self._conversation_worktree_historical = True
+                    else:
+                        from agent.conversation_worktree import ConversationWorktreeError
 
-                    raise ConversationWorktreeError(
-                        f"no ready conversation worktree for CLI root {root_session_id}",
-                        phase="recovery",
-                    )
+                        raise ConversationWorktreeError(
+                            f"no ready conversation worktree for CLI root {root_session_id}",
+                            phase="recovery",
+                        )
             else:
                 # A new CLI session is only a draft until its first prompt.  Do not
                 # create a retained manager-owned worktree for a process that exits
@@ -181,7 +190,9 @@ class CLIConversationWorktreeMixin:
     def _ensure_conversation_worktree_binding(self):
         """Bind a new CLI root when its first prompt makes the session durable."""
         manager = getattr(self, "_conversation_worktree_manager", None)
-        if manager is None or getattr(self, "_conversation_worktree_binding", None) is not None:
+        if (manager is None
+                or getattr(self, "_conversation_worktree_historical", False)
+                or getattr(self, "_conversation_worktree_binding", None) is not None):
             return getattr(self, "_conversation_worktree_binding", None)
 
         from agent.conversation_worktree import ConversationWorktreeError
@@ -222,6 +233,11 @@ class CLIConversationWorktreeMixin:
                     phase="state",
                 ) from exc
             if managed_binding is None:
+                row = self._session_db.get_session(root_session_id) or {}
+                recorded_cwd = str(row.get("cwd") or "").strip()
+                if recorded_cwd and os.path.isdir(os.path.expanduser(recorded_cwd)):
+                    self._conversation_worktree_historical = True
+                    return False
                 from agent.conversation_worktree import ConversationWorktreeError
 
                 raise ConversationWorktreeError(

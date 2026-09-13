@@ -519,7 +519,9 @@ def _bind_conversation_worktree_for_new_root(root_session_id: str, *, profile_ho
 
 def _bind_conversation_worktree_on_submit(session: dict) -> None:
     """Materialize a desktop/TUI draft's worktree when its first prompt makes it durable."""
-    if session.get("conversation_worktree") or session.get("source") not in {"desktop", "tui"}:
+    if (session.get("conversation_worktree")
+            or session.get("conversation_worktree_historical")
+            or session.get("source") not in {"desktop", "tui"}):
         return
     key = str(session.get("session_key") or "")
     if not key:
@@ -2525,11 +2527,13 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
 def _init_session(
     sid: str, key: str, agent, history: list, cols: int = 80, cwd: str | None = None,
     session_db=None, source: str | None = None, profile_home: str | None = None,
-    explicit_cwd: bool = False, conversation_worktree=None, conversation_root_lease=None):
+    explicit_cwd: bool = False, conversation_worktree=None, conversation_root_lease=None,
+    conversation_worktree_historical: bool = False):
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
             "conversation_worktree": conversation_worktree or {},
+            "conversation_worktree_historical": bool(conversation_worktree_historical),
             "conversation_root_lease": conversation_root_lease,
             "agent": agent, "session_key": key, "history": history, "history_lock": threading.Lock(),
             "history_version": 0, "inflight_turn": None, "created_at": now, "last_active": now,
@@ -2598,7 +2602,8 @@ def _deferred_session_record(
         "close_on_disconnect": close_on_disconnect, "active_session_lease": lease, "cols": cols,
         "created_at": now, "cwd": cwd, "display_history_prefix": display_history_prefix or [],
         "edit_snapshots": {}, "explicit_cwd": bool(explicit_cwd), "history": history,
-        "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
+        "history_lock": threading.Lock(), "prompt_submit_lock": threading.Lock(),
+        "history_version": 0, "image_counter": 0,
         "inflight_turn": None, "last_active": now, "lazy": lazy, "model_override": model_override,
         "pending_title": None,
         "profile_home": str(profile_home) if profile_home is not None else None,
