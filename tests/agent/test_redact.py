@@ -239,6 +239,21 @@ class TestBareSecretEnvSuffixes:
         if suffix:
             assert result.endswith(suffix)
 
+    def test_dotted_config_handles_following_fields_and_multiple_quoted_pipes(self):
+        truncated = redact_sensitive_text(
+            'app.password="hunter2hunter2 b="foo"', force=True
+        )
+        assert "hunter2hunter2" not in truncated
+        assert ' b="foo"' in truncated
+
+        multi_pipe = redact_sensitive_text(
+            'app.password="first-secret|second-secret|third-secret"|b=2',
+            force=True,
+        )
+        for secret in ("first-secret", "second-secret", "third-secret"):
+            assert secret not in multi_pipe
+        assert multi_pipe.endswith('"|b=2')
+
 class TestControlCharSplitTokens:
     """Tokens split by control/zero-width chars must still mask — #77484."""
 
