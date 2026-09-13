@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { I18nProvider, type Locale } from '@/i18n'
+import { I18nProvider, type Locale, TRANSLATIONS } from '@/i18n'
 import { $worldEnabled, $worldOnboardingDismissed, WORLD_ONBOARDING_DISMISSED_STORAGE_KEY } from '@/store/lunar-city'
 
 import { LunarCity } from './index'
@@ -22,40 +22,7 @@ const renderWorld = (initialLocale: Locale = 'en') => {
   )
 }
 
-const localizedSurfaceCopy = {
-  ja: {
-    setup: 'Lunar Cityワールドのセットアップ',
-    useDefaults: 'Hermesのデフォルトを使用',
-    skip: '今はスキップ',
-    scene: 'Lunar Cityシーン',
-    dispatcher: 'ディスパッチャーコンパニオン',
-    newTask: '新しいタスク'
-  },
-  ar: {
-    setup: 'إعداد عالم مدينة القمر',
-    useDefaults: 'استخدم إعدادات Hermes الافتراضية',
-    skip: 'تخطَّ الآن',
-    scene: 'مشهد مدينة القمر',
-    dispatcher: 'مساعد الموزّع',
-    newTask: 'مهمة جديدة'
-  },
-  ru: {
-    setup: 'Настройка мира Лунного города',
-    useDefaults: 'Использовать настройки Hermes',
-    skip: 'Пропустить пока',
-    scene: 'Сцена Лунного города',
-    dispatcher: 'Помощник диспетчера',
-    newTask: 'Новая задача'
-  },
-  'zh-hant': {
-    setup: '月城世界設定',
-    useDefaults: '使用 Hermes 預設設定',
-    skip: '暫時略過',
-    scene: '月城場景',
-    dispatcher: '派遣助手',
-    newTask: '新增任務'
-  }
-} as const
+const localizedLocales = (Object.keys(TRANSLATIONS).filter(locale => locale !== 'en') as Locale[])
 
 beforeEach(() => {
   localStorage.clear()
@@ -68,27 +35,30 @@ afterEach(cleanup)
 describe('LunarCity', () => {
   it('renders its surface copy through the active locale', () => {
     renderWorld('ja')
-    fireEvent.click(screen.getByRole('button', { name: localizedSurfaceCopy.ja.useDefaults }))
+    fireEvent.click(screen.getByRole('button', { name: TRANSLATIONS.ja.lunarCity.useDefaults }))
 
-    expect(screen.getByRole('heading', { name: 'Hermesの世界' })).toBeTruthy()
-    expect(screen.queryByRole('heading', { name: 'Your Hermes world' })).toBeNull()
+    expect(screen.getByRole('heading', { name: TRANSLATIONS.ja.lunarCity.heading })).toBeTruthy()
+    expect(TRANSLATIONS.ja.lunarCity.heading).not.toBe(TRANSLATIONS.en.lunarCity.heading)
   })
 
-  it.each(Object.entries(localizedSurfaceCopy))('renders the full Lunar City surface in %s', (locale, copy) => {
+  it.each(localizedLocales)('renders the full Lunar City surface in %s', locale => {
+    const copy = TRANSLATIONS[locale].lunarCity
     localStorage.clear()
     $worldEnabled.set(true)
     $worldOnboardingDismissed.set(false)
     renderWorld(locale as Locale)
 
-    expect(screen.getByRole('dialog', { name: copy.setup })).toBeTruthy()
+    expect(screen.getByRole('dialog', { name: copy.worldSetup })).toBeTruthy()
     expect(screen.getByRole('button', { name: copy.skip })).toBeTruthy()
     expect(screen.getByRole('button', { name: copy.useDefaults })).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: copy.useDefaults }))
 
-    expect(screen.getByRole('region', { name: copy.scene })).toBeTruthy()
-    expect(screen.getByRole('region', { name: copy.dispatcher })).toBeTruthy()
-    expect(screen.getByRole('button', { name: copy.newTask })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: copy.heading })).toBeTruthy()
+    expect(screen.getByRole('region', { name: copy.scene.ariaLabel })).toBeTruthy()
+    expect(screen.getByRole('region', { name: copy.dispatcher.companion })).toBeTruthy()
+    expect(screen.getByRole('button', { name: copy.dispatcher.newTask })).toBeTruthy()
+    expect(copy.heading).not.toBe(TRANSLATIONS.en.lunarCity.heading)
     cleanup()
   })
 

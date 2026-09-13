@@ -361,7 +361,75 @@ def _untrusted_content_digest(value: Any) -> str:
             payload = repr(value).encode("utf-8", errors="replace")
     return sha256(payload).hexdigest()
 
-def _typed_payload(
+def _typed_payload(value: Any, grant_texts: Sequence[tuple[str, SourceGrant]], used_grants: dict[str, SourceGrant], **kwargs: Any) -> Any:
+    """Classify a payload through the scalar, mapping, or sequence path."""
+
+    if isinstance(value, str):
+        return _typed_payload_string(value, grant_texts, used_grants, **kwargs)
+    if isinstance(value, (list, tuple)):
+        return _typed_payload_sequence(value, grant_texts, used_grants, **kwargs)
+    return _typed_payload_mapping(value, grant_texts, used_grants, **kwargs)
+
+
+def _typed_payload_string(
+    value: str,
+    grant_texts: Sequence[tuple[str, SourceGrant]],
+    used_grants: dict[str, SourceGrant],
+    *,
+    sanitized_cap: int,
+    field_name: str | None = None,
+    protected_tool_content: bool = False,
+    elide_kanban_tool_content: bool = False,
+    kanban_attachment_tool_content: bool = False,
+    protected_kanban_context: bool = False,
+    generated_context: bool = False,
+    redact_generated_context: bool = False,
+    **_: Any,
+) -> Any:
+    """Classify a scalar without carrying mapping-only policy state."""
+
+    if field_name in _PROTOCOL_LITERAL_FIELDS and value in _PROTOCOL_LITERAL_VALUES:
+        return LiteralSegment(value)
+    if protected_tool_content:
+        return _segment_protected_tool_result(
+            value,
+            grant_texts,
+            used_grants,
+            sanitized_cap=sanitized_cap,
+        )
+    if elide_kanban_tool_content:
+        return _project_bound_kanban_show(value)
+    if kanban_attachment_tool_content:
+        return _project_bound_kanban_attachments(value)
+    if generated_context and redact_generated_context:
+        return GeneratedContextSegment(redact_remote_unsafe_text(value))
+    if protected_kanban_context:
+        return _segment_protected_context(
+            value,
+            grant_texts,
+            used_grants,
+            sanitized_cap=sanitized_cap,
+        )
+    return _segment_text(
+        value,
+        grant_texts,
+        used_grants,
+        sanitized_cap=sanitized_cap,
+    )
+
+
+def _typed_payload_sequence(
+    value: list[Any] | tuple[Any, ...],
+    grant_texts: Sequence[tuple[str, SourceGrant]],
+    used_grants: dict[str, SourceGrant],
+    **kwargs: Any,
+) -> list[Any]:
+    """Recursively classify sequence items through the shared dispatcher."""
+
+    return [_typed_payload(item, grant_texts, used_grants, **kwargs) for item in value]
+
+
+def _typed_payload_mapping(
     value: Any,
     grant_texts: Sequence[tuple[str, SourceGrant]],
     used_grants: dict[str, SourceGrant],
@@ -407,37 +475,6 @@ def _typed_payload(
     registry: SourceProvenanceRegistry | None = None,
     request_identity: tuple[str, str, str, str] = ("", "", "", ""),
 ) -> Any:
-    if isinstance(value, str):
-        if field_name in _PROTOCOL_LITERAL_FIELDS and value in _PROTOCOL_LITERAL_VALUES:
-            return LiteralSegment(value)
-        if protected_tool_content:
-            return _segment_protected_tool_result(
-                value,
-                grant_texts,
-                used_grants,
-                sanitized_cap=sanitized_cap,
-            )
-        if elide_kanban_tool_content:
-            # Return only the bounded, redacted current assignment; omit
-            # comments, run history, identifiers, and raw host paths.
-            return _project_bound_kanban_show(value)
-        if kanban_attachment_tool_content:
-            return _project_bound_kanban_attachments(value)
-        if generated_context and redact_generated_context:
-            return GeneratedContextSegment(redact_remote_unsafe_text(value))
-        if protected_kanban_context:
-            return _segment_protected_context(
-                value,
-                grant_texts,
-                used_grants,
-                sanitized_cap=sanitized_cap,
-            )
-        return _segment_text(
-            value,
-            grant_texts,
-            used_grants,
-            sanitized_cap=sanitized_cap,
-        )
     if isinstance(value, Mapping):
         source_metadata = value.get("_source_provenance")
         is_read_file_result = (
@@ -1359,55 +1396,6 @@ def _typed_payload(
                 request_identity=request_identity,
             )
         return typed
-    if isinstance(value, (list, tuple)):
-        return [
-            _typed_payload(
-                item,
-                grant_texts,
-                used_grants,
-                sanitized_cap=sanitized_cap,
-                field_name=field_name,
-                syntax_tool_call_ids=syntax_tool_call_ids,
-                pytest_terminal_call_ids=pytest_terminal_call_ids,
-                elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
-                kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
-                kanban_lifecycle_tool_call_ids=kanban_lifecycle_tool_call_ids,
-                search_projection_tool_call_ids=search_projection_tool_call_ids,
-                tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
-                read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
-                web_replay_tool_call_ids=web_replay_tool_call_ids,
-                file_mutation_replay_tool_call_ids=file_mutation_replay_tool_call_ids,
-                scratch_read_file_tool_call_ids=scratch_read_file_tool_call_ids,
-                git_workspace_diagnostic_call_ids=git_workspace_diagnostic_call_ids,
-                git_grep_projection_tool_call_ids=git_grep_projection_tool_call_ids,
-                rg_projection_tool_call_ids=rg_projection_tool_call_ids,
-                git_diff_name_only_projection_tool_call_ids=git_diff_name_only_projection_tool_call_ids,
-                git_review_summary_projection_tool_call_ids=git_review_summary_projection_tool_call_ids,
-                github_pr_feedback_terminal_call_ids=github_pr_feedback_terminal_call_ids,
-                kanban_assignees_terminal_call_ids=kanban_assignees_terminal_call_ids,
-                github_list_terminal_call_limits=github_list_terminal_call_limits,
-                github_api_extract_call_limits=github_api_extract_call_limits,
-                github_api_paginate_call_limits=github_api_paginate_call_limits,
-                github_api_curl_terminal_call_ids=github_api_curl_terminal_call_ids,
-                plain_github_list_terminal_call_ids=plain_github_list_terminal_call_ids,
-                combined_github_list_terminal_call_limits=combined_github_list_terminal_call_limits,
-                combined_github_view_terminal_call_limits=combined_github_view_terminal_call_limits,
-                rejected_terminal_call_ids=rejected_terminal_call_ids,
-                terminal_replay_tool_call_ids=terminal_replay_tool_call_ids,
-                redact_terminal_arguments=redact_terminal_arguments,
-                redact_readonly_tool_arguments=redact_readonly_tool_arguments,
-                protected_tool_content=protected_tool_content,
-                elide_kanban_tool_content=elide_kanban_tool_content,
-                kanban_attachment_tool_content=kanban_attachment_tool_content,
-                protected_kanban_context=protected_kanban_context,
-                generated_context=generated_context,
-                redact_generated_context=redact_generated_context,
-                allow_codex_reasoning_replay=allow_codex_reasoning_replay,
-                registry=registry,
-                request_identity=request_identity,
-            )
-            for item in value
-        ]
     return value
 
 def _structured_tool_output_text(value: Any) -> str | None:
