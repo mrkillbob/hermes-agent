@@ -21,7 +21,7 @@ from hermes_cli._subprocess_compat import (
     windows_detach_flags_without_breakaway,
     windows_detach_popen_kwargs,
 )
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, profile_name_for_home
 from tools.comms import BROKER_PROTOCOL_VERSION
 from tools.registry import registry, tool_error
 
@@ -81,6 +81,16 @@ HISTORY_SCHEMA = {
 
 _DEFAULT_HISTORY_LIMIT = 100
 _BROKER_STARTUP_THREAD_LOCK = threading.Lock()
+
+
+def _default_agent_address() -> str:
+    """Return the stable profile address used when a call omits its agent name."""
+
+    for env_name in ("HERMES_SESSION_PROFILE", "HERMES_PROFILE"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return profile_name_for_home(get_hermes_home()) or "default"
 
 
 def _broker_process_argv() -> list[str]:
@@ -319,11 +329,9 @@ def inter_agent_tool(
     if action == "send":
         if not to or not body:
             return tool_error("send requires 'to' and 'body'")
-        return send_message(to, body, from_ or sender or "hermes-agent")
+        return send_message(to, body, from_ or _default_agent_address())
     elif action == "receive":
-        if not to:
-            return tool_error("receive requires 'to'")
-        return receive_messages(to, since, limit)
+        return receive_messages(to or _default_agent_address(), since, limit)
     elif action == "history":
         return list_history(with_, limit)
     else:

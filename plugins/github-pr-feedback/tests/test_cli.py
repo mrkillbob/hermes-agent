@@ -288,6 +288,8 @@ def _run_scan_with_primary_result(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     primary_result: SimpleNamespace,
+    *,
+    repair_callback=None,
 ) -> tuple[int, list[str], dict[str, object]]:
     from github_pr_feedback.cli import _scan
 
@@ -361,7 +363,7 @@ def _run_scan_with_primary_result(
     monkeypatch.setattr("github_pr_feedback.cli.RepairController", Repair)
     monkeypatch.setattr(
         "github_pr_feedback.cli._run_repair_scan_by_repository",
-        repair_by_repository,
+        repair_callback or repair_by_repository,
     )
     monkeypatch.setattr(
         "github_pr_feedback.cli._controller", lambda *_args: Primary()
@@ -413,16 +415,12 @@ def test_scan_passes_per_repository_ci_backlog_to_repair_lane(
     )
     observed = []
 
-    monkeypatch.setattr(
-        "github_pr_feedback.cli._run_repair_scan_by_repository",
-        lambda _policy, _ledger, backlog, **_kwargs: (
-            observed.append(dict(backlog))
-            or {"status": "ok", "created": 0, "skipped": {}}
-        ),
-    )
+    def repair_by_repository(_policy, _ledger, backlog, **_kwargs):
+        observed.append(dict(backlog))
+        return {"status": "ok", "created": 0, "skipped": {}}
 
     returncode, _order, _payload = _run_scan_with_primary_result(
-        monkeypatch, capsys, result
+        monkeypatch, capsys, result, repair_callback=repair_by_repository
     )
 
     assert returncode == 0

@@ -11,6 +11,7 @@ import pytest
 
 from tools.comms import broker
 from tools import inter_agent_tool
+from tools.registry import registry
 
 
 def _request(base_url, path, token, *, data=None):
@@ -127,6 +128,54 @@ def test_receive_waits_for_a_message(monkeypatch, tmp_path):
                 ],
             )
         ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_registry_dispatch_uses_replyable_profile_address_for_round_trip(
+    monkeypatch, tmp_path
+):
+    server, thread, _token, _base_url = _start_server(monkeypatch, tmp_path)
+    (tmp_path / "inter-agent-broker.json").write_text(
+        json.dumps({"port": server.server_port, "broker_id": server.broker_id}),
+        encoding="utf-8",
+    )
+    try:
+        monkeypatch.setenv("HERMES_PROFILE", "agent-a")
+        sent = json.loads(
+            registry.dispatch(
+                "inter_agent",
+                {"action": "send", "to": "agent-b", "body": "hello"},
+                session_id="opaque-session-a",
+            )
+        )
+        assert sent["ok"] is True
+
+        received = json.loads(
+            registry.dispatch(
+                "inter_agent", {"action": "receive", "to": "agent-b"}
+            )
+        )
+        assert received[0]["from"] == "agent-a"
+
+        monkeypatch.setenv("HERMES_PROFILE", "agent-b")
+        json.loads(
+            registry.dispatch(
+                "inter_agent",
+                {"action": "send", "to": received[0]["from"], "body": "reply"},
+                session_id="opaque-session-b",
+            )
+        )
+
+        monkeypatch.setenv("HERMES_PROFILE", "agent-a")
+        reply = json.loads(
+            registry.dispatch("inter_agent", {"action": "receive"})
+        )
+        assert reply[0]["from"] == "agent-b"
+        assert reply[0]["to"] == "agent-a"
+        assert reply[0]["body"] == "reply"
     finally:
         server.shutdown()
         server.server_close()
