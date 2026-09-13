@@ -30,8 +30,8 @@ def _request(base_url, path, token, *, data=None):
 
 
 def _start_server(monkeypatch, tmp_path):
-    monkeypatch.setattr(broker, "get_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(inter_agent_tool, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(broker, "get_default_hermes_root", lambda: tmp_path)
+    monkeypatch.setattr(inter_agent_tool, "get_default_hermes_root", lambda: tmp_path)
     token = "test-broker-token"
     (tmp_path / "inter-agent-broker.token").write_text(token, encoding="utf-8")
     server = broker._BrokerServer((broker.HOST, broker.PORT), broker._Handler)
@@ -83,7 +83,7 @@ def test_broker_readiness_rejects_an_old_protocol(monkeypatch, tmp_path):
 
 
 def test_ensure_broker_retires_rejected_owned_process(monkeypatch, tmp_path):
-    monkeypatch.setattr(inter_agent_tool, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(inter_agent_tool, "get_default_hermes_root", lambda: tmp_path)
     (tmp_path / "inter-agent-broker.token").write_text(
         "test-broker-token", encoding="utf-8"
     )
@@ -123,7 +123,7 @@ def test_ensure_broker_retires_rejected_owned_process(monkeypatch, tmp_path):
 
 
 def test_empty_broker_token_file_is_repaired_atomically(monkeypatch, tmp_path):
-    monkeypatch.setattr(inter_agent_tool, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(inter_agent_tool, "get_default_hermes_root", lambda: tmp_path)
     path = tmp_path / "inter-agent-broker.token"
     path.write_text("\n", encoding="utf-8")
 
@@ -177,12 +177,18 @@ def test_receive_waits_for_a_message(monkeypatch, tmp_path):
 def test_registry_dispatch_uses_replyable_profile_address_for_round_trip(
     monkeypatch, tmp_path
 ):
-    server, thread, _token, _base_url = _start_server(monkeypatch, tmp_path)
-    (tmp_path / "inter-agent-broker.json").write_text(
+    installation = tmp_path / "installation"
+    profile_a = installation / "profiles" / "agent-a"
+    profile_b = installation / "profiles" / "agent-b"
+    profile_a.mkdir(parents=True)
+    profile_b.mkdir(parents=True)
+    server, thread, _token, _base_url = _start_server(monkeypatch, installation)
+    (installation / "inter-agent-broker.json").write_text(
         json.dumps({"port": server.server_port, "broker_id": server.broker_id}),
         encoding="utf-8",
     )
     try:
+        monkeypatch.setenv("HERMES_HOME", str(profile_a))
         monkeypatch.setenv("HERMES_PROFILE", "agent-a")
         sent = json.loads(
             registry.dispatch(
@@ -192,6 +198,9 @@ def test_registry_dispatch_uses_replyable_profile_address_for_round_trip(
             )
         )
         assert sent["ok"] is True
+        assert (installation / "inter-agent-messages.db").exists()
+        assert not (profile_a / "inter-agent-messages.db").exists()
+        assert not (profile_b / "inter-agent-messages.db").exists()
 
         received = json.loads(
             registry.dispatch(
@@ -200,6 +209,7 @@ def test_registry_dispatch_uses_replyable_profile_address_for_round_trip(
         )
         assert received[0]["from"] == "agent-a"
 
+        monkeypatch.setenv("HERMES_HOME", str(profile_b))
         monkeypatch.setenv("HERMES_PROFILE", "agent-b")
         json.loads(
             registry.dispatch(
@@ -209,6 +219,7 @@ def test_registry_dispatch_uses_replyable_profile_address_for_round_trip(
             )
         )
 
+        monkeypatch.setenv("HERMES_HOME", str(profile_a))
         monkeypatch.setenv("HERMES_PROFILE", "agent-a")
         reply = json.loads(
             registry.dispatch("inter_agent", {"action": "receive"})
@@ -316,7 +327,7 @@ def test_concurrent_first_use_starts_only_one_broker(monkeypatch):
 
 
 def test_broker_shutdown_does_not_remove_replaced_endpoint(monkeypatch, tmp_path):
-    monkeypatch.setattr(broker, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(broker, "get_default_hermes_root", lambda: tmp_path)
     endpoint = tmp_path / "inter-agent-broker.json"
     endpoint.write_text(
         json.dumps({"port": 1234, "broker_id": "replacement"}), encoding="utf-8"
@@ -328,7 +339,7 @@ def test_broker_shutdown_does_not_remove_replaced_endpoint(monkeypatch, tmp_path
 
 
 def test_message_database_and_sidecars_are_owner_only(monkeypatch, tmp_path):
-    monkeypatch.setattr(broker, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(broker, "get_default_hermes_root", lambda: tmp_path)
     path = tmp_path / "inter-agent-messages.db"
     for suffix in ("-journal", "-wal", "-shm"):
         sidecar = Path(f"{path}{suffix}")
@@ -347,7 +358,7 @@ def test_message_database_and_sidecars_are_owner_only(monkeypatch, tmp_path):
 
 
 def test_history_query_has_sender_and_recipient_indexes(monkeypatch, tmp_path):
-    monkeypatch.setattr(broker, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(broker, "get_default_hermes_root", lambda: tmp_path)
     connection = broker._database()
     try:
         details = {

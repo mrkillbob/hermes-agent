@@ -1,8 +1,8 @@
 """Small persistent loopback broker for the inter-agent tool.
 
 The broker is deliberately a separate process so several Hermes conversations can
-share one queue. It binds only to loopback and stores messages in the active
-Hermes state home.
+share one queue. It binds only to loopback and stores messages in the installation
+control home so profile-local workers can interoperate.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_default_hermes_root
 from tools.comms import BROKER_PROTOCOL_VERSION
 
 HOST = "127.0.0.1"
@@ -30,11 +30,11 @@ RECEIVE_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _state_path(name: str) -> Path:
-    return get_hermes_home() / name
+    return get_default_hermes_root() / name
 
 
 def _broker_token() -> str:
-    home = get_hermes_home()
+    home = get_default_hermes_root()
     home.mkdir(parents=True, exist_ok=True)
     path = _state_path("inter-agent-broker.token")
     try:
@@ -114,7 +114,7 @@ def _limit(query: dict[str, list[str]]) -> int:
 
 
 def _database() -> sqlite3.Connection:
-    home = get_hermes_home()
+    home = get_default_hermes_root()
     home.mkdir(parents=True, exist_ok=True)
     path = home / "inter-agent-messages.db"
     try:

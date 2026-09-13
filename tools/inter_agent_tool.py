@@ -23,7 +23,7 @@ from hermes_cli._subprocess_compat import (
     windows_detach_flags_without_breakaway,
     windows_detach_popen_kwargs,
 )
-from hermes_constants import get_hermes_home, profile_name_for_home
+from hermes_constants import get_default_hermes_root, get_hermes_home, profile_name_for_home
 from tools.comms import BROKER_PROTOCOL_VERSION
 from tools.registry import registry, tool_error
 
@@ -111,11 +111,11 @@ def _broker_process_env() -> dict[str, str]:
 
 
 def _state_path(name: str) -> Path:
-    return get_hermes_home() / name
+    return get_default_hermes_root() / name
 
 
 def _broker_token() -> str:
-    home = get_hermes_home()
+    home = get_default_hermes_root()
     home.mkdir(parents=True, exist_ok=True)
     path = _state_path("inter-agent-broker.token")
     try:
