@@ -136,7 +136,7 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
         private_key: {launch_scope, worker_scope},
     }, raising=False)
     monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names_by_scope", {
-        worker_scope: {"mcp__shared__tool": "shared"},
+        worker_scope: {"mcp__shared__tool": private_key},
     }, raising=False)
     monkeypatch.setattr(mcp_tool, "_server_connecting", set())
     monkeypatch.setattr(mcp_tool, "_server_connect_errors", {})
@@ -219,6 +219,42 @@ def test_lazy_profile_overlay_survives_repeated_reconciliation(
         "shared": {"auth": "oauth", "lazy": True},
     }) == 0
     assert registry.snapshot_registration(tool_name, scope=scope) is not None
+
+
+@pytest.mark.parametrize("current_servers", [
+    {},
+    {"shared": {"auth": "oauth", "lazy": True, "url": "https://changed.example/mcp"}},
+])
+def test_stale_lazy_profile_overlay_is_removed_for_changed_or_removed_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current_servers: dict
+) -> None:
+    """A lazy overlay must not hide a changed or removed server from discovery."""
+    from tools import mcp_tool
+    from tools import mcp_tool_registration as registration
+    from tools.mcp_schema_cache import config_fingerprint
+    from tools.registry import registry
+
+    scope = hermes_home_key(tmp_path / "worker")
+    key = f"shared::profile::{scope}"
+    tool_name = "mcp__shared__echo"
+    original_config = {"auth": "oauth", "lazy": True}
+    monkeypatch.setattr(mcp_tool, "_servers", {})
+    monkeypatch.setattr(mcp_tool, "_server_public_names", {key: "shared"})
+    monkeypatch.setattr(mcp_tool, "_server_scope_keys", {key: scope})
+    monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {key: {scope}})
+    monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {key: original_config})
+    monkeypatch.setattr(mcp_tool, "_lazy_server_fingerprints", {
+        key: config_fingerprint(original_config),
+    })
+    monkeypatch.setattr(mcp_tool, "_lazy_server_tool_names", {key: [tool_name]})
+    monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: scope)
+    registry.register(tool_name, "mcp-shared", {"name": tool_name}, lambda **_kwargs: None, scope=scope)
+
+    assert registration._register_connected_into_current_scope(current_servers) == 0
+    assert registry.snapshot_registration(tool_name, scope=scope) is None
+    assert key not in mcp_tool._lazy_server_configs
+    assert key not in mcp_tool._lazy_server_fingerprints
+    assert key not in mcp_tool._lazy_server_tool_names
 
 
 def test_scoped_teardown_restores_alias_from_surviving_profile(

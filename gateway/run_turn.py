@@ -2310,7 +2310,10 @@ class GatewayTurnMixin:
                 from tools.mcp_tool import _mcp_tool_server_names_by_scope
                 with _lock:
                     provenance = _mcp_tool_server_names_by_scope.get(reload_scope, {})
-                    new_tools = [n for n in new_tools if provenance.get(n) in connected_servers]
+                    new_tools = [
+                        n for n in new_tools
+                        if _server_public_names.get(provenance.get(n), provenance.get(n)) in connected_servers
+                    ]
             # (label, i18n key, names); i18n lines list reconnected first, the injected note added first.
             changes = (
                 ("Reconnected", "gateway.reload_mcp.reconnected", connected_servers & old_servers),

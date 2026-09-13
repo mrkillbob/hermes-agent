@@ -130,7 +130,17 @@ def _remove_server_scope(server_name: str, scope: str) -> None:
 
     with _core._lock:
         public_name = _core._server_public_names.get(server_name, server_name)
-    for tool_name in registry.get_tool_names_for_toolset(f"mcp-{public_name}"):
+        scoped_provenance = _core._mcp_tool_server_names_by_scope.get(scope, {})
+        tool_names = {
+            tool_name for tool_name, owner in scoped_provenance.items()
+            if owner == server_name
+        }
+        tool_names.update(_core._lazy_server_tool_names.get(server_name, ()))
+        server = _core._servers.get(server_name)
+        tool_names.update(getattr(server, "_registered_tool_names", ()) or ())
+    for tool_name in tool_names:
+        if registry.snapshot_registration(tool_name, scope=scope) is None:
+            continue
         registry.deregister(tool_name, scope=scope)
         _forget_mcp_tool_server(tool_name, scope=scope)
     with _core._lock:
@@ -486,14 +496,23 @@ def _register_connected_into_current_scope(servers: dict) -> int:
     if scope is None:
         return 0
 
+    from tools.mcp_schema_cache import config_fingerprint
+
     with _core._lock:
         stale = []
         for name, scopes in _core._server_tool_scopes.items():
             if scope not in scopes:
                 continue
             if name in _core._lazy_server_configs:
-                # A cached lazy overlay intentionally has no live task yet. It is still a
-                # valid registration and must survive idempotent reconciliation.
+                # A cached lazy overlay has no live task yet, but remains valid only while the
+                # current config matches the cached manifest. Changed or removed config must
+                # release the overlay so the next discovery can reselect the server.
+                public_name = _core._server_public_names.get(name, name)
+                config = servers.get(public_name)
+                fingerprint = config_fingerprint(config) if isinstance(config, dict) else None
+                if (config is None or not _server_enabled(config)
+                        or fingerprint != _core._lazy_server_fingerprints.get(name)):
+                    stale.append(name)
                 continue
             server = _core._servers.get(name)
             config = servers.get(_core._server_public_names.get(name, name))
@@ -503,6 +522,11 @@ def _register_connected_into_current_scope(servers: dict) -> int:
                 stale.append(name)
     for name in stale:
         _remove_server_scope(name, scope)
+        with _core._lock:
+            if name in _core._lazy_server_configs:
+                _core._lazy_server_configs.pop(name, None)
+                _core._lazy_server_fingerprints.pop(name, None)
+                _core._lazy_server_tool_names.pop(name, None)
 
     registered_servers = 0
     for name, config in servers.items():

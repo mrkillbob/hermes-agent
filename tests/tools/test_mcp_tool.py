@@ -798,6 +798,25 @@ class TestToolHandler:
         finally:
             _servers.pop("test_srv", None)
 
+    def test_profile_scoped_errors_render_public_server_name(self, monkeypatch):
+        """Profile-private connection keys stay in state, not model-visible errors."""
+        from tools import mcp_tool
+        from tools.mcp_tool_handlers import _make_tool_handler
+
+        private_key = "shared::profile::worker"
+        public_name = "shared"
+        monkeypatch.setattr(mcp_tool, "_servers", {})
+        monkeypatch.setattr(mcp_tool, "_server_error_counts", {})
+        monkeypatch.setattr(mcp_tool, "_server_breaker_opened_at", {})
+
+        handler = _make_tool_handler(
+            private_key, "echo", 30, public_server_name=public_name,
+        )
+        result = json.loads(handler({}))
+
+        assert public_name in result["error"]
+        assert private_key not in result["error"]
+
 
 class TestRunOnMCPLoopInterrupts:
     @staticmethod
@@ -1867,6 +1886,25 @@ class TestUtilityHandlers:
             assert result["resources"][0]["name"] == "test.txt"
         finally:
             _servers.pop("srv", None)
+
+    def test_profile_scoped_errors_render_public_server_name(self, monkeypatch):
+        """Utility handler errors follow the same public-name boundary as tool calls."""
+        from tools import mcp_tool
+        from tools.mcp_tool_handlers import _make_list_resources_handler
+
+        private_key = "shared::profile::worker"
+        public_name = "shared"
+        monkeypatch.setattr(mcp_tool, "_servers", {})
+        monkeypatch.setattr(mcp_tool, "_server_error_counts", {})
+        monkeypatch.setattr(mcp_tool, "_server_breaker_opened_at", {})
+
+        handler = _make_list_resources_handler(
+            private_key, 30, public_server_name=public_name,
+        )
+        result = json.loads(handler({}))
+
+        assert public_name in result["error"]
+        assert private_key not in result["error"]
 
 
     # -- read_resource --
