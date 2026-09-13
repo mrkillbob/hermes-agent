@@ -794,609 +794,939 @@ def _typed_payload_mapping(
             and isinstance(value.get("encrypted_content"), str)
             and isinstance(value.get("summary", []), list)
         )
+        mapping_state = locals()
         for key, item in value.items():
-            if key == "_source_provenance":
-                continue
-            if (
-                key in _TOOL_PROTOCOL_IDENTIFIER_FIELDS
-                and is_tool_protocol_mapping
-                and isinstance(item, str)
-            ):
-                # Provider-issued call IDs are transport linkage, not model
-                # content.  Keep them exact so opaque IDs cannot be mistaken
-                # for a base64 payload and sever a function result from its call.
-                typed[key] = ValidatedToolSyntaxSegment(
-                    item, "tool_protocol_identifier"
-                )
-                continue
-            is_structured_result = (
-                key in {"content", "output"}
-                and isinstance(item, (list, Mapping))
-            )
-            if is_untrusted_tool_result and key in {"content", "output"}:
-                violation_reasons = {
-                    reason
-                    for _, reasons in content_free_violation_locations(item)
-                    for reason in reasons
-                }
-                if not violation_reasons:
-                    typed[key] = UntrustedProvenanceSegment(
-                        _untrusted_content_digest(item)
-                    )
-                    continue
-            structured_text = (
-                _structured_tool_output_text(item) if is_structured_result else None
-            )
-            if is_structured_result and is_kanban_lifecycle_result:
-                typed[key] = _project_bound_kanban_lifecycle(structured_text or "")
-                continue
-            if is_kanban_assignees_result and structured_text is not None:
-                projected = _project_kanban_assignees_terminal_result(structured_text)
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(projected)
-                    continue
-            if isinstance(github_list_limit, int) and structured_text is not None:
-                projected = _project_github_list_terminal_result(
-                    structured_text, max_rows=github_list_limit
-                )
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(projected)
-                    continue
-            if (
-                isinstance(github_api_paginate_limit, int)
-                and structured_text is not None
-            ):
-                projected = _project_github_api_paginate_terminal_result(
-                    structured_text, max_rows=github_api_paginate_limit
-                )
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                isinstance(combined_github_list_limit, int)
-                and structured_text is not None
-            ):
-                projected = _project_combined_github_list_terminal_result(
-                    structured_text, max_rows=combined_github_list_limit
-                )
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                isinstance(combined_github_view_limit, int)
-                and structured_text is not None
-            ):
-                projected = _project_combined_github_view_terminal_result(
-                    structured_text, max_rows=combined_github_view_limit
-                )
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if is_structured_result and (
-                is_read_file_result
-                or is_read_file_projection_tool_result
-                or is_scratch_read_file_tool_result
-            ):
-                if (
-                    source_metadata is not None
-                    and not is_scratch_read_file_tool_result
-                    and structured_text is not None
-                ):
-                    segment = _segment_read_file_presentation(
-                        structured_text,
-                        source_metadata,
-                        grant_texts,
-                        used_grants,
-                        registry=registry,
-                        session_id=request_identity[0],
-                        turn_id=request_identity[1],
-                        request_id=request_identity[2],
-                        policy_digest=request_identity[3],
-                    )
-                    if isinstance(segment, UntrustedProvenanceSegment) and protected_kanban_context:
-                        typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
-                    else:
-                        typed[key] = _replace_structured_tool_output_text(item, segment)
-                    continue
-                typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
-                continue
-            if is_structured_result and (
-                is_search_projection_tool_result
-                or is_tool_search_projection_result
-                or is_git_grep_projection_tool_result
-                or is_rg_projection_tool_result
-            ):
-                typed[key] = GeneratedContextSegment(
-                    _STRUCTURED_SEARCH_REPLAY_ELISION
-                )
-                continue
-            if (
-                is_structured_result
-                and is_git_diff_name_only_projection_tool_result
-                and structured_text is not None
-            ):
-                projected = _project_git_diff_name_only_terminal_result(structured_text)
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                is_structured_result
-                and is_git_review_summary_projection_tool_result
-                and structured_text is not None
-            ):
-                projected = _project_git_review_summary_terminal_result(structured_text)
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                is_structured_result
-                and is_pytest_terminal_result
-                and structured_text is not None
-            ):
-                typed[key] = GeneratedContextSegment(
-                    _pytest_terminal_result(structured_text)
-                )
-                continue
-            if (
-                is_structured_result
-                and is_web_replay_tool_result
-                and github_api_extract_limit is None
-            ):
-                if structured_text is not None:
-                    typed[key] = _project_web_search_replay(structured_text)
-                    continue
-            if is_structured_result and is_file_mutation_replay_result:
-                projected = _project_file_mutation_result(structured_text or "")
-                typed[key] = GeneratedContextSegment(projected)
-                continue
-            if is_structured_result and is_git_workspace_diagnostic_result:
-                typed[key] = GeneratedContextSegment(
-                    _GIT_WORKSPACE_DIAGNOSTIC_REPLAY
-                )
-                continue
-            if is_structured_result and is_plain_github_list_terminal_result:
-                typed[key] = GeneratedContextSegment(
-                    _GITHUB_PLAIN_LIST_OUTPUT_REPLAY
-                )
-                continue
-            if is_structured_result and is_github_pr_feedback_terminal_result:
-                typed[key] = GeneratedContextSegment(
-                    _github_pr_feedback_terminal_result(structured_text or "")
-                )
-                continue
-            if is_structured_result and is_terminal_replay_result:
-                # The Responses API represents function-call output as an
-                # array of input_text/input_image items.  A recognized local
-                # terminal call gets the same outcome-only replay boundary as
-                # its scalar counterpart; recursively typing the array would
-                # expose raw stdout to the remote firewall.
-                typed[key] = GeneratedContextSegment(_terminal_replay_result(""))
-                continue
-            if (
-                is_read_file_projection_tool_result
-                and source_metadata is None
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                # An exact call-id proves this is the local read tool's result,
-                # but an error/denial has no source grant.  Replay only the
-                # bounded outcome instead of treating the error text as source.
-                typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
-                continue
-            if (
-                (
-                    is_read_file_result
-                    or (
-                        is_read_file_projection_tool_result
-                        and source_metadata is not None
-                    )
-                )
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                if is_scratch_read_file_tool_result:
-                    typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
-                    continue
-                segment = _segment_read_file_presentation(
-                    item,
-                    source_metadata,
-                    grant_texts,
-                    used_grants,
-                    registry=registry,
-                    session_id=request_identity[0],
-                    turn_id=request_identity[1],
-                    request_id=request_identity[2],
-                    policy_digest=request_identity[3],
-                )
-                if (
-                    isinstance(segment, UntrustedProvenanceSegment)
-                    and protected_kanban_context
-                    and value.get("type") == "function_call_output"
-                ):
-                    typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
-                else:
-                    typed[key] = segment
-                continue
-            if (
-                is_search_projection_tool_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                typed[key] = _project_bound_search_files(item)
-                continue
-            if (
-                is_tool_search_projection_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                typed[key] = _project_bound_tool_search(item)
-                continue
-            if (
-                is_web_replay_tool_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-                and github_api_extract_limit is None
-            ):
-                # Search results originated outside the managed workspace and
-                # are useful only as untrusted public evidence. Preserve that
-                # evidence after the same path/secret/encoding redaction used
-                # for remote-safe generated context, while keeping it charged
-                # to the sanitized-text budget. The exact call-id binding is
-                # required so arbitrary tool output cannot claim this lane.
-                typed[key] = _project_web_search_replay(item)
-                continue
-            if (
-                is_file_mutation_replay_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                typed[key] = GeneratedContextSegment(
-                    _project_file_mutation_result(item)
-                )
-                continue
-            if (
-                is_kanban_assignees_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_kanban_assignees_terminal_result(item)
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(projected)
-                    continue
-            if (
-                is_git_workspace_diagnostic_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                typed[key] = GeneratedContextSegment(_GIT_WORKSPACE_DIAGNOSTIC_REPLAY)
-                continue
-            if (
-                is_git_grep_projection_tool_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_line_numbered_search_terminal_result(item)
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                is_rg_projection_tool_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_line_numbered_search_terminal_result(item)
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                is_git_diff_name_only_projection_tool_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_git_diff_name_only_terminal_result(item)
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                is_git_review_summary_projection_tool_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_git_review_summary_terminal_result(item)
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                is_pytest_terminal_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                typed[key] = GeneratedContextSegment(_pytest_terminal_result(item))
-                continue
-            if (
-                is_github_pr_feedback_terminal_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                typed[key] = GeneratedContextSegment(
-                    _github_pr_feedback_terminal_result(item)
-                )
-                continue
-            if (
-                isinstance(github_list_limit, int)
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_github_list_terminal_result(
-                    item, max_rows=github_list_limit
-                )
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                isinstance(github_api_paginate_limit, int)
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_github_api_paginate_terminal_result(
-                    item, max_rows=github_api_paginate_limit
-                )
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                isinstance(github_api_extract_limit, int)
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_github_api_extract_result(
-                    item, max_rows=github_api_extract_limit
-                )
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(
-                        redact_remote_unsafe_text(projected)
-                    )
-                    continue
-            if (
-                isinstance(github_api_extract_limit, int)
-                and key == "arguments"
-                and isinstance(item, str)
-            ):
-                # The bounded REST request already ran locally.  Its exact
-                # URL is not necessary for the remote reasoning turn, and
-                # repository path atoms can resemble an encoded payload.
-                typed[key] = GeneratedContextSegment(
-                    _GITHUB_API_EXTRACT_ARGUMENT_REPLAY
-                )
-                continue
-            if (
-                isinstance(github_api_paginate_limit, int)
-                and key == "arguments"
-                and isinstance(item, str)
-            ):
-                typed[key] = GeneratedContextSegment(
-                    _GITHUB_API_PAGINATE_ARGUMENT_REPLAY
-                )
-                continue
-            if is_github_api_curl_terminal_call and key == "arguments":
-                typed[key] = GeneratedContextSegment(
-                    _GITHUB_API_CURL_ARGUMENT_REPLAY
-                )
-                continue
-            if (
-                is_plain_github_list_terminal_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                typed[key] = GeneratedContextSegment(_GITHUB_PLAIN_LIST_OUTPUT_REPLAY)
-                continue
-            if (
-                is_kanban_lifecycle_result
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                typed[key] = _project_bound_kanban_lifecycle(item)
-                continue
-            if (
-                isinstance(combined_github_list_limit, int)
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_combined_github_list_terminal_result(
-                    item, max_rows=combined_github_list_limit
-                )
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(redact_remote_unsafe_text(projected))
-                    continue
-            if (
-                isinstance(combined_github_view_limit, int)
-                and key in {"content", "output"}
-                and isinstance(item, str)
-            ):
-                projected = _project_combined_github_view_terminal_result(
-                    item, max_rows=combined_github_view_limit
-                )
-                if projected is not None:
-                    typed[key] = GeneratedContextSegment(redact_remote_unsafe_text(projected))
-                    continue
-            if is_rejected_terminal_call and key == "arguments":
-                typed[key] = GeneratedContextSegment(_REJECTED_TERMINAL_COMMAND_REPLAY)
-                continue
-            if is_terminal_replay_result and key in {"content", "output"} and isinstance(item, str):
-                # Terminal stdout is produced locally and can contain source,
-                # credentials, or opaque values.  It must not cause a remote
-                # worker to fail closed after the local command already ran.
-                # Specialized GitHub/search projections above retain the few
-                # bounded facts a worker needs; all other stdout is outcome-only.
-                typed[key] = GeneratedContextSegment(_terminal_replay_result(item))
-                continue
-            if is_terminal_replay_call and key == "arguments" and isinstance(item, str):
-                typed[key] = GeneratedContextSegment(_terminal_replay_command(item))
-                continue
-            if (
-                protected_kanban_context
-                and is_tool_result_mapping
-                and key in {"content", "output"}
-                and not handled_tool_result
-            ):
-                raw = (
-                    item
-                    if isinstance(item, str)
-                    else json.dumps(item, ensure_ascii=False, sort_keys=True)
-                )
-                # Retain the original text as a separately scanned segment so
-                # diagnostics still report its concrete content class (for
-                # example ``base64_payload``) alongside the provenance denial.
-                # The untrusted marker guarantees this payload can never be
-                # sent, even when it contains no shape-based violation.
-                typed[key] = OutboundText(
-                    (
-                        UntrustedProvenanceSegment(
-                            sha256(raw.encode("utf-8")).hexdigest()
-                        ),
-                        _approved_sanitized(raw, cap=sanitized_cap),
-                    )
-                )
-                continue
-            if (
-                is_file_mutation_replay_call
-                and key == "arguments"
-                and isinstance(item, str)
-            ):
-                typed[key] = GeneratedContextSegment(_FILE_MUTATION_ARGUMENT_REPLAY)
-                continue
-            if (
-                redact_terminal_arguments
-                and isinstance(direct_name, str)
-                and direct_name in _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES
-                and key == "arguments"
-                and isinstance(item, str)
-            ):
-                # Chat-completions nests tool arguments under ``function``;
-                # by that recursive pass the outer call ID is unavailable.
-                # Every protected worker terminal command is local-only, so
-                # retain its coarse command class without replaying raw text.
-                typed[key] = GeneratedContextSegment(_terminal_replay_command(item))
-                continue
-            if (
-                redact_readonly_tool_arguments
-                and key == "arguments"
-                and isinstance(direct_name, str)
-                and direct_name in _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES
-                and isinstance(item, str)
-            ):
-                # The local call has already run.  Its read-only arguments are
-                # replayed only as remote context, where an ordinary search
-                # term (for example "DISABLE") can look like base64.  Redact
-                # opaque or secret-shaped text here without changing the
-                # executed call or relaxing validation for write-capable tools.
-                typed[key] = GeneratedContextSegment(redact_remote_unsafe_text(item))
-                continue
-            typed_key = (
-                GeneratedContextKey(key)
-                if generated_context and redact_generated_context
-                else key
-            )
-            if is_codex_reasoning_replay and key == "encrypted_content":
-                typed[typed_key] = CodexReasoningReplaySegment(item)
-                continue
-            if is_codex_reasoning_replay and key == "summary":
-                typed[typed_key] = _typed_payload(
-                    item,
-                    grant_texts,
-                    used_grants,
-                    sanitized_cap=sanitized_cap,
-                    field_name=key,
-                    generated_context=True,
-                    redact_generated_context=True,
-                    tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
-                    registry=registry,
-                    request_identity=request_identity,
-                )
-                continue
-            typed[typed_key] = _typed_payload(
-                item,
-                grant_texts,
-                used_grants,
-                sanitized_cap=sanitized_cap,
-                field_name=key,
-                syntax_tool_call_ids=syntax_tool_call_ids,
-                pytest_terminal_call_ids=pytest_terminal_call_ids,
-                elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
-                kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
-                kanban_lifecycle_tool_call_ids=kanban_lifecycle_tool_call_ids,
-                search_projection_tool_call_ids=search_projection_tool_call_ids,
-                tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
-                read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
-                web_replay_tool_call_ids=web_replay_tool_call_ids,
-                file_mutation_replay_tool_call_ids=file_mutation_replay_tool_call_ids,
-                scratch_read_file_tool_call_ids=scratch_read_file_tool_call_ids,
-                git_workspace_diagnostic_call_ids=git_workspace_diagnostic_call_ids,
-                git_grep_projection_tool_call_ids=git_grep_projection_tool_call_ids,
-                rg_projection_tool_call_ids=rg_projection_tool_call_ids,
-                git_diff_name_only_projection_tool_call_ids=git_diff_name_only_projection_tool_call_ids,
-                git_review_summary_projection_tool_call_ids=git_review_summary_projection_tool_call_ids,
-                github_pr_feedback_terminal_call_ids=github_pr_feedback_terminal_call_ids,
-                kanban_assignees_terminal_call_ids=kanban_assignees_terminal_call_ids,
-                github_list_terminal_call_limits=github_list_terminal_call_limits,
-                github_api_extract_call_limits=github_api_extract_call_limits,
-                github_api_paginate_call_limits=github_api_paginate_call_limits,
-                github_api_curl_terminal_call_ids=github_api_curl_terminal_call_ids,
-                plain_github_list_terminal_call_ids=plain_github_list_terminal_call_ids,
-                combined_github_list_terminal_call_limits=combined_github_list_terminal_call_limits,
-                combined_github_view_terminal_call_limits=combined_github_view_terminal_call_limits,
-                rejected_terminal_call_ids=rejected_terminal_call_ids,
-                terminal_replay_tool_call_ids=terminal_replay_tool_call_ids,
-                redact_terminal_arguments=redact_terminal_arguments,
-                redact_readonly_tool_arguments=redact_readonly_tool_arguments,
-                protected_tool_content=(
-                    is_recognized_tool_result and key in {"content", "output"}
-                ),
-                elide_kanban_tool_content=(
-                    is_elided_kanban_tool_result and key in {"content", "output"}
-                ),
-                kanban_attachment_tool_content=(
-                    is_kanban_attachment_result and key in {"content", "output"}
-                ),
-                protected_kanban_context=protected_kanban_context,
-                generated_context=(
-                    redact_generated_context
-                    and (
-                        generated_context
-                        or context_mapping
-                        or generated_assistant_mapping
-                        or key in {"instructions", "system_prompt", "tools"}
-                    )
-                ),
-                redact_generated_context=redact_generated_context,
-                allow_codex_reasoning_replay=allow_codex_reasoning_replay,
-                registry=registry,
-                request_identity=request_identity,
-            )
+            _typed_payload_mapping_item(mapping_state, key, item, typed)
         return typed
     return value
+
+
+def _typed_payload_mapping_item(
+    state: Mapping[str, Any], key: Any, item: Any, typed: dict[Any, Any]
+) -> None:
+    """Classify one mapping field while keeping projection families isolated."""
+    value = state['value']
+    grant_texts = state['grant_texts']
+    used_grants = state['used_grants']
+    sanitized_cap = state['sanitized_cap']
+    field_name = state['field_name']
+    syntax_tool_call_ids = state['syntax_tool_call_ids']
+    pytest_terminal_call_ids = state['pytest_terminal_call_ids']
+    elided_kanban_tool_call_ids = state['elided_kanban_tool_call_ids']
+    kanban_attachment_tool_call_ids = state['kanban_attachment_tool_call_ids']
+    kanban_lifecycle_tool_call_ids = state['kanban_lifecycle_tool_call_ids']
+    search_projection_tool_call_ids = state['search_projection_tool_call_ids']
+    tool_search_projection_tool_call_ids = state['tool_search_projection_tool_call_ids']
+    read_file_projection_tool_call_ids = state['read_file_projection_tool_call_ids']
+    web_replay_tool_call_ids = state['web_replay_tool_call_ids']
+    file_mutation_replay_tool_call_ids = state['file_mutation_replay_tool_call_ids']
+    scratch_read_file_tool_call_ids = state['scratch_read_file_tool_call_ids']
+    git_workspace_diagnostic_call_ids = state['git_workspace_diagnostic_call_ids']
+    git_grep_projection_tool_call_ids = state['git_grep_projection_tool_call_ids']
+    rg_projection_tool_call_ids = state['rg_projection_tool_call_ids']
+    git_diff_name_only_projection_tool_call_ids = state['git_diff_name_only_projection_tool_call_ids']
+    git_review_summary_projection_tool_call_ids = state['git_review_summary_projection_tool_call_ids']
+    github_pr_feedback_terminal_call_ids = state['github_pr_feedback_terminal_call_ids']
+    kanban_assignees_terminal_call_ids = state['kanban_assignees_terminal_call_ids']
+    github_list_terminal_call_limits = state['github_list_terminal_call_limits']
+    github_api_extract_call_limits = state['github_api_extract_call_limits']
+    github_api_paginate_call_limits = state['github_api_paginate_call_limits']
+    github_api_curl_terminal_call_ids = state['github_api_curl_terminal_call_ids']
+    plain_github_list_terminal_call_ids = state['plain_github_list_terminal_call_ids']
+    combined_github_list_terminal_call_limits = state['combined_github_list_terminal_call_limits']
+    combined_github_view_terminal_call_limits = state['combined_github_view_terminal_call_limits']
+    rejected_terminal_call_ids = state['rejected_terminal_call_ids']
+    terminal_replay_tool_call_ids = state['terminal_replay_tool_call_ids']
+    redact_terminal_arguments = state['redact_terminal_arguments']
+    redact_readonly_tool_arguments = state['redact_readonly_tool_arguments']
+    protected_tool_content = state['protected_tool_content']
+    elide_kanban_tool_content = state['elide_kanban_tool_content']
+    kanban_attachment_tool_content = state['kanban_attachment_tool_content']
+    protected_kanban_context = state['protected_kanban_context']
+    generated_context = state['generated_context']
+    redact_generated_context = state['redact_generated_context']
+    allow_codex_reasoning_replay = state['allow_codex_reasoning_replay']
+    registry = state['registry']
+    request_identity = state['request_identity']
+    combined_github_list_limit = state['combined_github_list_limit']
+    combined_github_view_limit = state['combined_github_view_limit']
+    context_mapping = state['context_mapping']
+    direct_function = state['direct_function']
+    direct_name = state['direct_name']
+    generated_assistant_mapping = state['generated_assistant_mapping']
+    github_api_extract_limit = state['github_api_extract_limit']
+    github_api_paginate_limit = state['github_api_paginate_limit']
+    github_list_limit = state['github_list_limit']
+    handled_tool_result = state['handled_tool_result']
+    is_codex_reasoning_replay = state['is_codex_reasoning_replay']
+    is_elided_kanban_tool_result = state['is_elided_kanban_tool_result']
+    is_file_mutation_replay_call = state['is_file_mutation_replay_call']
+    is_file_mutation_replay_result = state['is_file_mutation_replay_result']
+    is_git_diff_name_only_projection_tool_result = state['is_git_diff_name_only_projection_tool_result']
+    is_git_grep_projection_tool_result = state['is_git_grep_projection_tool_result']
+    is_git_review_summary_projection_tool_result = state['is_git_review_summary_projection_tool_result']
+    is_git_workspace_diagnostic_result = state['is_git_workspace_diagnostic_result']
+    is_github_api_curl_terminal_call = state['is_github_api_curl_terminal_call']
+    is_github_pr_feedback_terminal_result = state['is_github_pr_feedback_terminal_result']
+    is_kanban_assignees_result = state['is_kanban_assignees_result']
+    is_kanban_attachment_result = state['is_kanban_attachment_result']
+    is_kanban_lifecycle_result = state['is_kanban_lifecycle_result']
+    is_plain_github_list_terminal_result = state['is_plain_github_list_terminal_result']
+    is_pytest_terminal_result = state['is_pytest_terminal_result']
+    is_read_file_projection_tool_result = state['is_read_file_projection_tool_result']
+    is_read_file_result = state['is_read_file_result']
+    is_recognized_tool_result = state['is_recognized_tool_result']
+    is_rejected_terminal_call = state['is_rejected_terminal_call']
+    is_rg_projection_tool_result = state['is_rg_projection_tool_result']
+    is_scratch_read_file_tool_result = state['is_scratch_read_file_tool_result']
+    is_search_projection_tool_result = state['is_search_projection_tool_result']
+    is_terminal_replay_call = state['is_terminal_replay_call']
+    is_terminal_replay_result = state['is_terminal_replay_result']
+    is_tool_protocol_mapping = state['is_tool_protocol_mapping']
+    is_tool_result_mapping = state['is_tool_result_mapping']
+    is_tool_search_projection_result = state['is_tool_search_projection_result']
+    is_untrusted_tool_result = state['is_untrusted_tool_result']
+    is_web_replay_tool_result = state['is_web_replay_tool_result']
+    output_call_id = state['output_call_id']
+    source_metadata = state['source_metadata']
+    if key == "_source_provenance":
+        return True
+    if (
+        key in _TOOL_PROTOCOL_IDENTIFIER_FIELDS
+        and is_tool_protocol_mapping
+        and isinstance(item, str)
+    ):
+        # Provider-issued call IDs are transport linkage, not model
+        # content.  Keep them exact so opaque IDs cannot be mistaken
+        # for a base64 payload and sever a function result from its call.
+        typed[key] = ValidatedToolSyntaxSegment(
+            item, "tool_protocol_identifier"
+        )
+        return True
+    if _typed_payload_mapping_structured(state, key, item, typed):
+        return
+    if _typed_payload_mapping_scalar(state, key, item, typed):
+        return
+    typed_key = (
+        GeneratedContextKey(key)
+        if generated_context and redact_generated_context
+        else key
+    )
+    if is_codex_reasoning_replay and key == "encrypted_content":
+        typed[typed_key] = CodexReasoningReplaySegment(item)
+        return True
+    if is_codex_reasoning_replay and key == "summary":
+        typed[typed_key] = _typed_payload(
+            item,
+            grant_texts,
+            used_grants,
+            sanitized_cap=sanitized_cap,
+            field_name=key,
+            generated_context=True,
+            redact_generated_context=True,
+            tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
+            registry=registry,
+            request_identity=request_identity,
+        )
+        return True
+    typed[typed_key] = _typed_payload(
+        item,
+        grant_texts,
+        used_grants,
+        sanitized_cap=sanitized_cap,
+        field_name=key,
+        syntax_tool_call_ids=syntax_tool_call_ids,
+        pytest_terminal_call_ids=pytest_terminal_call_ids,
+        elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
+        kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
+        kanban_lifecycle_tool_call_ids=kanban_lifecycle_tool_call_ids,
+        search_projection_tool_call_ids=search_projection_tool_call_ids,
+        tool_search_projection_tool_call_ids=tool_search_projection_tool_call_ids,
+        read_file_projection_tool_call_ids=read_file_projection_tool_call_ids,
+        web_replay_tool_call_ids=web_replay_tool_call_ids,
+        file_mutation_replay_tool_call_ids=file_mutation_replay_tool_call_ids,
+        scratch_read_file_tool_call_ids=scratch_read_file_tool_call_ids,
+        git_workspace_diagnostic_call_ids=git_workspace_diagnostic_call_ids,
+        git_grep_projection_tool_call_ids=git_grep_projection_tool_call_ids,
+        rg_projection_tool_call_ids=rg_projection_tool_call_ids,
+        git_diff_name_only_projection_tool_call_ids=git_diff_name_only_projection_tool_call_ids,
+        git_review_summary_projection_tool_call_ids=git_review_summary_projection_tool_call_ids,
+        github_pr_feedback_terminal_call_ids=github_pr_feedback_terminal_call_ids,
+        kanban_assignees_terminal_call_ids=kanban_assignees_terminal_call_ids,
+        github_list_terminal_call_limits=github_list_terminal_call_limits,
+        github_api_extract_call_limits=github_api_extract_call_limits,
+        github_api_paginate_call_limits=github_api_paginate_call_limits,
+        github_api_curl_terminal_call_ids=github_api_curl_terminal_call_ids,
+        plain_github_list_terminal_call_ids=plain_github_list_terminal_call_ids,
+        combined_github_list_terminal_call_limits=combined_github_list_terminal_call_limits,
+        combined_github_view_terminal_call_limits=combined_github_view_terminal_call_limits,
+        rejected_terminal_call_ids=rejected_terminal_call_ids,
+        terminal_replay_tool_call_ids=terminal_replay_tool_call_ids,
+        redact_terminal_arguments=redact_terminal_arguments,
+        redact_readonly_tool_arguments=redact_readonly_tool_arguments,
+        protected_tool_content=(
+            is_recognized_tool_result and key in {"content", "output"}
+        ),
+        elide_kanban_tool_content=(
+            is_elided_kanban_tool_result and key in {"content", "output"}
+        ),
+        kanban_attachment_tool_content=(
+            is_kanban_attachment_result and key in {"content", "output"}
+        ),
+        protected_kanban_context=protected_kanban_context,
+        generated_context=(
+            redact_generated_context
+            and (
+                generated_context
+                or context_mapping
+                or generated_assistant_mapping
+                or key in {"instructions", "system_prompt", "tools"}
+            )
+        ),
+        redact_generated_context=redact_generated_context,
+        allow_codex_reasoning_replay=allow_codex_reasoning_replay,
+        registry=registry,
+        request_identity=request_identity,
+    )
+    return
+
+
+def _typed_payload_mapping_structured(
+    state: Mapping[str, Any], key: Any, item: Any, typed: dict[Any, Any]
+) -> bool:
+    """Handle Responses-style structured tool output projections."""
+    value = state['value']
+    grant_texts = state['grant_texts']
+    used_grants = state['used_grants']
+    sanitized_cap = state['sanitized_cap']
+    field_name = state['field_name']
+    syntax_tool_call_ids = state['syntax_tool_call_ids']
+    pytest_terminal_call_ids = state['pytest_terminal_call_ids']
+    elided_kanban_tool_call_ids = state['elided_kanban_tool_call_ids']
+    kanban_attachment_tool_call_ids = state['kanban_attachment_tool_call_ids']
+    kanban_lifecycle_tool_call_ids = state['kanban_lifecycle_tool_call_ids']
+    search_projection_tool_call_ids = state['search_projection_tool_call_ids']
+    tool_search_projection_tool_call_ids = state['tool_search_projection_tool_call_ids']
+    read_file_projection_tool_call_ids = state['read_file_projection_tool_call_ids']
+    web_replay_tool_call_ids = state['web_replay_tool_call_ids']
+    file_mutation_replay_tool_call_ids = state['file_mutation_replay_tool_call_ids']
+    scratch_read_file_tool_call_ids = state['scratch_read_file_tool_call_ids']
+    git_workspace_diagnostic_call_ids = state['git_workspace_diagnostic_call_ids']
+    git_grep_projection_tool_call_ids = state['git_grep_projection_tool_call_ids']
+    rg_projection_tool_call_ids = state['rg_projection_tool_call_ids']
+    git_diff_name_only_projection_tool_call_ids = state['git_diff_name_only_projection_tool_call_ids']
+    git_review_summary_projection_tool_call_ids = state['git_review_summary_projection_tool_call_ids']
+    github_pr_feedback_terminal_call_ids = state['github_pr_feedback_terminal_call_ids']
+    kanban_assignees_terminal_call_ids = state['kanban_assignees_terminal_call_ids']
+    github_list_terminal_call_limits = state['github_list_terminal_call_limits']
+    github_api_extract_call_limits = state['github_api_extract_call_limits']
+    github_api_paginate_call_limits = state['github_api_paginate_call_limits']
+    github_api_curl_terminal_call_ids = state['github_api_curl_terminal_call_ids']
+    plain_github_list_terminal_call_ids = state['plain_github_list_terminal_call_ids']
+    combined_github_list_terminal_call_limits = state['combined_github_list_terminal_call_limits']
+    combined_github_view_terminal_call_limits = state['combined_github_view_terminal_call_limits']
+    rejected_terminal_call_ids = state['rejected_terminal_call_ids']
+    terminal_replay_tool_call_ids = state['terminal_replay_tool_call_ids']
+    redact_terminal_arguments = state['redact_terminal_arguments']
+    redact_readonly_tool_arguments = state['redact_readonly_tool_arguments']
+    protected_tool_content = state['protected_tool_content']
+    elide_kanban_tool_content = state['elide_kanban_tool_content']
+    kanban_attachment_tool_content = state['kanban_attachment_tool_content']
+    protected_kanban_context = state['protected_kanban_context']
+    generated_context = state['generated_context']
+    redact_generated_context = state['redact_generated_context']
+    allow_codex_reasoning_replay = state['allow_codex_reasoning_replay']
+    registry = state['registry']
+    request_identity = state['request_identity']
+    combined_github_list_limit = state['combined_github_list_limit']
+    combined_github_view_limit = state['combined_github_view_limit']
+    context_mapping = state['context_mapping']
+    direct_function = state['direct_function']
+    direct_name = state['direct_name']
+    generated_assistant_mapping = state['generated_assistant_mapping']
+    github_api_extract_limit = state['github_api_extract_limit']
+    github_api_paginate_limit = state['github_api_paginate_limit']
+    github_list_limit = state['github_list_limit']
+    handled_tool_result = state['handled_tool_result']
+    is_codex_reasoning_replay = state['is_codex_reasoning_replay']
+    is_elided_kanban_tool_result = state['is_elided_kanban_tool_result']
+    is_file_mutation_replay_call = state['is_file_mutation_replay_call']
+    is_file_mutation_replay_result = state['is_file_mutation_replay_result']
+    is_git_diff_name_only_projection_tool_result = state['is_git_diff_name_only_projection_tool_result']
+    is_git_grep_projection_tool_result = state['is_git_grep_projection_tool_result']
+    is_git_review_summary_projection_tool_result = state['is_git_review_summary_projection_tool_result']
+    is_git_workspace_diagnostic_result = state['is_git_workspace_diagnostic_result']
+    is_github_api_curl_terminal_call = state['is_github_api_curl_terminal_call']
+    is_github_pr_feedback_terminal_result = state['is_github_pr_feedback_terminal_result']
+    is_kanban_assignees_result = state['is_kanban_assignees_result']
+    is_kanban_attachment_result = state['is_kanban_attachment_result']
+    is_kanban_lifecycle_result = state['is_kanban_lifecycle_result']
+    is_plain_github_list_terminal_result = state['is_plain_github_list_terminal_result']
+    is_pytest_terminal_result = state['is_pytest_terminal_result']
+    is_read_file_projection_tool_result = state['is_read_file_projection_tool_result']
+    is_read_file_result = state['is_read_file_result']
+    is_recognized_tool_result = state['is_recognized_tool_result']
+    is_rejected_terminal_call = state['is_rejected_terminal_call']
+    is_rg_projection_tool_result = state['is_rg_projection_tool_result']
+    is_scratch_read_file_tool_result = state['is_scratch_read_file_tool_result']
+    is_search_projection_tool_result = state['is_search_projection_tool_result']
+    is_terminal_replay_call = state['is_terminal_replay_call']
+    is_terminal_replay_result = state['is_terminal_replay_result']
+    is_tool_protocol_mapping = state['is_tool_protocol_mapping']
+    is_tool_result_mapping = state['is_tool_result_mapping']
+    is_tool_search_projection_result = state['is_tool_search_projection_result']
+    is_untrusted_tool_result = state['is_untrusted_tool_result']
+    is_web_replay_tool_result = state['is_web_replay_tool_result']
+    output_call_id = state['output_call_id']
+    source_metadata = state['source_metadata']
+    is_structured_result = (
+        key in {"content", "output"}
+        and isinstance(item, (list, Mapping))
+    )
+    structured_text = (
+        _structured_tool_output_text(item) if is_structured_result else None
+    )
+    if is_untrusted_tool_result and key in {"content", "output"}:
+        violation_reasons = {
+            reason
+            for _, reasons in content_free_violation_locations(item)
+            for reason in reasons
+        }
+        if not violation_reasons:
+            typed[key] = UntrustedProvenanceSegment(
+                _untrusted_content_digest(item)
+            )
+            return True
+    structured_text = (
+        _structured_tool_output_text(item) if is_structured_result else None
+    )
+    if is_structured_result and is_kanban_lifecycle_result:
+        typed[key] = _project_bound_kanban_lifecycle(structured_text or "")
+        return True
+    if is_kanban_assignees_result and structured_text is not None:
+        projected = _project_kanban_assignees_terminal_result(structured_text)
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(projected)
+            return True
+    if isinstance(github_list_limit, int) and structured_text is not None:
+        projected = _project_github_list_terminal_result(
+            structured_text, max_rows=github_list_limit
+        )
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(projected)
+            return True
+    if (
+        isinstance(github_api_paginate_limit, int)
+        and structured_text is not None
+    ):
+        projected = _project_github_api_paginate_terminal_result(
+            structured_text, max_rows=github_api_paginate_limit
+        )
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        isinstance(combined_github_list_limit, int)
+        and structured_text is not None
+    ):
+        projected = _project_combined_github_list_terminal_result(
+            structured_text, max_rows=combined_github_list_limit
+        )
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        isinstance(combined_github_view_limit, int)
+        and structured_text is not None
+    ):
+        projected = _project_combined_github_view_terminal_result(
+            structured_text, max_rows=combined_github_view_limit
+        )
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if is_structured_result and (
+        is_read_file_result
+        or is_read_file_projection_tool_result
+        or is_scratch_read_file_tool_result
+    ):
+        if (
+            source_metadata is not None
+            and not is_scratch_read_file_tool_result
+            and structured_text is not None
+        ):
+            segment = _segment_read_file_presentation(
+                structured_text,
+                source_metadata,
+                grant_texts,
+                used_grants,
+                registry=registry,
+                session_id=request_identity[0],
+                turn_id=request_identity[1],
+                request_id=request_identity[2],
+                policy_digest=request_identity[3],
+            )
+            if isinstance(segment, UntrustedProvenanceSegment) and protected_kanban_context:
+                typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+            else:
+                typed[key] = _replace_structured_tool_output_text(item, segment)
+            return True
+        typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+        return True
+    if is_structured_result and (
+        is_search_projection_tool_result
+        or is_tool_search_projection_result
+        or is_git_grep_projection_tool_result
+        or is_rg_projection_tool_result
+    ):
+        typed[key] = GeneratedContextSegment(
+            _STRUCTURED_SEARCH_REPLAY_ELISION
+        )
+        return True
+    if (
+        is_structured_result
+        and is_git_diff_name_only_projection_tool_result
+        and structured_text is not None
+    ):
+        projected = _project_git_diff_name_only_terminal_result(structured_text)
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        is_structured_result
+        and is_git_review_summary_projection_tool_result
+        and structured_text is not None
+    ):
+        projected = _project_git_review_summary_terminal_result(structured_text)
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        is_structured_result
+        and is_pytest_terminal_result
+        and structured_text is not None
+    ):
+        typed[key] = GeneratedContextSegment(
+            _pytest_terminal_result(structured_text)
+        )
+        return True
+    if (
+        is_structured_result
+        and is_web_replay_tool_result
+        and github_api_extract_limit is None
+    ):
+        if structured_text is not None:
+            typed[key] = _project_web_search_replay(structured_text)
+            return True
+    if is_structured_result and is_file_mutation_replay_result:
+        projected = _project_file_mutation_result(structured_text or "")
+        typed[key] = GeneratedContextSegment(projected)
+        return True
+    if is_structured_result and is_git_workspace_diagnostic_result:
+        typed[key] = GeneratedContextSegment(
+            _GIT_WORKSPACE_DIAGNOSTIC_REPLAY
+        )
+        return True
+    if is_structured_result and is_plain_github_list_terminal_result:
+        typed[key] = GeneratedContextSegment(
+            _GITHUB_PLAIN_LIST_OUTPUT_REPLAY
+        )
+        return True
+    if is_structured_result and is_github_pr_feedback_terminal_result:
+        typed[key] = GeneratedContextSegment(
+            _github_pr_feedback_terminal_result(structured_text or "")
+        )
+        return True
+    if is_structured_result and is_terminal_replay_result:
+        # The Responses API represents function-call output as an
+        # array of input_text/input_image items.  A recognized local
+        # terminal call gets the same outcome-only replay boundary as
+        # its scalar counterpart; recursively typing the array would
+        # expose raw stdout to the remote firewall.
+        typed[key] = GeneratedContextSegment(_terminal_replay_result(""))
+        return True
+    return False
+
+
+def _typed_payload_mapping_scalar(
+    state: Mapping[str, Any], key: Any, item: Any, typed: dict[Any, Any]
+) -> bool:
+    """Dispatch scalar tool-result and terminal replay projections."""
+    if _typed_payload_mapping_scalar_content(state, key, item, typed):
+        return True
+    return _typed_payload_mapping_scalar_arguments(state, key, item, typed)
+
+
+def _typed_payload_mapping_scalar_content(
+    state: Mapping[str, Any], key: Any, item: Any, typed: dict[Any, Any]
+) -> bool:
+    """Handle content projections and bounded terminal output."""
+    value = state['value']
+    grant_texts = state['grant_texts']
+    used_grants = state['used_grants']
+    sanitized_cap = state['sanitized_cap']
+    field_name = state['field_name']
+    syntax_tool_call_ids = state['syntax_tool_call_ids']
+    pytest_terminal_call_ids = state['pytest_terminal_call_ids']
+    elided_kanban_tool_call_ids = state['elided_kanban_tool_call_ids']
+    kanban_attachment_tool_call_ids = state['kanban_attachment_tool_call_ids']
+    kanban_lifecycle_tool_call_ids = state['kanban_lifecycle_tool_call_ids']
+    search_projection_tool_call_ids = state['search_projection_tool_call_ids']
+    tool_search_projection_tool_call_ids = state['tool_search_projection_tool_call_ids']
+    read_file_projection_tool_call_ids = state['read_file_projection_tool_call_ids']
+    web_replay_tool_call_ids = state['web_replay_tool_call_ids']
+    file_mutation_replay_tool_call_ids = state['file_mutation_replay_tool_call_ids']
+    scratch_read_file_tool_call_ids = state['scratch_read_file_tool_call_ids']
+    git_workspace_diagnostic_call_ids = state['git_workspace_diagnostic_call_ids']
+    git_grep_projection_tool_call_ids = state['git_grep_projection_tool_call_ids']
+    rg_projection_tool_call_ids = state['rg_projection_tool_call_ids']
+    git_diff_name_only_projection_tool_call_ids = state['git_diff_name_only_projection_tool_call_ids']
+    git_review_summary_projection_tool_call_ids = state['git_review_summary_projection_tool_call_ids']
+    github_pr_feedback_terminal_call_ids = state['github_pr_feedback_terminal_call_ids']
+    kanban_assignees_terminal_call_ids = state['kanban_assignees_terminal_call_ids']
+    github_list_terminal_call_limits = state['github_list_terminal_call_limits']
+    github_api_extract_call_limits = state['github_api_extract_call_limits']
+    github_api_paginate_call_limits = state['github_api_paginate_call_limits']
+    github_api_curl_terminal_call_ids = state['github_api_curl_terminal_call_ids']
+    plain_github_list_terminal_call_ids = state['plain_github_list_terminal_call_ids']
+    combined_github_list_terminal_call_limits = state['combined_github_list_terminal_call_limits']
+    combined_github_view_terminal_call_limits = state['combined_github_view_terminal_call_limits']
+    rejected_terminal_call_ids = state['rejected_terminal_call_ids']
+    terminal_replay_tool_call_ids = state['terminal_replay_tool_call_ids']
+    redact_terminal_arguments = state['redact_terminal_arguments']
+    redact_readonly_tool_arguments = state['redact_readonly_tool_arguments']
+    protected_tool_content = state['protected_tool_content']
+    elide_kanban_tool_content = state['elide_kanban_tool_content']
+    kanban_attachment_tool_content = state['kanban_attachment_tool_content']
+    protected_kanban_context = state['protected_kanban_context']
+    generated_context = state['generated_context']
+    redact_generated_context = state['redact_generated_context']
+    allow_codex_reasoning_replay = state['allow_codex_reasoning_replay']
+    registry = state['registry']
+    request_identity = state['request_identity']
+    combined_github_list_limit = state['combined_github_list_limit']
+    combined_github_view_limit = state['combined_github_view_limit']
+    context_mapping = state['context_mapping']
+    direct_function = state['direct_function']
+    direct_name = state['direct_name']
+    generated_assistant_mapping = state['generated_assistant_mapping']
+    github_api_extract_limit = state['github_api_extract_limit']
+    github_api_paginate_limit = state['github_api_paginate_limit']
+    github_list_limit = state['github_list_limit']
+    handled_tool_result = state['handled_tool_result']
+    is_codex_reasoning_replay = state['is_codex_reasoning_replay']
+    is_elided_kanban_tool_result = state['is_elided_kanban_tool_result']
+    is_file_mutation_replay_call = state['is_file_mutation_replay_call']
+    is_file_mutation_replay_result = state['is_file_mutation_replay_result']
+    is_git_diff_name_only_projection_tool_result = state['is_git_diff_name_only_projection_tool_result']
+    is_git_grep_projection_tool_result = state['is_git_grep_projection_tool_result']
+    is_git_review_summary_projection_tool_result = state['is_git_review_summary_projection_tool_result']
+    is_git_workspace_diagnostic_result = state['is_git_workspace_diagnostic_result']
+    is_github_api_curl_terminal_call = state['is_github_api_curl_terminal_call']
+    is_github_pr_feedback_terminal_result = state['is_github_pr_feedback_terminal_result']
+    is_kanban_assignees_result = state['is_kanban_assignees_result']
+    is_kanban_attachment_result = state['is_kanban_attachment_result']
+    is_kanban_lifecycle_result = state['is_kanban_lifecycle_result']
+    is_plain_github_list_terminal_result = state['is_plain_github_list_terminal_result']
+    is_pytest_terminal_result = state['is_pytest_terminal_result']
+    is_read_file_projection_tool_result = state['is_read_file_projection_tool_result']
+    is_read_file_result = state['is_read_file_result']
+    is_recognized_tool_result = state['is_recognized_tool_result']
+    is_rejected_terminal_call = state['is_rejected_terminal_call']
+    is_rg_projection_tool_result = state['is_rg_projection_tool_result']
+    is_scratch_read_file_tool_result = state['is_scratch_read_file_tool_result']
+    is_search_projection_tool_result = state['is_search_projection_tool_result']
+    is_terminal_replay_call = state['is_terminal_replay_call']
+    is_terminal_replay_result = state['is_terminal_replay_result']
+    is_tool_protocol_mapping = state['is_tool_protocol_mapping']
+    is_tool_result_mapping = state['is_tool_result_mapping']
+    is_tool_search_projection_result = state['is_tool_search_projection_result']
+    is_untrusted_tool_result = state['is_untrusted_tool_result']
+    is_web_replay_tool_result = state['is_web_replay_tool_result']
+    output_call_id = state['output_call_id']
+    source_metadata = state['source_metadata']
+    is_structured_result = (
+        key in {"content", "output"}
+        and isinstance(item, (list, Mapping))
+    )
+    structured_text = (
+        _structured_tool_output_text(item) if is_structured_result else None
+    )
+    if (
+        is_read_file_projection_tool_result
+        and source_metadata is None
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        # An exact call-id proves this is the local read tool's result,
+        # but an error/denial has no source grant.  Replay only the
+        # bounded outcome instead of treating the error text as source.
+        typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+        return True
+    if (
+        (
+            is_read_file_result
+            or (
+                is_read_file_projection_tool_result
+                and source_metadata is not None
+            )
+        )
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        if is_scratch_read_file_tool_result:
+            typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+            return True
+        segment = _segment_read_file_presentation(
+            item,
+            source_metadata,
+            grant_texts,
+            used_grants,
+            registry=registry,
+            session_id=request_identity[0],
+            turn_id=request_identity[1],
+            request_id=request_identity[2],
+            policy_digest=request_identity[3],
+        )
+        if (
+            isinstance(segment, UntrustedProvenanceSegment)
+            and protected_kanban_context
+            and value.get("type") == "function_call_output"
+        ):
+            typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+        else:
+            typed[key] = segment
+        return True
+    if (
+        is_search_projection_tool_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        typed[key] = _project_bound_search_files(item)
+        return True
+    if (
+        is_tool_search_projection_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        typed[key] = _project_bound_tool_search(item)
+        return True
+    if (
+        is_web_replay_tool_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+        and github_api_extract_limit is None
+    ):
+        # Search results originated outside the managed workspace and
+        # are useful only as untrusted public evidence. Preserve that
+        # evidence after the same path/secret/encoding redaction used
+        # for remote-safe generated context, while keeping it charged
+        # to the sanitized-text budget. The exact call-id binding is
+        # required so arbitrary tool output cannot claim this lane.
+        typed[key] = _project_web_search_replay(item)
+        return True
+    if (
+        is_file_mutation_replay_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        typed[key] = GeneratedContextSegment(
+            _project_file_mutation_result(item)
+        )
+        return True
+    if (
+        is_kanban_assignees_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_kanban_assignees_terminal_result(item)
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(projected)
+            return True
+    if (
+        is_git_workspace_diagnostic_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        typed[key] = GeneratedContextSegment(_GIT_WORKSPACE_DIAGNOSTIC_REPLAY)
+        return True
+    return False
+
+
+def _typed_payload_mapping_scalar_arguments(
+    state: Mapping[str, Any], key: Any, item: Any, typed: dict[Any, Any]
+) -> bool:
+    """Handle replay arguments and fail-closed tool output."""
+    sanitized_cap = state['sanitized_cap']
+    redact_terminal_arguments = state['redact_terminal_arguments']
+    redact_readonly_tool_arguments = state['redact_readonly_tool_arguments']
+    protected_kanban_context = state['protected_kanban_context']
+    combined_github_list_limit = state['combined_github_list_limit']
+    combined_github_view_limit = state['combined_github_view_limit']
+    direct_name = state['direct_name']
+    github_api_extract_limit = state['github_api_extract_limit']
+    github_api_paginate_limit = state['github_api_paginate_limit']
+    github_list_limit = state['github_list_limit']
+    handled_tool_result = state['handled_tool_result']
+    is_file_mutation_replay_call = state['is_file_mutation_replay_call']
+    is_git_diff_name_only_projection_tool_result = state['is_git_diff_name_only_projection_tool_result']
+    is_git_grep_projection_tool_result = state['is_git_grep_projection_tool_result']
+    is_git_review_summary_projection_tool_result = state['is_git_review_summary_projection_tool_result']
+    is_github_api_curl_terminal_call = state['is_github_api_curl_terminal_call']
+    is_github_pr_feedback_terminal_result = state['is_github_pr_feedback_terminal_result']
+    is_kanban_lifecycle_result = state['is_kanban_lifecycle_result']
+    is_plain_github_list_terminal_result = state['is_plain_github_list_terminal_result']
+    is_pytest_terminal_result = state['is_pytest_terminal_result']
+    is_rejected_terminal_call = state['is_rejected_terminal_call']
+    is_rg_projection_tool_result = state['is_rg_projection_tool_result']
+    is_terminal_replay_call = state['is_terminal_replay_call']
+    is_terminal_replay_result = state['is_terminal_replay_result']
+    is_tool_result_mapping = state['is_tool_result_mapping']
+    if (
+        is_git_grep_projection_tool_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_line_numbered_search_terminal_result(item)
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        is_rg_projection_tool_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_line_numbered_search_terminal_result(item)
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        is_git_diff_name_only_projection_tool_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_git_diff_name_only_terminal_result(item)
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        is_git_review_summary_projection_tool_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_git_review_summary_terminal_result(item)
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        is_pytest_terminal_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        typed[key] = GeneratedContextSegment(_pytest_terminal_result(item))
+        return True
+    if (
+        is_github_pr_feedback_terminal_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        typed[key] = GeneratedContextSegment(
+            _github_pr_feedback_terminal_result(item)
+        )
+        return True
+    if (
+        isinstance(github_list_limit, int)
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_github_list_terminal_result(
+            item, max_rows=github_list_limit
+        )
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        isinstance(github_api_paginate_limit, int)
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_github_api_paginate_terminal_result(
+            item, max_rows=github_api_paginate_limit
+        )
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        isinstance(github_api_extract_limit, int)
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_github_api_extract_result(
+            item, max_rows=github_api_extract_limit
+        )
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(
+                redact_remote_unsafe_text(projected)
+            )
+            return True
+    if (
+        isinstance(github_api_extract_limit, int)
+        and key == "arguments"
+        and isinstance(item, str)
+    ):
+        # The bounded REST request already ran locally.  Its exact
+        # URL is not necessary for the remote reasoning turn, and
+        # repository path atoms can resemble an encoded payload.
+        typed[key] = GeneratedContextSegment(
+            _GITHUB_API_EXTRACT_ARGUMENT_REPLAY
+        )
+        return True
+    if (
+        isinstance(github_api_paginate_limit, int)
+        and key == "arguments"
+        and isinstance(item, str)
+    ):
+        typed[key] = GeneratedContextSegment(
+            _GITHUB_API_PAGINATE_ARGUMENT_REPLAY
+        )
+        return True
+    if is_github_api_curl_terminal_call and key == "arguments":
+        typed[key] = GeneratedContextSegment(
+            _GITHUB_API_CURL_ARGUMENT_REPLAY
+        )
+        return True
+    if (
+        is_plain_github_list_terminal_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        typed[key] = GeneratedContextSegment(_GITHUB_PLAIN_LIST_OUTPUT_REPLAY)
+        return True
+    if (
+        is_kanban_lifecycle_result
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        typed[key] = _project_bound_kanban_lifecycle(item)
+        return True
+    if (
+        isinstance(combined_github_list_limit, int)
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_combined_github_list_terminal_result(
+            item, max_rows=combined_github_list_limit
+        )
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(redact_remote_unsafe_text(projected))
+            return True
+    if (
+        isinstance(combined_github_view_limit, int)
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        projected = _project_combined_github_view_terminal_result(
+            item, max_rows=combined_github_view_limit
+        )
+        if projected is not None:
+            typed[key] = GeneratedContextSegment(redact_remote_unsafe_text(projected))
+            return True
+    if is_rejected_terminal_call and key == "arguments":
+        typed[key] = GeneratedContextSegment(_REJECTED_TERMINAL_COMMAND_REPLAY)
+        return True
+    if is_terminal_replay_result and key in {"content", "output"} and isinstance(item, str):
+        # Terminal stdout is produced locally and can contain source,
+        # credentials, or opaque values.  It must not cause a remote
+        # worker to fail closed after the local command already ran.
+        # Specialized GitHub/search projections above retain the few
+        # bounded facts a worker needs; all other stdout is outcome-only.
+        typed[key] = GeneratedContextSegment(_terminal_replay_result(item))
+        return True
+    if is_terminal_replay_call and key == "arguments" and isinstance(item, str):
+        typed[key] = GeneratedContextSegment(_terminal_replay_command(item))
+        return True
+    if (
+        protected_kanban_context
+        and is_tool_result_mapping
+        and key in {"content", "output"}
+        and not handled_tool_result
+    ):
+        raw = (
+            item
+            if isinstance(item, str)
+            else json.dumps(item, ensure_ascii=False, sort_keys=True)
+        )
+        # Retain the original text as a separately scanned segment so
+        # diagnostics still report its concrete content class (for
+        # example ``base64_payload``) alongside the provenance denial.
+        # The untrusted marker guarantees this payload can never be
+        # sent, even when it contains no shape-based violation.
+        typed[key] = OutboundText(
+            (
+                UntrustedProvenanceSegment(
+                    sha256(raw.encode("utf-8")).hexdigest()
+                ),
+                _approved_sanitized(raw, cap=sanitized_cap),
+            )
+        )
+        return True
+    if (
+        is_file_mutation_replay_call
+        and key == "arguments"
+        and isinstance(item, str)
+    ):
+        typed[key] = GeneratedContextSegment(_FILE_MUTATION_ARGUMENT_REPLAY)
+        return True
+    if (
+        redact_terminal_arguments
+        and isinstance(direct_name, str)
+        and direct_name in _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES
+        and key == "arguments"
+        and isinstance(item, str)
+    ):
+        # Chat-completions nests tool arguments under ``function``;
+        # by that recursive pass the outer call ID is unavailable.
+        # Every protected worker terminal command is local-only, so
+        # retain its coarse command class without replaying raw text.
+        typed[key] = GeneratedContextSegment(_terminal_replay_command(item))
+        return True
+    if (
+        redact_readonly_tool_arguments
+        and key == "arguments"
+        and isinstance(direct_name, str)
+        and direct_name in _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES
+        and isinstance(item, str)
+    ):
+        # The local call has already run.  Its read-only arguments are
+        # replayed only as remote context, where an ordinary search
+        # term (for example "DISABLE") can look like base64.  Redact
+        # opaque or secret-shaped text here without changing the
+        # executed call or relaxing validation for write-capable tools.
+        typed[key] = GeneratedContextSegment(redact_remote_unsafe_text(item))
+        return True
+    return False
 
 def _structured_tool_output_text(value: Any) -> str | None:
     """Return the sole text item from a Responses function output array.
