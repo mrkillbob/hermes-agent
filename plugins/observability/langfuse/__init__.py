@@ -633,9 +633,11 @@ def _finalize_all_traces() -> None:
             _end_children(state, include_subagents=True)
             _end_root(state, f"atexit finalize for {key}")
     if states:
-        # atexit runs unscoped; flush every profile's client, not just the launch profile's.
-        for client in (_get_langfuse(), *_LANGFUSE_CLIENT_BY_HOME.values()):
-            if client is not _INIT_FAILED:
+        # atexit runs with NO profile scope, so it must never build a client (a credential read
+        # here raises UnscopedSecretError under multiplex and would skip every flush). Flush only
+        # the clients that settled during the run — the launch profile's slot plus one per home.
+        for client in (_LANGFUSE_CLIENT, *_LANGFUSE_CLIENT_BY_HOME.values()):
+            if client is not None and client is not _INIT_FAILED:
                 _flush(client)
 
 
