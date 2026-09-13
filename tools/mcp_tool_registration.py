@@ -102,13 +102,24 @@ def _restore_server_toolset_alias(server_name: str) -> None:
     from tools.registry import registry
 
     with _core._lock:
-        server = _core._servers.get(server_name)
         public_name = _core._server_public_names.get(server_name, server_name)
-        scopes = set(_core._server_tool_scopes.get(server_name, ()))
-        tool_names = list(getattr(server, "_registered_tool_names", ()) if server is not None else ())
+        connection_keys = {
+            key for key, configured_name in _core._server_public_names.items()
+            if configured_name == public_name
+        }
+        connection_keys.add(server_name)
+        global_provenance = dict(_core._mcp_tool_server_names)
+        scoped_provenance = {
+            scope: dict(names)
+            for scope, names in getattr(_core, "_mcp_tool_server_names_by_scope", {}).items()
+        }
     if any(
-        registry.snapshot_registration(tool_name, scope=scope) is not None
-        for scope in scopes for tool_name in tool_names
+        owner in connection_keys and registry.snapshot_registration(tool_name) is not None
+        for tool_name, owner in global_provenance.items()
+    ) or any(
+        owner in connection_keys and registry.snapshot_registration(tool_name, scope=scope) is not None
+        for scope, names in scoped_provenance.items()
+        for tool_name, owner in names.items()
     ):
         registry.register_toolset_alias(public_name, f"mcp-{public_name}")
 
@@ -478,6 +489,10 @@ def _register_connected_into_current_scope(servers: dict) -> int:
         stale = []
         for name, scopes in _core._server_tool_scopes.items():
             if scope not in scopes:
+                continue
+            if name in _core._lazy_server_configs:
+                # A cached lazy overlay intentionally has no live task yet. It is still a
+                # valid registration and must survive idempotent reconciliation.
                 continue
             server = _core._servers.get(name)
             config = servers.get(_core._server_public_names.get(name, name))

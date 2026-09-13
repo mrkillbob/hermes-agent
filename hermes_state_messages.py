@@ -573,7 +573,10 @@ class SessionMessagesMixin:
             self._message_columns_cache = [r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
         return self._message_columns_cache
 
-    def set_latest_user_api_content(self, session_id: str, content: Any, api_content: str) -> int:
+    def set_latest_user_api_content(
+        self, session_id: str, content: Any, api_content: str,
+        display_metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """Backfill the ``api_content`` sidecar onto the newest ACTIVE user row (0/1 rows). Preflight compaction
         inserts that row BEFORE the sidecar exists and the later persist identity-skips compacted dicts;
         without this a reload reopens the prompt-cache divergence. ``content`` match guards a racing rewrite.
@@ -591,10 +594,12 @@ class SessionMessagesMixin:
         instead — it addresses the exact row and cannot land on a neighbour.
         """
         return self._write_rowcount(
-            "UPDATE messages SET api_content = ? WHERE id = (SELECT id FROM messages "
+            "UPDATE messages SET api_content = ?, display_metadata = COALESCE(?, display_metadata) "
+            "WHERE id = (SELECT id FROM messages "
             "WHERE session_id = ? AND role = 'user' AND active = 1 ORDER BY id DESC LIMIT 1"
             ") AND content IS ?",
-            (_scrub_surrogates(api_content), session_id, self._encode_content(content)))
+            (_scrub_surrogates(api_content), self._encode_display_metadata(display_metadata),
+             session_id, self._encode_content(content)))
 
     def set_message_api_content(
         self, session_id: str, row_id: int, content: Any, api_content: str,

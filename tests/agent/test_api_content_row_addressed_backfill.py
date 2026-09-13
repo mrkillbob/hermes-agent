@@ -82,6 +82,20 @@ class TestSetMessageApiContent:
         finally:
             db.close()
 
+    def test_positional_api_backfill_preserves_display_metadata(self, tmp_path):
+        db = self._open(tmp_path)
+        try:
+            db.append_message("s1", "user", content="hello")
+            marker = {"_hermes_surface_switch": {"surface": "desktop"}}
+            assert db.set_latest_user_api_content(
+                "s1", "hello", "hello\n\nAPI-CONTEXT", display_metadata=marker
+            ) == 1
+            row = db.get_messages("s1")[0]
+            assert row["api_content"] == "hello\n\nAPI-CONTEXT"
+            assert row["display_metadata"] == marker
+        finally:
+            db.close()
+
 class TestPrologueRowAddressedBackfill:
     """The prologue gate: backfill iff a durable row exists for this dict."""
 

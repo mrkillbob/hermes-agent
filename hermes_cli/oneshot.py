@@ -426,8 +426,13 @@ def _create_fallback_resume_session(session_db, resume_meta: dict, history: list
          if key not in {"_row_id", "_db_persisted", "message_id"}}
         for message in history if isinstance(message, dict)
     ]
-    session_db.append_messages_batch(fallback_id, rows)
-    restored, _display = session_db.get_resume_conversations(fallback_id)
+    try:
+        session_db.append_messages_batch(fallback_id, rows)
+        restored, _display = session_db.get_resume_conversations(fallback_id)
+    except BaseException:
+        _quietly("failed fallback session cleanup", lambda: session_db.end_session(
+            fallback_id, "oneshot_setup_failed"))
+        raise
     return fallback_id, restored
 
 

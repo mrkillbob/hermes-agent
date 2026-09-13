@@ -131,6 +131,9 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
     monkeypatch.setattr(mcp_tool, "_servers", {"shared": live_server})
     monkeypatch.setattr(mcp_tool, "_server_scope_keys", {"shared": launch_scope})
     monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {"shared": {launch_scope}}, raising=False)
+    monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names_by_scope", {
+        worker_scope: {"mcp__shared__tool": "shared"},
+    }, raising=False)
     monkeypatch.setattr(mcp_tool, "_server_connecting", set())
     monkeypatch.setattr(mcp_tool, "_server_connect_errors", {})
     monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {})
@@ -157,6 +160,92 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
     assert "shared" in result
     assert mcp_tool._server_scope_keys["shared"] == launch_scope
     assert mcp_tool._server_tool_scopes["shared"] == {launch_scope, worker_scope}
+
+
+def test_failed_profile_owned_connection_does_not_change_peer_parallel_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed OAuth connection remains an ownership boundary for peer discovery."""
+    from tools import mcp_tool
+    from tools import mcp_tool_discovery as discovery
+
+    owner_scope = hermes_home_key(tmp_path / "owner")
+    worker_scope = hermes_home_key(tmp_path / "worker")
+    owner_key = f"shared::profile::{owner_scope}"
+    worker_key = f"shared::profile::{worker_scope}"
+    monkeypatch.setattr(mcp_tool, "_servers", {})
+    monkeypatch.setattr(mcp_tool, "_server_connecting", set())
+    monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {})
+    monkeypatch.setattr(mcp_tool, "_server_connect_errors", {owner_key: "expired token"})
+    monkeypatch.setattr(mcp_tool, "_server_connect_retry_after", {owner_key: 999999.0})
+    monkeypatch.setattr(mcp_tool, "_server_scope_keys", {owner_key: owner_scope})
+    monkeypatch.setattr(mcp_tool, "_server_public_names", {owner_key: "shared"})
+    monkeypatch.setattr(mcp_tool, "_parallel_safe_servers", {owner_key})
+    monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: worker_scope)
+
+    selected = discovery._select_new_servers({
+        "shared": {"auth": "oauth", "supports_parallel_tool_calls": False},
+    })
+
+    assert list(selected) == [worker_key]
+    assert owner_key in mcp_tool._parallel_safe_servers
+    assert worker_key not in mcp_tool._parallel_safe_servers
+
+
+def test_lazy_profile_overlay_survives_repeated_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cached lazy overlay is valid without a live task and is not stale."""
+    from tools import mcp_tool
+    from tools import mcp_tool_registration as registration
+    from tools.registry import registry
+
+    scope = hermes_home_key(tmp_path / "worker")
+    key = f"shared::profile::{scope}"
+    tool_name = "mcp__shared__echo"
+    monkeypatch.setattr(mcp_tool, "_servers", {})
+    monkeypatch.setattr(mcp_tool, "_server_public_names", {key: "shared"})
+    monkeypatch.setattr(mcp_tool, "_server_scope_keys", {key: scope})
+    monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {key: {scope}})
+    monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {key: {"auth": "oauth", "lazy": True}})
+    monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: scope)
+    registry.register(tool_name, "mcp-shared", {"name": tool_name}, lambda **_kwargs: None, scope=scope)
+
+    assert registration._register_connected_into_current_scope({
+        "shared": {"auth": "oauth", "lazy": True},
+    }) == 0
+    assert registry.snapshot_registration(tool_name, scope=scope) is not None
+
+
+def test_scoped_teardown_restores_alias_from_surviving_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing one profile's last tool must not remove the surviving profile alias."""
+    from tools import mcp_tool
+    from tools import mcp_tool_registration as registration
+    from tools.registry import registry
+
+    first_scope = hermes_home_key(tmp_path / "first")
+    second_scope = hermes_home_key(tmp_path / "second")
+    first_key = "shared"
+    second_key = "shared::profile::second"
+    tool_name = "mcp__shared__alias"
+    monkeypatch.setattr(mcp_tool, "_servers", {})
+    monkeypatch.setattr(mcp_tool, "_server_public_names", {first_key: "shared", second_key: "shared"})
+    monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {
+        first_key: {first_scope}, second_key: {second_scope},
+    })
+    monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names", {})
+    monkeypatch.setattr(mcp_tool, "_mcp_tool_server_names_by_scope", {})
+    for scope, key in ((first_scope, first_key), (second_scope, second_key)):
+        registry.register(tool_name, "mcp-shared", {"name": tool_name}, lambda **_kwargs: None, scope=scope)
+        registration._track_mcp_tool_server(tool_name, key, scope=scope)
+    registry.register_toolset_alias("shared", "mcp-shared")
+
+    registration._deregister_mcp_tool_all_scopes(first_key, tool_name)
+
+    assert registry.snapshot_registration(tool_name, scope=second_scope) is not None
+    assert registry.get_toolset_alias_target("shared") == "mcp-shared"
 
 
 @pytest.mark.parametrize("worker_cfg", [
@@ -304,7 +393,6 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
             assert mcp_tool._server_tool_scopes["shared"] == {launch_scope}
             assert mcp_tool._servers["shared"] is server
         assert registry.snapshot_registration(owner_tool_name, scope=launch_scope) is not None
-        assert registry.get_toolset_alias_target("shared") == "mcp-shared"
 
         # Removing the server from the worker config has the same scoped cleanup.
         assert _mcp_discovery.register_mcp_servers({}) == []

@@ -258,11 +258,27 @@ def _select_new_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
         for server_name, config in servers.items():
             connection_name = server_name
             existing = _core._servers.get(server_name)
+            known_keys = (set(_core._server_public_names) | set(_core._server_scope_keys)
+                          | set(_core._server_connecting) | set(_core._server_connect_errors)
+                          | set(_core._server_connect_retry_after)
+                          | set(_core._lazy_server_configs))
+            owned_keys = {
+                key for key in known_keys
+                if _core._server_public_names.get(key, key) == server_name
+            }
+            current_owned_key = next(
+                (key for key in owned_keys if _core._server_scope_keys.get(key) == current_scope),
+                None,
+            )
             foreign_connection = (existing is not None or server_name in _core._lazy_server_configs
-                                   or server_name in connecting)
-            if (foreign_connection and current_scope is not None
-                    and _registration._profile_owned_auth(config)
-                    and _core._server_scope_keys.get(server_name) != current_scope):
+                                   or server_name in connecting
+                                   or any(_core._server_scope_keys.get(key) != current_scope
+                                          for key in owned_keys))
+            if (current_scope is not None and _registration._profile_owned_auth(config)
+                    and current_owned_key is not None):
+                connection_name = current_owned_key
+            elif (foreign_connection and current_scope is not None
+                  and _registration._profile_owned_auth(config)):
                 # OAuth tokens and mTLS clients are profile-owned even when route config matches.
                 # Give this profile a real connection key so it cannot be skipped by the global name.
                 connection_name = f"{server_name}::profile::{current_scope}"
@@ -294,12 +310,15 @@ def _select_new_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
                 key for key in new_servers
                 if _core._server_public_names.get(key, key) == srv_name
             )
+            policy_keys = matching_keys if current_scope is None else {connection_name}
             if _parse_boolish(srv_cfg.get("supports_parallel_tool_calls", False), default=False):
-                _core._parallel_safe_servers.add(srv_name)
-                _core._parallel_safe_servers.update(matching_keys)
+                if current_scope is None:
+                    _core._parallel_safe_servers.add(srv_name)
+                _core._parallel_safe_servers.update(policy_keys)
             else:
-                _core._parallel_safe_servers.discard(srv_name)
-                _core._parallel_safe_servers.difference_update(matching_keys)
+                if current_scope is None:
+                    _core._parallel_safe_servers.discard(srv_name)
+                _core._parallel_safe_servers.difference_update(policy_keys)
     for srv in stale_cached:
         _loop._signal_reconnect(srv)
     return new_servers

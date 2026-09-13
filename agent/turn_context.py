@@ -835,7 +835,12 @@ def _stamp_api_content_sidecar(
                 # Compacted copies carry no row id; positional is safe only because
                 # archive_and_compact just made this message the newest active user row.
                 if has_api_backfill:
-                    _db.set_latest_user_api_content(agent.session_id, durable_content, _api_content)
+                    if display_metadata:
+                        _db.set_latest_user_api_content(
+                            agent.session_id, durable_content, _api_content,
+                            display_metadata=display_metadata)
+                    else:
+                        _db.set_latest_user_api_content(agent.session_id, durable_content, _api_content)
                 elif display_metadata:
                     _db.set_latest_user_display_metadata(
                         agent.session_id, durable_content, display_metadata)
