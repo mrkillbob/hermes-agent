@@ -746,6 +746,7 @@ class _SessionFlight:
         self.event = threading.Event()
         self.result: Optional["SessionEntry"] = None
         self.error: Optional[BaseException] = None
+        self.post_actions: list[tuple[Callable[["SessionEntry"], "SessionEntry"], threading.Event, list]] = []
 
 
 @dataclass
@@ -794,6 +795,12 @@ class AsyncSessionStore:
             return await asyncio.to_thread(attr, *args, **kwargs)
 
         return _offloaded
+
+    async def get_or_create_session_and_switch(self, *args, **kwargs) -> Any:
+        """Keep the handoff operation on the store's single-flight worker."""
+        return await asyncio.to_thread(
+            self._store.get_or_create_session_and_switch, *args, **kwargs
+        )
 
 
 class SessionStore(
@@ -912,7 +919,7 @@ class SessionStore(
 
     def get_or_create_session(
         self, source: SessionSource, force_new: bool = False, touch_activity: bool = True,
-        conversation_kind: str = "interactive",
+        conversation_kind: str = "interactive", _post_action=None,
     ) -> SessionEntry:
         """Single-flight session lookup/create per routing key: overlapping calls for one key (even
         concurrent ``force_new``) share the owner's result so only one transition and SQLite row is
@@ -932,9 +939,27 @@ class SessionStore(
                 slot = self._inflight_sessions[flight_key] = _SessionFlight()
 
         if not owner:
+            action_waiter = None
+            if _post_action is not None:
+                action_waiter = (threading.Event(), [])
+                with inflight_lock:
+                    if not slot.event.is_set():
+                        slot.post_actions.append((_post_action, *action_waiter))
+                    else:
+                        action_waiter = None
+            if _post_action is not None and action_waiter is None:
+                return self.get_or_create_session(
+                    source, force_new=force_new, touch_activity=touch_activity,
+                    conversation_kind=conversation_kind, _post_action=_post_action,
+                )
             slot.event.wait()
             if slot.error is not None:
                 raise slot.error
+            if action_waiter is not None:
+                action_waiter[0].wait()
+                if action_waiter[1]:
+                    raise action_waiter[1][0]
+                assert slot.result is not None
             assert slot.result is not None
             if conversation_kind == "interactive":
                 self._upgrade_route_for_interactive(slot.result)
@@ -947,6 +972,22 @@ class SessionStore(
                 source, force_new=force_new, touch_activity=touch_activity,
                 conversation_kind=conversation_kind,
             )
+            if _post_action is not None:
+                slot.result = _post_action(slot.result)
+            while True:
+                with inflight_lock:
+                    actions = slot.post_actions
+                    slot.post_actions = []
+                if not actions:
+                    break
+                for action, event, error in actions:
+                    try:
+                        assert slot.result is not None
+                        slot.result = action(slot.result)
+                    except BaseException as exc:
+                        error.append(exc)
+                    finally:
+                        event.set()
             return slot.result
         except BaseException as exc:
             slot.error = exc
@@ -955,6 +996,26 @@ class SessionStore(
             slot.event.set()
             with inflight_lock:
                 self._inflight_sessions.pop(flight_key, None)
+
+    def get_or_create_session_and_switch(
+        self, source: SessionSource, target_session_id: str, *,
+        conversation_kind: str = "task", persisted_cwd: Optional[str] = None,
+    ) -> Optional[SessionEntry]:
+        """Route and complete a handoff before releasing the routing flight."""
+        def _switch(_entry: SessionEntry) -> SessionEntry:
+            switched = self.switch_session(
+                _entry.session_key, target_session_id,
+                conversation_kind=conversation_kind, persisted_cwd=persisted_cwd,
+            )
+            if switched is None:
+                raise RuntimeError(
+                    f"could not switch session key {_entry.session_key} → {target_session_id}"
+                )
+            return switched
+
+        return self.get_or_create_session(
+            source, conversation_kind=conversation_kind, _post_action=_switch,
+        )
 
     def _get_or_create_session_impl(
         self, source: SessionSource, force_new: bool = False, touch_activity: bool = True,

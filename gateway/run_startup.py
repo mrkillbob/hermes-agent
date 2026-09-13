@@ -1506,14 +1506,21 @@ class GatewayStartupMixin:
             # Policy-disabled handoffs must still complete, and there is no
             # workspace to validate.
             switch_kwargs = {"conversation_kind": "task"}
-        # Ensure a session_store entry exists for this key; switch_session then re-points it.
-        await self.async_session_store.get_or_create_session(
-            dest.source, conversation_kind="task"
-        )
-        # switch_session ends the prior session and reopens the CLI session under the new key.
-        switched = await self.async_session_store.switch_session(
-            session_key, cli_session_id, **switch_kwargs
-        )
+        # Route ownership and the task handoff must complete as one flight. Otherwise an
+        # interactive message can observe the pre-handoff route between these two calls.
+        handoff = getattr(type(self.async_session_store), "get_or_create_session_and_switch", None)
+        if callable(handoff):
+            switched = await self.async_session_store.get_or_create_session_and_switch(
+                dest.source, cli_session_id, **switch_kwargs
+            )
+        else:
+            # Compatibility for narrow test doubles and older injected stores.
+            await self.async_session_store.get_or_create_session(
+                dest.source, conversation_kind="task"
+            )
+            switched = await self.async_session_store.switch_session(
+                session_key, cli_session_id, **switch_kwargs
+            )
         if switched is None:
             raise RuntimeError(f"could not switch session key {session_key} → {cli_session_id}")
         # Evict the cached AIAgent (rebuild against the CLI session_id, like /resume) and clear stale

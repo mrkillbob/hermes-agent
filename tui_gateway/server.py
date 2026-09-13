@@ -42,18 +42,28 @@ logger = logging.getLogger(__name__)
 
 _failed_conversation_root_leases: list[object] = []
 _failed_conversation_root_leases_lock = threading.Lock()
+_failed_conversation_root_lease_retry_timer = None
 
 
 def _remember_failed_conversation_root_lease(lease) -> None:
+    global _failed_conversation_root_lease_retry_timer
     with _failed_conversation_root_leases_lock:
         if all(existing is not lease for existing in _failed_conversation_root_leases):
             _failed_conversation_root_leases.append(lease)
+        timer = _failed_conversation_root_lease_retry_timer
+        if timer is None or not timer.is_alive():
+            timer = threading.Timer(1.0, _retry_failed_conversation_root_leases)
+            timer.daemon = True
+            _failed_conversation_root_lease_retry_timer = timer
+            timer.start()
 
 
 def _retry_failed_conversation_root_leases() -> None:
+    global _failed_conversation_root_lease_retry_timer
     with _failed_conversation_root_leases_lock:
         pending = list(_failed_conversation_root_leases)
         _failed_conversation_root_leases.clear()
+        _failed_conversation_root_lease_retry_timer = None
     for lease in pending:
         try:
             lease.release()
@@ -456,6 +466,45 @@ def _acquire_conversation_root_lease(binding, *, surface: str):
                                            repo_common_dir=Path(binding.repo_common_dir), surface=surface)
 
 
+def _remove_failed_conversation_worktree(session: dict, binding, db) -> None:
+    """Release a seeded root and remove its checkout before surfacing metadata failure."""
+    lease = session.get("conversation_root_lease")
+    if lease is not None:
+        try:
+            lease.release()
+        except Exception:
+            _remember_failed_conversation_root_lease(lease)
+            logger.warning("Failed to release failed conversation root lease", exc_info=True)
+        else:
+            session.pop("conversation_root_lease", None)
+    try:
+        manager, _, owns_db = _conversation_worktree_manager(
+            profile_home=session.get("profile_home"), db=db
+        )
+        remover = getattr(manager, "remove_after_explicit_request", None)
+        if callable(remover):
+            result = remover(str(binding.root_session_id), active_session_bound=False)
+            if not getattr(result, "removed", False):
+                logger.warning(
+                    "Failed to remove failed seeded conversation worktree %s",
+                    binding.root_session_id,
+                )
+        else:
+            logger.warning(
+                "Conversation worktree manager cannot remove failed seeded root %s",
+                binding.root_session_id,
+            )
+        if owns_db:
+            with contextlib.suppress(Exception):
+                db.close()
+    except Exception:
+        logger.warning(
+            "Failed to remove failed seeded conversation worktree %s",
+            binding.root_session_id,
+            exc_info=True,
+        )
+
+
 def _conversation_worktree_manager(*, profile_home=None, db=None):
     """Construct the policy-governed manager against the owning profile DB."""
     owns_db = False
@@ -541,9 +590,13 @@ def _bind_conversation_worktree_on_submit(session: dict) -> None:
         _register_session_cwd(session)
         if db is not None:
             common_root = git_probe.common_repo_root(metadata["path"]) or str(binding.repo_common_dir)
-            db.update_session_cwd(
-                key, metadata["path"], metadata.get("branch", ""),
-                common_root, replace_git_meta=True)
+            try:
+                db.update_session_cwd(
+                    key, metadata["path"], metadata.get("branch", ""),
+                    common_root, replace_git_meta=True)
+            except Exception:
+                _remove_failed_conversation_worktree(session, binding, db)
+                raise
 
 
 def _resolve_conversation_worktree_for_resume(session_id: str, *, profile_home=None, db=None):

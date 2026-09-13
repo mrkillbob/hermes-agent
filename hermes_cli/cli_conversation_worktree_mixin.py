@@ -135,6 +135,23 @@ class CLIConversationWorktreeMixin:
         for lease in pending:
             self._release_conversation_root_lease(lease, context="retry")
 
+    def _detach_historical_conversation_worktree(self, recorded_cwd: str) -> None:
+        """Drop the prior managed identity before restoring an unmanaged historical cwd."""
+        prior_note = getattr(self, "_conversation_worktree_prompt_note", "")
+        if prior_note:
+            rendered = f"\n\n[System note: {prior_note}]"
+            self.system_prompt = (self.system_prompt or "").replace(rendered, "")
+        if self.agent is not None:
+            self.agent.ephemeral_system_prompt = self.system_prompt
+        prior_lease = getattr(self, "_conversation_root_lease", None)
+        self._conversation_root_lease = None
+        self._conversation_worktree_binding = None
+        self._conversation_worktree_prompt_note = ""
+        self._conversation_worktree_historical = True
+        self.working_directory = recorded_cwd
+        os.environ["TERMINAL_CWD"] = recorded_cwd
+        self._release_conversation_root_lease(prior_lease, context="historical resume")
+
     def _initialize_conversation_worktree(self, config, resume, manage_conversation_worktree):
         self._conversation_worktree_manager = (
             _build_cli_conversation_worktree_manager(config, self._session_db)
@@ -236,7 +253,9 @@ class CLIConversationWorktreeMixin:
                 row = self._session_db.get_session(root_session_id) or {}
                 recorded_cwd = str(row.get("cwd") or "").strip()
                 if recorded_cwd and os.path.isdir(os.path.expanduser(recorded_cwd)):
-                    self._conversation_worktree_historical = True
+                    self._detach_historical_conversation_worktree(
+                        os.path.expanduser(recorded_cwd)
+                    )
                     return False
                 from agent.conversation_worktree import ConversationWorktreeError
 

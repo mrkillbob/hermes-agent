@@ -4754,7 +4754,17 @@ def test_prompt_submit_admission_is_serialized_per_session(monkeypatch):
     first_entered = threading.Event()
     release_first = threading.Event()
     claimed: list[str] = []
+    slot_claims: list[str] = []
     busy: list[str] = []
+    slot_entered = threading.Event()
+    release_slot = threading.Event()
+
+    def fake_slot(_sid, _current):
+        slot_claims.append("slot")
+        if len(slot_claims) == 1:
+            slot_entered.set()
+            assert release_slot.wait(2)
+        return None
 
     def fake_lock(rid, sid, current, text, *args):
         claimed.append(text)
@@ -4766,6 +4776,7 @@ def test_prompt_submit_admission_is_serialized_per_session(monkeypatch):
         return None, {}
 
     monkeypatch.setattr(server, "_lock_in_submit_turn", fake_lock)
+    monkeypatch.setattr(server, "_ensure_active_session_slot", fake_slot)
     monkeypatch.setattr(server, "_persist_session_row_for_submit", lambda *args: None)
     monkeypatch.setattr(
         server, "_handle_busy_submit",
@@ -4779,18 +4790,53 @@ def test_prompt_submit_admission_is_serialized_per_session(monkeypatch):
     second = threading.Thread(target=lambda: replies.append(server._admit_prompt_submit(
         "2", "sid", session, "second", {}, False, None, None, False, None)))
     first.start()
-    assert first_entered.wait(2)
+    assert slot_entered.wait(2)
     second.start()
     time.sleep(0.05)
     assert second.is_alive(), "second submit bypassed the per-session admission lock"
+    release_slot.set()
+    assert first_entered.wait(2)
     release_first.set()
     first.join(timeout=2)
     second.join(timeout=2)
 
+    assert slot_claims == ["slot", "slot"]
     assert claimed == ["first"]
     assert busy == ["session-key"]
     assert replies[0][0] is None
     assert replies[1][0]["error"]["code"] == 4099
+
+
+def test_failed_root_lease_release_retries_without_another_teardown(monkeypatch):
+    """A transient root-lease release failure schedules an independent retry."""
+    lease = Mock()
+    lease.release.side_effect = [RuntimeError("registry busy"), None]
+    scheduled = []
+
+    class _Timer:
+        def __init__(self, _delay, target):
+            self.target = target
+
+        def is_alive(self):
+            return False
+
+        def start(self):
+            scheduled.append(self.target)
+
+    monkeypatch.setattr(server.threading, "Timer", _Timer)
+    with server._failed_conversation_root_leases_lock:
+        server._failed_conversation_root_leases.clear()
+        server._failed_conversation_root_lease_retry_timer = None
+
+    server._remember_failed_conversation_root_lease(lease)
+    assert len(scheduled) == 1
+
+    scheduled[0]()
+    assert len(scheduled) == 2
+    scheduled[1]()
+    assert lease.release.call_count == 2
+    with server._failed_conversation_root_leases_lock:
+        assert server._failed_conversation_root_leases == []
 
 
 def test_prompt_submit_validates_truncation_before_materializing_draft(monkeypatch):

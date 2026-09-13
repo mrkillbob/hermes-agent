@@ -562,6 +562,9 @@ def _admit_prompt_submit(
     hosted_task, internal_hosted_submit, transport):
     """Serialize admission, validation, materialization, and turn claim per session."""
     with _session_prompt_submit_lock(session):
+        if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
+            reason = getattr(limit_message, "reason", None)
+            return _err(rid, 4090, str(limit_message), {"reason": reason} if reason else None), None
         while True:
             with session["history_lock"]:
                 if not session.get("running"):
@@ -612,11 +615,6 @@ def _(rid, params: dict) -> dict:
         if internal_hosted_submit else _legacy_group_fence_error(rid, session, params))
     if err is not None:
         return err
-    if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
-        # Refused HERE — before the busy queue, db row and agent build — so a refusal
-        # leaves the session untouched.  The reason travels as machine-readable data.
-        reason = getattr(limit_message, "reason", None)
-        return _err(rid, 4090, str(limit_message), {"reason": reason} if reason else None)
     # Rewritten every submit: a session alternates app window / HUD; stale "hud" misinforms.
     session["client_surface"] = "hud" if params.get("surface") == "hud" else ""
     has_truncation = any(params.get(k) is not None for k in _TRUNCATION_PARAMS)

@@ -470,6 +470,7 @@ class _Resume:
     def __init__(self, rid, params: dict, target: str) -> None:
         self.rid, self.params, self.target = rid, params, target
         self.db, self.owns_db, self.found, self.profile_resume_cwd = None, False, None, ""
+        self.recorded_cwd = ""
         self.conversation_worktree = {}
         self.conversation_worktree_historical = False
         self.conversation_root_lease = None
@@ -839,7 +840,8 @@ def _(rid, params: dict) -> dict:
         _resume_follow_tip(ctx)
         if (resp := _resume_guard(ctx)) is not None:
             return resp
-        ctx.profile_resume_cwd = _str_param(ctx.found, "cwd") or _profile_configured_cwd(ctx.profile_home)
+        ctx.recorded_cwd = _str_param(ctx.found, "cwd")
+        ctx.profile_resume_cwd = ctx.recorded_cwd or _profile_configured_cwd(ctx.profile_home)
         # Fast path: reuse a session live IN THIS PROFILE (never another profile's runtime).
         with _session_resume_lock:
             live = _find_live_session_by_key(ctx.target, ctx.profile_home)
@@ -856,11 +858,16 @@ def _(rid, params: dict) -> dict:
                     ctx.conversation_root_lease = _acquire_conversation_root_lease(
                         binding, surface=_resolve_session_source(_str_param(params, "source") or None))
                     ctx.profile_resume_cwd = ctx.conversation_worktree["path"]
-                elif manager is not None and ctx.profile_resume_cwd:
+                elif manager is not None and ctx.recorded_cwd and os.path.isdir(
+                        os.path.expanduser(ctx.recorded_cwd)):
                     # Rows written before isolation was enabled are historical:
                     # preserve their recorded workspace, but never turn the first
                     # resumed submit into a new root claim.
                     ctx.conversation_worktree_historical = True
+                elif manager is not None:
+                    return _err(
+                        rid, 5000,
+                        "no ready conversation worktree for resumed session; refusing profile checkout fallback")
             except Exception as exc:
                 return _err(rid, 5000, f"conversation worktree setup failed: {exc}")
         if ctx.lazy:

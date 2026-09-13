@@ -417,6 +417,49 @@ def test_task_and_interactive_calls_share_flight_and_upgrade_one_route(
     assert manager.bound_roots == [results["task"].session_id]
 
 
+def test_handoff_switch_completes_before_shared_flight_releases(store, manager, source, monkeypatch):
+    """A handoff waiter must publish the target before interactive waiters wake."""
+    task_entered = threading.Event()
+    release_task = threading.Event()
+    switched = threading.Event()
+    original = store._get_or_create_session_impl
+
+    def delayed(source_arg, *, force_new=False, touch_activity=True, conversation_kind="interactive"):
+        if conversation_kind == "task":
+            task_entered.set()
+            assert release_task.wait(2)
+        return original(
+            source_arg, force_new=force_new, touch_activity=touch_activity,
+            conversation_kind=conversation_kind,
+        )
+
+    def fake_switch(key, target, **_kwargs):
+        entry = store.lookup_by_session_key(key)
+        assert entry is not None
+        entry.session_id = target
+        switched.set()
+        return entry
+
+    monkeypatch.setattr(store, "_get_or_create_session_impl", delayed)
+    monkeypatch.setattr(store, "switch_session", fake_switch)
+    results = {}
+    handoff = threading.Thread(target=lambda: results.setdefault(
+        "handoff", store.get_or_create_session_and_switch(source, "cli-session")))
+    interactive = threading.Thread(target=lambda: results.setdefault(
+        "interactive", store.get_or_create_session(source, conversation_kind="interactive")))
+    handoff.start()
+    assert task_entered.wait(2)
+    interactive.start()
+    release_task.set()
+    handoff.join(timeout=2)
+    interactive.join(timeout=2)
+
+    assert switched.is_set()
+    assert results["handoff"] is results["interactive"]
+    assert results["interactive"].session_id == "cli-session"
+    assert manager.bound_roots == ["cli-session"]
+
+
 def test_explicit_fork_creation_failed_root_uses_recoverable_binding(store, manager, source, monkeypatch):
     """Explicit fork resume must retry a recoverable creation_failed root."""
     session_key = build_session_key(source)
