@@ -1570,6 +1570,40 @@ class TestBuildSafeEnv:
         assert result["NOTION_TOKEN"] == "from-op"
         assert "UNTRACKED_SECRET_KEY" not in result
 
+    def test_scoped_external_secret_is_passed_and_shapes_connection_identity(self, monkeypatch):
+        """A multiplexed stdio child and reusable connection use the active profile's source value."""
+        from agent import secret_scope
+        from hermes_cli import env_loader
+        from tools.mcp_tool_config import _build_safe_env, _connection_config
+        from tools.mcp_tool_registration import _connection_identity
+
+        monkeypatch.setitem(env_loader._SECRET_SOURCES, "MCP_TOKEN", "bitwarden")
+        monkeypatch.setenv("MCP_TOKEN", "launch-profile-token")
+        secret_scope.set_multiplex_active(True)
+
+        token_a = secret_scope.set_secret_scope({"MCP_TOKEN": "profile-a-token"})
+        try:
+            config_a = _connection_config({"command": "mcp-server"})
+            child_env_a = _build_safe_env(
+                None, external_env=config_a["_hermes_external_secret_env"]
+            )
+        finally:
+            secret_scope.reset_secret_scope(token_a)
+
+        token_b = secret_scope.set_secret_scope({"MCP_TOKEN": "profile-b-token"})
+        try:
+            config_b = _connection_config({"command": "mcp-server"})
+            child_env_b = _build_safe_env(
+                None, external_env=config_b["_hermes_external_secret_env"]
+            )
+        finally:
+            secret_scope.reset_secret_scope(token_b)
+            secret_scope.set_multiplex_active(False)
+
+        assert child_env_a["MCP_TOKEN"] == "profile-a-token"
+        assert child_env_b["MCP_TOKEN"] == "profile-b-token"
+        assert _connection_identity(config_a) != _connection_identity(config_b)
+
     def test_windows_location_vars_passed_without_secrets(self):
         """Windows launcher tools need location vars, but secrets stay filtered."""
         from tools.mcp_tool_config import _build_safe_env
