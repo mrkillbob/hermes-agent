@@ -899,6 +899,49 @@ def _validate_maintenance_command_evidence(
         for evidence in command_evidence
     ):
         raise ValueError("maintenance evidence cwd does not match exact worktree")
+    for evidence in command_evidence:
+        worktree = Path(evidence.cwd).resolve(strict=False)
+        try:
+            head_result = subprocess.run(
+                ["git", "-C", str(worktree), "rev-parse", "--verify", "HEAD"],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10,
+            )
+            status_result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(worktree),
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError(
+                "maintenance evidence worktree identity is unavailable"
+            ) from error
+        actual_head = head_result.stdout.strip()
+        if head_result.returncode != 0 or not _FULL_SHA.fullmatch(actual_head):
+            raise ValueError("maintenance evidence worktree HEAD is unavailable")
+        if actual_head.casefold() != head_sha.casefold():
+            raise ValueError(
+                "maintenance evidence worktree HEAD does not match exact head"
+            )
+        if status_result.returncode != 0:
+            raise ValueError("maintenance evidence worktree status is unavailable")
+        if status_result.stdout:
+            raise ValueError("maintenance evidence worktree is not clean")
 
 
 def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
@@ -1231,7 +1274,7 @@ def _scan(ctx: Any) -> int:
                 ]
                 maintenance_payload = (
                     maintenance_results[0]
-                    if len(eligible_release_policies) == 1
+                    if len(release_policies) == 1
                     else {
                         maintenance.repository: result
                         for maintenance, result in zip(

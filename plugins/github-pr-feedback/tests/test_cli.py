@@ -1276,6 +1276,27 @@ def test_complete_maintenance_cli_records_only_a_configured_exact_head_lane(
 
     repository = tmp_path / "repository"
     subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    (repository / "README.md").write_text("maintenance\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Hermes Tests",
+            "-c",
+            "user.email=hermes-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "initial",
+        ],
+        check=True,
+    )
+    head_sha = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
     settings = enabled_settings(repository)
     settings["release_maintenance"] = {
         "enabled": True,
@@ -1293,6 +1314,24 @@ def test_complete_maintenance_cli_records_only_a_configured_exact_head_lane(
         ],
     }
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    worktree_root = tmp_path / "profile" / "github-pr-feedback" / "maintenance-worktrees"
+    exact_cwd = maintenance_worktree_path(
+        worktree_root, "acme/widgets", head_sha, "audit-unit-tests"
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            str(exact_cwd),
+            head_sha,
+        ],
+        check=True,
+    )
     context = RecordingContext(settings)
     parser = argparse.ArgumentParser()
     from github_pr_feedback.cli import handle_cli_with_context, setup_cli
@@ -1304,7 +1343,7 @@ def test_complete_maintenance_cli_records_only_a_configured_exact_head_lane(
             "--repository",
             "acme/widgets",
             "--head-sha",
-            "a" * 40,
+            head_sha,
             "--lane",
             "unit-tests",
             "--status",
@@ -1317,12 +1356,7 @@ def test_complete_maintenance_cli_records_only_a_configured_exact_head_lane(
                     {
                         "argv": ["python3", "-m", "pytest", "-q"],
                         "cwd": str(
-                            maintenance_worktree_path(
-                                tmp_path / "profile" / "github-pr-feedback" / "maintenance-worktrees",
-                                "acme/widgets",
-                                "a" * 40,
-                                "audit-unit-tests",
-                            )
+                            exact_cwd
                         ),
                         "returncode": 0,
                         "duration_ms": 125,
@@ -1340,14 +1374,16 @@ def test_complete_maintenance_cli_records_only_a_configured_exact_head_lane(
     ledger = FeedbackLedger.for_current_profile()
     try:
         assert (
-            ledger.maintenance_receipts("acme/widgets", "a" * 40)["unit-tests"].status
+            ledger.maintenance_receipts("acme/widgets", head_sha)["unit-tests"].status
             == "passed"
         )
     finally:
         ledger.close()
 
 
-def test_maintenance_command_evidence_requires_exact_configured_argv() -> None:
+def test_maintenance_command_evidence_requires_exact_command_and_clean_head(
+    tmp_path: Path,
+) -> None:
     from github_pr_feedback.cli import _validate_maintenance_command_evidence
     from github_pr_feedback.policy import ReleaseMaintenanceLane, ReleaseMaintenancePolicy
     from github_pr_feedback.release_maintenance import maintenance_worktree_path
@@ -1376,9 +1412,68 @@ def test_maintenance_command_evidence_requires_exact_configured_argv() -> None:
             stderr_sha256="b" * 64,
         )
 
-    worktree_root = Path("/tmp/maintenance-worktrees")
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+
+    def commit(contents: str) -> str:
+        (repository / "README.md").write_text(contents, encoding="utf-8")
+        subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "-c",
+                "user.name=Hermes Tests",
+                "-c",
+                "user.email=hermes-tests@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "maintenance",
+            ],
+            check=True,
+        )
+        return subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+    head_sha = commit("initial\n")
+    repaired_head_sha = commit("repaired\n")
+    worktree_root = tmp_path / "maintenance-worktrees"
     exact_cwd = maintenance_worktree_path(
-        worktree_root, "acme/widgets", "a" * 40, "audit-unit-tests"
+        worktree_root, "acme/widgets", head_sha, "audit-unit-tests"
+    )
+    repair_cwd = maintenance_worktree_path(
+        worktree_root, "acme/widgets", head_sha, "repair-unit-tests"
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            str(exact_cwd),
+            head_sha,
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            str(repair_cwd),
+            repaired_head_sha,
+        ],
+        check=True,
     )
     _validate_maintenance_command_evidence(
         maintenance,
@@ -1395,7 +1490,7 @@ def test_maintenance_command_evidence_requires_exact_configured_argv() -> None:
             ),
         ),
         worktree_root=worktree_root,
-        head_sha="a" * 40,
+        head_sha=head_sha,
     )
     with pytest.raises(ValueError, match="does not match"):
         _validate_maintenance_command_evidence(
@@ -1403,7 +1498,7 @@ def test_maintenance_command_evidence_requires_exact_configured_argv() -> None:
             "unit-tests",
             (evidence(("python3", "-m", "pytest", "-q", "--maxfail=1")),),
             worktree_root=worktree_root,
-            head_sha="a" * 40,
+            head_sha=head_sha,
         )
     with pytest.raises(ValueError, match="exact worktree"):
         _validate_maintenance_command_evidence(
@@ -1411,8 +1506,98 @@ def test_maintenance_command_evidence_requires_exact_configured_argv() -> None:
             "unit-tests",
             (evidence(("python3", "-m", "pytest", "-q")),),
             worktree_root=worktree_root,
-            head_sha="a" * 40,
+            head_sha=head_sha,
         )
+    with pytest.raises(ValueError, match="HEAD does not match"):
+        _validate_maintenance_command_evidence(
+            maintenance,
+            "unit-tests",
+            (
+                MaintenanceCommandEvidence(
+                    argv=("python3", "-m", "pytest", "-q"),
+                    cwd=str(repair_cwd),
+                    returncode=0,
+                    duration_ms=1,
+                    timed_out=False,
+                    stdout_sha256="a" * 64,
+                    stderr_sha256="b" * 64,
+                ),
+            ),
+            worktree_root=worktree_root,
+            head_sha=head_sha,
+        )
+
+
+def test_scan_keeps_repository_keys_when_only_one_policy_is_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from github_pr_feedback.cli import _scan
+
+    class Lock:
+        def __enter__(self) -> bool:
+            return True
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class Ledger:
+        @classmethod
+        def for_current_profile(cls):
+            return cls()
+
+        def close(self) -> None:
+            pass
+
+    class Policy:
+        enabled = True
+        repair_steward = None
+        merge_maintainer = None
+        release_maintenance = None
+
+        def merge_policies(self):
+            return ()
+
+        def release_policies(self):
+            return (
+                SimpleNamespace(repository="acme/eligible"),
+                SimpleNamespace(repository="acme/blocked"),
+            )
+
+    class Primary:
+        def scan(self, *, apply_labels: bool):
+            assert apply_labels is False
+            return SimpleNamespace(
+                created=0,
+                skipped={},
+                degraded=False,
+                required_local_ci_backlog=1,
+                required_local_ci_backlog_by_repository={
+                    "acme/eligible": 0,
+                    "acme/blocked": 1,
+                },
+            )
+
+        def apply_agent_labels(self):
+            return {"status": "ok", "updated": 0, "skipped": {}}
+
+    monkeypatch.setattr("github_pr_feedback.cli._load_policy_from_context", lambda _ctx: Policy())
+    monkeypatch.setattr("github_pr_feedback.cli._exclusive_scan_lock", lambda: Lock())
+    monkeypatch.setattr("github_pr_feedback.cli.FeedbackLedger", Ledger)
+    monkeypatch.setattr("github_pr_feedback.cli._controller", lambda *_args: Primary())
+    monkeypatch.setattr(
+        "github_pr_feedback.cli._run_release_maintenance_scan",
+        lambda _policy, _ledger, *, maintenance: {
+            "status": "ok",
+            "repository": maintenance.repository,
+        },
+    )
+
+    assert _scan(object()) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["release_maintenance"] == {
+        "acme/eligible": {"repository": "acme/eligible", "status": "ok"}
+    }
 
 
 def test_release_maintenance_scan_is_part_of_the_governed_scan_surface(
