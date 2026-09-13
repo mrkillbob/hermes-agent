@@ -35,7 +35,7 @@ if __name__=='__main__':
   w,h=Image.open(source).size
   boxes={'top':[0,0,w//2,int(h*.46)],'left':[w//2,0,w,int(h*.46)],'front':[0,h//2-16,w//2,int(h*.95)],'back':[w//2,h//2-16,w,int(h*.95)]}
   if not (folder/'intake.json').exists():
-   with open(OUTPUT/f'{name}-intake.log','w') as log,contextlib.redirect_stdout(log):module['prepare'](source,folder,ROOT/'.lunar-runtime',height,boxes)
+   with open(OUTPUT/f'{name}-intake.log','w', encoding='utf-8') as log,contextlib.redirect_stdout(log):module['prepare'](source,folder,ROOT/'.lunar-runtime',height,boxes)
   manifest.append({'id':name,'source':str(source),'heightMetres':height,'status':'mask_review_pending'})
   print('Prepared',name,flush=True)
  (OUTPUT/'worker-intake-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')

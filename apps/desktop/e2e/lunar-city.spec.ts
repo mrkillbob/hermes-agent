@@ -21,7 +21,7 @@ import {
   type StandardGatewaySource,
   startPopulationGateways
 } from './lunar-city-fixtures'
-import { startMockServer } from './mock-server'
+import { startMockServer } from '../../../tests-js/scripts/mock-server'
 import { _electron, expect, installErrorBannerGuard, test } from './test'
 
 const DESKTOP_ROOT = path.resolve(import.meta.dirname, '..')

@@ -24,7 +24,7 @@ for c,ids in enumerate(components):
  points=[mesh.vertices[i].co for i in ids]
  low=[min(p[k] for p in points) for k in range(3)];high=[max(p[k] for p in points) for k in range(3)]
  rows.append({'component':c,'vertices':len(ids),'faces':faces[c],'min':low,'max':high,'extent':[b-a for a,b in zip(low,high)],'indices':ids})
-Path(OUTPUT).write_text(json.dumps({'body':body.name,'componentCount':len(components),'smallComponents':rows},indent=2)+'\n')
+Path(OUTPUT).write_text(json.dumps({'body':body.name,'componentCount':len(components),'smallComponents':rows},indent=2)+'\n', encoding='utf-8')
 print('Components',len(components),'small components',len(rows))
 if globals().get('REMOVE_SINGLE_TRIANGLES',False):
  import bmesh
