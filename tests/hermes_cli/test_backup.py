@@ -2508,3 +2508,27 @@ def test_run_backup_keeps_previous_zip_when_new_archive_is_incomplete(tmp_path, 
     backup_mod.run_backup(Namespace(output=None, keep=1))
 
     assert previous.exists()
+
+
+def test_run_backup_retention_prioritizes_successful_archives(tmp_path):
+    """``--keep`` bounds incomplete archives without evicting good restore points."""
+    from hermes_cli import backup as backup_mod
+
+    successful = {
+        "hermes-backup-2026-01-01-000000.zip",
+        "hermes-backup-2026-01-02-000000.zip",
+    }
+    incomplete = {
+        "hermes-backup-2026-01-03-000000-incomplete.zip",
+        "hermes-backup-2026-01-04-000000-incomplete.zip",
+        "hermes-backup-2026-01-05-000000-incomplete.zip",
+        "hermes-backup-2026-01-06-000000-incomplete.zip",
+    }
+    for name in successful | incomplete:
+        (tmp_path / name).write_bytes(b"archive")
+
+    backup_mod._prune_run_backup_zips(tmp_path, keep=3, what="backup")
+
+    assert {p.name for p in tmp_path.glob("hermes-backup-*.zip")} == successful | {
+        "hermes-backup-2026-01-06-000000-incomplete.zip",
+    }
