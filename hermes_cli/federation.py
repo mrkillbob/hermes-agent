@@ -25,11 +25,49 @@ _REASONING_EFFORTS = frozenset(
 )
 _FEDERATION_SEED_MARKER = ".federation_seed_incomplete"
 _FEDERATION_SEED_RESERVATION_SUFFIX = ".federation_seed.lock"
+_FEDERATION_SEED_RESERVATION_STALE_SECONDS = 300
 
 
 def _federation_seed_reservation(profile_dir: Path) -> Path:
     """Return the per-profile-parent reservation used during profile creation."""
     return profile_dir.parent / f".{profile_dir.name}{_FEDERATION_SEED_RESERVATION_SUFFIX}"
+
+
+def _federation_seed_reservation_is_stale(profile_dir: Path) -> bool:
+    """Return whether a lock can be recovered after a crashed seed.
+
+    A live owner is never evicted. A dead PID is conclusive; legacy or
+    half-written locks use an age floor because a process can be killed after
+    creating the file but before writing its metadata.
+    """
+    reservation = _federation_seed_reservation(profile_dir)
+    if profile_dir.is_dir():
+        return False
+    try:
+        stat = reservation.stat()
+    except FileNotFoundError:
+        return True
+
+    try:
+        payload = json.loads(reservation.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return time.time() - stat.st_mtime >= _FEDERATION_SEED_RESERVATION_STALE_SECONDS
+
+    pid = payload.get("pid") if isinstance(payload, dict) else None
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        except OSError:
+            return time.time() - stat.st_mtime >= _FEDERATION_SEED_RESERVATION_STALE_SECONDS
+        return False
+
+    return time.time() - stat.st_mtime >= _FEDERATION_SEED_RESERVATION_STALE_SECONDS
 
 
 def _claim_federation_seed_reservation(profile_dir: Path) -> bool:
@@ -41,9 +79,37 @@ def _claim_federation_seed_reservation(profile_dir: Path) -> bool:
             os.O_CREAT | os.O_EXCL | os.O_WRONLY,
             0o600,
         )
+        os.write(
+            fd,
+            json.dumps({"created_at": time.time(), "pid": os.getpid()}).encode("utf-8"),
+        )
         os.close(fd)
         return True
-    except (FileExistsError, OSError):
+    except FileExistsError:
+        # A creator can die after O_EXCL succeeds but before its profile
+        # directory exists. Recover only a provably abandoned reservation and
+        # retry the atomic claim once; never remove a live owner's lock.
+        if profile_dir.is_dir() or not _federation_seed_reservation_is_stale(profile_dir):
+            return False
+        try:
+            _federation_seed_reservation(profile_dir).unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            fd = os.open(
+                _federation_seed_reservation(profile_dir),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+            os.write(
+                fd,
+                json.dumps({"created_at": time.time(), "pid": os.getpid()}).encode("utf-8"),
+            )
+            os.close(fd)
+            return True
+        except OSError:
+            return False
+    except OSError:
         return False
 
 

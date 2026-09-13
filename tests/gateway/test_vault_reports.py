@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from plugins.kanban.vault_reports import append_vault_context, write_terminal_report
+from gateway.vault_reports import append_vault_context, write_terminal_report
 
 
 CONFIG = {
@@ -22,7 +22,7 @@ CONFIG = {
 
 def test_terminal_report_uses_fixed_command_json_stdin_and_no_shell():
     completed = SimpleNamespace(returncode=0, stdout='{"status":"ok"}', stderr="")
-    with patch("plugins.kanban.vault_reports.subprocess.run", return_value=completed) as run:
+    with patch("gateway.vault_reports.subprocess.run", return_value=completed) as run:
         assert (
             write_terminal_report(
                 CONFIG,
@@ -62,7 +62,7 @@ def test_disabled_or_failed_bridge_is_fail_open():
         )
         is False
     )
-    with patch("plugins.kanban.vault_reports.subprocess.run", side_effect=TimeoutError):
+    with patch("gateway.vault_reports.subprocess.run", side_effect=TimeoutError):
         assert (
             write_terminal_report(
                 CONFIG,
@@ -85,7 +85,7 @@ def test_progress_context_is_exact_and_labeled():
         }),
         stderr="",
     )
-    with patch("plugins.kanban.vault_reports.subprocess.run", return_value=completed) as run:
+    with patch("gateway.vault_reports.subprocess.run", return_value=completed) as run:
         response = append_vault_context(
             CONFIG,
             "Live Kanban status.",
@@ -105,7 +105,7 @@ def test_malformed_context_limit_falls_back_without_dropping_response():
         stdout=json.dumps({"status": "ok", "context": "narrative context"}),
         stderr="",
     )
-    with patch("plugins.kanban.vault_reports.subprocess.run", return_value=completed) as run:
+    with patch("gateway.vault_reports.subprocess.run", return_value=completed) as run:
         response = append_vault_context(
             config,
             "Live Kanban status.",

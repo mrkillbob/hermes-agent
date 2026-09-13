@@ -141,6 +141,31 @@ def test_seed_apply_writes_role_identity_metadata(tmp_path: Path) -> None:
     assert "Your working style:" in (profile_dir / "SOUL.md").read_text()
 
 
+def test_seed_recovers_abandoned_reservation_without_profile_directory(tmp_path: Path) -> None:
+    manifest = load_manifest(MANIFEST)
+    profile_dir = tmp_path / "profiles" / "writer"
+    profile_dir.parent.mkdir(parents=True)
+    reservation = profile_dir.parent / ".writer.federation_seed.lock"
+    reservation.write_text(json.dumps({"created_at": 0, "pid": -1}))
+
+    def create_profile(**kwargs):
+        profile_dir.mkdir()
+        return profile_dir
+
+    result = seed_federation(
+        manifest,
+        role_ids=["writer"],
+        existing_profiles=set(),
+        apply=True,
+        create_profile=create_profile,
+        profile_dir_for=lambda name: profile_dir,
+    )
+
+    assert result["created"] == ["writer"]
+    assert profile_dir.is_dir()
+    assert not reservation.exists()
+
+
 def test_seed_refresh_existing_preserves_soul_and_adopts_route(tmp_path: Path) -> None:
     manifest = load_manifest(MANIFEST)
     profile_dir = tmp_path / "profiles" / "writer"

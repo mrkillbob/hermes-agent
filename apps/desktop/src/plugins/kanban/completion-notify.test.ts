@@ -21,8 +21,8 @@ interface OsDoor {
 }
 interface Mod {
   bindCompletionNotify(r: Rest, t?: Translate, os?: OsDoor): void
-  kanbanEventsSince(slug: string): number | undefined
-  onKanbanEventsFrame(slug: string, events?: CompletionEvent[]): Promise<boolean>
+  kanbanEventsSince(slug: string, sourceKey?: string): number | undefined
+  onKanbanEventsFrame(slug: string, events?: CompletionEvent[], sourceKey?: string): Promise<boolean>
 }
 
 const { hostMock } = vi.hoisted(() => ({
@@ -200,6 +200,20 @@ describe('authoritative baseline', () => {
     expect(fired).toBe(false)
     expect(hostMock.notify).toHaveBeenCalledTimes(1)
     expect(nextRest).toHaveBeenCalledWith('/board?board=smoke')
+  })
+
+  it('keeps cursors independent for the same board across active sources', async () => {
+    let baseline = 100
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => baseline) as never)
+
+    await m.onKanbanEventsFrame('smoke', [ev(101, 'completed')], 'source-a')
+    baseline = 0
+    await m.onKanbanEventsFrame('smoke', [ev(50, 'completed')], 'source-b')
+
+    expect(hostMock.notify).toHaveBeenCalledTimes(2)
+    expect(m.kanbanEventsSince('smoke', 'source-a')).toBe(101)
+    expect(m.kanbanEventsSince('smoke', 'source-b')).toBe(50)
   })
 
   it('baseline failure is fail-closed: unknown baseline suppresses, later success binds', async () => {
