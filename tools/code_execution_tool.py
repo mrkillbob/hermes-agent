@@ -1220,6 +1220,7 @@ def _execute_remote(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+
 def execute_code(
     code: str,
     task_id: Optional[str] = None,
@@ -1316,7 +1317,10 @@ def execute_code(
     # Resolve config
     _cfg = _load_config()
     timeout = _cfg.get("timeout", DEFAULT_TIMEOUT)
-    max_tool_calls = _configured_max_tool_calls(_cfg)
+    try:
+        max_tool_calls = _configured_max_tool_calls(_cfg)
+    except ValueError as exc:
+        return tool_error(str(exc))
 
     # Determine which tools the sandbox can call
     session_tools = set(enabled_tools) if enabled_tools else set()
