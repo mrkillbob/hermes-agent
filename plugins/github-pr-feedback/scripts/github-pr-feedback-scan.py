@@ -170,12 +170,23 @@ def main() -> int:
             file=sys.stderr,
         )
         return 127
-    completed = subprocess.run(
-        [str(executable), "github-pr-feedback", "scan"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            [str(executable), "github-pr-feedback", "scan"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=int(os.environ.get("HERMES_PR_FEEDBACK_SCAN_TIMEOUT_SECONDS", "900")),
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout.decode() if isinstance(error.stdout, bytes) else (error.stdout or "")
+        stderr = error.stderr.decode() if isinstance(error.stderr, bytes) else (error.stderr or "")
+        if stdout:
+            sys.stdout.write(stdout)
+        print(json.dumps({"status": "scan_timeout", "timeout_seconds": int(os.environ.get("HERMES_PR_FEEDBACK_SCAN_TIMEOUT_SECONDS", "900"))}, sort_keys=True), flush=True)
+        if stderr:
+            sys.stderr.write(stderr)
+        return 124
     if not completed.stdout.strip():
         # A clean child exit without the scan's JSON is not a successful scan.
         # Preserve the child diagnostic on stderr, but always render a typed

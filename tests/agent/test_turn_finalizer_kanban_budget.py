@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
-from agent.turn_finalizer import _record_kanban_budget_exhausted
+from agent.turn_finalizer import _record_kanban_budget_exhausted, finalize_turn
 from hermes_cli import kanban_db as kb
 
 
@@ -35,3 +36,42 @@ def test_budget_exhaustion_parks_task_for_narrower_input(tmp_path, monkeypatch):
     payload = blocked[-1].payload or {}
     assert payload["kind"] == "needs_input"
     assert "Iteration budget exhausted (18/18)" in payload["reason"]
+
+
+def test_guardrail_halt_records_kanban_worker_outcome(monkeypatch):
+    """A controlled guardrail stop must not look like a missing terminal call."""
+    from tests.agent.test_turn_finalizer_final_response_persistence import FakeAgent
+
+    agent = FakeAgent()
+    decision = SimpleNamespace(
+        tool_name="terminal",
+        code="same_tool_failure_halt",
+        to_metadata=lambda: {"code": "same_tool_failure_halt"},
+    )
+    agent._tool_guardrail_halt_decision = decision
+    observed = []
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_guardrail")
+    monkeypatch.setattr(
+        "agent.turn_finalizer._record_kanban_guardrail_halt",
+        lambda task_id, actual, _logger: observed.append((task_id, actual)),
+    )
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+
+    result = finalize_turn(
+        agent,
+        final_response="Stopped safely.",
+        api_call_count=2,
+        interrupted=False,
+        failed=False,
+        messages=[{"role": "user", "content": "work"}],
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="work",
+        original_user_message="work",
+        _should_review_memory=False,
+        _turn_exit_reason="guardrail_halt",
+    )
+
+    assert result["guardrail"]["code"] == "same_tool_failure_halt"
+    assert observed == [("t_guardrail", decision)]

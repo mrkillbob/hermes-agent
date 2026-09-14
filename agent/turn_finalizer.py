@@ -585,7 +585,14 @@ def finalize_turn(
         "session_id": agent.session_id,
     }
     if agent._tool_guardrail_halt_decision is not None:
-        result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
+        _guardrail_decision = agent._tool_guardrail_halt_decision
+        result["guardrail"] = _guardrail_decision.to_metadata()
+        # A non-interactive Kanban worker deliberately stops on a guardrail
+        # halt. Persist that outcome before the subprocess exits so the
+        # dispatcher never interprets the clean exit as a protocol violation.
+        _kanban_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+        if _kanban_task:
+            _record_kanban_guardrail_halt(_kanban_task, _guardrail_decision, logger)
     # Persistence failures already set failed=True; also stamp `error` so the gateway
     # surfaces status="error" (desktop can toast) instead of a quiet complete frame, plus
     # the machine-readable cause 'session_persistence_failed:<locked|compression|...>'.

@@ -6,10 +6,14 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from hermes_cli.github_identity import GitHubAutomationIdentity, GitHubIdentityError
+from hermes_cli.github_identity import (
+    GitHubAutomationIdentity,
+    GitHubIdentityError,
+    run_as_github_automation,
+)
 
 from .git_stack import GitStackRunner
-from .github_client import GitHubClient, GitHubClientError
+from .github_client import GitHubClient, GitHubClientError, _automation_gh_config_dir
 from .policy import PluginPolicy, codex_review_trigger_comment
 from .stack import StackEntry, StackManifest, StackStore
 
@@ -42,6 +46,56 @@ class StackController:
             raise ValueError("StackController requires an identity-bound GitHub client")
         self.github = github
         self.store = StackStore(get_default_hermes_root() / "github-pr-feedback" / "stacks")
+
+    def refresh_native(
+        self,
+        repository: str,
+        pr_number: int,
+        *,
+        repository_path: Path,
+    ):
+        """Rebase and push a GitHub-native stack through the bot identity.
+
+        GitHub-native stacks are not represented by Hermes' explicit local
+        manifests. The official gh-stack extension is the supported headless
+        interface for discovering and updating them from a selected PR.
+        """
+
+        merge_policy = self.policy.merge_policy_for(repository)
+        if merge_policy is None:
+            raise ValueError("repository is not configured for merge maintenance")
+        if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1:
+            raise ValueError("pr_number must be positive")
+        identity = self.policy.github_identity
+        if identity is None:
+            raise ValueError("GitHub automation identity is not configured")
+        try:
+            github_environment = GitHubAutomationIdentity(
+                identity.expected_login, identity.token_env
+            ).git_command_environment()
+            github_environment["GH_CONFIG_DIR"] = str(_automation_gh_config_dir())
+            verified = run_as_github_automation(
+                ["gh", "api", "user"],
+                identity=GitHubAutomationIdentity(
+                    identity.expected_login, identity.token_env
+                ),
+            )
+        except GitHubIdentityError as error:
+            raise ValueError("GitHub automation credential is unavailable") from error
+        if verified.returncode != 0:
+            raise ValueError("GitHub automation identity verification failed")
+        runner = GitStackRunner(repository_path, environment=github_environment)
+        stack_number = self.github.get_pull_request_stack_number(repository, pr_number)
+        if stack_number is None:
+            raise GitHubClientError("PR is not part of a GitHub-native stack")
+        selector = str(stack_number)
+        runner.native_stack_checkout(selector)
+        runner.native_stack_rebase()
+        runner.native_stack_push()
+        current = self.github.get_pull_request(repository, pr_number)
+        if current.base_branch != merge_policy.base_branch:
+            raise GitHubClientError("native stack PR base branch changed")
+        return current
 
     def create(
         self,

@@ -170,7 +170,12 @@ class GitDeploymentRepository:
             if marker_path.exists():
                 raise DeploymentError("deployment_git_operation_active")
         branch = self._run(root, "branch", "--show-current").strip()
-        if branch != merge.base_branch:
+        # The dedicated deployment worktree may intentionally be detached so
+        # no user-facing branch is moved by a package/relaunch operation. A
+        # named branch is still required to be the merged base; detached HEAD
+        # is accepted only after the ancestry check below proves it can be
+        # advanced directly to that base.
+        if branch and branch != merge.base_branch:
             raise DeploymentError("deployment_branch_mismatch")
         remote = self._run(root, "remote", "get-url", "origin").strip()
         if _repository_from_remote(remote) != merge.repository:
@@ -196,6 +201,26 @@ class GitDeploymentRepository:
         )
         if ancestor.returncode != 0:
             raise DeploymentError("merged_commit_not_on_remote_base")
+        if not branch:
+            current_head = self._run(root, "rev-parse", "HEAD").strip().lower()
+            current_ancestor = subprocess.run(
+                (
+                    "git",
+                    "-C",
+                    str(root),
+                    "merge-base",
+                    "--is-ancestor",
+                    current_head,
+                    deployed_sha,
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if current_ancestor.returncode != 0:
+                raise DeploymentError("deployment_head_not_on_remote_base")
         self._run(root, "merge", "--ff-only", remote_ref)
         if self._run(root, "rev-parse", "HEAD").strip().lower() != deployed_sha:
             raise DeploymentError("deployment_head_mismatch")
@@ -263,12 +288,7 @@ class PostMergeExecutor:
             )
             if package.returncode != 0 or package.timed_out:
                 raise DeploymentError("package_failed")
-            try:
-                package_payload = json.loads(package.stdout)
-            except (json.JSONDecodeError, TypeError) as error:
-                raise DeploymentError("package_output_invalid") from error
-            if not isinstance(package_payload, dict):
-                raise DeploymentError("package_output_invalid")
+            _require_package_payload(package.stdout)
             identity = self._bundles.inspect(bundle)
             if (
                 identity.identifier != self._policy.bundle_identifier
@@ -371,6 +391,22 @@ def _require_runtime_absent(
                 raise DeploymentError(blocker)
 
 
+def _require_package_payload(stdout: str) -> dict[str, object]:
+    """Read the final JSON receipt after build tools' human-readable output."""
+
+    if not isinstance(stdout, str):
+        raise DeploymentError("package_output_invalid")
+    lines = stdout.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if not lines[index].lstrip().startswith("{"):
+            continue
+        try:
+            payload = json.loads("\n".join(lines[index:]))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise DeploymentError("package_output_invalid")
 def _repository_from_remote(remote: str) -> str:
     patterns = (
         r"^git@github\.com:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$",

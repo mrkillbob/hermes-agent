@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from github_pr_feedback.post_merge import (
     PostMergeExecutor,
     ProcessRecord,
 )
+import github_pr_feedback.post_merge as post_merge_module
 
 
 NOW = datetime(2026, 8, 25, 13, 0, tzinfo=UTC)
@@ -176,6 +178,20 @@ def test_post_merge_runs_census_prepare_build_verify_relaunch_and_final_census(
     ledger.close()
 
 
+def test_post_merge_accepts_build_logs_before_json_package_receipt(
+    tmp_path: Path,
+) -> None:
+    executor, ledger, _processes, _repository, _commands = build_executor(
+        tmp_path,
+        command_results=[completed('swift build\n{"status":"ok"}'), completed("")],
+    )
+
+    receipt = executor.run(merge_receipt())
+
+    assert receipt.status == "completed"
+    ledger.close()
+
+
 @pytest.mark.parametrize(
     "record",
     [
@@ -274,3 +290,64 @@ def test_post_launch_protected_runtime_is_a_failed_deployment_receipt(tmp_path: 
     assert len(commands.calls) == 2
     assert all(not isinstance(call, tuple) or call[0] != "terminate" for call in processes.calls)
     ledger.close()
+
+
+def _git(root: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ("git", "-C", str(root), *arguments),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def test_deployment_prepare_accepts_clean_detached_head_on_remote_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bare = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    deploy = tmp_path / "deployment"
+    subprocess.run(("git", "init", "--bare", str(bare)), check=True, capture_output=True)
+    subprocess.run(("git", "init", str(seed)), check=True, capture_output=True)
+    _git(seed, "config", "user.email", "test@example.com")
+    _git(seed, "config", "user.name", "Hermes test")
+    (seed / "tracked.txt").write_text("initial\n")
+    _git(seed, "add", "tracked.txt")
+    _git(seed, "commit", "-m", "initial")
+    _git(seed, "branch", "-M", "stable")
+    _git(seed, "remote", "add", "origin", str(bare))
+    _git(seed, "push", "origin", "stable")
+    initial_sha = _git(seed, "rev-parse", "HEAD")
+    subprocess.run(
+        ("git", "clone", str(bare), str(deploy)),
+        check=True,
+        capture_output=True,
+    )
+    _git(deploy, "switch", "--detach", initial_sha)
+    (seed / "tracked.txt").write_text("deployed\n")
+    _git(seed, "commit", "-am", "merge")
+    merge_sha = _git(seed, "rev-parse", "HEAD")
+    _git(seed, "push", "origin", "stable")
+
+    monkeypatch.setattr(post_merge_module, "_repository_from_remote", lambda _remote: "acme/widgets")
+    prepared = post_merge_module.GitDeploymentRepository().prepare(
+        MergeReceipt(
+            repository="acme/widgets",
+            pr_number=17,
+            author_login="owner",
+            base_branch="stable",
+            tested_head_sha="a" * 40,
+            ci_receipt_id="d" * 64,
+            snapshot_digest="e" * 64,
+            method="squash",
+            merge_commit_oid=merge_sha,
+            merged_at=NOW,
+            executor="merge-test",
+        ),
+        policy(deploy),
+    )
+
+    assert prepared == merge_sha
+    assert _git(deploy, "branch", "--show-current") == ""
+    assert _git(deploy, "rev-parse", "HEAD") == merge_sha

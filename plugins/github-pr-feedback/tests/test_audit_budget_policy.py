@@ -22,7 +22,7 @@ def test_audit_pr_passes_fresh_canonical_actions_state_to_exact_head_runner(
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     policy = SimpleNamespace(
-        local_ci_audit=SimpleNamespace(audit_only=True),
+        local_ci_audit=SimpleNamespace(audit_only=True, required_for_open_prs=False),
         targets={"acme/widgets": object()},
         uses_budget_exhausted_local_ci=lambda repository: repository == "acme/widgets",
     )
@@ -53,6 +53,9 @@ def test_audit_pr_passes_fresh_canonical_actions_state_to_exact_head_runner(
             return actions_enabled
 
     class Ledger:
+        def has_pending_mutation(self, _repository: str, _number: int) -> bool:
+            return False
+
         def close(self) -> None:
             pass
 
@@ -95,7 +98,6 @@ def test_audit_pr_passes_fresh_canonical_actions_state_to_exact_head_runner(
     )
     monkeypatch.setattr("github_pr_feedback.cli._run_grouped_exact_head_audit", run_audit)
     monkeypatch.setattr("github_pr_feedback.cli._complete_current_ci_task", lambda _receipt: None)
-    monkeypatch.setattr("github_pr_feedback.cli._terminate_current_ci_worker", lambda: None)
 
     result = _audit_pr(
         object(),

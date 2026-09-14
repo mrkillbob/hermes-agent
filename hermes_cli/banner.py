@@ -338,23 +338,34 @@ def check_for_updates() -> Optional[int]:
 
     if _quiet(_install_method) in {"docker", "apt"}:
         return None
-    # Cache is invalidated when the embedded rev OR installed version changed since the last check.
+    repo_dir = None if embedded_rev else _resolve_repo_dir()
+
+    # Cache is invalidated when the embedded rev, installed version, checkout HEAD, or tracking
+    # tip changes. The latter matters after ``hermes update --check`` fetches a new ref: a cache
+    # keyed only by version can keep the banner on old evidence for six hours.
+    cache_identity = {"rev": embedded_rev, "ver": VERSION}
+    if repo_dir is not None:
+        cache_identity.update({
+            "repo": str(repo_dir),
+            "head": _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir),
+            "target": _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir),
+        })
     now = time.time()
     cached = _read_json(cache_file)
     if (cached is not None and now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
-            and cached.get("rev") == embedded_rev and cached.get("ver") == VERSION):
+            and all(cached.get(key) == value for key, value in cache_identity.items())
+            and (repo_dir is None or (cache_identity["head"] and cache_identity["target"]))):
         return cached.get("behind")
     if embedded_rev:
         behind = _check_via_rev(embedded_rev)
     else:
         # No checkout and no embedded revision — status can't be determined.
-        repo_dir = _resolve_repo_dir()
         behind = _check_via_local_git(repo_dir) if repo_dir is not None else None
     # Don't cache inconclusive results: None means the check could not run (typically a failed
     # fetch), and caching it would suppress retries for the full 6-hour window (#82166).
     if behind is not None:
-        _quiet(lambda: cache_file.write_text(
-            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}), encoding="utf-8"))
+        cache_payload = {"ts": now, "behind": behind, **cache_identity}
+        _quiet(lambda: cache_file.write_text(json.dumps(cache_payload), encoding="utf-8"))
     return behind
 
 

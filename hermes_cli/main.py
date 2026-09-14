@@ -3236,6 +3236,10 @@ def _build_cli_parser():
     build_uninstall_parser(subparsers, cmd_uninstall=cmd_uninstall)
     build_acp_parser(subparsers, cmd_acp=cmd_acp)
     build_profile_parser(subparsers, cmd_profile=cmd_profile)
+    from hermes_cli.federation import cmd_federation
+    from hermes_cli.subcommands.federation import build_federation_parser
+
+    build_federation_parser(subparsers, cmd_federation=cmd_federation)
     build_completion_parser(subparsers, cmd_completion=cmd_completion, parser=parser)
     build_dashboard_parser(
         subparsers,

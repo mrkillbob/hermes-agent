@@ -1,14 +1,30 @@
 """Hermes directory-plugin entry point."""
 
+from pathlib import Path
+
 try:
     from .github_pr_feedback.cli import cli_bindings
+    from .github_pr_feedback.repair_completion_policy import register_repair_completion_policy
+    from .github_pr_feedback.completion_guard import register_completion_guard
 except ImportError:  # Direct module loading in lightweight test hosts.
     from github_pr_feedback.cli import cli_bindings
+    from github_pr_feedback.repair_completion_policy import register_repair_completion_policy
+    from github_pr_feedback.completion_guard import register_completion_guard
 
 
 def register(ctx) -> None:
     """Register the standalone, host-owned CLI command tree."""
 
+    register_skill = getattr(ctx, "register_skill", None)
+    if callable(register_skill):
+        register_skill(
+            "ci-failure-recovery",
+            Path(__file__).parent / "skills" / "ci-failure-recovery" / "SKILL.md",
+            description="Classify and recover bounded exact-head CI failures before merge.",
+        )
+
+    register_completion_guard(ctx)
+    register_repair_completion_policy(ctx)
     setup_fn, handler_fn = cli_bindings(ctx)
     ctx.register_cli_command(
         name="github-pr-feedback",

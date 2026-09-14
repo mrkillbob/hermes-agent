@@ -399,13 +399,59 @@ def test_github_client_posts_bounded_issue_comment_with_fixed_argv() -> None:
         "repos/acme/widgets/issues/17/comments",
         "--method",
         "POST",
-        "--field",
+        "--raw-field",
         "body=exact-head receipt passed",
     )
     runner = RecordingRunner({argv: {"id": 1}})
 
     GitHubClient(runner).post_issue_comment(
         "acme/widgets", 17, "exact-head receipt passed"
+    )
+
+    assert runner.calls == [argv]
+
+
+def test_github_client_decodes_accidentally_base64_encoded_receipt_comment() -> None:
+    body = (
+        "Hermes automated repair (task-orchestrator)\n\n"
+        "Verification passed.\n\n"
+        "<!-- pr-maintenance-receipt:v1 status=completed kind=review_comment "
+        "head=" + "a" * 40 + " -->"
+    )
+    encoded = __import__("base64").b64encode(body.encode()).decode()
+    argv = (
+        "gh",
+        "api",
+        "repos/acme/widgets/issues/17/comments",
+        "--method",
+        "POST",
+        "--raw-field",
+        f"body={body}",
+    )
+    runner = RecordingRunner({argv: {"id": 1}})
+
+    GitHubClient(runner).post_issue_comment("acme/widgets", 17, encoded)
+
+    assert runner.calls == [argv]
+
+
+def test_github_client_posts_review_body_as_literal_raw_field() -> None:
+    body = "Hermes automated review\n\nNo blocking findings."
+    argv = (
+        "gh",
+        "api",
+        "-X",
+        "POST",
+        "repos/acme/widgets/pulls/17/reviews",
+        "--raw-field",
+        "event=COMMENT",
+        "--raw-field",
+        f"body={body}",
+    )
+    runner = RecordingRunner({argv: {"id": 1}})
+
+    GitHubClient(runner).submit_pull_request_review(
+        "acme/widgets", 17, event="COMMENT", body=body
     )
 
     assert runner.calls == [argv]
@@ -643,6 +689,34 @@ def test_github_client_fails_closed_if_owned_pr_query_hits_coverage_cap() -> Non
 
     with pytest.raises(GitHubClientError, match="coverage cap"):
         GitHubClient(runner).list_open_pull_requests("acme/widgets", "owner")
+
+
+def test_github_client_covers_current_large_owned_pr_backlog() -> None:
+    pulls_argv = (
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        "acme/widgets",
+        "--state",
+        "open",
+        "--author",
+        "owner",
+        "--limit",
+        str(MAX_DISCOVERED_PULL_REQUESTS),
+        "--json",
+        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+    )
+    runner = RecordingRunner(
+        {
+            pulls_argv: [canonical_list_pull(number=number) for number in range(1, 330)]
+        }
+    )
+
+    pulls = GitHubClient(runner).list_open_pull_requests("acme/widgets", "owner")
+
+    assert len(pulls) == 329
+    assert pulls[-1].number == 329
 
 
 def test_github_client_reads_all_open_prs_and_exact_base_head_for_maintenance() -> None:
@@ -1204,25 +1278,16 @@ def test_github_client_flags_a_check_run_waiting_on_human_approval_as_action_req
     )
 
 
-@pytest.mark.parametrize(
-    "method,flag",
-    [("squash", "--squash"), ("rebase", "--rebase"), ("merge", "--merge")],
-)
-def test_github_client_uses_only_fixed_exact_head_merge_argv(
-    method: str, flag: str
-) -> None:
+@pytest.mark.parametrize("method", ["squash", "rebase", "merge"])
+def test_github_client_uses_async_merge_for_exact_head(method: str) -> None:
     merge_argv = (
-        "gh",
-        "pr",
-        "merge",
-        "17",
-        "--repo",
-        "acme/widgets",
-        flag,
-        "--match-head-commit",
-        "a" * 40,
+        "gh", "api", "--method", "PUT",
+        "repos/acme/widgets/pulls/17/merge-async", "-f", f"sha={'a' * 40}",
+        "-f", f"merge_method={method}", "-f", "merge_action=default",
     )
-    runner = RecordingRunner({merge_argv: "remote output is not merge truth"})
+    runner = RecordingRunner(
+        {merge_argv: {"status": "merged", "details": {"sha": "b" * 40}}}
+    )
 
     result = GitHubClient(runner).merge_pull_request(
         "acme/widgets", 17, "a" * 40, method=method
@@ -1230,6 +1295,34 @@ def test_github_client_uses_only_fixed_exact_head_merge_argv(
 
     assert result is None
     assert runner.calls == [merge_argv]
+
+
+def test_github_client_polls_async_merge_until_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submit_argv = (
+        "gh", "api", "--method", "PUT",
+        "repos/acme/widgets/pulls/17/merge-async", "-f", f"sha={'a' * 40}",
+        "-f", "merge_method=squash", "-f", "merge_action=default",
+    )
+    poll_argv = (
+        "gh", "api",
+        "repos/acme/widgets/pulls/17/merge-async/123e4567-e89b-12d3-a456-426614174000",
+    )
+    runner = RecordingRunner(
+        {
+            submit_argv: {
+                "status": "pending",
+                "details": {"uuid": "123e4567-e89b-12d3-a456-426614174000"},
+            },
+            poll_argv: {"status": "merged", "details": {"sha": "b" * 40}},
+        }
+    )
+    monkeypatch.setattr("github_pr_feedback.github_client.time.sleep", lambda _seconds: None)
+
+    GitHubClient(runner).merge_pull_request("acme/widgets", 17, "a" * 40, method="squash")
+
+    assert runner.calls == [submit_argv, poll_argv]
 
 
 @pytest.mark.parametrize("head_sha", ["short", "g" * 40, "a" * 39, "a" * 41])
@@ -1315,6 +1408,21 @@ def test_github_client_fails_closed_on_invalid_actions_permission_shape(
         GitHubClient(RecordingRunner({argv: payload})).actions_enabled("acme/widgets")
 
 
+@pytest.mark.parametrize(
+    "stack_payload,expected",
+    [({"number": 1329}, 1329), (None, None)],
+)
+def test_github_client_reads_native_stack_number(stack_payload, expected):
+    argv = ("gh", "api", "repos/acme/widgets/pulls/17")
+    payload = canonical_pull()
+    if stack_payload is not None:
+        payload["stack"] = stack_payload
+
+    assert GitHubClient(RecordingRunner({argv: payload})).get_pull_request_stack_number(
+        "acme/widgets", 17
+    ) == expected
+
+
 def canonical_pull(number: int = 17, head_sha: str = "a" * 40) -> dict[str, object]:
     return {
         "number": number,
@@ -1393,3 +1501,12 @@ def feedback_responses(body: str) -> dict[tuple[str, ...], object]:
             "repos/acme/widgets/pulls/17/reviews?per_page=100",
         ): [[]],
     }
+
+
+@pytest.mark.parametrize("permissions,allowed", [({},False),({"pull":True},False),({"triage":True},True),({"push":True},True),({"admin":"true"},False)])
+def test_label_permission_requires_explicit_write_capability(permissions, allowed):
+    class Runner:
+        def run(self, argv):
+            assert argv == ["gh", "api", "repos/acme/widgets"]
+            return json.dumps({"permissions":permissions})
+    assert GitHubClient(Runner()).can_label_repository("acme/widgets") is allowed

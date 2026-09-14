@@ -82,6 +82,55 @@ for candidate in "${VENV_CANDIDATES[@]}"; do
   fi
 done
 
+# A checkout venv can be present but contain only the release dependencies
+# (this happens after a plain `uv sync`, or when a venv is carried forward from
+# a runtime install). Repair that state once, in place, before refusing to
+# run. `uv pip` intentionally does not rewrite uv.lock; the project metadata
+# remains the source of truth and the next explicit `uv lock` owns resolution.
+if [ -z "$VENV" ] && command -v uv >/dev/null 2>&1; then
+  for candidate in "${VENV_CANDIDATES[@]}"; do
+    candidate_python=""
+    if [ -x "$candidate/bin/python" ]; then
+      candidate_python="$candidate/bin/python"
+    elif [ -x "$candidate/Scripts/python.exe" ]; then
+      candidate_python="$candidate/Scripts/python.exe"
+    fi
+    if [ -n "$candidate_python" ]; then
+      echo "▶ pytest missing — installing Hermes dev dependencies into $candidate" >&2
+      if UV_CACHE_DIR="${TMPDIR:-/tmp}/hermes-uv-cache" uv pip install \
+          --python "$candidate_python" -e "${REPO_ROOT}[dev]" >/dev/null; then
+        if "$candidate_python" -c 'import pytest' 2>/dev/null; then
+          VENV="$candidate"
+          VENV_PYTHON="$candidate_python"
+          echo "▶ repaired test venv: $candidate" >&2
+          break
+        fi
+      fi
+      echo "▶ unable to install pytest into $candidate; continuing to other runtimes" >&2
+    fi
+  done
+fi
+
+# If the checkout has no interpreter at all, create the canonical local venv
+# rather than requiring every operator to know the bootstrap command. This is
+# still an explicit dev-only install and is never attempted when a usable
+# HERMES_PYTHON runtime was supplied.
+if [ -z "$VENV" ] && [ -z "${HERMES_PYTHON:-}" ] && command -v uv >/dev/null 2>&1; then
+  bootstrap_venv="$REPO_ROOT/.venv"
+  echo "▶ no checkout Python — creating $bootstrap_venv" >&2
+  if UV_CACHE_DIR="${TMPDIR:-/tmp}/hermes-uv-cache" uv venv \
+      --python 3.13 "$bootstrap_venv" >/dev/null \
+      && UV_CACHE_DIR="${TMPDIR:-/tmp}/hermes-uv-cache" uv pip install \
+      --python "$bootstrap_venv/bin/python" -e "${REPO_ROOT}[dev]" >/dev/null \
+      && "$bootstrap_venv/bin/python" -c 'import pytest' 2>/dev/null; then
+    VENV="$bootstrap_venv"
+    VENV_PYTHON="$bootstrap_venv/bin/python"
+    echo "▶ created test venv: $bootstrap_venv" >&2
+  else
+    echo "▶ unable to create a pytest test venv" >&2
+  fi
+fi
+
 if [ -n "$SKIPPED_VENVS" ]; then
   for skipped in $SKIPPED_VENVS; do
     echo "▶ skipping venv without pytest: $skipped" >&2
