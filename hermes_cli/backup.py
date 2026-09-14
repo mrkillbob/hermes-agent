@@ -1408,6 +1408,9 @@ def run_import(args) -> None:
             if Path(rel).name in _IMPORT_SKIP_NAMES:
                 skipped_runtime.append(rel)
                 continue
+            if rel.endswith(_EXCLUDED_SUFFIXES):
+                skipped_runtime.append(rel)
+                continue
 
             target = hermes_root / rel
 
@@ -1420,7 +1423,20 @@ def run_import(args) -> None:
 
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                _extract_member_atomically(zf, member, target, new_file_mode)
+                if target.suffix == ".db":
+                    # Database publication must preserve the destination inode
+                    # for live SQLite connections; never rename over it.
+                    with tempfile.NamedTemporaryFile(suffix=".db", dir=target.parent, delete=False) as tmp:
+                        tmp_path = Path(tmp.name)
+                        with zf.open(member) as source:
+                            shutil.copyfileobj(source, tmp)
+                    try:
+                        if not _safe_restore_db(tmp_path, target):
+                            raise OSError("live database holder refused restore")
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+                else:
+                    _extract_member_atomically(zf, member, target, new_file_mode)
                 if target.name in _SECRET_FILE_NAMES:
                     os.chmod(target, 0o600)
                 restored += 1
@@ -1934,7 +1950,9 @@ def restore_quick_snapshot(
                 # (gateway, dashboard, another CLI session) see the
                 # restored data instead of continuing to serve stale
                 # cached pages from a replaced inode (issue #65942).
-                _safe_restore_db(src, dst)
+                if not _safe_restore_db(src, dst):
+                    logger.error("SQLite restore refused for %s", rel)
+                    continue
             else:
                 shutil.copy2(src, dst)
             restored += 1
