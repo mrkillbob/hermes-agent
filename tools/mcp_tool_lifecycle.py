@@ -127,43 +127,87 @@ def _reregister_orphaned_adopters() -> None:
             reset_hermes_home_override(home_token)
 
 
-def shutdown_mcp_servers(*, scope: Optional[str] = None, names: Optional[set] = None):
+def shutdown_mcp_servers(*, scope: Optional[str] = None):
     """Close MCP server connections (in parallel) and stop the background loop. Each server
     Task is signalled to exit its own ``async with`` so the anyio cancel-scope cleanup runs in
     the Task that opened it. ``scope`` restricts teardown to one multiplexed profile's servers
     (its ``/reload-mcp`` must not kill other profiles') and leaves the shared loop running if
-    anything else is still connected. ``names`` restricts it further to those server names
-    (dropped-from-config pruning); other servers' bookkeeping is untouched."""
-    from tools.mcp_tool_scope import _key_name
+    anything else is still connected."""
     with _core._lock:
         selected = [key for key in _core._servers if scope is None or _core._server_scope_keys.get(key) == scope]
-        if names is not None:
-            selected = [key for key in selected if _key_name(key) in names]
+        adopted = [] if scope is None else [
+            key for key, scopes in _core._server_tool_scopes.items()
+            if scope in scopes and _core._server_scope_keys.get(key) != scope
+        ]
         servers_snapshot = [_core._servers[key] for key in selected]
-        if names is not None:
-            selected_status = set(selected)
-        elif scope is None:
-            selected_status = (
-                set(_core._servers) | set(_core._server_scope_keys)
-                | set(_core._server_tool_scopes)
-                | set(_core._server_connecting) | set(_core._server_connect_errors))
-        else:
-            selected_status = {key for key, owner in _core._server_scope_keys.items() if owner == scope}
+        selected_status = (
+            set(_core._servers) | set(_core._server_scope_keys)
+            | set(_core._server_tool_scopes)
+            | set(_core._server_connecting) | set(_core._server_connect_errors)
+            if scope is None else {
+                key for key, owner in _core._server_scope_keys.items() if owner == scope
+            }
+        )
         # Adopters of the connections being torn down lose their overlays with the tasks' own
         # ``_deregister_tools``; remember them so the next discovery pass re-registers them
         # (``_reregister_orphaned_adopters``).
         if scope is not None:
+            from tools.mcp_tool_scope import _key_name
             for key in selected:
                 for adopter in _core._server_tool_scopes.get(key, ()):
                     if adopter != scope:
                         _core._orphaned_adopters.setdefault(adopter, set()).add(_key_name(key))
 
+    # An adopted connection is not owned by the requesting profile, so reload only removes that
+    # profile's registry overlay and leaves the owner's transport alive.
+    if adopted:
+        from tools.mcp_tool_registration import _remove_server_scope
+        from tools.registry import registry
+        with _core._lock:
+            adopted_tools = {
+                tool_name
+                for tool_name, key in _core._mcp_tool_server_names_by_scope.get(scope, {}).items()
+                if key in adopted
+            }
+        for tool_name in adopted_tools:
+            registry.deregister(tool_name, scope=scope)
+        for key in adopted:
+            _remove_server_scope(key, scope)
+        with _core._lock:
+            scoped_names = _core._mcp_tool_server_names_by_scope.get(scope, {})
+            for tool_name, mapped_key in list(scoped_names.items()):
+                if mapped_key in adopted:
+                    scoped_names.pop(tool_name, None)
+            if not scoped_names:
+                _core._mcp_tool_server_names_by_scope.pop(scope, None)
+
     def clear_selected_status():
+        from tools.registry import registry
         _core._server_connecting.difference_update(selected_status)
+        selected_tools = {
+            tool_name
+            for names in _core._mcp_tool_server_names_by_scope.values()
+            for tool_name, key in names.items()
+            if key in selected_status
+        }
+        for tool_name in selected_tools:
+            registry.deregister(tool_name, scope=scope)
         for key in selected_status:
             _core._server_connect_errors.pop(key, None)
             _core._server_scope_keys.pop(key, None)
             _core._server_tool_scopes.pop(key, None)
+            _core._lazy_server_configs.pop(key, None)
+            _core._lazy_server_fingerprints.pop(key, None)
+            _core._lazy_server_tool_names.pop(key, None)
+            _core._server_public_names.pop(key, None)
+            _core._parallel_safe_servers.discard(key)
+        for names in list(_core._mcp_tool_server_names_by_scope.values()):
+            for tool_name, key in list(names.items()):
+                if key in selected_status:
+                    names.pop(tool_name, None)
+        for owner, names in list(_core._mcp_tool_server_names_by_scope.items()):
+            if not names:
+                _core._mcp_tool_server_names_by_scope.pop(owner, None)
 
     # Fast path: nothing to shut down. The connect-cooldown maps can still be populated here — a server that
     # failed to connect is never recorded in ``_servers`` (that is the very premise of the #50394 cooldown),
@@ -180,7 +224,7 @@ def shutdown_mcp_servers(*, scope: Optional[str] = None, names: Optional[set] = 
                     _core._servers.pop(key, None)
                     _core._server_scope_keys.pop(key, None)
                 clear_selected_status()
-                _clear_connect_cooldowns(None if scope is None and names is None else selected_status)
+                _clear_connect_cooldowns(None if scope is None else selected_status)
 
         with _core._lock:
             loop = _core._mcp_loop
@@ -199,8 +243,8 @@ def shutdown_mcp_servers(*, scope: Optional[str] = None, names: Optional[set] = 
     with _core._lock:
         if not servers_snapshot:
             clear_selected_status()
-        _clear_connect_cooldowns(None if scope is None and names is None else selected_status)
-    _loop._stop_mcp_loop(only_if_idle=scope is not None or names is not None)
+        _clear_connect_cooldowns(None if scope is None else selected_status)
+    _loop._stop_mcp_loop(only_if_idle=scope is not None)
 
 
 def _take_reapable_pids(include_active: bool, server_name: Optional[str]) -> tuple[Dict[int, str], Dict[int, int]]:

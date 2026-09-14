@@ -198,7 +198,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # MCP client SDK for the cua-driver, so computer_use never dead-ends on `No module named 'mcp'`.
     "tool.computer_use": (
         "mcp==2.0.0",
-        "httpx2==2.7.0",  # mcp 2.x HTTP stack — sync with pyproject [computer-use]
+        "httpx2==2.12.0",  # mcp 2.x HTTP stack — sync with pyproject [computer-use]
         "starlette==1.3.1",
     ),
     # huggingface-hub is SHARED with transformers (>=1.5.0,<2 via Hindsight) and marked active
@@ -475,8 +475,7 @@ def _warm_installed_bytecode(specs: tuple[str, ...], target: Optional[Path]) -> 
 
 
 def _run_installer(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    # _SUBPROCESS_KW carries stdin=DEVNULL  # noqa: subprocess-stdin
-    return subprocess.run(cmd, **_SUBPROCESS_KW, creationflags=windows_hide_flags(), **kw)
+    return subprocess.run(cmd, **_SUBPROCESS_KW, creationflags=windows_hide_flags(), **kw)  # noqa: subprocess-stdin
 
 
 def _uv_binary() -> Optional[str]:

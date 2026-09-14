@@ -137,7 +137,7 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
   const [platforms, setPlatforms] = useState<MessagingPlatformInfo[] | null>(null)
   // A saved credential/toggle only takes effect on the next gateway start, so a
   // vanishing toast is not enough: the page keeps a banner up until a restart
-  // actually happens (dashboard parity). Cleared on a completed restart.
+  // actually happens. Cleared on a completed restart.
   const [restartNeeded, setRestartNeeded] = useState(false)
   const gatewayRestarting = useStore($gatewayRestarting)
 
@@ -156,26 +156,12 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
   const [selectedId, setSelectedId] = useRouteEnumParam('platform', platformIds, platformIds[0] ?? '')
 
   const restartGatewayNow = useCallback(async () => {
-    // runGatewayRestart never rejects: it toasts the failure and settles the
-    // statusbar indicator; the banner stays if the restart did not complete.
     const ok = await runGatewayRestart()
 
     if (ok) {
       setRestartNeeded(false)
       window.setTimeout(() => void refreshPlatformsRef.current(true), 4000)
     }
-  }, [])
-
-  // A multiplexed named profile is re-served from its new config at once (`hot_served`): no restart
-  // banner; re-read status once the adapter had a moment to connect. Anything else needs a restart.
-  const settleAfterUpdate = useCallback((hotServed: boolean | undefined) => {
-    if (hotServed) {
-      window.setTimeout(() => void refreshPlatformsRef.current(true), 4000)
-
-      return
-    }
-
-    setRestartNeeded(true)
   }, [])
 
   const refreshPlatforms = useCallback(
@@ -200,8 +186,23 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
     [m, scopeProfile]
   )
 
-  // Latest-callback ref: the deferred post-restart refresh must not capture a
-  // stale scope closure from before a profile switch.
+  // A multiplexed named profile is re-served from its new config at once (`hot_served`): no restart
+  // banner; re-read status once the adapter had a moment to connect. Anything else needs a restart.
+  const settleAfterUpdate = useCallback(
+    (hotServed: boolean | undefined) => {
+      if (hotServed) {
+        window.setTimeout(() => void refreshPlatforms(true), 4000)
+
+        return
+      }
+
+      setRestartNeeded(true)
+    },
+    [refreshPlatforms]
+  )
+
+  // Latest-callback ref: deferred post-restart refreshes must use the current
+  // profile scope after a profile switch.
   const refreshPlatformsRef = useRef(refreshPlatforms)
 
   refreshPlatformsRef.current = refreshPlatforms
@@ -406,7 +407,7 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
     }
   }
 
-  // QR onboarding wrote the token + allowlist and asked the backend to restart
+  // QR onboarding writes the token + allowlist and asks the backend to restart
   // the gateway. restart_started only means the child spawned; watch its exit
   // so a failed restart lands in the banner instead of a silent "stopped".
   async function handleTelegramApplied(result: TelegramOnboardingApplyResponse) {
@@ -428,8 +429,8 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
     }
 
     if (result.needs_restart) {
-      // Backend could not spawn the restart (or is too old to try): fall back
-      // to the app's own restart action, same as the manual-save path.
+      // Older backends may not spawn the restart themselves: use the app's
+      // normal restart action, same as the manual credential path.
       await restartGatewayNow()
 
       if (result.restart_error) {
@@ -690,8 +691,6 @@ function PlatformDetail({
             <StatePill tone={stateTone(platform)}>{stateLabel(platform.state, m)}</StatePill>
             {/* Resting states earn no pill — only actionable ones. */}
             {!platform.configured && <SetupPill active={false}>{m.needsSetup}</SetupPill>}
-            {/* The state pill already reads "gateway stopped" when that is the
-                platform's whole story; only add the hint when it is not. */}
             {!platform.gateway_running && platform.state !== 'gateway_stopped' && (
               <SetupPill active={false}>{m.gatewayStopped}</SetupPill>
             )}
@@ -1024,19 +1023,6 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 function PlatformHint({ platform }: { platform: MessagingPlatformInfo }) {
   const { t } = useI18n()
-
-  // A served secondary's api_server/webhook live on the shared gateway listener under
-  // /p/<profile>/: the state pill says connected, this line says where to point the client.
-  if (platform.ingress_url) {
-    return (
-      <p className="mt-2 text-xs leading-5 text-muted-foreground break-all">
-        {t.messaging.sharedListenerUrl}{' '}
-        <code className="font-mono text-foreground" data-slot="ingress-url">
-          {platform.ingress_url}
-        </code>
-      </p>
-    )
-  }
 
   if (!platform.enabled || platform.state === 'connected') {
     return null

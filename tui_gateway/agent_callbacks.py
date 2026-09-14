@@ -8,6 +8,7 @@ import json
 
 import contextlib
 import threading
+import os
 
 from .method_ctx import bind_module
 

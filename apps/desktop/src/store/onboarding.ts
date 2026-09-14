@@ -394,6 +394,9 @@ async function completeWithModelConfirm(
         return
       }
 
+      if (generation !== flowGeneration) {
+        return
+      }
       notifyGatewayTools(res.gateway_tools)
     } catch (error) {
       if (generation !== flowGeneration) {

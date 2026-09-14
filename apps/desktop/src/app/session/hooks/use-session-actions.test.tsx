@@ -16,7 +16,7 @@ import {
   getSession,
   type ProfileScope,
   type SessionInfo,
-  type SessionResumeResult,
+  type SessionResumeResponse,
   setSessionArchived
 } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
@@ -35,6 +35,7 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  $freshDraftReady,
   $messages,
   $messagingSessions,
   $newChatWorkspaceTarget,
@@ -42,10 +43,8 @@ import {
   $selectedStoredSessionId,
   $sessions,
   $turnStartedAt,
-  _resetSessionOwnerHintsForTests,
   getSessionOwnerHint,
   knownSessionOwner,
-  ownerLookupSessionRows,
   sessionMatchesStoredId,
   setActiveSessionId,
   setActiveSessionStoredIdRotation,
@@ -66,17 +65,12 @@ import {
   setSelectedStoredSessionId,
   setSessions,
   setTurnStartedAt,
-  setUnlistedSessionOwnerRows
+  setWorkspaceCwdOwner,
+  workspaceCwdBelongsToSelectedSession
 } from '@/store/session'
-import { assertSessionOwnerResolved } from '@/store/session-owner-resolution'
 import { $removedSessionIds, $sessionMutationsInFlight } from '@/store/session-removal'
 import { requestForSessionProfile, type SessionProfileRoute } from '@/store/session-request-router'
-import {
-  $sessionTiles,
-  knownOwnerForSession,
-  requestForOwnedSession,
-  sessionTileOwnerRoute
-} from '@/store/session-states'
+import { $sessionTiles, sessionTileOwnerRoute } from '@/store/session-states'
 import { $sessionSeenCounts, $unreadFinishedMarkers } from '@/store/session-unread'
 
 import sessionResumeActiveTurn from '../../../../../../tests/fixtures/session-resume-active-turn.json'
@@ -706,6 +700,49 @@ describe('startFreshSessionDraft', () => {
     expect($newChatWorkspaceTarget.get()).toBeNull()
   })
 
+  it('does not let an implicit fresh draft claim the previous conversation workspace', async () => {
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+
+    setSelectedStoredSessionId('stored-previous')
+    setCurrentCwd('/repo/previous-worktree')
+    setWorkspaceCwdOwner('stored-previous')
+
+    render(<Harness onReady={value => (handle = value)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    act(() => handle!.startFreshSessionDraft({ preserveRoute: true }))
+
+    expect($selectedStoredSessionId.get()).toBeNull()
+    expect(workspaceCwdBelongsToSelectedSession()).toBe(false)
+  })
+
+  it('releases the fresh-draft paint gate when session creation fails', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        throw new Error('create failed')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+
+    render(<Harness onReady={value => (handle = value)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    act(() => handle!.startFreshSessionDraft({ preserveRoute: true }))
+    expect($freshDraftReady.get()).toBe(true)
+
+    await expect(
+      act(async () => {
+        await handle!.createBackendSessionForSend()
+      })
+    ).rejects.toThrow('create failed')
+
+    expect($freshDraftReady.get()).toBe(false)
+  })
+
   it('fronts the workspace without closing a terminal that is merely behind a tab', async () => {
     // Regression: a persisted terminal takeover kept the terminal fronted
     // after New Session / ⌘N. The fix is to reveal the workspace — NOT to
@@ -1136,26 +1173,16 @@ describe('resumeSession failure recovery', () => {
 
     const requestGateway = vi.fn(async (method: string) => {
       if (method === 'session.resume') {
-        // The channel re-delivers `open_requests` to the request handler BEFORE
-        // the caller sees the result; that handler parks the card. Mirror that
-        // ordering here (no channel in this harness).
-        setClarifyRequest({
-          choices: ['safe', 'fast'],
-          multiSelect: false,
-          question: 'Which path?',
-          receivedAt: Date.now(),
-          requestId: 'req-resumed',
-          sessionId: 'runtime-1'
-        })
-
         return {
           info: {},
           message_count: 2,
           messages: [],
           messages_omitted: true,
-          open_requests: [
-            { id: 'req-resumed', method: 'clarify', params: { choices: ['safe', 'fast'], question: 'Which path?' } }
-          ],
+          pending_clarify: {
+            choices: ['safe', 'fast'],
+            question: 'Which path?',
+            request_id: 'req-resumed'
+          },
           resumed: 'stored-1',
           running: true,
           session_id: 'runtime-1',
@@ -1206,34 +1233,21 @@ describe('resumeSession failure recovery', () => {
       session_id: 'stored-1'
     } as never)
 
-    const questions = [
-      { choices: ['Blue', 'Red'], qid: 'q0', question: 'Color?' },
-      { choices: ['Small', 'Large'], qid: 'q1', question: 'Size?' }
-    ]
-
     const requestGateway = vi.fn(async (method: string) => {
       if (method === 'session.resume') {
-        // Request handler parks the batch card (with the server-locked answer)
-        // from the re-delivered open request before the result lands.
-        setClarifyRequest({
-          choices: null,
-          lockedAnswers: { q0: 'Blue' },
-          multiSelect: false,
-          question: '',
-          questions: questions.map(q => ({ ...q, multiSelect: false })),
-          receivedAt: Date.now(),
-          requestId: 'req-batch-resumed',
-          sessionId: 'runtime-1'
-        })
-
         return {
           info: {},
           message_count: 2,
           messages: [],
           messages_omitted: true,
-          open_requests: [
-            { id: 'req-batch-resumed', method: 'clarify', params: { answers: { q0: 'Blue' }, questions } }
-          ],
+          pending_clarify: {
+            answers: { q0: 'Blue' },
+            questions: [
+              { choices: ['Blue', 'Red'], qid: 'q0', question: 'Color?' },
+              { choices: ['Small', 'Large'], qid: 'q1', question: 'Size?' }
+            ],
+            request_id: 'req-batch-resumed'
+          },
           resumed: 'stored-1',
           running: true,
           session_id: 'runtime-1',
@@ -2774,7 +2788,7 @@ describe('resumeSession warm-cache mapping integrity', () => {
       session_id: 'stored-A'
     })
 
-    const deferredResume = deferred<SessionResumeResult>()
+    const deferredResume = deferred<SessionResumeResponse>()
 
     const requestGatewayMock = vi.fn((method: string, _params?: Record<string, unknown>) => {
       if (method === 'session.resume') {
@@ -2923,23 +2937,16 @@ describe('resumeSession warm-cache mapping integrity', () => {
 
     const requestGateway = vi.fn(async (method: string) => {
       if (method === 'session.activate') {
-        setClarifyRequest({
-          choices: ['safe', 'fast'],
-          multiSelect: false,
-          question: 'Which path?',
-          receivedAt: Date.now(),
-          requestId: 'req-warm',
-          sessionId: 'rt-A'
-        })
-
         return {
           info: {},
           message_count: 2,
           messages: [],
           messages_omitted: true,
-          open_requests: [
-            { id: 'req-warm', method: 'clarify', params: { choices: ['safe', 'fast'], question: 'Which path?' } }
-          ],
+          pending_clarify: {
+            choices: ['safe', 'fast'],
+            question: 'Which path?',
+            request_id: 'req-warm'
+          },
           resumed: 'stored-A',
           running: true,
           session_id: 'rt-A',
@@ -3094,7 +3101,7 @@ describe('resumeSession warm-cache mapping integrity', () => {
       current: new Map([['rt-A', clientState('stored-A')]])
     }
 
-    const activated = deferred<SessionResumeResult>()
+    const activated = deferred<SessionResumeResponse>()
 
     const requestGateway = vi.fn((method: string) =>
       method === 'session.activate' ? activated.promise : Promise.resolve({})
@@ -4135,14 +4142,8 @@ describe('createBackendSessionForSend workspace target', () => {
 describe('openNewSessionTile workspace target', () => {
   afterEach(() => {
     cleanup()
-    $profiles.set([])
-    $newChatProfile.set(null)
-    $activeGatewayProfile.set('default')
     $projectScope.set(ALL_PROJECTS)
     $projectTree.set([])
-    $sessionTiles.set([])
-    setConnection(null)
-    setSessions([])
     vi.restoreAllMocks()
   })
 
@@ -4183,201 +4184,6 @@ describe('openNewSessionTile workspace target', () => {
     })
 
     expect(createParams).not.toHaveProperty('cwd')
-  })
-
-  it('keeps an unlisted named local legacy-profile tile owned by its bare profile', async () => {
-    const storedSessionId = 'stored-unlisted-omar'
-    $profiles.set([{ name: 'default' }, { name: 'omar' }] as never)
-    setConnection({ mode: 'local' } as never)
-
-    const requestGateway = vi.fn(async (method: string) => {
-      if (method === 'session.create') {
-        return {
-          info: { cwd: '', model: 'test-model', tools: {}, skills: {} },
-          session_id: RUNTIME_SESSION_ID,
-          stored_session_id: storedSessionId
-        } as never
-      }
-
-      throw new Error(`Unexpected ambient RPC: ${method}`)
-    })
-
-    vi.mocked(requestGatewayForProfile).mockResolvedValue({ control: {} } as never)
-
-    let handle: HarnessHandle | null = null
-    render(<Harness onReady={value => (handle = value)} requestGateway={requestGateway} />)
-    await waitFor(() => expect(handle).not.toBeNull())
-
-    await act(async () => {
-      await handle!.openNewSessionTile('center', { listed: false, profile: 'omar' })
-    })
-
-    expect(requestGateway).toHaveBeenCalledWith('session.create', expect.any(Object))
-    expect(vi.mocked(requestGatewayForAgent)).not.toHaveBeenCalled()
-    expect($sessions.get().some(session => sessionMatchesStoredId(session, storedSessionId))).toBe(false)
-    expect($sessionTiles.get()).toContainEqual(expect.objectContaining({ ownerProfile: 'omar', storedSessionId }))
-    expect(knownOwnerForSession(storedSessionId)).toBe('omar')
-
-    await expect(
-      requestForOwnedSession(storedSessionId, requestGateway, 'session.control.read', {
-        session_id: RUNTIME_SESSION_ID
-      })
-    ).resolves.toEqual({ control: {} })
-    expect(requestGatewayForProfile).toHaveBeenCalledWith(
-      'omar',
-      'session.control.read',
-      { session_id: RUNTIME_SESSION_ID },
-      undefined,
-      undefined
-    )
-  })
-
-  it('records the draft profile owner when tab-strip create omits profile', async () => {
-    const storedSessionId = 'stored-unlisted-draft-omar'
-    $profiles.set([{ name: 'default' }, { name: 'omar' }] as never)
-    $newChatProfile.set('omar')
-    $activeGatewayProfile.set('default')
-    setConnection({ mode: 'local' } as never)
-
-    const requestGateway = vi.fn(async (method: string) => {
-      if (method === 'session.create') {
-        return {
-          info: { cwd: '', model: 'test-model', tools: {}, skills: {} },
-          session_id: RUNTIME_SESSION_ID,
-          stored_session_id: storedSessionId
-        } as never
-      }
-
-      throw new Error(`Unexpected ambient RPC: ${method}`)
-    })
-
-    vi.mocked(requestGatewayForProfile).mockResolvedValue({ control: {} } as never)
-
-    let handle: HarnessHandle | null = null
-    render(<Harness onReady={value => (handle = value)} requestGateway={requestGateway} />)
-    await waitFor(() => expect(handle).not.toBeNull())
-
-    await act(async () => {
-      await handle!.openNewSessionTile('center', { listed: false })
-    })
-
-    expect($sessionTiles.get()).toContainEqual(expect.objectContaining({ ownerProfile: 'omar', storedSessionId }))
-    expect(knownOwnerForSession(storedSessionId)).toBe('omar')
-
-    await expect(
-      requestForOwnedSession(storedSessionId, requestGateway, 'session.control.read', {
-        session_id: RUNTIME_SESSION_ID
-      })
-    ).resolves.toEqual({ control: {} })
-    expect(requestGatewayForProfile).toHaveBeenCalledWith(
-      'omar',
-      'session.control.read',
-      { session_id: RUNTIME_SESSION_ID },
-      undefined,
-      undefined
-    )
-  })
-})
-
-describe('openNewSessionTile unlisted owner (#102792)', () => {
-  const STORED_UNLISTED = 'stored-unlisted-102792'
-
-  function createRequestGateway(stored: string = STORED_UNLISTED) {
-    return vi.fn(async (method: string) => {
-      if (method === 'session.create') {
-        return {
-          info: { cwd: '', model: 'test-model', skills: {}, tools: {} },
-          session_id: RUNTIME_SESSION_ID,
-          stored_session_id: stored
-        } as never
-      }
-
-      return {} as never
-    })
-  }
-
-  async function readyHandle(requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>) {
-    let handle: HarnessHandle | null = null
-    render(<Harness onReady={value => (handle = value)} requestGateway={requestGateway} />)
-    await waitFor(() => expect(handle).not.toBeNull())
-
-    return handle!
-  }
-
-  beforeEach(() => {
-    setSessions([])
-    setMessagingSessions([])
-    setCronSessions([])
-    setUnlistedSessionOwnerRows([])
-    _resetSessionOwnerHintsForTests()
-    $profiles.set(profiles('default', 'omar'))
-    $activeGatewayProfile.set('omar')
-    $sessionTiles.set([])
-  })
-
-  afterEach(() => {
-    cleanup()
-    setSessions([])
-    setMessagingSessions([])
-    setCronSessions([])
-    setUnlistedSessionOwnerRows([])
-    _resetSessionOwnerHintsForTests()
-    $profiles.set([])
-    $activeGatewayProfile.set('default')
-    $sessionTiles.set([])
-    vi.restoreAllMocks()
-  })
-
-  it('records the ambient-profile owner for an unlisted tile created on the null (legacy ambient) route', async () => {
-    const handle = await readyHandle(createRequestGateway())
-
-    await act(async () => {
-      await handle.openNewSessionTile('center', { listed: false, route: null })
-    })
-
-    // The draft stays out of the visible sidebar list ...
-    expect($sessions.get().some(s => sessionMatchesStoredId(s, STORED_UNLISTED))).toBe(false)
-    // ... but its owner still resolves on the row rung (bare ambient profile),
-    // so the tile's immediate session.resume passes the fail-closed gate.
-    const owner = knownSessionOwner(ownerLookupSessionRows(), STORED_UNLISTED)
-    expect(owner).toBe('omar')
-    expect(() =>
-      assertSessionOwnerResolved(owner, { method: 'session.resume', sessionId: STORED_UNLISTED })
-    ).not.toThrow()
-    expect($sessionTiles.get().some(t => t.storedSessionId === STORED_UNLISTED)).toBe(true)
-  })
-
-  it('resolves the ephemeral runtime id through the stub for session.control.read without hitting ambient', async () => {
-    const handle = await readyHandle(createRequestGateway())
-
-    await act(async () => {
-      await handle.openNewSessionTile('center', { listed: false, route: null })
-    })
-
-    // The composer banner calls with the ephemeral runtime id, not the stored
-    // id — it must see the same bare ambient profile as the stored-id rung.
-    expect(knownOwnerForSession(RUNTIME_SESSION_ID)).toBe('omar')
-
-    const ambient = vi.fn(async () => ({}) as never)
-    vi.mocked(requestGatewayForProfile).mockResolvedValue({ control: {} } as never)
-
-    await expect(
-      requestForOwnedSession(RUNTIME_SESSION_ID, ambient, 'session.control.read', {
-        session_id: RUNTIME_SESSION_ID
-      })
-    ).resolves.toEqual({ control: {} })
-
-    // Bare profile routes through the profile-pool door, never ambient ...
-    expect(ambient).not.toHaveBeenCalled()
-    expect(requestGatewayForProfile).toHaveBeenCalledWith(
-      'omar',
-      'session.control.read',
-      expect.objectContaining({ session_id: RUNTIME_SESSION_ID }),
-      undefined,
-      undefined
-    )
-    // ... and the draft stays out of the sidebar.
-    expect($sessions.get().some(s => sessionMatchesStoredId(s, STORED_UNLISTED))).toBe(false)
   })
 })
 describe('selectSidebarItem', () => {

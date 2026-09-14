@@ -775,17 +775,17 @@ class TestWebServerEndpoints:
         seen = {}
 
         def _pid(pid_path=None, **kw):
-            # The served-profile probe also verifies the DEFAULT home's gateway identity; the
-            # contract here is that the worker's OWN pid file is what the scoped rung reads.
+            seen["pid_path"] = pid_path
             seen.setdefault("pid_paths", []).append(pid_path)
             return None
 
         def _runtime(path=None):
+            seen["status_path"] = path
             seen.setdefault("status_paths", []).append(path)
             return None
 
         def _runtime_pid(runtime=None, *, expected_home=None):
-            seen.setdefault("expected_homes", []).append(expected_home)
+            seen["expected_home"] = expected_home
             return None
 
         monkeypatch.setattr(_gw_status, "get_running_pid_cached", _pid)
@@ -799,7 +799,7 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert worker_home / "gateway.pid" in seen["pid_paths"]
         assert worker_home / "gateway_state.json" in seen["status_paths"]
-        assert worker_home in seen["expected_homes"]
+        assert seen["expected_home"] == worker_home
 
 
 
@@ -3287,9 +3287,8 @@ class TestDenormalizeProviderSwitch:
         model = result["model"]
         assert model["provider"] == "openrouter"
         assert model["default"] == "google/gemini-2.5-flash"
-        # The old ollama-local endpoint must not carry over to openrouter (the switch resolves
-        # the aggregator's own endpoint instead of leaving the field blank or stale).
-        assert model.get("base_url") != "http://localhost:11434/v1"
+        # The old ollama-local endpoint must not carry over to openrouter.
+        assert not model.get("base_url")
 
 
     def test_context_length_override_survives_provider_switch(self):
@@ -3309,38 +3308,6 @@ class TestDenormalizeProviderSwitch:
         model = result["model"]
         assert model["provider"] == "openrouter"
         assert model["context_length"] == 128000
-
-    def test_rejected_switch_is_400_and_leaves_the_model_block_byte_identical(self, monkeypatch):
-        """``switch_model`` rejecting the inferred provider must surface as 400 from
-        ``PUT /api/config`` — not fall back to the flat string, which the deep-merge would
-        write OVER the on-disk ``model:`` dict (provider/base_url/api_mode/slots destroyed)."""
-        from starlette.testclient import TestClient
-        from hermes_constants import get_hermes_home
-        from hermes_cli.model_switch import ModelSwitchResult
-        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
-
-        cfg_path = get_hermes_home() / "config.yaml"
-        cfg_path.write_text(
-            "model:\n"
-            "  default: llama3.2\n"
-            "  provider: ollama-local\n"
-            "  base_url: http://localhost:11434/v1\n"
-            "  api_mode: chat_completions\n"
-            "  context_length: 32000\n"
-            "  model_slots:\n"
-            "    fast: qwen3\n",
-            encoding="utf-8")
-        before = cfg_path.read_bytes()
-        monkeypatch.setattr("hermes_cli.models_detect.provider_has_credentials", lambda p: p == "openrouter")
-        monkeypatch.setattr("hermes_cli.model_switch.switch_model",
-                            lambda **_kw: ModelSwitchResult(success=False, error_message="models.dev offline"))
-
-        client = TestClient(app)
-        client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
-        resp = client.put("/api/config", json={"config": {"model": "openai/gpt-5.5-zzz"}})
-
-        assert resp.status_code == 400 and "models.dev offline" in resp.json()["detail"]
-        assert cfg_path.read_bytes() == before
 
 
 class TestModelContextLengthSchema:
@@ -5076,6 +5043,26 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert called.wait(3.0), "expected cron tick under HERMES_DESKTOP=1"
+
+    def test_ticker_does_not_run_in_desktop_pool_backend(
+        self, monkeypatch, _isolate_hermes_home
+    ):
+        import threading
+        import hermes_cli.web_server as web_server
+
+        called = threading.Event()
+        monkeypatch.setenv("HERMES_DESKTOP", "1")
+        monkeypatch.setenv("HERMES_DESKTOP_POOL", "1")
+        monkeypatch.setattr(
+            web_server,
+            "_start_desktop_cron_ticker",
+            lambda *_args, **_kwargs: called.set(),
+        )
+
+        with self._client():
+            assert not called.wait(0.25), (
+                "pooled profile backends must not become duplicate cron authorities"
+            )
 
 
 class TestServeIndexMissingIndex:

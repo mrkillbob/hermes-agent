@@ -1587,6 +1587,101 @@ export interface Translations {
     importedBadge: string
     resetToMine: string
   }
+  lunarCity: {
+    disabled: string
+    disabledHint: string
+    label: string
+    worldAriaLabel: string
+    heading: string
+    intro: string
+    selectSubject: string
+    defaultsActive: string
+    starterAssets: string
+    assetCompanions: string
+    assetScene: string
+    assetTextures: string
+    localAssets: string
+    localAssetsForReview: string
+    reviewOnly: string
+    worldSetup: string
+    worldSetupDescription: string
+    builtInPets: string
+    builtInPetAlt: string
+    safeDefault: string
+    dropLocalAssets: string
+    dropToStage: string
+    formats: string
+    stagedFiles: (count: number) => string
+    skip: string
+    useDefaults: string
+    dialogue: {
+      ariaLabel: (title: string) => string
+      label: string
+      close: string
+      source: string
+      state: string
+      severity: string
+      task: string
+      detailUnavailable: string
+      role: (role: string) => string
+      assignedTo: (assignee: string) => string
+      actionUnavailable: string
+      actionAccepted: string
+      inspectBlocker: string
+      inspect: string
+      recover: string
+    }
+    dispatcher: {
+      companion: string
+      cube: string
+      commandCenter: string
+      description: string
+      newTask: string
+      newSession: string
+      attention: string
+      recentEvents: string
+      recentActivity: string
+      createTask: string
+      title: string
+      brief: string
+      sending: string
+      dispatch: string
+      startPrompt: string
+      starting: string
+      startSession: string
+      activeConditions: (count: number) => string
+      recentEventsCount: (count: number) => string
+      report: string
+      openReport: string
+      taskRequired: string
+    }
+    scene: {
+      ariaLabel: string
+      liveProjection: string
+      colonyNetwork: string
+      stale: string
+      connected: string
+      baselineAriaLabel: string
+      authoredAssets: (count: number, profile: string) => string
+      assetDetail: (kind: string, collection: string, role: string, lods: string) => string
+      sceneObject: (name: string) => string
+      downloadScene: string
+      downloadRoster: string
+      npcActivity: string
+      quiet: string
+      recentEvents: string
+      status: string
+      conditions: string
+      events: string
+      recapAriaLabel: string
+      whileAway: string
+      transitions: (count: number) => string
+    }
+    glb: {
+      canvasAriaLabel: string
+      imageAlt: string
+    }
+  }
   agents: {
     extendedTranscript: string
     transcriptTruncated: string
@@ -2380,6 +2475,25 @@ export interface Translations {
       openInNewTab: string
       openInSplit: string
       copyIdFailed: string
+      cleanupWorktree: string
+      cleanupTitle: string
+      cleanupBlockedTitle: string
+      cleanupAllowedDesc: (branch: string, path: string) => string
+      cleanupInspectFailed: string
+      cleanupRemoving: string
+      cleanupRemoved: string
+      cleanupRemove: string
+      cleanupReasons: {
+        active: string
+        dirty: string
+        'in-progress': string
+        'mismatched identity': string
+        'missing remote evidence': string
+        remove_failed: string
+        unintegrated: string
+        unknown: string
+        unpushed: string
+      }
       sessionActions: string
       sessionRunning: string
       needsInput: string

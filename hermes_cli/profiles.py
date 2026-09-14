@@ -22,6 +22,7 @@ from hermes_constants import clear_named_profile_deleted, mark_named_profile_del
 logger = logging.getLogger(__name__)
 
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_WARNED_MISSING_ALLOWLIST_ENTRIES: set[tuple[str, ...]] = set()
 
 # Directories bootstrapped inside every new profile. ``home`` is the back-compat/Docker
 # HOME for tool subprocesses (host subprocesses keep the real HOME so CLI credentials
@@ -51,9 +52,6 @@ _CLONE_ALL_DEFAULT_EXCLUDE_ROOT: frozenset[str] = frozenset({
 # (+wal/shm, can reach many GB), session dirs, `hermes backup` archives, quick-backup
 # snapshots, checkpoints. Inheriting them is never useful (restoring one inside the
 # clone would resurrect the SOURCE profile's state) and can balloon the copy by tens of GB.
-# ``cron`` is scheduled work bound to the source profile and its origin channel: a clone
-# that inherits jobs.json runs every job twice (two gateways, same job ids, double spend,
-# duplicate deliveries) the moment its gateway starts. The empty dir is recreated below.
 _CLONE_ALL_HISTORY_EXCLUDE_ROOT: frozenset[str] = frozenset({
     "state.db", "state.db-wal", "state.db-shm", "sessions", "backups", "state-snapshots", "checkpoints",
     "cron",
@@ -234,25 +232,15 @@ def get_profile_dir(name: str) -> Path:
     canon = normalize_profile_name(name)
     if canon == "default":
         return _get_default_hermes_home()
-    # The name becomes a path component under profiles/; refuse anything that
-    # is not a valid profile id so every caller (WS params, /p/<profile>/
-    # prefixes, tool args) fails closed instead of escaping the root. The
-    # regex only, not _RESERVED_NAMES: a pre-reserved-list dir like
-    # profiles/hermes may still exist and must keep resolving.
-    if not _PROFILE_ID_RE.match(canon):
-        raise ValueError(f"Invalid profile name {canon!r}. Must match [a-z0-9][a-z0-9_-]{{0,63}}")
     return _get_profiles_root() / canon
 
 
 def profile_exists(name: str) -> bool:
     """Check whether a live (non-tombstoned) profile directory exists."""
-    try:
-        canon = normalize_profile_name(name)
-        profile_dir = get_profile_dir(canon)
-    except ValueError:
-        return False
+    canon = normalize_profile_name(name)
     if canon == "default":
         return True
+    profile_dir = get_profile_dir(canon)
     return profile_dir.is_dir() and not named_profile_is_deleted(profile_dir)
 
 
@@ -542,11 +530,17 @@ def _check_gateway_running(profile_dir: Path) -> bool:
     the lock isn't held by *this* reader: dashboard as a separate s6 service, launch-service
     gateways with no live PID file); fallback validates the PID in ``gateway_state.json``
     against the process table, matching ``/api/status``."""
-    from gateway.status import get_running_pid, resolve_gateway_liveness
-    # cleanup_stale=False: a status probe for ANOTHER profile must never unlink its PID file.
-    return resolve_gateway_liveness(
-        profile_dir=profile_dir, use_cache=False,
-        pid_probe=lambda path: get_running_pid(path, cleanup_stale=False)).running
+    try:
+        from gateway.status import get_running_pid, get_runtime_status_running_pid, read_runtime_status
+        if get_running_pid(profile_dir / "gateway.pid", cleanup_stale=False) is not None:
+            return True
+    except Exception:
+        pass
+    try:
+        runtime = read_runtime_status(profile_dir / "gateway_state.json")
+        return get_runtime_status_running_pid(runtime, expected_home=profile_dir) is not None
+    except Exception:
+        return False
 
 
 def _served_by_running_multiplexer(profile_name: str) -> bool:
@@ -707,19 +701,38 @@ def list_profiles() -> List[ProfileInfo]:
     return profiles
 
 
-def profiles_to_serve(multiplex: bool) -> List[Tuple[str, Path]]:
+def profiles_to_serve(multiplex: bool, profile_allowlist: Optional[List[str]] = None) -> List[Tuple[str, Path]]:
     """``(profile_name, hermes_home)`` pairs a gateway should serve — the single chokepoint
     for "which profiles does the inbound gateway handle".
 
     ``multiplex=False``: exactly one entry for the *active* profile (byte-for-byte the
     historical single-profile behavior; name is ``"default"`` or the named profile's id).
-    ``multiplex=True``: default plus every live named profile under ``profiles/`` (tombstoned
-    profiles skipped). Pure directory read: never creates a profile dir (#94590)."""
+    ``multiplex=True``: default plus every live named profile, optionally filtered by
+    *profile_allowlist* (invalid entries skipped, missing ones warned once)."""
     active = get_active_profile_name() or "default"
     if not multiplex:
         return [(active, get_profile_dir(active))]
     serve: List[Tuple[str, Path]] = [("default", _get_default_hermes_home())]
-    serve.extend((entry.name, entry) for entry in _iter_named_profile_dirs())
+    allowed: Optional[set[str]] = None
+    if profile_allowlist is not None:
+        allowed = set()
+        for entry in profile_allowlist:
+            if not isinstance(entry, str):
+                continue
+            try:
+                name = _canon_valid(entry)
+            except ValueError:
+                continue
+            if name != "default":
+                allowed.add(name)
+    for entry in _iter_named_profile_dirs():
+        if allowed is None or entry.name in allowed:
+            serve.append((entry.name, entry))
+    if allowed is not None:
+        missing = tuple(sorted(allowed - {name for name, _ in serve}))
+        if missing and missing not in _WARNED_MISSING_ALLOWLIST_ENTRIES:
+            _WARNED_MISSING_ALLOWLIST_ENTRIES.add(missing)
+            logger.warning("Skipping missing gateway.multiplex_profile_allowlist profile(s): %s", ", ".join(missing))
     return serve
 
 
@@ -734,6 +747,28 @@ def _resolve_clone_source(clone_from: Optional[str]) -> Path:
     if not source_dir.is_dir():
         raise FileNotFoundError(f"Source profile '{clone_from or 'active'}' does not exist at {source_dir}")
     return source_dir
+
+
+def _refuse_clone_channels_from_live_multiplexer(source_dir: Path, source_label: str) -> None:
+    """Reject a cross-surface channel clone when the live multiplexer already serves its source."""
+    from hermes_cli.gateway_multiplex_served import live_default_gateway_pid, recorded_served_profiles
+    from hermes_cli.profile_channels import channel_platforms_configured
+    if live_default_gateway_pid() is None:
+        return
+    served = recorded_served_profiles()
+    if served is None:
+        return
+    source_name = normalize_profile_name(source_label)
+    if source_name not in {normalize_profile_name(name) for name in served}:
+        return
+    platforms = channel_platforms_configured(source_dir)
+    if platforms:
+        raise ValueError(
+            f"--clone-channels would copy {', '.join(platforms)} from '{source_label}', which the running "
+            "multiplexed gateway already serves: the bot can only belong to one profile, so the copy would be "
+            "parked as a duplicate credential. Clone without --clone-channels and give the new profile its own bot "
+            "(hermes -p <name> setup), or route its chats with gateway.profile_routes instead."
+        )
 
 
 def _seed_file_if_missing(path: Path, text: str, mode: Optional[int] = None) -> None:
@@ -760,39 +795,21 @@ def _clone_file(source_dir: Path, profile_dir: Path, relpath: str) -> None:
             os.chmod(str(dst), 0o600)
 
 
-# Files a clone edits in place after copying. A ``--clone-all`` copy preserves symlinks
-# (``symlinks=True``), so a symlinked source ``.env`` would otherwise be edited THROUGH the link and
-# the channel stripping would mutate the SOURCE profile. These are materialized as real files first.
-_CLONE_MATERIALIZE = (".env", "config.yaml", "auth.json", "SOUL.md")
-
-
-def _materialize_symlinked_files(profile_dir: Path) -> List[str]:
-    """Replace symlinked root files the clone will edit with private copies of their targets (a
-    dangling link is dropped). Returns the relative names materialized."""
-    done: List[str] = []
-    for name in _CLONE_MATERIALIZE:
-        path = profile_dir / name
-        if not path.is_symlink():
-            continue
-        target = Path(os.path.realpath(path))
-        path.unlink()
-        if target.is_file():
-            shutil.copy2(target, path)
-        done.append(name)
-    return done
-
-
 def _clone_all_into(source_dir: Path, profile_dir: Path, canon: str) -> None:
     """--clone-all: full copytree minus infrastructure/history, then strip runtime files
     and cloned single-use OAuth grants."""
     shutil.copytree(source_dir, profile_dir, symlinks=True, ignore=_clone_all_copytree_ignore(source_dir))
-    materialized = _materialize_symlinked_files(profile_dir)
-    if materialized:
-        logger.info("profile %s: materialized symlinked %s so the clone never writes through to %s",
-                    canon, materialized, source_dir)
-    # Excluded history dirs (sessions/, cron/) must still exist as empty dirs so the clone runs.
-    for subdir in _PROFILE_DIRS:
-        (profile_dir / subdir).mkdir(parents=True, exist_ok=True)
+    # Keep the profile layout bootstrapped while leaving scheduled work bound to the source
+    # profile.  The ignore callback excludes the root cron directory and all of its contents.
+    (profile_dir / "cron").mkdir(parents=True, exist_ok=True)
+    env_path = profile_dir / ".env"
+    if env_path.is_symlink():
+        # copytree(..., symlinks=True) preserves a managed source link. Materialize the clone before
+        # channel stripping so write_text cannot follow the link back into the source profile.
+        data = env_path.read_bytes()
+        env_path.unlink()
+        env_path.write_bytes(data)
+        os.chmod(str(env_path), 0o600)
     for stale in _CLONE_ALL_STRIP:
         (profile_dir / stale).unlink(missing_ok=True)
     # auth.json / .anthropic_oauth.json copied verbatim fork single-use OAuth grants
@@ -847,9 +864,6 @@ def create_profile(
             "--no-skills is mutually exclusive with --clone / --clone-from / --clone-all "
             "(cloning explicitly copies skills from the source profile)."
         )
-    cloning = clone_from is not None or clone_all or clone_config
-    if clone_channels and not cloning:
-        raise ValueError("--clone-channels only applies to a clone (--clone, --clone-from or --clone-all).")
     canon = _canon_valid(name)
     if canon == "default":
         raise ValueError("Cannot create a profile named 'default' — it is the built-in profile (~/.hermes).")
@@ -862,59 +876,24 @@ def create_profile(
         shutil.rmtree(profile_dir)
     if profile_dir.exists():
         raise FileExistsError(f"Profile '{canon}' already exists at {profile_dir}")
-    source_dir = _resolve_clone_source(clone_from) if cloning else None
-    if source_dir is not None and clone_channels:
-        from hermes_cli.profile_channels import clone_channels_refusal
-        refusal = clone_channels_refusal(source_dir, clone_from or get_active_profile_name() or "default")
-        if refusal:
-            raise ValueError(refusal)
     clear_named_profile_deleted(profile_dir)
-    # Build in a hidden sibling and publish with one rename: a running multiplexer rescans profiles/
-    # on every create and every 30 s, and ``_iter_named_profile_dirs`` only lists valid ids (no leading
-    # dot), so it can never adopt the half-copied tree and start adapters on credentials the strip
-    # below has not removed yet.
-    staging = _clone_staging_dir(profile_dir)
-    try:
-        if clone_all and source_dir:
-            _clone_all_into(source_dir, staging, canon)
-        else:
-            _bootstrap_profile_dir(staging, source_dir)
-        if source_dir is not None and not clone_channels:
-            from hermes_cli.profile_channels import strip_channel_settings
-            stripped = strip_channel_settings(staging, include_state=clone_all, source_dir=source_dir)
-            if stripped:
-                logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
-        _finish_profile_layout(staging, no_skills=no_skills, clone_all=clone_all, description=description)
-        os.rename(staging, profile_dir)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    source_dir = None
+    if clone_from is not None or clone_all or clone_config:
+        source_dir = _resolve_clone_source(clone_from)
+        if clone_channels:
+            _refuse_clone_channels_from_live_multiplexer(
+                source_dir, clone_from or get_active_profile_name()
+            )
+    if clone_all and source_dir:
+        _clone_all_into(source_dir, profile_dir, canon)
+    else:
+        _bootstrap_profile_dir(profile_dir, source_dir)
+    if source_dir is not None and not clone_channels:
+        from hermes_cli.profile_channels import strip_channel_settings
+        stripped = strip_channel_settings(profile_dir, include_state=clone_all)
+        if stripped:
+            logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
 
-    # Inside a container under s6, register the gateway as a runtime s6 service so
-    # `hermes -p <profile> gateway start` supervises via `s6-svc -u` instead of a bare
-    # process. No-op on host (systemd/launchd/windows unit generation handles lifecycle).
-    _maybe_register_gateway_service(canon)
-    # A running multiplexer enumerates profiles/ at boot: ask it to serve this one now (it also
-    # rescans periodically, so a missed signal only delays serving).
-    _notify_multiplexer(canon)
-    return profile_dir
-
-
-def _clone_staging_dir(profile_dir: Path) -> Path:
-    """Fresh ``profiles/.<name>.staging-<pid>`` beside the final dir (same filesystem, so the publish
-    rename is atomic). A leftover from a crashed create is discarded."""
-    staging = profile_dir.parent / f".{profile_dir.name}.staging-{os.getpid()}"
-    profile_dir.parent.mkdir(parents=True, exist_ok=True)
-    if staging.is_symlink() or staging.is_file():
-        staging.unlink()
-    elif staging.is_dir():
-        shutil.rmtree(staging, ignore_errors=True)
-    return staging
-
-
-def _finish_profile_layout(profile_dir: Path, *, no_skills: bool, clone_all: bool,
-                           description: Optional[str]) -> None:
-    """Seed files a fresh profile owns from day one; runs on the staging tree before publish."""
     # Seed an empty .env so the profile owns a credentials file from day one. Without it,
     # profile-scoped env writes (dashboard Channels/Keys pages, `hermes -p <name> auth add`)
     # had no file until first write and the profile silently inherited shell API keys —
@@ -946,20 +925,19 @@ def _finish_profile_layout(profile_dir: Path, *, no_skills: bool, clone_all: boo
         with contextlib.suppress(Exception):  # non-fatal — `hermes profile describe` works later
             write_profile_meta(profile_dir, description=description.strip(), description_auto=False)
 
+    # Inside a container under s6, register the gateway as a runtime s6 service so
+    # `hermes -p <profile> gateway start` supervises via `s6-svc -u` instead of a bare
+    # process. No-op on host (systemd/launchd/windows unit generation handles lifecycle).
+    _maybe_register_gateway_service(canon)
+    # A running multiplexer enumerates profiles/ at boot: ask it to serve this one now (it also
+    # rescans periodically, so a missed signal only delays serving).
+    _notify_multiplexer(canon)
+    return profile_dir
+
 
 def _notify_multiplexer(canon: str) -> None:
     from hermes_cli.gateway_multiplex_served import notify_multiplexer_profiles_changed
     notify_multiplexer_profiles_changed(canon)
-
-
-def _live_default_multiplexer() -> bool:
-    """True when a live default gateway has recorded a served-profile set: every dir under
-    profiles/ is then served by it, so a profile-identity change must be unrouted first."""
-    try:
-        from hermes_cli.gateway_multiplex_served import recorded_served_profiles
-        return recorded_served_profiles() is not None
-    except Exception:
-        return False
 
 
 def seed_profile_skills(profile_dir: Path, quiet: bool = False) -> Optional[dict]:
@@ -1085,7 +1063,13 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
     except Exception:
         current_user = None
     pids: list[int] = []
-    for proc in psutil.process_iter(["pid", "name", "username", "cmdline"]):
+    try:
+        processes = list(psutil.process_iter(["pid", "name", "username", "cmdline"]))
+    except Exception:
+        # Process enumeration itself can be denied on macOS hardened hosts. The caller
+        # can still remove the profile after the best-effort backend cleanup.
+        return []
+    for proc in processes:
         try:
             info = proc.info
             pid = info.get("pid")
@@ -1259,10 +1243,8 @@ def delete_profile(name: str, yes: bool = False) -> Path:
         if _released:
             print(f"✓ Released {_released} memory-store connection(s) held by this process")
     with contextlib.suppress(Exception):
-        from hermes_state_registry import close_all_under as _close_session_dbs_under
-        _closed = _close_session_dbs_under(profile_dir)
-        if _closed:
-            print(f"✓ Released {_closed} session database connection(s) held by this process")
+        from hermes_state_registry import close_all_under
+        close_all_under(profile_dir)
 
     # 3. Remove wrapper script
     if has_wrapper and remove_wrapper_script(canon):
@@ -1664,12 +1646,15 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
 # Rename
 
 def _atomic_write_json(path: Path, data: dict) -> bool:
-    """Atomic rewrite of a third-party JSON config; False on OSError (nothing partially written)."""
-    from utils import atomic_json_write
+    """Write *data* to *path* via a sibling ``.tmp`` + rename. Returns False (tmp cleaned) on OSError."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        atomic_json_write(path, data)
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(path)
         return True
     except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
         return False
 
 
@@ -1737,31 +1722,9 @@ def rename_profile(old_name: str, new_name: str) -> Path:
         _cleanup_gateway_service(old_canon, old_dir)
         _stop_gateway_process(old_dir)
 
-    # 1b. Unroute the old name from a live multiplexer BEFORE the rename (same protocol as
-    # delete_profile). A multiplexed secondary has no gateway.pid of its own, so the check above
-    # reports it stopped while the default gateway still holds its adapters, cron ticker, logging
-    # and SQLite handles; those re-``mkdir`` the old home the moment it moves (no tombstone →
-    # ``mkdir_under_hermes_home`` does not refuse it) and the periodic reconcile re-adopts the
-    # resurrected dir as a ghost served profile (#109267).
-    live_mux = _live_default_multiplexer()
-    if live_mux:
-        mark_named_profile_deleted(old_dir)
-        _notify_multiplexer(old_canon)
-
-    # 2. Rename directory. If the move fails (cross-device EXDEV, permissions, a racing writer),
-    # undo the unroute so the profile is never stranded tombstoned-but-present.
-    try:
-        old_dir.rename(new_dir)
-    except Exception:
-        if live_mux:
-            clear_named_profile_deleted(old_dir)
-            _notify_multiplexer(old_canon)
-        raise
+    # 2. Rename directory
+    old_dir.rename(new_dir)
     print(f"✓ Renamed {old_dir.name} → {new_dir.name}")
-    # The tombstone lives at profiles/.deleted/<old_name>; old_dir is gone so nothing can
-    # resurrect it, and a future profile reusing the old name must not read as deleted.
-    if live_mux:
-        clear_named_profile_deleted(old_dir)
 
     # 3. Update profile-scoped Honcho host blocks, preserving aiPeer identity
     _migrate_honcho_profile_host(old_canon, new_canon, new_dir)
@@ -1777,10 +1740,6 @@ def rename_profile(old_name: str, new_name: str) -> Path:
 
     # 5. Update active_profile if it pointed to old name
     _retarget_active_profile(old_canon, new_canon, f"✓ Active profile updated: {new_canon}")
-
-    # 6. Hot-serve the renamed profile now (mirrors create; a missed signal only delays it).
-    if live_mux:
-        _notify_multiplexer(new_canon)
     return new_dir
 
 

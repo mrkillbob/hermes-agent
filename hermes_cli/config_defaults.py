@@ -33,13 +33,23 @@ DEFAULT_CONFIG = {
         "journal_size_limit": None,
     },
     # Soft fd limit for long-running server processes; clamped to OS hard limit. 0/false/null = off.
-    "runtime": {"nofile_soft_limit": 4096},
+    "runtime": {
+        "nofile_soft_limit": 4096,
+        # Temporary operator posture for protected remote LLM egress. Keep the
+        # identity/guarded-work classification active; this only gates dispatch.
+        "llm_egress_enforcement": "enabled",
+    },
     # Global active chat session cap across CLI, TUI/dashboard, and messaging. None/0 = unbounded.
     "max_concurrent_sessions": None,
     # Soft LRU cap on in-memory TUI/desktop/dashboard sessions. Above it the gateway evicts the
     # least-recently-active DETACHED sessions (no live client); reopening re-resumes from disk.
     # 0/null disables.
     "max_live_sessions": 16,
+    # Per-root-conversation Git worktree isolation. ``None`` is a deliberate
+    # default-only sentinel: deep merge replaces it with a user top-level
+    # mapping, while the policy resolver can still honor a legacy desktop
+    # block when no top-level policy was configured.
+    "conversation_worktree": None,
     "session": {
         # Per-terminal `hermes -c`: each CLI session writes a breadcrumb under
         # $HERMES_HOME/terminal-sessions/<terminal-id>, so bare -c/--continue resumes THIS
@@ -47,6 +57,10 @@ DEFAULT_CONFIG = {
         "terminal_continue": True,
     },
     "agent": {
+        # Per-profile default reasoning effort ("", "low", "medium", "high", "none"/"off" to disable
+        # thinking). "" defers to the provider/model's own default. model.reasoning_efforts overrides
+        # this per-model-name spelling.
+        "reasoning_effort": "",
         # Turn cap. null = unlimited (default; caps caused silent mid-task truncation). Positive int
         # caps; "none"/"unlimited"/"inf"/0/-1 also mean unlimited (resolve_turn_limit).
         "max_turns": None,
@@ -254,6 +268,12 @@ DEFAULT_CONFIG = {
         # timeout_s <= 0 disables; poll_s = sampling interval. Invalid values (NaN, Inf,
         # non-positive poll) warn and fall back to defaults. See agent/turn_liveness.py.
         "turn_liveness": {"timeout_s": 600.0, "poll_s": 15.0},
+        # Optional path to a benchmark-backed model performance route artifact (JSON produced by
+        # ``hermes_cli.profile_route_compiler.compile_profile_configs``). When set, the gateway
+        # compiles it at startup and installs a per-surface, per-profile model route table that
+        # ``_route_for_agent`` consults when the agent declares a ``performance_surface``.
+        # null (default) leaves the table empty so agent provider/model config stays active.
+        "performance_route_artifact": None,
     },
 
     "terminal": {
@@ -627,9 +647,8 @@ DEFAULT_CONFIG = {
         # path.
         "in_place": True,
         # Per-model threshold overrides: keys substring-match the model name (longest wins), values
-        # replace the global `threshold`, e.g. {"glm-5.2": 0.40}. Prefix a key with "<provider>:" to
-        # scope it to one route ({"openai-codex:astra": 0.85} leaves Astra on OpenRouter/Nous at the
-        # global value). The <512K floor (0.75) still applies raise-only on top.
+        # replace the global `threshold`, e.g. {"glm-5.2": 0.40}. The <512K floor (0.75) still
+        # applies raise-only on top.
         "model_thresholds": {},
         # Opt-in idle compaction (0 = off): a session resuming after this many idle seconds compacts
         # up front, before the first reply. Time-based complement to `threshold`; skipped when
@@ -841,9 +860,6 @@ DEFAULT_CONFIG = {
         # fights terminal auto-scroll in non-fullscreen mode.
         # See #45592.
         "cli_refresh_interval": 1.0,
-        # Vi/vim keybindings in the CLI input composer (config-only, no slash command).
-        # Off by default, preserving prompt_toolkit's standard emacs bindings.
-        "vim_mode": False,
         "user_message_preview": {  # CLI: submitted user-message lines echoed to scrollback
             "first_lines": 2,
             "last_lines": 2,
@@ -903,8 +919,7 @@ DEFAULT_CONFIG = {
         # CLI/TUI status bar fields. Non-empty = only listed fields show (built-in order kept,
         # config controls visibility not ordering); empty = default set. Available: model,
         # context_detail, context_pct, cache_hit, latency, tps, compressions, bg_tasks,
-        # bg_processes, bg_subagents, goal, git_branch (⎇ current branch, opt-in only), duration,
-        # prompt_elapsed, idle_since, focus, yolo,
+        # bg_processes, bg_subagents, goal, duration, prompt_elapsed, idle_since, focus, yolo,
         # stash, battery, title, total_tokens (session Σ, opt-in only). Narrow terminals still drop
         # context_detail/prompt_elapsed/idle_since.
         "status_bar": {
@@ -1124,19 +1139,6 @@ DEFAULT_CONFIG = {
     },
 
     "voice": {
-        # How the Desktop voice conversation is wired:
-        #   chained  — STT → Hermes turn → TTS (the stt.* / tts.* providers below)
-        #   gpt-live — one full-duplex voice model (OpenAI GPT-Live) owns the mic and speaker and
-        #              DELEGATES every real request to Hermes (any model / provider you have
-        #              selected); needs an OpenAI API key. $0.05/min voice layer billing.
-        "voice_chat_mode": "chained",
-        "gpt_live": {
-            "model": "gpt-live-1",
-            "voice": "marin",  # marin | quartz | ripple | vesper | willow | stone | gleam | meridian | ...
-            # Extra sentences appended to the live model's conversation persona (tone, pacing, language).
-            "instructions": "",
-            # optional "api_key" / "base_url" keys override the OpenAI audio credentials for this mode only
-        },
         "record_key": "ctrl+b",
         "submit_mode": "direct",  # TUI: direct submits immediately; draft = editable transcript
         "max_recording_seconds": 120,
@@ -1211,6 +1213,10 @@ DEFAULT_CONFIG = {
             # Suppress INFO logs when the readable RSS delta is smaller; 0 = log all.
             "info_log_min_delta_mb": 0.0,
         },
+    },
+    "learning": {
+        "vault_dir": "",
+        "shared_catalog_enabled": False,
     },
     "memory": {  # Persistent memory — bounded curated memory injected into the system prompt
         "memory_enabled": True,
@@ -1335,8 +1341,7 @@ DEFAULT_CONFIG = {
                     {"provider": "openai-codex", "model": "gpt-5.5"},
                     {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
                 ],
-                "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
-
+                "aggregator": {"provider": "openai-codex", "model": "gpt-5.5"},
                 "enabled": True,
             }
         },
@@ -1380,7 +1385,6 @@ DEFAULT_CONFIG = {
         # See #79686.
         "ledger": True,
     },
-
     # Curator — background maintenance of AGENT-CREATED skills (never hub-installed): marks
     # long-unused skills stale, archives (never deletes) obsolete ones, optionally consolidates
     # overlaps via a forked aux-model agent. Inactivity-triggered from session start, no cron
@@ -1501,7 +1505,7 @@ DEFAULT_CONFIG = {
     },
 
     "whatsapp": {
-        # reply_prefix: None = built-in "☤ *Hermes Agent*" header; "" disables; \n allowed.
+        # reply_prefix: None = built-in "⚕ *Hermes Agent*" header; "" disables; \n allowed.
     },
 
     "telegram": {
@@ -1589,6 +1593,8 @@ DEFAULT_CONFIG = {
     # Plugin system. `enabled`/`disabled` lists are written by `hermes plugins enable|disable` and
     # deliberately omitted here so an empty default never clobbers a user allow-list.
     "plugins": {
+        # Maximum serialized payload size for API lifecycle hooks. Minimum 1000; max 600000.
+        "hook_payload_max_chars": 50000,
         # Wall-clock cap (seconds) for one in-process Python plugin hook callback; shell hooks keep
         # their own per-entry `timeout`. 0 = no cap (sync call on agent thread). Max 600.
         "hook_callback_timeout": 30,
@@ -1641,7 +1647,6 @@ DEFAULT_CONFIG = {
     },
 
     "cron": {
-        "catch_up_missed": True,  # False skips recurring misses beyond the local grace window.
         # Let cron-spawned agents use the cronjob toolset (the "cron-librarian" pattern). Off by
         # default: policy-denied in cron context to prevent unattended scheduling loops. Jobs
         # created this way are user-owned in the same flat jobs table. Interactive toolsets
@@ -1652,10 +1657,13 @@ DEFAULT_CONFIG = {
         # platforms are configured. Failure -> last_status=blocked_config, ONE alert, no LLM call.
         # False = fail during the run instead.
         "preflight": True,
+        # Fail closed when an unpinned job's current global model/provider differs from its
+        # creation-time snapshot, so unattended jobs never silently inherit a paid default. False
+        # only when jobs should track changing global inference defaults.
+        "model_drift_guard": True,
         # Default model for cron jobs (WHAT model runs). Fire-time resolution: per-job pin >
-        # cron.model > the job's creation-time snapshot > model.default. An unpinned job keeps
-        # running on the model it was created under when model.default later changes; cron.model
-        # is the way to move the whole fleet at once. "" = fall through.
+        # cron.model > model.default. When set, unpinned jobs follow it deliberately and the drift
+        # guard does not engage for the model axis. "" = fall through to model.default.
         "model": "",
         # Inference provider paired with cron.model (NOT the scheduler provider below). "" = resolve
         # from global config.
@@ -1691,10 +1699,9 @@ DEFAULT_CONFIG = {
         # Make cron deliveries CONTINUABLE (user can reply to a brief with it in context). False
         # keeps deliveries isolated to the job's session; per-job `attach_to_session` overrides.
         # Thread-capable platforms (Telegram topics, Discord/Slack threads) get a seeded thread per
-        # job via create_handoff_thread; DM-only platforms mirror the brief into the target DM
+        # job via create_handoff_thread; DM-only platforms mirror the brief into the origin DM
         # session. Appended at a turn boundary via mirror_to_session, cached system prompt
-        # untouched. User-written bare platforms address home conversations, unlike `all`
-        # broadcast expansions, which do not gain mirror eligibility.
+        # untouched; fan-out/broadcast targets are never mirrored.
         "mirror_delivery": False,
         # Max due jobs run in parallel per tick. None/0 = unbounded (thread count only); 1 = serial.
         # Env override: HERMES_CRON_MAX_PARALLEL.
@@ -1713,15 +1720,12 @@ DEFAULT_CONFIG = {
         # (long TTS audio, big exports) need more than 30s. Env: HERMES_CRON_MEDIA_SEND_TIMEOUT.
         # Keep in sync with cron.scheduler._DEFAULT_MEDIA_SEND_TIMEOUT.
         "media_send_timeout_seconds": 300,
-        # Managed systemd gateway with no user session (containers, no linger): false runs
-        # cron jobs as a direct external subprocess (warns once; no cgroup isolation), true
-        # fails closed with the enable-linger remedy. Kanban always requires a scope.
-        "require_restart_safe_scope": False,
     },
     # Kanban multi-agent coordination. The dispatcher ticks every N seconds, reclaims stale claims,
     # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
     # claimable task. Run ONE dispatcher per profile; two on the same kanban.db race for claims.
     "kanban": {
+        "worker_watchdog": {"enabled": True},
         # Auto-subscribe the originating gateway/TUI session to completion + block events when
         # kanban_create is called from a session with a persistent delivery channel. Disable for
         # profiles that prefer explicit kanban_notify-subscribe calls per task.
@@ -1732,6 +1736,9 @@ DEFAULT_CONFIG = {
         # Run the dispatcher inside the gateway process (~300µs per idle tick). False only if you
         # run it as a separate unit or don't want the gateway spawning workers.
         "dispatch_in_gateway": True,
+        # Explicit source refs for carried project integrations; keys are absolute repo paths.
+        # Unconfigured projects retain remote-default-branch worktree behavior.
+        "worktree_base_refs": {},
         # Auto-claim tasks in the review column and spawn the assigned profile with the bundled
         # sdlc-review skill. Disable where every review is done manually from the dashboard.
         "review_dispatch": True,
@@ -1844,10 +1851,6 @@ DEFAULT_CONFIG = {
             # Range 200..60000.
             "listing_max_tokens": 4000,
         },
-        # Remote connector discovery/lifecycle through the Nous tool gateway.
-        # The flag is the user's off switch; availability additionally requires
-        # the portal sign-in every managed tool gates on.
-        "connectors": {"enabled": True},
     },
     "logging": {  # File logging to ~/.hermes/logs/: agent.log captures INFO+, errors.log WARNING+.
         "level": "INFO",       # minimum level for agent.log: DEBUG, INFO, WARNING
@@ -1945,8 +1948,6 @@ DEFAULT_CONFIG = {
         "loop_watchdog_probe_interval_s": 30.0,
         "loop_watchdog_probe_timeout_s": 10.0,
         "loop_watchdog_max_strikes": 3,
-        # Bot-to-bot loop guard: admitted bot messages per conversation before a cooldown.
-        "bot_loop_guard": {"enabled": True, "max_events": 20, "window_seconds": 300, "cooldown_seconds": 600},
         # Startup-liveness watchdog: stdlib-only daemon thread armed at process entry that
         # hard-exits 75 if the loop isn't live within the deadline. Armed before config loads, so
         # run_gateway() bridges these to HERMES_STARTUP_WATCHDOG / HERMES_STARTUP_WATCHDOG_TIMEOUT_S
@@ -2207,23 +2208,6 @@ DEFAULT_CONFIG = {
     },
     # External secret sources — pull credentials from secret managers at startup instead of storing
     # them in ~/.hermes/.env.
-    # Browser credential vault: which login sources browser_vault_list/fill may draw from. The local
-    # encrypted vault (`hermes vault add`, Desktop → Settings → Credential Vault) is always on.
-    # External password managers are unlocked per session with a masked master-password prompt;
-    # headless sessions (cron, webhook, API) never prompt and see them as locked.
-    "vault": {
-        "onepassword": {
-            "enabled": False,       # `op` CLI: Login items with a website URL become fillable handles.
-            "account": "",          # account shorthand for `op --account`; empty = default account.
-            "binary_path": "",      # absolute path to op; empty = PATH.
-            # Env var holding a service-account token (headless auth, no unlock prompt). Unset = prompt.
-            "service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN",
-        },
-        "bitwarden": {
-            "enabled": False,       # `bw` CLI (Password Manager, not Secrets Manager); run `bw login` once first.
-            "binary_path": "",      # absolute path to bw; empty = PATH.
-        },
-    },
     "secrets": {
         # Optional ordering of enabled sources (e.g. [onepassword, bitwarden]); default registration
         # order. Mapped sources (explicit VAR→ref) always beat bulk sources (BSM project dumps);
@@ -2384,11 +2368,6 @@ DEFAULT_CONFIG = {
         # 14-20% of consecutive calls in concurrent tool loops (measured 2026-09-06;
         # NousResearch/api#227), so chat is the default until that is fixed.
         "anthropic_wire": "chat",
-        # Nous free tier: with no other provider configured, Hermes sets up a free Nous identity on
-        # first use (inference on nous/welcome + connectors) and offers `/login` (terminal:
-        # `hermes auth upgrade`) to sign in. false turns the free tier off entirely: nothing is set
-        # up and nothing is used.
-        "guest": True,
     },
     # Google Vertex AI (Gemini). Auth is OAuth2 from a service-account JSON or ADC, NOT an API key;
     # the credential path lives in .env (VERTEX_CREDENTIALS_PATH / GOOGLE_APPLICATION_CREDENTIALS).
@@ -2465,11 +2444,6 @@ def _base_url(name, prompt_name=None):
 OPTIONAL_ENV_VARS = {
     # ── Provider (handled in provider selection, not shown in checklists) ──
     "NOUS_BASE_URL": _base_url("Nous Portal"),
-    "HERMES_ANON_API_SECRET": _env(
-        "Shared secret for the Nous free-tier sign-up endpoints while they are in their gated "
-        "integration phase (not needed once the gate is removed)",
-        "Nous free-tier shared secret (leave empty unless given one)", password=True,
-        category="provider", advanced=True),
     "OPENROUTER_API_KEY": _env("OpenRouter API key (for vision, web scraping helpers, and MoA)",
         "OpenRouter API key", url="https://openrouter.ai/keys", password=True, tools=["vision_analyze"],
         category="provider", advanced=True),
@@ -2586,14 +2560,6 @@ OPTIONAL_ENV_VARS = {
         "Exact Firecrawl tool-gateway origin override for Nous Subscribers only (optional)",
         "Firecrawl gateway URL (leave empty to derive from domain)", None, password=False,
         advanced=True),
-    "TOOL_GATEWAY_URL": _tool(
-        "Exact shared tool-gateway origin for on-origin vendors and media uploads (optional)",
-        "Shared tool-gateway URL (leave empty to derive from domain)", None,
-        password=False, advanced=True),
-    "CONNECTOR_GATEWAY_URL": _tool(
-        "Exact connector-gateway origin for the connectors API (optional)",
-        "Connector-gateway URL (leave empty to derive from domain)", None,
-        password=False, advanced=True),
     "TOOL_GATEWAY_DOMAIN": _tool(
         "Shared tool-gateway domain suffix for Nous Subscribers only, used to derive vendor "
         "hosts, e.g. nousresearch.com -> firecrawl-gateway.nousresearch.com",
@@ -2608,10 +2574,6 @@ OPTIONAL_ENV_VARS = {
     "TAVILY_API_KEY": _tool(
         "Tavily API key for AI-native web search and extract (optional — keyless works when "
         "Tavily is selected)", "Tavily API key", "https://app.tavily.com/home",
-        tools=["web_search", "web_extract"]),
-    "PERPLEXITY_API_KEY": _tool(
-        "Perplexity API key for the Search API web backend (ranked results + query-relevant page "
-        "snippets)", "Perplexity API key", "https://www.perplexity.ai/account/api",
         tools=["web_search", "web_extract"]),
     "KEENABLE_API_KEY": _tool(
         "Keenable API key for fast independent-index web search and page fetch (optional — "

@@ -35,6 +35,16 @@ _IS_WINDOWS = platform.system() == "Windows"
 
 logger = logging.getLogger(__name__)
 
+# The foreground terminal is the operator's trusted shell. Preserve the
+# operator's Git/GitHub configuration and auth there so ordinary authenticated
+# workflows keep working; non-terminal and delegated child paths continue to
+# use the shared scrubber below.
+_LOCAL_TERMINAL_GIT_AUTH_ENV = frozenset({
+    "GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT",
+    "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_AUTH_SOCK",
+})
+
 # --- Terminal temp-cache pruning ---
 # get_temp_dir() defaults to HERMES_HOME/cache/terminal (real storage, not tmpfs), so
 # stale artifacts don't vanish on reboot: the gateway housekeeping loop prunes hourly
@@ -252,7 +262,7 @@ def _filter_secret_env(
             if not _is_hermes_internal_secret(key):
                 out[key] = value
             continue
-        if _is_hermes_internal_secret(key) or key in plugin_strip:
+        if key in _ALWAYS_STRIP_KEYS or _is_hermes_internal_secret(key) or key in plugin_strip:
             continue
         first_party = _is_terminal_first_party_env(key)
         passthrough = is_env_passthrough(key)
@@ -264,6 +274,18 @@ def _filter_secret_env(
             out[key] = value
 
 
+def _neutralize_github_credential_paths(env: dict) -> None:
+    """Force GH_CONFIG_DIR/GIT_CONFIG_GLOBAL to a nonexistent path rather than merely
+    stripping them: a caller-supplied value survives scrubbing (it isn't itself a secret,
+    just a path), and simply removing it lets `gh`/`git` fall back to their DEFAULT
+    location — the operator's own keyring/config — silently granting a spawned child the
+    operator's real GitHub credentials. GIT_TERMINAL_PROMPT=0 stops `gh`/`git` from
+    blocking on (or leaking through) an interactive credential prompt instead."""
+    env["GH_CONFIG_DIR"] = os.devnull
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
+
+
 def _finalize_child_env(env: dict) -> dict:
     """Guards shared by every spawn surface: profile-home propagation, session-context
     bridging, Hermes-owned PYTHONPATH + venv-marker strip, MSYS defaults, delegate_task
@@ -272,6 +294,7 @@ def _finalize_child_env(env: dict) -> dict:
     _inject_session_context_env(env)
     _strip_hermes_owned_pythonpath_and_runtime_markers(env)
     _apply_windows_msys_bash_env_defaults(env)
+    _neutralize_github_credential_paths(env)
     from agent.delegation_context import delegated_child_subprocess_env
     return delegated_child_subprocess_env(env)
 
@@ -562,10 +585,55 @@ def _path_env_key(run_env: dict) -> str | None:
     return next((k for k in run_env if k.upper() == "PATH"), None) if _IS_WINDOWS else "PATH"
 
 
+def _trusted_local_terminal_session() -> bool:
+    """Return whether this LocalEnvironment call is a human-attended CLI terminal.
+
+    ``LocalEnvironment`` is also used by gateways, cron, API sessions, and
+    delegated agents. Their absence of a Kanban marker is not proof that the
+    operator intended to expose the host's Git credentials.
+    """
+    try:
+        from agent.delegation_context import is_delegated_child_process_context
+        from tools.approval_context import (
+            _is_cron_approval_context,
+            _is_gateway_approval_context,
+            _is_interactive_cli,
+            _is_single_query_approval_context,
+            _is_unattended_platform_approval_context,
+        )
+        return (
+            _is_interactive_cli()
+            and not os.environ.get("HERMES_KANBAN_TASK")
+            and not _is_gateway_approval_context()
+            and not _is_cron_approval_context()
+            and not _is_single_query_approval_context()
+            and not _is_unattended_platform_approval_context()
+            and not is_delegated_child_process_context()
+        )
+    except Exception:
+        return False
+
+
 def _make_run_env(env: dict) -> dict:
     """Build a run environment with a sane PATH and provider-var stripping."""
-    return _scrubbed_env([(dict(os.environ | env), True)], frozenset(),
-                         lambda p: _prepend_git_bash_dirs(_append_missing_sane_path_entries(p)))
+    source = dict(os.environ | env)
+    result = _scrubbed_env(
+        [(source, True)], frozenset(),
+        lambda p: _prepend_git_bash_dirs(_append_missing_sane_path_entries(p)),
+    )
+    # _scrubbed_env protects background/untrusted children by neutralizing the
+    # host Git config and credentials. Only a human-attended CLI terminal gets
+    # the explicit operator-authenticated exception; gateway, cron, single-query,
+    # and delegated sessions must remain fenced even when TASK is absent.
+    if _trusted_local_terminal_session():
+        for key in _LOCAL_TERMINAL_GIT_AUTH_ENV:
+            if source.get(key) is not None:
+                result[key] = source[key]
+            elif key in {"GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL"}:
+                # Let gh/git use their normal HOME-scoped defaults in the trusted
+                # terminal. The scrubber's /dev/null values must not leak into it.
+                result.pop(key, None)
+    return result
 
 
 # --- Hermes venv / repo-root detection (module-level, computed once) ---

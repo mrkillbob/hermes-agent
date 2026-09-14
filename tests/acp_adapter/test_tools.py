@@ -1,8 +1,6 @@
 """Tests for acp_adapter.tools — tool kind mapping and ACP content building."""
 
 
-import pytest
-
 from acp_adapter.edit_approval import EditProposal
 from acp_adapter.tools import (
     TOOL_KIND_MAP,
@@ -27,7 +25,7 @@ from acp.schema import (
 # ---------------------------------------------------------------------------
 
 
-COMMON_HERMES_TOOLS = ["read_file", "search_files", "terminal", "patch", "write_file", "process"]
+COMMON_HERMES_TOOLS = ["read_file", "search_files", "terminal", "patch", "write_file", "process", "process_manage"]
 
 
 class TestToolKindMap:
@@ -41,6 +39,9 @@ class TestToolKindMap:
 
     def test_tool_kind_terminal(self):
         assert get_tool_kind("terminal") == "execute"
+
+    def test_tool_kind_process_manage(self):
+        assert get_tool_kind("process_manage") == "execute"
 
 
 
@@ -90,40 +91,32 @@ class TestBuildToolTitle:
 
     def test_read_file_title(self):
         title = build_tool_title("read_file", {"path": "/etc/hosts"})
-        assert "hosts" in title
+        assert "/etc/hosts" in title
+
+    def test_process_manage_title_uses_process_formatter(self):
+        assert build_tool_title("process_manage", {"action": "list"}) == "process list"
+
 
     def test_search_title(self):
         title = build_tool_title("search_files", {"pattern": "TODO"})
         assert "TODO" in title
 
+
+
+
     def test_skill_view_title_includes_skill_name(self):
         title = build_tool_title("skill_view", {"name": "github-pitfalls"})
-        assert "github-pitfalls" in title
+        assert title == "skill view (github-pitfalls)"
+
 
     def test_execute_code_title_includes_first_code_line(self):
         title = build_tool_title("execute_code", {"code": "\nfrom hermes_tools import terminal\nprint('done')"})
-        assert "from hermes_tools import terminal" in title
+        assert title == "python: from hermes_tools import terminal"
+
 
     def test_unknown_tool_uses_name(self):
         title = build_tool_title("some_new_tool", {"foo": "bar"})
         assert title == "some_new_tool"
-
-    @pytest.mark.parametrize(
-        "tool_name, args",
-        [
-            ("terminal", {"command": "git status --short"}),
-            ("read_file", {"path": "/etc/hosts", "offset": 10}),
-            ("search_files", {"pattern": "TODO", "path": "src"}),
-            ("web_search", {"query": "hermes agent acp"}),
-            ("execute_code", {"code": "\nfrom hermes_tools import terminal\nprint('done')"}),
-            ("skill_view", {"name": "github", "file_path": "references/x.md"}),
-        ],
-    )
-    def test_title_derives_from_display_preview(self, tool_name, args):
-        """ACP titles are the shared agent.display preview, not a parallel per-tool table."""
-        from agent.display import build_tool_preview
-
-        assert build_tool_preview(tool_name, args, max_len=80) in build_tool_title(tool_name, args)
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +172,7 @@ class TestBuildToolStart:
         args = {"url": "https://x.com"}
         result = build_tool_start("tc-browser-start", "browser_navigate", args)
         assert isinstance(result, ToolCallStart)
-        assert "https://x.com" in result.title
+        assert result.title == "navigate: https://x.com"
         assert result.kind == "fetch"
         assert result.content[0].content.text == '{\n  "url": "https://x.com"\n}'
         assert result.raw_input is None

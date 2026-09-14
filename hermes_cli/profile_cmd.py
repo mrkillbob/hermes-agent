@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import sys
-from typing import Optional
 
 
 def _die(msg: str, code: int = 1, *, err: bool = False) -> None:
@@ -210,7 +209,7 @@ def _profile_create(args):
     print(f"\nProfile '{name}' created at {profile_dir}")
     if cloned:
         if clone_all:
-            print(f"Full copy from {source_label} (excluding session history, cron jobs, backups, and snapshots).")
+            print(f"Full copy from {source_label} (excluding session history, backups, and snapshots).")
         else:
             print(f"Cloned config, .env, SOUL.md, and skills from {source_label}.")
         _print_channel_clone_notice(name, source_label, clone_channels, "--clone-all" if clone_all else "--clone")

@@ -452,13 +452,15 @@ def _get_code_identity_fields() -> dict[str, Any]:
         return {}
 
 
-def _pid_record_belongs_to_current_profile(record: Optional[dict[str, Any]]) -> bool:
+def _pid_record_belongs_to_current_profile(
+    record: Optional[dict[str, Any]], *, expected_home: Optional[Path] = None
+) -> bool:
     """True when the record's ``hermes_home`` matches the current process (legacy records: True);
     another HERMES_HOME's record must be ignored or the default gateway assumes its identity."""
     if not isinstance(record, dict):
         return False
     record_home = record.get("hermes_home")
-    return not record_home or _same_hermes_home(record_home, _get_process_hermes_home())
+    return not record_home or _same_hermes_home(record_home, expected_home or _get_process_hermes_home())
 
 
 def _build_runtime_status_record() -> dict[str, Any]:
@@ -806,7 +808,7 @@ def write_runtime_status(
     active_agents: Any = _UNSET, active_work: Any = _UNSET, platform: Any = _UNSET, platform_state: Any = _UNSET,
     error_code: Any = _UNSET, error_message: Any = _UNSET, needs_attention: Any = _UNSET,
     retrying_since: Any = _UNSET, served_profiles: Any = _UNSET, session_store: Any = _UNSET,
-    ingress_url: Any = _UNSET, listener_base: Any = _UNSET, clear_profile_platforms: bool = False,
+    ingress_url: Any = _UNSET, clear_profile_platforms: bool = False,
     drop_profile_platforms: Optional[str] = None,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status. ``drop_profile_platforms``
@@ -852,9 +854,6 @@ def write_runtime_status(
             ("retrying_since", retrying_since, None),
             # Shared-listener secondaries: the /p/<profile>/ callback URL the vendor console must target.
             ("ingress_url", ingress_url, None),
-            # Bound listener (``http://host:port``) of the default's api_server/webhook: a served
-            # profile's mirror of that platform is reported off it (``<listener_base>/p/<profile>/...``).
-            ("listener_base", listener_base, None),
         ))
         # Per-entry writer provenance: top-level pid/start_time only identify the most recent
         # writer; /api/status tells "live" from "preserved" by exact (pid, start_time) equality.
@@ -925,25 +924,18 @@ class GatewayLiveness:
     source: str
     health_body: Optional[dict[str, Any]] = None
     probe_error: bool = False
-    # The multiplexer's own ``gateway_state.json`` when the ``multiplexer`` rung answered: a served
-    # profile writes no runtime record of its own, so its platform states live there under
-    # ``<profile>:<platform>`` keys.
     runtime: Optional[dict[str, Any]] = None
 
 
 def multiplexer_liveness_for_profile(profile_dir: Path) -> Optional[tuple[int, dict[str, Any]]]:
-    """``(pid, default gateway_state.json)`` when the live default multiplexer serves the named profile at
-    ``profile_dir``; None for the default home itself, an unserved profile, or no live multiplexer.
-
-    A served profile owns no ``gateway.pid``/``gateway_state.json`` (#97120), so every PID-file rung of the
-    dashboard ladder reports it stopped while ``hermes -p X status`` says running — the two must agree.
-    """
+    """Return the live default multiplexer record when it serves ``profile_dir``."""
     name = _profile_name_for_home(Path(profile_dir))
     if not name:
         return None
     from hermes_cli.gateway import named_profile_served_by_running_multiplexer
     from hermes_cli.gateway_multiplex_served import live_default_gateway_pid
     from hermes_constants import get_default_hermes_root
+
     if not named_profile_served_by_running_multiplexer(name):
         return None
     pid = live_default_gateway_pid()
@@ -953,14 +945,9 @@ def multiplexer_liveness_for_profile(profile_dir: Path) -> Optional[tuple[int, d
 
 
 def shared_listener_mirror_platforms(runtime: Optional[dict[str, Any]], profile: str) -> dict[str, Any]:
-    """Entries for the api_server/webhook mirrors a served ``profile`` gets from the DEFAULT's
-    listener. The multiplexer never builds those adapters for a secondary (``gateway.run_adapters``
-    skips them: ``SHARED_LISTENER_MIRROR_PLATFORMS``), so the record has no ``<profile>:api_server``
-    entry and every reader fell through to ``pending_restart`` — "Restart needed" forever while
-    ``/p/<profile>/v1/...`` answered. Only a live default entry is mirrored; its state is the profile's
-    state, plus the ``/p/<profile>`` URL the client must actually call.
-    """
+    """Return default-listener mirror entries for a served secondary profile."""
     from gateway.config import SHARED_LISTENER_MIRROR_PATHS, SHARED_LISTENER_MIRROR_PLATFORMS
+
     plats = (runtime or {}).get("platforms")
     if not profile or profile == "default" or not isinstance(plats, dict):
         return {}
@@ -969,25 +956,28 @@ def shared_listener_mirror_platforms(runtime: Optional[dict[str, Any]], profile:
         entry = plats.get(name)
         if not isinstance(entry, dict) or entry.get("state") not in {"connected", "connecting", "retrying"}:
             continue
-        # api_server and webhook bind separate ports; each mirror hangs off its own listener. A record
-        # from an older gateway carries no ``listener_base``: connected, URL unknown.
         base = entry.get("listener_base")
-        url = f"{base}/p/{profile}{SHARED_LISTENER_MIRROR_PATHS.get(name, '')}" if isinstance(base, str) and base else None
-        mirrored[name] = {k: v for k, v in entry.items() if k != "listener_base"}
+        url = (
+            f"{base}/p/{profile}{SHARED_LISTENER_MIRROR_PATHS.get(name, '')}"
+            if isinstance(base, str) and base
+            else None
+        )
+        mirrored[name] = {key: value for key, value in entry.items() if key != "listener_base"}
         mirrored[name].update(ingress_url=url, mirrored_from="default")
     return mirrored
 
 
 def profile_platforms_from_multiplexer(runtime: Optional[dict[str, Any]], profile: str) -> dict[str, Any]:
-    """The ``<profile>:<platform>`` entries of a multiplexer record, re-keyed to bare platform names — the
-    same shape a standalone gateway for ``profile`` writes into its own ``gateway_state.json`` — plus the
-    default listener's api_server/webhook mirrors the profile is served through (``ingress_url`` set)."""
+    """Return a served profile's bare platform state, including default listener mirrors."""
     plats = (runtime or {}).get("platforms")
     if not isinstance(plats, dict):
         return {}
     prefix = f"{profile}:"
-    own = {key[len(prefix):]: value for key, value in plats.items()
-           if isinstance(key, str) and key.startswith(prefix) and isinstance(value, dict)}
+    own = {
+        key[len(prefix):]: value
+        for key, value in plats.items()
+        if isinstance(key, str) and key.startswith(prefix) and isinstance(value, dict)
+    }
     return {**shared_listener_mirror_platforms(runtime, profile), **own}
 
 
@@ -1003,9 +993,7 @@ def resolve_gateway_liveness(
     so polling does not re-flock ``gateway.lock``); (2) caller-supplied HTTP health probe (gateway
     in another container); (3) LOCAL runtime status PID validated against the live process table
     with ``expected_home`` (a recycled PID of another profile never counts; pass ``runtime`` if
-    already read); (4) for a named ``profile_dir`` only, the live default multiplexer that records the
-    profile in ``served_profiles`` (a served profile writes no identity files of its own). ``*_probe``/
-    ``runtime_reader`` are the dashboard's injection/test seam. A rung
+    already read). ``*_probe``/``runtime_reader`` are the dashboard's injection/test seam. A rung
     that raises degrades to the next (never 500 a status endpoint) and sets ``probe_error``.
 
     Before this existed, ``/api/status`` and ``/api/messaging/platforms`` each open-coded their own ladder
@@ -1052,11 +1040,6 @@ def resolve_gateway_liveness(
         return GatewayLiveness(
             running=True, pid=runtime_pid, source="runtime_status", health_body=health_body
         )
-    # (4) A named profile served by the live default multiplexer: no identity files of its own, but
-    # the multiplexer IS its gateway (mirrors `hermes -p X status` / `gateway list`). Unscoped, the
-    # question is about the process's OWN home — which is a named profile inside a pooled
-    # `hermes --profile X serve` (the Desktop's per-profile backend answers its REST without
-    # `?profile=`), so it takes the same rung instead of reporting the served profile stopped.
     own_home = profile_dir if scoped else _get_process_hermes_home()
     served = guarded(multiplexer_liveness_for_profile, own_home)
     if served is not None:
@@ -1559,41 +1542,26 @@ def planned_stop_marker_targets_self() -> bool:
 
 
 def get_running_pid(
-    pid_path: Optional[Path] = None, *, cleanup_stale: bool = True
+    pid_path: Optional[Path] = None, *, cleanup_stale: bool = True,
+    expected_home: Optional[Path] = None,
 ) -> Optional[int]:
-    """PID of a running gateway (lock + PID file verified against the live process), or None.
-    An explicit ``pid_path`` is a scoped query into that home's identity files: records are
-    validated against the probed home (not the serve process's), and a live record is never
-    cleanup-unlinked, so polling another profile must not delete its gateway.pid/gateway.lock
-    (#106406). The unscoped path keeps main's poison-file housekeeping: a live record owned by
-    another home inside this home's gateway.pid is unlinked on refusal (#89315)."""
+    """PID of a running gateway (lock + PID file verified against the live process), or None."""
     resolved_pid_path = pid_path or _get_pid_path()
+    if expected_home is None and pid_path is not None:
+        expected_home = resolved_pid_path.parent
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
     if is_gateway_runtime_lock_active(resolved_lock_path):
         records = (
             _read_pid_record(resolved_pid_path), _read_gateway_lock_record(resolved_lock_path),
         )
-        expected_home = pid_path.parent if pid_path is not None else None
-        saw_live_pid = False
         for record in records:
             pid = _live_pid_from_record(record)
-            if pid is None:
+            if pid is None or not _pid_record_belongs_to_current_profile(record, expected_home=expected_home):
                 continue
-            home_ok = (
-                _pid_record_belongs_to_current_profile(record) if expected_home is None
-                else not recorded_gateway_home_conflicts(record, expected_home=expected_home)
-            )
-            if home_ok and _record_matches_live_gateway_pid(
-                record, pid, expected_home=expected_home
-            ):
+            if _record_matches_live_gateway_pid(record, pid, expected_home=expected_home):
                 return pid
-            # Scoped only: a live record we could not adopt may still be a real gateway;
-            # unlinking its identity files would break that home's double-run protection
-            # while the PID is alive. Unscoped keeps the #89315 poison-file cleanup.
-            saw_live_pid = True
-        if expected_home is None or not saw_live_pid:
-            _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
-        return get_runtime_status_running_pid() if pid_path is None else None
+        _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+        return get_runtime_status_running_pid(expected_home=expected_home) if pid_path is None else None
     # Lock inactive: the runtime-status fallback runs BEFORE cleanup here.
     runtime_pid = get_runtime_status_running_pid() if pid_path is None else None
     if runtime_pid is None:

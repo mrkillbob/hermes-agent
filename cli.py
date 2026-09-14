@@ -15,6 +15,8 @@ import sys
 import json
 import re
 import atexit
+
+from hermes_cli.github_identity import run_as_github_automation
 import errno
 import time
 import textwrap
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 os.environ["HERMES_QUIET"] = "1"  # suppress our modules' startup chatter
 
 from hermes_cli.fallback_config import get_fallback_chain
+from hermes_cli.worktree_base import resolve_worktree_base
 from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
 from hermes_cli.cli_commands_mixin import CLICommandsMixin
 from hermes_cli.cli_billing_mixin import CLIBillingMixin
@@ -334,7 +337,12 @@ def _mirror_config_to_env(defaults, _file_has_terminal_config):
     # terminal_tool uses its per-backend default; an explicit path is kept.
     effective_backend = terminal_config.get("env_type", "local")
     if effective_backend == "local":
-        terminal_config["cwd"] = os.getcwd()
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        terminal_config["cwd"] = (
+            resolve_kanban_worker_cwd(os.environ.get("TERMINAL_CWD"))
+            or os.getcwd()
+        )
         defaults["terminal"]["cwd"] = terminal_config["cwd"]
     elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
         terminal_config.pop("cwd", None)
@@ -2537,7 +2545,10 @@ from hermes_cli.cli_chat_turn_mixin import CLIChatTurnMixin
 _PASTE_REF_RE = re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
 
 
-class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMixin, CLIStatusBarMixin, CLIVoiceMixin, CLIModelSwitchMixin, CLISessionMixin, CLIStreamMixin, CLIModalMixin, CLITerminalMixin, CLIInfoMixin, CLILoopsMixin, CLIChatTurnMixin):
+from hermes_cli.cli_conversation_worktree_mixin import CLIConversationWorktreeMixin
+
+
+class HermesCLI(CLIConversationWorktreeMixin, CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMixin, CLIStatusBarMixin, CLIVoiceMixin, CLIModelSwitchMixin, CLISessionMixin, CLIStreamMixin, CLIModalMixin, CLITerminalMixin, CLIInfoMixin, CLILoopsMixin, CLIChatTurnMixin):
     """Interactive REPL for the Hermes Agent."""
 
     # Seeded -q first message (see _should_seed_interactive); run() re-creates
@@ -2562,12 +2573,14 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
         checkpoints: bool = False,
         pass_session_id: bool = False,
         ignore_rules: bool = False,
+        manage_conversation_worktree: bool = True,
     ):
         """CLI args win over config; ``reasoning`` is per-run only; ``resume`` restores history from SQLite."""
         self._init_display_options(verbose, compact)
         self._init_model_routing(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
                                  checkpoints, pass_session_id, ignore_rules)
         self._init_runtime_state(resume)
+        self._initialize_conversation_worktree(CLI_CONFIG, resume, manage_conversation_worktree)
 
     def _init_display_options(self, verbose, compact):
         """Display-related config: compact/tool-progress/focus view, bells, streaming, previews, stream buffers."""
@@ -2851,6 +2864,15 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
             # holds the GIL — that repeat was the post-banner freeze before the first prompt.
             from hermes_state_registry import acquire
             self._session_db = acquire()
+        except TypeError:
+            # Keep embedders that replace SessionDB with the historical
+            # zero-argument constructor compatible with the registry migration.
+            try:
+                from hermes_state import SessionDB
+                self._session_db = SessionDB()
+            except Exception as e:
+                self._session_db_unavailable = True
+                logger.warning("Failed to initialize SessionDB — session will NOT be indexed for search: %s", e)
         except Exception as e:
             # Without a store the transcript is NOT persisted while the chat looks healthy,
             # so surface it prominently rather than only logging.
@@ -2998,14 +3020,20 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
 
     def _release_active_session(self) -> None:
         lease = getattr(self, "_active_session_lease", None)
-        if lease is None:
-            return
-        try:
-            lease.release()
-        except Exception:
-            logger.debug("Failed to release active session slot", exc_info=True)
-        finally:
-            self._active_session_lease = None
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception:
+                logger.debug("Failed to release active session slot", exc_info=True)
+            finally:
+                self._active_session_lease = None
+        retry = getattr(self, "_retry_failed_conversation_root_leases", None)
+        if callable(retry):
+            retry()
+        root_lease = getattr(self, "_conversation_root_lease", None)
+        if root_lease is not None and self._release_conversation_root_lease(
+                root_lease, context="process exit"):
+            self._conversation_root_lease = None
 
     _PET_FRAME_INTERVAL = 0.16
     _PET_CFG_INTERVAL = 2.5
@@ -4289,7 +4317,7 @@ def _install_single_query_signal_handlers(cli):
                 _signal.signal(getattr(_signal, _name), _signal_handler_q)
 
 
-def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills):
+def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills, *, manage_conversation_worktree=True):
     """Resolve the toolset list (explicit / coding posture / platform default), construct HermesCLI, and start the background skills preload."""
     toolsets_list = None
     if isinstance(toolsets, str) and toolsets:
@@ -4328,6 +4356,7 @@ def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url
             checkpoints=checkpoints,
             pass_session_id=pass_session_id,
             ignore_rules=ignore_rules,
+            manage_conversation_worktree=manage_conversation_worktree,
         )
     except ImportError as e:
         # Direct `python cli.py` bypasses cmd_chat's partial-update ImportError handler.
@@ -4371,7 +4400,9 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
     Returns a join callable that publishes ``_active_worktree``/TERMINAL_CWD and
     schedules stale-worktree GC, or None when no worktree is wanted.
     """
-    if list_tools or list_toolsets or not (worktree or w or CLI_CONFIG.get("worktree", False)):
+    from hermes_cli.cli_conversation_worktree_mixin import _should_use_legacy_worktree
+
+    if list_tools or list_toolsets or not _should_use_legacy_worktree(worktree=worktree, shorthand=w, config=CLI_CONFIG):
         return None
     # Overlap tool discovery with the I/O-bound worktree setup so show_banner() hits a warm
     # cache (~0.4s). Only on the -w path: plain `hermes` has no I/O wait to hide.
@@ -4574,7 +4605,8 @@ def main(
     _join_worktree = _start_worktree_setup(list_tools, list_toolsets, worktree, w)
     query = query or q
     cli = _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
-                               verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills)
+                               verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills,
+                               manage_conversation_worktree=not list_tools and not list_toolsets)
 
     # Join the background worktree creation before anything consumes TERMINAL_CWD.
     # A requested worktree whose setup failed aborts: never silently run without isolation.
