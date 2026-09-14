@@ -237,6 +237,12 @@ class TestToolCallLimit(unittest.TestCase):
         self.assertFalse(_tool_call_limit_reached(4, 5))
         self.assertTrue(_tool_call_limit_reached(5, 5))
 
+    def test_negative_limit_is_rejected(self):
+        from tools.code_execution_tool import _configured_max_tool_calls
+
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            _configured_max_tool_calls({"max_tool_calls": -1})
+
 
 @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestExecuteCode(unittest.TestCase):
@@ -290,6 +296,24 @@ print(result.get("output", ""))
         self.assertEqual(result["status"], "success")
         self.assertIn("mock output for: echo hello", result["output"])
         self.assertEqual(result["tool_calls_made"], 1)
+
+    def test_zero_limit_allows_more_than_legacy_default_through_rpc(self):
+        """The real sandbox/RPC path honors zero as unlimited past 50 calls."""
+        code = """
+from hermes_tools import terminal
+for i in range(51):
+    terminal(f"echo {i}")
+print("completed-51")
+"""
+        with patch(
+            "tools.code_execution_tool._load_config",
+            return_value={"timeout": 30, "max_tool_calls": 0},
+        ):
+            result = self._run(code)
+
+        self.assertEqual(result["status"], "success", msg=result)
+        self.assertIn("completed-51", result["output"])
+        self.assertEqual(result["tool_calls_made"], 51)
 
 
     def test_concurrent_tool_calls_match_responses(self):
