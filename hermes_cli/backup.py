@@ -1644,7 +1644,7 @@ def run_import(args) -> None:
         # would shadow or hijack the machine's primary install. Only revive
         # the service automatically when the restore landed in the default
         # home, or when no other install exists on this machine.
-        if hermes_root != native_default and default_has_install:
+        if hermes_root != native_default:
             print(
                 "\nRestored into a non-default home; leaving the gateway service "
                 "alone to avoid clashing with the install at "
