@@ -18,12 +18,36 @@ GH_AUTH_METHOD="none"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 GH_USER=""
 
-if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+# Terminal children intentionally receive GH_CONFIG_DIR=/dev/null and do not
+# inherit Hermes credentials.  When a GitHub skill is explicitly sourced,
+# hydrate only the governed bot pair from the active Hermes dotenv so the
+# skill can bind `gh` to mrkillbobbot without exposing the token through the
+# general terminal environment or falling back to the operator's profile.
+_hermes_env="${HERMES_HOME:-$HOME/.hermes}/.env"
+if [ -z "${HERMES_GITHUB_BOT_TOKEN:-}" ] && [ -f "$_hermes_env" ]; then
+    HERMES_GITHUB_BOT_TOKEN=$(sed -n 's/^HERMES_GITHUB_BOT_TOKEN=//p' "$_hermes_env" | head -1)
+fi
+if [ -z "${HERMES_GITHUB_BOT_LOGIN:-}" ] && [ -f "$_hermes_env" ]; then
+    HERMES_GITHUB_BOT_LOGIN=$(sed -n 's/^HERMES_GITHUB_BOT_LOGIN=//p' "$_hermes_env" | head -1)
+fi
+
+# Hermes-governed GitHub work must use the dedicated bot identity. Worker
+# sandboxes intentionally set GH_CONFIG_DIR=/dev/null so a human gh profile
+# cannot leak into automation; bind gh to the injected bot token first and use
+# an isolated config directory that contains no stored credentials.
+if [ -n "${HERMES_GITHUB_BOT_TOKEN:-}" ] && [ -n "${HERMES_GITHUB_BOT_LOGIN:-}" ]; then
+    GH_CONFIG_DIR="${HERMES_HOME:-$HOME/.hermes}/github-bot-gh-config"
+    mkdir -p "$GH_CONFIG_DIR"
+    export GH_CONFIG_DIR
+    export GH_TOKEN="$HERMES_GITHUB_BOT_TOKEN"
+    GH_AUTH_METHOD="gh-bot"
+    GH_USER="$HERMES_GITHUB_BOT_LOGIN"
+elif command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
     GH_AUTH_METHOD="gh"
     GH_USER=$(gh api user --jq '.login' 2>/dev/null)
 elif [ -n "$GITHUB_TOKEN" ]; then
     GH_AUTH_METHOD="curl"
-elif _hermes_env="${HERMES_HOME:-$HOME/.hermes}/.env"; [ -f "$_hermes_env" ] && grep -q "^GITHUB_TOKEN=" "$_hermes_env" 2>/dev/null; then
+elif [ -f "$_hermes_env" ] && grep -q "^GITHUB_TOKEN=" "$_hermes_env" 2>/dev/null; then
     GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" "$_hermes_env" | head -1 | cut -d= -f2 | tr -d '\n\r')
     if [ -n "$GITHUB_TOKEN" ]; then
         GH_AUTH_METHOD="curl"

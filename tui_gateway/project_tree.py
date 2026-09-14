@@ -297,16 +297,29 @@ def _seed_folder_repos(
 
 
 class _FolderIndex:
-    """Normalized folder path -> (owning project, depth); matched by walking cwd ancestors."""
+    """Normalized folder/repository identity -> owning project.
 
-    def __init__(self, projects: list[dict]) -> None:
+    A named project may point at one linked worktree while a conversation lives in
+    another linked worktree.  Git reports the common repository root for both, so
+    matching only the literal folder path incorrectly creates a second auto-project.
+    """
+
+    def __init__(self, projects: list[dict], resolve: Optional[Resolve] = None) -> None:
         self._by_path: dict[str, tuple[dict, int]] = {}
+        self._by_repo_root: dict[str, dict] = {}
         for project in projects:
             for folder in project.get("folders") or []:
-                segs = _comparison_segments(folder.get("path") or "")
+                path = folder.get("path") or ""
+                segs = _comparison_segments(path)
                 # Deepest folder wins; ties keep the first project (scan order).
                 if segs and len(segs) > self._by_path.get("/".join(segs), (None, -1))[1]:
                     self._by_path["/".join(segs)] = (project, len(segs))
+                if resolve and path:
+                    info = resolve(path)
+                    repo_root = (info or {}).get("repo_root") or ""
+                    key = _path_key(repo_root)
+                    if key and key not in self._by_repo_root:
+                        self._by_repo_root[key] = project
 
     def match(self, target: str) -> tuple[Optional[dict], int]:
         """Owning project for ``target`` by longest ancestor folder, + its depth."""
@@ -316,6 +329,10 @@ class _FolderIndex:
             if hit:
                 return hit
         return None, -1
+
+    def match_repo_root(self, repo_root: str) -> Optional[dict]:
+        """Return the named project owning this linked worktree's common repo root."""
+        return self._by_repo_root.get(_path_key(repo_root))
 
 
 def _project_for_session(
@@ -406,11 +423,13 @@ def build_tree(
     _junk = is_junk_root or (lambda _root: False)
     _junk_cwd = is_junk_cwd or (lambda _cwd: False)
     _exists = exists or (lambda _path: True)
-    folder_index = _FolderIndex(active_projects)
+    folder_index = _FolderIndex(active_projects, resolve)
     by_project: dict[str, list[dict]] = {}  # explicit project id -> owned rows
     unowned: list[dict] = []
     for session in sessions:
         owner = _project_for_session(session, folder_index, resolve)
+        if owner is None:
+            owner = folder_index.match_repo_root(_session_repo_root(session, resolve))
         (by_project.setdefault(owner["id"], []) if owner else unowned).append(session)
 
     scoped_ids: list[str] = []

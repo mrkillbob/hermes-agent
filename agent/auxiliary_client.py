@@ -2466,6 +2466,11 @@ def _dispatch_auxiliary_request(
         client, provider=provider, model=model or request.get("model"), api_mode=api_mode
     )
     if binding is None:
+        if isinstance(request, dict) and "_hermes_source_provenance" in request:
+            request = {
+                key: value for key, value in request.items()
+                if key != "_hermes_source_provenance"
+            }
         return callback(request)
     from agent.llm_egress_runtime import dispatch_authorized_agent_request
 
@@ -2644,7 +2649,16 @@ def _relay_sync_stream(
     provider_name, fallback_model, metadata = route
     from agent import relay_llm
     return relay_llm.stream_current(
-        kwargs, lambda request: client.chat.completions.create(**request), name=provider_name,
+        kwargs,
+        lambda request: _dispatch_auxiliary_request(
+            client,
+            request,
+            lambda authorized: client.chat.completions.create(**authorized),
+            provider=provider,
+            model=kwargs.get("model"),
+            api_mode=api_mode,
+        ),
+        name=provider_name,
         model_name=str(kwargs.get("model") or fallback_model), finalizer=dict, metadata=metadata,
         completed_response_predicate=lambda value: hasattr(value, "choices"),
     )
@@ -4767,6 +4781,49 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
     return None, None
 
 
+def _resolve_llamacpp_branch(req: _ResolveRequest) -> _ResolveResult:
+    """Managed local llama.cpp endpoint, including its supervisor-issued API key.
+
+    Auxiliary tasks such as ``goal_judge`` use the same provider router as the main
+    agent.  Route the explicit ``llamacpp`` alias through the managed-runtime resolver
+    instead of the generic API-key registry, which cannot see the supervisor endpoint
+    or its per-runtime key.
+    """
+    from hermes_cli.runtime_provider import _resolve_named_custom_runtime
+
+    runtime = _resolve_named_custom_runtime(
+        requested_provider=req.provider,
+        explicit_api_key=req.explicit_api_key,
+        explicit_base_url=req.explicit_base_url,
+        target_model=req.model,
+    )
+    if not runtime:
+        logger.warning("resolve_provider_client: managed llamacpp runtime unavailable")
+        return None, None
+    base_url = str(runtime.get("base_url") or "").strip()
+    api_key = runtime.get("api_key") or "no-key-required"
+    if not base_url:
+        logger.warning("resolve_provider_client: managed llamacpp runtime returned no base_url")
+        return None, None
+    final_model = _normalize_resolved_model(req.model or _read_main_model_for_aux(), req.provider)
+    if not final_model:
+        logger.warning("resolve_provider_client: managed llamacpp request has no model")
+        return None, None
+    logger.info(
+        "resolve_provider_client: managed llamacpp auxiliary route base=%s key_present=%s key_len=%d model=%s",
+        base_url,
+        bool(str(api_key or "").strip()),
+        len(str(api_key or "")),
+        final_model,
+    )
+    client = _create_openai_client(
+        api_key=api_key,
+        base_url=_to_openai_base_url(base_url),
+    )
+    client = _wrap_transport(req, client, final_model, base_url, str(api_key))
+    return _route_client(req, client, final_model)
+
+
 def _named_custom_openai_wire_client(custom_base: str, custom_key: Any):
     """Plain OpenAI client on the /v1 equivalent of a named custom entry's base URL."""
     _clean_base, _dq = _extract_url_query_params(_to_openai_base_url(custom_base))
@@ -5001,6 +5058,7 @@ _EXPLICIT_PROVIDER_BRANCHES: Dict[str, Callable[[_ResolveRequest], _ResolveResul
     "openai-codex": _resolve_openai_codex_branch,
     "xai-oauth": _resolve_xai_oauth_branch,
     "custom": _resolve_custom_branch,
+    "llamacpp": _resolve_llamacpp_branch,
 }
 
 
@@ -6699,10 +6757,39 @@ def _resolve_call_client(
         if client is not None:
             resolved_provider = effective_provider or resolved_provider
     else:
-        client, final_model = _get_cached_client(
-            resolved_provider, resolved_model, async_mode=async_mode, base_url=resolved_base_url,
-            api_key=resolved_api_key, api_mode=resolved_api_mode, main_runtime=main_runtime,
-            task=task)
+        # ``llamacpp`` is a supervisor-managed local runtime.  Its credential is issued
+        # in the runtime state file, not through the generic provider API-key registry.
+        # Resolve it at call time as well as during the startup probe; otherwise auxiliary
+        # calls (notably goal_judge) fall through to the generic ``LLAMACPP_API_KEY`` path.
+        if (resolved_provider or "").strip().lower() == "llamacpp":
+            _req = _ResolveRequest(
+                resolved_provider,
+                resolved_provider,
+                resolved_model,
+                async_mode,
+                False,
+                resolved_base_url,
+                resolved_api_key,
+                resolved_api_mode,
+                main_runtime,
+                False,
+                task,
+            )
+            client, final_model = _resolve_llamacpp_branch(_req)
+        else:
+            client, final_model = _get_cached_client(
+                resolved_provider, resolved_model, async_mode=async_mode, base_url=resolved_base_url,
+                api_key=resolved_api_key, api_mode=resolved_api_mode, main_runtime=main_runtime,
+                task=task)
+        logger.info(
+            "auxiliary route resolved task=%s provider=%s model=%s base=%s key_present=%s client=%s",
+            task or "",
+            resolved_provider,
+            resolved_model or "",
+            resolved_base_url or "",
+            bool(str(resolved_api_key or "").strip()),
+            type(client).__name__ if client is not None else "NONE",
+        )
         effective_provider = _effective_provider_for_client(client, resolved_provider)
         if client is None:
             # Explicit provider with no credentials: honor the task fallback_chain before

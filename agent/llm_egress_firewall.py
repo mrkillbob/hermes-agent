@@ -1505,7 +1505,7 @@ def _contains_private_absolute_path(value: Any, *, seen: set[int] | None = None)
     return False
 
 
-def redact_remote_unsafe_text(text: str) -> str:
+def redact_remote_unsafe_text(text: str, *, redact_base64: bool = True) -> str:
     """Redact non-secret unsafe text in Hermes-generated remote context.
 
     Secrets intentionally remain a hard firewall denial. Private paths and
@@ -1559,6 +1559,8 @@ def redact_remote_unsafe_text(text: str) -> str:
             return "<redacted-base64>"
         return match.group(0)
 
+    if not redact_base64:
+        return redacted
     redacted = _BASE64_CANDIDATE.sub(replace_base64, redacted)
     return _CHUNKED_BASE64_CANDIDATE.sub(
         lambda match: "<redacted-base64>"

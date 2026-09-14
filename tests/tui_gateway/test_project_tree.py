@@ -378,6 +378,22 @@ def test_explicit_project_claims_sessions_and_beats_auto():
     assert any(p["id"] == "/www/other" and p["isAuto"] for p in tree["projects"])
 
 
+def test_explicit_project_claims_linked_worktree_by_common_repo_root():
+    project = _project("p_app", "App", ["/worktrees/app"])
+    resolve = _resolver(
+        {
+            "/worktrees/app": ("/repos/app", "/worktrees/app"),
+            "/hermes/conversation": ("/repos/app", "/hermes/conversation"),
+        }
+    )
+
+    tree = pt.build_tree(
+        [project], [_session("/hermes/conversation", branch="feature")], [], resolve, hydrate=True
+    )
+
+    assert [(p["id"], p["sessionCount"]) for p in tree["projects"]] == [("p_app", 1)]
+
+
 def test_scoped_session_ids_is_union_of_placed_sessions():
     project = _project("p_app", "App", ["/www/app"])
     resolve = _resolver(

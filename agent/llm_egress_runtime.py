@@ -531,7 +531,28 @@ def _sanitize_protected_kanban_body(value: Any) -> Any:
 def provider_uses_egress_firewall(provider: Any) -> bool:
     """Return whether an exact configured provider owns a protected remote lane."""
 
-    return str(provider or "").strip().lower() in _PROTECTED_REMOTE_PROVIDERS
+    return egress_enforcement_enabled() and str(provider or "").strip().lower() in _PROTECTED_REMOTE_PROVIDERS
+
+
+def egress_enforcement_enabled() -> bool:
+    """Return the operator-controlled egress enforcement posture.
+
+    Enforcement remains on by default.  The explicit temporary disable switch is
+    intentionally configuration-backed so false-positive repairs can be tested
+    without deleting the firewall or its receipt/audit implementation.
+    """
+    raw = os.environ.get("HERMES_LLM_EGRESS_ENFORCEMENT", "").strip().lower()
+    if raw:
+        return raw not in {"0", "false", "off", "disabled", "disable", "monitor"}
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        runtime = load_config_readonly().get("runtime") or {}
+        posture = str(runtime.get("llm_egress_enforcement", "enabled") or "enabled")
+        return posture.strip().lower() not in {"0", "false", "off", "disabled", "disable", "monitor"}
+    except Exception:
+        # A malformed/unavailable config must not silently weaken the boundary.
+        return True
 
 
 # Benchmark-backed per-profile model route table, installed at startup by
@@ -685,6 +706,7 @@ def _segment_text(
     *,
     sanitized_cap: int,
     allow_line_split: bool = False,
+    redact_remote_unsafe: bool = False,
 ) -> SanitizedSegment | SourceBoundSegment | OutboundText:
     matches: list[tuple[int, int, SourceGrant]] = []
     cursor = 0
@@ -703,6 +725,13 @@ def _segment_text(
         cursor = chosen[1]
 
     if not matches:
+        # Tool/context text is not source-granted.  Remove host-private paths
+        # and encoding-shaped protocol values before it becomes a sanitized
+        # remote segment; otherwise the final firewall correctly sees those
+        # values but incorrectly treats this trusted local projection as an
+        # unsafe outbound payload.
+        if redact_remote_unsafe:
+            text = redact_remote_unsafe_text(text, redact_base64=False)
         sanitized = _approved_sanitized_segments(
             text,
             cap=sanitized_cap,
@@ -714,9 +743,14 @@ def _segment_text(
     cursor = 0
     for start, end, grant in matches:
         if start > cursor:
+            prefix_text = (
+                redact_remote_unsafe_text(text[cursor:start], redact_base64=False)
+                if redact_remote_unsafe
+                else text[cursor:start]
+            )
             segments.extend(
                 _approved_sanitized_segments(
-                    text[cursor:start],
+                    prefix_text,
                     cap=sanitized_cap,
                     allow_line_split=allow_line_split,
                 )
@@ -726,9 +760,14 @@ def _segment_text(
         used_grants[digest] = grant
         cursor = end
     if cursor < len(text):
+        suffix_text = (
+            redact_remote_unsafe_text(text[cursor:], redact_base64=False)
+            if redact_remote_unsafe
+            else text[cursor:]
+        )
         segments.extend(
             _approved_sanitized_segments(
-                text[cursor:],
+                suffix_text,
                 cap=sanitized_cap,
                 allow_line_split=allow_line_split,
             )
@@ -2451,6 +2490,7 @@ def _segment_protected_tool_result(
                 used_grants,
                 sanitized_cap=sanitized_cap,
                 allow_line_split=True,
+                redact_remote_unsafe=True,
             )
             segments.extend(prefix.segments if isinstance(prefix, OutboundText) else (prefix,))
         atom = validate_tool_syntax(match.group(0), "verified_diagnostic_atom")
@@ -2463,6 +2503,7 @@ def _segment_protected_tool_result(
             used_grants,
             sanitized_cap=sanitized_cap,
             allow_line_split=True,
+            redact_remote_unsafe=True,
         )
         segments.extend(suffix.segments if isinstance(suffix, OutboundText) else (suffix,))
     if not segments:
@@ -2472,6 +2513,7 @@ def _segment_protected_tool_result(
             used_grants,
             sanitized_cap=sanitized_cap,
             allow_line_split=True,
+            redact_remote_unsafe=True,
         )
     return segments[0] if len(segments) == 1 else OutboundText(tuple(segments))
 

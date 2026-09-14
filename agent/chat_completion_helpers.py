@@ -683,6 +683,10 @@ _EGRESS_PROTECTED_PROVIDERS = frozenset(
 def _destination_requires_egress_firewall(agent) -> bool:
     """Return whether this route is under the protected egress contract."""
 
+    from agent.llm_egress_runtime import egress_enforcement_enabled
+
+    if not egress_enforcement_enabled():
+        return False
     provider = str(getattr(agent, "provider", "") or "").strip().lower()
     return provider in _EGRESS_PROTECTED_PROVIDERS or (
         os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1"
@@ -709,6 +713,15 @@ def _dispatch_provider_request(agent, request, callback):
     """Apply the exact provider-bound egress policy at a physical call site."""
 
     if not _destination_requires_egress_firewall(agent):
+        # This is an internal Hermes control field, never a provider argument.
+        # Local OpenAI-compatible providers (including Qwen) commonly reject
+        # unknown kwargs, so remove it even when no protected egress binding is
+        # required for the route.
+        if isinstance(request, dict) and "_hermes_source_provenance" in request:
+            request = {
+                key: value for key, value in request.items()
+                if key != "_hermes_source_provenance"
+            }
         return callback(request)
     from agent.llm_egress_runtime import dispatch_authorized_agent_request
 
@@ -2853,7 +2866,14 @@ class _StreamingCall(StreamingWaitMonitor):
             self.agent._create_request_openai_client(reason="chat_completion_stream_request", api_kwargs=stream_kwargs))
         self.last_chunk_time["t"] = time.time()
         self.agent._touch_activity("waiting for provider response (streaming)")
-        return request_client.chat.completions.create(**stream_kwargs)
+        # Route streaming calls through the same egress sanitizer as non-streaming
+        # calls.  In particular, source-provenance is an internal Hermes sidecar;
+        # it must never be forwarded as an OpenAI-compatible provider keyword.
+        return _dispatch_provider_request(
+            self.agent,
+            stream_kwargs,
+            lambda authorized: request_client.chat.completions.create(**authorized),
+        )
 
     def _chat_stream_created(self, raw_stream: Any) -> None:
         response = self._attempt_stream_response = getattr(raw_stream, "response", None)

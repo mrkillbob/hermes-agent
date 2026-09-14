@@ -276,6 +276,37 @@ def _neutralize_github_credential_paths(env: dict) -> None:
     env["GIT_TERMINAL_PROMPT"] = "0"
 
 
+def _inject_governed_github_bot_env(env: dict) -> None:
+    """Bind raw ``gh`` terminal commands to Hermes' dedicated bot identity.
+
+    Ordinary operator credentials remain sealed.  When the active Hermes
+    profile explicitly has the governed bot credential, expose it only as
+    ``GH_TOKEN`` with an isolated config directory so model-driven GitHub
+    reads/writes cannot fall back to the human account or ``/dev/null``.
+    """
+    try:
+        from agent.secret_scope import get_secret
+        token = get_secret("HERMES_GITHUB_BOT_TOKEN", "") or ""
+        login = get_secret("HERMES_GITHUB_BOT_LOGIN", "") or ""
+    except Exception:
+        return
+    if not token or not login:
+        return
+    try:
+        from hermes_constants import get_default_hermes_root
+        config_dir = get_default_hermes_root() / "github-bot-gh-config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_dir.chmod(0o700)
+    except OSError:
+        # GH_TOKEN is sufficient for gh API calls; retain the isolated path
+        # even when a restricted filesystem refuses the mkdir/chmod.
+        config_dir = Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / "hermes-github-bot-gh-config"
+    env["GH_TOKEN"] = token
+    env["GH_CONFIG_DIR"] = str(config_dir)
+    env["HERMES_GITHUB_BOT_LOGIN"] = login
+    env["GIT_TERMINAL_PROMPT"] = "0"
+
+
 def _finalize_child_env(env: dict) -> dict:
     """Guards shared by every spawn surface: profile-home propagation, session-context
     bridging, Hermes-owned PYTHONPATH + venv-marker strip, MSYS defaults, delegate_task
@@ -285,6 +316,7 @@ def _finalize_child_env(env: dict) -> dict:
     _strip_hermes_owned_pythonpath_and_runtime_markers(env)
     _apply_windows_msys_bash_env_defaults(env)
     _neutralize_github_credential_paths(env)
+    _inject_governed_github_bot_env(env)
     from agent.delegation_context import delegated_child_subprocess_env
     return delegated_child_subprocess_env(env)
 
