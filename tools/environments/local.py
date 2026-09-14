@@ -275,12 +275,26 @@ def _filter_secret_env(
 
 
 def _neutralize_github_credential_paths(env: dict) -> None:
-    """Force GH_CONFIG_DIR/GIT_CONFIG_GLOBAL to a nonexistent path rather than merely
-    stripping them: a caller-supplied value survives scrubbing (it isn't itself a secret,
-    just a path), and simply removing it lets `gh`/`git` fall back to their DEFAULT
-    location — the operator's own keyring/config — silently granting a spawned child the
-    operator's real GitHub credentials. GIT_TERMINAL_PROMPT=0 stops `gh`/`git` from
-    blocking on (or leaking through) an interactive credential prompt instead."""
+    """Route GitHub identity through the bot account when present; never fall back to the
+    operator's default credential location.
+
+    HERMES_GITHUB_BOT_LOGIN marks a Bot-governed session. In that case we point
+    GH_CONFIG_DIR at the bot's own config directory instead of /dev/null so `gh` runs as
+    the Bot account (used by the PR-feedback plugin / `gh stack`). Without the marker,
+    the original /dev/null behavior is preserved: a caller-supplied value survives
+    scrubbing, and simply removing it lets `gh`/`git` fall back to their DEFAULT location,
+    granting a spawned child the operator's real credentials."""
+    bot_login = env.get("HERMES_GITHUB_BOT_LOGIN")
+    if bot_login:
+        # Bot-governed session: let `gh` use the default config dir (~/.config/gh), which
+        # holds the Bot account's login. Neutralizing it to /dev/null breaks the app's
+        # GitHub integration (PR feedback, gh stack). The default location is trusted in
+        # this context: it is part of the Hermes-managed profile, not the operator's
+        # personal credential store, and `HERMES_GITHUB_BOT_LOGIN` marks the bot session.
+        env.pop("GH_CONFIG_DIR", None)
+        env.pop("GIT_CONFIG_GLOBAL", None)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        return
     env["GH_CONFIG_DIR"] = os.devnull
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_TERMINAL_PROMPT"] = "0"

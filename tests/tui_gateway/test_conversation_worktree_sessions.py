@@ -111,6 +111,40 @@ def test_alternate_project_root_stays_outside_both_repositories(monkeypatch, tmp
     assert not routed.worktree_root.is_relative_to(selected)
 
 
+def test_missing_configured_source_uses_selected_repository(monkeypatch, tmp_path):
+    from agent.conversation_worktree_policy import ConversationWorktreePolicy
+
+    configured = tmp_path / "deleted-lunabot"
+    selected = tmp_path / "hermes-agent"
+    selected.mkdir()
+    policy = ConversationWorktreePolicy(
+        enabled=True,
+        source_worktree=configured,
+        worktree_root=tmp_path / "conversations",
+    )
+
+    monkeypatch.setattr(server.git_probe, "repo_root", lambda _cwd: str(selected))
+    monkeypatch.setattr(
+        server.git_probe,
+        "common_repo_root",
+        lambda cwd: "" if str(cwd) == str(configured) else str(selected),
+    )
+    monkeypatch.setattr(
+        server.git_probe,
+        "run_git",
+        lambda cwd, *_args: f"worktree {selected}\n" if str(cwd) == str(selected) else "",
+    )
+    monkeypatch.setattr(server, "get_hermes_home", lambda: tmp_path / ".hermes")
+
+    routed = server._conversation_worktree_policy_for_session(policy, str(selected))
+
+    assert routed.source_worktree == selected
+    assert routed.worktree_root is not None
+    assert routed.worktree_root.parent == policy.worktree_root
+    assert routed.bootstrap is False
+    assert routed.bootstrap_command == ()
+
+
 def test_selected_linked_checkout_preserves_its_source_path(monkeypatch, tmp_path):
     from agent.conversation_worktree_policy import ConversationWorktreePolicy
 

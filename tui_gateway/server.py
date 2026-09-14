@@ -556,14 +556,23 @@ def _conversation_worktree_policy_for_session(policy, session_cwd: str | None):
     if source_path == configured_path:
         return policy
 
-    configured_common = git_probe.common_repo_root(str(configured_path))
     selected_common = git_probe.common_repo_root(str(source_path))
-    if not configured_common or not selected_common:
+    if not selected_common:
         from agent.conversation_worktree import ConversationWorktreeError
         raise ConversationWorktreeError(
             "selected session repository common identity could not be established",
             phase="identity",
         )
+    configured_common = git_probe.common_repo_root(str(configured_path))
+    if not configured_common:
+        logger.warning(
+            "conversation_worktree.configured_source_missing_common_identity "
+            "session_cwd=%s configured_source=%s selected_source=%s",
+            session_cwd,
+            configured_path,
+            source_path,
+        )
+        configured_common = selected_common
     same_repository = Path(configured_common).resolve() == Path(selected_common).resolve()
     if same_repository and source_path == configured_path:
         return policy
@@ -574,8 +583,10 @@ def _conversation_worktree_policy_for_session(policy, session_cwd: str | None):
     suffix = hashlib.sha256(str(selected_common_path).encode()).hexdigest()[:12]
     namespace = f"{selected_common_path.name}-{suffix}"
     configured_root = policy.worktree_root.resolve()
-    repository_worktrees = {configured_path, selected_common_path}
-    for common_path in (Path(configured_common).resolve(), selected_common_path):
+    repository_worktrees = {selected_common_path}
+    if git_probe.common_repo_root(str(configured_path)):
+        repository_worktrees.add(configured_path)
+    for common_path in {Path(configured_common).resolve(), selected_common_path}:
         listing = git_probe.run_git(str(common_path), "worktree", "list", "--porcelain")
         repository_worktrees.update(
             Path(line.removeprefix("worktree ")).resolve()
