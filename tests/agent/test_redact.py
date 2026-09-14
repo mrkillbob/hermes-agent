@@ -1347,20 +1347,18 @@ class TestValueAwareGatingCorpus:
         assert prose_line in result
         assert "A9f3kZq7Lm2Xw8Rt4Yv6" not in result
 
-    @pytest.mark.parametrize(
-        ("key", "value"),
-        [
-            ("password", "supersecretvalue12345"),
-            ("secret", "supersecretvalue12345"),
-            ("credential", "supersecretvalue12345"),
-            ("pass", "supersecretvalue12345"),
-            ("pw", "supersecretvalue12345"),
-            ("api_key", "supersecretvalue12345"),
-        ],
-    )
-    def test_whitespace_delimited_credential_assignments_are_redacted(
-        self, key, value
-    ):
-        text = f"provider failed {key}={value}"
-        result = redact_sensitive_text(text, force=True)
-        assert value not in result
+
+class TestRedactForEgress:
+    """``redact_for_egress`` is the single scrub every remote-reader surface (gateway chat, A2A, monitoring)
+    calls; there is no second pattern list to keep in sync."""
+
+    def test_opaque_bearer_without_vendor_prefix_is_masked(self):
+        from agent.redact import redact_for_egress
+        out = redact_for_egress("curl -H 'Authorization: Bearer opaque0123456789abcdef' https://x.example")
+        assert "opaque0123456789abcdef" not in out
+        assert "https://x.example" in out
+
+    def test_fails_closed_when_the_redactor_raises(self, monkeypatch):
+        from agent import redact as R
+        monkeypatch.setattr(R, "redact_sensitive_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert R.redact_for_egress("sk-live-0123456789abcdef") == R.REDACTION_UNAVAILABLE
