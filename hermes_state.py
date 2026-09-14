@@ -25,8 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent.message_sanitization import _sanitize_surrogates
-from hermes_constants import get_hermes_home, get_hermes_home_override, mkdir_under_hermes_home
+from hermes_constants import get_hermes_home, mkdir_under_hermes_home
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, cast
 
 from hermes_state_common import escape_like as _escape_like, stat_db_file_identity as _stat_db_file_identity
@@ -154,11 +153,6 @@ def _compression_lock_holder_process_is_dead(holder: str) -> bool:
     except (OSError, OverflowError):  # PermissionError is an OSError: alive but foreign
         return False
     return False
-
-
-def _scrub_surrogates(value: Any) -> Any:
-    """Replace lone surrogates in text (sqlite3 raises UnicodeEncodeError, aborting the whole write)."""
-    return _sanitize_surrogates(value) if isinstance(value, str) else value
 
 
 # Billing buckets that aren't a routable provider identity: a session that persisted only
