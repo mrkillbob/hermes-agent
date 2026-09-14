@@ -600,7 +600,17 @@ def _conversation_worktree_policy_for_session(policy, session_cwd: str | None):
     # Keep the selected checkout as the manager source so its HEAD becomes the
     # immutable conversation base.  ``selected_common`` remains the durable
     # repository namespace and ownership identity used above.
-    return replace(policy, source_worktree=source_path, worktree_root=worktree_root)
+    # Bootstrap commands are repository-specific.  The configured command in
+    # the user's policy belongs to the configured source (currently LunaBot);
+    # applying it after switching to another project makes valid Hermes-agent
+    # worktrees fail with status 2 when that script is absent.
+    return replace(
+        policy,
+        source_worktree=source_path,
+        worktree_root=worktree_root,
+        bootstrap=False,
+        bootstrap_command=(),
+    )
 
 
 def _conversation_worktree_manager(*, profile_home=None, db=None, session_cwd=None):
