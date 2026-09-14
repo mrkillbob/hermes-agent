@@ -1838,19 +1838,11 @@ def _kill_process_group(proc, escalate: bool = False):
 
 
 def _load_config() -> dict:
-    """Load code_execution config without importing the interactive CLI.
-
-    This helper is called while building the module-level execute_code schema
-    during tool discovery.  Importing ``cli`` here pulls prompt_toolkit/Rich and
-    a large chunk of the classic REPL onto every agent startup path, including
-    ``hermes --tui`` where it is never used.  Read the lightweight raw config
-    instead; the config layer already caches by (mtime, size), and an absent
-    key cleanly falls back to DEFAULT_EXECUTION_MODE.
-    """
+    """Effective ``code_execution`` section (defaults + user file + managed overlay) — runs while the
+    module-level schema is built at tool discovery, so it must not import ``cli``."""
     try:
-        from hermes_cli.config import read_raw_config
-
-        cfg = read_raw_config().get("code_execution", {})
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly().get("code_execution", {})
         return cfg if isinstance(cfg, dict) else {}
     except Exception:
         return {}
