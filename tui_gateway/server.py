@@ -1510,6 +1510,16 @@ def _load_cfg() -> dict:
     return {}
 
 
+def _sync_agent_turn_limit_with_config(session: dict) -> None:
+    """Adopt config max-turn edits for an already-built Desktop/TUI agent."""
+    agent = session.get("agent")
+    if agent is None:
+        return
+    from tui_gateway.agent_callbacks import _cfg_max_turns
+
+    agent.max_iterations = _cfg_max_turns(_load_cfg(), 500)
+
+
 def _save_cfg(cfg: dict):
     global _cfg_cache, _cfg_mtime, _cfg_path
     from utils import atomic_roundtrip_yaml_save

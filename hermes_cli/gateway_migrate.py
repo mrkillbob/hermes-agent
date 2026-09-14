@@ -714,11 +714,13 @@ def rollback_migration(default_home: Optional[Path] = None) -> bool:
         return False
 
     default_rec = manifest.get("default") or {}
+    recorded_service = _secondary_service(default_rec) if isinstance(default_rec, dict) else None
+    live_default_pid = _live_gateway_pid(default_home)
+    live_default_service = _installed_service(default_home)
     _restore_default_gateway(default_home, default_rec)
-    default_service = _secondary_service(default_rec) if isinstance(default_rec, dict) else None
     default_gw = ProfileGateway(
-        "default", default_home, pid=_live_gateway_pid(default_home),
-        service=default_service or _installed_service(default_home),
+        "default", default_home, pid=live_default_pid,
+        service=recorded_service or live_default_service,
     )
     secondaries = [rec for rec in manifest.get("secondaries", []) if isinstance(rec, dict)]
     ok = len(secondaries) == len(manifest.get("secondaries", []))

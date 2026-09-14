@@ -194,6 +194,14 @@ def build_tool_title(tool_name: str, args: Args) -> str:
     """``<tool_name>: <preview>`` using the same per-tool preview (and argument redaction) as
     every other Hermes surface, so ACP clients never show a different summary than the CLI/TUI;
     bare tool name when the arguments yield no preview."""
+    if tool_name == "read_file":
+        preview = build_tool_preview(tool_name, args, max_len=80)
+        path = args.get("path", "?")
+        return f"{preview} ({path})" if preview else f"read: {path}"
+    if tool_name in {"process", "process_manage"}:
+        action = args.get("action", "manage")
+        session_id = args.get("session_id")
+        return f"process {action}: {session_id}" if session_id else f"process {action}"
     preview = build_tool_preview(tool_name, args, max_len=80)
     return f"{tool_name}: {preview}" if preview else tool_name
 

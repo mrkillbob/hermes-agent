@@ -48,6 +48,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.thread_context import propagate_context_to_thread
+from agent.thread_scoped_output import thread_scoped_silence
 from tools.registry import registry, tool_error
 
 from hermes_time import get_timezone_name
@@ -94,6 +95,74 @@ def _configured_max_tool_calls(config: Dict[str, Any]) -> int:
     if maximum < 0:
         raise ValueError("code_execution.max_tool_calls cannot be negative")
     return maximum
+
+
+# operational marker: without it, a sandbox script that spawns/imports Hermes
+# code can lose the DB-layer Kanban mutation guard while still inheriting
+# HERMES_HOME.
+#
+# NB: the broad "HERMES_" prefix was deliberately removed (#27303) — it leaked
+# HERMES_*-named config that lacks a secret substring (e.g. HERMES_BASE_URL,
+# HERMES_KANBAN_DB, HERMES_*_WEBHOOK).  The child only needs the few
+# location/profile vars in _HERMES_CHILD_ALLOWED below; HERMES_RPC_SOCKET /
+# HERMES_RPC_DIR / TZ / HOME are injected explicitly after scrubbing.
+_SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
+                      "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
+                      "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
+_SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
+                      "PASSWD", "AUTH", "DSN", "WEBHOOK",
+                      # Abbreviations that appear in real-world credential
+                      # variable names but were previously undetected:
+                      # CREDS (CREDENTIALS abbreviated), BEARER
+                      # (Authorization: Bearer tokens), APIKEY (written
+                      # without an underscore). "PASS" is intentionally NOT
+                      # added — it false-positives on legitimate non-secret
+                      # vars (BYPASS_CACHE, COMPASS_DIR, PASSENGER_HOST) while
+                      # PASSWORD/PASSWD already cover the credential cases.
+                      "CREDS", "BEARER", "APIKEY")
+
+# Operational HERMES_* vars the child legitimately needs by exact name — these
+# are non-secret runtime-location flags (the same set hermes_cli treats as the
+# runtime location) that repo-root modules a sandbox script imports may read at
+# import time.  None match _SECRET_SUBSTRINGS.
+_HERMES_CHILD_ALLOWED = frozenset({
+    "HERMES_HOME",
+    "HERMES_PROFILE",
+    "HERMES_CONFIG",
+    "HERMES_ENV",
+    "HERMES_DELEGATED_CHILD_CONTEXT",
+})
+
+# Windows-only: a handful of variables are required by the OS/CRT itself.
+# Without them, even stdlib calls like ``socket.socket()`` fail with
+# WinError 10106 (Winsock can't locate mswsock.dll) and ``subprocess``
+# can't resolve cmd.exe.  These are well-known OS paths, not secrets, so
+# we allow them through by exact name.  The _SECRET_SUBSTRINGS block
+# still runs as a safety net (none of these names match those substrings).
+_WINDOWS_ESSENTIAL_ENV_VARS = frozenset({
+    "SYSTEMROOT",       # %SYSTEMROOT%\System32 — Winsock needs this
+    "SYSTEMDRIVE",      # C: (or wherever Windows lives)
+    "WINDIR",           # usually same as SYSTEMROOT
+    "COMSPEC",          # cmd.exe path — subprocess shell=True needs it
+    "PATHEXT",          # .COM;.EXE;.BAT;... — shell lookup
+    "OS",               # "Windows_NT" — some tools gate on this
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
+    "PUBLIC",           # C:\Users\Public
+    "ALLUSERSPROFILE",  # C:\ProgramData — some stdlib paths use it
+    "PROGRAMDATA",      # C:\ProgramData
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "APPDATA",          # %USERPROFILE%\AppData\Roaming — Python uses it
+    "LOCALAPPDATA",     # %USERPROFILE%\AppData\Local
+    "USERPROFILE",      # C:\Users\<name> — Python's expanduser uses it
+    "USERDOMAIN",
+    "USERNAME",
+    "HOMEDRIVE",        # C:
+    "HOMEPATH",         # \Users\<name>
+    "COMPUTERNAME",
+})
 
 
 def _assemble_stdout_result(
@@ -161,6 +230,27 @@ def _truncate_stdout_text(stdout_text: str) -> Tuple[str, Dict[str, Any]]:
                                f"script did run. FULL output saved to {spill_path} — page it "
                                f'with read_file(path="{spill_path}", offset=...) instead of re-running.')
     return text, metadata
+def _spill_full_stdout(stdout_text: str) -> Optional[str]:
+    """Write full stdout to cache/exec; return its path (None on failure — best-effort,
+    the truncated inline output is still returned). Keyed by content digest so identical
+    reruns coalesce; the dir rides the cache/web remote bind-mount list (credential_files)."""
+    try:
+        import hashlib
+        from hermes_constants import get_hermes_dir
+        from tools.spill_safety import write_text_exclusive
+        if len(stdout_text) > MAX_SPILLED_STDOUT_BYTES:
+            stdout_text = (stdout_text[:MAX_SPILLED_STDOUT_BYTES]
+                           + f"\n\n[... spill capped at {MAX_SPILLED_STDOUT_BYTES:,} bytes ...]")
+        cache_dir = get_hermes_dir("cache/exec", "exec_spill")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(stdout_text.encode("utf-8", errors="replace")).hexdigest()[:12]
+        path = cache_dir / f"stdout-{digest}.txt"
+        write_text_exclusive(path, stdout_text, private=False, overwrite=True)
+        return str(path)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to spill execute_code stdout: %s", exc)
+        return None
+
 
 def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
     """Produce the scrubbed child-process env for execute_code.
@@ -311,9 +401,9 @@ _TOOL_STUBS = {
     ),
     "search_files": (
         "search_files",
-        'pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0',
+        'pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0, order: str = "discovery"',
         '"""Search file contents (target="content") or find files by name (target="files"). Returns dict with "matches"."""',
-        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context}',
+        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context, "order": order}',
     ),
     "patch": (
         "patch",
@@ -323,9 +413,9 @@ _TOOL_STUBS = {
     ),
     "terminal": (
         "terminal",
-        "command: str, timeout: int = None, workdir: str = None",
+        "command: str, timeout: int = None, workdir: str = None, notify: bool | list[str] = None",
         '"""Run a shell command (foreground only). Returns dict with "output" and "exit_code"."""',
-        '{"command": command, "timeout": timeout, "workdir": workdir}',
+        '{"command": command, "timeout": timeout, "workdir": workdir, "notify": notify}',
     ),
 }
 
@@ -1479,8 +1569,8 @@ def execute_code(
         # environment children and may be incompatible with external
         # interpreters (project mode can select a different venv), so they
         # must not shadow or poison the child's sys.path (#74817).
-        from tools.environments.local import _strip_hermes_owned_pythonpath
-        _strip_hermes_owned_pythonpath(child_env)
+        from tools.environments.local import _strip_hermes_owned_pythonpath_and_runtime_markers
+        _strip_hermes_owned_pythonpath_and_runtime_markers(child_env)
         _hermes_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         _existing_pp = child_env.get("PYTHONPATH", "")
         _pp_parts = [tmpdir]
