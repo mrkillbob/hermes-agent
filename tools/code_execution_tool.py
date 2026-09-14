@@ -48,8 +48,12 @@ _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.thread_context import propagate_context_to_thread
-from agent.thread_scoped_output import thread_scoped_silence
+from tools.registry import registry, tool_error
 
+from hermes_time import get_timezone_name
+from tools.code_execution_env import _resolve_child_cwd, _resolve_child_python
+from tools.code_execution_rpc import _rpc_poll_loop
+from tools.tool_output_truncate import head_tail_split, truncation_notice
 # Availability gate.  On Windows we fall back to loopback TCP for the
 # sandbox RPC transport (AF_UNIX is unreliable on Windows Python) — see
 # ``_use_tcp_rpc`` in ``_execute_local`` below.  That makes execute_code
@@ -137,88 +141,26 @@ def _assemble_stdout_result(
 def _truncate_stdout_text(stdout_text: str) -> Tuple[str, Dict[str, Any]]:
     """Cap a complete stdout string by bytes using the same head/tail policy."""
     stdout_bytes = stdout_text.encode("utf-8", errors="replace")
-    if len(stdout_bytes) <= MAX_STDOUT_BYTES:
-        return _assemble_stdout_result(stdout_bytes)
-
-    head_bytes = int(MAX_STDOUT_BYTES * 0.4)
-    tail_bytes = MAX_STDOUT_BYTES - head_bytes
-    return _assemble_stdout_result(
-        stdout_bytes[:head_bytes],
-        stdout_bytes[-tail_bytes:],
-        total_bytes=len(stdout_bytes),
-    )
-
-# Environment variable scrubbing rules (shared between the local + remote
-# backends).  Secret-substring block is applied first; anything left must
-# match a safe prefix, the operational HERMES_ allowlist, or (on Windows) an
-# OS-essential name.  Delegate-task child context is also an exact-name
-# operational marker: without it, a sandbox script that spawns/imports Hermes
-# code can lose the DB-layer Kanban mutation guard while still inheriting
-# HERMES_HOME.
-#
-# NB: the broad "HERMES_" prefix was deliberately removed (#27303) — it leaked
-# HERMES_*-named config that lacks a secret substring (e.g. HERMES_BASE_URL,
-# HERMES_KANBAN_DB, HERMES_*_WEBHOOK).  The child only needs the few
-# location/profile vars in _HERMES_CHILD_ALLOWED below; HERMES_RPC_SOCKET /
-# HERMES_RPC_DIR / TZ / HOME are injected explicitly after scrubbing.
-_SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
-                      "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
-                      "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
-_SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
-                      "PASSWD", "AUTH", "DSN", "WEBHOOK",
-                      # Abbreviations that appear in real-world credential
-                      # variable names but were previously undetected:
-                      # CREDS (CREDENTIALS abbreviated), BEARER
-                      # (Authorization: Bearer tokens), APIKEY (written
-                      # without an underscore). "PASS" is intentionally NOT
-                      # added — it false-positives on legitimate non-secret
-                      # vars (BYPASS_CACHE, COMPASS_DIR, PASSENGER_HOST) while
-                      # PASSWORD/PASSWD already cover the credential cases.
-                      "CREDS", "BEARER", "APIKEY")
-
-# Operational HERMES_* vars the child legitimately needs by exact name — these
-# are non-secret runtime-location flags (the same set hermes_cli treats as the
-# runtime location) that repo-root modules a sandbox script imports may read at
-# import time.  None match _SECRET_SUBSTRINGS.
-_HERMES_CHILD_ALLOWED = frozenset({
-    "HERMES_HOME",
-    "HERMES_PROFILE",
-    "HERMES_CONFIG",
-    "HERMES_ENV",
-    "HERMES_DELEGATED_CHILD_CONTEXT",
-})
-
-# Windows-only: a handful of variables are required by the OS/CRT itself.
-# Without them, even stdlib calls like ``socket.socket()`` fail with
-# WinError 10106 (Winsock can't locate mswsock.dll) and ``subprocess``
-# can't resolve cmd.exe.  These are well-known OS paths, not secrets, so
-# we allow them through by exact name.  The _SECRET_SUBSTRINGS block
-# still runs as a safety net (none of these names match those substrings).
-_WINDOWS_ESSENTIAL_ENV_VARS = frozenset({
-    "SYSTEMROOT",       # %SYSTEMROOT%\System32 — Winsock needs this
-    "SYSTEMDRIVE",      # C: (or wherever Windows lives)
-    "WINDIR",           # usually same as SYSTEMROOT
-    "COMSPEC",          # cmd.exe path — subprocess shell=True needs it
-    "PATHEXT",          # .COM;.EXE;.BAT;... — shell lookup
-    "OS",               # "Windows_NT" — some tools gate on this
-    "PROCESSOR_ARCHITECTURE",
-    "NUMBER_OF_PROCESSORS",
-    "PUBLIC",           # C:\Users\Public
-    "ALLUSERSPROFILE",  # C:\ProgramData — some stdlib paths use it
-    "PROGRAMDATA",      # C:\ProgramData
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PROGRAMW6432",
-    "APPDATA",          # %USERPROFILE%\AppData\Roaming — Python uses it
-    "LOCALAPPDATA",     # %USERPROFILE%\AppData\Local
-    "USERPROFILE",      # C:\Users\<name> — Python's expanduser uses it
-    "USERDOMAIN",
-    "USERNAME",
-    "HOMEDRIVE",        # C:
-    "HOMEPATH",         # \Users\<name>
-    "COMPUTERNAME",
-})
-
+    total = len(stdout_bytes)
+    captured = min(total, MAX_STDOUT_BYTES)
+    metadata: Dict[str, Any] = {"stdout_truncated": total > captured, "stdout_bytes_captured": captured,
+                                "stdout_bytes_total": total, "stdout_bytes_omitted": total - captured}
+    if total <= MAX_STDOUT_BYTES:
+        return stdout_bytes.decode("utf-8", errors="replace"), metadata
+    head_bytes, tail_bytes = head_tail_split(MAX_STDOUT_BYTES)
+    text = (stdout_bytes[:head_bytes].decode("utf-8", errors="replace")
+            + truncation_notice(total - captured, total, unit="bytes")
+            + stdout_bytes[-tail_bytes:].decode("utf-8", errors="replace"))
+    metadata["warning"] = ("execute_code stdout was truncated; the script did run, but only "
+                           "the captured head/tail output is included. Re-run only with "
+                           "narrower output if the omitted data is required.")
+    spill_path = _spill_full_stdout(stdout_text)
+    if spill_path:
+        metadata["stdout_spill_path"] = spill_path
+        metadata["warning"] = ("execute_code stdout was truncated (head/tail shown); the "
+                               f"script did run. FULL output saved to {spill_path} — page it "
+                               f'with read_file(path="{spill_path}", offset=...) instead of re-running.')
+    return text, metadata
 
 def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
     """Produce the scrubbed child-process env for execute_code.
