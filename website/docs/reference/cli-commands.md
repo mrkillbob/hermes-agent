@@ -724,7 +724,7 @@ Board resolution order (highest precedence first): `--board <slug>` flag → `HE
 
 All actions are also available as a slash command in the gateway (`/kanban …`), with the same argument surface — including `boards` subcommands and the `--board` flag.
 
-For the full design — comparison with Cline Kanban / Paperclip / NanoClaw / Gemini Enterprise, eight collaboration patterns, four user stories, concurrency correctness proof — see `docs/hermes-kanban-v1-spec.pdf` in the repository or the [Kanban user guide](/user-guide/features/kanban).
+For the full design — comparison with Cline Kanban / Paperclip / NanoClaw / Gemini Enterprise, eight collaboration patterns, four user stories, concurrency correctness proof — see the [Kanban user guide](/user-guide/features/kanban).
 
 ## `hermes egress`
 
@@ -841,8 +841,9 @@ hermes webhook subscribe <name> [options]
 | `--secret` | Custom HMAC secret. Auto-generated if omitted. |
 | `--deliver-only` | Skip the agent — deliver the rendered `--prompt` as the literal message. Zero LLM cost, sub-second delivery. Requires `--deliver` to be a real target (not `log`). |
 | `--script` | Filter/transform script under `~/.hermes/scripts/`. The webhook payload is passed as JSON on stdin; JSON stdout replaces the payload, and empty stdout, `[SILENT]`, or a nonzero exit code ignores the webhook. See [Script Filters and Transforms](../user-guide/messaging/webhooks.md#script-filters-and-transforms). |
+| `--route-profile` | Bind the route to a multiplexed profile: it is then reachable only at `/p/<profile>/webhooks/<name>` and the agent runs as that profile. Validated against existing profiles; kept on update when omitted. Not the same as the global `-p/--profile`, which selects the gateway whose subscriptions file is written. See [Multi-profile gateways](../user-guide/multi-profile-gateways.md). |
 
-Subscriptions persist to `~/.hermes/webhook_subscriptions.json` and are hot-reloaded by the webhook adapter without a gateway restart.
+Subscriptions persist to `~/.hermes/webhook_subscriptions.json` and are hot-reloaded by the webhook adapter without a gateway restart. Re-running `subscribe` for an existing name keeps its secret and profile binding unless you pass `--secret` / `--route-profile`.
 
 ## `hermes doctor`
 

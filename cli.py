@@ -19,7 +19,6 @@ import atexit
 from hermes_cli.github_identity import run_as_github_automation
 import errno
 import time
-import uuid
 import textwrap
 from collections import deque
 from dataclasses import dataclass
@@ -173,6 +172,7 @@ _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 
 # ~/.hermes/.env first, project .env as dev fallback; user env files override stale shell exports.
 from hermes_constants import get_hermes_home
+from hermes_state_ids import new_session_id
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import base_url_host_matches, base_url_hostname, fast_safe_load
 
@@ -967,10 +967,16 @@ def _wait_for_oneshot_background_completions(cli) -> None:
     Waits on the whole registry: a one-shot process hosts one agent, and task_id
     filtering would skip processes registered before the session id settled.
 
+    Skipped when the quiet -Q notify-resume loop already consumed the run's linger
+    budget: it calls wait_for_pending_completions with a shared deadline, so a
+    re-wait here would double-block on the same stuck notify_on_complete child.
+
     See #90879.
     """
     from tools.process_registry import process_registry
 
+    if getattr(cli, "_quiet_notify_linger_done", False):
+        return
     _agent, task_id = _oneshot_agent_and_session(cli)
     result = process_registry.wait_for_pending_completions(None)
     if result.get("waited"):
@@ -2155,7 +2161,7 @@ def _terminal_may_leak_cpr() -> bool:
 
     Delayed CPR replies (``ESC[<row>;<col>R`` / visible ``^[[<row>;<col>R``) leak into the status line and
     can freeze input when the reply is slow (#13870 on SSH/slow PTYs). The same race hits local POSIX TTYs
-    under heavy subagent / status-line load — see ``tests/cli/test_cpr_local_leak.py``.
+    under heavy subagent / status-line load — see ``tests/hermes_cli/test_cpr_local_leak.py``.
     """
     return os.environ.get("PROMPT_TOOLKIT_NO_CPR", "") == "1" or sys.platform != "win32"
 
@@ -2840,7 +2846,7 @@ class HermesCLI(CLIConversationWorktreeMixin, CLIProcessNotificationsMixin, CLIA
         self._init_session_store()
         self._pending_title: Optional[str] = None
         self._resumed = bool(resume)
-        self.session_id = resume or f"{self.session_start.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        self.session_id = resume or new_session_id(self.session_start)
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
 
         self._history_file = _hermes_home / ".hermes_history"
@@ -3043,12 +3049,6 @@ class HermesCLI(CLIConversationWorktreeMixin, CLIProcessNotificationsMixin, CLIA
         set_unlock_prompt_callback(self._vault_unlock_callback)
         set_save_login_prompt_callback(self._vault_save_login_callback)
         set_code_prompt_callback(self._vault_code_callback)
-        try:
-            from tools.computer_use_tool import set_approval_callback as _set_cu_cb
-
-            _set_cu_cb(self._computer_use_approval_callback)
-        except ImportError:
-            pass
         self._tool_callbacks_installed = True
 
     def _ensure_tirith_security(self) -> None:
@@ -3488,11 +3488,11 @@ class HermesCLI(CLIConversationWorktreeMixin, CLIProcessNotificationsMixin, CLIA
 
     def _tui_process_one_input(self, user_input):
         """Route one submitted input: file drop, /resume pick, ! shell, slash command, or a chat turn."""
-        from tools.process_registry_notifications import SubagentNotification
-        notification_preview = user_input if isinstance(user_input, SubagentNotification) else None
+        from tools.process_registry_notifications import TimelineNotification
         user_input, is_voice_input, is_seeded_query = self._tui_unwrap_input(user_input)
         if not user_input:
             return
+        notification_preview = user_input if isinstance(user_input, TimelineNotification) else None
         self._status_bar_suppressed_after_resize = False  # input ends post-resize suppression
 
         submit_images = []
@@ -4107,24 +4107,63 @@ def _sync_cli_session_id_from_agent(cli) -> None:
 
 def _run_quiet_single_query(cli, effective_query):
     """Quiet (-Q) one-shot turn: run, print the response (stderr for errors/session_id), then sys.exit with the automation exit code.
-    HERMES_TURN_AUTHOR (set only by a bot-to-bot dispatcher) is consumed here so tool subprocesses do not inherit it."""
+    HERMES_TURN_AUTHOR (set only by a bot-to-bot dispatcher) is consumed here so tool subprocesses do not inherit it.
+    Nested Bot Mode notifies bind this session's key (not the dispatcher's) and resume in-process
+    before stdout is printed, so a teammate reply is the quiet run's final answer rather than a
+    stranded receipt."""
     from agent.interrupt_compat import _accepts_keyword
     from agent.turn_author import take_turn_author_from_env
+    from hermes_cli.quiet_single_query import (
+        bind_quiet_session_key, continue_quiet_notify_completions, quiet_notify_linger_seconds,
+    )
 
     author = take_turn_author_from_env()
     author_kwargs = {"turn_author": author} if author is not None and _accepts_keyword(cli.agent.run_conversation, "turn_author") else {}
-    try:
-        result = cli.agent.run_conversation(
-            user_message=effective_query, conversation_history=cli.conversation_history, **author_kwargs,
-        )
-    except KeyboardInterrupt:
-        _emit_interrupted_session_end(cli, reason="keyboard_interrupt")
-        print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
-        sys.exit(130)
-    # The exit line below reports session_id to stderr for automation wrappers;
-    # without this sync it would point at the ended parent after compression.
-    _sync_cli_session_id_from_agent(cli)
-    response = result.get("final_response", "") if isinstance(result, dict) else str(result)
+    with bind_quiet_session_key(getattr(cli, "session_id", "") or "default"):
+        try:
+            result = cli.agent.run_conversation(
+                user_message=effective_query, conversation_history=cli.conversation_history, **author_kwargs,
+            )
+        except KeyboardInterrupt:
+            _emit_interrupted_session_end(cli, reason="keyboard_interrupt")
+            print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
+            sys.exit(130)
+        # The exit line below reports session_id to stderr for automation wrappers;
+        # without this sync it would point at the ended parent after compression.
+        _sync_cli_session_id_from_agent(cli)
+        if isinstance(result, dict) and not result.get("failed"):
+            history = result.get("messages") or cli.conversation_history
+
+            def _follow_up(text):
+                nonlocal history
+                follow = cli.agent.run_conversation(
+                    user_message=text, conversation_history=history, **author_kwargs,
+                )
+                if isinstance(follow, dict) and follow.get("messages"):
+                    history = follow["messages"]
+                # Same sync contract as the main turn: a compression rotation during a
+                # follow-up must not leave a stale id on the exit line / drain key.
+                _sync_cli_session_id_from_agent(cli)
+                return follow
+
+            # One shared linger budget for the whole run: the loop below and the later
+            # _wait_for_oneshot_background_completions pass must not each wait the full
+            # oneshot_completion_wait_seconds on the same stuck notify_on_complete child.
+            # Flagged after the loop (finally-equivalent): the wait is the loop's first
+            # statement, so anything raising past that point has consumed budget the
+            # finalize pass must not re-wait.
+            try:
+                continued = continue_quiet_notify_completions(
+                    getattr(cli, "session_id", "") or "",
+                    _follow_up,
+                    owns_event=getattr(cli, "_owns_process_notification", None),
+                    linger_budget=quiet_notify_linger_seconds(),
+                )
+            finally:
+                cli._quiet_notify_linger_done = True
+            if isinstance(continued, dict):
+                result = continued
+        response = result.get("final_response", "") if isinstance(result, dict) else str(result)
     # Surface backend errors that produced no visible output (e.g. invalid model slug
     # -> provider 4xx) on stderr so piped stdout stays clean.
     if (
