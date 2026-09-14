@@ -6,8 +6,19 @@ globals at install time (method_ctx.bind_module), so they reference server.py gl
 from __future__ import annotations
 
 import contextlib
+from typing import TYPE_CHECKING, Any, Callable
 
 from .method_ctx import bind_module
+
+if TYPE_CHECKING:
+    from .server import (
+        _TURN_SETTLE_BEFORE_CLOSE_SECONDS, _WS_ORPHAN_ACTIVITY_STALE_S, _WS_ORPHAN_INTERRUPT_REAP_MAX_POLLS,
+        _WS_ORPHAN_INTERRUPT_REAP_POLL_S, _WS_ORPHAN_REAP_GRACE_S, _broadcast_global_event, _clear_pending,
+        _detached_ws_transport, _err, _get_db, _load_cfg, _resolve_agent_platform, _session_resume_lock,
+        _sessions, _sessions_lock, _transport_is_dead, logger, threading, time,
+    )
+    from .transport import Transport
+    from pathlib import Path
 
 
 def _notify_session_boundary(event_type: str, session_id: str | None, platform: str | None = None) -> None:

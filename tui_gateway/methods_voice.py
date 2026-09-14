@@ -6,8 +6,16 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from typing import TYPE_CHECKING, Optional
 
 from .method_ctx import HandlerRegistry, bind_module
+
+if TYPE_CHECKING:
+    from .server import (
+        _emit, _err, _load_cfg, _ok, _sessions, _sessions_lock, _stdio_transport, bind_transport,
+        current_transport, logger, os, queue, reset_transport, threading, time,
+    )
+    from .transport import Transport
 
 _registry = HandlerRegistry()
 method = _registry.method

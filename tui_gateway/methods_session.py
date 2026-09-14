@@ -5,8 +5,43 @@ helpers (``_sessions``, ``_ok``, ``_err``, ...) bare; module-level helpers are p
 server.py the same way (tests monkeypatching ``server.X`` still intercept)."""
 
 import contextlib
+from typing import TYPE_CHECKING
 
 from .method_ctx import HandlerRegistry, bind_module
+
+if TYPE_CHECKING:
+    from datetime import datetime
+    from pathlib import Path
+    from .server import (
+        _acquire_conversation_root_lease, _append_spawn_tree_index, _attach_todo_state,
+        _cancel_ws_orphan_reap, _child_run_active, _clear_session_context, _coerce_message_text,
+        _coerce_seed_history, _completion_cwd, _compress_session_history, _compute_host_compress_wait_seconds,
+        _context_cwd_is_launch_artifact, _conversation_worktree_manager, _conversation_worktree_metadata,
+        _current_profile_name, _current_session_steer_authority, _db_unavailable_error, _default_session_cwd,
+        _deferred_session_record, _display_session_cwd, _drop_queued_duplicates_of_inflight_user, _emit,
+        _emit_session_info_for_session, _enable_gateway_prompts, _enqueue_prompt, _ensure_session_db_row, _err,
+        _finalize_session, _find_live_session_by_key, _get_db, _get_usage, _history_to_messages,
+        _history_without_ephemeral_scaffolding, _init_session, _interrupt_session_turn, _lazy_resume_info,
+        _live_session_payload, _load_show_reasoning, _load_tool_progress_mode, _main_runtime_from_agent,
+        _make_agent, _maybe_schedule_auto_continue, _metadata_mirror, _new_session_key, _ok,
+        _pet_active_selection, _pet_cancel_arm, _pet_cancel_release, _pet_cancel_request, _pet_config_scale,
+        _pet_gen_root, _pet_gen_sweep, _pet_is_cancelled, _pet_png_data_uri, _pet_reference_images_from_data_url,
+        _pet_sheet_revision, _pet_sprite_payload, _pop_session_by_id, _profile_configured_cwd, _profile_db,
+        _profile_home, _project_info_for_cwd, _read_spawn_tree_index, _reattach_refusal, _rebind_live_transport,
+        _reconcile_display_with_live, _record_inflight_correction, _register_session_cwd,
+        _resolve_conversation_worktree_for_resume, _resolve_model, _resolve_session_source, _response_profile_name,
+        _retire_turn_marker, _rewind_active_session_history, _schedule_agent_build, _schedule_resume_hydration,
+        _schedule_session_cap_enforcement, _send_compute_host_control, _serialize_billing_error, _serialize_subscription_preview,
+        _sess, _sess_nowait, _session_cwd, _session_db, _session_info, _session_live_item,
+        _session_profile_runtime_scope, _session_resume_lock, _session_source, _session_usage_snapshot,
+        _session_uses_compute_host, _sessions, _sessions_lock, _set_session_context, _set_session_cwd,
+        _spawn_tree_session_dir, _spawn_trees_root, _status_update, _stdio_transport,
+        _stored_session_runtime_overrides, _sync_session_key_after_compress, _teardown_popped_session,
+        _todo_state_from_history, _transfer_db_to_agent, _tts_stream_stop, current_transport, get_hermes_home,
+        git_probe, is_truthy_value, logger, profile_name_for_home, reset_secret_scope, sanitize_replay_history,
+        set_hermes_home_override, set_secret_scope,
+    )
+    import json, os, queue, threading, time, uuid
 
 _registry = HandlerRegistry()
 method = _registry.method

@@ -8,6 +8,28 @@ import contextlib
 import threading
 import os
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .server import (
+        _bind_build_profile_scopes, _block, _clarify_block, _clear_session_context,
+        _config_model_target, _emit, _find_live_session_by_key, _get_db, _load_cfg,
+        _load_enabled_toolsets, _load_interim_assistant_messages, _load_reasoning_config,
+        _load_service_tier, _load_show_reasoning, _load_tool_progress_mode, _make_agent,
+        _open_profile_session_db, _project_info_for_cwd, _release_build_profile_scopes,
+        _resolve_model, _restart_slash_worker, _session_info, _session_verbose, _sessions,
+        _sessions_lock, _set_session_context, _status_update, _tool_ctx,
+        _tool_progress_enabled, _tour_request, _transfer_db_to_agent, git_probe, json,
+        logger, time,
+    )
+    from .session_workdir import (
+        _context_cwd_is_launch_artifact, _persist_session_cwd_and_schedule_git_meta,
+        _register_session_cwd, _session_source,
+    )
+    from .tool_progress import (
+        _fmt_tool_duration, _on_tool_complete, _on_tool_progress, _on_tool_start, _tool_summary,
+    )
+
 from .method_ctx import bind_module
 
 

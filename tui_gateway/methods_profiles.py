@@ -5,8 +5,16 @@ onto server.py, so they must not collide with its globals.
 """
 
 import contextlib
+from typing import TYPE_CHECKING
 
 from .method_ctx import HandlerRegistry, bind_module
+
+if TYPE_CHECKING:
+    from .server import (
+        _err, _ok, _profile_ui_meta_lock, get_hermes_home, is_truthy_value, json, os,
+        reset_hermes_home_override, set_hermes_home_override,
+    )
+    from pathlib import Path
 
 _registry = HandlerRegistry()
 method = _registry.method

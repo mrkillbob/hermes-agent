@@ -5,8 +5,20 @@ method_ctx.bind_module), so they reference server.py globals bare.
 """
 
 import contextlib
+from typing import TYPE_CHECKING
 
 from .method_ctx import HandlerRegistry, bind_module
+
+if TYPE_CHECKING:
+    from .server import (
+        _ATTACH_BYTES_MAX_BYTES, _PDF_ATTACH_MAX_BYTES, _PDF_ATTACH_MAX_PAGES, _background_agent_kwargs,
+        _cancel_ws_orphan_reap, _db_error, _emit, _err, _ephemeral_preview_agent_kwargs, _find_live_session_by_key,
+        _history_without_ephemeral_scaffolding, _load_cfg, _load_dashboard_process_isolation_config, _ok,
+        _respond, _session_resume_lock, _sessions, _sessions_lock, _set_session_context, _sess, _sess_building,
+        _sess_nowait, _session_uses_compute_host, _start_agent_build, current_transport, datetime,
+        is_truthy_value, logger, os, reset_hermes_home_override, set_hermes_home_override, threading, time, uuid,
+    )
+    from pathlib import Path
 
 _registry = HandlerRegistry()
 method = _registry.method

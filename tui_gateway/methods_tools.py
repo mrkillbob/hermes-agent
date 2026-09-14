@@ -6,8 +6,21 @@ Helper names must not collide with server.py's own (``_cmd_`` / ``_toolset_`` / 
 """
 
 import sys
+from typing import TYPE_CHECKING
 
 from .method_ctx import HandlerRegistry, bind_module
+
+if TYPE_CHECKING:
+    from .server import (
+        _MCP_RELOAD_MAX_PASSES, _PENDING_INPUT_COMMANDS, _SlashWorker, _TUI_EXTRA, _TUI_HIDDEN,
+        _WORKER_BLOCKED_COMMANDS, _cli_exec_blocked, _compute_mcp_rev, _db_unavailable_error,
+        _emit, _err, _finish_reload, _get_db, _hermes_home, _load_cfg, _load_enabled_toolsets,
+        _load_tool_progress_mode, _mcp_reload_lock, _mcp_reset_profile, _mcp_summarize_server,
+        _methods, _ok, _resolve_checkpoint_hash, _resolve_model, _resolve_name,
+        _resolve_session_platform, _session_processes, _sessions, _sessions_lock, _with_checkpoints,
+        contextlib, hermes_subprocess_env, is_truthy_value, json, logger, os, render_diff, subprocess,
+        threading, time,
+    )
 
 _registry = HandlerRegistry()
 method = _registry.method
