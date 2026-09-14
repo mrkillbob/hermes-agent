@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
-import { ensureMainWindow } from './main-window-lifecycle'
+import { ensureMainWindow, shouldQuitAfterLastWindowCloses } from './main-window-lifecycle'
+
+test('quits after the last window closes so the desktop backend cannot outlive the app', () => {
+  assert.equal(shouldQuitAfterLastWindowCloses(), true)
+})
 
 test('recreates a destroyed primary window without focusing it', () => {
   const destroyedWindow = {

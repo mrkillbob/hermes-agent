@@ -232,7 +232,7 @@ import { createHudSnapShortcut } from './hud-snap-shortcut'
 import { buildHudWindowUrl } from './hud-url'
 import { resolveHudWindowing } from './hud-windowing'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
-import { ensureMainWindow } from './main-window-lifecycle'
+import { ensureMainWindow, shouldQuitAfterLastWindowCloses } from './main-window-lifecycle'
 import {
   assertManagedUpdatePreflightClear,
   executeManagedRemoteUpdate,
@@ -3365,13 +3365,8 @@ async function readCommitLog(cwd, branch, isShallow) {
 let updateInFlight = false
 
 // Set to true when the desktop is about to quit so a detached swap/install/
-// uninstall script can take over. On macOS, app.quit() closes windows but
-// window-all-closed deliberately keeps the process alive (standard Electron
-// macOS convention). Without this flag the process never exits — the detached
-// hand-off script spins its PID-wait for the full timeout, and the user sees a
-// blank app with no window (and an uninstall that appears to do nothing). When
-// set, window-all-closed calls app.quit() on every platform so the process
-// actually dies and the hand-off script can proceed immediately.
+// uninstall script can take over. The last-window lifecycle always quits
+// because the desktop owns its local backend.
 let isQuittingForHandoff = false
 
 // Quit-guard latches: one while the confirmation is on screen (a second
@@ -18362,13 +18357,9 @@ app.on('before-quit', event => {
 })
 
 app.on('window-all-closed', () => {
-  // macOS convention: keep the process alive in the Dock when the user closes
-  // the last window. But when we're handing off to a detached updater / swap /
-  // uninstall script, the process MUST exit so the script can replace or remove
-  // the bundle and relaunch — without this the script's PID-wait spins to its
-  // full timeout and the user is left with an invisible app (or an uninstall
-  // that appears to do nothing).
-  if (process.platform !== 'darwin' || isQuittingForHandoff) {
+  // The local `serve` backend is owned by Electron; always exit after the last
+  // window closes so backend teardown runs on macOS too.
+  if (shouldQuitAfterLastWindowCloses() || isQuittingForHandoff) {
     app.quit()
   }
 })

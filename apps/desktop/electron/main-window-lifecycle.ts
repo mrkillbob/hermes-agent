@@ -9,6 +9,11 @@ type EnsureMainWindowOptions<T extends MainWindowLike> = {
   focusExisting?: boolean
 }
 
+/** The desktop owns its local backend, so it must exit with its last window. */
+export function shouldQuitAfterLastWindowCloses(): boolean {
+  return true
+}
+
 export function ensureMainWindow<T extends MainWindowLike>(
   window: T | null | undefined,
   { isReady, createWindow, focusWindow, focusExisting = true }: EnsureMainWindowOptions<T>
