@@ -26,8 +26,6 @@ class TurnFacadeMixin:
         persist_user_timestamp: Optional[float]=None, persist_user_display_kind: Optional[str]=None,
         persist_user_display_metadata: Optional[Dict[str, Any]]=None,
         persist_user_platform_id: Optional[str]=None, moa_config: Optional[dict[str, Any]]=None,
-        turn_author: Optional[Dict[str, Any]] = None,
-        relay_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         # A review shares this session_id for cache parity: fence review startup or interrupt
@@ -49,7 +47,6 @@ class TurnFacadeMixin:
         from agent.prompt_cache_scope import declared_conversation_scope_safe
         from agent.review_idle_queue import QUEUE as _review_queue
         from agent.subagent_lifecycle import bind_subagent_parent
-        from agent.interrupt_scope import track_in_interrupt_scope
         from agent.turn_facade_lease import admit_durable_turn_lease
         from hermes_cli.observability.relay_shared_metrics import finish_task_run, start_task_run
 
@@ -95,14 +92,8 @@ class TurnFacadeMixin:
                 parent_session_id=relay_parent_session_id,
                 model=str(getattr(self, "model", None) or ""),
             )
-            relay_turn_kwargs: Dict[str, Any] = {
-                "turn_id": relay_turn_id,
-                "task_id": effective_task_id,
-            }
-            if relay_metadata:
-                relay_turn_kwargs["metadata"] = relay_metadata
             relay_turn = relay_runtime.SESSION_COORDINATOR.begin_turn(
-                relay_lease, **relay_turn_kwargs
+                relay_lease, turn_id=relay_turn_id, task_id=effective_task_id
             )
             # Minimal relay-runtime shims may lack the opt-out flag: default enabled.
             if getattr(relay_turn, "relay_enabled", True):
@@ -124,8 +115,7 @@ class TurnFacadeMixin:
             )
 
             # Keep the ContextVar scope local (agent tokens may be observed from another thread).
-            # A host that owns this thread (Hermes Console) may cancel the turn cross-thread.
-            with bind_subagent_parent(self), scoped_runtime_main({}), track_in_interrupt_scope(self):
+            with bind_subagent_parent(self), scoped_runtime_main({}):
                 try:
                     if lease is not None:
                         lease.start()
@@ -136,7 +126,6 @@ class TurnFacadeMixin:
                         persist_user_display_kind=persist_user_display_kind,
                         persist_user_display_metadata=persist_user_display_metadata,
                         persist_user_platform_id=persist_user_platform_id, moa_config=moa_config,
-                        turn_author=turn_author,
                     )
                 finally:
                     # Post-loop relay/task finalization must not receive a late refresh interrupt;

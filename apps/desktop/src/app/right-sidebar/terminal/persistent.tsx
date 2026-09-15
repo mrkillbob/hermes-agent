@@ -210,7 +210,7 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
             scheduleMeasure('ancestor-mutation')
           })
 
-    pauseController = createRendererLoopPauseController(handleVisibilityChange, { pauseWhenUnfocused: true })
+    pauseController = createRendererLoopPauseController(handleVisibilityChange)
 
     if (measure('initial')) {
       scheduleMeasure('settle')

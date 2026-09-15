@@ -100,15 +100,13 @@ export interface GatewayFileRequestPaths {
 
 export function gatewayFileRequestPaths(
   filePath: string,
-  scopePath: (requestPath: string) => string,
-  sessionId?: string
+  scopePath: (requestPath: string) => string
 ): GatewayFileRequestPaths {
   const encodedPath = encodeURIComponent(filePath)
-  const session = sessionId === undefined ? '' : `&session_id=${encodeURIComponent(sessionId)}`
 
   return {
-    dataUrl: scopePath(`/api/fs/read-data-url?path=${encodedPath}${session}`),
-    download: scopePath(`/api/fs/download?path=${encodedPath}${session}`)
+    dataUrl: scopePath(`/api/fs/read-data-url?path=${encodedPath}`),
+    download: scopePath(`/api/fs/download?path=${encodedPath}`)
   }
 }
 
@@ -331,9 +329,23 @@ export function filenameFromContentDisposition(value: unknown): string {
   }
 }
 
-// Preserve file URIs: only the gateway knows its native drive/UNC semantics.
+// Normalize a gateway file path that may arrive as a bare path or a file:// URL.
 export function gatewayFilePath(rawPath: unknown): string {
-  return String(rawPath || '').trim()
+  const value = String(rawPath || '').trim()
+
+  if (!value) {
+    return ''
+  }
+
+  if (!/^file:/i.test(value)) {
+    return value
+  }
+
+  try {
+    return decodeURIComponent(new URL(value).pathname)
+  } catch {
+    return value.replace(/^file:\/\//i, '')
+  }
 }
 
 // True when an error thrown by a transport wrapper represents an HTTP 404, used

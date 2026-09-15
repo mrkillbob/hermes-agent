@@ -75,12 +75,7 @@ def get_provider_profile(name: str) -> ProviderProfile | None:
     if not _discovered:
         _discover_providers()
     canonical = _ALIASES.get(name, name)
-    profile = _REGISTRY.get(canonical)
-    # Named custom routes share the generic wire policy unless a plugin
-    # explicitly registered that route. Other names retain exact lookup.
-    if profile is None and isinstance(name, str) and name.lower().startswith("custom:"):
-        profile = _REGISTRY.get("custom")
-    return profile
+    return _REGISTRY.get(canonical)
 
 
 def list_providers() -> list[ProviderProfile]:

@@ -28,15 +28,7 @@ logger = logging.getLogger(__name__)
 
 _MEMORY_PLUGINS_DIR = Path(__file__).parent
 ENTRY_POINTS_GROUP = "hermes_agent.memory_providers"
-# Per Hermes home (plugin managers are per home too): pruning under one multiplexed profile must
-# only retract that profile's provider skills, never a sibling profile's.
-_REGISTERED_MEMORY_PROVIDER_SKILLS: dict[str, dict[str, Path]] = {}
-
-
-def _registered_skills_for_active_home() -> dict[str, Path]:
-    from hermes_constants import hermes_home_key
-
-    return _REGISTERED_MEMORY_PROVIDER_SKILLS.setdefault(hermes_home_key(), {})
+_REGISTERED_MEMORY_PROVIDER_SKILLS: dict[str, Path] = {}
 
 # Synthetic parent package so user-installed providers don't collide with bundled ones.
 _USER_NAMESPACE = "_hermes_user_memory"
@@ -338,7 +330,7 @@ class _ProviderCollector:
 
             registered_path = get_plugin_manager().find_plugin_skill(qualified_name)
             if registered_path is not None:
-                _registered_skills_for_active_home()[qualified_name] = registered_path
+                _REGISTERED_MEMORY_PROVIDER_SKILLS[qualified_name] = registered_path
         except Exception as exc:
             logger.debug("Memory provider '%s' failed to register skill: %s", self.name, exc)
 
@@ -391,13 +383,12 @@ def _prune_inactive_memory_provider_skills(active_provider: Optional[str] = None
     from hermes_cli.plugins import get_plugin_manager
 
     manager = get_plugin_manager()
-    registered = _registered_skills_for_active_home()
-    for qualified_name, registered_path in list(registered.items()):
+    for qualified_name, registered_path in list(_REGISTERED_MEMORY_PROVIDER_SKILLS.items()):
         if qualified_name.partition(":")[0] == active_provider:
             continue
         if manager.find_plugin_skill(qualified_name) == registered_path:
             manager.remove_plugin_skill(qualified_name)
-        registered.pop(qualified_name, None)
+        _REGISTERED_MEMORY_PROVIDER_SKILLS.pop(qualified_name, None)
 
 
 def discover_plugin_cli_commands() -> List[dict]:

@@ -135,11 +135,6 @@ const config: Config = {
           position: 'left',
         },
         {
-          to: '/plugins',
-          label: 'Plugins',
-          position: 'left',
-        },
-        {
           href: 'https://hermes-agent.nousresearch.com/',
           label: 'Download',
           position: 'left',

@@ -172,13 +172,13 @@ describe('PetSprite RAF scheduling', () => {
     expect(raf.request).toHaveBeenCalledTimes(2)
   })
 
-  it('keeps animating while unfocused and leaves no work after unmount', () => {
+  it('suspends while unfocused, resumes on focus, and leaves no work after unmount', () => {
     const raf = installRaf()
 
     mount.render(<PetSprite info={INFO} />)
 
     act(() => window.dispatchEvent(new Event('blur')))
-    expect(raf.pending()).toBe(1)
+    expect(raf.pending()).toBe(0)
 
     act(() => window.dispatchEvent(new Event('focus')))
     expect(raf.pending()).toBe(1)

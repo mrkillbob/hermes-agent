@@ -23,7 +23,7 @@ import {
   startMockServer,
   VERIFICATION_STOP_TEXT,
   VERIFICATION_STOP_TRIGGER,
-} from '../../../tests-js/scripts/mock-server'
+} from './mock-server'
 import { RealSessionBuilder } from './real-session-builder'
 import { expect, test } from './test'
 

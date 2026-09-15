@@ -6,13 +6,11 @@ import { chatMessageText, collectUnspokenTurnSpeech } from '@/lib/chat-messages'
 import { triggerHaptic } from '@/lib/haptics'
 import { adoptSpokenReplySession, markAssistantIdSpoken, resolveSpokenReply } from '@/lib/spoken-reply'
 import { CONVERSATION_LEASE, READ_ALOUD_LEASE, syncTtsLease } from '@/lib/tts-lease'
-import { toLiveHistory } from '@/lib/voice-live'
 import { clearWakeIndicator, syncWakeIndicatorWithVoice } from '@/lib/wake-indicator'
 import { $voiceConversationStartRequest, takeVoiceConversationStart } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import { $gateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
-import { $voiceLiveStatus, refreshVoiceLiveStatus, selectedVoiceChatMode } from '@/store/voice-live'
 import { $autoSpeakReplies, $voiceStopPhrase, setAutoSpeakReplies } from '@/store/voice-prefs'
 import { resumeWakeAfterVoice } from '@/store/wake-word'
 
@@ -23,7 +21,6 @@ import type { ChatBarProps } from '../types'
 
 import { useAutoSpeakReplies } from './use-auto-speak-replies'
 import { useVoiceConversation } from './use-voice-conversation'
-import { useVoiceLiveConversation } from './use-voice-live-conversation'
 import { useVoiceRecorder } from './use-voice-recorder'
 
 interface UseComposerVoiceArgs {
@@ -67,9 +64,6 @@ export function useComposerVoice({
   // A tile's composer speaks ITS transcript, not the primary chat's.
   const { $messages } = useComposerScope()
   const [voiceConversationActive, setVoiceConversationActive] = useState(false)
-  // Engine selection is latched at conversation START (a Settings change
-  // applies to the next conversation, never mid-call).
-  const [liveEngineActive, setLiveEngineActive] = useState(false)
   const ownsWakeIndicatorRef = useRef(false)
   const previousSessionIdRef = useRef(sessionId)
   const voiceStartRequest = useStore($voiceConversationStartRequest)
@@ -141,32 +135,6 @@ export function useComposerVoice({
     await onSubmit(text)
   }
 
-  /** A GPT-Live delegation → Hermes turn. The bubble and the persisted row are
-   *  what the user said; the transcript window rides the model input only. */
-  const submitLiveDelegation = async (text: string, voiceContext: string) => {
-    triggerHaptic('submit')
-    resetBrowseState(sessionId)
-    clearDraft()
-    await onSubmit(text, { surface: 'voice-live', voiceContext })
-  }
-
-  /** Recent text turns of this chat, as GPT-Live startup history. */
-  const seedLiveHistory = () =>
-    toLiveHistory(
-      $messages
-        .get()
-        .filter(m => !m.hidden && (m.role === 'user' || m.role === 'assistant'))
-        .map(m => ({ role: m.role as 'assistant' | 'user', text: chatMessageText(m) }))
-    )
-
-  /** The tool Hermes is running right now, for quiet progress in the voice. */
-  const activeToolLabel = () => {
-    const last = $messages.get().findLast(m => m.role === 'assistant' && !m.hidden)
-    const running = last?.parts.findLast(part => part.type === 'tool-call' && part.result === undefined)
-
-    return running && running.type === 'tool-call' ? running.toolName : null
-  }
-
   const wakePausedRef = useRef(false)
   // Resolves once the in-flight wake.pause round-trip completes (mic released by
   // the wake listener). The conversation awaits this before opening its own mic
@@ -175,10 +143,10 @@ export function useComposerVoice({
   // fail and the conversation never starts listening.
   const wakePauseBarrierRef = useRef<Promise<void> | null>(null)
 
-  const chainedConversation = useVoiceConversation({
+  const conversation = useVoiceConversation({
     busy,
     consumePendingResponse,
-    enabled: voiceConversationActive && !liveEngineActive,
+    enabled: voiceConversationActive,
     onFatalError: () => setVoiceConversationActive(false),
     // Speaking over the model mid-generation interrupts the in-flight turn —
     // the same seam as the Stop button — so the interjection becomes the next
@@ -196,53 +164,6 @@ export function useComposerVoice({
     // to finish releasing the capture device (see wakePauseBarrierRef).
     beforeMicOpen: () => wakePauseBarrierRef.current ?? undefined
   })
-
-  const liveConversation = useVoiceLiveConversation({
-    activeToolLabel,
-    beforeMicOpen: () => wakePauseBarrierRef.current ?? undefined,
-    busy,
-    consumePendingResponse,
-    enabled: voiceConversationActive && liveEngineActive,
-    onFatalError: () => setVoiceConversationActive(false),
-    onInterrupt,
-    onStopWord: () => setVoiceConversationActive(false),
-    onSubmit: submitLiveDelegation,
-    pendingResponse: pendingTurnResponse,
-    seedHistory: seedLiveHistory
-  })
-
-  const conversation = liveEngineActive ? liveConversation : chainedConversation
-
-  /** Turn the conversation on with the engine `voice.voice_chat_mode` selects,
-   *  decided in the same state batch so the other engine never sees a frame of
-   *  `enabled`. gpt-live selected but not startable (no OpenAI key on the
-   *  gateway) falls back to chained with a notice rather than a dead button. */
-  const activateConversation = useCallback(() => {
-    const status = $voiceLiveStatus.get()
-    let live = false
-
-    if (selectedVoiceChatMode(status) === 'gpt-live') {
-      if (status?.available) {
-        live = true
-      } else {
-        notify({
-          id: 'voice-live-unavailable',
-          kind: 'warning',
-          message: t.notifications.voice.liveUnavailable(status?.reason ?? 'not configured')
-        })
-      }
-    }
-
-    setLiveEngineActive(live)
-    setVoiceConversationActive(true)
-  }, [t])
-
-  useEffect(() => {
-    if (!voiceConversationActive) {
-      // Prefetch so the first press picks the right engine without a round trip.
-      void refreshVoiceLiveStatus().catch(() => undefined)
-    }
-  }, [voiceConversationActive])
 
   // eslint-disable-next-line no-restricted-syntax -- ownership token used only by unmount cleanup
   useEffect(() => {
@@ -276,9 +197,9 @@ export function useComposerVoice({
       setVoiceConversationActive(false)
       void conversation.end()
     } else {
-      activateConversation()
+      setVoiceConversationActive(true)
     }
-  }, [activateConversation, conversation, disabled, voiceConversationActive])
+  }, [conversation, disabled, voiceConversationActive])
 
   useEffect(
     () => onComposerVoiceToggleRequest(toggled => toggled === target && toggleVoiceConversation()),
@@ -287,9 +208,9 @@ export function useComposerVoice({
 
   useEffect(() => {
     if (target === 'main' && !disabled && takeVoiceConversationStart(voiceStartRequest) && !voiceConversationActive) {
-      activateConversation()
+      setVoiceConversationActive(true)
     }
-  }, [activateConversation, disabled, target, voiceConversationActive, voiceStartRequest])
+  }, [disabled, target, voiceConversationActive, voiceStartRequest])
 
   const resumeWakeIfPaused = useCallback(() => {
     if (!wakePausedRef.current) {
@@ -358,8 +279,8 @@ export function useComposerVoice({
   // lease, and the backend unloads resident local models once no surface holds
   // one. Fire-and-forget — the toggle never waits on or fails from this.
   useEffect(() => {
-    void syncTtsLease(CONVERSATION_LEASE, voiceConversationActive && !liveEngineActive)
-  }, [liveEngineActive, voiceConversationActive])
+    void syncTtsLease(CONVERSATION_LEASE, voiceConversationActive)
+  }, [voiceConversationActive])
 
   useEffect(() => () => void syncTtsLease(CONVERSATION_LEASE, false), [])
 
@@ -374,7 +295,7 @@ export function useComposerVoice({
 
   // Explicit start/end for the on-screen conversation controls (the hotkey uses
   // the gated toggle above).
-  const startConversation = activateConversation
+  const startConversation = useCallback(() => setVoiceConversationActive(true), [])
 
   const endConversation = useCallback(() => {
     setVoiceConversationActive(false)

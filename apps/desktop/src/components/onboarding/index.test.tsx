@@ -17,8 +17,7 @@ function setProviders(providers: OAuthProvider[]) {
     requested: false,
     firstRunSkipped: false,
     manual: false,
-    localEndpoint: false,
-    freeTierReady: false
+    localEndpoint: false
   } satisfies DesktopOnboardingState)
 }
 
@@ -42,8 +41,7 @@ afterEach(() => {
     requested: false,
     firstRunSkipped: false,
     manual: false,
-    localEndpoint: false,
-    freeTierReady: false
+    localEndpoint: false
   })
 })
 

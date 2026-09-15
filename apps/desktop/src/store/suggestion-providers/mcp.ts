@@ -1,5 +1,12 @@
-import { capabilityScoped } from '@/api/client'
-import { addMcpServer, getMcpCatalog, listMcpServers, removeMcpServer } from '@/hermes'
+import {
+  addMcpServer,
+  authMcpServer,
+  cancelMcpOAuthFlow,
+  getMcpCatalog,
+  getMcpOAuthFlow,
+  listMcpServers,
+  removeMcpServer
+} from '@/hermes'
 import { translateNow } from '@/i18n'
 import { completeMcpDesktopOAuth, McpOAuthCancelled } from '@/lib/mcp-dashboard-oauth'
 import { MCP_DIRECTORY } from '@/lib/mcp-directory'
@@ -183,22 +190,23 @@ export function matchSuggestions(text: string, index: KeywordEntry[]): McpMatch[
 }
 
 async function connect(known: SuggestibleServer, sessionId: string | null, cancelled: () => boolean): Promise<void> {
-  const oauthScope = capabilityScoped()
-
   try {
-    await addMcpServer({ name: known.server, url: known.url }, oauthScope)
+    await addMcpServer({ name: known.server, url: known.url })
 
     try {
       await completeMcpDesktopOAuth({
         serverName: known.server,
-        profile: oauthScope,
-        cancelled
+        start: authMcpServer,
+        status: getMcpOAuthFlow,
+        cancelled,
+        cancel: cancelMcpOAuthFlow,
+        openExternal: url => window.hermesDesktop.openExternal(url)
       })
     } catch (error) {
       // Decline/failure means "no server" — roll back the config write
       // rather than stranding an unauthorized entry (authoritative-write
       // rule). Best-effort; the primary error wins.
-      await removeMcpServer(known.server, oauthScope).catch(() => {})
+      await removeMcpServer(known.server).catch(() => {})
       throw error
     }
 

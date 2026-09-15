@@ -29,8 +29,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from utils import atomic_json_write, atomic_write_text
-
 logger = logging.getLogger(__name__)
 
 # Pinned: never auto-resolve "latest" — the YAML schema may change between releases.
@@ -579,15 +577,21 @@ def ensure_audit_log(audit_path: Path) -> None:
         ) from exc
 
 
-def write_proxy_config(config: Dict) -> Path:
-    """Serialize the config dict to ``<hermes_home>/proxy/proxy.yaml`` (safe_dump, no Python tags).
+def _write_state_file_atomic(state: Path, name: str, dump) -> Path:
+    """0600 temp file + atomic replace: the file holds proxy tokens; chmod-after-replace would be a world-readable TOCTOU window."""
+    tmp_path = state / f".{name}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        dump(f)
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, state / name)
+    return state / name
 
-    The file holds proxy tokens: written 0600 from creation, never at process umask."""
+
+def write_proxy_config(config: Dict) -> Path:
+    """Serialize the config dict to ``<hermes_home>/proxy/proxy.yaml`` (safe_dump, no Python tags)."""
     if (yaml := _yaml()) is None:
         raise RuntimeError("PyYAML is required to write the iron-proxy config but is not installed.")
-    path = _proxy_state_dir() / "proxy.yaml"
-    atomic_write_text(path, yaml.safe_dump(config, default_flow_style=False, sort_keys=False), mode=0o600)
-    return path
+    return _write_state_file_atomic(_proxy_state_dir(), "proxy.yaml", lambda f: yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False))
 
 
 def write_mappings(mappings: List[TokenMapping]) -> Path:
@@ -596,9 +600,7 @@ def write_mappings(mappings: List[TokenMapping]) -> Path:
         "proxy_token": m.proxy_token, "env_name": m.real_env_name, "upstream_hosts": list(m.upstream_hosts),
         "match_headers": list(m.match_headers), "alias_env_names": list(m.alias_env_names),
     } for m in mappings]}
-    path = _proxy_state_dir() / "mappings.json"
-    atomic_json_write(path, payload, mode=0o600)
-    return path
+    return _write_state_file_atomic(_proxy_state_dir(), "mappings.json", lambda f: json.dump(payload, f, indent=2))
 
 
 def load_mappings() -> List[TokenMapping]:

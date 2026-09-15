@@ -19,9 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import SendResult
-from gateway.platforms.event import MessageEvent
-from gateway.run import GatewayRunner
+from gateway.platforms.base import MessageEvent, SendResult
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 E2E_MESSAGE_SETTLE_DELAY = 0.3
@@ -166,11 +164,13 @@ def make_event(
     )
 
 
-def make_runner(platform: Platform, session_entry: SessionEntry = None) -> GatewayRunner:
+def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "GatewayRunner":
     """Create a GatewayRunner with mocked internals for e2e testing.
 
     Skips __init__ to avoid filesystem/network side effects.
     """
+    from gateway.run import GatewayRunner
+
     if session_entry is None:
         session_entry = make_session_entry(platform)
 

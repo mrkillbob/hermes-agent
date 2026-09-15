@@ -10,16 +10,7 @@ import type {
   SessionSearchResponse
 } from '@/types/hermes'
 
-import {
-  ambientOwnerConnectionId,
-  capabilityScoped,
-  connectionScoped,
-  getApiRequestConnection,
-  getApiRequestProfile,
-  hermesApi,
-  type ProfileScope,
-  profileScoped
-} from './client'
+import { capabilityScoped, getApiRequestConnection, hermesApi, type ProfileScope, profileScoped } from './client'
 
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
 
@@ -405,8 +396,7 @@ export function getSession(id: string, profile?: ProfileScope): Promise<SessionI
 export function getSessionMessages(
   id: string,
   profile?: ProfileScope,
-  page: { limit?: number; offset?: number; order?: 'latest' | 'oldest'; includeCompacted?: boolean } = {},
-  options: { passive?: boolean } = {}
+  page: { limit?: number; offset?: number; order?: 'latest' | 'oldest'; includeCompacted?: boolean } = {}
 ): Promise<SessionMessagesResponse> {
   const query = new URLSearchParams()
 
@@ -436,8 +426,7 @@ export function getSessionMessages(
 
   return hermesApi<SessionMessagesResponse>({
     ...sessionScope,
-    path: `/api/sessions/${encodeURIComponent(id)}/messages${suffix}`,
-    ...(options.passive ? { passive: true } : {})
+    path: `/api/sessions/${encodeURIComponent(id)}/messages${suffix}`
   })
 }
 
@@ -450,49 +439,23 @@ export function getSessionMessages(
  */
 export const LATEST_SESSION_MESSAGES_LIMIT = 120
 
-export function getLatestSessionMessages(
-  id: string,
-  profile?: ProfileScope,
-  options: { passive?: boolean } = {}
-): Promise<SessionMessagesResponse> {
-  // Key pagination by the effective request owner, not the caller's spelling
-  // (ambient, profile string, or explicit pin). Otherwise refreshes create
-  // duplicate tail entries and "Show earlier" cannot resolve the loaded tail.
-  // Capture before awaiting: the active gateway may change during the read.
-  const route = { ...connectionScoped(), ...sessionScoped(profile) }
-  // Only the lookup key is normalized — backfill replays `route` verbatim.
-  const ambientConnectionId = route.connectionId || ambientOwnerConnectionId()
-  const ambientProfile = getApiRequestProfile() || 'default'
-
+export function getLatestSessionMessages(id: string, profile?: ProfileScope): Promise<SessionMessagesResponse> {
   // includeCompacted: durable display history must include rows preserved by
   // in-place compaction (active=0, compacted=1); without them the transcript
   // silently ends at the compaction boundary and earlier turns are unreachable.
-  return getSessionMessages(
-    id,
-    profile,
-    {
-      limit: LATEST_SESSION_MESSAGES_LIMIT,
-      order: 'latest',
-      includeCompacted: true
-    },
-    options
-  ).then(page => {
+  return getSessionMessages(id, profile, {
+    limit: LATEST_SESSION_MESSAGES_LIMIT,
+    order: 'latest',
+    includeCompacted: true
+  }).then(page => {
     // Record whether the tail was truncated (page came back full) and where
     // the next older page starts, so "Show earlier" can backfill over REST
     // (app/chat/transcript-backfill). Keyed under both the requested id and
     // the resolved id — callers hold either.
-    // A backend that predates the `profile` field cannot name itself; its
-    // untagged read landed on the ambient profile.
-    const owner = {
-      ...route,
-      connectionId: ambientConnectionId,
-      profile: route.profile || page.profile || ambientProfile
-    }
-
-    recordTranscriptTail(id, page, route, owner)
+    recordTranscriptTail(id, page, profile)
 
     if (page.session_id && page.session_id !== id) {
-      recordTranscriptTail(page.session_id, page, route, owner)
+      recordTranscriptTail(page.session_id, page, profile)
     }
 
     return page

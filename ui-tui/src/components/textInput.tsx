@@ -782,7 +782,6 @@ export function TextInput({
   onSubmit,
   mask,
   mouseApiRef,
-  cursorSnapshotRef,
   voiceRecordKey = DEFAULT_VOICE_RECORD_KEY,
   placeholder = '',
   placeholderColor,
@@ -790,10 +789,7 @@ export function TextInput({
   color,
   focus = true
 }: TextInputProps) {
-  const [cur, setCur] = useState(() =>
-    cursorSnapshotRef?.current?.value === value ? cursorSnapshotRef.current.cursor : value.length
-  )
-
+  const [cur, setCur] = useState(value.length)
   const [sel, setSel] = useState<null | { end: number; start: number }>(null)
   const fwdDel = useFwdDelete(focus)
   const termFocus = useTerminalFocus()
@@ -926,7 +922,7 @@ export function TextInput({
     const ownEcho = self.current && value === vRef.current
     self.current = false
 
-    if (ownEcho || value === vRef.current) {
+    if (ownEcho) {
       return
     }
 
@@ -939,17 +935,6 @@ export function TextInput({
     undo.current = []
     redo.current = []
   }, [value])
-
-  // The composer unmounts while full-screen monitors own input. Keep its
-  // insertion point with the shell, not with transient steer/secret inputs.
-  useEffect(
-    () => () => {
-      if (cursorSnapshotRef) {
-        cursorSnapshotRef.current = { cursor: curRef.current, value: vRef.current }
-      }
-    },
-    [cursorSnapshotRef]
-  )
 
   useEffect(() => {
     if (!focus) {
@@ -1365,7 +1350,7 @@ export function TextInput({
       // actually get voice toggled instead of a paste (Copilot round-7
       // follow-up on #19835). The pass-through predicate is a no-op for
       // ordinary typing and plain paste when voice is unbound to 'v'.
-      if (event.keypress.name === 'f7' || shouldPassThroughToGlobalHandler(inp, k, voiceRecordKey)) {
+      if (shouldPassThroughToGlobalHandler(inp, k, voiceRecordKey)) {
         flushKeyBurst()
 
         return
@@ -1462,10 +1447,7 @@ export function TextInput({
         return swap(undo, redo)
       }
 
-      // Extended-key terminals (kitty CSI-u / modifyOtherKeys) deliver a shifted
-      // letter as its uppercase char, so Cmd+Shift+Z arrives as inp 'Z' — match
-      // case-insensitively like the copy/paste chords above.
-      if ((mod && inp === 'y') || (mod && k.shift && inp.toLowerCase() === 'z')) {
+      if ((mod && inp === 'y') || (mod && k.shift && inp === 'z')) {
         return swap(redo, undo)
       }
 
@@ -1792,18 +1774,12 @@ export interface PasteEvent {
   value: string
 }
 
-export interface InputCursorSnapshot {
-  cursor: number
-  value: string
-}
-
 interface TextInputProps {
   /** Hex/ansi256 tone for `/skill`, `@ref`, and `[[ token ]]` spans. */
   accentColor?: string
   /** Hex color for typed text (theme text); terminal default when omitted. */
   color?: string
   columns?: number
-  cursorSnapshotRef?: MutableRefObject<InputCursorSnapshot | null>
   focus?: boolean
   mask?: string
   mouseApiRef?: MutableRefObject<null | TextInputMouseApi>
@@ -1855,7 +1831,6 @@ export const shouldPassThroughToGlobalHandler = (
   (key.ctrl && input === 'c') ||
   (key.ctrl && input === 'x') ||
   (key.ctrl && input === 'o') ||
-  (key.ctrl && input === 't') ||
   key.tab ||
   (key.shift && key.tab) ||
   key.pageUp ||

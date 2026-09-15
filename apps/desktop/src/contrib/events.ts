@@ -6,9 +6,9 @@
  * listens.
  */
 
-import type { GatewayEvent } from '@hermes/shared'
+import type { RpcEvent } from '@/types/hermes'
 
-export type GatewayEventListener = (event: GatewayEvent) => void
+export type GatewayEventListener = (event: RpcEvent) => void
 
 const listeners = new Map<string, Set<GatewayEventListener>>()
 
@@ -28,7 +28,7 @@ export function onGatewayEvent(type: string, listener: GatewayEventListener): ()
 }
 
 /** Fan an event to subscribers (wiring-side; call before app dispatch). */
-export function emitGatewayEvent(event: GatewayEvent): void {
+export function emitGatewayEvent(event: RpcEvent): void {
   if (listeners.size === 0) {
     return
   }

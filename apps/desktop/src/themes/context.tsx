@@ -9,7 +9,6 @@
  * The two are persisted independently. Shift+X toggles light/dark.
  */
 
-import { ensureContrast, mix, parseColor } from '@hermes/shared/color'
 import { useStore } from '@nanostores/react'
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
@@ -21,7 +20,7 @@ import { setAppearance } from '@/store/translucency'
 
 import { $accentOverride } from './accent-override'
 import { $backendThemes, $pendingSkinApply } from './backend-sync'
-import { harmonize, readableInk } from './color'
+import { ensureContrast, harmonize, hexToRgb, mix, readableOn } from './color'
 import { BUILTIN_THEME_LIST, DEFAULT_SKIN_NAME, DEFAULT_TYPOGRAPHY, nousTheme } from './presets'
 import { retintTheme } from './retint'
 import type { DesktopTheme, DesktopThemeColors } from './types'
@@ -103,8 +102,8 @@ const readBootProfileKey = () => normalizeProfileKey(storedString(LAST_PROFILE_K
 const rememberActiveProfileKey = (profile: string) => persistString(LAST_PROFILE_KEY, profile)
 
 // ─── Color math (for synthesised light variants of dark-only skins) ────────
-// mix / ensureContrast live in @hermes/shared/color (shared with the TUI);
-// readableInk in ./color pins the desktop's near-black ink.
+// hexToRgb / mix / readableOn live in ./color so the VS Code converter shares
+// the exact same math.
 
 function synthLightColors(seed: DesktopTheme): DesktopThemeColors {
   const accent = seed.colors.ring || seed.colors.primary
@@ -123,7 +122,7 @@ function synthLightColors(seed: DesktopTheme): DesktopThemeColors {
     popover: '#ffffff',
     popoverForeground: '#161616',
     primary: accent,
-    primaryForeground: readableInk(accent),
+    primaryForeground: readableOn(accent),
     secondary: soft,
     secondaryForeground: mix('#2a2a2a', accent, 0.34),
     accent: soft,
@@ -132,7 +131,7 @@ function synthLightColors(seed: DesktopTheme): DesktopThemeColors {
     input: mix('#e2e2e6', accent, 0.18),
     ring: accent,
     midground,
-    midgroundForeground: readableInk(midground),
+    midgroundForeground: readableOn(midground),
     destructive: '#b94a3a',
     destructiveForeground: '#ffffff',
     sidebarBackground: mix('#fafafa', accent, 0.05),
@@ -171,7 +170,7 @@ function deriveTheme(skinName: string, mode: 'light' | 'dark'): DesktopTheme {
  * the actual background luminance.
  */
 function renderedModeFor(colors: DesktopThemeColors, mode: 'light' | 'dark'): 'light' | 'dark' {
-  const rgb = parseColor(colors.background)
+  const rgb = hexToRgb(colors.background)
 
   if (!rgb) {
     return mode
@@ -254,7 +253,7 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark') {
     '--dt-input': c.input,
     '--dt-ring': c.ring,
     '--dt-muted': c.muted,
-    '--dt-midground-foreground': c.midgroundForeground ?? readableInk(midground),
+    '--dt-midground-foreground': c.midgroundForeground ?? readableOn(midground),
     // A LOUD fill of the brand colour, for the rare surface that has to read as
     // the app speaking rather than as chrome. `primary` alone can't do that job:
     // a pale accent (imported VS Code themes love a pastel pink) is a perfectly

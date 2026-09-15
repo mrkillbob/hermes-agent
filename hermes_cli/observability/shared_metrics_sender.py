@@ -20,7 +20,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from agent.retry_utils import parse_retry_after_seconds
 from hermes_cli.sqlite_util import write_txn
 
 from .shared_metrics import _isoformat, _utc_now
@@ -119,11 +118,14 @@ def _post(endpoint: str, payload: bytes, *, timeout: int) -> _Response:
 
 
 def _retry_after_seconds(value: str | None, default: int) -> int:
-    seconds = parse_retry_after_seconds(value)
-    if seconds is None:
+    if not value:
         return default
-    # Clamp so a bogus value cannot park a package for years, and never go below one second.
-    return max(1, min(int(seconds), 86_400))
+    try:
+        # Contract sends seconds. Clamp so a bogus value cannot park a package for
+        # years, and never go below one second.
+        return max(1, min(int(float(value)), 86_400))
+    except (TypeError, ValueError):
+        return default
 
 
 def reconcile_send_consent(

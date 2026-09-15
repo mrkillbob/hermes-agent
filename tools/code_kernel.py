@@ -241,14 +241,15 @@ class CellAuthority:
         self.task_id = task_id
         self.ctx = contextvars.copy_context()
         self.active = True
-        # ((getter, setter), captured value) per thread-local prompt callback (approval, sudo, vault unlock…)
-        self._callbacks: list = []
+        self._api = None  # (get_approval, get_sudo, set_approval, set_sudo)
+        self._callbacks = (None, None)
         try:
             from tools.thread_context import _callback_api
-            self._callbacks = [(pair, pair[0]()) for pair in _callback_api()]
+            self._api = _callback_api()
+            self._callbacks = (self._api[0](), self._api[1]())
         except Exception:
             # Fail-closed like propagate_context_to_thread: no callbacks → dangerous approvals deny.
-            self._callbacks = []
+            self._api = None
 
     def retire(self) -> None:
         self.active = False
@@ -264,11 +265,12 @@ class CellAuthority:
     def _invoke(self, tool_name: str, tool_args: dict) -> str:
         from model_tools import handle_function_call
         previous = None
-        if self._callbacks:
+        if self._api is not None:
+            get_approval, get_sudo, set_approval, set_sudo = self._api
             try:
-                previous = [(setter, getter()) for (getter, setter), _cb in self._callbacks]
-                for (_getter, setter), cb in self._callbacks:
-                    setter(cb)
+                previous = (get_approval(), get_sudo())
+                set_approval(self._callbacks[0])
+                set_sudo(self._callbacks[1])
             except Exception:
                 previous = None
         try:
@@ -276,8 +278,8 @@ class CellAuthority:
         finally:
             if previous is not None:
                 try:
-                    for setter, cb in previous:
-                        setter(cb)
+                    set_approval(previous[0])
+                    set_sudo(previous[1])
                 except Exception:
                     pass
 

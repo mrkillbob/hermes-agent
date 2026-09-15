@@ -324,6 +324,7 @@ export const SessionControlGoalSection = memo(function SessionControlGoalSection
                   </DropdownMenuContent>
                 </DropdownMenu>
               }
+              defaultCollapsed={false}
               icon={<Codicon className={iconClass} name="target" size="0.8rem" />}
               label={headerLabel}
             >

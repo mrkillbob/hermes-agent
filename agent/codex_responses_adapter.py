@@ -43,7 +43,6 @@ _FULLWIDTH_PIPE = "\uff5c"
 
 _TEXT_PART_TYPES = {"text", "input_text", "output_text"}
 _IMAGE_PART_TYPES = {"image_url", "input_image"}
-_VIDEO_PART_TYPES = {"video", "video_url", "input_video"}
 _OUTPUT_TEXT_TYPES = {"output_text", "text"}
 _ASSISTANT_IMAGE_PLACEHOLDER = "[Assistant image omitted during replay]"
 _INCOMPLETE_STATUSES = {"queued", "in_progress", "incomplete"}
@@ -182,13 +181,7 @@ def _input_image_part(part: Dict[str, Any], role: str = "user", *, keep_empty_ur
 def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> List[Dict[str, Any]]:
     """Chat-style multimodal content → Responses API input parts ([] if not a list). Text is
     ``input_text`` (user) / ``output_text`` (assistant) — the API rejects the wrong type per role;
-    ``input_image`` is only legal on user messages (see :func:`_input_image_part`). Unsupported
-    video parts fail closed instead of silently turning a video request into a text-only request."""
-    for part in _as_list(content):
-        if isinstance(part, dict) and (ptype := _part_type(part)) in _VIDEO_PART_TYPES:
-            raise ValueError(
-                f"Codex Responses does not support {ptype} input; use a video-capable provider."
-            )
+    ``input_image`` is only legal on user messages (see :func:`_input_image_part`)."""
     text_type = _text_type_for(role)
     converted: List[Dict[str, Any]] = []
     for kind, payload in _iter_content_parts(_as_list(content)):

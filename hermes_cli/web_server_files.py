@@ -21,7 +21,7 @@ class ManagedFilesPolicy:
     can_change_path: bool
 
 
-def _fs_path(raw_path: str, *, cwd: str | None = None) -> Path:
+def _fs_path(raw_path: str) -> Path:
     raw = str(raw_path or "").strip()
     if not raw:
         raise HTTPException(status_code=400, detail="Path is required")
@@ -30,18 +30,12 @@ def _fs_path(raw_path: str, *, cwd: str | None = None) -> Path:
     try:
         if raw.lower().startswith("file:"):
             parsed = urllib.parse.urlparse(raw)
-            uri_path = parsed.path
-            if parsed.netloc and parsed.netloc.lower() != "localhost":
-                if os.name != "nt":
-                    raise ValueError
-                uri_path = f"//{parsed.netloc}{uri_path}"
-            raw = urllib.request.url2pathname(uri_path)
+            if parsed.netloc and parsed.netloc not in {"", "localhost"}:
+                raise ValueError
+            raw = urllib.request.url2pathname(parsed.path)
         candidate = Path(raw).expanduser()
         if not candidate.is_absolute():
-            base = Path(cwd).expanduser() if cwd is not None else Path.cwd()
-            if not base.is_absolute():
-                raise HTTPException(status_code=400, detail="Session working directory is unavailable")
-            candidate = base / candidate
+            candidate = Path.cwd() / candidate
         return candidate.resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid path")

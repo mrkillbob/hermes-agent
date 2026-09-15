@@ -26,7 +26,6 @@ Prints one path per line (POSIX separators, repo-relative), sorted.
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 from pathlib import Path
@@ -44,20 +43,14 @@ def find_marked_files(marker: str, root: Path) -> list[Path]:
     """
     pattern = re.compile(rf"\b{re.escape(marker)}\b")
     hits: list[Path] = []
-    # os.walk, not Path.rglob: rglob raises FileNotFoundError when a directory
-    # (a sibling job's __pycache__) vanishes mid-scan; os.walk skips it.
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for fname in filenames:
-            if not (fname.startswith("test_") and fname.endswith(".py")):
-                continue
-            path = Path(dirpath) / fname
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if pattern.search(text):
-                hits.append(path)
-    return sorted(hits)
+    for path in sorted(root.rglob("test_*.py")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if pattern.search(text):
+            hits.append(path)
+    return hits
 
 
 def main(argv: list[str]) -> int:

@@ -335,5 +335,8 @@ def check_browser_vision_requirements() -> bool:
     """
     if not check_browser_requirements():
         return False
-    from tools.vision_tools import check_vision_requirements
+    try:
+        from tools.vision_tools import check_vision_requirements
+    except ImportError:
+        return False
     return check_vision_requirements()

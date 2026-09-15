@@ -425,7 +425,7 @@ def test_wait_notice_omits_reconnect_when_all_deadlines_are_non_finite(
 
 
 def test_moa_heartbeat_survives_infinite_stale_timeout(monkeypatch):
-    """A MoA silence notice must leave an unbounded healthy call running."""
+    """The full 100-poll MoA heartbeat must leave a healthy call running."""
     from agent import chat_completion_helpers as h
 
     notices: list[str] = []
@@ -441,11 +441,8 @@ def test_moa_heartbeat_survives_infinite_stale_timeout(monkeypatch):
         _emit_wait_notice=notices.append,
     )
 
-    now = [1000.0]
-    monkeypatch.setattr(h.time, "time", lambda: now[0])
-
     class HeartbeatThread:
-        """Keep the synthetic worker alive through the first silence notice."""
+        """Keep the synthetic worker alive through one heartbeat."""
 
         def __init__(self, *, target, daemon):
             self._polls = 0
@@ -455,11 +452,11 @@ def test_moa_heartbeat_survives_infinite_stale_timeout(monkeypatch):
             pass
 
         def join(self, timeout=None):
-            now[0] = round(now[0] + timeout, 1)
+            pass
 
         def is_alive(self):
             self._polls += 1
-            if self._polls == 201:
+            if self._polls == 101:
                 self._target()
                 return False
             return True
@@ -495,9 +492,6 @@ def test_wait_notice_formatting_error_does_not_abort_request(monkeypatch):
         _emit_wait_notice=lambda _message: None,
     )
 
-    now = [1000.0]
-    monkeypatch.setattr(h.time, "time", lambda: now[0])
-
     class HeartbeatThread:
         def __init__(self, *, target, daemon):
             self._polls = 0
@@ -507,11 +501,11 @@ def test_wait_notice_formatting_error_does_not_abort_request(monkeypatch):
             pass
 
         def join(self, timeout=None):
-            now[0] = round(now[0] + timeout, 1)
+            pass
 
         def is_alive(self):
             self._polls += 1
-            if self._polls == 201:
+            if self._polls == 101:
                 self._target()
                 return False
             return True

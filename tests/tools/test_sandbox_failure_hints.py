@@ -16,11 +16,11 @@ class TestSandboxFailureHint:
         assert "read_file" in h and "terminal" in h
         assert "normal tool call" in h
 
-    def test_helper_import_failure_reports_module_skew(self):
+    def test_builtin_helper_import_redirects(self):
         err = "ImportError: cannot import name 'json_parse' from 'hermes_tools'"
         h = _sandbox_failure_hint(err)
-        assert "from hermes_tools import json_parse" in h
-        assert "sys.path" in h
+        assert "BUILT-IN" in h
+        assert "no import" in h.lower()
 
     def test_missing_third_party_module(self):
         err = "ModuleNotFoundError: No module named 'matplotlib'"

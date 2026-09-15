@@ -19,17 +19,28 @@ import tempfile
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Optional
 
-import copy
-
 from hermes_constants import display_hermes_home
 
 logger = logging.getLogger(__name__)
 
 
+def get_env_value(name, default=None):
+    """Read env values through the live config module (resolved per call so test patches apply)."""
+    try:
+        from hermes_cli.config import get_env_value as _get_env_value
+    except ImportError:
+        return os.getenv(name, default)
+    value = _get_env_value(name)
+    return default if value is None else value
+
+
 def _resolve_provider_key(env_var: str, provider_id: str) -> str:
     """Resolve a TTS provider API key via the shared voice-key resolver (config > env/.env > pool)."""
-    from tools.tool_backend_helpers import resolve_provider_secret
-    return resolve_provider_secret(env_var, provider_id)
+    try:
+        from tools.tool_backend_helpers import resolve_provider_secret
+    except ImportError:  # pragma: no cover — helpers are in-repo
+        return str(get_env_value(env_var) or "").strip()
+    return resolve_provider_secret(env_var, provider_id, env_getter=get_env_value)
 
 
 from tools.tts_command_provider import (
@@ -511,19 +522,6 @@ def check_tts_requirements() -> bool:
 # --- Registry ---
 from tools.registry import registry, tool_error
 
-def _output_path_description(home: str) -> str:
-    return f"Optional custom file path to save the audio. Defaults to {home}/audio_cache/<timestamp>.mp3"
-
-
-def _tts_schema_overrides() -> dict:
-    """Rebuild the ``output_path`` default hint from the ACTIVE profile at every get_definitions():
-    the multiplexed gateway serves every profile from one process, so a path baked in at import
-    would name the launch profile's home for everyone else (#95685)."""
-    params = copy.deepcopy(TTS_SCHEMA["parameters"])
-    params["properties"]["output_path"]["description"] = _output_path_description(display_hermes_home())
-    return {"parameters": params}
-
-
 TTS_SCHEMA = {
     "name": "text_to_speech",
     "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio. Compatible providers render as a voice bubble on Telegram; otherwise audio is sent as a regular attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
@@ -536,7 +534,7 @@ TTS_SCHEMA = {
             },
             "output_path": {
                 "type": "string",
-                "description": _output_path_description("the profile HERMES_HOME")
+                "description": f"Optional custom file path to save the audio. Defaults to {display_hermes_home()}/audio_cache/<timestamp>.mp3"
             },
             "speed": {
                 "type": "number",
@@ -574,8 +572,7 @@ registry.register(
         text=args.get("text", ""),
         **{k: args.get(k) for k in ("output_path", "speed", "instructions", "provider")}),
     check_fn=check_tts_requirements,
-    emoji="🔊",
-    dynamic_schema_overrides=_tts_schema_overrides)
+    emoji="🔊")
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

@@ -87,18 +87,19 @@ def _scrub_config_yaml_mirrors(old_value: str, new_value: str | None) -> List[st
     """
     if not old_value:
         return []
-    from utils import atomic_yaml_write
+    from utils import atomic_yaml_write, fast_safe_load
 
-    from hermes_cli.config import get_config_path, read_user_config_raw, require_readable_config_before_write
+    from hermes_cli.config import get_config_path, require_readable_config_before_write
 
     config_path = get_config_path()
     if not config_path.exists():
         return []
     try:
-        user_config = read_user_config_raw(config_path)
+        with open(config_path, encoding="utf-8") as f:
+            user_config = fast_safe_load(f) or {}
     except Exception:
         return []
-    if not user_config:
+    if not isinstance(user_config, dict):
         return []
 
     touched: List[str] = []

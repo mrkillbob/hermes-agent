@@ -24,7 +24,6 @@ import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { CircleLetterA, Loader2, MessageQuestion } from '@/lib/icons'
-import { isSubmitEnter } from '@/lib/ime'
 import { visibleClarifyCard } from '@/lib/keybinds/composer-focus-keys'
 import { cn } from '@/lib/utils'
 import {
@@ -41,7 +40,6 @@ import { $gateway } from '@/store/gateway'
 import { notifyError } from '@/store/notifications'
 import { requestForOwnedSession } from '@/store/session-states'
 
-import { handleClarifySubmitShortcut } from './clarify-submit-shortcut'
 import { selectMessageRunning } from './tool/fallback-model'
 import { parseMaybeObject } from './tool/fallback-model/format'
 
@@ -593,7 +591,11 @@ function ClarifyToolSinglePending({
 
   const handleTextareaKey = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (isSubmitEnter(event) && !event.shiftKey) {
+      if (event.nativeEvent.isComposing) {
+        return
+      }
+
+      if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault()
         submitAnswer()
       }
@@ -730,7 +732,6 @@ function ClarifyToolSinglePending({
     <form
       className="my-1.5 grid gap-4"
       data-clarify-choices={hasChoices ? choices.length : undefined}
-      onKeyDownCapture={handleClarifySubmitShortcut}
       onSubmit={handleSubmit}
       ref={formRef}
     >
@@ -1131,12 +1132,7 @@ function ClarifyToolBatchPending({ onAnswered, request }: { onAnswered: () => vo
   }
 
   return (
-    <form
-      className="my-1.5 grid gap-4"
-      data-clarify-batch={questions.length}
-      onKeyDownCapture={handleClarifySubmitShortcut}
-      onSubmit={handleSubmit}
-    >
+    <form className="my-1.5 grid gap-4" data-clarify-batch={questions.length} onSubmit={handleSubmit}>
       <ClarifyShell className="grid gap-3">
         <div className="flex items-start gap-2">
           <span className="flex-1 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">

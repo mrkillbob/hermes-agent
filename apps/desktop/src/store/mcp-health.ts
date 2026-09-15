@@ -1,10 +1,8 @@
 /**
  * Background MCP health checker. On gateway connect — and every 30 minutes
  * after — probe the ACTIVE profile's enabled HTTP/SSE MCP servers and nudge
- * the user when one is in needs-auth (expired OAuth token) or error: on the
- * transition, then at most once a day while it stays broken, with a
- * one-click path to the MCP page's Authenticate button and a Disable button
- * for servers the user no longer wants.
+ * the user when one transitions into needs-auth (expired OAuth token) or
+ * error, with a one-click path to the MCP page's Authenticate button.
  *
  * Scope is deliberate: stdio servers are NEVER probed here. Probing a stdio
  * server SPAWNS a local process, so a background timer would silently launch
@@ -14,12 +12,11 @@
  * the other just learned.
  */
 
-import { getHermesConfigRecord, type McpTestResult, setMcpServerEnabled, testMcpServer } from '@/hermes'
+import { getHermesConfigRecord, type McpTestResult, testMcpServer } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { classifyProbe, freshProbe, probeCache, probeKey } from '@/lib/mcp-probe-cache'
 import { getServers } from '@/lib/mcp-servers'
-import { persistString, storedString } from '@/lib/storage'
-import { notify, notifyError } from '@/store/notifications'
+import { notify } from '@/store/notifications'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { $gatewayState } from '@/store/session'
 
@@ -31,61 +28,29 @@ const CHECK_INTERVAL_MS = 30 * 60_000
 export type McpHealthStatus = 'error' | 'needs-auth' | 'ok'
 
 /**
- * The notify decision, as a pure state machine: nudge on a TRANSITION into a
- * bad state — never for ok. An unknown previous state (first sweep of the
- * session) counts as a transition: an expired token discovered at launch is
- * exactly the case this exists for.
- *
- * A server that STAYS broken is nudged again once the daily snooze lapses:
- * a dead OAuth token is a standing problem the user has to act on (sign in
- * again, or disable the server), and a one-shot toast they closed on Monday
- * is forgotten by Wednesday. `snoozedUntil` is the persisted per-server
- * cooldown (set when a toast is shown); the recheck path re-nudges only past
- * it, so an unchanged bad state costs at most one toast per day.
+ * The notify decision, as a pure state machine: nudge only on a TRANSITION
+ * into a bad state — never on every recheck of an already-known-bad server,
+ * and never for ok. An unknown previous state (first sweep of the session)
+ * counts as a transition: an expired token discovered at launch is exactly
+ * the case this exists for.
  */
-export function shouldNotify(
-  previous: McpHealthStatus | null,
-  next: McpHealthStatus,
-  snoozedUntil: number,
-  now: number
-): boolean {
-  if (next !== 'error' && next !== 'needs-auth') {
-    return false
-  }
-
-  return previous !== next || now >= snoozedUntil
+export function shouldNotifyOnTransition(previous: McpHealthStatus | null, next: McpHealthStatus): boolean {
+  return (next === 'error' || next === 'needs-auth') && previous !== next
 }
 
-// Same time-based snooze the update/skew toasts use (store/updates.ts): a
-// shown toast arms a 24h cooldown for that (profile, server), persisted so an
-// app restart does not re-nudge before the day is up.
-const SNOOZE_KEY_PREFIX = 'hermes:mcp-health-snooze-until:'
-const SNOOZE_MS = 24 * 60 * 60 * 1000
-
-function snoozedUntil(key: string): number {
-  const until = Number(storedString(SNOOZE_KEY_PREFIX + key) || 0)
-
-  return Number.isFinite(until) ? until : 0
-}
-
-function snooze(key: string): void {
-  persistString(SNOOZE_KEY_PREFIX + key, String(Date.now() + SNOOZE_MS))
-}
-
-// Last-known status per (profile, server) — the transition memory. Keyed by
-// profile so one profile's broken server can't mute or trigger another's
-// (AGENTS.md scope-in-key).
+// Last-known status per (profile, server) — the transition memory — and the
+// per-app-session notification cap. Both keyed by profile so one profile's
+// broken server can't mute or trigger another's (AGENTS.md scope-in-key).
 const lastStatus = new Map<string, McpHealthStatus>()
+const notifiedThisSession = new Set<string>()
 
 let started = false
 let timer: ReturnType<typeof setInterval> | null = null
 // Bumped on profile switch; in-flight sweeps compare and bail so a slow
 // profile-A probe can't record (or notify) into profile B's state.
 let sweepEpoch = 0
-// At most one sweep runs and one follow-up is remembered. Reconnect storms
-// still request a fresh pass, but cannot append an unbounded backlog.
-let sweepInFlight: Promise<void> | null = null
-let sweepQueued = false
+// Sweeps are chained, never concurrent — sequential probes, no parallel bursts.
+let sweepChain: Promise<void> = Promise.resolve()
 let offGatewayState: (() => void) | null = null
 let offProfile: (() => void) | null = null
 
@@ -97,33 +62,16 @@ function openMcpServerPage(name: string): void {
   window.location.hash = `#/skills?tab=mcp&server=${encodeURIComponent(name)}`
 }
 
-// "Disable" from the toast: `enabled: false` in config.yaml (the server stays
-// listed on the MCP page for a later re-enable). The backend follows the edit
-// on its own — the gateway's config reconcile and the serve backend's next
-// reload both drop a disabled server — so no reload RPC is issued here.
-async function disableServer(profileKey: string, name: string): Promise<void> {
-  try {
-    await setMcpServerEnabled(name, false)
-    lastStatus.delete(`${profileKey}::${name}`)
-    notify({
-      kind: 'success',
-      message: translateNow('notifications.mcp.disabledMessage', name)
-    })
-  } catch (err) {
-    notifyError(err, translateNow('notifications.mcp.disableFailed', name))
-  }
-}
-
 function recordResult(profileKey: string, name: string, status: McpHealthStatus): void {
   const key = `${profileKey}::${name}`
   const previous = lastStatus.get(key) ?? null
   lastStatus.set(key, status)
 
-  if (!shouldNotify(previous, status, snoozedUntil(key), Date.now())) {
+  if (!shouldNotifyOnTransition(previous, status) || notifiedThisSession.has(key)) {
     return
   }
 
-  snooze(key)
+  notifiedThisSession.add(key)
 
   const needsAuth = status === 'needs-auth'
 
@@ -135,10 +83,6 @@ function recordResult(profileKey: string, name: string, status: McpHealthStatus)
     id: `mcp-health-${key}`,
     kind: 'warning',
     message: translateNow(needsAuth ? 'notifications.mcp.needsAuthMessage' : 'notifications.mcp.errorMessage', name),
-    secondaryAction: {
-      label: translateNow('notifications.mcp.disable'),
-      onClick: () => void disableServer(profileKey, name)
-    },
     title: translateNow(needsAuth ? 'notifications.mcp.needsAuthTitle' : 'notifications.mcp.errorTitle')
   })
 }
@@ -199,24 +143,7 @@ async function sweep(): Promise<void> {
 }
 
 function queueSweep(): void {
-  if (sweepInFlight) {
-    sweepQueued = true
-
-    return
-  }
-
-  sweepInFlight = sweep()
-
-  const settled = () => {
-    sweepInFlight = null
-
-    if (sweepQueued) {
-      sweepQueued = false
-      queueSweep()
-    }
-  }
-
-  sweepInFlight.then(settled, settled)
+  sweepChain = sweepChain.then(sweep, sweep)
 }
 
 function arm(): void {
@@ -229,8 +156,6 @@ function arm(): void {
 }
 
 function disarm(): void {
-  sweepQueued = false
-
   if (timer !== null) {
     clearInterval(timer)
     timer = null
@@ -257,7 +182,7 @@ export function startMcpHealthChecker(): void {
 
   // Profile switch: invalidate in-flight sweeps, drop the timer, and re-arm
   // for the new profile (fresh immediate sweep + fresh interval) if its
-  // gateway is connected. lastStatus and the snooze keys are profile-keyed,
+  // gateway is connected. lastStatus/notifiedThisSession are profile-keyed,
   // so no wipe is needed — profile A's transition memory stays intact for
   // when the user switches back.
   offProfile = $activeGatewayProfile.listen(() => {

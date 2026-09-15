@@ -134,11 +134,7 @@ function buildRefFragment(
   return fragment
 }
 
-export function insertInlineRefsIntoEditor(
-  editor: HTMLDivElement,
-  refs: readonly InlineRefInput[],
-  { interactive = true }: { interactive?: boolean } = {}
-) {
+export function insertInlineRefsIntoEditor(editor: HTMLDivElement, refs: readonly InlineRefInput[]) {
   const parsed = refs.map(parseInlineRef).filter((ref): ref is NonNullable<typeof ref> => ref !== null)
   const hasEmptySentinel = editor.childNodes.length === 1 && editor.firstChild?.nodeName === 'BR'
 
@@ -150,11 +146,9 @@ export function insertInlineRefsIntoEditor(
     editor.replaceChildren()
   }
 
-  if (interactive) {
-    editor.focus({ preventScroll: true })
-  }
+  editor.focus({ preventScroll: true })
 
-  const selection = interactive ? window.getSelection() : null
+  const selection = window.getSelection()
 
   const range =
     !hasEmptySentinel && selection?.rangeCount && editor.contains(selection.getRangeAt(0).commonAncestorContainer)
@@ -183,10 +177,7 @@ export function insertInlineRefsIntoEditor(
         needsBeforeSpace: current.length > 0 && !/\s$/.test(current)
       })
     )
-
-    if (interactive) {
-      placeCaretEnd(editor)
-    }
+    placeCaretEnd(editor)
   }
 
   normalizeComposerEditorDom(editor)

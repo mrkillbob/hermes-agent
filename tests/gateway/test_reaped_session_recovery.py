@@ -20,9 +20,10 @@ from gateway.config import (
     GatewayConfig,
     Platform,
     PlatformConfig,
+    SessionResetPolicy,
 )
-from gateway.platforms.event import MessageEvent, MessageType
-from gateway.run import GatewayRunner, _INTERRUPT_REASON_EVICTED
+from gateway.platforms.base import MessageEvent, MessageType
+from gateway.run import GatewayRunner
 from gateway.session import SessionSource, SessionStore
 
 
@@ -36,7 +37,7 @@ class _FakeAdapter:
 
 
 class _DeadReapedAgent:
-    """Runtime whose durable session was reaped; records eviction interrupts."""
+    """Runtime whose turn was reaped: interrupt() lands nowhere."""
 
     def __init__(self):
         self.interrupts = []
@@ -92,7 +93,7 @@ def _source(chat_id="555001") -> SessionSource:
 
 def _store(tmp_path) -> SessionStore:
     config = GatewayConfig(
-
+        default_reset_policy=SessionResetPolicy(mode="none")
     )
     return SessionStore(sessions_dir=tmp_path, config=config)
 
@@ -138,9 +139,8 @@ async def test_reaped_session_message_reaches_cold_path(tmp_path):
 
     assert result == "COLD_PATH_REPLY"
     assert cold_path.await_count == 1
-    # The stale runtime is interrupted before eviction, then the message still heals through
-    # the cold path instead of being delivered to the ended session.
-    assert agent.interrupts == [_INTERRUPT_REASON_EVICTED]
+    # Nothing was interrupt()-delivered into the dead runtime.
+    assert agent.interrupts == []
 
 
 @pytest.mark.asyncio

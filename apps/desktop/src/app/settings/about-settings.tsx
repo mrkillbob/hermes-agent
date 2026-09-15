@@ -72,7 +72,7 @@ export function AboutSettings() {
 
   const handleCheck = async () => {
     setJustChecked(false)
-    const next = await checkUpdates({ force: true })
+    const next = await checkUpdates()
     setJustChecked(Boolean(next))
   }
 
@@ -83,7 +83,7 @@ export function AboutSettings() {
     statusLine = status?.message ?? a.cantUpdate
     statusTone = 'error'
   } else if (status?.error) {
-    statusLine = status.message ? `${a.cantReach} ${status.message}` : a.cantReach
+    statusLine = a.cantReach
     statusTone = 'error'
   } else if (applying) {
     statusLine = a.installing

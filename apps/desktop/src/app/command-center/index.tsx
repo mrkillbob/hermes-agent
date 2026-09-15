@@ -1,4 +1,3 @@
-import { compactNumber } from '@hermes/shared'
 import { type MouseEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { LogTail } from '@/components/chat/log-tail'
@@ -13,6 +12,7 @@ import { getActionStatus, getLogs, getStatus, getUsageAnalytics, restartGateway,
 import type { ActionStatusResponse, AnalyticsResponse, SessionInfo, StatusResponse } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { sessionTitle } from '@/lib/chat-runtime'
+import { compactNumber } from '@/lib/format'
 import {
   Activity,
   AlertCircle,
@@ -30,9 +30,7 @@ import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { upsertDesktopActionTask } from '@/store/activity'
 import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
-import { notify } from '@/store/notifications'
 import { $sessions, sessionPinId } from '@/store/session'
-import { confirmSharedGatewayRestart } from '@/store/system-actions'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
@@ -269,13 +267,6 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
     async (kind: 'restart' | 'update') => {
       setSystemError('')
 
-      // A profile served by the shared multiplexer restarts every bot on this device: ask first.
-      const shared = kind === 'restart' ? await confirmSharedGatewayRestart() : null
-
-      if (shared === false) {
-        return
-      }
-
       try {
         const started = kind === 'restart' ? await restartGateway() : await updateHermes()
         let nextStatus: ActionStatusResponse | null = null
@@ -290,10 +281,6 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
           if (!polled.running) {
             break
           }
-        }
-
-        if (shared && nextStatus && !nextStatus.running && (nextStatus.exit_code ?? 0) === 0) {
-          notify({ kind: 'success', message: cc.sharedGatewayRestarted(shared.length) })
         }
 
         if (!nextStatus) {

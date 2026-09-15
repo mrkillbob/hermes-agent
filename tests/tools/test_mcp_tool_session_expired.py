@@ -137,9 +137,8 @@ def _install_stub_server(name: str = "wpcom"):
     ],
     ids=["stdio", "http"],
 )
-@pytest.mark.parametrize("application_error", [False, True], ids=["success", "application-error"])
 def test_call_tool_handler_rebuilds_configured_server_transport(
-    monkeypatch, tmp_path, transport_config, expected_route, application_error
+    monkeypatch, tmp_path, transport_config, expected_route
 ):
     """The real server run loop selects and rebuilds its configured transport."""
     from anyio import ClosedResourceError
@@ -161,7 +160,7 @@ def test_call_tool_handler_rebuilds_configured_server_transport(
             if call_count["n"] == 1:
                 raise ClosedResourceError
             result = MagicMock()
-            result.is_error = application_error
+            result.is_error = False
             result.content = [MagicMock(type="text", text="reconnected")]
             result.structured_content = None
             return result
@@ -197,17 +196,8 @@ def test_call_tool_handler_rebuilds_configured_server_transport(
         handler = _make_tool_handler("resumed", "health", 10.0)
         parsed = json.loads(handler({}))
 
-        if expected_route == "stdio":
-            # A stdio pipe closing after dispatch is an ambiguous mid-call death: the transport
-            # is rebuilt for future calls, but the call itself is not replayed (#106440).
-            assert parsed["outcome_uncertain"] is True, parsed
-            assert call_count["n"] == 1
-        else:
-            assert parsed == {"error" if application_error else "result": "reconnected"}
-            # The recovered result is the tool's real answer either way; an application error is
-            # still one breaker strike (#10447), a success resets the counter.
-            assert mcp_tool._server_error_counts.get("resumed", 0) == (1 if application_error else 0)
-            assert call_count["n"] == 2
+        assert parsed == {"result": "reconnected"}
+        assert call_count["n"] == 2
         assert routes == [expected_route, expected_route]
         assert configs == [transport_config, transport_config]
         assert len(sessions) == 2

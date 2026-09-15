@@ -12,8 +12,6 @@ from html import escape as html_escape
 import json
 from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Tuple
 
-from hermes_cli.timefmt import coerce_epoch
-
 
 ExportFormat = Literal["jsonl", "markdown"]
 ExportOnly = Literal["user-prompts"]
@@ -93,7 +91,7 @@ def iter_user_prompt_records(sessions: Iterable[Dict[str, Any]]) -> Iterator[Dic
             record: Dict[str, Any] = {
                 "session_id": session_id,
                 "index": index,
-                "created_at": _format_timestamp(message.get("timestamp"), session_id),
+                "created_at": _format_timestamp(message.get("timestamp")),
                 "role": "user",
                 "text": _message_text(message.get("content")),
             }
@@ -125,7 +123,7 @@ def _append_session_messages(lines: List[str], session: Dict[str, Any], *, headi
         return
     for message in visible_messages:
         role = str(message.get("role") or "unknown")
-        timestamp = _format_timestamp(message.get("timestamp"), _session_id(session))
+        timestamp = _format_timestamp(message.get("timestamp"))
         suffix = f" - {timestamp}" if timestamp else ""
         text = _message_text(message.get("content"))
         if role == "tool":
@@ -159,15 +157,15 @@ def _content_part_text(part: Any) -> str:
     return json.dumps(part, ensure_ascii=False, sort_keys=True)
 
 
-def _format_timestamp(value: Any, session_id: Optional[str] = None) -> Optional[str]:
+def _format_timestamp(value: Any) -> Optional[str]:
     if value is None:
         return None
-    if isinstance(value, datetime):
+    if isinstance(value, (int, float)):
+        dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    elif isinstance(value, datetime):
         dt = (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
-    elif (ts := coerce_epoch(value, session_id=session_id)) is None:
-        return str(value)  # corrupt cell: odd-looking date, not an aborted export
     else:
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        return str(value)
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
@@ -178,7 +176,7 @@ def _session_metadata_lines(session: Dict[str, Any]) -> List[str]:
             lines.append(f"- {label}: `{session[key]}`")
     if title := session.get("title"):
         lines.append(f"- Title: {' '.join(str(title).splitlines()).strip()}")
-    if started := _format_timestamp(session.get("started_at"), _session_id(session)):
+    if started := _format_timestamp(session.get("started_at")):
         lines.append(f"- Started: {started}")
     if (message_count := session.get("message_count")) is not None:
         lines.append(f"- Messages: {message_count}")

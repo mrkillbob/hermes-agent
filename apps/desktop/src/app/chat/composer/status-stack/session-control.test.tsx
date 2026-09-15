@@ -169,8 +169,7 @@ describe('ComposerStatusStack session-control UI', () => {
 
     expect(mockRefreshSessionControl).toHaveBeenCalledWith(SID)
     expect(mockRefreshSessionGoal).not.toHaveBeenCalled()
-    // Legacy goal remains available while capability is unknown.
-    fireEvent.click(screen.getByRole('button', { name: /Goal active/ }))
+    // Legacy goal is rendered while capability is unknown
     expect(screen.getByText('Legacy Goal Title')).toBeTruthy()
   })
 
@@ -188,7 +187,6 @@ describe('ComposerStatusStack session-control UI', () => {
 
     renderStack()
 
-    fireEvent.click(screen.getByRole('button', { name: /Goal active/ }))
     expect(screen.getByText('Structured Goal Title')).toBeTruthy()
     expect(screen.queryByText('Legacy Goal Title')).toBeNull()
   })

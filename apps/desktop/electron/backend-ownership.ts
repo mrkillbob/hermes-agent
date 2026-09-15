@@ -320,36 +320,17 @@ export function backendCommandMatches(command: unknown): boolean {
 /** Coordinates all quit paths so asynchronous backend teardown runs once. */
 export function createBackendShutdownCoordinator(teardown: () => Promise<void> | void) {
   let completion: Promise<void> | undefined
-  let settled = false
 
   return {
     run(): Promise<void> {
       if (!completion) {
-        try {
-          // Invoke synchronously so no-wait quit paths still invalidate cached
-          // connection state and stop timers before Electron exits.
-          completion = Promise.resolve(teardown())
-        } catch (error) {
-          completion = Promise.reject(error)
-        }
-
-        void completion.then(
-          () => {
-            settled = true
-          },
-          () => {
-            settled = true
-          }
-        )
+        completion = Promise.resolve().then(teardown)
       }
 
       return completion
     },
     hasStarted(): boolean {
       return completion !== undefined
-    },
-    isPending(): boolean {
-      return completion !== undefined && !settled
     }
   }
 }

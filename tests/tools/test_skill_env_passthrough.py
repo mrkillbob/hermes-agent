@@ -20,10 +20,10 @@ _AGENTMAIL_SKILL_SRC = (
 @pytest.fixture(autouse=True)
 def _clean_passthrough():
     clear_env_passthrough()
-    _ep_mod._config_passthrough.clear()
+    _ep_mod._config_passthrough = None
     yield
     clear_env_passthrough()
-    _ep_mod._config_passthrough.clear()
+    _ep_mod._config_passthrough = None
 
 
 def _create_skill(tmp_path, name, frontmatter_extra=""):

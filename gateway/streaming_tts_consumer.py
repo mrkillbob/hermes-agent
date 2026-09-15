@@ -66,12 +66,11 @@ class StreamingTTSConsumer:
             if log_errors:
                 logger.debug("streaming TTS on_delta error", exc_info=True)
 
-    def on_delta(self, text: Optional[str]) -> None:
-        """Receive text, or flush a ``None`` segment boundary without ending audio. Non-blocking."""
+    def on_delta(self, text: str) -> None:
+        """Receive a text delta from the agent. Non-blocking."""
         if self._aborted or not self.active or self._finished:
             return
-        clauses = self._chunker.flush() if text is None else self._chunker.feed(text)
-        self._enqueue_clauses(clauses, "streaming TTS queue full, dropping clause",
+        self._enqueue_clauses(self._chunker.feed(text), "streaming TTS queue full, dropping clause",
                               log_errors=True)
 
     def finish(self) -> None:

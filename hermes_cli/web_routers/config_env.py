@@ -15,7 +15,6 @@ from hermes_cli.web_routers._common import http_failure, scoped_to_thread
 from hermes_cli.web_deps import LateState, late
 from hermes_cli.web_server_config import (
     _apply_main_model_assignment, _denormalize_config_from_web, _normalize_config_for_web, _schema_with_dynamic_provider_options,
-    _validated_main_model_selection,
 )
 from hermes_cli.web_server_profiles import (
     _approval_mode_of, _broadcast_gateway_session_info, _is_other_profile, _parse_model_ids,
@@ -75,15 +74,12 @@ def _env_write_errors(log_msg: str, *, http_passthrough: bool):
 
 
 @config_router.get("/api/config")
-async def get_config(profile: Optional[str] = None, include_defaults: bool = True):
+async def get_config(profile: Optional[str] = None):
     # _profile_scope blocks on the process-wide _SKILLS_PROFILE_LOCK and
     # load_config() reads from disk; a slow lock-holder on the event loop froze
     # the whole gateway for >1s. asyncio.to_thread copies the contextvar
     # context, so the profile override stays scoped to the worker thread.
-    # Opt in to saved values so clients can distinguish user choices from defaults.
-    config = await scoped_to_thread(
-        profile, lambda: _normalize_config_for_web(load_config() if include_defaults else read_raw_config())
-    )
+    config = await scoped_to_thread(profile, lambda: _normalize_config_for_web(load_config()))
     # Strip internal keys that the frontend shouldn't see or send back
     return {k: v for k, v in config.items() if not k.startswith("_")}
 
@@ -111,9 +107,7 @@ async def get_egress_status():
 
 
 @router.put("/api/config")
-async def update_config(
-    body: ConfigUpdate, profile: Optional[str] = None, preserve_language: bool = False
-):
+async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
     def _run():
         approvals_mode_changed = False
         with _profile_scope(body.profile or profile):
@@ -132,12 +126,7 @@ async def update_config(
                 # serve the pre-save cache on an (mtime_ns, size) collision.
                 # Only approvals.mode feeds session.info, so it is the trigger.
                 approvals_mode_changed = _approval_mode_of(merged) != _approval_mode_of(existing)
-                # Explicit English must survive default stripping: an absent
-                # language lets the desktop follow the OS on its next launch.
-                # Ordinary settings saves include merged defaults, not a choice.
-                save_config(
-                    merged, preserve_keys={("display", "language")} if preserve_language else None
-                )
+                save_config(merged)
         # REST saves bypass the config.set RPC (which re-emits itself), so
         # refresh live sessions' cached approval/YOLO indicators after a mode
         # change. Own-profile saves only: a profile-scoped save targets a
@@ -517,8 +506,9 @@ def _write_custom_endpoint(cfg: Dict[str, Any], body: CustomEndpointUpdate) -> T
     cfg["providers"] = providers
 
     if body.make_default:
-        result = _validated_main_model_selection(cfg, endpoint_id, model, base_url)
-        cfg["model"] = _apply_main_model_assignment(cfg.get("model", {}), result)
+        cfg["model"] = _apply_main_model_assignment(
+            cfg.get("model", {}), endpoint_id, model, base_url
+        )
         if entry.get("key_env") and isinstance(cfg["model"], dict):
             cfg["model"]["key_env"] = entry["key_env"]
             cfg["model"].pop("api_key", None)
@@ -573,8 +563,7 @@ def activate_custom_endpoint(endpoint_id: str, profile: Optional[str] = None):
             if not model or not base_url:
                 raise HTTPException(status_code=400, detail="custom endpoint is incomplete")
 
-            model_cfg = _apply_main_model_assignment(
-                cfg.get("model", {}), _validated_main_model_selection(cfg, provider_key, model, base_url))
+            model_cfg = _apply_main_model_assignment(cfg.get("model", {}), provider_key, model, base_url)
             if entry.get("key_env"):
                 model_cfg["key_env"] = entry["key_env"]
                 model_cfg.pop("api_key", None)
@@ -621,6 +610,8 @@ def delete_custom_endpoint(endpoint_id: str, profile: Optional[str] = None):
 @router.post("/api/providers/custom-endpoints/validate")
 async def validate_custom_endpoint(body: CustomEndpointUpdate):
     """Probe a custom endpoint by calling its OpenAI-compatible /models URL."""
+    import httpx
+
     base_url = (body.base_url or "").strip().rstrip("/")
     if not base_url:
         return {"ok": False, "reachable": True, "message": "Enter an endpoint URL first.", "models": []}
@@ -631,7 +622,7 @@ async def validate_custom_endpoint(body: CustomEndpointUpdate):
         headers["Authorization"] = f"Bearer {body.api_key.strip()}"
 
     try:
-        async with _endpoint_probe_client(url, 8.0) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
             resp = await client.get(url, headers=headers)
     except Exception:
         return {"ok": False, "reachable": False, "message": f"Could not reach {url}.", "models": []}
@@ -642,16 +633,6 @@ async def validate_custom_endpoint(body: CustomEndpointUpdate):
         return {"ok": False, "reachable": True, "message": f"Endpoint returned HTTP {resp.status_code}.", "models": []}
 
     return {"ok": True, "reachable": True, "message": "", "models": _parse_model_ids(resp)}
-
-
-def _endpoint_probe_client(url: str, timeout: float):
-    """httpx client for a user-entered endpoint probe. Local endpoints (loopback, LAN, Tailscale)
-    ignore ``HTTP(S)_PROXY``: httpx honours the env/system proxy but not its bypass list, so a
-    system proxy (Clash on Windows, corporate) answered the ``127.0.0.1`` probe with its own error
-    page and the GUI reported "advertised no models" while the CLI saw the model (#63472)."""
-    import httpx
-    from agent.model_metadata import is_local_endpoint
-    return httpx.AsyncClient(timeout=httpx.Timeout(timeout), trust_env=not is_local_endpoint(url))
 
 
 @router.post("/api/providers/validate")
@@ -681,16 +662,11 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
         api_key = (body.api_key or "").strip()
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         try:
-            async with _endpoint_probe_client(url, 8.0) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
                 resp = await client.get(url, headers=headers)
+            return {"ok": True, "reachable": True, "message": "", "models": _parse_model_ids(resp)}
         except Exception:
             return {"ok": False, "reachable": False, "message": f"Could not reach {url}."}
-        models = _parse_model_ids(resp)
-        if not models and not resp.is_success:
-            # A proxy/gateway error page parses as "no models"; name the status instead so the
-            # GUI does not tell the user to "start a model" on a server that answered.
-            return {"ok": False, "reachable": True, "message": f"{url} answered HTTP {resp.status_code}.", "models": []}
-        return {"ok": True, "reachable": True, "message": "", "models": models}
 
     probe = _CREDENTIAL_PROBES.get(key)
     if not probe:

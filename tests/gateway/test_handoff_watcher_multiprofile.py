@@ -25,8 +25,9 @@ from gateway import run
 
 
 class _FakeConfig:
-    def __init__(self, multiplex):
+    def __init__(self, multiplex, allowlist=None):
         self.multiplex_profiles = multiplex
+        self.multiplex_profile_allowlist = allowlist
 
 
 def test_scopes_single_profile_gateway_is_root_only():

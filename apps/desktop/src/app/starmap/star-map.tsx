@@ -3,7 +3,6 @@ import { atom, type WritableAtom } from 'nanostores'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useThemeEpoch } from '@/hooks/use-theme-epoch'
-import { createRendererLoopPauseController } from '@/lib/renderer-loop-pause'
 import { createDoubleTapDetector, isSmartZoomWheel } from '@/lib/trackpad-gestures'
 import type { StarmapGraph } from '@/types/hermes'
 
@@ -11,7 +10,6 @@ import { computePalette, memoryInkFor, resolveRgb, rgba } from './color'
 import { RING_OUTER, TILT, ZOOM_MAX, ZOOM_MIN } from './constants'
 import { clamp, distToSegmentSq, fitScale, fitViewport, nodeRadius } from './geometry'
 import { NodeContextMenu, type NodeMenuTarget } from './node-context-menu'
-import { shouldIgnorePlaybackHotkey } from './playback-hotkey'
 import { drawScene, drawScramble } from './render'
 import { decodeShareCode, encodeShareCode, ShareCodeError } from './share-code'
 import { ShareControls } from './share-controls'
@@ -446,11 +444,17 @@ export function StarMap({
   )
 
   // Spacebar toggles playback (unless typing, or the play button itself is
-  // focused — that already handles Space natively, so skip to avoid a double;
-  // same for focused context-menu items, which Radix renders as divs).
+  // focused — that already handles Space natively, so skip to avoid a double).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (shouldIgnorePlaybackHotkey(e, document.activeElement)) {
+      if (e.code !== 'Space' && e.key !== ' ') {
+        return
+      }
+
+      const el = document.activeElement
+      const tag = el?.tagName
+
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON' || (el as HTMLElement | null)?.isContentEditable) {
         return
       }
 
@@ -492,7 +496,7 @@ export function StarMap({
   }, [invalidate, themeEpoch])
 
   // Render loop. The core scramble animates continuously, so the loop runs while
-  // the window is visible — but each frame is cheap (live scramble + a blit of the
+  // the window is focused — but each frame is cheap (live scramble + a blit of the
   // cached static layer). The expensive scene only re-renders when invalidate()
   // marks it dirty. Capped to ~30fps; interaction (force) bypasses the cap.
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
@@ -502,8 +506,16 @@ export function StarMap({
     let lastAnimTs = 0
     let force = true
 
-    let paused = false
-    let pauseController: ReturnType<typeof createRendererLoopPauseController>
+    // The scramble keeps the loop perpetually "animating", so a fully-built,
+    // untouched map still repaints 30×/s for as long as the panel is open. That's
+    // wasted CPU/GPU (WindowServer compositing) when the window isn't even the one
+    // you're looking at. Freeze the loop while the window is hidden or unfocused;
+    // a frozen core next to other work is fine, and it resumes instantly on focus.
+    const isPaused = () =>
+      (typeof document !== 'undefined' && document.hidden) ||
+      (typeof document.hasFocus === 'function' && !document.hasFocus())
+
+    let paused = isPaused()
 
     const schedule = () => {
       if (!paused && !raf) {
@@ -629,10 +641,10 @@ export function StarMap({
       schedule()
     }
 
-    // Suspend the loop when the window drops out of view; wake + force a
+    // Suspend the loop when the window drops out of view/focus; wake + force a
     // fresh frame the moment it returns so the resume is seamless.
     const onActivity = () => {
-      const next = pauseController.isPaused()
+      const next = isPaused()
 
       if (next === paused) {
         return
@@ -652,14 +664,17 @@ export function StarMap({
       }
     }
 
-    pauseController = createRendererLoopPauseController(onActivity)
-    paused = pauseController.isPaused()
+    document.addEventListener('visibilitychange', onActivity)
+    window.addEventListener('blur', onActivity)
+    window.addEventListener('focus', onActivity)
 
     schedule()
 
     return () => {
       cancelAnimationFrame(raf)
-      pauseController.dispose()
+      document.removeEventListener('visibilitychange', onActivity)
+      window.removeEventListener('blur', onActivity)
+      window.removeEventListener('focus', onActivity)
 
       invalidateRef.current = () => {}
     }

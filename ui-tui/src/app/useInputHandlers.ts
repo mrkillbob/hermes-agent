@@ -17,7 +17,6 @@ import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionW
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
 import { closeWidget, dispatchWidgetInput } from '../sdk/host.js'
 
-import { $agentDockCollapsed } from './agentRoster.js'
 import { getInputSelection } from './inputSelectionStore.js'
 import {
   type GatewayRpc,
@@ -143,7 +142,7 @@ export function applyVoiceRecordResponse(
 }
 
 export function dismissSensitivePrompt(
-  overlay: Pick<OverlayState, 'secret' | 'sudo' | 'vaultUnlock'>,
+  overlay: Pick<OverlayState, 'secret' | 'sudo'>,
   rpc: GatewayRpc,
   sys: (text: string) => void
 ) {
@@ -163,15 +162,6 @@ export function dismissSensitivePrompt(
     sys('secret entry cancelled')
 
     return rpc<SecretRespondResponse>('secret.respond', { request_id: requestId, value: '' })
-  }
-
-  if (overlay.vaultUnlock) {
-    const requestId = overlay.vaultUnlock.requestId
-
-    patchOverlayState({ vaultUnlock: null })
-    sys(`${overlay.vaultUnlock.displayName} stays locked`)
-
-    return rpc<SecretRespondResponse>('vault.unlock.respond', { password: '', request_id: requestId })
   }
 }
 
@@ -233,7 +223,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
         .then(r => r && (patchOverlayState({ approval: null }), patchTurnState({ outcome: 'denied' })))
     }
 
-    if (overlay.sudo || overlay.secret || overlay.vaultUnlock) {
+    if (overlay.sudo || overlay.secret) {
       return dismissSensitivePrompt(overlay, gateway.rpc, actions.sys)
     }
 
@@ -376,7 +366,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
   // still the dedicated discard (pushes the draft to history so Up recalls it).
   const lastEscRef = useRef(0)
 
-  useInput((ch, key, event) => {
+  useInput((ch, key) => {
     const live = getUiState()
 
     if (key.escape) {
@@ -490,7 +480,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
         return
       }
 
-      if (isCtrl(key, ch, 'c') || (key.escape && (overlay.secret || overlay.sudo || overlay.vaultUnlock))) {
+      if (isCtrl(key, ch, 'c') || (key.escape && (overlay.secret || overlay.sudo))) {
         cancelOverlayFromCtrlC()
       } else if (key.escape && overlay.sessions) {
         patchOverlayState({ sessions: false })
@@ -641,16 +631,6 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     // typed to run the command. Works mid-stream: picking a model writes the
     // session model (config.set), which the next turn reads while the in-flight
     // turn keeps streaming.
-    if (event.keypress.name === 'f7' && !key.ctrl && !key.meta && !key.shift && !key.super) {
-      $agentDockCollapsed.set(!$agentDockCollapsed.get())
-
-      return
-    }
-
-    if (isCtrl(key, ch, 't')) {
-      return patchOverlayState({ agents: true, agentsInitialHistoryIndex: 0 })
-    }
-
     if (isCtrl(key, ch, 'o')) {
       return patchOverlayState({ modelPicker: true })
     }

@@ -18,7 +18,6 @@ import {
   DropdownMenuTrigger,
   ErrorState,
   host,
-  isSubmitEnter,
   Loader,
   LogView,
   Textarea,
@@ -323,7 +322,7 @@ function CommentComposer({
           className={cn('field-sizing-content max-h-40 min-h-0 resize-none', running ? 'pr-[3.5rem]' : 'pr-[5rem]')}
           onChange={event => setBody(event.target.value)}
           onKeyDown={event => {
-            if (isSubmitEnter(event) && !event.shiftKey) {
+            if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()
               submit()
             }
@@ -946,13 +945,11 @@ export function TaskDrawer({
               </Section>
             )}
 
-            {Array.isArray(detail.attachments) && (
-              <AttachmentsSection
-                attachments={detail.attachments}
-                onUpload={file => uploadMut.mutate(file)}
-                pending={uploadMut.isPending}
-              />
-            )}
+            <AttachmentsSection
+              attachments={detail.attachments}
+              onUpload={file => uploadMut.mutate(file)}
+              pending={uploadMut.isPending}
+            />
           </div>
         )}
       </div>

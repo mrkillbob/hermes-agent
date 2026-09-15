@@ -115,15 +115,14 @@ def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = Non
 
 
 def _append_to_sqlite(session_id: str, message: dict) -> None:
-    """Append a message to the SQLite session database.
-
-    Raises on failure: ``mirror_to_session`` reports ``False`` (and warns) only when the
-    exception reaches it — swallowing it here made every failed write look mirrored (#10130).
-    """
-    from hermes_state_registry import acquire, release_or_close
-
-    db = acquire()
+    """Append a message to the SQLite session database."""
     try:
-        db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
-    finally:
-        release_or_close(db)
+        from hermes_state_registry import acquire, release_or_close
+
+        db = acquire()
+        try:
+            db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
+        finally:
+            release_or_close(db)
+    except Exception as e:
+        logger.debug("Mirror SQLite write failed: %s", e)

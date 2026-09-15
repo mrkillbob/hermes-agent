@@ -379,8 +379,7 @@ def _do_git_install(entry: CatalogEntry) -> Path:
     # upfront so the fast path doesn't always fail noisily before the full-clone fallback.
     is_sha_ref = bool(re.fullmatch(r"[0-9a-f]{7,40}", install.ref))
     # Never hang on a credential prompt: installs run from CLI/dashboard flows nobody can answer.
-    from hermes_cli.git_credentials import with_git_auth
-    _git_env = with_git_auth(noninteractive_git_env(), install.url)
+    _git_env = noninteractive_git_env()
 
     def _git(*args: str) -> int:
         return subprocess.run([git, *args], stdin=subprocess.DEVNULL, env=_git_env).returncode
@@ -561,9 +560,7 @@ def _apply_tool_selection(
         return
 
     if not probed:
-        # Keep a prior explicit selection: "no tools today" must not widen ``include: []`` to
-        # "all tools" the next time the server does advertise some.
-        _write_tools_filter(name, "include", prior_selection)
+        _write_tools_filter(name, "include", None)
         _say("  Server reported no tools.", Colors.YELLOW)
         return
 
@@ -578,9 +575,7 @@ def _apply_tool_selection(
         )
         return
 
-    # A prior ``include: []`` (user chose zero tools) outranks manifest defaults, like the non-TTY path.
-    preferred = prior_selection if prior_selection is not None else (entry.tools.default_enabled or tool_names)
-    pre_set = {n for n in preferred if n in tool_names}
+    pre_set = {n for n in (prior_selection or entry.tools.default_enabled or tool_names) if n in tool_names}
     pre_indices = {i for i, n in enumerate(tool_names) if n in pre_set}
     _say(f"  Found {len(probed)} tool(s). Pre-checked: {len(pre_indices)}.")
 

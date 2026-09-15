@@ -19,23 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 def _callback_api():
-    """(getter, setter) pairs for every thread-local prompt callback a tool may need mid-dispatch
-    (lazy: terminal_tool imports tools.approval at load, so a top-level import risks a cycle).
-    Add a new per-thread prompt here — a callback missing from this table is silently absent on
-    every parallel/timeout worker, so the tool believes nobody can answer."""
-    from agent.vault_backends import unlock as vault_unlock
+    """Resolve the terminal_tool callback getters/setters (lazy: terminal_tool imports
+    tools.approval at load, so a top-level import risks a cycle for tools.approval callers)."""
     from tools import terminal_tool as tt
 
-    return ((tt._get_approval_callback, tt.set_approval_callback),
-            (tt._get_sudo_password_callback, tt.set_sudo_password_callback),
-            (vault_unlock.get_unlock_prompt_callback, vault_unlock.set_unlock_prompt_callback),
-            (vault_unlock.get_save_login_prompt_callback, vault_unlock.set_save_login_prompt_callback),
-            (vault_unlock.get_code_prompt_callback, vault_unlock.set_code_prompt_callback))
+    return (tt._get_approval_callback, tt._get_sudo_password_callback,
+            tt.set_approval_callback, tt.set_sudo_password_callback)
 
 
 def propagate_context_to_thread(target: Callable) -> Callable:
-    """Wrap *target* to run with the *current* thread's ContextVars and per-thread prompt callbacks
-    (approval, sudo, password-manager unlock).
+    """Wrap *target* to run with the *current* thread's ContextVars and approval/sudo callbacks.
 
     Fail-closed: if callback installation raises they stay ``None`` — dangerous commands are then
     denied by ``prompt_dangerous_approval`` and the gateway approval queue blocks.
@@ -44,7 +37,8 @@ def propagate_context_to_thread(target: Callable) -> Callable:
     # (setter, parent callback) pairs; None when the callback API could not be captured.
     installs = None
     try:
-        installs = tuple((setter, getter()) for getter, setter in _callback_api())
+        get_approval, get_sudo, set_approval, set_sudo = _callback_api()
+        installs = ((set_approval, get_approval()), (set_sudo, get_sudo()))
     except Exception:
         logger.debug("Could not capture parent approval/sudo callbacks", exc_info=True)
 

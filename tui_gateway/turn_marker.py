@@ -8,13 +8,15 @@ marker" instead of raising."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Any
-from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +59,16 @@ def _store(path: Path, entries: dict[str, dict]) -> None:
     if not entries:
         path.unlink(missing_ok=True)
         return
-    atomic_json_write(path, entries, indent=None, mode=0o600)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".turn-marker-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(entries, f)
+        os.replace(tmp, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
@@ -72,15 +83,13 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
         logger.debug("failed to %s turn marker for %s", what, session_key, exc_info=True)
 
 
-def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
-                      auto_continue: bool = True) -> None:
+def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0) -> None:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
     this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume."""
     if not session_key or not prompt:
         return
     now = time.time()
-    entry = {"attempts": max(0, int(attempts)), "prompt": prompt[:_MAX_PROMPT_CHARS], "started_at": now,
-             "auto_continue": bool(auto_continue)}
+    entry = {"attempts": max(0, int(attempts)), "prompt": prompt[:_MAX_PROMPT_CHARS], "started_at": now}
     _update(home, session_key, lambda entries: {**_prune(entries, now), session_key: entry}, "record")
 
 
@@ -100,7 +109,6 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
         prompt = str(entry.get("prompt") or "") if isinstance(entry, dict) else ""
         if not prompt.strip():
             return None
-        return {"attempts": max(0, int(entry.get("attempts") or 0)), "prompt": prompt, "started_at": _started_at(entry),
-                "auto_continue": bool(entry.get("auto_continue", True))}
+        return {"attempts": max(0, int(entry.get("attempts") or 0)), "prompt": prompt, "started_at": _started_at(entry)}
     except Exception:
         return None

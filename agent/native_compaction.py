@@ -135,9 +135,8 @@ RETAINED_SUMMARY_TOKEN_BUDGET = 32_000
 
 
 def _approx_tokens(text: str) -> int:
-    """Retention cost of one carried-over text; never 0 so an empty item still consumes budget."""
-    from agent.model_metadata import estimate_tokens_rough
-    return max(1, estimate_tokens_rough(text))
+    """Cheap chars//4 token estimate — same shape Codex uses for retention."""
+    return max(1, len(text) // 4)
 
 
 def _extract_item_text(item: Any) -> Optional[str]:

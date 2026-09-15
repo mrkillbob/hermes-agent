@@ -26,6 +26,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 import tools.delegate_tool as dt
 
@@ -82,7 +83,7 @@ def _make_real_child():
     # Keep the test hermetic: no session persistence.
     child._persist_disabled = True
     child._session_db = None
-
+    child._session_json_enabled = False
     return child
 
 

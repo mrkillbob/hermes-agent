@@ -7,10 +7,10 @@ import '@/store/suggestion-providers/mcp'
 import '@/store/suggestion-providers/skill'
 
 import { useAui, useAuiState, useComposerRuntime } from '@assistant-ui/react'
-import { SLASH_COMMAND_RE } from '@hermes/shared'
 import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
+import { SLASH_COMMAND_RE } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import {
   type ComposerAttachment,
@@ -147,22 +147,14 @@ export function useComposerDraft({
 
       if (editor) {
         renderComposerContents(editor, next, { trailingCommitted: true })
-
-        // Selection is document-global: a keep-alive composer in a hidden tab
-        // may repaint when its background session updates, but moving its caret
-        // here steals the selection from the visible composer without changing
-        // document.activeElement. The foreground then still looks focused while
-        // printable keydowns produce no input.
-        if (paneVisible) {
-          placeCaretEnd(editor)
-        }
+        placeCaretEnd(editor)
       }
 
       if (focus) {
         requestMainFocus()
       }
     },
-    [paneVisible, requestMainFocus, setComposerText]
+    [requestMainFocus, setComposerText]
   )
 
   const appendExternalText = useCallback(
@@ -271,12 +263,9 @@ export function useComposerDraft({
 
     if (editorRef.current) {
       renderComposerContents(editorRef.current, '')
-
-      if (paneVisible) {
-        placeCaretEnd(editorRef.current)
-      }
+      placeCaretEnd(editorRef.current)
     }
-  }, [paneVisible, setComposerText])
+  }, [setComposerText])
 
   // Read the editor's current plain text into draftRef + composer state. This
   // closes the "queued rAF flush hasn't run yet" window so scope-swap/pagehide
@@ -375,7 +364,7 @@ export function useComposerDraft({
       return false
     }
 
-    const nextDraft = insertInlineRefsIntoEditor(editor, refs, { interactive: paneVisible })
+    const nextDraft = insertInlineRefsIntoEditor(editor, refs)
 
     if (nextDraft === null) {
       return false
@@ -383,10 +372,7 @@ export function useComposerDraft({
 
     draftRef.current = nextDraft
     setComposerText(nextDraft)
-
-    if (paneVisible) {
-      requestMainFocus()
-    }
+    requestMainFocus()
 
     return true
   }

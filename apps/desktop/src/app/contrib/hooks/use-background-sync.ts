@@ -160,9 +160,7 @@ export async function reconcileTileTranscripts({
     const signatureKey = tileTranscriptSignatureKey(tile)
 
     try {
-      // Passive: a hidden tile's refresh must never cold-start its owner
-      // backend or hold a pool slot (#103375); no warm backend = retry next tick.
-      const latest = await getLatestSessionMessages(storedSessionId, profileScope, { passive: true })
+      const latest = await getLatestSessionMessages(storedSessionId, profileScope)
 
       if (
         requestId !== requestSequenceRef.current ||
@@ -577,6 +575,7 @@ export function useBackgroundSync({
 }: BackgroundSyncParams): void {
   const changeEventsAvailable = useStore($changeEventsAvailable)
   const cronChangeTick = useStore($cronChangeTick)
+  const sessionsChangeTick = useStore($sessionsChangeTick)
   const activeTranscriptBusy = useStore($busy)
   const activeTranscriptRefreshPendingRef = useRef<string | null>(null)
   // Tile reconcile state (#93942 slice 1): shared sequence guard + per-tile
@@ -683,16 +682,9 @@ export function useBackgroundSync({
 
     let cancelled = false
     let inFlight = false
-    let refreshPending = false
 
     const refreshLiveStatuses = async () => {
-      if (cancelled) {
-        return
-      }
-
       if (inFlight) {
-        refreshPending = true
-
         return
       }
 
@@ -709,15 +701,8 @@ export function useBackgroundSync({
         // still work as before; leave the current sidebar state untouched.
       } finally {
         inFlight = false
-
-        if (refreshPending && !cancelled) {
-          refreshPending = false
-          void refreshLiveStatuses()
-        }
       }
     }
-
-    const unsubscribe = $sessionsChangeTick.listen(() => void refreshLiveStatuses())
 
     const dispose = visiblePoll(
       changeEventsAvailable ? LIVE_SESSION_STATUS_BACKSTOP_INTERVAL_MS : LIVE_SESSION_STATUS_POLL_INTERVAL_MS,
@@ -728,12 +713,11 @@ export function useBackgroundSync({
 
     return () => {
       cancelled = true
-      unsubscribe()
       dispose()
     }
-    // Keep the in-flight guard alive across change ticks; a slow response must
-    // not create a new request (and invalidate the old result) on every tick.
-  }, [activeConnectionId, activeGatewayProfile, changeEventsAvailable, gatewayState, requestGateway])
+    // sessionsChangeTick: each sessions.changed broadcast re-seeds immediately
+    // via the effect re-run (already coalesced to 2s server-side).
+  }, [activeGatewayProfile, changeEventsAvailable, gatewayState, requestGateway, sessionsChangeTick])
 
   // sessions.changed also means the *stored* list may have new rows (a cron
   // run's session, an inbound messaging turn creating a thread). The full list

@@ -24,10 +24,10 @@ def _clean_state():
     """Reset module state between tests."""
     import tools.credential_files as _cred_mod
     clear_credential_files()
-    _cred_mod._config_files = {}
+    _cred_mod._config_files = None
     yield
     clear_credential_files()
-    _cred_mod._config_files = {}
+    _cred_mod._config_files = None
 
 
 class TestRegisterCredentialFiles:

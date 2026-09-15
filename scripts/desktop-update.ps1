@@ -7,10 +7,5 @@
 # Without it, that Desktop would silently fall back to the frozen staged
 # Tauri binary for one update cycle — the exact rot this script family
 # exists to escape.
-$target = Join-Path $PSScriptRoot "desktop-update\windows.ps1"
-if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
-    Write-Error "The maintained Desktop updater is missing. Repair the Hermes installation before updating."
-    exit 3
-}
-& $target @args
+& (Join-Path $PSScriptRoot "desktop-update\windows.ps1") @args
 exit $LASTEXITCODE

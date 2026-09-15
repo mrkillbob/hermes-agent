@@ -102,7 +102,6 @@ class TestConfigHomeChannelFallback:
             "platform": "discord",
             "chat_id": "1517373704248758474",
             "thread_id": None,
-            "_resolved_from": "home",
         }]
 
 

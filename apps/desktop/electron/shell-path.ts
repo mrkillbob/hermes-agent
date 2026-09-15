@@ -70,17 +70,10 @@ function mergeLoginShellPath(loginPath, currentPath, { delimiter = ':' }: any = 
 function runProbe(shell, flags, execFileFn, timeoutMs): Promise<string | null> {
   return new Promise(resolve => {
     let settled = false
-    let hardTimer: ReturnType<typeof setTimeout> | null = null
-    let capturedStdout = ''
 
     const finish = value => {
       if (!settled) {
         settled = true
-
-        if (hardTimer) {
-          clearTimeout(hardTimer)
-        }
-
         resolve(value)
       }
     }
@@ -99,23 +92,6 @@ function runProbe(shell, flags, execFileFn, timeoutMs): Promise<string | null> {
 
       // Interactive shells with a broken rc can block reading stdin.
       child?.stdin?.end?.()
-
-      // Mirror what the callback would have seen, so a sentinel that already
-      // printed before a descendant wedged the pipe isn't thrown away below.
-      child?.stdout?.on?.('data', chunk => {
-        capturedStdout += chunk
-      })
-
-      // Kill the probe child directly before settling so a hung profile cannot park boot.
-      hardTimer = setTimeout(() => {
-        try {
-          child?.kill?.('SIGKILL')
-        } catch {
-          // Hard settlement must not depend on kill succeeding.
-        }
-
-        finish(extractSentinelPath(capturedStdout))
-      }, timeoutMs + 1000)
     } catch {
       finish(null)
     }

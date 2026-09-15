@@ -13,7 +13,6 @@ from agent.reasoning_effort import (
     KIMI_K3_EFFORTS, KIMI_K3_OVERRIDES, OPENAI_COMPAT_WIRE_EFFORTS, TOKENHUB_EFFORTS, clamp_effort,
     kimi_supported_efforts, requested_effort,
 )
-from agent.message_sanitization import normalize_finish_reason as _normalize_finish_reason
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
@@ -140,17 +139,7 @@ def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> 
         return None
     effort = str(reasoning_config.get("effort", "medium") or "medium").strip().lower()
     if reasoning_config.get("enabled") is False or effort == "none":
-        # ``includeThoughts: False`` only omits thought parts from the returned
-        # response; the model may still reason internally and bill thought
-        # tokens against maxOutputTokens, starving small budgets (title
-        # generation's 64 tokens). Set thinkingBudget to 0 to actually disable
-        # thinking on families that document it: Gemini 2.5 and 3+ (plus the
-        # ``gemini-flash-latest`` alias); future majors are added only when the
-        # API documents thinkingBudget for them. (#91927)
-        config: dict[str, Any] = {"includeThoughts": False}
-        if normalized_model == "gemini-flash-latest" or normalized_model.startswith(("gemini-2.5-", "gemini-3")):
-            config["thinkingBudget"] = 0
-        return config
+        return {"includeThoughts": False}
     thinking_config: dict[str, Any] = {"includeThoughts": True}
     # Gemini 2.5 takes thinkingBudget; don't guess one from coarse effort levels.
     if normalized_model.startswith("gemini-2.5-"):
@@ -261,7 +250,7 @@ def _swap_developer_role(sanitized: list, model_lower: str) -> list:
 
 
 def _apply_max_tokens(api_kwargs: dict, model: str, reasoning_config: Any, params: dict, profile_max: Any = None) -> None:
-    """Preserve internal task/recovery budgets and provider protocol exceptions."""
+    """Resolve max_tokens — priority: ephemeral > user > profile default > anthropic_max_output."""
     max_tokens_fn = params.get("max_tokens_param_fn")
     for candidate in (params.get("ephemeral_max_output_tokens"), params.get("max_tokens")):
         if candidate is not None and max_tokens_fn:
@@ -269,7 +258,8 @@ def _apply_max_tokens(api_kwargs: dict, model: str, reasoning_config: Any, param
             return
     if profile_max and max_tokens_fn:
         api_kwargs.update(max_tokens_fn(_raise_gemini_thinking_max_tokens(model, reasoning_config, profile_max)))
-
+    elif params.get("anthropic_max_output") is not None:
+        api_kwargs["max_tokens"] = params["anthropic_max_output"]
 
 
 def _base_kwargs(model: str, sanitized: list, tools: Any, params: dict, profile: Any = None) -> dict[str, Any]:
@@ -513,9 +503,7 @@ class ChatCompletionsTransport(ProviderTransport):
         choice = response.choices[0]
         msg = getattr(choice, "message", None)
         _fr = getattr(choice, "finish_reason", None)
-        # Poolside returns int finish_reason; Gemini-fronting gateways return
-        # uppercase STOP / MAX_TOKENS — fold to the OpenAI contract here.
-        finish_reason = _normalize_finish_reason(str(_fr) if isinstance(_fr, int) else _fr) or "stop"
+        finish_reason = (str(_fr) if isinstance(_fr, int) else _fr) or "stop"  # Poolside returns int finish_reason
 
         tool_calls = None
         if getattr(msg, "tool_calls", None):

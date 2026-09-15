@@ -10,8 +10,7 @@ from gateway.session import SessionSource, build_session_key
 from gateway.run import GatewayRunner
 from gateway.profile_routing import ProfileRoute, ProfileRouteRejected
 from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import BasePlatformAdapter
-from gateway.platforms.event import MessageEvent
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent
 
 
 @pytest.fixture
@@ -175,7 +174,8 @@ class TestNonDiscordProfileRouting:
         ):
             assert mock_runner._profile_name_for_source(telegram_source) == "tg-profile"
 
-    def test_route_to_served_profile_resolves(self, mock_runner, telegram_source):
+    def test_route_inside_allowlist_resolves(self, mock_runner, telegram_source):
+        mock_runner.config.multiplex_profile_allowlist = ["worker"]
         mock_runner.config.profile_routes = [
             ProfileRoute(
                 name="worker-route",
@@ -193,9 +193,12 @@ class TestNonDiscordProfileRouting:
         ) as enumerate_profiles:
             assert mock_runner._profile_name_for_source(telegram_source) == "worker"
 
-        enumerate_profiles.assert_called_once_with(multiplex=True)
+        enumerate_profiles.assert_called_once_with(
+            multiplex=True, profile_allowlist=["worker"]
+        )
 
-    def test_route_to_unserved_profile_rejects(self, mock_runner, telegram_source, caplog):
+    def test_route_outside_allowlist_rejects(self, mock_runner, telegram_source, caplog):
+        mock_runner.config.multiplex_profile_allowlist = ["worker"]
         mock_runner.config.profile_routes = [
             ProfileRoute(
                 name="restricted-route",
@@ -217,6 +220,7 @@ class TestNonDiscordProfileRouting:
         assert "target profile 'restricted' is not served" in caplog.text
 
     def test_no_route_match_preserves_default_sentinel(self, mock_runner, telegram_source):
+        mock_runner.config.multiplex_profile_allowlist = ["worker"]
         mock_runner.config.profile_routes = [
             ProfileRoute(
                 name="other-chat",
@@ -371,6 +375,7 @@ class TestAdapterToSessionKeyIntegration:
 
     @pytest.mark.asyncio
     async def test_adapter_drops_rejected_route_before_dispatch(self, mock_runner):
+        mock_runner.config.multiplex_profile_allowlist = []
         mock_runner.config.profile_routes = [
             ProfileRoute(
                 name="restricted-route",
@@ -401,6 +406,7 @@ class TestAdapterToSessionKeyIntegration:
     @pytest.mark.asyncio
     async def test_direct_source_is_rejected_at_shared_ingress(self, mock_runner):
         mock_runner.config.multiplex_profiles = True
+        mock_runner.config.multiplex_profile_allowlist = []
         mock_runner.config.profile_routes = [
             ProfileRoute(
                 name="restricted-route",

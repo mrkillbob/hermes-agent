@@ -41,10 +41,9 @@ import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { ToolIcon } from '@/components/ui/tool-icon'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
-import { connectorCalls } from '@/lib/connector-tools'
 import { PrettyLink, LinkifiedText as SharedLinkifiedText, urlSlugTitleLabel } from '@/lib/external-link'
 import { AlertCircle, CheckCircle2 } from '@/lib/icons'
-import { isOnboardingEnabled } from '@/lib/onboarding-enabled'
+import { normalize } from '@/lib/text'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import { recordPreviewArtifact } from '@/store/preview-status'
@@ -256,7 +255,7 @@ function leadingStatus(isPending: boolean, status: ToolStatus): ToolStatus | und
     return 'running'
   }
 
-  return status === 'success' || status === 'notice' ? undefined : status
+  return status === 'success' ? undefined : status
 }
 
 function SearchResultsList({ hits }: { hits: SearchResultRow[] }) {
@@ -432,11 +431,16 @@ function ToolEntry({ part }: ToolEntryProps) {
       .map(chunk => chunk.trim())
       .filter(Boolean)
 
-    // The subtitle is not rendered in the header; keep its explanation here.
     const [summary = '', ...rest] = chunks
+    const subtitleNorm = normalize(view.subtitle)
+    const summaryDuplicatesSubtitle = summary && summary.toLowerCase() === subtitleNorm
+
+    if (summaryDuplicatesSubtitle) {
+      return { body: rest.join('\n\n').trim(), summary: '' }
+    }
 
     return { body: rest.join('\n\n').trim(), summary }
-  }, [view.detail, view.status])
+  }, [view.detail, view.status, view.subtitle])
 
   // `looksRedundant` normalizes the FULL (uncapped) detail payload — a
   // read_file / terminal result can be huge. Memoize on the view fields so it
@@ -449,7 +453,6 @@ function ToolEntry({ part }: ToolEntryProps) {
     !view.inlineDiff &&
     (Boolean(view.stdout || view.stderr) ||
       (view.status === 'error' && Boolean(detailSections.summary || detailSections.body)) ||
-      (view.status === 'notice' && Boolean(view.detail)) ||
       (view.status !== 'error' && Boolean(view.detail) && !detailMatchesTitle && !detailMatchesSubtitle))
 
   const renderDetailAsCode =
@@ -644,7 +647,7 @@ function ToolEntry({ part }: ToolEntryProps) {
                   {detailSections.body && (
                     <pre
                       className={cn(
-                        'max-h-56 overflow-auto whitespace-pre-wrap wrap-anywhere font-mono text-[0.7rem] leading-[1.55] text-(--ui-text-secondary)',
+                        'max-h-56 overflow-auto whitespace-pre-wrap wrap-anywhere font-mono text-[0.7rem] leading-[1.55] text-destructive/90',
                         detailSections.summary && 'mt-1.5'
                       )}
                     >
@@ -996,13 +999,7 @@ export const ToolGroupSlot: FC<PropsWithChildren<{ endIndex: number; startIndex:
   const toolNameKey = useAuiState(state =>
     state.message.parts
       .slice(Math.max(0, startIndex), endIndex + 1)
-      .map(part =>
-        part.type === 'tool-call'
-          ? isOnboardingEnabled() && connectorCalls(part.toolName, part.args).length
-            ? 'manage_connections'
-            : part.toolName
-          : ''
-      )
+      .map(part => (part.type === 'tool-call' ? part.toolName : ''))
       .join('\u0000')
   )
 

@@ -690,17 +690,7 @@ function buildPosixPinArgs({ installStamp, activeRoot, hermesHome, pinCommit = t
   return args
 }
 
-async function fetchManifest({
-  scriptPath,
-  installerKind,
-  emit,
-  hermesHome,
-  activeRoot,
-  installStamp,
-  pinCommit,
-  abortSignal
-}) {
-  abortSignal?.throwIfAborted()
+async function fetchManifest({ scriptPath, installerKind, emit, hermesHome, activeRoot, installStamp, pinCommit }) {
   const isPosix = installerKind === 'posix'
 
   const args = isPosix
@@ -710,7 +700,6 @@ async function fetchManifest({
   const result = await (isPosix ? spawnBash : spawnPowerShell)(scriptPath, args, {
     emit,
     stageName: '__manifest__',
-    abortSignal,
     hermesHome
   })
 
@@ -939,8 +928,6 @@ async function runBootstrap(opts) {
 
     // 1. Resolve the platform installer.
     const scriptInfo = await resolveInstallScript({ installStamp, sourceRepoRoot, hermesHome, emit })
-    abortSignal?.throwIfAborted()
-
     const installerKind = scriptInfo.kind || 'powershell'
 
     // 2. Fetch manifest
@@ -951,11 +938,8 @@ async function runBootstrap(opts) {
       hermesHome,
       activeRoot,
       installStamp,
-      pinCommit,
-      abortSignal
+      pinCommit
     })
-
-    abortSignal?.throwIfAborted()
 
     emit({
       type: 'manifest',
@@ -1023,18 +1007,12 @@ async function runBootstrap(opts) {
 
     return { ok: true, marker }
   } catch (err) {
-    if (abortSignal?.aborted) {
-      emit({ type: 'failed', error: 'bootstrap cancelled by user' })
-
-      return { ok: false, cancelled: true }
-    }
-
     emit({ type: 'failed', error: err.message || String(err) })
 
     return { ok: false, error: err.message || String(err) }
   } finally {
     try {
-      await new Promise<void>(resolve => runLog.stream.end(resolve))
+      runLog.stream.end()
     } catch {
       void 0
     }

@@ -99,8 +99,7 @@ const {
   resetUpdateApplyState,
   startUpdatePoller,
   stopUpdatePoller,
-  $updateStatus,
-  BACKGROUND_UPDATE_CHECK_MS
+  $updateStatus
 } = await import('./updates')
 
 const { setConnection } = await import('./session')
@@ -1357,27 +1356,24 @@ describe('startUpdatePoller', () => {
   it('calls checkUpdates() on startup so the version pill populates immediately', async () => {
     startUpdatePoller()
 
-    // checkUpdates() is async — flush microtasks without advancing the daily interval.
+    // checkUpdates() is async — flush microtasks without advancing the 30-min interval.
     await vi.advanceTimersByTimeAsync(0)
 
     expect(checkMock).toHaveBeenCalled()
     expect($updateStatus.get()?.behind).toBe(5)
   })
 
-  it('polls once per day and never forces past the caches', async () => {
+  it('calls checkUpdates() on each interval tick', async () => {
     startUpdatePoller()
     await vi.advanceTimersByTimeAsync(0)
-    expect(checkMock).toHaveBeenCalledWith({ force: false })
     checkMock.mockClear()
 
-    await vi.advanceTimersByTimeAsync(BACKGROUND_UPDATE_CHECK_MS - 1)
-    expect(checkMock).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
 
-    await vi.advanceTimersByTimeAsync(1)
-    expect(checkMock).toHaveBeenCalledTimes(1)
+    expect(checkMock).toHaveBeenCalled()
   })
 
-  it('window focus only re-checks once the daily cadence has elapsed', async () => {
+  it('calls checkUpdates() when the window regains focus', async () => {
     startUpdatePoller()
     await vi.advanceTimersByTimeAsync(0)
     checkMock.mockClear()
@@ -1385,12 +1381,9 @@ describe('startUpdatePoller', () => {
     // Invoke the registered focus handler directly (the mock window doesn't
     // propagate DOM events, so call the stored listener).
     listeners['focus']?.()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(checkMock).not.toHaveBeenCalled()
 
-    vi.setSystemTime(Date.now() + BACKGROUND_UPDATE_CHECK_MS)
-    listeners['focus']?.()
     await vi.advanceTimersByTimeAsync(0)
-    expect(checkMock).toHaveBeenCalledTimes(1)
+
+    expect(checkMock).toHaveBeenCalled()
   })
 })

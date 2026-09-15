@@ -13,7 +13,7 @@ import {
   shouldAutoDrain
 } from '@/store/composer-queue'
 import { notify } from '@/store/notifications'
-import { $sessions, $sessionsLoading, idsShareLineage } from '@/store/session'
+import { $sessions, idsShareLineage } from '@/store/session'
 import { $workingSessionIds } from '@/store/session-states'
 
 import type { SubmitTextOptions } from './use-prompt-actions/utils'
@@ -46,7 +46,6 @@ export function useBackgroundQueueDrain({
   const { t } = useI18n()
   const queuedPromptsBySession = useStore($queuedPromptsBySession)
   const parkedQueueSessions = useStore($parkedQueueSessions)
-  const sessionsLoading = useStore($sessionsLoading)
   const workingSessionIds = useStore($workingSessionIds)
   const submitTextRef = useRef(submitText)
   const drainingSessionIdsRef = useRef(new Set<string>())
@@ -152,10 +151,7 @@ export function useBackgroundQueueDrain({
   )
 
   useEffect(() => {
-    // Preserve the retry budget while session discovery runs at boot, on a
-    // gateway/profile switch, or during a refresh over an empty list.
-    // Once discovery settles, submitText can resume by stored id.
-    if (!enabled || sessionsLoading) {
+    if (!enabled) {
       return
     }
 
@@ -198,7 +194,6 @@ export function useBackgroundQueueDrain({
     queuedPromptsBySession,
     retryTick,
     selectedStoredSessionId,
-    sessionsLoading,
     workingSessionIds
   ])
 }

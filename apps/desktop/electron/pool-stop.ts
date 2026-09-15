@@ -38,11 +38,9 @@ export interface PoolStopperDeps {
 export interface PoolStopper {
   /** The in-flight stop for a key, if any — await before respawning it. */
   inFlight: (key: string) => Promise<void> | undefined
-  /** Whether the pool has a local child or an already-evicted stop in flight. */
-  hasPending: () => boolean
   /** Stop one pooled backend; concurrent calls share the same promise. */
   stop: (key: string) => Promise<void>
-  /** Stop every pooled backend and join stops already in flight. */
+  /** Stop every pooled backend currently in the pool. */
   stopAll: () => Promise<void>
 }
 
@@ -80,12 +78,9 @@ export function createPoolStopper(deps: PoolStopperDeps): PoolStopper {
 
   return {
     inFlight: key => stops.get(key),
-    hasPending: () => stops.size > 0 || [...deps.pool.values()].some(entry => entry.process != null),
     stop,
     stopAll: async () => {
-      const currentStops = [...deps.pool.keys()].map(stop)
-
-      await Promise.all(new Set([...stops.values(), ...currentStops]))
+      await Promise.all([...deps.pool.keys()].map(stop))
     }
   }
 }

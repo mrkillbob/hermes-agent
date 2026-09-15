@@ -1,18 +1,15 @@
 import { atom } from 'nanostores'
 
-import { persistBoolean, readKey, storedBoolean } from '@/lib/storage'
+import { getHermesConfigRecord, saveHermesConfig } from '@/hermes'
 
-// Desktop read-aloud is local; voice.auto_tts belongs to the messaging gateway.
-const AUTO_SPEAK_KEY = 'hermes.desktop.autoSpeakReplies'
-export const $autoSpeakReplies = atom<boolean>(storedBoolean(AUTO_SPEAK_KEY, false))
-// Best-effort persistence must not give config refresh authority again.
-let autoSpeakChosen = readKey(AUTO_SPEAK_KEY) !== null
+// "Read replies aloud" — mirrors the canonical `voice.auto_tts` config key (also
+// in Settings → Voice, honored by the messaging gateway) so the composer toggle
+// and the Settings switch are one source of truth, not two that can disagree.
+export const $autoSpeakReplies = atom<boolean>(false)
 
-/** Migrate the legacy value once without editing the backend configuration. */
+/** Seed the atom from a loaded config payload (mount / refresh). */
 export function applyAutoSpeakFromConfig(config: { voice?: { auto_tts?: unknown } | null } | null | undefined) {
-  if (config != null && !autoSpeakChosen) {
-    void setAutoSpeakReplies(Boolean(config.voice?.auto_tts))
-  }
+  $autoSpeakReplies.set(Boolean(config?.voice?.auto_tts))
 }
 
 // First configured `voice.stop_phrases` entry — drives the "Say "stop" to end
@@ -51,9 +48,27 @@ export function applyThinkingSoundFromConfig(
   $thinkingSoundEnabled.set(config?.voice?.thinking_sound !== false)
 }
 
-/** Persist even an unchanged value, so migrating false is also one-time. */
+/**
+ * Flip the preference and persist it. Optimistic — the atom updates instantly and
+ * reverts if the config write fails. Read-modify-writes the whole record (the
+ * same path the Settings page uses; there's no partial-update endpoint).
+ */
 export async function setAutoSpeakReplies(enabled: boolean): Promise<void> {
-  autoSpeakChosen = true
-  persistBoolean(AUTO_SPEAK_KEY, enabled)
+  const previous = $autoSpeakReplies.get()
+
+  if (previous === enabled) {
+    return
+  }
+
   $autoSpeakReplies.set(enabled)
+
+  try {
+    const record = await getHermesConfigRecord()
+    const voice = record.voice && typeof record.voice === 'object' ? (record.voice as Record<string, unknown>) : {}
+
+    await saveHermesConfig({ ...record, voice: { ...voice, auto_tts: enabled } })
+  } catch (error) {
+    $autoSpeakReplies.set(previous)
+    throw error
+  }
 }

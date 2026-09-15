@@ -276,7 +276,7 @@ describe('active transcript refresh', () => {
 
     // Behavior assertions:
     expect(updaterCallCount).toBeGreaterThan(0)
-    expect(getLatestSessionMessages).toHaveBeenCalledWith(TILE_STORED_ID, undefined, { passive: true })
+    expect(getLatestSessionMessages).toHaveBeenCalledWith(TILE_STORED_ID, undefined)
   })
 
   it('reconciles an idle tile while the main pane is busy', async () => {
@@ -301,7 +301,7 @@ describe('active transcript refresh', () => {
       updateSessionState
     })
 
-    expect(getLatestSessionMessages).toHaveBeenCalledWith(storedId, undefined, { passive: true })
+    expect(getLatestSessionMessages).toHaveBeenCalledWith(storedId, undefined)
     expect(updateSessionState).toHaveBeenCalledTimes(1)
   })
 
@@ -394,19 +394,15 @@ describe('active transcript refresh', () => {
       updateSessionState
     })
 
-    // Every tile read is passive: it may serve from a warm owner backend but
-    // must never cold-start one (#103375).
-    expect(getLatestSessionMessages).toHaveBeenCalledWith(
-      'stored-a',
-      { connectionId: 'connection-a', profile: 'target-a' },
-      { passive: true }
-    )
-    expect(getLatestSessionMessages).toHaveBeenCalledWith(
-      'stored-b',
-      { connectionId: 'connection-b', profile: 'shared-profile' },
-      { passive: true }
-    )
-    expect(getLatestSessionMessages).toHaveBeenCalledWith('stored-local', undefined, { passive: true })
+    expect(getLatestSessionMessages).toHaveBeenCalledWith('stored-a', {
+      connectionId: 'connection-a',
+      profile: 'target-a'
+    })
+    expect(getLatestSessionMessages).toHaveBeenCalledWith('stored-b', {
+      connectionId: 'connection-b',
+      profile: 'shared-profile'
+    })
+    expect(getLatestSessionMessages).toHaveBeenCalledWith('stored-local', undefined)
     expect(updateSessionState).toHaveBeenCalledWith('runtime-a', expect.any(Function), 'stored-a')
     expect(updateSessionState).toHaveBeenCalledWith('runtime-b', expect.any(Function), 'stored-b')
     expect(updateSessionState).toHaveBeenCalledWith('runtime-local', expect.any(Function), 'stored-local')

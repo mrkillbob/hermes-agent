@@ -102,7 +102,7 @@ class TestHooksTest:
         # Same top-level keys _serialize_payload produces at runtime
         assert set(seen.keys()) == {
             "hook_event_name", "tool_name", "tool_input",
-            "session_id", "cwd", "extra", "profile",
+            "session_id", "cwd", "extra",
         }
         # parent_session_id was routed to top-level session_id (matches runtime)
         assert seen["session_id"] == "parent-sess"

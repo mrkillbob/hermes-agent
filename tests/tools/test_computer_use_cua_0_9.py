@@ -259,6 +259,10 @@ def test_release_seam_stops_exact_backend_and_clears_session_state():
         "conversation-a": computer_use.threading.RLock(),
         "conversation-b": computer_use.threading.RLock(),
     })
+    computer_use._session_auto_approve["conversation-a"] = True
+    computer_use._always_allow["conversation-a"] = {
+        ("click", "background"),
+    }
 
     assert computer_use.release_computer_use_session("conversation-a") is True
     assert computer_use.release_computer_use_session("conversation-a") is False
@@ -267,6 +271,8 @@ def test_release_seam_stops_exact_backend_and_clears_session_state():
     second.stop.assert_not_called()
     assert "conversation-a" not in computer_use._backends
     assert "conversation-a" not in computer_use._backend_call_locks
+    assert "conversation-a" not in computer_use._session_auto_approve
+    assert "conversation-a" not in computer_use._always_allow
     assert computer_use._backends["conversation-b"] is second
 
 
@@ -277,10 +283,12 @@ def test_release_seam_evicts_state_even_when_backend_stop_fails():
     backend.stop.side_effect = RuntimeError("driver teardown failed")
     computer_use._backends["failed-run"] = backend
     computer_use._backend_call_locks["failed-run"] = computer_use.threading.RLock()
+    computer_use._session_auto_approve["failed-run"] = True
 
     assert computer_use.release_computer_use_session("failed-run") is True
     assert "failed-run" not in computer_use._backends
     assert "failed-run" not in computer_use._backend_call_locks
+    assert "failed-run" not in computer_use._session_auto_approve
 
 
 def test_release_seam_waits_for_in_flight_action_before_stopping_backend():
@@ -351,18 +359,15 @@ def test_concurrent_hermes_sessions_do_not_share_backend_state():
     assert len(created) == 2
 
 
-def test_persistent_focus_has_a_separate_approval_scope(monkeypatch):
+def test_persistent_focus_has_a_separate_approval_scope():
     from tools.computer_use import tool as computer_use
 
     seen = []
 
-    def approve(command, description, **kw):
-        # The shared gate prompts once per scope key: the click itself, then the separate bring_to_front scope.
-        action = description.split("`")[1]
+    def approve(action, args, summary):
         seen.append(action)
-        return "once" if action == "click" else "deny"
+        return "approve_once" if action == "click" else "deny"
 
-    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     computer_use.set_approval_callback(approve)
     try:
         result = json.loads(
@@ -380,6 +385,6 @@ def test_persistent_focus_has_a_separate_approval_scope(monkeypatch):
         computer_use.set_approval_callback(None)
 
     assert seen == ["click", "bring_to_front"]
-    assert result["error"].startswith("BLOCKED: User denied")
+    assert result["error"] == "denied by user"
     assert result["action"] == "bring_to_front"
 

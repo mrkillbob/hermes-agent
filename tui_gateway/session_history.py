@@ -4,7 +4,6 @@ turn tracking and turn-failure detail. Bodies are rebound onto server.py's globa
 from __future__ import annotations
 
 from .method_ctx import bind_module
-from agent.prompt_builder import STEER_DISPLAY_KIND
 
 
 def _active_image_routing_identity(agent: Any) -> tuple[str, str]:
@@ -168,13 +167,7 @@ def _legacy_display_kind(role: str, text: str) -> str | None:
     return "auto_continue" if role == "user" and text.lstrip().startswith(_AUTO_CONTINUE_NOTE_PREFIX) else None
 
 
-_HISTORY_ASSISTANT_DETAIL_KEYS = (
-    "reasoning",
-    "reasoning_content",
-    "reasoning_details",
-    "codex_reasoning_items",
-    "codex_message_items",
-)
+_HISTORY_REASONING_KEYS = ("reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items")
 _HISTORY_ROLES = frozenset({"user", "assistant", "tool", "system"})
 
 
@@ -203,10 +196,8 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                     except (json.JSONDecodeError, TypeError):
                         args = {}
                     tool_call_args[tc_id] = (fn["name"], args)
-        if role == "user" and m.get("display_kind") == STEER_DISPLAY_KIND:
-            # Mid-turn /steer: show the user's own words, not the model-facing marker wrapper.
-            from agent.conversation_compression import _extract_steer_text_from_message
-            content_text = _extract_steer_text_from_message(m) or content_text
+            if not content_text.strip():
+                continue
         if role == "tool":
             tc_name, tc_args = tool_call_args.get(m.get("tool_call_id") or "", (None, None))
             name = tc_name or m.get("tool_name") or "tool"
@@ -214,9 +205,9 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             # `context` is an 80-char preview; ship args so a full-call renderer isn't truncated.
             messages.append({"role": "tool", "name": name, "context": _tool_ctx(name, args), **({"args": args} if args else {})})
             continue
-        # Assistant detail sidecars can carry the only visible reply or reasoning after resume/reload.
-        has_assistant_detail = role == "assistant" and any(m.get(key) for key in _HISTORY_ASSISTANT_DETAIL_KEYS)
-        if not content_text.strip() and not has_assistant_detail:
+        # A reasoning-only assistant turn is kept so "Thinking…" still shows after resume/reload.
+        has_reasoning = role == "assistant" and any(m.get(key) for key in _HISTORY_REASONING_KEYS)
+        if not content_text.strip() and not has_reasoning:
             continue
         msg = {"role": role, "text": content_text}
         # Authoring time (Unix seconds) for display.timestamps; display-only.
@@ -232,7 +223,7 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         if invocation:
             msg.update(text=invocation, display_kind="skill_invocation")
         if role == "assistant":
-            msg.update((key, m[key]) for key in _HISTORY_ASSISTANT_DETAIL_KEYS if m.get(key) is not None)
+            msg.update((key, m[key]) for key in _HISTORY_REASONING_KEYS if m.get(key) is not None)
         # Display-only timeline metadata (model switches, delegation events).
         display_kind = m.get("display_kind") or _legacy_display_kind(role, content_text)
         if display_kind:
@@ -250,13 +241,7 @@ def _coerce_seed_history(value: Any) -> list[dict]:
             continue
         content = item.get("text") if item.get("content") is None else item.get("content")
         if isinstance(content, str) and content.strip():
-            row = {"role": item["role"], "content": content}
-            # "hidden" is the one display_kind a seeding client may author: model-facing scaffolding the
-            # renderer must not paint (a guided-chat runbook). Every other kind is stamped by the gateway
-            # at turn time, so it is not accepted from the wire.
-            if item.get("display_kind") == "hidden":
-                row["display_kind"] = "hidden"
-            history.append(row)
+            history.append({"role": item["role"], "content": content})
     return history
 
 

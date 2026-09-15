@@ -230,11 +230,10 @@ def _looks_like_git_url(s: str) -> bool:
 def _git_clone(url: str, dest: Path) -> None:
     if _GITHUB_SHORTHAND_RE.match(url):
         url = f"https://{url.rstrip('/')}"
-    from hermes_cli.git_credentials import with_git_auth
     try:
         subprocess.run(
             ["git", "clone", "--depth", "1", url, str(dest)], check=True, capture_output=True,
-            stdin=subprocess.DEVNULL, env=with_git_auth(noninteractive_git_env(), url),
+            stdin=subprocess.DEVNULL, env=noninteractive_git_env(),
         )
     except FileNotFoundError as exc:
         raise DistributionError("git is required for git-URL installs") from exc

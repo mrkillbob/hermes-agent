@@ -1,5 +1,3 @@
-import { LOCALE_ENDONYMS } from '@hermes/shared/i18n'
-
 import { normalize } from '@/lib/text'
 
 import type { Locale } from './types'
@@ -9,37 +7,37 @@ export const DEFAULT_LOCALE: Locale = 'en'
 export const LOCALE_OPTIONS = [
   {
     id: 'en',
-    name: LOCALE_ENDONYMS.en,
+    name: 'English',
     englishName: 'English',
     configValue: 'en'
   },
   {
     id: 'zh',
-    name: LOCALE_ENDONYMS.zh,
+    name: '简体中文',
     englishName: 'Simplified Chinese',
     configValue: 'zh'
   },
   {
     id: 'zh-hant',
-    name: LOCALE_ENDONYMS['zh-hant'],
+    name: '繁體中文',
     englishName: 'Traditional Chinese',
     configValue: 'zh-hant'
   },
   {
     id: 'ja',
-    name: LOCALE_ENDONYMS.ja,
+    name: '日本語',
     englishName: 'Japanese',
     configValue: 'ja'
   },
   {
     id: 'ar',
-    name: LOCALE_ENDONYMS.ar,
+    name: 'العربية',
     englishName: 'Arabic',
     configValue: 'ar'
   },
   {
     id: 'ru',
-    name: LOCALE_ENDONYMS.ru,
+    name: 'Русский',
     englishName: 'Russian',
     configValue: 'ru'
   }
@@ -113,32 +111,6 @@ export function normalizeLocale(value: unknown): Locale {
 
 export function isSupportedLocaleValue(value: unknown): boolean {
   return typeof value === 'string' && LOCALE_ALIASES[normalize(value)] != null
-}
-
-/** OS tags can include regions absent from the picker aliases, such as ru-UA. */
-export function osPreferredLocale(tag: string | null | undefined): Locale | null {
-  if (!tag) {
-    return null
-  }
-
-  const exact = LOCALE_ALIASES[normalize(tag)]
-
-  if (exact) {
-    return exact
-  }
-
-  const base = tag.split(/[-_]/)[0]
-
-  return (base && LOCALE_ALIASES[normalize(base)]) || null
-}
-
-/** An explicit choice must win even when it differs from the OS language. */
-export function resolveInitialLocale(saved: string | null | undefined, osLocale: string | null | undefined): Locale {
-  if (isSupportedLocaleValue(saved)) {
-    return normalizeLocale(saved)
-  }
-
-  return osPreferredLocale(osLocale) ?? DEFAULT_LOCALE
 }
 
 export function localeConfigValue(locale: Locale): string {

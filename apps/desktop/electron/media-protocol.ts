@@ -1,6 +1,3 @@
-import { httpStatusError, readStatusCode } from './api-transport'
-import { requestWithOauthFallback } from './oauth-rest-request'
-
 const STREAMABLE_MEDIA_EXTENSIONS = [
   '.avi',
   '.flac',
@@ -164,26 +161,15 @@ export function createMediaProtocolHandler(dependencies: MediaProtocolDependenci
       )
 
       if (connection.authMode === 'oauth') {
-        return await requestWithOauthFallback(connection.baseUrl, {
-          ensureNativeAccessToken: dependencies.ensureRemoteBearer,
-          requestWithBearer: bearer => {
-            headers.set('authorization', `Bearer ${bearer}`)
+        const bearer = await dependencies.ensureRemoteBearer(connection.baseUrl)
 
-            return dependencies.fetchRemote(endpoint, headers, method)
-          },
-          requestWithCookie: async () => {
-            const response = await dependencies.fetchRemoteWithCookies(endpoint, headers, method)
+        if (bearer) {
+          headers.set('authorization', `Bearer ${bearer}`)
 
-            // Fetch resolves HTTP errors; translate only the auth verdict so
-            // the shared fallback can preserve a failed native refresh.
-            if (response.status === 401 || response.status === 403) {
-              await response.body?.cancel()
-              throw httpStatusError(response.status, 'Remote media authentication unavailable')
-            }
+          return await dependencies.fetchRemote(endpoint, headers, method)
+        }
 
-            return response
-          }
-        })
+        return await dependencies.fetchRemoteWithCookies(endpoint, headers, method)
       }
 
       if (!connection.token) {
@@ -193,10 +179,8 @@ export function createMediaProtocolHandler(dependencies: MediaProtocolDependenci
       headers.set('x-hermes-session-token', connection.token)
 
       return await dependencies.fetchRemote(endpoint, headers, method)
-    } catch (error) {
-      const status = readStatusCode(error)
-
-      return new Response('Remote media unavailable', { status: status === 401 || status === 403 ? status : 502 })
+    } catch {
+      return new Response('Remote media unavailable', { status: 502 })
     }
   }
 }

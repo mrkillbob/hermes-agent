@@ -1,4 +1,4 @@
-import { isArtifactFilePath, mediaExternalUrl, resolveMediaDisplaySrc } from '@/lib/media'
+import { mediaExternalUrl, resolveMediaDisplaySrc } from '@/lib/media'
 import type { SessionInfo, SessionMessage } from '@/types/hermes'
 
 export type ArtifactKind = 'image' | 'file' | 'link'
@@ -12,7 +12,6 @@ export interface ArtifactRecord {
   href: string
   label: string
   sessionId: string
-  profile?: string
   sessionTitle: string
   timestamp: number
 }
@@ -31,7 +30,7 @@ const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)\)/g
 const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g
 const MEDIA_RE = /[`"']?MEDIA:\s*(`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|\S+)[`"']?/g
 const URL_RE = /https?:\/\/[^\s<>"')]+/g
-const PATH_RE = /(^|[\s("'`])((?:\/|~[\\/]|\.\.?[\\/]|\\\\)[^\s"'`<>]+(?:\.[a-z0-9]{1,8})?)/gi
+const PATH_RE = /(^|[\s("'`])((?:\/|~\/|\.\.?\/)[^\s"'`<>]+(?:\.[a-z0-9]{1,8})?)/gi
 const WINDOWS_PATH_RE = /(^|[\s("'`])([A-Za-z]:[\\/][^\s"'`<>]+(?:\.[a-z0-9]{1,8})?)/gi
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:\?.*)?$/i
 
@@ -136,8 +135,13 @@ function looksLikePathOrUrl(value: string): boolean {
   return (
     value.startsWith('http://') ||
     value.startsWith('https://') ||
+    value.startsWith('file://') ||
     value.startsWith('data:image/') ||
-    isArtifactFilePath(value)
+    value.startsWith('/') ||
+    value.startsWith('./') ||
+    value.startsWith('../') ||
+    value.startsWith('~/') ||
+    isWindowsPath(value)
   )
 }
 
@@ -154,7 +158,14 @@ function artifactKind(value: string): ArtifactKind {
     return 'image'
   }
 
-  if (isArtifactFilePath(value)) {
+  if (
+    value.startsWith('/') ||
+    value.startsWith('./') ||
+    value.startsWith('../') ||
+    value.startsWith('~/') ||
+    value.startsWith('file://') ||
+    isWindowsPath(value)
+  ) {
     return 'file'
   }
 
@@ -409,7 +420,6 @@ export function collectArtifactsForSession(session: SessionInfo, messages: Sessi
         href: artifactHref(value),
         label: artifactLabel(value),
         sessionId: session.id,
-        profile: session.profile,
         sessionTitle: title,
         timestamp: artifactTimestamp(message, session)
       })

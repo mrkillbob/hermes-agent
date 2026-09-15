@@ -83,7 +83,7 @@ describe('DiffusionCanvas scheduling', () => {
     delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
   })
 
-  it('keeps animating while unfocused but cancels its loop while minimized', () => {
+  it('cancels its loop while inactive and resumes only when the window is observable', () => {
     const raf = installRaf()
 
     render()
@@ -93,7 +93,7 @@ describe('DiffusionCanvas scheduling', () => {
     act(() => {
       window.dispatchEvent(new Event('blur'))
     })
-    expect(raf.pending()).toBe(1)
+    expect(raf.pending()).toBe(0)
 
     act(() => {
       window.dispatchEvent(new Event('focus'))

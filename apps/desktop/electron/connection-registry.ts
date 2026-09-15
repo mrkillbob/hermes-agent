@@ -64,8 +64,6 @@ export interface RegistryConnection {
   headers?: Record<string, unknown>
   /** cloud: portal org slug/id the instance was discovered under. */
   org?: string
-  /** Cloud instance name, separate from the user-editable label. */
-  name?: string
   /** ssh fields (normalizeSshConfig shapes). */
   host?: string
   user?: string
@@ -824,8 +822,6 @@ export interface ConnectionInput {
   token?: unknown
   headers?: Record<string, unknown>
   org?: string
-  /** Cloud instance name, separate from the user-editable label. */
-  name?: string
   host?: string
   user?: string
   port?: number | string
@@ -962,12 +958,6 @@ export function normalizeConnectionInput(input: ConnectionInput, registry: Conne
       }
     }
 
-    const name = String(input.name || '').trim()
-
-    if (kind === 'cloud' && name) {
-      entry.name = name
-    }
-
     const org = String(input.org || '').trim()
 
     if (kind === 'cloud' && org) {
@@ -1005,14 +995,6 @@ export function mergeConnectionInput(input: ConnectionInput, existing?: null | R
   inherit('url')
   inherit('authMode')
   inherit('org')
-
-  if (
-    input.kind === 'cloud' &&
-    (input.url === undefined || normalizeRemoteBaseUrl(input.url) === normalizeRemoteBaseUrl(existing.url))
-  ) {
-    inherit('name')
-  }
-
   inherit('host')
   inherit('keyPath')
   inherit('remoteHermesPath')
@@ -1202,12 +1184,6 @@ export function normalizeRegistry(raw: unknown): ConnectionRegistry {
           clean.headers = storedHeaders
         }
 
-        const name = String(entry.name || '').trim()
-
-        if (kind === 'cloud' && name) {
-          clean.name = name
-        }
-
         const org = String(entry.org || '').trim()
 
         if (kind === 'cloud' && org) {
@@ -1317,12 +1293,6 @@ export function migrateV1ToRegistry(v1: unknown): ConnectionRegistry {
 
     if (Object.keys(v1Headers).length > 0) {
       entry.headers = v1Headers
-    }
-
-    const name = String(block.name || '').trim()
-
-    if (kind === 'cloud' && name) {
-      entry.name = name
     }
 
     const org = String(block.org || '').trim()
@@ -1472,7 +1442,7 @@ export function setLastUsedConnection(registry: ConnectionRegistry, id: string):
  *
  * Remote-shaped entries are matched by normalized URL across remote/cloud so
  * changing provenance never duplicates a gateway. Existing identity and
- * user-chosen label win; a Cloud name upgrades only the default host label. Switching to
+ * user-chosen label win; a new entry derives both from the host. Switching to
  * local keeps registered remotes available while moving primary/last-used
  * back to This device.
  */
@@ -1509,16 +1479,12 @@ export function reconcileAppliedGlobalConnection(
 
   const kind: ConnectionKind = mode === 'cloud' ? 'cloud' : 'remote'
 
-  const hostLabel = hostLabelFromBaseUrl(url) || (kind === 'cloud' ? 'Hermes Cloud' : 'Remote gateway')
-  const name = kind === 'cloud' ? String(block.name ?? existing?.name ?? '').trim() : ''
-
   const label =
-    existing && (!name || existing.label !== hostLabel)
-      ? existing.label
-      : uniqueLabel(
-          name || hostLabel,
-          registry.connections.filter(connection => connection.id !== existing?.id).map(connection => connection.label)
-        )
+    existing?.label ||
+    uniqueLabel(
+      hostLabelFromBaseUrl(url) || (kind === 'cloud' ? 'Hermes Cloud' : 'Remote gateway'),
+      registry.connections.map(connection => connection.label)
+    )
 
   const entry = normalizeConnectionInput(
     {
@@ -1529,8 +1495,7 @@ export function reconcileAppliedGlobalConnection(
       authMode: block.authMode,
       token: block.token,
       headers: block.headers,
-      org: block.org,
-      name
+      org: block.org
     },
     registry
   )

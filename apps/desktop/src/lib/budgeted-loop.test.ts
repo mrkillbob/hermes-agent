@@ -71,7 +71,7 @@ describe('createBudgetedLoop', () => {
     loop.dispose()
   })
 
-  it('keeps drawing while unfocused but pauses while minimized', () => {
+  it('pauses while the window is not observable and resumes when it is', () => {
     const raf = installRaf()
     const draw = vi.fn()
     const loop = createBudgetedLoop(draw)
@@ -79,9 +79,7 @@ describe('createBudgetedLoop', () => {
     expect(raf.pending()).toBe(1)
 
     window.dispatchEvent(new Event('blur'))
-    expect(raf.pending()).toBe(1)
-    raf.runNext(1000)
-    expect(draw).toHaveBeenCalledTimes(1)
+    expect(raf.pending()).toBe(0)
 
     window.dispatchEvent(new Event('focus'))
     expect(raf.pending()).toBe(1)

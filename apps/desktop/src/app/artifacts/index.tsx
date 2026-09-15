@@ -30,7 +30,7 @@ import {
   useLinkTitle
 } from '@/lib/external-link'
 import { FileImage, FileText, FolderOpen, Link2 } from '@/lib/icons'
-import { downloadGatewayMediaFile, isArtifactFilePath, isRemoteGateway } from '@/lib/media'
+import { downloadGatewayMediaFile, isRemoteGateway } from '@/lib/media'
 import { normalize } from '@/lib/text'
 import { fmtDayTime } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -92,7 +92,7 @@ function paginationItems(page: number, pageCount: number): Array<number | 'ellip
 }
 
 type CellCtx = {
-  onOpen: (artifact: ArtifactRecord) => void | Promise<void>
+  onOpen: (href: string) => void | Promise<void>
   onOpenChat: (sessionId: string) => void
 }
 
@@ -270,18 +270,14 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
   }, [artifacts])
 
   const openArtifact = useCallback(
-    async (artifact: ArtifactRecord) => {
-      const { href } = artifact
-
+    async (href: string) => {
       try {
         // A gateway-local file resolves to file:// in remote mode (the file
         // lives on the gateway, not this disk). Opening that locally fails —
         // and an OAuth remote connection has no query token to build a download
         // URL. Fetch the bytes over the authenticated fs bridge instead.
-        // Tilde/relative hrefs have no file URL form. Keep them gateway-owned:
-        // expanding them on the client would target the wrong home or cwd.
-        if (isRemoteGateway() && isArtifactFilePath(artifact.value)) {
-          await downloadGatewayMediaFile(artifact.value, { sessionId: artifact.sessionId, profile: artifact.profile })
+        if (isRemoteGateway() && /^file:/i.test(href)) {
+          await downloadGatewayMediaFile(href)
 
           return
         }
@@ -594,7 +590,7 @@ const PrimaryCell = memo(function PrimaryCell({ artifact, ctx }: { artifact: Art
   return (
     <ArtifactCellAction
       href={isLink ? artifact.href : undefined}
-      onClick={isLink ? undefined : () => void ctx.onOpen(artifact)}
+      onClick={isLink ? undefined : () => void ctx.onOpen(artifact.href)}
       title={label}
     >
       <span className="mt-0.5 grid size-6 shrink-0 place-items-center self-start rounded-md bg-(--ui-bg-tertiary) text-(--ui-text-tertiary)">

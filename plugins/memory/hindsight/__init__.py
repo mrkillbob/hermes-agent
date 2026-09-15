@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -24,19 +25,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from agent.memory_provider import MemoryProvider, RecallStatus, spawn_context_thread
-from agent.secret_scope import UnscopedSecretError, get_secret
+from agent.memory_provider import MemoryProvider, RecallStatus
+from agent.secret_scope import get_secret
 from hermes_cli.config import cfg_get
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 from tools.registry import tool_error
-from utils import read_json_or_empty
 
 from .embedded import (
     _RETRIABLE_CONNECTION_MARKERS, _build_embedded_profile_env,
     _check_local_runtime, _embedded_llm_api_key, _embedded_profile_env_path,
     _export_port_health_grace_timeout, _load_simple_env, _local_runtime_hint, _materialize_embedded_profile_env,
-    _may_rewrite_profile_env,
 )
 from .settings import (
     _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL, _DEFAULT_RETAIN_SOURCE,
@@ -61,30 +60,6 @@ def _ensure_client_dependency() -> None:
         pass
     except Exception as exc:
         raise ImportError(str(exc)) from exc
-
-
-def _scoped_setting(name: str, default: str = "") -> str:
-    """Profile-scoped read of a retain SHAPING value, with the provider's own default on a miss.
-
-    Under ``gateway.multiplex_profiles`` ``os.environ`` holds the DEFAULT profile's ``.env``, so a miss
-    is a miss — never ``os.environ`` (same rule as the daemon's key and base URL in ``embedded.py``).
-    Single-profile deployments are unchanged: with no scope installed ``get_secret`` still reads the
-    process env, where the value IS this profile's own.
-
-    Deliberately narrower than a bare ``get_secret``: this helper is only for presentation shaping
-    (retain source label, speaker prefixes, tags). The isolation-critical values — ``mode``,
-    ``apiKey`` and the ``bankId`` data partition — read through bare ``get_secret`` above and so
-    still fail loud on a scopeless multiplexed read, matching the other scoped credential readers.
-    In ``_load_config`` that read happens FIRST, so a missing scope raises on ``HINDSIGHT_MODE``
-    before this helper is ever reached; swallowing here therefore cannot mask an isolation failure.
-    What it does avoid is losing the whole memory provider (``initialize`` failing, and the manager
-    logging + dropping it) because a speaker prefix could not be resolved.
-    """
-    try:
-        value = get_secret(name, default)
-    except UnscopedSecretError:
-        return default
-    return default if value is None else value
 
 
 def _cloud_api_key(config: dict) -> str:
@@ -115,11 +90,9 @@ def _maybe_upgrade_client() -> None:
         pass  # packaging not available or other issue — proceed anyway
 
 
-# update_mode='append' capability (Hindsight >= 0.5.0), cached per (API URL, key fingerprint)
-# per process so every provider on the same API+key shares one /version round trip. A failed probe
-# caches False, so the key must include the credential or one profile's 401 would silently downgrade
-# a sibling profile that shares the URL with a valid key.
-_append_capability_cache: Dict[tuple[str, str | None], bool] = {}
+# update_mode='append' capability (Hindsight >= 0.5.0), cached per API URL per
+# process so every provider on the same API shares one /version round trip.
+_append_capability_cache: Dict[str, bool] = {}
 _append_capability_lock = threading.Lock()
 
 
@@ -149,12 +122,9 @@ def _check_api_supports_update_mode_append(api_url: str, api_key: str | None = N
     """
     if not api_url:
         return False
-    from agent.credential_persistence import fingerprint_secret_value
-
-    cache_key = (api_url, fingerprint_secret_value(api_key))
     with _append_capability_lock:
-        if cache_key in _append_capability_cache:
-            return _append_capability_cache[cache_key]
+        if api_url in _append_capability_cache:
+            return _append_capability_cache[api_url]
     version = _fetch_hindsight_api_version(api_url, api_key)
     try:  # missing/invalid version -> unsupported
         from packaging.version import Version
@@ -163,7 +133,7 @@ def _check_api_supports_update_mode_append(api_url: str, api_key: str | None = N
         supported = False
     with _append_capability_lock:
         # A concurrent probe may have filled the cache meanwhile; its answer wins.
-        supported = _append_capability_cache.setdefault(cache_key, supported)
+        supported = _append_capability_cache.setdefault(api_url, supported)
     if supported:
         logger.debug("Hindsight API %s version %s supports update_mode='append'", api_url, version)
     else:
@@ -207,6 +177,14 @@ def _run_sync(coro, timeout: float = _DEFAULT_TIMEOUT):
     if future is None:
         raise RuntimeError("Hindsight loop unavailable")
     return future.result(timeout=timeout)
+
+
+def _context_thread(target, name: str) -> threading.Thread:
+    """Daemon thread running *target* in a snapshot of the spawner's contextvars.
+    Threads start with an EMPTY Context; under multiplex_profiles get_secret fails
+    closed without the profile's secret scope + HERMES_HOME override. (The shared
+    loop needs no wrap: run_coroutine_threadsafe inherits the submitter's context.)"""
+    return threading.Thread(target=contextvars.copy_context().run, args=(target,), daemon=True, name=name)
 
 
 RETAIN_SCHEMA = {
@@ -259,23 +237,20 @@ def _load_config() -> dict:
     """$HERMES_HOME/hindsight/config.json (profile-scoped), else ~/.hindsight/config.json
     (legacy, shared), else environment variables."""
     for path in (get_hermes_home() / "hindsight" / "config.json", Path.home() / ".hindsight" / "config.json"):
-        # A corrupt (or empty) file falls through to the next source, as before the dedup.
-        if path.exists() and (data := read_json_or_empty(path)):
-            return data
-    # Mode, bank (the data partition), endpoint and retain shaping are per-profile .env values like
-    # the key beside them: read through the secret scope so a multiplexed secondary never inherits
-    # the default profile's bank/mode. Tuning knobs (timeouts, budget) stay process-global.
+        if path.exists():
+            with contextlib.suppress(Exception):
+                return json.loads(path.read_text(encoding="utf-8"))
     return {
-        "mode": get_secret("HINDSIGHT_MODE", "") or "cloud",
+        "mode": os.environ.get("HINDSIGHT_MODE", "cloud"),
         "apiKey": get_secret("HINDSIGHT_API_KEY", ""),
         "timeout": _parse_int_setting(os.environ.get("HINDSIGHT_TIMEOUT"), _DEFAULT_TIMEOUT),
         "idle_timeout": _parse_int_setting(os.environ.get("HINDSIGHT_IDLE_TIMEOUT"), _DEFAULT_IDLE_TIMEOUT),
-        "retain_tags": get_secret("HINDSIGHT_RETAIN_TAGS", "") or "",
-        "observation_scopes": get_secret("HINDSIGHT_RETAIN_OBSERVATION_SCOPES", "") or "",
-        "retain_source": _scoped_setting("HINDSIGHT_RETAIN_SOURCE", _DEFAULT_RETAIN_SOURCE),
-        "retain_user_prefix": _scoped_setting("HINDSIGHT_RETAIN_USER_PREFIX", "User"),
-        "retain_assistant_prefix": _scoped_setting("HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant"),
-        "banks": {"hermes": {"bankId": get_secret("HINDSIGHT_BANK_ID", "") or "hermes",
+        "retain_tags": os.environ.get("HINDSIGHT_RETAIN_TAGS", ""),
+        "observation_scopes": os.environ.get("HINDSIGHT_RETAIN_OBSERVATION_SCOPES", ""),
+        "retain_source": os.environ.get("HINDSIGHT_RETAIN_SOURCE", _DEFAULT_RETAIN_SOURCE),
+        "retain_user_prefix": os.environ.get("HINDSIGHT_RETAIN_USER_PREFIX", "User"),
+        "retain_assistant_prefix": os.environ.get("HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant"),
+        "banks": {"hermes": {"bankId": os.environ.get("HINDSIGHT_BANK_ID", "hermes"),
                              "budget": os.environ.get("HINDSIGHT_BUDGET", "mid"), "enabled": True}},
     }
 
@@ -381,7 +356,7 @@ class HindsightMemoryProvider(MemoryProvider):
             if mode in _LOCAL_MODES:
                 return _check_local_runtime()[0]
             return mode == "local_external" or bool(
-                _cloud_api_key(cfg) or cfg.get("api_url") or get_secret("HINDSIGHT_API_URL", ""))
+                _cloud_api_key(cfg) or cfg.get("api_url") or os.environ.get("HINDSIGHT_API_URL", ""))
         except Exception:
             return False
 
@@ -405,7 +380,13 @@ class HindsightMemoryProvider(MemoryProvider):
         """Merge *values* into $HERMES_HOME/hindsight/config.json."""
         from utils import atomic_json_write
         config_path = Path(hermes_home) / "hindsight" / "config.json"
-        atomic_json_write(config_path, {**read_json_or_empty(config_path), **values}, mode=0o600)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = {}
+        if config_path.exists():
+            with contextlib.suppress(Exception):
+                existing = json.loads(config_path.read_text(encoding="utf-8"))
+        existing.update(values)
+        atomic_json_write(config_path, existing, mode=0o600)
 
     def post_setup(self, hermes_home: str, config: dict) -> None:
         """Custom setup wizard — installs only the deps needed for the selected mode."""
@@ -529,7 +510,7 @@ class HindsightMemoryProvider(MemoryProvider):
             return
         # A previous writer may have exited after shutdown(); allow the fresh one to drain.
         self._shutting_down.clear()
-        thread = spawn_context_thread(self._writer_loop, name="hindsight-writer")
+        thread = _context_thread(self._writer_loop, "hindsight-writer")
         self._writer_thread = self._sync_thread = thread
         thread.start()
 
@@ -726,7 +707,7 @@ class HindsightMemoryProvider(MemoryProvider):
         """Endpoint, bank and mode selectors from *cfg* (env fallbacks where documented)."""
         self._api_key = _cloud_api_key(cfg)
         default_url = _DEFAULT_LOCAL_URL if self._mode in {"local_embedded", "local_external"} else _DEFAULT_API_URL
-        self._api_url = cfg.get("api_url") or get_secret("HINDSIGHT_API_URL", "") or default_url
+        self._api_url = cfg.get("api_url") or os.environ.get("HINDSIGHT_API_URL", default_url)
         self._llm_base_url = cfg.get("llm_base_url", "")
 
         banks = cfg_get(cfg, "banks", "hermes", default={})
@@ -748,9 +729,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _apply_retain_settings(self, cfg: dict) -> None:
         def _cfg_or_env(key: str, env_var: str, default: str = "") -> Any:
-            # The env half is the same per-profile value ``_load_config`` resolves through the scope;
-            # a raw read here handed a multiplexed secondary the DEFAULT profile's retain shaping back.
-            return cfg.get(key) or _scoped_setting(env_var, default)
+            return cfg.get(key) or os.environ.get(env_var, default)
 
         self._retain_tags = _normalize_retain_tags(_cfg_or_env("retain_tags", "HINDSIGHT_RETAIN_TAGS"))
         self._tags = self._retain_tags or None
@@ -817,7 +796,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 print(f"  ⚠ {msg}", file=sys.stderr, flush=True)
             self._mode = "disabled"
             return
-        spawn_context_thread(self._daemon_start_worker, name="hindsight-daemon-start").start()
+        _context_thread(self._daemon_start_worker, "hindsight-daemon-start").start()
 
     def _daemon_start_worker(self) -> None:
         import traceback
@@ -837,24 +816,11 @@ class HindsightMemoryProvider(MemoryProvider):
             client = self._get_client()
             profile = self._config.get("profile", "hermes")
             # Profile .env out of sync with config -> rewrite and restart a running daemon.
-            # Fail-closed on key material: when this process holds no key (no secret
-            # scope on this thread) but the file does, a rewrite would destroy the
-            # only key copy the daemon subprocess can read. Skip the write AND the
-            # stop: restarting the daemon now would boot it keyless, which is the
-            # exact outage this guards against. _get_client() above already passed
-            # whatever key WAS available into the in-process client kwargs.
             if _load_simple_env(_embedded_profile_env_path(self._config)) != _build_embedded_profile_env(self._config):
-                if _may_rewrite_profile_env(self._config):
-                    _materialize_embedded_profile_env(self._config)
-                    if client._manager.is_running(profile):
-                        _log("\n=== Config changed, restarting daemon ===\n")
-                        client._manager.stop(profile)
-                else:
-                    logger.warning(
-                        "Hindsight profile env for %r holds an LLM API key this process cannot see "
-                        "(no secret scope); leaving the file untouched so the daemon keeps its key.",
-                        profile)
-                    _log("\n=== Profile env has a key this process cannot see; left untouched ===\n")
+                _materialize_embedded_profile_env(self._config)
+                if client._manager.is_running(profile):
+                    _log("\n=== Config changed, restarting daemon ===\n")
+                    client._manager.stop(profile)
             client._ensure_started()
             _log("\n=== Daemon started successfully ===\n")
         except Exception as e:
@@ -963,7 +929,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 with self._prefetch_lock:
                     self._prefetch_result, self._prefetch_count = text, count
 
-        self._prefetch_thread = spawn_context_thread(_run, name="hindsight-prefetch")
+        self._prefetch_thread = _context_thread(_run, "hindsight-prefetch")
         self._prefetch_thread.start()
 
     # -- retain ------------------------------------------------------------------

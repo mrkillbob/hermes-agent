@@ -26,7 +26,8 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from gateway.platforms.base import (
-    _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS, _MEDIA_DELIVERY_DENIED_PREFIXES, _ROOT_CREDENTIAL_PATHS)
+    _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS, _MEDIA_DELIVERY_DENIED_PREFIXES, _ROOT_CREDENTIAL_PATHS,
+    _TRUTHY, MEDIA_DELIVERY_STRICT_ENV)
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +79,7 @@ def _active_remote_env():
 def fetch_remote_media(path: str) -> Optional[str]:
     """Host path of a validated copy of sandbox file ``path``, or None (never raises). Only fires
     when a remote backend is active; the caller has already failed local validation."""
-    from gateway.media_policy import media_delivery_strict
-    if media_delivery_strict():
+    if os.environ.get(MEDIA_DELIVERY_STRICT_ENV, "0").strip().lower() in _TRUTHY:
         return None
     env = _active_remote_env()
     if env is None:

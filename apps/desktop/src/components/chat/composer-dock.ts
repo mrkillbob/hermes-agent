@@ -19,13 +19,9 @@ const composerDockEdge = (edge: 'bottom' | 'top') =>
 
 /** Glassy docked card — the status stack / queue. Paints the SAME
  *  `--composer-fill` as the surface, so rest / scrolled / focused / drawer-open
- *  all match the composer by construction.
- *
- * Keep the card non-shrinking inside capped flex scroll containers. Otherwise
- * flexbox compresses the card to the cap and its own overflow-hidden clips
- * later status rows before the outer status stack gets anything to scroll. */
+ *  all match the composer by construction. */
 export const composerDockCard = (edge: 'bottom' | 'top' = 'top') =>
-  cn('shrink-0', composerDockEdge(edge), composerFill, composerSurfaceGlass)
+  cn(composerDockEdge(edge), composerFill, composerSurfaceGlass)
 
 /** Floating composer panel skin — the `/`·`@`·`?` completion drawer and the
  *  attach (`+`) menu. Glassy translucent card, hairline border, full radius,

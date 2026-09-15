@@ -43,14 +43,11 @@ class TurnLeaseToken:
     """Held-lease handle from :meth:`SessionTurnLeaseRegistry.acquire`; ``released`` makes
     release idempotent."""
 
-    __slots__ = ("session_id", "owner_key", "generation", "released", "lease")
+    __slots__ = ("session_id", "owner_key", "generation", "released")
 
-    def __init__(self, session_id: str, owner_key: str, generation: int, lease: "_SessionLease") -> None:
+    def __init__(self, session_id: str, owner_key: str, generation: int) -> None:
         self.session_id, self.owner_key, self.generation = session_id, owner_key, generation
         self.released = False
-        # The concrete lease, so release resolves by identity even after a rotation re-aliases
-        # ``session_id`` (both ids map to this same lease).
-        self.lease = lease
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (f"TurnLeaseToken(session_id={self.session_id!r}, owner_key={self.owner_key!r}, "
@@ -103,8 +100,8 @@ class SessionTurnLeaseRegistry:
         if not session_id:
             return None
         wait = float(timeout) if timeout and timeout > 0 else DEFAULT_LEASE_WAIT
+        token = TurnLeaseToken(session_id, owner_key, int(generation))
         lease = self._get_or_create(session_id)
-        token = TurnLeaseToken(session_id, owner_key, int(generation), lease=lease)
         if lease.lock.locked():
             logger.warning(
                 "turn lease contention on session %s: routing key %s (gen %s) waiting behind "
@@ -144,8 +141,7 @@ class SessionTurnLeaseRegistry:
         if (token is None or token.released or not new_session_id
                 or new_session_id == token.session_id):
             return False
-        lease = token.lease
-        if lease.holder is not token:
+        if (lease := self._leases.get(token.session_id)) is None or lease.holder is not token:
             return False
         existing = self._leases.get(new_session_id)
         if existing is not None and existing is not lease and not existing.idle:
@@ -168,7 +164,8 @@ class SessionTurnLeaseRegistry:
         if token is None or token.released:
             return False
         token.released = True
-        lease = token.lease
+        if (lease := self._leases.get(token.session_id)) is None:
+            return False
         if lease.holder is not token:
             logger.debug("turn lease release skipped on session %s: token (key %s gen %s) is not "
                          "the current holder", token.session_id, token.owner_key, token.generation)

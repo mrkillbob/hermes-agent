@@ -98,14 +98,14 @@ describe('usePetRoam RAF scheduling', () => {
     expect(vi.getTimerCount()).toBe(1)
   })
 
-  it('keeps idle movement scheduled while unfocused and cleans up on unmount', () => {
+  it('suspends idle movement while unfocused and cleans up its wake timer on unmount', () => {
     const raf = installRaf()
 
     mount.render(<RoamHarness />)
     expect(vi.getTimerCount()).toBe(1)
 
     act(() => window.dispatchEvent(new Event('blur')))
-    expect(vi.getTimerCount()).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
 
     act(() => window.dispatchEvent(new Event('focus')))
     expect(vi.getTimerCount()).toBe(1)

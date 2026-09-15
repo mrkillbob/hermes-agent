@@ -424,12 +424,7 @@ def _stop_browser_cleanup_thread():
     """Stop the background cleanup thread."""
     _bt._cleanup_running = False
     if _bt._cleanup_thread is not None:
-        # A second Ctrl+C during the timed join lands here as KeyboardInterrupt; the janitor is a
-        # daemon thread, so letting it propagate only prints "Exception ignored in atexit callback".
-        try:
-            _bt._cleanup_thread.join(timeout=5)
-        except (SystemExit, KeyboardInterrupt):
-            pass
+        _bt._cleanup_thread.join(timeout=5)
 
 
 def _update_session_activity(task_id: str):

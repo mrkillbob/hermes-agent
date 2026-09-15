@@ -1,7 +1,5 @@
 'use strict'
 
-import { runBackendStartStep } from './backend-start-cancellation'
-
 /**
  * update-gate.ts
  *
@@ -49,11 +47,9 @@ export function updateGateReason(deps: UpdateGateDeps): UpdateGateReason {
   return null
 }
 
-export type UpdateClearanceOutcome = 'clear' | 'finished' | 'timeout' | 'cancelled'
+export type UpdateClearanceOutcome = 'clear' | 'finished' | 'timeout'
 
 export interface WaitForUpdateClearanceOptions {
-  signal?: AbortSignal
-  isCancelled?: () => boolean
   timeoutMs: number
   pollMs: number
   /** Invoked once per poll while parked (boot progress / logging). */
@@ -78,12 +74,6 @@ export async function waitForUpdateClearance(
   const now = options.now || Date.now
   const sleep = options.sleep || (ms => new Promise<void>(r => setTimeout(r, ms)))
 
-  const isCancelled = () => options.signal?.aborted || options.isCancelled?.()
-
-  if (isCancelled()) {
-    return 'cancelled'
-  }
-
   let reason = updateGateReason(deps)
 
   if (!reason) {
@@ -93,42 +83,11 @@ export async function waitForUpdateClearance(
   const deadline = now() + options.timeoutMs
 
   while (reason && now() < deadline) {
-    if (isCancelled()) {
-      return 'cancelled'
+    if (options.onWaitTick) {
+      await options.onWaitTick(reason)
     }
 
-    let timer: ReturnType<typeof setTimeout> | undefined
-
-    try {
-      if (options.onWaitTick) {
-        await runBackendStartStep(options.signal, () => options.onWaitTick!(reason!))
-      }
-
-      if (isCancelled()) {
-        return 'cancelled'
-      }
-
-      await runBackendStartStep(options.signal, () =>
-        options.sleep
-          ? sleep(options.pollMs)
-          : new Promise<void>(resolve => {
-              timer = setTimeout(resolve, options.pollMs)
-            })
-      )
-    } catch (error) {
-      if (isCancelled()) {
-        return 'cancelled'
-      }
-
-      throw error
-    } finally {
-      clearTimeout(timer)
-    }
-
-    if (isCancelled()) {
-      return 'cancelled'
-    }
-
+    await sleep(options.pollMs)
     reason = updateGateReason(deps)
   }
 

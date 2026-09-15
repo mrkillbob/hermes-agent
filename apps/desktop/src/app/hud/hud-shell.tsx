@@ -2,7 +2,6 @@ import { useStore } from '@nanostores/react'
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 
-import { useViewedInterval } from '@/hooks/use-viewed-interval'
 import { chatMessageText } from '@/lib/chat-messages'
 import { $activeSessionAwaitingInput } from '@/store/prompts'
 import { $busy, $messages } from '@/store/session'
@@ -232,11 +231,7 @@ export function HudShell() {
   // hysteresis so the layout can't flutter while it's dragged along the line.
   const [edge, setEdge] = useState<'bottom' | 'top'>('top')
 
-  // Viewed-gated (#88275): window position only changes while the user can
-  // see the window, so an ungated 300ms poll keeps the idle renderer hot
-  // forever. useViewedInterval parks the timer when hidden/unfocused and
-  // leading-ticks on return, so a drag is still picked up within one tick.
-  const measureEdge = useCallback(() => {
+  useEffect(() => {
     // Measured on the WINDOW, and flush-only. Flipping is what lets the bar
     // reach the top of the screen at all: the window's top edge can sit against
     // the menu bar, and the flip moves the composer to that edge. Keying it off
@@ -247,33 +242,33 @@ export function HudShell() {
     const FLIP_ON = 0
     const FLIP_OFF = 4
 
-    // TRYING IT: the bar stays on top and the transcript always hangs below,
-    // wherever the HUD is parked. Flip the constant to re-enable the
-    // edge-aware layout (the CSS for both orientations is still here).
-    if (HUD_THREAD_ALWAYS_BELOW) {
-      setEdge('top')
+    const measure = () => {
+      // TRYING IT: the bar stays on top and the transcript always hangs below,
+      // wherever the HUD is parked. Flip the constant to re-enable the
+      // edge-aware layout (the CSS for both orientations is still here).
+      if (HUD_THREAD_ALWAYS_BELOW) {
+        setEdge('top')
 
-      return
+        return
+      }
+
+      // availTop ≈ menu bar / notch inset on macOS; screenY is in full-screen
+      // coordinates, so "parked at the top" means screenY ≈ availTop, not 0.
+      const availTop = (window.screen as { availTop?: number }).availTop ?? 0
+      const topGap = window.screenY - availTop
+
+      setEdge(prev => (topGap <= FLIP_ON ? 'top' : topGap >= FLIP_OFF ? 'bottom' : prev))
     }
 
-    // availTop ≈ menu bar / notch inset on macOS; screenY is in full-screen
-    // coordinates, so "parked at the top" means screenY ≈ availTop, not 0.
-    const availTop = (window.screen as { availTop?: number }).availTop ?? 0
-    const topGap = window.screenY - availTop
-
-    setEdge(prev => (topGap <= FLIP_ON ? 'top' : topGap >= FLIP_OFF ? 'bottom' : prev))
-  }, [])
-
-  useViewedInterval(measureEdge, 300)
-
-  useEffect(() => {
-    measureEdge()
-    window.addEventListener('resize', measureEdge)
+    measure()
+    const timer = setInterval(measure, 300)
+    window.addEventListener('resize', measure)
 
     return () => {
-      window.removeEventListener('resize', measureEdge)
+      clearInterval(timer)
+      window.removeEventListener('resize', measure)
     }
-  }, [measureEdge])
+  }, [])
 
   const rootRef = useRef<HTMLDivElement | null>(null)
 

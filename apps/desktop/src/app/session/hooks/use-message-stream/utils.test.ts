@@ -25,8 +25,7 @@ describe('completionErrorText', () => {
 describe('toTodoPayload', () => {
   it('routes named todo and anonymous todos-bearing events to the todo stream', () => {
     expect(toTodoPayload(payload({ name: 'todo' }))?.tool_id).toBe('todo-live')
-    expect(toTodoPayload(payload({ todos: [] }))?.name).toBe('todo_list')
-    expect(toTodoPayload(payload({ name: 'todo_list' }))?.tool_id).toBe('todo-live')
+    expect(toTodoPayload(payload({ todos: [] }))?.name).toBe('todo')
     expect(toTodoPayload(payload({ name: 'web_search' }))).toBeUndefined()
     expect(toTodoPayload(undefined)).toBeUndefined()
   })

@@ -407,7 +407,7 @@ def _append_unconfigured_rows(
     """Empty setup skeletons for canonical providers missing from ``rows`` — except the *current* one:
     if config.yaml still points at it but credentials are gone, keep a row carrying the saved model so
     GUI pickers don't silently snap to another provider."""
-    from hermes_cli.models import CANONICAL_PROVIDERS, _model_requires_account_discovery
+    from hermes_cli.models import CANONICAL_PROVIDERS
 
     seen = {r["slug"].lower() for r in rows}
     cur = (ctx.current_provider or "").lower()
@@ -419,19 +419,16 @@ def _append_unconfigured_rows(
         if current_only and entry.slug.lower() != cur:
             continue
         if entry.slug.lower() == cur:
-            saved_model = "" if _model_requires_account_discovery(entry.slug, cur_model) else cur_model
             auth_type, key_env = _provider_auth_hint(entry.slug)
-            tail = (
-                "Astra requires successful account-scoped model discovery."
-                if cur_model and not saved_model else "Showing the saved model only."
-            )
             warning = (
-                f"Configured provider missing usable credentials; paste {key_env} to reactivate. {tail}"
+                f"Configured provider missing usable credentials; paste {key_env} to reactivate. "
+                "Showing the saved model only."
                 if auth_type == "api_key" and key_env
-                else f"Configured provider is not authenticated; run `hermes model` to reactivate. {tail}"
+                else "Configured provider is not authenticated; run `hermes model` to reactivate. "
+                "Showing the saved model only."
             )
             extras.append(_canonical_row(
-                entry, cur, models=[saved_model] if saved_model else [], total_models=1 if saved_model else 0,
+                entry, cur, models=[cur_model] if cur_model else [], total_models=1 if cur_model else 0,
                 source="configured-current", authenticated=False, auth_type=auth_type, key_env=key_env,
                 warning=warning,
             ))
@@ -595,10 +592,6 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
         slug = str(row.get("slug", "")).lower()
         models = row.get("models") or []
         if not models:
-            continue
-        if row.get("free_tier_row"):
-            # The free tier's one model has no Portal pricing and no entitlement to read: pricing
-            # it would lock the only row a free-tier install can select.
             continue
         try:
             pricing_kwargs = {"cached_only": True} if cached_only else {}

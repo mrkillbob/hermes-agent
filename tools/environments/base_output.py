@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import IO, Callable, Protocol
 
 from hermes_constants import get_hermes_home
-from tools.tool_output_truncate import head_tail_split, truncation_notice
 from hermes_cli._subprocess_compat import windows_hide_flags
 
 # Sentinel capacity for full-fidelity capture: large enough that the collector
@@ -155,13 +154,16 @@ class _BoundedOutputCollector:
             notice = ""
             for _ in range(4):
                 omitted = max(0, self._total_chars - max(0, available - len(notice)))
-                updated = truncation_notice(omitted, self._total_chars)
+                updated = (
+                    f"\n\n... [OUTPUT TRUNCATED - {omitted:,} chars omitted "
+                    f"out of {self._total_chars:,} total] ...\n\n")
                 if updated == notice:
                     break
                 notice = updated
 
             content_budget = max(0, available - len(notice))
-            head_chars, tail_chars = head_tail_split(content_budget)
+            head_chars = int(content_budget * 0.4)
+            tail_chars = content_budget - head_chars
             rendered_tail = tail[-tail_chars:] if tail_chars else ""
             return head[:head_chars] + notice[:available] + rendered_tail + suffix
 

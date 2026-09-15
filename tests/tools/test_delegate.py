@@ -1046,7 +1046,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_base_url_with_provider_carries_runtime_request_overrides(self, mock_resolve):
         """#65035: the base_url short-circuit must not drop the configured
-        provider's generic request_overrides; dedicated output caps are ignored."""
+        provider's request_overrides / max_output_tokens."""
         mock_resolve.return_value = {
             "provider": "custom",
             "base_url": "https://provider-default.example/v1",
@@ -1071,7 +1071,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
             creds["request_overrides"],
             {"extra_body": {"thinking": {"type": "disabled"}}},
         )
-        self.assertNotIn("max_output_tokens", creds)
+        self.assertEqual(creds["max_output_tokens"], 8192)
 
     def test_bare_base_url_returns_none_overrides(self):
         """No provider alongside base_url → no overrides source; keys are
@@ -1080,7 +1080,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         cfg = {"model": "m", "provider": "", "base_url": "http://localhost:1234/v1", "api_key": "k"}
         creds = _resolve_delegation_credentials(cfg, parent)
         self.assertIsNone(creds["request_overrides"])
-        self.assertNotIn("max_output_tokens", creds)
+        self.assertIsNone(creds["max_output_tokens"])
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_base_url_survives_runtime_resolution_failure(self, mock_resolve):
@@ -1093,7 +1093,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         creds = _resolve_delegation_credentials(cfg, parent)
         self.assertEqual(creds["base_url"], "https://api.xiaomimimo.com/v1")
         self.assertIsNone(creds["request_overrides"])
-        self.assertNotIn("max_output_tokens", creds)
+        self.assertIsNone(creds["max_output_tokens"])
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_failure_raises_valueerror(self, mock_resolve):
@@ -2125,10 +2125,7 @@ class TestFallbackModelInheritance(unittest.TestCase):
         fallback_entry = {"provider": "openrouter", "model": "gpt-4o-mini", "api_key": "sk-or-x"}
         parent._fallback_chain = [fallback_entry]
 
-        with (
-            patch("run_agent.AIAgent") as MockAgent,
-            patch("tools.delegate_tool._load_config", return_value={}),
-        ):
+        with patch("run_agent.AIAgent") as MockAgent:
             MockAgent.return_value = MagicMock()
             _build_child_agent(
                 task_index=0,
@@ -2149,10 +2146,7 @@ class TestFallbackModelInheritance(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
         parent._fallback_chain = []
 
-        with (
-            patch("run_agent.AIAgent") as MockAgent,
-            patch("tools.delegate_tool._load_config", return_value={}),
-        ):
+        with patch("run_agent.AIAgent") as MockAgent:
             MockAgent.return_value = MagicMock()
             _build_child_agent(
                 task_index=0,

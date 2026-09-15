@@ -6,7 +6,7 @@
  * backend, no core edits.
  *
  * Ships OFF by default (`defaultEnabled: false`): it inventories in
- * Capabilities ▸ Plugins and registers nothing until the user flips the switch.
+ * Settings ▸ Plugins and registers nothing until the user flips the switch.
  */
 
 import './kanban.css'

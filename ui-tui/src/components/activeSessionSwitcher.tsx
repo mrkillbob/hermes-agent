@@ -1,5 +1,4 @@
 import { Box, Text, useInput, useStdout } from '@hermes/ink'
-import type { SessionListItem, SessionListResponse } from '@hermes/shared/gateway-events'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { sessionScopedModelArg } from '../domain/slash.js'
@@ -8,7 +7,9 @@ import type {
   SessionActiveItem,
   SessionActiveListResponse,
   SessionCloseResponse,
-  SessionDeleteResponse
+  SessionDeleteResponse,
+  SessionListItem,
+  SessionListResponse
 } from '../gatewayTypes.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
@@ -218,7 +219,7 @@ export const draftModelNameFromArg = (value: string) => {
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i]!
 
-    if (part === '--provider' || part === '--reasoning') {
+    if (part === '--provider') {
       i++
 
       continue

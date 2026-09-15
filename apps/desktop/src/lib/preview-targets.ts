@@ -1,7 +1,11 @@
 const PREVIEW_MARKDOWN_RE = /\[Preview:[^\]]+\]\((?<href>#preview[:/][^)]+)\)/gi
 
 export function stripPreviewTargets(text: string): string {
-  return text.replace(PREVIEW_MARKDOWN_RE, '')
+  return text
+    .replace(PREVIEW_MARKDOWN_RE, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 export function extractPreviewTargets(text: string): string[] {

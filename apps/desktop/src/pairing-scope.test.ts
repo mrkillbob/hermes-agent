@@ -4,19 +4,14 @@
 // `profileScoped()` at the top level would approve into the default
 // profile's whitelist while the operator was managing another one — a grant
 // the running gateway for that profile never consults.
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const api = vi.fn().mockResolvedValue({ ok: true })
 
-describe('pairing requests carry the active profile', () => {
-  beforeEach(() => {
-    api.mockClear()
-    Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { api } })
-  })
+vi.stubGlobal('window', { hermesDesktop: { api } })
 
-  afterEach(() => {
-    Reflect.deleteProperty(window, 'hermesDesktop')
-  })
+describe('pairing requests carry the active profile', () => {
+  beforeEach(() => api.mockClear())
 
   it('scopes approve and revoke by body, and the listing by query', async () => {
     const mod = await import('@/hermes')

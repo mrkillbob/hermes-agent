@@ -8,7 +8,7 @@ describe('installRendererAnimationPauseState', () => {
     vi.restoreAllMocks()
   })
 
-  it('keeps visible animations running across blur and focus, and cleans up its root state', () => {
+  it('pauses on blur, resumes on focus, and cleans up its root state', () => {
     let focused = true
     vi.spyOn(document, 'hasFocus').mockImplementation(() => focused)
 
@@ -17,7 +17,7 @@ describe('installRendererAnimationPauseState', () => {
 
     focused = false
     window.dispatchEvent(new Event('blur'))
-    expect(document.documentElement.hasAttribute(RENDERER_ANIMATIONS_PAUSED_ATTRIBUTE)).toBe(false)
+    expect(document.documentElement.hasAttribute(RENDERER_ANIMATIONS_PAUSED_ATTRIBUTE)).toBe(true)
 
     focused = true
     window.dispatchEvent(new Event('focus'))

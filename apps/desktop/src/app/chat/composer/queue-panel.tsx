@@ -25,9 +25,7 @@ interface QueuePanelProps {
 }
 
 const entryPreview = (entry: QueuedPromptEntry, c: Translations['composer']) =>
-  entry.displayKind === 'hidden'
-    ? c.hiddenQueued
-    : (entry.displayText ?? entry.text).trim() || (entry.attachments.length > 0 ? c.attachmentOnly : c.emptyTurn)
+  (entry.displayText ?? entry.text).trim() || (entry.attachments.length > 0 ? c.attachmentOnly : c.emptyTurn)
 
 export function QueuePanel({
   busy,
@@ -48,6 +46,10 @@ export function QueuePanel({
   }
 
   return (
+    // Keyed on the park flag: StatusSection owns its collapse state from
+    // defaultCollapsed, so remount on park/unpark. A Stop must EXPAND the
+    // panel — the halted prompts' only presence is here, and leaving them
+    // behind a collapsed "N queued" pill is how they read as vanished.
     <StatusSection
       accessory={
         parked ? (
@@ -64,7 +66,9 @@ export function QueuePanel({
           </Tip>
         ) : undefined
       }
+      defaultCollapsed={!parked}
       icon={<Codicon className="text-muted-foreground/70" name={parked ? 'debug-pause' : 'layers'} size="0.8rem" />}
+      key={parked ? 'parked' : 'flowing'}
       label={parked ? c.queuedPaused(entries.length) : c.queued(entries.length)}
     >
       {entries.map(entry => {

@@ -5,7 +5,7 @@ interface WindowStatePayload {
 
 export const RENDERER_ANIMATIONS_PAUSED_ATTRIBUTE = 'data-renderer-animations-paused'
 
-export function createRendererLoopPauseController(onChange: () => void, { pauseWhenUnfocused = false } = {}) {
+export function createRendererLoopPauseController(onChange: () => void, { pauseWhenUnfocused = true } = {}) {
   let windowPaused = false
   let windowFocused = document.hasFocus()
 
@@ -37,11 +37,8 @@ export function createRendererLoopPauseController(onChange: () => void, { pauseW
   })
 
   document.addEventListener('visibilitychange', onVisibilityChange)
-
-  if (pauseWhenUnfocused) {
-    window.addEventListener('blur', onBlur)
-    window.addEventListener('focus', onFocus)
-  }
+  window.addEventListener('blur', onBlur)
+  window.addEventListener('focus', onFocus)
 
   return {
     dispose: () => {

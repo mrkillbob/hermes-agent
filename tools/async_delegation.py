@@ -17,7 +17,8 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from hermes_constants import get_hermes_home
 from tools.daemon_pool import DaemonThreadPoolExecutor
@@ -82,42 +83,69 @@ def _db_path():
 
 
 def _connect() -> sqlite3.Connection:
-    from hermes_cli.sqlite_util import open_db
-    # Same state.db as hermes_state.SessionDB -- reuse its owner-only (0600)
-    # hardening so this writer doesn't create/leave the file (and its WAL
-    # sidecars) at the process umask. See hermes_state._secure_state_db_files.
-    from hermes_state import _secure_state_db_files
-
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    _secure_state_db_files(path, create_main=True)
-    # wal=False: SessionDB owns state.db's journal mode (_initialize_schema applies the barriers).
-    conn = open_db(path, db_label="state.db (async_delegation)", busy_timeout_ms=10_000,
-                   wal=False, row_factory=None, initialize=_initialize_schema)
-    _secure_state_db_files(path)
+    conn = sqlite3.connect(path, timeout=10)
+    try:
+        _initialize_schema(conn)
+    except Exception:
+        conn.close()  # don't leak the connection on PRAGMA/DDL failure
+        raise
     return conn
 
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
     from hermes_state_repair import apply_durability_barriers
-    from hermes_state_schema import reconcile_state_schema
     # Preserve the journal mode SessionDB configured on state.db: forcing WAL from
     # every short-lived connection collides with live transcript/FTS writers.
     apply_durability_barriers(conn)
-    # Single durable-shape authority: the canonical SCHEMA_SQL drives both
-    # table creation and column backfill (reconcile_state_schema replays the
-    # canonical DDL and reuses SessionDB's declarative reconciliation). This
-    # module previously carried its own CREATE TABLE + ALTER column list,
-    # which drifted from SCHEMA_SQL — same-name columns with different
-    # nullability/defaults depending on which authority touched the database
-    # first (#94691).
-    reconcile_state_schema(conn)
+    conn.execute("""CREATE TABLE IF NOT EXISTS async_delegations (
+            delegation_id TEXT PRIMARY KEY,
+            origin_session TEXT NOT NULL,
+            origin_ui_session_id TEXT NOT NULL DEFAULT '',
+            parent_session_id TEXT,
+            state TEXT NOT NULL,
+            dispatched_at REAL NOT NULL,
+            completed_at REAL,
+            updated_at REAL NOT NULL,
+            event_json TEXT,
+            result_json TEXT,
+            delivery_state TEXT NOT NULL DEFAULT 'pending',
+            delivery_attempts INTEGER NOT NULL DEFAULT 0,
+            delivered_at REAL,
+            owner_pid INTEGER,
+            owner_started_at INTEGER,
+            task_json TEXT,
+            delivery_claim TEXT,
+            delivery_claimed_at REAL,
+            origin_session_id TEXT NOT NULL DEFAULT ''
+        )""")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(async_delegations)")}
+    # origin_session_id: raw api_server session id of the ORIGINATING request
+    # (wake target); without it restart-recovered completions are unroutable there.
+    for name, sql_type in (("owner_pid", "INTEGER"), ("owner_started_at", "INTEGER"), ("task_json", "TEXT"),
+                           ("delivery_claim", "TEXT"), ("delivery_claimed_at", "REAL"), ("origin_session_id", "TEXT")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE async_delegations ADD COLUMN {name} {sql_type}")
 
 
-def _transaction():
-    from hermes_cli.sqlite_util import transaction
+@contextmanager
+def _transaction() -> Iterator[sqlite3.Connection]:
+    """Open a connection, commit/rollback on exit, and ALWAYS close it (``with conn:``
+    alone leaks the connection and WAL/SHM fds until GC).
 
-    return transaction(_connect())
+    ``sqlite3.Connection.__enter__``/``__exit__`` only commit or roll back the transaction; they do not
+    close the connection. Using ``with _connect()`` alone therefore leaks a connection — and its WAL/SHM
+    file descriptors — on every durable dispatch, completion, and delivery-claim, deferring the close to the
+    garbage collector. On a long-running gateway that exhausts ``RLIMIT_NOFILE`` (the cron-ledger sibling of
+    this bug was #69567 / PR #69594).
+    """
+    conn = _connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _capture_routing_origin() -> Dict[str, Any]:
@@ -374,15 +402,6 @@ def release_completion_delivery(delegation_id: str, claim_id: str) -> bool:
         return cur.rowcount == 1
 
 
-def defer_completion_delivery(delegation_id: str, claim_id: str) -> bool:
-    """Return an unadmitted completion to pending without spending a delivery attempt."""
-    return _update_delivery("""UPDATE async_delegations SET delivery_claim=NULL,
-                  delivery_claimed_at=NULL, delivery_attempts=MAX(0, delivery_attempts-1),
-                  updated_at=?
-           WHERE delegation_id=? AND delivery_state='pending' AND delivery_claim=?""",
-        (time.time(), delegation_id, claim_id))
-
-
 def drop_completion_delivery(delegation_id: str, claim_id: str) -> bool:
     """Terminally drop a claimed completion whose target is permanently gone (the
     spawning session ended at an explicit user boundary such as /new or reset).
@@ -432,15 +451,12 @@ def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:
 
 # ── In-memory registry queries ──────────────────────────────────────────────
 def _get_executor(max_workers: int) -> ThreadPoolExecutor:
-    """Lazily create (or grow in place, never shrink) the shared daemon executor. Raising
-    ``_max_workers`` is enough: the next ``submit`` spawns threads up to the new cap."""
+    """Lazily create (or grow, never shrink) the shared daemon executor; in-flight
+    futures keep running on a replaced pool until it is collected."""
     global _executor, _executor_max_workers
     with _executor_lock:
-        if _executor is None:
+        if _executor is None or max_workers > _executor_max_workers:
             _executor = DaemonThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="async-delegate")
-            _executor_max_workers = max_workers
-        elif max_workers > _executor_max_workers:
-            _executor._max_workers = max_workers
             _executor_max_workers = max_workers
         return _executor
 
@@ -560,20 +576,12 @@ def _dispatch(
         if record["slot_key"] not in active_slots and len(active_slots) >= max_async_children:
             return {"status": "rejected", "error": capacity_error}
         _records[delegation_id] = record
-        live_units = sum(1 for r in _records.values() if r.get("status") in _LIVE_STATES)
     _persist_dispatch(record)
-    # Units of one call share a slot, so live units can exceed slots: size the pool by units or a
-    # unit queues behind a full pool and the stale monitor kills it before its child ever starts.
-    executor = _get_executor(max(max_async_children, live_units))
+    executor = _get_executor(max_async_children)
 
     def _worker() -> None:
         result: Dict[str, Any] = {}
         status = "error"
-        with _records_lock:
-            rec = _records.get(delegation_id)
-            if rec is not None:
-                # The stall clock starts when the runner starts; a unit queued behind a full pool is not stalled.
-                rec.update(_started=True, _progress_ts=time.time())
         try:
             result = runner() or {}
             status = classify(result)
@@ -796,8 +804,6 @@ def _sweep_stale_locked(now: float):
         if status != "running" or progress_fn is None:
             continue
         any_monitorable = True
-        if not record.get("_started"):
-            continue  # queued behind a full pool: not stalled, but keep the monitor alive for when it starts
         try:
             token, in_tool = progress_fn()
         except Exception:

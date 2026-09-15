@@ -15,8 +15,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from hermes_cli.route_identity import normalize_route_base_url
-
 logger = logging.getLogger(__name__)
 
 
@@ -53,8 +51,7 @@ class BackendIdentity:
         base_url: Optional[str] = None,
     ) -> "BackendIdentity":
         return cls(
-            provider=_norm(provider), model=_norm(model),
-            base_url=normalize_route_base_url(base_url),
+            provider=_norm(provider), model=_norm(model), base_url=_norm(base_url).rstrip("/"),
         )
 
 

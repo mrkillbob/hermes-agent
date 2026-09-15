@@ -17,10 +17,11 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.platforms.base import (
+    MessageEvent,
+    MessageType,
     SendResult,
     SUPPORTED_VIDEO_TYPES,
 )
-from gateway.platforms.event import MessageEvent, MessageType
 
 
 # ---------------------------------------------------------------------------

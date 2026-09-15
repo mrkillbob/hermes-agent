@@ -37,15 +37,9 @@ else:
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import coerce_port as _coerce_port
-from gateway.platforms._shared import (
-    extra_or_secret as _extra_or_secret, get_scoped_secret as _get_scoped_secret,
-    seed_extra_from_env as _seed_extra_from_env, send_error
-)
-from gateway.platforms.base import BasePlatformAdapter, SendResult
-from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import compile_mention_patterns, strip_markdown
-from gateway.platforms.helpers import MessageDeduplicator, bounded_put, cancel_task
-from utils import atomic_json_write
 
 from .auth import load_project_credentials
 # Sidecar dir resolution is lazy (never at import): it probes the filesystem and may
@@ -94,9 +88,22 @@ def _runtime_record_path() -> Path:
 
 
 def _write_runtime_record(port: int, token: str, pid: int) -> None:
-    """Atomically persist ``{port, token, pid}`` 0600 from creation (best-effort)."""
+    """Atomically persist ``{port, token, pid}`` with owner-only perms (best-effort)."""
+    import tempfile
     try:
-        atomic_json_write(_runtime_record_path(), {"port": port, "token": token, "pid": pid}, indent=None, mode=0o600)
+        path = _runtime_record_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".photon-sidecar.", suffix=".tmp")
+        try:
+            with contextlib.suppress(OSError):  # perms BEFORE the token hits disk (Windows / odd fs)
+                os.chmod(tmp, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"port": port, "token": token, "pid": pid}, fh)
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
     except Exception as e:
         logger.warning("[photon] failed to write sidecar runtime record: %s", e)
 
@@ -271,13 +278,16 @@ def is_connected(cfg: PlatformConfig) -> bool:
 
 
 def _env_enablement() -> Optional[dict]:
-    """``env_enablement_fn``: seed ``PlatformConfig.extra`` so env-only setups appear in status."""
+    """Seed PlatformConfig.extra from env so env-only setups appear in status
+    (``home_channel`` becomes a ``HomeChannel`` via the core plugin hook)."""
     project_id, project_secret = load_project_credentials()
     if not (project_id and project_secret):
         return None
-    return {"project_id": project_id, "project_secret": project_secret,
-            **_seed_extra_from_env((), home_env="PHOTON_HOME_CHANNEL")}
-
+    seed: dict = {"project_id": project_id, "project_secret": project_secret}
+    home = _get_scoped_secret("PHOTON_HOME_CHANNEL", "").strip()
+    if home:
+        seed["home_channel"] = {"chat_id": home, "name": _get_scoped_secret("PHOTON_HOME_CHANNEL_NAME", "Home")}
+    return seed
 
 
 def _markdown_enabled() -> bool:
@@ -439,6 +449,24 @@ def _guess_mime(path: str) -> Optional[str]:
     return mimetypes.guess_type(path)[0] or None
 
 
+def _bounded_put(store: Dict[str, Any], key: str, value: Any, max_size: int) -> None:
+    """Insert with insertion-order refresh and a HARD size bound (evict oldest)."""
+    if key in store:
+        del store[key]
+    store[key] = value
+    if len(store) > max_size:
+        for old in list(store.keys())[: len(store) - max_size]:
+            del store[old]
+
+
+async def _cancel_task(task: Optional[asyncio.Task]) -> None:
+    """Cancel *task* and wait for it, unless it is the current task."""
+    if task is None:
+        return
+    task.cancel()
+    if task is not asyncio.current_task():
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
 
 # -- Adapter -------------------------------------------------------------------
@@ -468,8 +496,11 @@ class PhotonAdapter(BasePlatformAdapter):
         # respawns only when the sidecar's HTTP loop hangs; 10-min interval because shared
         # lines are quiet for hours. Config key wins, then env; None-aware so 0 disables it.
         def _setting(key: str, env: str, default: Any, cast: Callable[[Any], Any]) -> Any:
+            value = extra.get(key)
+            if value is None:
+                value = _get_scoped_secret(env)
             try:
-                return cast(_extra_or_secret(extra, key, env, None))
+                return cast(value)
             except (TypeError, ValueError):
                 return default
         self._probe_interval = _setting("probe_interval_seconds", "PHOTON_PROBE_INTERVAL_SECONDS", 600.0, float)
@@ -486,7 +517,7 @@ class PhotonAdapter(BasePlatformAdapter):
         self._sidecar_health_interval = 15.0
         self._probe_failures = 0
         self._last_upstream_activity = 0.0  # monotonic; watchdog skips probe if traffic proved liveness
-        self._dedup = MessageDeduplicator(max_size=_DEDUP_MAX_SIZE, ttl_seconds=_DEDUP_WINDOW_SECONDS)  # at-least-once stream
+        self._seen_messages: Dict[str, float] = {}  # at-least-once stream dedup
         self._sent_message_ids: Dict[str, float] = {}  # only reactions targeting OUR sends are routed
         self._last_inbound_by_chat: Dict[str, str] = {}  # default target for the react action
         self._recent_richlinks_by_chat: Dict[str, float] = {}  # coalesce preview-art attachments
@@ -576,9 +607,9 @@ class PhotonAdapter(BasePlatformAdapter):
         self._inbound_running = False
         await self._stop_watchdog()  # first, so it can't respawn while we tear the sidecar down
         task, self._sidecar_health_task = self._sidecar_health_task, None
-        await cancel_task(task)
+        await _cancel_task(task)
         task, self._inbound_task = self._inbound_task, None
-        await cancel_task(task)
+        await _cancel_task(task)
         for _, fffc_task in list(self._pending_fffc.values()):
             if fffc_task and not fffc_task.done():
                 fffc_task.cancel()
@@ -678,12 +709,20 @@ class PhotonAdapter(BasePlatformAdapter):
             logger.debug("[photon] skipping non-JSON inbound line")
             return
         msg_id = event.get("messageId")
-        if msg_id and self._dedup.is_duplicate(msg_id):
+        if msg_id and self._is_duplicate(msg_id):
             return
         try:
             await self._dispatch_inbound(event)
         except Exception:
             logger.exception("[photon] inbound dispatch failed")
+
+    def _is_duplicate(self, msg_id: str) -> bool:
+        now = time.time()
+        t = self._seen_messages.get(msg_id)
+        if t is not None and now - t < _DEDUP_WINDOW_SECONDS:
+            return True
+        _bounded_put(self._seen_messages, msg_id, now, _DEDUP_MAX_SIZE)
+        return False
 
     async def _fffc_timeout_handler(self, chat_key: str, message_id: str) -> None:
         await asyncio.sleep(_FFFC_WAIT_SECONDS)
@@ -719,7 +758,7 @@ class PhotonAdapter(BasePlatformAdapter):
 
         def _event(text: str, mtype: MessageType = MessageType.TEXT, **kwargs: Any) -> MessageEvent:
             source = self.build_source(chat_id=space_id, chat_name=space_id, chat_type=chat_type,
-                                       user_id=sender_id, user_name=sender_id or None, message_id=message_id)
+                                       user_id=sender_id, user_name=sender_id or None)
             return MessageEvent(text=text, message_type=mtype, source=source, message_id=message_id,
                                 raw_message=event, timestamp=timestamp, **kwargs)
         if ctype in {"read", "read_receipt"}:  # presence signal, not a user turn (receipts for our sends)
@@ -1087,7 +1126,7 @@ class PhotonAdapter(BasePlatformAdapter):
     async def _stop_watchdog(self) -> None:
         self._watchdog_running = False
         task, self._watchdog_task = self._watchdog_task, None
-        await cancel_task(task)
+        await _cancel_task(task)
 
     # -- Outbound ------------------------------------------------------------------
 
@@ -1174,7 +1213,7 @@ class PhotonAdapter(BasePlatformAdapter):
 
     def _record_sent_message(self, message_id: Optional[str]) -> None:
         if message_id:
-            bounded_put(self._sent_message_ids, message_id, time.time(), self._SENT_IDS_MAX)
+            _bounded_put(self._sent_message_ids, message_id, time.time(), self._SENT_IDS_MAX)
 
     # A DM space is addressable as the chat GUID (`any;-;+1555...`) inbound events carry, or
     # the bare E.164 phone home-channel config uses; the sidecar's resolveSpace treats them
@@ -1187,7 +1226,7 @@ class PhotonAdapter(BasePlatformAdapter):
         return match.group(1) if match else chat_id
 
     def _put_by_chat(self, store: Dict[str, Any], chat_id: str, value: Any) -> None:
-        bounded_put(store, self._normalize_chat_key(chat_id), value, self._LAST_INBOUND_CHATS_MAX)
+        _bounded_put(store, self._normalize_chat_key(chat_id), value, self._LAST_INBOUND_CHATS_MAX)
 
     def _record_last_inbound(self, chat_id: Optional[str], message_id: Optional[str]) -> None:
         if chat_id and message_id:
@@ -1287,14 +1326,48 @@ class PhotonAdapter(BasePlatformAdapter):
         return (isinstance(raw, dict) and raw.get("retryable") is False
                 and raw.get("error_class") in ("auth_or_config", "target_not_allowed"))
 
-    def _send_retry_is_final(self, result: SendResult) -> bool:
-        return self._is_permanent_sidecar_failure(result)  # already carries the user-facing explanation
+    async def _send_with_retry(self, chat_id: str, content: str, reply_to: Optional[str] = None,
+                               metadata: Any = None, max_retries: int = 1, base_delay: float = 2.0) -> SendResult:
+        """Retry sends without the generic Markdown banner (replies are markdown or
+        already-stripped plain text, so it never applies)."""
+        text = self.format_message(content)
 
-    async def _send_plain_fallback(self, chat_id: str, content: str, *, reply_to: Optional[str], metadata: Any) -> SendResult:
-        """No Markdown banner (replies are markdown or already-stripped plain text); bypass
-        richlink() so a rich-link outage doesn't strand a sendable URL."""
-        return await self._sidecar_send(
-            chat_id, self.format_message(content)[: self.MAX_MESSAGE_LENGTH], richlink=False, markdown=False)
+        async def _send() -> SendResult:
+            return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
+
+        result = await _send()
+        if result.success:
+            return result
+        if self._is_permanent_sidecar_failure(result):
+            return result  # structured failure already carries the user-facing explanation
+        error_str = result.error or ""
+        is_network = result.retryable or self._is_retryable_error(error_str)
+        if not is_network and self._is_timeout_error(error_str):
+            return result
+        if is_network:
+            for attempt in range(1, max_retries + 1):
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning("[photon] Send failed (attempt %d/%d, retrying in %.1fs): %s",
+                               attempt, max_retries, delay, error_str)
+                await asyncio.sleep(delay)
+                result = await _send()
+                if result.success:
+                    return result
+                error_str = result.error or ""
+                if self._is_permanent_sidecar_failure(result):
+                    return result
+                if not (result.retryable or self._is_retryable_error(error_str)):
+                    break
+            else:
+                logger.error("[photon] Failed to deliver response after %d retries: %s", max_retries, error_str)
+                # Fall through to plain text; for URL-only responses this bypasses richlink()
+                # so a rich-link outage doesn't strand a sendable URL.
+        logger.warning("[photon] Send failed: %s - retrying plain-text message", error_str)
+        fallback_result = await self._sidecar_send(
+            chat_id, text[: self.MAX_MESSAGE_LENGTH], richlink=False, markdown=False)
+        if not fallback_result.success:
+            logger.error("[photon] Plain-text retry also failed: %s", fallback_result.error)
+        return fallback_result
 
     async def _post_send(self, path: str, body: Dict[str, Any], *, structured: bool = False) -> SendResult:
         """POST a send-like body and wrap the outcome as a SendResult. ``structured`` carries
@@ -1434,7 +1507,7 @@ def _standalone_error(resp: Any) -> Dict[str, Any]:
         error = f"sidecar returned {resp.status_code}: {resp.text[:200]}"
     else:
         error = str(data.get("error") or "sidecar reported failure")
-    return {**send_error(error), "error_class": error_class, "retryable": retryable}
+    return {"error": error, "error_class": error_class, "retryable": retryable}
 
 
 def _standalone_token_from_record(port: int) -> Tuple[Optional[str], int, str]:
@@ -1461,14 +1534,14 @@ async def _standalone_send(
     force_document: bool = False,  # noqa: ARG001 — iMessage auto-detects file kind
 ) -> Dict[str, Any]:
     if not HTTPX_AVAILABLE:
-        return send_error("httpx not installed")
+        return {"error": "httpx not installed"}
     port = _coerce_port(
         (pconfig.extra or {}).get("sidecar_port") or _get_scoped_secret("PHOTON_SIDECAR_PORT"), _DEFAULT_SIDECAR_PORT)
     token = _get_scoped_secret("PHOTON_SIDECAR_TOKEN")
     if not token:
         token, port, error = _standalone_token_from_record(port)
         if not token:
-            return send_error(error)
+            return {"error": error}
     base = f"http://{_DEFAULT_SIDECAR_BIND}:{port}"
     headers = {"X-Hermes-Sidecar-Token": token}
     last_message_id: Optional[str] = None
@@ -1509,7 +1582,7 @@ async def _standalone_send(
                 last_message_id = data.get("messageId") or last_message_id
         return {"success": True, "message_id": last_message_id}
     except Exception as e:
-        return send_error(f"Photon standalone send failed: {e}")
+        return {"error": f"Photon standalone send failed: {e}"}
 
 
 # -- Plugin entry point ----------------------------------------------------------
@@ -1550,7 +1623,7 @@ def register(ctx) -> None:
 
 
 _PLUGIN_COMPAT_LAZY = {
-    'ProcessingOutcome': ('gateway.platforms.event', 'ProcessingOutcome'),
+    'ProcessingOutcome': ('gateway.platforms.base', 'ProcessingOutcome'),
     'resolve_sidecar_dir': ('plugins.platforms.photon.sidecar_paths', 'resolve_sidecar_dir'),
 }
 

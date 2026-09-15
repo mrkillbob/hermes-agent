@@ -1,5 +1,3 @@
-import { X509Certificate } from 'node:crypto'
-
 interface NodeTlsCaApi {
   getCACertificates(type?: 'default' | 'system'): string[]
   setDefaultCACertificates(certificates: string[]): void
@@ -33,36 +31,12 @@ function installWindowsSystemCaTrust(tlsApi: NodeTlsCaApi, platform = process.pl
       }
     }
 
-    // Prefer existing defaults. Expired Windows roots can divert OpenSSL onto
-    // an expired chain even when a valid bundled trust path exists.
-    const seen = new Set<string>()
-    const now = Date.now()
-
-    const keepCertificate = (pem: string): boolean => {
-      try {
-        const certificate = new X509Certificate(pem)
-
-        if (certificate.validToDate.getTime() <= now || seen.has(certificate.fingerprint256)) {
-          return false
-        }
-
-        seen.add(certificate.fingerprint256)
-      } catch {
-        // Leave PEM acceptability to Node if its X.509 parser cannot inspect it.
-      }
-
-      return true
-    }
-
-    const filteredDefaults = defaultCertificates.filter(keepCertificate)
-    const filteredSystem = systemCertificates.filter(keepCertificate)
-    const certificates = [...filteredDefaults, ...filteredSystem]
-
+    const certificates = [...defaultCertificates, ...systemCertificates]
     tlsApi.setDefaultCACertificates(certificates)
 
     return {
       applied: true,
-      systemCertificateCount: filteredSystem.length,
+      systemCertificateCount: systemCertificates.length,
       totalCertificateCount: certificates.length
     }
   } catch (error) {

@@ -20,7 +20,6 @@ from typing import Any, Dict, Iterator, List, Optional
 import httpx
 
 from agent.bounded_response import read_streaming_error_body
-from agent.retry_utils import parse_retry_after_seconds
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 
 logger = logging.getLogger(__name__)
@@ -507,41 +506,24 @@ def _make_stream_chunk(
     return _envelope(model, "chat.completion.chunk", choice, None, cls=_GeminiStreamChunk)
 
 
-_SSE_DONE = object()  # sentinel: terminal [DONE] frame
-
-
-def _parse_sse_line(line: str) -> Any:
-    """One SSE line → payload dict, ``_SSE_DONE`` for the terminal frame, or None."""
-    line = line.rstrip("\r")
-    if not line.startswith("data: "):
-        return None
-    if (data := line[6:]) == "[DONE]":
-        return _SSE_DONE
-    try:
-        payload = json.loads(data)
-    except json.JSONDecodeError:
-        logger.debug("Non-JSON Gemini SSE line: %s", data[:200])
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _iter_sse_events(response: httpx.Response) -> Iterator[Dict[str, Any]]:
     buffer = ""
     for chunk in response.iter_text():
         buffer += chunk or ""
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
-            payload = _parse_sse_line(line)
-            if payload is _SSE_DONE:
+            line = line.rstrip("\r")
+            if not line.startswith("data: "):
+                continue
+            if (data := line[6:]) == "[DONE]":
                 return
-            if payload is not None:
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                logger.debug("Non-JSON Gemini SSE line: %s", data[:200])
+                continue
+            if isinstance(payload, dict):
                 yield payload
-    # The final frame may not be newline-terminated: flush the residual buffer
-    # after EOF instead of silently dropping its content (pi#8997 bug class).
-    if buffer:
-        payload = _parse_sse_line(buffer)
-        if payload is not None and payload is not _SSE_DONE:
-            yield payload
 
 
 def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices: Dict[str, Dict[str, Any]]) -> List[_GeminiStreamChunk]:
@@ -609,7 +591,10 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
     err_obj = _error_object(body_text)
     err_status, err_message = (str(err_obj.get(k) or "").strip() for k in ("status", "message"))
     reason, metadata = _error_info(err_obj)
-    retry_after = parse_retry_after_seconds(response.headers)
+    try:
+        retry_after: Optional[float] = float(response.headers.get("Retry-After") or response.headers.get("retry-after"))
+    except (TypeError, ValueError):
+        retry_after = None
     message = (
         f"Gemini HTTP {status} ({err_status or 'error'}): {err_message}" if err_message
         else f"Gemini returned HTTP {status}: {body_text[:500]}"

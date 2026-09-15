@@ -17,7 +17,7 @@ from gateway.pairing import (
     RATE_LIMIT_SECONDS,
     MAX_PENDING_PER_PLATFORM,
     MAX_FAILED_ATTEMPTS,
-    _save_json_file,
+    _secure_write,
 )
 
 
@@ -82,11 +82,11 @@ class TestProfileScopedDiscovery:
 
 
 # ---------------------------------------------------------------------------
-# _save_json_file
+# _secure_write
 # ---------------------------------------------------------------------------
 
 
-class TestSaveJsonFile:
+class TestSecureWrite:
 
     @pytest.mark.skipif(
         sys.platform.startswith("win"),
@@ -94,7 +94,7 @@ class TestSaveJsonFile:
     )
     def test_sets_file_permissions(self, tmp_path):
         target = tmp_path / "secret.json"
-        _save_json_file(target, {"data": 1})
+        _secure_write(target, "data")
         mode = oct(target.stat().st_mode & 0o777)
         assert mode == "0o600"
 

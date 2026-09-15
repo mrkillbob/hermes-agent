@@ -90,8 +90,7 @@ def _bash_starts(bash: str) -> bool:
         result = subprocess.run(
             [bash, "--noprofile", "--norc", "-c", _BASH_EXTERNAL_PROGRAM_PROBE],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=15, creationflags=windows_hide_flags() if _IS_WINDOWS else 0,
-            stdin=subprocess.DEVNULL)  # #78820: never hand the TUI gateway's stdin pipe to MSYS bash
+            timeout=15, creationflags=windows_hide_flags() if _IS_WINDOWS else 0)
         ok = result.returncode == 0
         if not ok:
             combined = f"{result.stdout or ''}{result.stderr or ''}".strip()

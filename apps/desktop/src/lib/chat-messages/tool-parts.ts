@@ -1,5 +1,5 @@
 import { firstStringField, normalize } from '@/lib/text'
-import { isTodoToolName, parseTodos } from '@/lib/todos'
+import { parseTodos } from '@/lib/todos'
 import type { SessionMessage } from '@/types/hermes'
 
 import type { ChatMessage, ChatMessagePart, GatewayEventPayload } from './types'
@@ -179,15 +179,10 @@ function findToolPartIndex(
     }
   }
 
-  const pendingIndices: number[] = []
-
-  for (let index = 0; index < parts.length; index += 1) {
-    const part = parts[index]
-
-    if (part.type === 'tool-call' && part.toolName === name && part.result === undefined) {
-      pendingIndices.push(index)
-    }
-  }
+  const pendingIndices = parts
+    .map((part, index) => ({ part, index }))
+    .filter(({ part }) => part.type === 'tool-call' && part.toolName === name && part.result === undefined)
+    .map(({ index }) => index)
 
   if (pendingIndices.length === 0) {
     return -1
@@ -236,7 +231,7 @@ function carryTodos(payload: GatewayEventPayload | undefined, ...prev: unknown[]
     return next === null ? undefined : { todos: next }
   }
 
-  if (!isTodoToolName(payload?.name)) {
+  if (payload?.name !== 'todo') {
     return undefined
   }
 
@@ -284,17 +279,11 @@ function toolResult(
 }
 
 function completeOpenStreamParts(parts: ChatMessagePart[], completedAt: number): ChatMessagePart[] {
-  const next = parts.slice()
-
-  for (let index = 0; index < next.length; index += 1) {
-    const part = next[index]
-
-    if ((part.type === 'text' || part.type === 'reasoning') && part.completedAt === undefined) {
-      next[index] = { ...part, completedAt } as ChatMessagePart
-    }
-  }
-
-  return next
+  return parts.map(part =>
+    (part.type === 'text' || part.type === 'reasoning') && part.completedAt === undefined
+      ? ({ ...part, completedAt } as ChatMessagePart)
+      : part
+  )
 }
 
 export function upsertToolPart(
@@ -336,10 +325,10 @@ export function upsertToolPart(
   } satisfies ChatMessagePart
 
   if (index === -1) {
-    next.push(base)
-  } else {
-    next[index] = { ...next[index], ...base }
+    return [...next, base]
   }
+
+  next[index] = { ...next[index], ...base }
 
   return next
 }

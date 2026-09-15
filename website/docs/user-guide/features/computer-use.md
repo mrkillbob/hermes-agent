@@ -340,15 +340,8 @@ magic-byte sniffing.
 Hermes applies multi-layer guardrails:
 
 - Destructive actions (click, type, drag, scroll, key, focus_app)
-  require approval through the same gate as dangerous shell commands —
-  interactively via the CLI dialog or the messaging-platform approval
-  buttons. Once/session/always grants are keyed
-  `cua:<action>:<background|foreground>` and live in the shared
-  session/`command_allowlist` store (a background grant never covers the
-  visible foreground variant). Where nobody can answer — cron
-  (`approvals.cron_mode`), single-query, unattended platforms, or any
-  headless run — the action is refused rather than auto-approved;
-  `--yolo` / `/yolo` still bypass.
+  require approval — either interactively via the CLI dialog or via the
+  messaging-platform approval buttons.
 - Hard-blocked key combos at the tool level: empty trash, force delete,
   lock screen, log out, force log out.
 - Hard-blocked type patterns: `curl | bash`, `sudo rm -rf /`, fork

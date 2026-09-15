@@ -17,12 +17,13 @@ from unittest.mock import patch
 import pytest
 
 from gateway.config import GatewayConfig, Platform
-from gateway.platforms.event import MessageEvent, MessageType
-from gateway.run import GatewayRunner
+from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 
 
-def _make_runner(stt_enabled: bool = True) -> GatewayRunner:
+def _make_runner(stt_enabled: bool = True) -> "GatewayRunner":  # type: ignore[name-defined]
+    from gateway.run import GatewayRunner
+
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=stt_enabled)
     runner.adapters = {}

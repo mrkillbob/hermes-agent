@@ -152,15 +152,13 @@ def _get_ollama_native_headers(base_url: Optional[str], *, api_key: Optional[str
     *base_url* shares the configured Ollama root; an explicit *api_key* replaces any configured
     Authorization variant rather than inheriting it."""
     configured_base = _configured_ollama_base_url()
-    from agent.command_token_source import materialize_probe_api_key
-    explicit_key = materialize_probe_api_key(api_key)
+    explicit_key = str(api_key or "").strip()
     configured_matches = bool(configured_base and base_url and _same_ollama_native_root(base_url, configured_base))
     if not configured_matches and not explicit_key:
         return {}
     headers = _get_ollama_request_headers() if configured_matches else {}
-    if explicit_key or callable(api_key):
-        _drop_authorization(headers)
     if explicit_key:
+        _drop_authorization(headers)
         headers["Authorization"] = f"Bearer {explicit_key}"
     return headers
 
@@ -368,8 +366,7 @@ def _lmstudio_server_root(base_url: Optional[str]) -> Optional[str]:
 def _lmstudio_request_headers(api_key: Optional[str] = None) -> dict:
     """HTTP headers for LM Studio native API requests."""
     from hermes_cli.models import _HERMES_USER_AGENT
-    from agent.command_token_source import materialize_probe_api_key
-    token = materialize_probe_api_key(api_key)
+    token = str(api_key or "").strip()
     return {"User-Agent": _HERMES_USER_AGENT, **({"Authorization": f"Bearer {token}"} if token else {})}
 
 
@@ -594,8 +591,7 @@ def ollama_model_supports_thinking(
     if not server_url or not bare_model:
         return None
 
-    from agent.command_token_source import materialize_probe_api_key
-    token = materialize_probe_api_key(api_key)
+    token = str(api_key or "").strip()
     try:
         with httpx.Client(timeout=timeout, headers={"Authorization": f"Bearer {token}"} if token else {}) as client:
             resp = client.post(f"{server_url}/api/show", json={"name": bare_model})

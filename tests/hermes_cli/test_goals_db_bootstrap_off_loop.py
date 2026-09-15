@@ -33,7 +33,7 @@ class _RecordingDB:
 
     constructed_on: list = []
 
-    def __init__(self, db_path=None):
+    def __init__(self):
         _RecordingDB.constructed_on.append(threading.get_ident())
 
     def get_meta(self, key):
@@ -47,12 +47,10 @@ def _clean_cache(monkeypatch):
     yield
 
 
-def _patch_sessiondb(monkeypatch, cls=_RecordingDB):
-    # goals.py acquires through hermes_state_registry (shared writer per home); patch its
-    # construction seam, and keep every acquired fake out of the registry so tests don't share.
-    import hermes_state_registry
+def _patch_sessiondb(monkeypatch):
+    import hermes_state
 
-    monkeypatch.setattr(hermes_state_registry, "_open_session_db", lambda path: cls(db_path=path))
+    monkeypatch.setattr(hermes_state, "SessionDB", _RecordingDB)
 
 
 def test_loop_thread_cache_miss_constructs_off_loop(monkeypatch):
@@ -121,12 +119,13 @@ def test_slow_construction_does_not_block_the_loop(monkeypatch):
     1.5s window plus margins; the two-window CONTRACT is what's under
     test, not the production constants.
     """
+    import hermes_state
 
     monkeypatch.setattr(goals, "_DB_BOOTSTRAP_INIT_WAIT_S", 0.3)
     monkeypatch.setattr(goals, "_DB_BOOTSTRAP_LOOP_WAIT_S", 0.05)
 
     class _BlockingDB:
-        def __init__(self, db_path=None):
+        def __init__(self):
             # Far past both (shrunk) wait windows. The margin keeps the
             # "still None" assertions from racing the bootstrap thread on
             # a loaded runner (negative-timing race, flake policy).
@@ -135,7 +134,7 @@ def test_slow_construction_does_not_block_the_loop(monkeypatch):
         def get_meta(self, key):
             return None
 
-    _patch_sessiondb(monkeypatch, _BlockingDB)
+    monkeypatch.setattr(hermes_state, "SessionDB", _BlockingDB)
     elapsed = None
     elapsed2 = None
     result = "UNSET"

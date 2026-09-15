@@ -31,7 +31,6 @@ class RecordingAdapter:
 
     async def handle_message(self, event):
         self.handled.append(event)
-        event._gateway_accepted = True
 
 
 class FailingWakeAdapter(RecordingAdapter):
@@ -158,8 +157,8 @@ def test_wake_only_failure_rewinds_and_redelivers(tmp_path, monkeypatch):
     assert list(runner2._kanban_sub_fail_counts.values()) == [2]
 
 
-def test_notify_wake_failure_retries_without_repeating_ping(tmp_path, monkeypatch):
-    """notify+wake requires both deliveries, retaining the sent-ping checkpoint."""
+def test_notify_wake_failure_stays_best_effort(tmp_path, monkeypatch):
+    """notify+wake: text ping IS the delivery; failed wake must NOT rewind."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "notify-wake.db"))
     kb.init_db()
     tid = _make_completed_task("notify+wake")
@@ -169,14 +168,16 @@ def test_notify_wake_failure_retries_without_repeating_ping(tmp_path, monkeypatc
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert len(adapter.sent) == 1, "text ping delivered"
-    assert len(adapter.handled) == 1, "wake attempted after the ping"
-    assert len(_unseen_terminal_events(tid)) == 1
-    assert list(runner._kanban_sub_fail_counts.values()) == [1]
-    runner._running = True
-    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
-    assert len(adapter.sent) == 1
-    assert len(adapter.handled) == 2
-    assert list(runner._kanban_sub_fail_counts.values()) == [2]
+    assert len(adapter.handled) == 1, "wake attempted best-effort"
+    assert _unseen_terminal_events(tid) == [], (
+        "notify+wake: cursor advances on text delivery; a failed wake is "
+        "best-effort and must not rewind"
+    )
+    assert runner._kanban_sub_fail_counts == {}, (
+        "best-effort wake failure must not bump the send-failure counter"
+    )
+    # (The sub itself unsubscribes because the task reached 'done' —
+    # pre-existing task_terminal behavior, unrelated to the wake outcome.)
 
 
 def test_wake_only_failure_cap_drops_subscription(tmp_path, monkeypatch):

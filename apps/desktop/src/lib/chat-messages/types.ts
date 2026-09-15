@@ -18,8 +18,6 @@ export type ChatMessage = {
   id: string
   role: SessionMessage['role']
   parts: ChatMessagePart[]
-  /** Result body only; the system text remains the compact completion label. */
-  asyncResult?: string
   timestamp?: number
   completedAt?: number
   pending?: boolean
@@ -117,13 +115,6 @@ export type GatewayEventPayload = {
   // secret.request (skill credential capture)
   env_var?: string
   prompt?: string
-  // vault.unlock.request (external password-manager unlock)
-  backend?: string
-  display_name?: string
-  /** vault.save_login.request / vault.code.request */
-  origin?: string
-  site?: string
-  hint?: string
   // terminal.read.request / preview.read.request (GUI agent reading the
   // in-app terminal pane or the browser/preview pane)
   start?: number
@@ -178,8 +169,6 @@ export type GatewayEventPayload = {
   // message.complete — signals the final text was already previewed via
   // interim_assistant_callback, so the UI can settle instead of duplicating.
   response_previewed?: boolean
-  // message.complete — history-commit note the gateway surfaced instead of dropping.
-  warning?: string
   // message.complete with status "error" — `text` is streamed partial output
   // (keep it visible), not the error string.
   partial?: boolean

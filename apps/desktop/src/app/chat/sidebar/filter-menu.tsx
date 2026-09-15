@@ -31,7 +31,6 @@ import {
   $sidebarProfileFilter,
   $sidebarProjectFilter,
   $sidebarRowMeta,
-  $sidebarShowAllSessions,
   $sidebarShowArchived,
   $sidebarStatusFilter,
   $sidebarViewCustomized,
@@ -40,7 +39,6 @@ import {
   setSidebarCardRows,
   setSidebarGrouping,
   setSidebarOrdering,
-  setSidebarShowAllSessions,
   setSidebarShowArchived,
   setWorkspaceNodesOpen,
   type SidebarGrouping,
@@ -157,7 +155,6 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
   const ordering = useStore($sidebarOrdering)
   const rowMeta = useStore($sidebarRowMeta)
   const cardRows = useStore($sidebarCardRows)
-  const showAllSessions = useStore($sidebarShowAllSessions)
   const statusFilter = useStore($sidebarStatusFilter)
   const projectFilter = useStore($sidebarProjectFilter)
   const profileFilter = useStore($sidebarProfileFilter)
@@ -190,11 +187,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
 
   const foldCollapsed = foldIds.length > 0 && foldIds.every(id => nodeOpen[id] === false)
 
-  const groupings = GROUPINGS.map(option =>
-    option.id === 'profile' ? { ...option, label: t.sidebar.gatewayGroups.grouping } : option
-  )
-
-  const groupingLabel = groupings.find(option => option.id === grouping)?.label
+  const groupingLabel = GROUPINGS.find(option => option.id === grouping)?.label
 
   // Two options are conditional: dragging a row is what picks manual, so it
   // only appears as a way back out once there's a hand-picked order to leave;
@@ -256,7 +249,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
                 onValueChange={value => setSidebarGrouping(value as SidebarGrouping)}
                 value={grouping}
               >
-                {groupings.map(option => (
+                {GROUPINGS.map(option => (
                   <OptionRadio key={option.id} option={option} />
                 ))}
               </DropdownMenuRadioGroup>
@@ -290,14 +283,6 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
               ))}
             </DropdownMenuSubContent>
           </DropdownMenuSub>
-
-          {grouping === 'project' && (
-            <OptionCheckbox
-              checked={showAllSessions}
-              onCheck={() => setSidebarShowAllSessions(!showAllSessions)}
-              option={{ icon: 'list-unordered', id: 'all-sessions', label: t.sidebar.projects.showAllSessions }}
-            />
-          )}
 
           {/* A render variant, not a grouping: three-line cards (project · age /
               title / model · size) compose with whichever grouping is active. */}

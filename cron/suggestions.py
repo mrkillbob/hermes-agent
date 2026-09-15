@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -19,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
-from utils import atomic_json_write
+from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,13 @@ _STATUS_DISMISSED = "dismissed"
 
 def _current_suggestions_file() -> Path:
     return SUGGESTIONS_FILE or (get_hermes_home().resolve() / "cron" / "suggestions.json")
+
+
+def _secure_file(path: Path) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _ensure_dir() -> None:
@@ -72,8 +81,22 @@ def _load_raw() -> Dict[str, Any]:
 
 def _save_raw(suggestions: List[Dict[str, Any]]) -> None:
     _ensure_dir()
-    payload = {"suggestions": suggestions, "updated_at": _hermes_now().isoformat()}
-    atomic_json_write(_current_suggestions_file(), payload, mode=0o600)
+    suggestions_file = _current_suggestions_file()
+    fd, tmp_path = tempfile.mkstemp(dir=str(suggestions_file.parent), suffix=".tmp", prefix=".sugg_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            payload = {"suggestions": suggestions, "updated_at": _hermes_now().isoformat()}
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        atomic_replace(tmp_path, suggestions_file)
+        _secure_file(suggestions_file)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def load_suggestions() -> List[Dict[str, Any]]:
