@@ -250,7 +250,8 @@ async def run_codex_hygiene_compaction(
     count_before = getattr(compressor, "compression_count", 0)
     # copy_context carries profile secret scope / HERMES_HOME override (executors don't propagate ContextVars).
     worker_future = asyncio.get_running_loop().run_in_executor(
-        None, copy_context().run, lambda: agent._compress_context(history, "", approx_tokens=approx_tokens))
+        None, copy_context().run,
+        lambda: agent._compress_context(history, "", approx_tokens=approx_tokens, task_id=session_id or "default"))
     track_worker = getattr(gateway, "_track_deferred_agent_worker", None)
     if callable(track_worker):
         # ``wait_for`` only cancels the asyncio wrapper; keep the running executor thread visible to shutdown.
@@ -585,30 +586,41 @@ def _redact_approval_command(cmd: "str | None") -> str:
 def _format_exec_approval_fallback(
     command: str, description: str, command_prefix: str, *, allow_permanent: bool = True,
     allow_session: bool = True, smart_denied: bool = False) -> str:
-    """Render the text fallback from approval capabilities, not platform names."""
+    """Render the text fallback from approval capabilities, not platform names. Same words as
+    the button card (``BasePlatformAdapter._format_exec_approval``), plus the typed ``/approve``
+    steps a surface without buttons needs."""
+    from gateway.platforms.base_exec_approval import (
+        EA_HEADER_TEXT, EA_REASON_LABEL_TEXT, approval_timeout_seconds, format_approval_deadline_line)
     cmd_preview = command[:200] + "..." if len(command) > 200 else command
     heading = ("⚠️ **Smart DENY — owner override for one operation:**" if smart_denied
-               else "⚠️ **Dangerous command requires approval:**")
+               else f"⚠️ **{EA_HEADER_TEXT}**")
 
-    choices = [f"Reply `{command_prefix}approve` to execute this one operation"]
+    choices = [f"Reply `{command_prefix}approve` to run it once"]
     if not smart_denied and allow_session:
-        choices.append(f"`{command_prefix}approve session` to approve this pattern for the session")
+        choices.append(f"`{command_prefix}approve session` to allow this pattern for the rest of this session")
         if allow_permanent:
-            choices.append(f"`{command_prefix}approve always` to approve permanently")
+            choices.append(f"`{command_prefix}approve always` to allow it permanently")
     choices.append(f"`{command_prefix}deny` to cancel")
     return (
-        f"{heading}\n```\n{cmd_preview}\n```\nReason: {description}\n\n"
-        + ", ".join(choices[:-1]) + f", or {choices[-1]}.")
+        f"{heading}\n```\n{cmd_preview}\n```\n{EA_REASON_LABEL_TEXT}: {description}\n\n"
+        + ", ".join(choices[:-1]) + f", or {choices[-1]}.\n"
+        + format_approval_deadline_line(approval_timeout_seconds()))
 
 # Ordered: auth beats policy beats rate-limit beats connection; first match wins.
 _PROVIDER_ERROR_REPLIES = (
-    (_GATEWAY_AUTH_ERROR_RE, "⚠️ Provider authentication failed. Check the configured credentials; "
-                             "raw provider details are in the gateway logs."),
-    (_GATEWAY_PROVIDER_POLICY_RE, "⚠️ The model provider rejected the request. I kept the raw provider "
-                                  "error out of chat; check gateway logs for details or try rephrasing."),
+    (_GATEWAY_AUTH_ERROR_RE, "⚠️ Sign-in to the AI model service failed. Use /login to sign in again, "
+                             "or ask whoever runs this bot to run `hermes doctor` on the host."),
+    (_GATEWAY_PROVIDER_POLICY_RE, "⚠️ The AI model service rejected this request. Try rephrasing your "
+                                  "message, or use /model to switch models."),
     (_GATEWAY_RATE_LIMIT_RE, "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."),
     (_GATEWAY_CONNECTION_ERROR_RE, "⚠️ The model server is not responding — it looks like the configured "
                                    "model endpoint is not running or is unreachable."))
+
+# Shared by the failed-turn normalizer and ``run_turn._hmwa_agent_error_reply``; canonical
+# commands (/compress, /new) — the /compact and /reset aliases are absent from /help.
+_CONTEXT_OVERFLOW_REPLY = (
+    "⚠️ This conversation has grown too long for me to read all at once. "
+    "Use /compress to shorten the history, or /new to start a fresh conversation.")
 
 
 def _gateway_provider_error_reply(text: str) -> str:
@@ -2239,6 +2251,8 @@ _CONVERSATION_SCOPED_STATE: tuple = (
     # Stall-watchdog "already notified" latch; cleared on /new so a fresh conversation can warn again.
     # See #72016.
     "_session_stall_notified",
+    # Transcript-lag streak counter (#114266); a fresh conversation starts with no lag history.
+    "_transcript_lag_streaks",
     # Sidecar notes staged but never consumed (turn aborted before run_sync) must not leak into a
     # future conversation's first user message — session keys are source-derived and REUSED.
     "_pending_turn_sidecar_notes")
@@ -2303,12 +2317,39 @@ class _GatewayModelContext:
     context_source: str
 
 
-def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModelContext:
-    """Resolve the configured gateway route and effective context window. Call off-loop (may block)."""
+def _resolve_gateway_model_context(
+    model: Optional[str] = None, route: Optional[dict] = None
+) -> _GatewayModelContext:
+    """Resolve the configured gateway route and effective context window. Call off-loop (may block).
+
+    ``route`` bypasses config + runtime resolution when provided (e.g. a session /model override):
+    its ``provider``, ``base_url``, and ``api_key`` are used directly with no config_context_length.
+    """
     from agent.model_metadata import DEFAULT_FALLBACK_CONTEXT, get_model_context_length
     resolved_model = model or _resolve_gateway_model()
     config_context_length = provider = base_url = api_key = custom_providers = None
     configured_model = configured_provider = configured_base_url = None
+
+    if route is not None and ("api_key" in route or "base_url" in route):
+        # Session override supplies a full endpoint; skip config + runtime lookup (no config pin).
+        provider = route.get("provider") or None
+        base_url = route.get("base_url") or None
+        api_key = route.get("api_key") or None
+        context_length = get_model_context_length(
+            resolved_model, base_url=base_url or "", api_key=api_key or "",
+            config_context_length=None, provider=provider or "",
+            custom_providers=None)
+        # A catalog hit with a context length that happens to equal DEFAULT_FALLBACK_CONTEXT is
+        # "detected", not "default". Check the hardcoded table directly (not mocked by callers).
+        if context_length == DEFAULT_FALLBACK_CONTEXT:
+            from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS, _longest_key_match
+            catalog_hit = _longest_key_match(DEFAULT_CONTEXT_LENGTHS, resolved_model.lower())
+            context_source = "detected" if catalog_hit else "default"
+        else:
+            context_source = "detected"
+        return _GatewayModelContext(
+            model=resolved_model, provider=provider or "", base_url=base_url or "",
+            context_length=context_length, context_source=context_source)
 
     def _read_config() -> None:
         nonlocal config_context_length, provider, base_url, custom_providers
@@ -2367,11 +2408,15 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
         context_length=context_length, context_source=context_source)
 
 
-def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
-    """Resolve runtime credentials for a specific provider (e.g. from channel override)."""
+def _resolve_runtime_agent_kwargs_for_provider(provider: str, target_model: Optional[str] = None) -> dict:
+    """Resolve runtime credentials for a specific provider (e.g. from channel override).
+
+    ``target_model`` is the model the override will actually send: the ladder's model-keyed rungs
+    (Zen/Go relay + api_mode) must see it rather than config's ``default``, or a Go-only override
+    resolves an api_mode/base_url the sent model cannot use (#112600)."""
     from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error
     try:
-        runtime = resolve_runtime_provider(requested=provider)
+        runtime = resolve_runtime_provider(requested=provider, target_model=target_model or None)
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
     return {
@@ -2417,7 +2462,8 @@ def _try_resolve_fallback_provider() -> dict | None:
                 from hermes_cli.fallback_config import resolve_entry_api_key
                 runtime = resolve_runtime_provider(
                     requested=entry.get("provider"), explicit_base_url=entry.get("base_url"),
-                    explicit_api_key=resolve_entry_api_key(entry))
+                    explicit_api_key=resolve_entry_api_key(entry),
+                    target_model=entry.get("model") or None)
                 # Log the config `provider`, not the runtime category (Ollama would log "openrouter").
                 logger.info(
                     # Log the literal `provider` key from config, not the resolved runtime category — an
@@ -2566,6 +2612,9 @@ _INTERRUPT_REASON_EVICTED = "Session ended while the turn was running"
 _INTERRUPT_REASON_SSE_DISCONNECT = "SSE client disconnected"
 _INTERRUPT_REASON_GATEWAY_SHUTDOWN = "Gateway shutting down"
 _INTERRUPT_REASON_GATEWAY_RESTART = "Gateway restarting"
+# ``tool_reason`` for eviction / shutdown: these stops are system-issued, not user stops (#112647).
+_INTERRUPT_TOOL_REASON_EVICTED = "session evicted"
+_INTERRUPT_TOOL_REASON_GATEWAY_SHUTDOWN = "gateway shutdown"
 
 
 def _reap_gateway_turn_processes(
@@ -2675,15 +2724,27 @@ def _watch_gateway_turn_inactivity(
     *, agent_holder, task_id: str, process_baseline, timeout: float, worker_done: threading.Event,
     timeout_fired: threading.Event, cleanup_lock: threading.Lock, poll_interval: float = 5.0,
     is_still_current: Optional[Callable[[], bool]] = None) -> None:
-    """Thread watchdog that remains runnable when gateway asyncio is starved."""
+    """Thread watchdog that remains runnable when gateway asyncio is starved.
+
+    Until an agent publishes a usable activity snapshot, elapsed worker time is the
+    liveness clock.  Otherwise a provider hang before activity initialization can
+    retain the session turn lease forever because every watchdog poll just skips it.
+    """
+    activity_origin = time.monotonic()
     while not worker_done.wait(max(0.01, poll_interval)):
+        now = time.monotonic()
+        idle_seconds = now - activity_origin
         agent = agent_holder[0] if agent_holder else None
-        if agent is None or not hasattr(agent, "get_activity_summary"):
-            continue
-        try:
-            idle_seconds = float(agent.get_activity_summary().get("seconds_since_activity", 0.0))
-        except Exception:
-            continue
+        if agent is not None and hasattr(agent, "get_activity_summary"):
+            try:
+                reported_idle = agent.get_activity_summary().get("seconds_since_activity")
+                if reported_idle is not None:
+                    idle_seconds = max(0.0, float(reported_idle))
+                    # Preserve the most recent usable activity clock as the fallback if
+                    # a later provider-side diagnostic read raises or returns None.
+                    activity_origin = now - idle_seconds
+            except Exception:
+                pass
         if idle_seconds < timeout:
             continue
         _abandon_timed_out_gateway_turn(
@@ -2926,31 +2987,41 @@ def _get_channel_override(
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
-    """Hermes update command argv: ``hermes`` on PATH, else ``python -m hermes_cli.main``, else None."""
+    """Hermes update command argv: prefer module argv (safe re-exec), then PATH binary, then None."""
+    try:
+        import importlib.util
+        if importlib.util.find_spec("hermes_cli.main") is not None:
+            return [sys.executable, "-m", "hermes_cli.main"]
+    except Exception:
+        pass
     import shutil
     hermes_bin = shutil.which("hermes")
     if hermes_bin:
         return [hermes_bin]
-    try:
-        import importlib.util
-        if importlib.util.find_spec("hermes_cli") is not None:
-            return [sys.executable, "-m", "hermes_cli.main"]
-    except Exception:
-        pass
     return None
 
 
+_PROFILE_ID_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
 def _parse_session_key(session_key: str) -> "dict | None":
-    """Parse a session key (``agent:{profile}:{platform}:{chat_type}:{chat_id}[:{extra}...]``).
-    For group/channel sessions the suffix may be a user_id, not a thread_id, so ``thread_id`` is omitted.
+    """Parse a session key (``agent:{ns}:{platform}:{chat_type}:{chat_id}[:{extra}...]``).
+
+    ``{ns}`` is ``main`` for the default profile, ``main~`` for a profile literally named ``main``
+    (``gateway.session._session_key_namespace``), or a named-profile id.
+    For group/channel sessions the suffix may be a user_id, not a thread_id, so ``thread_id``
+    is omitted.
     """
+    from gateway.session import profile_from_session_key_namespace
     parts = session_key.split(":")
-    if len(parts) >= 5 and parts[0] == "agent" and (
-        parts[1] == "main" or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", parts[1])
+    if (
+        len(parts) >= 5
+        and parts[0] == "agent"
+        and (parts[1] in ("main", "main~") or _PROFILE_ID_KEY_RE.match(parts[1]))
     ):
         result = {"platform": parts[2], "chat_type": parts[3], "chat_id": parts[4]}
         if parts[1] != "main":
-            result["profile"] = parts[1]
+            result["profile"] = profile_from_session_key_namespace(parts[1])
         if len(parts) > 5 and parts[3] in {"dm", "thread"}:
             result["thread_id"] = parts[5]
         return result
@@ -2992,6 +3063,8 @@ def _format_concise_process_notification(
             tail = tail[-500:]
         if tail:
             text += f"\n```\n{tail}\n```"
+    if not ok:
+        text += "\nAsk me to rerun it or show the full log."
     return text
 
 
@@ -3091,9 +3164,12 @@ def _normalize_empty_agent_response(
             return (
                 "⚠️ Session too large for the model's context window.\n"
                 "Use /compact to compress the conversation, or /reset to start fresh.")
+        # Raw exception text (class names, JSON bodies, URLs) stays in the gateway log.
+        logger.warning("Agent turn failed; reply sanitized for chat. Detail: %s", str(error_detail)[:500])
         return (
-            f"The request failed: {str(error_detail)[:300]}\n"
-            "Try again or use /reset to start a fresh session.")
+            "⚠️ Something went wrong and I couldn't finish this reply. Use /retry to try again, "
+            "or /new to start a fresh conversation. Technical details are in the gateway log "
+            "(`hermes logs`).")
 
     api_calls = int(agent_result.get("api_calls", 0) or 0)
     if agent_result.get("interrupted"):
@@ -3122,8 +3198,19 @@ def _normalize_empty_agent_response(
         if _is_gateway_hidden_reasoning_incomplete_turn(agent_result):
             return ""
         if agent_result.get("partial"):
-            err = agent_result.get("error", "processing incomplete")
-            return f"⚠️ Processing stopped: {str(err)[:200]}. Try again."
+            err = str(agent_result.get("error") or "processing incomplete")
+            from agent.turn_failure_copy import SITE_FAILURE_CODES
+            if (str(agent_result.get("failure_reason") or "") in SITE_FAILURE_CODES
+                    and err.strip() and not _looks_like_gateway_provider_error(err)):
+                return err if err.startswith("⚠️") else f"⚠️ {err}"
+            if _looks_like_gateway_provider_error(err):
+                logger.warning("Agent turn ended partially; reply sanitized for chat. Detail: %s", err[:500])
+                reason = ""
+            else:
+                reason = f": {err[:200]}"
+            return (
+                f"⚠️ I had to stop before finishing{reason}. Use /retry to try again, or /compress "
+                "if this conversation has grown very long.")
         return (
             "⚠️ Processing completed but no response was generated. "
             "This may be a transient error — try sending your message again.")
@@ -3524,6 +3611,9 @@ class GatewayRunner(
         # paths, busy-ack debounce timestamps and the monotonic run-generation counter (#28686, NEVER reset)
         # live on SessionState too. See gateway.session_stall.
         self._session_stall_notified: Dict[str, bool] = {}
+        # Consecutive "persisted transcript lagged live cached history" turns per session key; see
+        # run_turn_runner._load_turn_history (#114266). Cleared on /new.
+        self._transcript_lag_streaks: Dict[str, int] = {}
         # Startup restore gate: while restart-interrupted sessions auto-resume, real inbound messages
         # queue instead of competing with the synthetic resume turns; drained after all resume tasks end.
         self._startup_restore_in_progress = False
@@ -3695,6 +3785,7 @@ class GatewayRunner(
         # the clock; and a one-shot latch so the "platform owns the suspend" notice logs once.
         self._scale_to_zero_cooldown_until: float = 0.0
         self._scale_to_zero_no_suspend_logged: bool = False
+        self._scale_to_zero_direct_platform_logged: bool = False
 
     def _open_session_db_for_active_scope(self, raise_on_error: bool = False) -> Any:
         """AsyncSessionDB for the active profile scope, resolved per access (not in ``__init__``) since
@@ -4332,12 +4423,13 @@ class GatewayRunner(
             matched = match_profile_route(
                 routes, platform=source.platform.value, guild_id=getattr(source, "guild_id", None),
                 chat_id=source.chat_id, thread_id=getattr(source, "thread_id", None),
-                parent_chat_id=getattr(source, "parent_chat_id", None), adapter_profile=adapter_profile)
-        except Exception:
+                parent_chat_id=getattr(source, "parent_chat_id", None),
+                adapter_profile=adapter_profile, user_id=getattr(source, "user_id", None))
+        except Exception as exc:
             logger.warning(
-                "Profile route matching failed for %s/%s, falling back to default",
+                "Rejecting %s/%s: profile route matching failed",
                 source.platform, source.chat_id, exc_info=True)
-            return None
+            raise ProfileRouteRejected("matcher") from exc
         if matched:
             try:
                 served = {name for name, _home in _multiplex_profile_homes(config)}
@@ -4359,11 +4451,16 @@ class GatewayRunner(
         return None
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
-        """Resolve which profile's HERMES_HOME serves this source: ``source.profile``, then
-        ``_profile_name_for_source`` (sources bypassing ``build_source``), then the active profile."""
+        """Resolve which profile's HERMES_HOME serves this source: the pinned identity's runtime
+        home, else ``source.profile``, then ``_profile_name_for_source`` (sources bypassing
+        ``build_source``), then the active profile."""
         from gateway.profile_routing import ProfileRouteRejected
+        from gateway.session_identity import identity_of
         from hermes_cli.profiles import get_active_profile_name, get_profile_dir, profile_exists
         from hermes_constants import get_hermes_home
+        identity = identity_of(source)
+        if identity is not None:
+            return identity.runtime_home
         explicit_profile = None  # explicitly requested (source or routing) vs. default fallback
         try:
             name = (source.profile or "").strip() or self._profile_name_for_source(source)
@@ -4580,6 +4677,13 @@ def _housekeeping_deferred_fts_retry() -> None:
                     getattr(_sdb, "db_path", "state.db"))
 
 
+def _housekeeping_checkpoint_prune() -> None:
+    """Checkpoint store retention + size cap on a live timer; ``auto_prune_from_config`` gates on
+    the presence of a configured store and skips itself when nothing was configured."""
+    from tools.checkpoint_manager import auto_prune_from_config
+    auto_prune_from_config()
+
+
 def _housekeeping_memory_trim() -> None:
     """Messaging-gateway counterpart to the TUI idle reaper; config-gated and rate-limited inside."""
     from hermes_cli.mem_trim import trim_memory
@@ -4613,11 +4717,18 @@ def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
 
 def _start_gateway_housekeeping(
     stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, cron_provider=None, runner=None,
+    cron_thread=None,
 ):
     """Background thread for gateway-only periodic chores (NOT cron). Separate from the cron trigger
     so chores run under any ``CronScheduler`` provider (external scale-to-zero has no 60s loop).
     Cadences are ticks of ``interval``; inner gates own the real cadence."""
-    chores: list[tuple[int, str, Any]] = []
+    from gateway.run_profile_reconcile import _mcp_config_reconciler
+    chores: list[tuple[int, str, Any]] = [
+        # First every tick: re-stamp ``updated_at`` in gateway_state.json so it is a real heartbeat.
+        # ``hermes gateway status`` / ``/api/status`` warn when it ages past 2x ``interval`` with the
+        # PID alive — the thread (or a chore blocked on the loop) wedged (#113372). Runs first so a
+        # wedged chore stops the NEXT stamp instead of a slow one delaying this tick's.
+        (1, "Runtime heartbeat", _write_runtime_status_quiet)]
     if adapters is not None or runner is not None:
         # Restart-safe cron workers run outside the gateway cgroup and queue their final send for
         # whichever gateway is live; drained here (not the scheduler tick) so external providers get it too.
@@ -4635,7 +4746,8 @@ def _start_gateway_housekeeping(
         (60, "Org sync pull tick", _housekeeping_org_skill_sync),
         (60, "Auto-archive tick", _housekeeping_auto_archive),
         (1, "Deferred FTS retry tick", _housekeeping_deferred_fts_retry),
-        (1, "gateway housekeeping memory trim", _housekeeping_memory_trim)]
+        (1, "gateway housekeeping memory trim", _housekeeping_memory_trim),
+        (1, "Checkpoint prune tick", _housekeeping_checkpoint_prune)]
 
     logger.info("Gateway housekeeping started (interval=%ds)", interval)
     tick_count = 0

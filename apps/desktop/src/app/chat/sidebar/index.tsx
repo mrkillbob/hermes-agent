@@ -72,7 +72,6 @@ import {
   toggleSidebarMessagingOpen,
   unpinSession
 } from '@/store/layout'
-import { $worldEnabled } from '@/store/lunar-city'
 import { notifyError } from '@/store/notifications'
 import {
   $newChatProfile,
@@ -83,9 +82,11 @@ import {
   normalizeProfileKey,
   sidebarProfileForScope
 } from '@/store/profile'
+import { $profileRailVisible } from '@/store/profile-rail-prefs'
 import {
   $activeProjectId,
   $newProjectDropPlacement,
+  $projectOwnerBySessionId,
   $projects,
   $projectScope,
   $projectTree,
@@ -137,7 +138,6 @@ import {
   type AppView,
   ARTIFACTS_ROUTE,
   CRON_ROUTE,
-  LUNAR_CITY_ROUTE,
   MESSAGING_ROUTE,
   SIDEBAR_NAV_AREA,
   type SidebarNavContribution,
@@ -166,6 +166,7 @@ import {
   ProjectMenu,
   projectTreeCwd,
   reconcileEnteredProjectSessions,
+  sessionBucketId,
   sessionMatchesProjectFilter,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
@@ -232,12 +233,6 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     icon: props => <Codicon name="watch" {...props} />,
     route: CRON_ROUTE,
     keybindActionId: 'nav.cron'
-  },
-  {
-    id: 'lunar-city',
-    label: 'Lunar City',
-    icon: props => <Codicon name="globe" {...props} />,
-    route: LUNAR_CITY_ROUTE
   }
 ]
 
@@ -349,7 +344,6 @@ export function ChatSidebar({
   // Contributed nav rows (plugins pairing a page with a sidebar entry) render
   // below the built-ins with the same chrome; active = at their route.
   const navContributions = useContributions(SIDEBAR_NAV_AREA)
-  const worldEnabled = useStore($worldEnabled)
 
   const contributedNav = useMemo<SidebarNavItem[]>(
     () =>
@@ -445,6 +439,7 @@ export function ChatSidebar({
   const projectOrderIds = useStore($sidebarProjectOrderIds)
   const projects = useStore($projects)
   const projectTree = useStore($projectTree)
+  const projectOwners = useStore($projectOwnerBySessionId)
 
   // The persisted project filter's storage is shared across profiles, so ids
   // picked in another profile don't resolve in the active one and the raw
@@ -506,6 +501,7 @@ export function ChatSidebar({
   }, [])
 
   const activeSidebarSessionId = currentView === 'chat' ? selectedSessionId : null
+  const profileRailVisible = useStore($profileRailVisible)
 
   const dndSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -553,11 +549,22 @@ export function ChatSidebar({
         }
       }
 
-      // Same membership the sidebar groups and colors by, so a filtered row
-      // lands in the lane the user picked it from.
-      return sessionMatchesProjectFilter(session, projectFilter, projects)
+      // Same membership the sidebar groups and colors by (backend owner first,
+      // cwd walk otherwise), so a filtered row lands in the lane the user
+      // picked it from.
+      return sessionMatchesProjectFilter(session, projectFilter, projects, projectOwners)
     },
-    [statusFilter, projectFilter, profileFilter, showAllProfiles, prFilter, pullRequests, projects, dotStates]
+    [
+      statusFilter,
+      projectFilter,
+      profileFilter,
+      showAllProfiles,
+      prFilter,
+      pullRequests,
+      projects,
+      projectOwners,
+      dotStates
+    ]
   )
 
   const filtersNarrow =
@@ -1051,8 +1058,10 @@ export function ChatSidebar({
   // overlay always has a lane to place a missing in-project session into.
   const enteredProjectContent = useMemo(
     () =>
-      enteredProject ? overlayLiveLanes(enteredProject, enteredProjectOverlaySessions, removedSessionIds) : undefined,
-    [enteredProject, enteredProjectOverlaySessions, removedSessionIds]
+      enteredProject
+        ? overlayLiveLanes(enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners)
+        : undefined,
+    [enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners]
   )
 
   const scopedRepoPaths = useMemo(
@@ -1169,6 +1178,27 @@ export function ChatSidebar({
       ),
     [projectOverview, agentSessions, projects, removedSessionIds, sortOrderIds, showAllSessions]
   )
+
+  // A row's "Show all" hydrates raw backend lanes, which — like the drill-in —
+  // must go through the same exclusion as the previews above (pins, filter
+  // misses, optimistic removals), or a pinned chat renders twice and a
+  // just-deleted one comes back. The per-project count of loaded sessions
+  // that exclusion hides also corrects the backend's `sessionCount` in the
+  // "Show all N" label (a pin is always loaded — it renders in Pinned).
+  const overviewHidden = useMemo(() => {
+    const isHidden = (session: SessionInfo) => isHiddenFromProjects(session) || removedSessionIds.has(session.id)
+    const counts: Record<string, number> = {}
+
+    for (const session of sessions) {
+      const projectId = isHidden(session) ? sessionBucketId(session, projects, projectOwners) : null
+
+      if (projectId) {
+        counts[projectId] = (counts[projectId] ?? 0) + 1
+      }
+    }
+
+    return { isHidden, counts }
+  }, [sessions, projects, projectOwners, isHiddenFromProjects, removedSessionIds])
 
   const onEnterProject = useCallback(
     (id: string) => {
@@ -1465,8 +1495,6 @@ export function ChatSidebar({
       })
     )
 
-  const visibleNav = [...SIDEBAR_NAV, ...contributedNav].filter(item => item.id !== 'lunar-city' || worldEnabled)
-
   return (
     <Sidebar
       className={cn(
@@ -1485,7 +1513,7 @@ export function ChatSidebar({
         <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
           <SidebarGroupContent>
             <SidebarMenu className="gap-px">
-              {visibleNav.map(item => {
+              {[...SIDEBAR_NAV, ...contributedNav].map(item => {
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
 
                 const active =
@@ -1866,6 +1894,7 @@ export function ChatSidebar({
                 }
                 projectContent={inProject ? enteredProjectContent : undefined}
                 projectOverview={projectOverview}
+                projectOverviewHidden={overviewHidden}
                 projectOverviewPreviews={overviewPreviews}
                 projectRepoWorktrees={inProject ? scopedRepoWorktrees : undefined}
                 projectsLoading={worktreeGroupingActive ? projectTreeLoading : false}
@@ -1941,9 +1970,13 @@ export function ChatSidebar({
 
         {!showSessionSections && <SidebarBlankState onNewProject={openProjectCreate} />}
 
-        <div className="shrink-0 px-0.5 pb-1 pt-0.5">
-          <ProfileRail />
-        </div>
+        {/* Off, the statusbar's profile dropdown (beside the gateway switcher)
+            takes over — the rail is a duplicate door for bot-only setups. */}
+        {profileRailVisible && (
+          <div className="shrink-0 px-0.5 pb-1 pt-0.5">
+            <ProfileRail />
+          </div>
+        )}
       </SidebarContent>
       <ProjectDialog />
       {/* One mount for the whole app. The header of WorktreeDialog tells why. */}

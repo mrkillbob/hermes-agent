@@ -262,12 +262,13 @@ def _request_gateway_self_restart(pid: int) -> bool:
     return True
 
 
-def _graceful_restart_via_sigusr1(pid: int, drain_timeout: float) -> bool:
+def _graceful_restart_via_sigusr1(pid: int, drain_timeout: float, *, on_progress=None) -> bool:
     """SIGUSR1 (drain-aware restart) a gateway PID and wait for exit; False if unsent or it outlived the timeout.
 
     gateway/run.py maps SIGUSR1 to ``request_restart(via_service=True)``: refuse new turns, drain,
     ``stop()``, exit; the supervisor relaunches. ``drain_timeout`` must cover after-turn wait + drain
-    — pass ``resolve_restart_exit_wait_budget(...)``.
+    — pass ``resolve_restart_exit_wait_budget(...)``. ``on_progress`` (zero-arg) runs on every poll so
+    a long wait can report what the gateway is still holding for (``update_cmd_drain_report``).
     """
     if not hasattr(signal, "SIGUSR1") or pid <= 0:
         return False
@@ -278,10 +279,10 @@ def _graceful_restart_via_sigusr1(pid: int, drain_timeout: float) -> bool:
     except (PermissionError, OSError):
         return False
 
-    return _wait_for_pid_exit(pid, max(drain_timeout, 1.0))
+    return _wait_for_pid_exit(pid, max(drain_timeout, 1.0), on_progress=on_progress)
 
 
-def _wait_for_pid_exit(pid: int, timeout: float) -> bool:
+def _wait_for_pid_exit(pid: int, timeout: float, *, on_progress=None) -> bool:
     """Wait up to ``timeout``s for ``pid`` to exit; True once gone. (``launchctl bootstrap`` fails EIO
     while the previous instance still drains, so teardown callers must wait for the real exit.)"""
     if pid <= 0:
@@ -294,6 +295,8 @@ def _wait_for_pid_exit(pid: int, timeout: float) -> bool:
             return True
         if time.monotonic() >= deadline:
             return False
+        if on_progress is not None:
+            on_progress()
         time.sleep(0.5)
 
 
@@ -590,9 +593,11 @@ def _scan_gateway_pids(
                 or f"hermes_home={current_home_lc}" in command_lc
             )
 
-        # Default profile: accept unless argv advertises another profile. HERMES_HOME may come via
-        # env (invisible to wmic/CIM), so only a non-matching explicit HERMES_HOME= disqualifies.
-        if "--profile " in command_lc or " -p " in command_lc:
+        # Default profile: accept unless argv advertises another profile in any spelling the CLI
+        # pre-parser accepts (``--profile=ops`` slipped past a substring test, so a default-profile
+        # fallback stop could SIGTERM the named gateway). HERMES_HOME may come via env (invisible to
+        # wmic/CIM), so only a non-matching explicit HERMES_HOME= disqualifies.
+        if profile_flag_value(command_lc) is not None:
             return False
         return not ("hermes_home=" in command_lc and f"hermes_home={current_home_lc}" not in command_lc)
 
@@ -1219,8 +1224,12 @@ def _wait_for_systemd_service_restart(
                 if runtime_state and _runtime_state_pid(runtime_state) != new_pid:
                     runtime_state = None
             gateway_state = (runtime_state or {}).get("gateway_state")
-            if gateway_state == "running":
+            if gateway_state in ("running", "degraded"):
                 print(f"✓ {scope_label} service restarted (PID {new_pid})")
+                if gateway_state == "degraded":
+                    # Serving, but a configured platform is parked or retrying: a real restart, not a
+                    # failure — say so instead of waiting out the timeout and reporting one.
+                    print(f"⚠ {scope_label} gateway is DEGRADED — see `hermes gateway status`")
                 return True
             if gateway_state == "startup_failed":
                 reason = (runtime_state or {}).get("exit_reason") or "startup failed"
@@ -1646,6 +1655,12 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
     for pid in orphans:
         with contextlib.suppress(Exception):
             write_planned_stop_marker(pid)
+        # ``os.kill(..., SIGTERM)`` maps to TerminateProcess on Windows, so it
+        # would kill the gateway before its marker watcher can drain and close
+        # state cleanly. Let the bounded survivor wait below escalate instead.
+        if is_windows():
+            reaped = True
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -1737,7 +1752,8 @@ def _force_kill_survivors(survivors, *, kill=None) -> None:
     kill = kill or os.kill
     for pid in survivors:
         logger.warning(
-            "Gateway PID %s did not exit within %.0fs of SIGTERM — sending "
+            "Gateway PID %s did not exit within %.0fs of the stop request (SIGTERM, or the planned-stop "
+            "marker on Windows) — sending "
             "SIGKILL. A kill during a WAL checkpoint can corrupt state.db; "
             "the next start will run an integrity check.",
             pid, _ORPHAN_EXIT_GRACE_SECONDS,
@@ -1776,14 +1792,31 @@ def stop_profile_gateway() -> bool:
     if pid is None:
         return _reap_unsupervised_gateway_orphans()
 
-    _mark_planned_stop(pid)
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass  # Already gone
-    except PermissionError:
-        print(f"⚠ Permission denied to kill PID {pid}")
-        return False
+    if is_windows():
+        # Windows maps SIGTERM to TerminateProcess. The marker watcher is the
+        # gateway's graceful-stop IPC, so wait for it before force-killing a
+        # wedged process.
+        from gateway.status import get_process_start_time
+        from hermes_cli.gateway_windows import (
+            _drain_gateway_pid,
+            _force_terminate_known_gateway_pids,
+            _windows_stop_drain_timeout,
+        )
+
+        # Capture identity BEFORE the drain (as _escalate_wedged_gateway does): if the PID is
+        # recycled during the wait, terminate_pid's start-time mismatch refuses the taskkill.
+        expected_start_time = get_process_start_time(pid)
+        if not _drain_gateway_pid(pid, _windows_stop_drain_timeout()):
+            _force_terminate_known_gateway_pids({pid: expected_start_time})
+    else:
+        _mark_planned_stop(pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass  # Already gone
+        except PermissionError:
+            print(f"⚠ Permission denied to kill PID {pid}")
+            return False
 
     # ``_pid_exists``, NOT ``os.kill(pid, 0)`` (TerminateProcess on Windows).
     from gateway.status import _pid_exists
@@ -1859,17 +1892,34 @@ _WINDOWS_TASK_SUPERVISOR_STATES = frozenset({"Running", "Ready", "Queued"})
 
 
 def _windows_scheduled_task_state(task_name: str) -> str | None:
-    """English ``Get-ScheduledTask`` State, or None on failure. PowerShell, not ``schtasks``: schtasks
-    localizes its output in the local codepage (utf-8 decoding mangles it); the State enum is stable."""
+    """Locale-independent Task Scheduler state, or None on failure.
+
+    Query the COM API directly: Get-ScheduledTask auto-loads the CIM module,
+    which can stall desktop backend startup for the entire ten-second timeout.
+    Keep the existing supervisor semantics (Ready and Queued count as owned).
+    """
     if not is_windows():
         return None
-    ps_cmd = f"$t = Get-ScheduledTask -TaskName '{task_name}' -ErrorAction SilentlyContinue; if ($t) {{ $t.State }} else {{ 'MISSING' }}"
+    quoted_name = task_name.replace("'", "''")
+    ps_cmd = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$s = [Activator]::CreateInstance([type]::GetTypeFromProgID('Schedule.Service')); "
+        "$s.Connect(); "
+        "try { "
+        f"$t = $s.GetFolder('\\').GetTask('{quoted_name}'); "
+        # TASK_STATE values are stable, unlike localized schtasks.exe output.
+        "@('Unknown', 'Disabled', 'Queued', 'Ready', 'Running')[[int]$t.State] "
+        "} catch { "
+        "$e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; "
+        "if ($e.HResult -in @(-2147024894, -2147024893)) { 'MISSING' } else { throw } "
+        "}"
+    )
     try:
         powershell = shutil.which("powershell") or shutil.which("pwsh")
         if powershell is None:
             return None
         result = subprocess.run(
-            [powershell, "-NoProfile", "-Command", ps_cmd],
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
             capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=10,
         )
         if result.returncode != 0:
@@ -2227,7 +2277,8 @@ def _run_systemctl(args: list[str], *, system: bool = False, **kwargs) -> subpro
     try:
         return subprocess.run(_systemctl_cmd(system) + args, **kwargs)
     except FileNotFoundError:
-        raise RuntimeError("systemctl is not available on this system") from None
+        from hermes_cli.gateway_command_errors import SystemctlUnavailableError
+        raise SystemctlUnavailableError() from None
 
 
 def _service_scope_label(system: bool = False) -> str:
@@ -2387,6 +2438,32 @@ def print_systemd_scope_conflict_warning() -> None:
     print_info("    sudo hermes gateway uninstall --system")
 
 
+def refuses_container_user_scope_install(system: bool) -> bool:
+    """True (after printing the guidance) when a fresh USER-scope unit was requested inside a container.
+
+    A systemd container passes ``supports_systemd_services()`` on purpose so ``--system`` keeps working,
+    but a user unit there is not container-scoped: the unit file and its ``default.target.wants`` symlink
+    land in ``~/.config/systemd/user`` — commonly the host's own home bind-mounted in — so the host's
+    ``systemd --user`` enables it too and a second gateway polls the same bot token outside the container.
+    Callers decide between ``sys.exit(1)`` (CLI) and skipping the install (wizard)."""
+    if system or not is_container():
+        return False
+    print_error("Refusing to install a user-scope systemd gateway service inside a container.")
+    _print_info_lines(
+        "The unit file and its enable symlink would be written to the home directory, which is",
+        "commonly the host's own home bind-mounted in — the host's user manager then enables and",
+        "starts the same unit, so a second gateway polls the same bot token outside the container",
+        "(Telegram: 'Conflict: terminated by other getUpdates request').",
+        "",
+        "  hermes gateway run                                # run as the container's main process",
+        "  docker run --restart unless-stopped ...           # container restart policy",
+        "",
+        "If systemd manages this container (systemd as PID 1), install an isolated system service instead:",
+        "  sudo hermes gateway install --system --run-as-user <user>",
+    )
+    return True
+
+
 def _require_root_for_system_service(action: str) -> None:
     if os.geteuid() != 0:  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
         raise SystemScopeRequiresRootError(f"System gateway {action} requires root. Re-run with sudo.", action)
@@ -2472,6 +2549,8 @@ def install_linux_gateway_from_setup(force: bool = False, enable_on_startup: boo
         systemd_install(force=force, system=True, run_as_user=run_as_user, enable_on_startup=enable_on_startup)
         return scope, True
 
+    if refuses_container_user_scope_install(system=False):
+        return scope, False
     systemd_install(force=force, system=False, enable_on_startup=enable_on_startup)
     return scope, True
 
@@ -2498,6 +2577,8 @@ def ensure_gateway_service(context: str = "setup") -> bool:
 
     try:
         if _is_service_running():
+            return True
+        if _served_profile_needs_no_service():
             return True
         if not _is_service_installed():
             if supports_systemd and has_conflicting_systemd_units():
@@ -3371,7 +3452,8 @@ def _systemd_graceful_restart_action(system: bool, pid: int) -> str | None:
         f"⏳ {scope_label} service restarting gracefully (PID {pid}) — "
         f"waiting up to {wait_budget:.0f}s for in-flight turns + drain..."
     )
-    if not _graceful_restart_via_sigusr1(pid, wait_budget):
+    from hermes_cli.update_cmd_drain_report import drain_progress_reporter
+    if not _graceful_restart_via_sigusr1(pid, wait_budget, on_progress=drain_progress_reporter(budget_s=wait_budget)):
         print(f"⚠ Graceful restart did not complete within {int(wait_budget)}s; forcing a service restart...")
         return "restart"
 
@@ -3750,8 +3832,24 @@ def _launchd_fallback_to_detached(reason: str, *, exit_on_failure: bool = True) 
 
 
 def _launchd_degrade_or_raise(exc: subprocess.CalledProcessError, what: str) -> None:
-    """Shared launchctl failure policy: domain unmanageable (5/125) → detached fallback; else re-raise."""
+    """Shared launchctl failure policy: domain unmanageable (5/125) → detached fallback; else re-raise.
+
+    A 5/125 exit is evidence about the *domain* only when launchd is not already supervising this job.
+    EIO (5) is ``launchctl bootstrap``'s answer for a label that is already loaded, so the ordinary
+    "reinstall/restart over the live gateway" case lands here with the service up and supervised.
+    Degrading there is not a graceful fallback: it writes the permanent launchd-unsupported marker and
+    starts a detached gateway *beside* the supervised one, and the marker makes
+    :func:`wait_for_launchd_gateway_supervision` answer True unconditionally — so no later
+    install/update can tell that nothing ties the gateway to launchd any more. A live supervised PID is
+    direct evidence this macOS does manage the job, so surface the failure instead of branding the host.
+    """
     if not _launchctl_domain_unsupported(exc.returncode):
+        raise exc
+    label = get_launchd_label()
+    if _launchctl_label_supervising_process(label):
+        print(f"⚠ {what} failed (exit {exc.returncode}), but launchd still supervises {label}")
+        print("  Not switching to the detached fallback — this host manages the job.")
+        print("  Apply the definition with: hermes gateway stop && hermes gateway install --force")
         raise exc
     _launchd_fallback_to_detached(f"{what} exit {exc.returncode}")
 
@@ -3830,9 +3928,16 @@ def generate_launchd_plist() -> str:
     <true/>
     
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
-    <!-- ThrottleInterval raises launchd's default 10s minimum respawn interval
+    <!-- SuccessfulExit=false parks a clean stop (exit 0), including gateway
+         EX_CONFIG 78 after stderr_timestamp maps it to 0 — launchd cannot
+         honor RestartPreventExitStatus, and KeepAlive=true respawned token
+         collisions forever (#89477). Exit 75 and crashes still relaunch.
+         ThrottleInterval raises launchd's default 10s minimum respawn interval
          to 30s so a crash-looping gateway can't hammer launchd into a rapid
          respawn storm; ExitTimeOut gives the gateway 25s of graceful-drain
          headroom before launchd escalates from SIGTERM to SIGKILL on stop. -->
@@ -4148,6 +4253,48 @@ def _wait_for_gateway_exit(timeout: float = 10.0, force_after: float | None = 5.
     return True
 
 
+def _wait_for_tcp_port_free(host: str, port: int, *, timeout: float = 10.0) -> bool:
+    """Wait until nothing accepts TCP connections on host:port.
+
+    PID exit is not enough on macOS: api_server disables SO_REUSEADDR, so a restart that wins
+    the race logs EADDRINUSE and keeps running with no API. Connection-refused means the
+    listener is gone; a timed-out connect is a live listener with a slow accept queue.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                pass
+        except ConnectionRefusedError:
+            return True
+        except TimeoutError:
+            pass  # a slow accept queue is still a live listener
+        except OSError:
+            return True  # unresolvable/unreachable address: nothing to wait for; the bind retry covers it
+        time.sleep(0.1)
+    return False
+
+
+def _wait_for_api_server_port_free(*, timeout: float = 10.0) -> bool:
+    """Wait for the configured api_server listen address to stop accepting.
+
+    Only when api_server is enabled: with the platform off, a foreign listener on the default
+    port is nobody's race and must not delay the restart."""
+    from gateway.config import Platform
+    from gateway.platforms.api_server import listen_address
+    pconfig = load_gateway_config().platforms.get(Platform.API_SERVER)
+    if pconfig is None or not pconfig.enabled:
+        return True
+    host, port = listen_address(pconfig.extra or {})
+    freed = _wait_for_tcp_port_free(host, port, timeout=timeout)
+    if not freed:
+        print(
+            f"⚠ {host}:{port} still accepting connections — "
+            "new api_server may fail to bind"
+        )
+    return freed
+
+
 def _launchd_kickstart(label: str, domain: str) -> None:
     """``launchctl kickstart -k domain/label``; raises so callers own per-label failure accounting."""
     subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{label}"], check=True, timeout=90, **_CAPTURE_TEXT)
@@ -4190,7 +4337,8 @@ def launchd_restart():
             # surfaces with no other feedback (desktop updater) read silence as "update stuck".
             wait_budget = _get_restart_exit_wait_budget()
             print(f"→ Stopping gateway (PID {pid}) — draining in-flight runs (up to {wait_budget:.0f}s)...")
-            if _graceful_restart_via_sigusr1(pid, wait_budget):
+            from hermes_cli.update_cmd_drain_report import drain_progress_reporter
+            if _graceful_restart_via_sigusr1(pid, wait_budget, on_progress=drain_progress_reporter(budget_s=wait_budget)):
                 # KeepAlive revives a planned exit, so do NOT kickstart (-k would kill the replacement) —
                 # but a clean exit doesn't prove supervision, so verify a replacement PID appears first.
                 if _wait_for_launchd_service_pid(label, pid, timeout=15.0, domain=domain):
@@ -4199,6 +4347,9 @@ def launchd_restart():
                 print("⚠ launchd did not revive the gateway after its graceful exit — forcing restart")
             else:
                 print(f"⚠ Gateway drain timed out after {wait_budget:.0f}s — forcing launchd restart")
+        # Captured: an unloaded job (3/113/125) is the expected case below, which
+        # prints its own ↻ line — and e.stderr feeds the update_cmd failure diagnostic.
+        _wait_for_api_server_port_free()
         subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90, **_CAPTURE_TEXT)
         _launchd_ok("✓ Service restarted")
     except subprocess.CalledProcessError as e:
@@ -4401,6 +4552,22 @@ def named_profile_served_by_running_multiplexer(profile_name: str | None = None)
         return False
 
 
+def _served_profile_needs_no_service() -> bool:
+    """Print the "already served" note and return True when a setup flow must not install a standalone
+    service: a live multiplexing default gateway already serves this named profile, so the unit/plist it
+    would register can only sit dead (the start guard refuses it) or double-bind its platforms.
+    Shared by ``hermes setup gateway`` / ``hermes setup`` / ``hermes import`` (``ensure_gateway_service``)
+    and the ``hermes gateway setup`` wizard. See #111958."""
+    if not named_profile_served_by_running_multiplexer():
+        return False
+    print_success(
+        f"Profile '{_current_profile_name()}' is already served by the default multiplexer."
+    )
+    print_info("  (served now by the running multiplexed gateway — add its bot token and it connects)")
+    print_info("  No standalone gateway service was installed or started.")
+    return True
+
+
 def _named_profile_refused_under_multiplexer(force: bool = False) -> bool:
     """Print the served-profile refusal and return True when a named-profile gateway must not start:
     a multiplexing default gateway already serves it (a second one would double-bind its platforms: two
@@ -4517,10 +4684,10 @@ def _guard_existing_gateway_process_conflict(replace: bool = False) -> None:
             pass
         return
 
-    print_error(f"Another gateway instance is already running (PID {pid}).")
-    print("  Use 'hermes gateway restart' to replace it,")
-    print("  or 'hermes gateway stop' first.")
-    print("  Or use 'hermes gateway run --replace' to auto-replace.")
+    print_error(f"A gateway is already running (PID {pid}), so your bots are most likely online already.")
+    print("  Check with `hermes gateway status`.")
+    print("  To restart it: `hermes gateway restart`. To stop it: `hermes gateway stop`.")
+    print("  To replace it from here: `hermes gateway run --replace`.")
     sys.exit(1)
 
 
@@ -4914,10 +5081,21 @@ def _platform_status(platform: dict) -> str:
     return "partially configured" if any(present) else "not configured"
 
 
+# Operator wording for the out-of-loop watchdog exit reasons stamped by gateway/shutdown_watchdog.py.
+_WATCHDOG_EXIT_REASONS = {
+    "loop_liveness_watchdog": (
+        "event loop stopped dispatching (housekeeping, cron and the kanban dispatcher froze); "
+        f"the liveness watchdog exited with code {GATEWAY_SERVICE_RESTART_EXIT_CODE} for the supervisor to restart it"
+    ),
+    "shutdown_watchdog": "shutdown drain wedged; the shutdown watchdog forced the exit (see logs/gateway-shutdown-watchdog.log)",
+}
+
+
 def _runtime_health_lines() -> list[str]:
     """Summarize the latest persisted gateway runtime health state."""
     try:
-        from gateway.status import read_runtime_status, runtime_status_is_stale, runtime_status_pid_is_live
+        from gateway.status import (
+            read_runtime_status, runtime_status_heartbeat_age_s, runtime_status_is_stale, runtime_status_pid_is_live)
     except Exception:
         return []
 
@@ -4935,24 +5113,37 @@ def _runtime_health_lines() -> list[str]:
 
     # A live-claiming snapshot can outlive an ungracefully killed gateway (taskkill /F, OOM). Past
     # the freshness TTL with the recorded PID gone, say so instead of rendering stale live state.
-    if (
-        gateway_state in ("running", "starting", "draining")
-        and runtime_status_is_stale(state)
-        and not runtime_status_pid_is_live(state)
-    ):
-        lines.append(
-            f"⚠ Stale gateway_state.json: recorded state '{gateway_state}' but the "
-            "recorded process is gone (likely an ungraceful shutdown)"
-        )
-        return lines
+    if gateway_state in ("running", "degraded", "starting", "draining") and runtime_status_is_stale(state):
+        if not runtime_status_pid_is_live(state):
+            lines.append(
+                f"⚠ Stale gateway_state.json: recorded state '{gateway_state}' but the "
+                "recorded process is gone (likely an ungraceful shutdown)"
+            )
+            return lines
+        # PID alive but housekeeping stopped re-stamping the file: the reporter's "not a crash" case
+        # (#113372) — the process looks 'running' while housekeeping/cron/kanban dispatch are frozen.
+        age = runtime_status_heartbeat_age_s(state)
+        if gateway_state != "draining" and age is not None:
+            lines.append(
+                f"⚠ Gateway heartbeat stale: housekeeping has not refreshed gateway_state.json for {age} s "
+                f"(event loop or housekeeping wedged; pid {state.get('pid')} alive) — restart the gateway"
+            )
 
     if gateway_state == "startup_failed" and exit_reason:
         lines.append(f"⚠ Last startup issue: {exit_reason}")
+    elif gateway_state == "degraded" and exit_reason:
+        # An out-of-loop watchdog hard-exited the process (#113372): the loop stopped dispatching, so
+        # housekeeping/cron/kanban froze together. Without this arm the file would read 'running'.
+        lines.append(f"⚠ Gateway exited degraded: {_WATCHDOG_EXIT_REASONS.get(exit_reason, exit_reason)}")
     elif gateway_state == "draining":
         action = "restart" if state.get("restart_requested") else "shutdown"
         from gateway.status import parse_active_agents
         count = parse_active_agents(state.get("active_agents"))
         lines.append(f"⏳ Gateway draining for {action} ({count} active agent(s))")
+        work = state.get("active_work")
+        if isinstance(work, list) and work:
+            from hermes_cli.update_cmd_drain_report import describe_active_work_unit
+            lines.extend(f"     • {describe_active_work_unit(u)}" for u in work if isinstance(u, dict))
     elif gateway_state == "stopped" and exit_reason:
         lines.append(f"⚠ Last shutdown reason: {exit_reason}")
 
@@ -5002,19 +5193,22 @@ def _prompt_csv(prompt_text: str, default: str) -> str:
 
 # (default index, *choices) for the no-allowlist access prompt, keyed by is_email.
 _UNAUTHORIZED_ACCESS_CHOICES = {
-    True: (2,
+    True: (3,
         "Enable open access (any email sender can message the bot)",
         "Use DM pairing (unknown email senders receive a pairing code)",
+        "Politely decline unknown senders (one-time message, then silence)",
         "Keep unknown senders silent"),
     False: (1,
         "Enable open access (anyone can message the bot)",
         "Use DM pairing (unknown users request access, you approve with 'hermes pairing approve')",
+        "Politely decline unknown senders (one-time message, then silence)",
         "Skip for now (bot will deny all users until configured)"),
 }
 
 
-def _prompt_unauthorized_access(*, is_email: bool) -> None:
-    """No allowlist was given — ask open access vs DM pairing vs skip/silent, and persist."""
+def _prompt_unauthorized_access(platform_key: str) -> None:
+    """No allowlist was given — ask open access vs DM pairing vs decline vs skip/silent, and persist."""
+    is_email = platform_key == "email"
     print()
     default_idx, *access_choices = _UNAUTHORIZED_ACCESS_CHOICES[is_email]
     access_idx = prompt_choice("  How should unauthorized users be handled?", access_choices, default_idx)
@@ -5026,6 +5220,9 @@ def _prompt_unauthorized_access(*, is_email: bool) -> None:
             _set_platform_unauthorized_dm_behavior("email", "pair")
         print_success("  DM pairing mode — users will receive a code to request access.")
         print_info("  Approve with: hermes pairing approve <platform> <code>")
+    elif access_idx == 2:
+        _set_platform_unauthorized_dm_behavior(platform_key, "decline")
+        print_success("  Unknown senders get one polite decline, then silence (unauthorized_dm_behavior: decline).")
     elif is_email:
         print_success("  Unknown email senders will be ignored.")
     else:
@@ -5097,7 +5294,7 @@ def _prompt_allowlist_var(var: dict, platform_key: str, auto_owner_user_id) -> s
     )
     value = prompt(f"  {var['prompt']}", password=False)
     if not value:
-        _prompt_unauthorized_access(is_email=platform_key == "email")
+        _prompt_unauthorized_access(platform_key)
         return None
     cleaned = value.replace(" ", "")
     if "DISCORD" in var["name"]:
@@ -5703,6 +5900,8 @@ def _wizard_post_setup() -> None:
     """Offer to install/start/restart the gateway once at least one platform has progress."""
     print()
     print(color("─" * 58, Colors.DIM))
+    if _served_profile_needs_no_service():
+        return
     service_installed = _is_service_installed()
     service_running = _is_service_running()
 
@@ -5761,7 +5960,8 @@ def _dispatch_via_service_manager_if_s6(action: str, profile: str | None = None)
     """Dispatch start/stop/restart via s6 inside an s6 container; True iff dispatched (caller returns).
     Profile defaults to the current one; missing slot / s6 errors become actionable CLI messages."""
     from hermes_cli.service_manager import (
-        GatewayNotRegisteredError, S6CommandError, detect_service_manager, get_service_manager,
+        GatewayNotRegisteredError, detect_service_manager, get_service_manager,
+        register_unregistered_profile_gateway,
     )
 
     if detect_service_manager() != "s6":
@@ -5772,9 +5972,19 @@ def _dispatch_via_service_manager_if_s6(action: str, profile: str | None = None)
     mgr = get_service_manager()
     if action not in ("start", "stop", "restart"):
         return False
+    service = f"gateway-{profile}"
     try:
-        getattr(mgr, action)(f"gateway-{profile}")
-    except (GatewayNotRegisteredError, S6CommandError) as exc:
+        try:
+            getattr(mgr, action)(service)
+        except GatewayNotRegisteredError:
+            # A profile created from the HOST against a bind-mounted home has a directory but no
+            # slot (`profile create` cannot reach the container's /run/service). Only `start`
+            # repairs that; stop/restart on a missing slot stay an error.
+            if action != "start" or not register_unregistered_profile_gateway(mgr, profile):
+                raise
+            print(f"✓ registered the s6 gateway slot for profile {profile!r}")
+            mgr.start(service)
+    except (RuntimeError, ValueError, OSError) as exc:  # S6Error is a RuntimeError
         print(f"✗ {exc}")
         sys.exit(1)
     return True
@@ -5821,6 +6031,15 @@ def gateway_command(args):
         # System-scope action typed without sudo; the wizard intercepts this earlier with guidance.
         print(str(e))
         sys.exit(1)
+    except (subprocess.CalledProcessError, RuntimeError) as e:
+        # systemctl exited non-zero or is missing entirely: guidance, not a traceback.
+        from hermes_cli.gateway_command_errors import explain_service_failure
+        lines = explain_service_failure(e)
+        if lines is None:
+            raise
+        print_error(lines[0])
+        _print_indented("\n".join(lines[1:]))
+        sys.exit(1)
 
 
 def _maybe_redirect_run_to_s6_supervision(args) -> bool:
@@ -5835,6 +6054,12 @@ def _maybe_redirect_run_to_s6_supervision(args) -> bool:
         return False
     if not _dispatch_via_service_manager_if_s6("start"):
         return False
+    # This process never reaches a GatewayRunner, so the watchdog armed by hermes_cli.main's argv
+    # fast-path has no other disarm site: the in-process heartbeat below parks with zero CPU and no
+    # progress lease, which the watchdog reads as a startup deadlock and os._exit(75)s the CMD process.
+    from hermes_startup_watchdog import disarm_startup_watchdog
+
+    disarm_startup_watchdog()
     # Breadcrumb on stderr (keep stdout clean for scripts); gateway logs follow via s6-log.
     print(
         "→ gateway is now running under s6 supervision (auto-restart on crash,\n"
@@ -6001,7 +6226,10 @@ _NO_BACKEND_MESSAGES = {
         "Service uninstall is not applicable inside a Docker container.",
         "To stop the gateway, stop or remove the container:", "",
         "  docker stop <container>", "  docker rm <container>"),
-    ("uninstall", "unsupported"): (1, "Not supported on this platform."),
+    ("uninstall", "unsupported"): (1,
+        "Running the gateway as a background service is not available on this platform "
+        "(no systemd, launchd or Scheduled Tasks), so there is nothing to uninstall.",
+        "Stop a manually started gateway with: hermes gateway stop"),
     ("start", "termux"): (1,
         "Gateway service start is not supported on Termux because there is no system service manager.",
         "Run manually: hermes gateway"),
@@ -6015,7 +6243,10 @@ _NO_BACKEND_MESSAGES = {
         "  docker start <container>     # start a stopped container",
         "  docker restart <container>   # restart a running container", "",
         "Or run the gateway directly: hermes gateway run"),
-    ("start", "unsupported"): (1, "Not supported on this platform."),
+    ("start", "unsupported"): (1,
+        "Running the gateway as a background service is not available on this platform "
+        "(no systemd, launchd or Scheduled Tasks).",
+        "Run it directly with: hermes gateway run"),
 }
 
 
@@ -6079,6 +6310,8 @@ def _cmd_install(args):
         _no_backend_exit("install", "termux")
     backend = _service_backend()
     if backend == "systemd":
+        if refuses_container_user_scope_install(system):
+            sys.exit(1)
         _install_systemd_from_cli(args, force=force, system=system, run_as_user=run_as_user)
     elif backend == "launchd":
         launchd_install(force)
@@ -6125,6 +6358,7 @@ def _cmd_start(args):
         if killed:
             print(f"✓ Killed {killed} stale gateway process(es) across all profiles")
             _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+            _wait_for_api_server_port_free()
 
     if is_termux():
         _no_backend_exit("start", "termux")
@@ -6176,6 +6410,7 @@ def _restart_all(system: bool) -> None:
     if total:
         print(f"✓ Stopped {total} gateway process(es) across all profiles")
     _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+    _wait_for_api_server_port_free()
 
     print("Starting gateway...")
     # Even without a registered task, gateway_windows.start() uses the detached launcher.
@@ -6231,9 +6466,22 @@ def _cmd_restart(args):
         )
         sys.exit(1)
 
+    # A gateway that declares an external supervisor (custom launchd agent / unit running
+    # `gateway run --external-supervisor`) restarts by exiting back to it: the stop + foreground
+    # run below would stamp this CLI's PID as the gateway and wedge every respawn (#110637).
+    from gateway.status import get_running_pid
+    from hermes_cli.gateway_supervised_restart import (
+        gateway_declares_external_supervisor, restart_externally_supervised_gateway,
+    )
+    supervised_pid = get_running_pid()
+    if supervised_pid and gateway_declares_external_supervisor(supervised_pid):
+        restart_externally_supervised_gateway(supervised_pid)
+        return
+
     if stop_profile_gateway():
         print("✓ Stopped gateway for this profile")
     _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+    _wait_for_api_server_port_free()
     print("Starting gateway...")
     run_gateway(verbose=0, force=force)
 

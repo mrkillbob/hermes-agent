@@ -1,8 +1,9 @@
-import { atom } from 'nanostores'
+import { atom, onMount } from 'nanostores'
 import type { ReactNode } from 'react'
 
 import { noteActiveTreeGroup, revealTreePane } from '@/components/pane-shell/tree/store'
 import { registry } from '@/contrib/registry'
+import type { Contribution } from '@/contrib/types'
 
 type NavigateLike = (to: string, options?: { replace?: boolean }) => void
 
@@ -19,7 +20,6 @@ export const CRON_ROUTE = '/cron'
 export const PROFILES_ROUTE = '/profiles'
 export const AGENTS_ROUTE = '/agents'
 export const STARMAP_ROUTE = '/starmap'
-export const LUNAR_CITY_ROUTE = '/lunar-city'
 
 export type AppView =
   | 'session-import'
@@ -34,7 +34,6 @@ export type AppView =
   // session-title dropdown while a plugin page was showing.
   | 'extension'
   | 'messaging'
-  | 'lunar-city'
   | 'profiles'
   | 'settings'
   | 'skills'
@@ -53,7 +52,6 @@ export type AppRouteId =
   | 'settings'
   | 'skills'
   | 'starmap'
-  | 'lunar-city'
   | 'webhooks'
 
 export interface AppRoute {
@@ -74,8 +72,7 @@ export const APP_ROUTES = [
   { id: 'cron', path: CRON_ROUTE, view: 'cron' },
   { id: 'profiles', path: PROFILES_ROUTE, view: 'profiles' },
   { id: 'agents', path: AGENTS_ROUTE, view: 'agents' },
-  { id: 'starmap', path: STARMAP_ROUTE, view: 'starmap' },
-  { id: 'lunar-city', path: LUNAR_CITY_ROUTE, view: 'lunar-city' }
+  { id: 'starmap', path: STARMAP_ROUTE, view: 'starmap' }
 ] as const satisfies readonly AppRoute[]
 
 const APP_VIEW_BY_PATH = new Map<string, AppView>(APP_ROUTES.map(route => [route.path, route.view]))
@@ -95,9 +92,20 @@ export interface RouteContribution {
   path: string
 }
 
-export function contributedRoutes(): Array<{ key: string; path: string; title?: string; render: () => ReactNode }> {
-  return registry
-    .getArea(ROUTES_AREA)
+/** Bumps whenever the `routes` area mutates. For non-React consumers that
+ *  derive from `contributedRoutes()` outside a render (paneMirror titles):
+ *  hand it to `also` so a plugin route registering after its tile opened
+ *  re-syncs the tab title. Subscribes to the registry only while listened to. */
+export const $routesVersion = atom(0)
+onMount($routesVersion, () => registry.subscribeArea(ROUTES_AREA, () => $routesVersion.set($routesVersion.get() + 1)))
+
+// React consumers must pass their `useContributions(ROUTES_AREA)` snapshot in:
+// with React Compiler enabled, an independently-called `contributedRoutes()`
+// can stay memoized across a late registration the subscription DID deliver.
+export function contributedRoutes(
+  contributions: readonly Contribution[] = registry.getArea(ROUTES_AREA)
+): Array<{ key: string; path: string; title?: string; render: () => ReactNode }> {
+  return contributions
     .map(c => ({
       key: `${c.source ?? 'core'}:${c.id}`,
       path: (c.data as RouteContribution | undefined)?.path ?? '',
@@ -221,7 +229,7 @@ export function appViewForPath(pathname: string): AppView {
 /** Does `to` land on a full page rendered INSIDE the workspace pane
  *  (skills/messaging/artifacts/contributed routes)? Overlays don't count —
  *  they float over whatever the workspace is already showing. */
-function isWorkspacePageRoute(to: string): boolean {
+export function isWorkspacePageRoute(to: string): boolean {
   const view = appViewForPath(to)
 
   return view !== 'chat' && !isOverlayView(view)
@@ -233,6 +241,12 @@ function isWorkspacePageRoute(to: string): boolean {
  *  it as `headerVeto` so the zone tab bar stands down on pages. Overlays
  *  (settings/…) don't count — the chat stays beneath them. */
 export const $workspaceIsPage = atom(false)
+
+/** Page-owned controls (kanban's board switcher) projected into the workspace
+ *  panel's tab-header space while `$workspaceIsPage` holds — the page's title
+ *  row, not the native band. Distinct from `titleBar.*`, whose slots stay
+ *  mounted on every route so plugin components never remount on navigation. */
+export const WORKSPACE_PAGE_HEADER_AREA = 'workspace.pageHeader'
 
 function revealWorkspacePane(): void {
   noteActiveTreeGroup(null)

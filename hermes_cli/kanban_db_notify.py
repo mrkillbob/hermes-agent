@@ -89,7 +89,9 @@ def add_notify_sub(
     omitting it would key the wake into a different session. ``None`` keeps an
     existing row's value. ``delivery_mode``: ``None`` leaves an existing row
     untouched, an explicit valid value is last-write-wins, unknown falls back
-    to ``"notify"``. New subs start caught up (``last_event_id`` =
+    to ``"notify"``. ``delivery_metadata`` merges supplied routing anchors
+    into an existing row so re-subscribing never discards them. New subs start
+    caught up (``last_event_id`` =
     ``MAX(task_events.id)``) so the notifier never replays history at boot.
     """
     valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
@@ -114,10 +116,12 @@ def add_notify_sub(
                 insert_mode, metadata_json, int(time.time()), task_id,
             ),
         )
-        # chat_type / delivery_mode / delivery_metadata are last-write-wins;
-        # user_id_alt and notifier_profile only self-heal legacy rows lacking one.
+        # chat_type / delivery_mode are last-write-wins; delivery metadata
+        # preserves existing routing fields while supplied fields overwrite them.
+        # user_id, user_id_alt and notifier_profile only self-heal legacy rows lacking one.
         for column, value, fill_only in (
             ("chat_type", chat_type, False),
+            ("user_id", user_id, True),
             ("user_id_alt", user_id_alt, True),
             ("notifier_profile", notifier_profile, True),
             ("delivery_mode", valid_mode, False),
