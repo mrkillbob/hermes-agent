@@ -111,6 +111,29 @@ class TestReapOrphanedBrowserSessions:
         assert 12345 in terminate_calls
         assert not d.exists()
 
+    def test_real_profile_attach_daemon_is_reaped_when_owner_is_dead(self, fake_tmpdir):
+        """#100855: the shared ``hermes-real-profile`` attach daemon is not ``<prefix>_<hex>``
+        named, so the reaper's glob never saw it and a wedged daemon + headless Chrome outlived
+        gateway restarts. Same owner-liveness rule as every other lane: dead owner => reaped."""
+        import tools.browser_tool as bt
+        from tools.browser_tool_lifecycle import _reap_orphaned_browser_sessions
+
+        d = _make_socket_dir(fake_tmpdir, bt._REAL_PROFILE_SESSION, pid=4242, owner_pid=99999)
+        terminate_calls = []
+
+        def _pid_exists(pid):
+            return pid == 4242  # daemon alive, owning hermes gone
+
+        with patch("gateway.status._pid_exists", side_effect=_pid_exists), \
+             patch("gateway.status.get_process_start_time", return_value=777), \
+             patch("tools.browser_tool_lifecycle._verify_reapable_browser_daemon", return_value=True), \
+             patch("tools.process_registry.ProcessRegistry._terminate_host_pid",
+                   side_effect=lambda pid, expected_start=None: terminate_calls.append(pid)):
+            _reap_orphaned_browser_sessions()
+
+        assert terminate_calls == [4242]
+        assert not d.exists()
+
     def test_unfingerprintable_daemon_is_refused(self, fake_tmpdir):
         """No start-time fingerprint -> the kill is refused (fail closed).
 
@@ -347,6 +370,27 @@ class TestReaperIdentityGuard:
                      "/tmp/agent-browser-h_OTHER999"},
         )
         assert self._run(proc, socket_dir) is False
+
+    def test_recycled_pid_carrying_only_socket_dir_basename_is_refused(self):
+        """The socket-dir BASENAME anywhere in argv is not a binding (#116884).
+
+        `agent-browser-<session>` is predictable, so a recycled PID whose argv merely
+        mentions it (a grep, a shell) must not pass the binding gate; only the full
+        normalized path as an argv token (or the environ match) binds.
+        """
+        socket_dir = "/tmp/agent-browser-h_sess123456"
+        proc = self._FakeProc(
+            name="bash",
+            cmdline=["grep", "agent-browser-h_sess123456", "/var/log/syslog"],
+            environ={},
+        )
+        assert self._run(proc, socket_dir) is False
+        # Control: the full path as a `--flag=value` token still binds.
+        bound = self._FakeProc(
+            name="agent-browser",
+            cmdline=["agent-browser", "daemon", f"--socket-dir={socket_dir}/"],
+        )
+        assert self._run(bound, socket_dir) is True
 
 
     def test_planted_pid_survives_full_reaper_path(self, fake_tmpdir):

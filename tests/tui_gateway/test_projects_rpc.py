@@ -38,7 +38,7 @@ def _fast_git_probe(monkeypatch):
         d = str(cwd)
         while d and d not in ("/", os.path.dirname(d)):
             if os.path.isdir(os.path.join(d, ".git")):
-                return d
+                return os.path.join(d, ".git") if _a and _a[-1] == "--git-common-dir" else d
             d = os.path.dirname(d)
         return ""
 
@@ -858,7 +858,7 @@ def test_record_repos_writes_to_the_requested_profiles_projects_db(monkeypatch, 
 
 
 def test_projects_without_a_profile_stay_on_the_launch_home(monkeypatch, tmp_path):
-    """Omitted/blank/unknown profile is a no-op — the pre-scoping behavior."""
+    """Only omitted/blank profiles use launch data; unknown targets fail closed."""
     launch_home = _profile_dir(tmp_path, "launch")
     coder_home = _profile_dir(tmp_path, "coder")
     repo = tmp_path / "repos" / "launch-only"
@@ -873,15 +873,17 @@ def test_projects_without_a_profile_stay_on_the_launch_home(monkeypatch, tmp_pat
 
         omitted = _call("projects.list")
         blank = _call("projects.list", {"profile": ""})
-        unknown = _call("projects.list", {"profile": "not-a-profile"})
+        with pytest.raises(FileNotFoundError, match="not-a-profile"):
+            _call("projects.list", {"profile": "not-a-profile"})
+        with pytest.raises(FileNotFoundError, match="not-a-profile"):
+            _call("projects.create", {"profile": "not-a-profile", "name": "Wrong target"})
+        assert _call("projects.list") == omitted
 
     assert [p["name"] for p in omitted["projects"]] == ["Launch only"]
     assert blank == omitted
-    assert unknown == omitted
     assert omitted["active_id"] == created["id"]
 
     assert _cached_repo_labels(launch_home) == ["only"]
     assert not (coder_home / "projects.db").exists()
     assert not (Path(os.environ["HERMES_HOME"]) / "projects.db").exists()
-
 

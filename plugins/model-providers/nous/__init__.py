@@ -29,9 +29,10 @@ class NousProfile(ProviderProfile):
         sticky_key = _cache_scope_from_session_id(get_affinity_scope() or get_conversation_context() or session_id)
         if sticky_key:
             body["session_id"] = sticky_key
-        provider_preferences = context.get("provider_preferences")
-        if provider_preferences:
-            body["provider"] = provider_preferences
+        # Nous Portal inference rejects caller-supplied provider routing prefs
+        # (only/ignore/order/sort/data_collection/zdr/require_parameters) with
+        # HTTP 400 — routing is decided centrally per model. provider_routing
+        # from config.yaml is OpenRouter-only, so it is not forwarded here.
         return body
 
     @staticmethod
@@ -63,6 +64,10 @@ class NousProfile(ProviderProfile):
         if rc.get("enabled") is False and self._cannot_disable_reasoning(model):
             return {}, {}
         return {"reasoning": rc}, {}
+
+    def owns_reasoning_policy(self, **context: Any) -> bool:
+        """Nous owns reasoning emission, including intentional omission."""
+        return bool(context.get("supports_reasoning"))
 
 
 nous = NousProfile(
