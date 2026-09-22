@@ -749,6 +749,10 @@ def _(rid, params: dict) -> dict:
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
+    # Capture before starting the worker: it consumes the staging dict and may finish before the RPC returns.
+    staged_user = session.get("_submit_user_row") or {}
+    if isinstance(staged_user.get("_row_id"), int):
+        survivor_fields["user_row_id"] = staged_user["_row_id"]
     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
     if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
         _start_agent_build(sid, session)
