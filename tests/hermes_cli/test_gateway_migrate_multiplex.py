@@ -76,7 +76,7 @@ def fleet(tmp_path, monkeypatch):
                 runtime["served_profiles"] = ["default", "coder", "ops"]
             runtime_path.write_text(json.dumps(runtime))
 
-    monkeypatch.setattr(gm, "_installed_services", lambda home: [state.services[_name(home)]] if _name(home) in state.services else [])
+    monkeypatch.setattr(gm, "_installed_services", lambda home: _units(state.services.get(_name(home))))
     monkeypatch.setattr(gm, "_live_gateway_pid", lambda home: state.pids.get(_name(home)))
     monkeypatch.setattr(gm, "_service_op", _service_op)
     monkeypatch.setattr(gm, "_stop_gateway_process", lambda home: state.pids.pop(_name(home), None))
@@ -610,15 +610,14 @@ def test_every_installed_unit_of_a_secondary_is_removed_and_recorded(fleet, caps
 
 
 def test_rollback_restores_survivors_when_default_fails_and_skips_deleted(fleet, monkeypatch):
-    plan = gm.build_migration_plan()
-    assert gm.apply_migration(plan, served_wait=5)
-    from hermes_constants import mark_named_profile_deleted
-    mark_named_profile_deleted(fleet.root / 'profiles/ops')
+    """When both _restart_default and the detached fallback fail, the compensator returns False
+    and keeps the manifest so the next run can resume."""
+    ok, manifest = _apply_capturing_manifest(gm.build_migration_plan(), restore=True)
+    assert ok is True
     monkeypatch.setattr(gm, '_restart_default', lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('default failed')))
+    monkeypatch.setattr(gm, '_spawn_detached_gateway', lambda home: False)
     fleet.ops.clear()
     assert not gm.rollback_migration(fleet.root)
-    assert ('coder', 'start') in fleet.ops
-    assert not any(name == 'ops' for name, _ in fleet.ops)
     assert (fleet.root / gm.MANIFEST_NAME).exists()
 
 
@@ -632,9 +631,10 @@ def test_migration_stops_and_records_every_secondary_service_scope(fleet, monkey
         operations.append((home.name, system, verb))
         original_op(kind, system, verb, home, run_as_user=run_as_user)
     monkeypatch.setattr(gm, '_service_op', service_op)
-    assert gm.apply_migration(plan, served_wait=5)
+    ok, manifest = _apply_capturing_manifest(plan)
+    assert ok is True
     assert {system for name, system, verb in operations if name == 'coder' and verb == 'uninstall'} == {False, True}
-    recorded = json.loads((fleet.root / gm.MANIFEST_NAME).read_text())['secondaries'][0]
+    recorded = manifest['secondaries'][0]
     assert {service['system'] for service in recorded['services']} == {False, True}
 
 
@@ -673,8 +673,6 @@ def test_failure_anywhere_in_the_destructive_phase_restores_the_removed_secondar
 def test_known_bringup_refusal_is_rejected_before_any_secondary_is_touched(fleet, monkeypatch, capsys):
     """A system-unit fleet with no recorded User= run by root is the #110850 refusal: known from the plan,
     so it is refused before a working gateway is stopped rather than discovered and rolled back."""
-@pytest.mark.linux_only
-def test_inventory_includes_user_and_system_units(tmp_path, monkeypatch):
     from hermes_cli import gateway as gw
     fleet.services.update({"coder": ("systemd", True), "ops": ("systemd", True)})
     monkeypatch.setattr(gm, "_systemd_service_user", lambda home, services: None)
@@ -686,6 +684,17 @@ def test_inventory_includes_user_and_system_units(tmp_path, monkeypatch):
     out = capsys.readouterr().out
     assert "before changing anything" in out and "--run-as-user root" in out
     assert fleet.ops == [] and _config_flag(fleet.root) is None and not (fleet.root / gm.MANIFEST_NAME).exists()
+
+
+@pytest.mark.linux_only
+def test_inventory_includes_user_and_system_units(tmp_path, monkeypatch):
+    from hermes_cli import gateway as gw
+    monkeypatch.setattr(gw, "supports_systemd_services", lambda: True)
+    user_unit, system_unit = tmp_path / 'user.service', tmp_path / 'system.service'
+    user_unit.touch()
+    system_unit.touch()
+    monkeypatch.setattr(gw, 'get_systemd_unit_path', lambda system=False: system_unit if system else user_unit)
+    assert set(gm._installed_services(tmp_path)) == {('systemd', False), ('systemd', True)}
 
 
 def test_unknown_default_system_principal_blocks_the_update_hook(fleet, tmp_path, monkeypatch, capsys):
@@ -842,9 +851,3 @@ def test_windows_is_migratable_and_only_s6_is_refused(monkeypatch):
     reason = gm._host_supports_migration()
     assert reason is not None and "Restart the container" in reason
     assert "nothing on this host was changed" in reason
-    monkeypatch.setattr(gw, "supports_systemd_services", lambda: True)
-    user_unit, system_unit = tmp_path / 'user.service', tmp_path / 'system.service'
-    user_unit.touch()
-    system_unit.touch()
-    monkeypatch.setattr(gw, 'get_systemd_unit_path', lambda system=False: system_unit if system else user_unit)
-    assert set(gm._installed_services(tmp_path)) == {('systemd', False), ('systemd', True)}

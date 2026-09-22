@@ -850,10 +850,6 @@ export interface VerificationEvidenceRow {
   output_summary?: string | null
   [key: string]: unknown
 }
-/** Passthrough respond methods carry a free-form payload. */
-export type RespondParams = Record<string, never>
-/** Passthrough respond methods return nothing structured. */
-export type RespondResult = Record<string, never>
 export interface ConnectionOperationParams {
   profile?: string | null
   owner: SessionOwner | AccountOwner
@@ -1112,6 +1108,10 @@ export interface ConnectorPolicySetResult {
   revision: string
   effective: ConnectorPolicyEffectiveUnrestricted | ConnectorPolicyEffectiveDenyAll | ConnectorPolicyEffectiveAllow | ConnectorPolicyEffectiveDeny
 }
+/** Passthrough respond methods carry a free-form payload. */
+export type RespondParams = Record<string, never>
+/** Passthrough respond methods return nothing structured. */
+export type RespondResult = Record<string, never>
 export interface GroupsCapabilitiesParams {
   profile?: string | null
 }

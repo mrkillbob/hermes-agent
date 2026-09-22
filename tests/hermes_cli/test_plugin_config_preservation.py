@@ -99,7 +99,7 @@ def test_capability_consent_is_atomic_when_consent_write_fails(tmp_path, monkeyp
     path = home / "config.yaml"
     path.write_text(yaml.safe_dump({"plugins": {"entries": {"example": {"keep": True}}}}))
     before = path.read_bytes()
-    real_atomic_write = config.atomic_yaml_write
+    real_atomic_write = config.atomic_config_write
 
     def fail_when_consent_is_present(config_path, data, **kwargs):
         entry = data["plugins"]["entries"]["example"]
@@ -107,7 +107,7 @@ def test_capability_consent_is_atomic_when_consent_write_fails(tmp_path, monkeyp
             raise OSError("synthetic consent write failure")
         return real_atomic_write(config_path, data, **kwargs)
 
-    monkeypatch.setattr(config, "atomic_yaml_write", fail_when_consent_is_present)
+    monkeypatch.setattr(config, "atomic_config_write", fail_when_consent_is_present)
     from hermes_cli.plugin_capabilities import record_consent
 
     with pytest.raises(OSError, match="synthetic consent write failure"):
