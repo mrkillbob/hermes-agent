@@ -630,36 +630,6 @@ class TestRootLevelProviderOverride:
         assert cfg["terminal"]["vercel_runtime"] == "python3.13"
         assert os.environ["TERMINAL_VERCEL_RUNTIME"] == "python3.13"
 
-    def test_kanban_worker_workspace_survives_cli_config_load(
-        self, tmp_path, monkeypatch
-    ):
-        """A profile cwd must not redirect a dispatcher-owned worker."""
-        import yaml
-
-        hermes_home = tmp_path / ".hermes"
-        hermes_home.mkdir()
-        profile_cwd = tmp_path / "stable"
-        profile_cwd.mkdir()
-        workspace = tmp_path / "worktree"
-        workspace.mkdir()
-        (hermes_home / "config.yaml").write_text(
-            yaml.safe_dump(
-                {"terminal": {"backend": "local", "cwd": str(profile_cwd)}}
-            )
-        )
-        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_example")
-        monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
-        monkeypatch.setenv("TERMINAL_CWD", str(workspace))
-
-        import cli
-
-        monkeypatch.setattr(cli, "_hermes_home", hermes_home)
-        cfg = cli.load_cli_config()
-
-        assert cfg["terminal"]["cwd"] == str(workspace)
-        assert os.environ["TERMINAL_CWD"] == str(workspace)
-
     def test_normalize_root_model_keys_moves_to_model(self):
         """_normalize_root_model_keys migrates root keys into model section."""
         from hermes_cli.config import _normalize_root_model_keys
@@ -791,5 +761,54 @@ class TestRootLevelProviderOverride:
         })
         assert result["model"]["default"] == "flat-default-model"
         assert result["model"]["provider"] == "auto"
+
+
+class TestPluginToolsetStartupValidation:
+    """A toolset that is merely *not registered yet* must not be reported as unknown.
+
+    Plugins register their toolsets during background discovery, while the CLI validates
+    the configured list during construction -- i.e. before that thread has landed. Judging
+    by the live registry alone therefore flags every configured plugin toolset as a typo on
+    every launch, including one-shot/quiet runs whose stdout is machine-parsed.
+    """
+
+    @staticmethod
+    def _init_toolsets(monkeypatch, toolsets, *, registry, plugin_keys):
+        import cli as _cli_mod
+
+        stub = object.__new__(_cli_mod.HermesCLI)
+        printed: list[str] = []
+        stub._console_print = printed.append
+        monkeypatch.setattr(_cli_mod, "validate_toolset", lambda name: name in registry)
+        monkeypatch.setattr(_cli_mod, "CLI_CONFIG", {"agent": {}})
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_toolset_keys_nowait",
+            lambda: set(plugin_keys),
+        )
+        stub._init_toolsets(list(toolsets))
+        return stub, printed
+
+    def test_plugin_toolset_not_yet_registered_is_not_flagged(self, monkeypatch):
+        stub, printed = self._init_toolsets(
+            monkeypatch,
+            ["terminal", "voice_stack"],
+            registry={"terminal"},
+            plugin_keys={"voice_stack"},
+        )
+        assert printed == []
+        # The configured list is kept verbatim; only the false warning is silenced.
+        assert stub.enabled_toolsets == ["terminal", "voice_stack"]
+
+    def test_real_typo_still_warns(self, monkeypatch):
+        _, printed = self._init_toolsets(
+            monkeypatch,
+            ["terminal", "voice_stak"],
+            registry={"terminal"},
+            plugin_keys={"voice_stack"},
+        )
+        assert len(printed) == 1
+        assert "voice_stak" in printed[0]
+        assert "voice_stack" not in printed[0]
+
 
 

@@ -30,6 +30,8 @@ _OAUTH_CAPABLE_PROVIDERS = {"anthropic", "nous", "openai-codex", "xai-oauth", "q
 # ...and default to it when ``--type`` is omitted. OpenRouter stays API-key-first: the documented
 # ``hermes auth add openrouter --api-key sk-or-...`` must keep working with no ``--type``.
 _OAUTH_DEFAULT_PROVIDERS = _OAUTH_CAPABLE_PROVIDERS - {"openrouter"}
+# Providers whose sibling CLI login Hermes may borrow (``auth.adopt_external_logins``).
+EXTERNAL_LOGIN_PROVIDERS = {"anthropic", "openai-codex"}
 
 
 def _get_custom_provider_entries() -> list[dict]:
@@ -77,14 +79,14 @@ def _resolve_custom_provider_input(raw: str) -> str | None:
 
 
 _PROVIDER_ALIASES = {
-    "or": "openrouter", "open-router": "openrouter", "chatgpt": "openai-codex",
-    "chatgpt-codex": "openai-codex", "grok-oauth": "xai-oauth",
+    "or": "openrouter", "open-router": "openrouter", "grok-oauth": "xai-oauth",
     "xai-oauth": "xai-oauth", "x-ai-oauth": "xai-oauth", "xai-grok-oauth": "xai-oauth"}
 
 
 def _normalize_provider(provider: str) -> str:
     normalized = (provider or "").strip().lower()
-    return _PROVIDER_ALIASES.get(normalized) or _resolve_custom_provider_input(normalized) or normalized
+    return (_PROVIDER_ALIASES.get(normalized) or _resolve_custom_provider_input(normalized)
+            or auth_mod._plugin_aliases().get(normalized) or normalized)
 
 
 def _migrate_legacy_custom_pool_key(provider: str, legacy_key: str) -> None:
@@ -135,19 +137,15 @@ def _is_known_provider(provider: str, configured_provider: dict | None) -> bool:
 
 
 def _unknown_provider_exit(provider: str) -> SystemExit:
-    """Offer nearby provider names and the commands for listing or choosing providers."""
+    """Did-you-mean over the known provider ids plus the two commands that list/pick them."""
     import difflib
-
-    known = sorted(
-        set(PROVIDER_REGISTRY) | {"openrouter"}
-        | {entry["name"] for entry in _get_custom_provider_entries()}
-    )
+    known = sorted(set(PROVIDER_REGISTRY) | {"openrouter"}
+                   | {entry["name"] for entry in _get_custom_provider_entries()})
     close = difflib.get_close_matches(provider, known, n=3, cutoff=0.5)
     hint = f" Did you mean {', '.join(close)}?" if close else ""
     return SystemExit(
         f"Unknown provider '{provider}'.{hint} Run `hermes auth` to see the provider list, or "
-        "`hermes model` to pick one interactively."
-    )
+        "`hermes model` to pick one interactively.")
 
 
 def _display_source(source: str) -> str:
@@ -216,24 +214,31 @@ def _qwen_oauth_login(args) -> dict:
     return creds
 
 
-def _codex_oauth_login(args) -> dict:
-    from hermes_cli.auth_codex_browser import codex_oauth_login
-
-    return codex_oauth_login(args)
-
-
 @dataclass(frozen=True)
 class _OAuthAddSpec:
     """Per-provider parameters for the generic ``hermes auth add <provider> --type oauth`` path."""
 
     login: Callable[[Any], dict]
     token: Callable[[dict], str]
-    source: str
+    # Pool ``source`` string, or a callable deriving it from the login result when one provider
+    # offers several flows (Codex: device code vs browser PKCE).
+    source: str | Callable[[dict], str]
     fields: Callable[[dict, str], dict]
     activate_first: bool = False
     # OpenRouter's PKCE exchange mints a plain API key (no refresh pair), so its pool entry is an
     # ``api_key`` row that happens to come from a browser login.
     auth_type: str = AUTH_TYPE_OAUTH
+
+
+def _codex_login(args) -> dict:
+    from hermes_cli.auth_codex_browser import codex_oauth_login
+    return codex_oauth_login(args)
+
+
+def _codex_pool_source(creds: dict) -> str:
+    if creds.get("source") == "loopback_pkce":
+        return f"{SOURCE_MANUAL}:loopback_pkce"
+    return SOURCE_MANUAL_DEVICE_CODE
 
 
 _OAUTH_ADD_SPECS: dict[str, _OAuthAddSpec] = {
@@ -246,9 +251,9 @@ _OAUTH_ADD_SPECS: dict[str, _OAuthAddSpec] = {
             "expires_at_ms": creds.get("expires_at_ms"),
             "base_url": _provider_base_url(provider)}),
     "openai-codex": _OAuthAddSpec(
-        login=_codex_oauth_login,
+        login=_codex_login,
         token=lambda creds: creds["tokens"]["access_token"],
-        source=SOURCE_MANUAL_DEVICE_CODE,
+        source=_codex_pool_source,
         fields=lambda creds, provider: {
             "refresh_token": creds["tokens"].get("refresh_token"),
             "base_url": creds.get("base_url"),
@@ -394,7 +399,11 @@ def auth_add_command(args) -> None:
         _unsuppress_provider_sources(provider)
 
     wanted_priority = getattr(args, "priority", None)
-    entry = _add_credential(args, provider, pool, requested_type)
+    try:
+        entry = _add_credential(args, provider, pool, requested_type)
+    except auth_mod.AuthError as exc:
+        # A denied / mismatched / timed-out OAuth login is a user-facing outcome, not a crash.
+        raise SystemExit(f"Login failed: {auth_mod.format_auth_error(exc)}") from exc
     if wanted_priority is not None:
         placed_pool = load_pool(provider)
         moved = placed_pool.move_entry(entry.id, int(wanted_priority))
@@ -420,44 +429,37 @@ def _add_credential(args, provider: str, pool, requested_type: str) -> PooledCre
     # ``manual:*`` entries refresh from their own token pair, so they need no singleton shadow.
     entry = PooledCredential(
         provider=provider, id=uuid.uuid4().hex[:6], label=label, auth_type=spec.auth_type, priority=0,
-        source=("manual:loopback_pkce" if provider == "openai-codex" and
-                creds.get("source") == "loopback_pkce" else spec.source),
+        source=spec.source(creds) if callable(spec.source) else spec.source,
         access_token=token, **spec.fields(creds, provider))
-    if provider == "openai-codex":
-        _warn_if_duplicate_codex_account(pool, token)
-    first_credential = not pool.entries()
+    existing = pool.entries()
     entry = pool.add_entry(entry)
     # The first Codex/xAI credential becomes the active provider (as the old singleton save path
     # did implicitly); subsequent adds leave the active provider as-is.
-    if spec.activate_first and first_credential:
+    if spec.activate_first and not existing:
         auth_mod.mark_provider_active_if_unset(provider)
     print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
+    if provider == "openai-codex":
+        _warn_same_codex_account(token, existing)
     return entry
 
 
-def _warn_if_duplicate_codex_account(pool, access_token: str) -> None:
-    """Warn, without blocking, when a new Codex OAuth login duplicates a pooled account."""
-    claims = auth_mod._decode_jwt_claims(access_token)
-    auth_claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else None
-    account_id = auth_claims.get("chatgpt_account_id") if isinstance(auth_claims, dict) else None
-    if not isinstance(account_id, str) or not account_id.strip():
+def _warn_same_codex_account(token: str, existing: list[PooledCredential]) -> None:
+    """Tell the user when a fresh Codex login is the same OpenAI account as a pooled credential.
+
+    Two logins of one account share a single token family upstream: the provider revokes the
+    older grant, so the second credential adds no quota and silently kills the first (#47096).
+    Only distinct accounts rotate independently — the pool cannot keep both alive.
+    """
+    identity = _codex_principal_identity(token)
+    if identity is None:
         return
-    email = claims.get("email") if isinstance(claims, dict) else None
-    for index, existing in enumerate(pool.entries(), start=1):
-        existing_claims = auth_mod._decode_jwt_claims(getattr(existing, "access_token", ""))
-        existing_auth = existing_claims.get("https://api.openai.com/auth") if isinstance(existing_claims, dict) else None
-        existing_account_id = (
-            existing_auth.get("chatgpt_account_id") if isinstance(existing_auth, dict) else None)
-        if existing_account_id != account_id:
-            continue
-        email_text = f' ("{email}")' if isinstance(email, str) and email else ""
-        print(
-            f"Warning: this is the same OpenAI account as openai-codex credential #{index}"
-            f"{email_text}. Both credentials share one token family; remove the duplicate with "
-            f"`hermes auth remove openai-codex {index}` if it is not intentional.",
-            file=sys.stderr,
-        )
-        return
+    for position, sibling in enumerate(existing, start=1):
+        if _codex_principal_identity(sibling.access_token) == identity:
+            print(f'warning: this login is the same OpenAI account as openai-codex credential #{position} '
+                  f'("{sibling.label}"). Both logins share one token family, so OpenAI will revoke the older one '
+                  "and you gain no extra quota. Log into a different account instead, or keep just one "
+                  f"(`hermes auth remove openai-codex {position}`).", file=sys.stderr)
+            return
 
 
 def _report_priority(provider: str, pool, moved, requested: int, verb: str, prep: str) -> None:
@@ -504,8 +506,6 @@ def _is_free_tier_entry(entry) -> bool:
 
 
 def auth_list_command(args) -> None:
-    from agent.credential_sources import EXTERNAL_LOGINS_NOT_ADOPTED_NOTICE, adopt_external_logins_enabled
-    external_logins_enabled = adopt_external_logins_enabled()
     provider_filter = _normalize_provider(getattr(args, "provider", "") or "")
     if provider_filter:
         providers = [provider_filter]
@@ -539,9 +539,18 @@ def auth_list_command(args) -> None:
             )
             print(row.rstrip())
         print()
-    _print_oauth_heal_notices()
-    if not external_logins_enabled:
+    if not provider_filter or provider_filter in EXTERNAL_LOGIN_PROVIDERS:
+        _print_external_login_notice()
+
+
+def _print_external_login_notice() -> None:
+    """One line telling the user why no Codex CLI / Claude Code login shows up when adoption is off."""
+    from agent.credential_sources import EXTERNAL_LOGINS_NOT_ADOPTED_NOTICE, adopt_external_logins_enabled
+    if not adopt_external_logins_enabled():
         print(EXTERNAL_LOGINS_NOT_ADOPTED_NOTICE)
+
+
+    _print_oauth_heal_notices()
 
 
 def _print_oauth_heal_notices() -> None:
@@ -636,9 +645,13 @@ def auth_refresh_command(args) -> None:
             "Reauthenticate with `hermes auth add nous --type oauth`.")
     refreshed = pool.try_refresh_matching(credential_id=matched.id)
     if refreshed is None:
+        after = next((e for e in pool.entries() if e.id == matched.id), None)
+        label = PROVIDER_REGISTRY[provider].name if provider in PROVIDER_REGISTRY else provider
+        state = ("it was removed from the pool" if after is None
+                 else "the saved session is no longer valid")
         raise SystemExit(
-            f"Could not renew {provider} credential #{index} ({matched.label}). "
-            f"Run `hermes auth add {provider} --type oauth` to sign in again.")
+            f"Could not renew the {label} sign-in for credential #{index} ({matched.label}); {state}. "
+            f"Sign in again with `hermes auth add {provider} --type oauth`.")
     status = refreshed.last_status or "ok"
     if status == "ok":
         print(f"Refreshed {provider} credential #{index} ({refreshed.label}); status: ok")
@@ -652,10 +665,10 @@ def auth_status_command(args) -> None:
     provider = _normalize_provider(getattr(args, "provider", "") or "")
     if not provider:
         raise SystemExit("Provider is required. Example: `hermes auth status spotify`.")
-    if provider in auth_mod.SINGLE_USE_REFRESH_POOL_PROVIDERS:
-        load_pool(provider)  # runs the forked-grant heal first so the report reflects the consolidated grant
     if dispatch_plugin_auth("status", args, provider):
         return
+    if provider in auth_mod.SINGLE_USE_REFRESH_POOL_PROVIDERS:
+        load_pool(provider)  # runs the forked-grant heal first so the report reflects the consolidated grant
     status = auth_mod.get_auth_status(provider)
     _print_oauth_heal_notices()
     if status.get("free_tier"):
@@ -667,6 +680,8 @@ def auth_status_command(args) -> None:
     if not status.get("logged_in"):
         reason = status.get("error")
         print(f"{provider}: logged out" + (f" ({reason})" if reason else ""))
+        if provider in EXTERNAL_LOGIN_PROVIDERS:
+            _print_external_login_notice()
         return
     print(f"{provider}: logged in")
     for key in ("auth_type", "client_id", "redirect_uri", "scope", "expires_at", "api_base_url"):

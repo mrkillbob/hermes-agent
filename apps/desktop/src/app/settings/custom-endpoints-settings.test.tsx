@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -107,7 +107,7 @@ describe('CustomEndpointsSettings', () => {
 
     expect(validateCustomEndpoint).toHaveBeenCalledWith(
       expect.objectContaining({ api_mode: 'codex_responses' }),
-      undefined
+      'default'
     )
     expect(notify).toHaveBeenCalledWith({
       kind: 'success',
@@ -122,7 +122,7 @@ describe('CustomEndpointsSettings', () => {
         ]),
         models: ['gpt-5.6-sol', 'gpt-5.6-sol-high']
       }),
-      undefined
+      'default'
     )
   })
 
@@ -148,17 +148,23 @@ describe('CustomEndpointsSettings', () => {
 
     render(<CustomEndpointsSettings />)
 
-    await waitFor(() => expect(getCustomEndpoints).toHaveBeenCalledWith('content-studio'))
+    // Wait for loading to finish (the form is hidden while loading=true); findBy uses waitFor
+    // internally, so it also implicitly proves getCustomEndpoints was awaited and resolved.
+    await screen.findByPlaceholderText('Axet Proxy')
+    expect(getCustomEndpoints).toHaveBeenCalledWith('content-studio')
     expect(screen.getByText('Applies to')).toBeTruthy()
 
-    fireEvent.change(screen.getByPlaceholderText('Axet Proxy'), { target: { value: 'Studio gateway' } })
+    fireEvent.change(await screen.findByPlaceholderText('Axet Proxy'), { target: { value: 'Studio gateway' } })
     fireEvent.change(screen.getByPlaceholderText('http://127.0.0.1:8081/v1'), {
       target: { value: 'https://studio.example.com/v1' }
     })
     fireEvent.change(screen.getByPlaceholderText('gpt-5.4'), { target: { value: 'studio-model' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
-    expect(saveCustomEndpoint).toHaveBeenCalledWith(expect.objectContaining({ name: 'Studio gateway' }), 'content-studio')
+    expect(saveCustomEndpoint).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Studio gateway' }),
+      'content-studio'
+    )
   })
 
   it('hydrates the API mode from a saved endpoint', async () => {
@@ -209,7 +215,12 @@ describe('CustomEndpointsSettings', () => {
 
   it('Test rewrites the URL field to the base that actually served /models (#65488)', async () => {
     getCustomEndpoints.mockResolvedValue(emptyResponse)
-    validateCustomEndpoint.mockResolvedValue({ ok: true, message: '', models: ['model-a'], resolved_base_url: 'http://h.test/v1' })
+    validateCustomEndpoint.mockResolvedValue({
+      ok: true,
+      message: '',
+      models: ['model-a'],
+      resolved_base_url: 'http://h.test/v1'
+    })
     const { CustomEndpointsSettings } = await import('./custom-endpoints-settings')
     render(<CustomEndpointsSettings onConfigSaved={vi.fn()} onMainModelChanged={vi.fn()} />)
 

@@ -2829,6 +2829,49 @@ def _worker_terminal_timeout_env(
     return str(desired)
 
 
+@contextlib.contextmanager
+def _worker_profile_scope(hermes_home: str, *, bind_home: bool = True):
+    """Bind an assigned profile's runtime scope (secrets + terminal policy, optionally home) for
+    one dispatch-side read or spawn-env build.
+
+    The dispatcher runs detached from any turn, so nothing binds a profile for it: ``load_config``,
+    the toolset probes' ``get_secret`` reads and ``build_subprocess_env``'s passthrough resolution
+    all fall back to the LAUNCH profile's ambient ``os.environ`` / ``TERMINAL_*``. Binding was
+    previously conditional on ``is_multiplex_active()``, so on a single-profile host a worker for
+    profile B was built entirely from the dispatcher's own environment.
+
+    ``bind_home=False`` for the spawn-env build: which variables may cross into a child is the
+    DISPATCHER's ``terminal.env_passthrough`` policy (#109494, read through the home override) —
+    only their VALUES come from the assignee's scope, so that branch binds the secret scope alone.
+    Toolset resolution binds the home and the terminal policy, as it always has.
+
+    The secret mapping is never widened: a profile that is not this process's own home gets its own
+    ``.env`` + external sources ONLY, while the launch home keeps its established
+    env-over-``.env`` precedence (``launch_secret_scope``) so systemd / ``op run`` injection still
+    resolves for a standalone dispatcher.
+    """
+    from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
+    from hermes_constants import get_process_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    from tools.terminal_scope import install_profile_terminal_scope, reset_terminal_scope
+    from tui_gateway.launch_profile_policy import launch_secret_scope, launch_terminal_env
+
+    home = Path(hermes_home)
+    is_launch_home = str(home.resolve()) == str(Path(get_process_hermes_home()).resolve())
+    home_token = set_hermes_home_override(str(home)) if bind_home else None
+    secret_token = set_secret_scope(
+        launch_secret_scope(home) if is_launch_home else build_profile_secret_scope(home))
+    terminal_token = install_profile_terminal_scope(
+        home, env_overlay=launch_terminal_env() if is_launch_home else None) if bind_home else None
+    try:
+        yield
+    finally:
+        if terminal_token is not None:
+            reset_terminal_scope(terminal_token)
+        reset_secret_scope(secret_token)
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
 def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[str]]:
     """Return the assigned profile's effective CLI toolsets for a worker.
 
@@ -2841,23 +2884,12 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
     if not hermes_home:
         return None
     try:
-        from agent.secret_scope import (
-            build_profile_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope)
-        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         from hermes_cli.config import load_config
         from hermes_cli.tools_config import _get_platform_tools
 
-        token = set_hermes_home_override(hermes_home)
-        secret_token = (
-            set_secret_scope(build_profile_secret_scope(Path(hermes_home)))
-            if is_multiplex_active() else None)
-        try:
+        with _worker_profile_scope(hermes_home):
             cfg = load_config()
             toolsets = sorted(set(_get_platform_tools(cfg, "cli")))
-        finally:
-            if secret_token is not None:
-                reset_secret_scope(secret_token)
-            reset_hermes_home_override(token)
         return toolsets or None
     except Exception as exc:
         _kb._log.debug(
@@ -3000,23 +3032,30 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
 
     profile_arg = normalize_profile_name(task.assignee)
 
-    from agent.secret_scope import (
-        build_profile_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope)
-    from tools.environments.local import build_subprocess_env, strip_launch_profile_env
+    from agent.secret_scope import is_multiplex_active
+    from tools.environments.local import _is_routed_home, build_subprocess_env, strip_launch_profile_env
 
-    secret_token = None
-    if is_multiplex_active():
-        secret_token = set_secret_scope(
-            build_profile_secret_scope(Path(resolve_profile_env(profile_arg)))
-        )
     try:
+        profile_home = resolve_profile_env(profile_arg)
+    except FileNotFoundError:
+        # No profile dir (isolated test fixtures) — the CLI resolves it from
+        # HERMES_PROFILE (set below) instead.
+        profile_home = None
+
+    # Scrub for a ROUTED home, not only under multiplex: the authority test is "does this worker act
+    # for another profile", exactly as served_profile_child_env decides it (tools/environments/local.py).
+    # Gating on the gateway-wide flag left B's worker inheriting the dispatcher's own OPENAI_API_KEY and
+    # systemd-injected tokens on every single-profile host.
+    routed = bool(profile_home) and _is_routed_home(profile_home)
+    # build_subprocess_env's secret scrub resolves terminal.env_passthrough vars through get_secret(),
+    # which without a bound scope reads the LAUNCH profile's ambient environment for a worker spawned
+    # on B's behalf (and raises under multiplex) — so bind B's secret scope around the build.
+    with (_worker_profile_scope(profile_home, bind_home=False) if profile_home
+          else contextlib.nullcontext()):
         env = build_subprocess_env(
-            scrub_secrets=is_multiplex_active(),
+            scrub_secrets=is_multiplex_active() or routed,
             inherit_profile_home=True,
         )
-    finally:
-        if secret_token is not None:
-            reset_secret_scope(secret_token)
     # Keep the assigned repository cwd from shadowing Hermes runtime imports.
     env["PYTHONSAFEPATH"] = "1"
     # The dispatcher is detached from every conversation; its worker must never

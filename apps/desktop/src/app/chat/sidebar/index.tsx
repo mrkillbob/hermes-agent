@@ -31,6 +31,7 @@ import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source
 import { cn } from '@/lib/utils'
 import { $activeConnectionId } from '@/store/connections'
 import { $cronJobs } from '@/store/cron'
+import { $interfaceMode, $showsAdvancedChrome, shownInMode } from '@/store/interface-mode'
 import { $bindings } from '@/store/keybinds'
 import {
   $dismissedAutoProjectIds,
@@ -200,6 +201,8 @@ const NON_SESSION_LOAD_STEP = 10
 // screen — has the connection to itself first.
 const PROJECT_TREE_WARM_MS = 2_000
 
+// A row's `tier` is the one mode it belongs to (Simple keeps the setup rows,
+// Advanced adds the readouts); the list filters once, nothing is passed down.
 const SIDEBAR_NAV: SidebarNavItem[] = [
   {
     id: 'new-session',
@@ -222,19 +225,23 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     route: MESSAGING_ROUTE,
     keybindActionId: 'nav.messaging'
   },
+  // Artifacts and Scheduled jobs are outputs of running Hermes the developer
+  // way; Capabilities and Messaging are how anyone sets it up.
   {
     id: 'artifacts',
     label: '',
     icon: props => <Codicon name="files" {...props} />,
     route: ARTIFACTS_ROUTE,
-    keybindActionId: 'nav.artifacts'
+    keybindActionId: 'nav.artifacts',
+    tier: 'advanced'
   },
   {
     id: 'cron',
     label: '',
     icon: props => <Codicon name="watch" {...props} />,
     route: CRON_ROUTE,
-    keybindActionId: 'nav.cron'
+    keybindActionId: 'nav.cron',
+    tier: 'advanced'
   },
   {
     id: 'lunar-city',
@@ -425,11 +432,20 @@ export function ChatSidebar({
             id: c.id,
             label: data.label,
             icon: (props: { className?: string }) => <Codicon name={codicon} {...props} />,
-            route: data.path
+            route: data.path,
+            tier: data.tier
           }
         ]
       }),
     [navContributions]
+  )
+
+  const interfaceMode = useStore($interfaceMode)
+  const showsAdvancedChrome = useStore($showsAdvancedChrome)
+
+  const navItems = useMemo(
+    () => [...SIDEBAR_NAV, ...contributedNav].filter(shownInMode(interfaceMode)),
+    [contributedNav, interfaceMode]
   )
 
   const panesFlipped = useStore($panesFlipped)
@@ -1557,7 +1573,7 @@ export function ChatSidebar({
         <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
           <SidebarGroupContent>
             <SidebarMenu className="gap-px">
-              {[...SIDEBAR_NAV, ...contributedNav].map(item => {
+              {navItems.map(item => {
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
 
                 const active =
@@ -2003,7 +2019,7 @@ export function ChatSidebar({
                 )
               })}
 
-            {!trimmedQuery && !worktreeGroupingActive && cronJobs.length > 0 && (
+            {!trimmedQuery && !worktreeGroupingActive && showsAdvancedChrome && cronJobs.length > 0 && (
               <SidebarCronJobsSection
                 jobs={cronJobs}
                 label={s.cronJobs}

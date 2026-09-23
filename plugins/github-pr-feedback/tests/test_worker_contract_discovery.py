@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from hermes_cli.config import atomic_config_write
 
 from github_pr_feedback.cli import DoctorProbe
 from github_pr_feedback.ledger import FeedbackLedger
@@ -60,8 +61,8 @@ def test_real_worker_discovery_enforces_control_home_receipt(tmp_path, monkeypat
     control = tmp_path / "control"
     worker = tmp_path / "worker"
     worker.mkdir()
-    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": ["github-pr-feedback"] if enabled else [], "disabled": []}}))
+    atomic_config_write(worker / "config.yaml", {"plugins": {
+        "enabled": ["github-pr-feedback"] if enabled else [], "disabled": []}})
     monkeypatch.setenv("HERMES_HOME", str(worker))
     monkeypatch.setenv("HERMES_CONTROL_HOME", str(control))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -94,8 +95,8 @@ def test_worker_readiness_rejects_user_override_without_completion_hooks(tmp_pat
 
     worker = tmp_path / "profiles/worker"
     worker.mkdir(parents=True)
-    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    atomic_config_write(worker / "config.yaml", {"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}})
     plugin = worker / "plugins/github-pr-feedback"
     plugin.mkdir(parents=True)
     (plugin / "plugin.yaml").write_text(
@@ -117,8 +118,8 @@ def test_worker_readiness_ignores_malformed_user_override(tmp_path, monkeypatch)
 
     worker = tmp_path / "profiles/worker"
     worker.mkdir(parents=True)
-    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    atomic_config_write(worker / "config.yaml", {"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}})
     plugin = worker / "plugins/github-pr-feedback"
     plugin.mkdir(parents=True)
     (plugin / "plugin.yaml").write_text("name: github-pr-feedback\nprovides_hooks: [\n", encoding="utf-8")
@@ -132,8 +133,8 @@ def test_worker_readiness_rejects_portable_manifest_hooks(tmp_path, monkeypatch)
 
     worker = tmp_path / "profiles/worker"
     worker.mkdir(parents=True)
-    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    atomic_config_write(worker / "config.yaml", {"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}})
     plugin = worker / "plugins/github-pr-feedback"
     plugin.mkdir(parents=True)
     (plugin / "plugin.json").write_text(json.dumps({
@@ -154,8 +155,8 @@ def test_worker_readiness_applies_project_plugin_opt_in(
 
     worker = tmp_path / "profiles/worker"
     worker.mkdir(parents=True)
-    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    atomic_config_write(worker / "config.yaml", {"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}})
     project_plugin = tmp_path / "project/.hermes/plugins/github-pr-feedback"
     project_plugin.mkdir(parents=True)
     (project_plugin / "plugin.yaml").write_text(yaml.safe_dump({
@@ -175,8 +176,8 @@ def test_worker_readiness_rejects_categorized_project_override(tmp_path, monkeyp
 
     worker = tmp_path / "profiles/worker"
     worker.mkdir(parents=True)
-    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    atomic_config_write(worker / "config.yaml", {"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}})
     project_plugin = tmp_path / "project/.hermes/plugins/category/github-pr-feedback"
     project_plugin.mkdir(parents=True)
     (project_plugin / "plugin.yaml").write_text(yaml.safe_dump({
@@ -196,8 +197,8 @@ def test_worker_readiness_rejects_entrypoint_override_without_completion_hooks(t
 
     worker = tmp_path / "profiles/worker"
     worker.mkdir(parents=True)
-    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    atomic_config_write(worker / "config.yaml", {"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}})
     monkeypatch.setattr(importlib.metadata, "entry_points", lambda: [
         SimpleNamespace(group="hermes_agent.plugins", name="github-pr-feedback")
     ])
@@ -211,8 +212,8 @@ def test_worker_readiness_rejects_manifest_declared_hooks_without_importing_work
     worker = tmp_path / "profiles/worker"
     plugin = worker / "plugins/github-pr-feedback"
     plugin.mkdir(parents=True)
-    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": ["github-pr-feedback"], "disabled": []}}))
+    atomic_config_write(worker / "config.yaml", {"plugins": {
+        "enabled": ["github-pr-feedback"], "disabled": []}})
     (plugin / "plugin.yaml").write_text(yaml.safe_dump({
         "name": "github-pr-feedback", "provides_hooks": ["pre_tool_call", "pre_kanban_complete"]
     }))
@@ -228,8 +229,8 @@ def test_worker_readiness_rejects_untrusted_bare_and_canonical_manifest_keys(tmp
     worker = tmp_path / "profiles/worker"
     plugin = worker / "plugins/category/github-pr-feedback"
     plugin.mkdir(parents=True)
-    (worker / "config.yaml").write_text(yaml.safe_dump({"plugins": {
-        "enabled": enabled, "disabled": []}}))
+    atomic_config_write(worker / "config.yaml", {"plugins": {
+        "enabled": enabled, "disabled": []}})
     (plugin / "plugin.yaml").write_text(yaml.safe_dump({
         "name": "github-pr-feedback", "provides_hooks": ["pre_tool_call", "pre_kanban_complete"]
     }))
@@ -245,7 +246,7 @@ def test_worker_readiness_respects_managed_policy_and_invalid_encoding(tmp_path,
     from github_pr_feedback.worker_contract import worker_contract_enabled
     managed_dir = tmp_path / "managed"
     managed_dir.mkdir()
-    (managed_dir / "config.yaml").write_text(yaml.safe_dump(managed), encoding="utf-8")
+    atomic_config_write(managed_dir / "config.yaml", managed)
     monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
     profile = tmp_path / "profiles/worker/config.yaml"
     profile.parent.mkdir(parents=True)

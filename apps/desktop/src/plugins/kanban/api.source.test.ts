@@ -3,8 +3,15 @@ import { afterEach, expect, it, vi } from 'vitest'
 const state = vi.hoisted(() => ({ notify: vi.fn(), invalidate: vi.fn(), update: vi.fn() }))
 vi.mock('@hermes/plugin-sdk', () => ({
   atom,
-  host: { state: { connectionId: atom('local'), profile: atom('default') } },
-  queryClient: { setQueriesData: state.update, invalidateQueries: state.invalidate }
+  host: {
+    activeConnectionId: vi.fn(() => 'local'),
+    state: { connectionId: atom('local'), profile: atom('default') }
+  },
+  queryClient: {
+    setQueriesData: state.update,
+    invalidateQueries: state.invalidate,
+    setQueryDefaults: vi.fn()
+  }
 }))
 vi.mock('./completion-notify', () => ({
   bindCompletionNotify: vi.fn(),

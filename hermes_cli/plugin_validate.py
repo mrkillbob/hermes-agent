@@ -1,14 +1,24 @@
 """``hermes plugins validate`` — admission checks for a plugin directory.
 
-Catalog admission performs static manifest and Python registration checks. Candidate
-modules are parsed, never imported or executed: a subprocess alone is not a sandbox.
-Static results do not certify runtime behavior or plugin safety.
+This is the command the plugin-catalog admission CI (and the
+``.github/actions/plugin-validate`` composite action) runs against a
+candidate plugin. It performs static manifest checks plus a
+subprocess-isolated capability probe: the plugin is imported and its
+``register(ctx)`` called against a minimal recording stub context in a
+scratch child process (with a throwaway ``HERMES_HOME``), so a crashing or
+malicious plugin cannot take down the CLI, and the *actually registered*
+tools/hooks/middleware are compared against the manifest's declared
+``provides_*`` lists.
 """
 
 from __future__ import annotations
 
-import ast
+import json
+import os
 import re
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,6 +30,8 @@ _CONFIG_TYPES = {
     "str", "string", "int", "integer", "float", "number",
     "bool", "boolean", "list", "array", "dict", "mapping", "map",
 }
+_PROBE_TIMEOUT = 30
+_PROBE_SENTINEL = "HERMES_VALIDATE_JSON:"
 
 
 @dataclass
@@ -168,308 +180,187 @@ def _check_requires_env(report: ValidationReport, manifest: dict) -> None:
         report.add("requires_env", True, "all entries UPPER_SNAKE")
 
 
-# ─── Static capability declarations ──────────────────────────────────────────
+# ─── Capability probe (subprocess-isolated) ──────────────────────────────────
 
-_REGISTRATION_KINDS = {
-    "register_tool": ("tools", "name"),
-    "register_hook": ("hooks", "hook_name"),
-    "register_middleware": ("middleware", "kind"),
-    "register_command": ("commands", "name"),
-    "register_cli_command": ("commands", "name"),
-}
+# Self-contained harness run in a scratch child process. Imports the plugin
+# module using the same file-location mechanics PluginManager uses, calls
+# register() against a recording stub ctx, and prints a sentinel-prefixed
+# JSON line of what was actually registered. Deliberately imports NOTHING
+# from hermes so a hostile plugin only sees a bare interpreter — the one
+# exception is `providers` for `kind: model-provider`, whose contract IS
+# calling providers.register_provider at import.
+_PROBE_SCRIPT = r"""
+import importlib.util
+import json
+import sys
 
+plugin_dir = sys.argv[1]
+sentinel = sys.argv[2]
+options = json.loads(sys.argv[3])
+# Public method names of the real PluginContext, computed by the parent so the
+# stub's attribute surface cannot drift from the class plugins run against.
+context_methods = set(options["context_methods"])
+provider_kind = options["kind"] == "model-provider"
 
-# Directories excluded from capability scanning: test fixtures and maintenance
-# scripts register tools/hooks that the plugin itself never uses at runtime.
-_EXCLUDED_SCAN_DIRS = frozenset({".git", ".venv", "venv", "__pycache__", "test", "tests", "_test", "_tests"})
-
-
-def _module_assignments(tree: ast.Module) -> Dict[str, ast.expr]:
-    """Return unambiguous simple module assignments for bounded static resolution."""
-    values: Dict[str, List[ast.expr]] = {}
-    assignment_targets: set[ast.Name] = set()
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            targets, value = node.targets, node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets, value = [node.target], node.value
-        else:
-            continue
-        for target in targets:
-            if isinstance(target, ast.Name):
-                values.setdefault(target.id, []).append(value)
-                assignment_targets.add(target)
-
-    mutable: set[str] = set()
-    mutating_methods = {"add", "append", "clear", "discard", "extend", "insert", "pop", "remove", "reverse", "setdefault", "sort", "update"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node not in assignment_targets:
-            mutable.add(node.id)
-        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name):
-            mutable.add(node.value.id)
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in mutating_methods
-            and isinstance(node.func.value, ast.Name)
-        ):
-            mutable.add(node.func.value.id)
-    return {
-        name: assignments[0]
-        for name, assignments in values.items()
-        if len(assignments) == 1 and name not in mutable
-    }
+recorded = {"tools": [], "hooks": [], "middleware": [], "commands": [], "providers": []}
 
 
-def _target_path(target: ast.expr, name: str) -> Optional[Tuple[int, ...]]:
-    if isinstance(target, ast.Name):
-        return () if target.id == name else None
-    if isinstance(target, (ast.Tuple, ast.List)):
-        for index, child in enumerate(target.elts):
-            path = _target_path(child, name)
-            if path is not None:
-                return (index, *path)
-    return None
+class RecordingContext:
+    plugin_config = {}
+    profile_name = "default"
+    plugin_id = "hermes_validate_probe_plugin"
 
+    def register_tool(self, name, *args, **kwargs):
+        recorded["tools"].append(str(name))
 
-def _literal_sequence(
-    node: ast.expr, assignments: Dict[str, ast.expr], seen: Optional[set[str]] = None
-) -> Optional[ast.expr]:
-    if isinstance(node, (ast.Tuple, ast.List)):
-        return node
-    if not isinstance(node, ast.Name):
-        return None
-    seen = seen or set()
-    if node.id in seen or node.id not in assignments:
-        return None
-    return _literal_sequence(assignments[node.id], assignments, seen | {node.id})
+    def register_hook(self, hook_name, callback):
+        recorded["hooks"].append(str(hook_name))
 
+    def register_middleware(self, kind, callback):
+        recorded["middleware"].append(str(kind))
 
-def _node_at_path(node: ast.expr, path: Tuple[int, ...]) -> Optional[ast.expr]:
-    for index in path:
-        if not isinstance(node, (ast.Tuple, ast.List)) or index >= len(node.elts):
-            return None
-        node = node.elts[index]
-    return node
+    def register_command(self, name, *args, **kwargs):
+        recorded["commands"].append(str(name))
 
+    def register_cli_command(self, name, *args, **kwargs):
+        recorded["commands"].append(str(name))
 
-def _literal_loop_values(
-    iterable: ast.expr, path: Tuple[int, ...], assignments: Dict[str, ast.expr]
-) -> Optional[List[str]]:
-    sequence = _literal_sequence(iterable, assignments)
-    if sequence is None:
-        return None
-    values: List[str] = []
-    for item in sequence.elts:
-        value = _node_at_path(item, path)
-        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
-            return None
-        values.append(value.value)
-    return values
+    def get_config(self, key, default=None):
+        # Mirrors PluginContext.get_config with no config on disk: the DEFAULT, never None —
+        # plugins do `int(ctx.get_config("timeout", 180))` in register().
+        return default
 
-
-def _loop_reassigns_name(loop: ast.For, name: str) -> bool:
-    target_nodes = set(ast.walk(loop.target))
-    return any(
-        isinstance(node, ast.Name)
-        and node not in target_nodes
-        and node.id == name
-        and isinstance(node.ctx, ast.Store)
-        for node in ast.walk(loop)
-    )
-
-
-def _registration_loop_values(
-    name: str, call: ast.Call, parents: Dict[ast.AST, ast.AST], assignments: Dict[str, ast.expr]
-) -> Optional[List[str]]:
-    node: ast.AST = call
-    while node in parents:
-        node = parents[node]
-        if isinstance(node, ast.For):
-            path = _target_path(node.target, name)
-            if path is not None:
-                if _loop_reassigns_name(node, name):
-                    return None
-                return _literal_loop_values(node.iter, path, assignments)
-    return None
-
-
-def _top_level_statements(statements: List[ast.stmt]):
-    """Walk module try blocks to find conditional import re-exports without execution."""
-    for node in statements:
-        yield node
-        if isinstance(node, (ast.Try, ast.TryStar)):
-            for field_name in ("body", "orelse", "finalbody"):
-                yield from _top_level_statements(getattr(node, field_name, []))
-            for handler in getattr(node, "handlers", []):
-                yield from _top_level_statements(handler.body)
-
-
-def _provider_profile_aliases(tree: ast.Module) -> set[str]:
-    aliases: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "providers.base":
-            aliases.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if alias.name == "ProviderProfile"
-            )
-    return aliases
-
-
-def _provider_names_for_registration(
-    call: ast.Call, tree: ast.Module, assignments: Dict[str, ast.expr], parents: Dict[ast.AST, ast.AST]
-) -> Optional[List[str]]:
-    aliases = _provider_profile_aliases(tree)
-    if not aliases:
-        return None
-
-    subclasses = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef)
-        and any(isinstance(base, ast.Name) and base.id in aliases for base in node.bases)
-    }
-    changed = True
-    while changed:
-        changed = False
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.ClassDef)
-                and node.name not in subclasses
-                and any(isinstance(base, ast.Name) and base.id in subclasses for base in node.bases)
-            ):
-                subclasses.add(node.name)
-                changed = True
-    constructors = aliases | subclasses
-
-    def profile_name(expression: ast.expr) -> Optional[str]:
-        if (
-            isinstance(expression, ast.Call)
-            and isinstance(expression.func, ast.Name)
-            and expression.func.id in constructors
-        ):
-            name = next((kw.value for kw in expression.keywords if kw.arg == "name"), None)
-            if isinstance(name, ast.Constant) and isinstance(name.value, str):
-                return name.value
-            if isinstance(name, ast.Name):
-                assigned = assignments.get(name.id)
-                if isinstance(assigned, ast.Constant) and isinstance(assigned.value, str):
-                    return assigned.value
-        return None
-
-    def helper_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> Optional[List[str]]:
-        returns: List[str] = []
-        for returned in ast.walk(function):
-            if not isinstance(returned, ast.Return):
-                continue
-            owner: ast.AST = returned
-            while owner in parents and owner is not function:
-                owner = parents[owner]
-                if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                    break
-            if owner is not function:
-                continue
-            name = profile_name(returned.value) if returned.value is not None else None
-            if name is None:
+    def __getattr__(self, name):
+        # Any other REAL registration surface (platforms, providers, skills,
+        # context engines, ...) is accepted as a no-op — the probe only audits
+        # the declared-capability categories. Names the real PluginContext does
+        # not have raise AttributeError exactly like it would; handing back a
+        # callable made `getattr(ctx, "profile_path", None)` truthy and crashed
+        # register() in the probe alone.
+        if name in context_methods:
+            def _noop(*args, **kwargs):
                 return None
-            returns.append(name)
-        return returns or None
 
-    def names_for_argument(argument: ast.expr) -> Optional[List[str]]:
-        direct = profile_name(argument)
-        if direct is not None:
-            return [direct]
-        if isinstance(argument, ast.Name):
-            assigned = profile_name(assignments.get(argument.id, ast.Constant(None)))
-            return [assigned] if assigned is not None else None
-        if isinstance(argument, ast.Call) and isinstance(argument.func, ast.Name):
-            helpers = [
-                node for node in tree.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == argument.func.id
-            ]
-            if len(helpers) == 1:
-                return helper_names(helpers[0])
-        return None
-
-    arguments = [*call.args, *(kw.value for kw in call.keywords)]
-    resolved: List[str] = []
-    for argument in arguments:
-        names = names_for_argument(argument)
-        if names is not None:
-            resolved.extend(names)
-        elif isinstance(argument, (ast.Name, ast.Call)):
-            return None
-    return resolved or None
+            return _noop
+        raise AttributeError(name)
 
 
-def _scan_capabilities(plugin_dir: Path, *, model_provider: bool = False) -> Tuple[Optional[dict], str]:
-    """Inspect literal registration calls without running candidate code.
+def emit(payload):
+    print(sentinel + json.dumps(payload))
 
-    Dynamic names cannot establish admission declarations and fail closed. Calls in
-    helpers and conditional branches are included conservatively, not claimed to run.
+
+if provider_kind:
+    # `kind: model-provider` plugins register at import via
+    # providers.register_provider(ProviderProfile) — the PluginManager never
+    # calls a register(ctx) on them (plugins_discovery skips the kind), so the
+    # probe records that call instead of demanding an entry point that would
+    # be dead code.
+    try:
+        import providers as _providers
+    except Exception as exc:
+        emit({"error": "model-provider probe could not import providers: %s" % exc})
+        sys.exit(0)
+    _real_register_provider = _providers.register_provider
+
+    def _recording_register_provider(profile):
+        recorded["providers"].append(str(getattr(profile, "name", profile)))
+        return _real_register_provider(profile)
+
+    _providers.register_provider = _recording_register_provider
+
+try:
+    spec = importlib.util.spec_from_file_location(
+        "hermes_validate_probe_plugin",
+        plugin_dir + "/__init__.py",
+        submodule_search_locations=[plugin_dir],
+    )
+    module = importlib.util.module_from_spec(spec)
+    module.__path__ = [plugin_dir]
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+except Exception as exc:
+    emit({"error": "import failed: %s" % exc})
+    sys.exit(0)
+
+if provider_kind:
+    if not recorded["providers"]:
+        emit({"error": "model-provider plugin registered no ProviderProfile at import"})
+    else:
+        emit(recorded)
+    sys.exit(0)
+
+register = getattr(module, "register", None)
+if register is None:
+    emit({"error": "no register() function"})
+    sys.exit(0)
+
+try:
+    register(RecordingContext())
+except Exception as exc:
+    emit({"error": "register() raised: %s" % exc})
+    sys.exit(0)
+
+emit(recorded)
+"""
+
+
+def _probe_options(manifest: dict) -> dict:
+    from hermes_cli.plugins import PluginContext
+
+    return {
+        "kind": str(manifest.get("kind") or ""),
+        "context_methods": sorted(
+            n for n in dir(PluginContext)
+            if not n.startswith("_") and callable(getattr(PluginContext, n))
+        ),
+    }
+
+
+def _run_capability_probe(plugin_dir: Path, manifest: dict) -> Tuple[Optional[dict], str]:
+    """Run the recording probe in a scratch subprocess.
+
+    Returns ``(recorded, error)`` — exactly one is meaningful: *recorded*
+    is the ``{tools, hooks, middleware, commands, providers}`` dict on
+    success, and *error* is a human-readable failure description otherwise.
     """
-    recorded = {"tools": [], "hooks": [], "middleware": [], "commands": [], "model_providers": []}
-    entry = plugin_dir / "__init__.py"
-    has_register = False
-    has_provider_profile_registration = False
-    for path in sorted(plugin_dir.rglob("*.py")):
-        if any(part in _EXCLUDED_SCAN_DIRS for part in path.relative_to(plugin_dir).parts):
-            continue
+    with tempfile.TemporaryDirectory(prefix="hermes-validate-") as scratch:
+        env = dict(os.environ)
+        env["HERMES_HOME"] = scratch
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except (OSError, UnicodeError, SyntaxError) as exc:
-            return None, f"cannot parse plugin Python: {exc}"
-        if path == entry:
-            for node in _top_level_statements(tree.body):
-                # Accept register() defined directly OR re-exported via
-                # `from .impl import register` (an ImportFrom whose only
-                # name is "register" aliases it into this module's namespace).
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "register":
-                    has_register = True
-                    if any(isinstance(statement, ast.Raise) for statement in node.body):
-                        return None, "register() contains an unconditional raise"
-                if isinstance(node, ast.ImportFrom) and any(alias.name == "register" for alias in node.names):
-                    has_register = True
-        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-        assignments = _module_assignments(tree)
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call)
-                    and isinstance(node.func, (ast.Name, ast.Attribute))
-                    and (node.func.id if isinstance(node.func, ast.Name) else node.func.attr) == "register_provider"):
-                provider_names = _provider_names_for_registration(node, tree, assignments, parents)
-                if provider_names:
-                    has_provider_profile_registration = True
-                    recorded["model_providers"].extend(provider_names)
-            if isinstance(node, ast.Attribute) and node.attr in _REGISTRATION_KINDS:
-                parent = parents.get(node)
-                if not isinstance(parent, ast.Call) or parent.func is not node:
-                    return None, "aliased registration requires manual capability review"
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
-                if len(node.args) > 1 and isinstance(node.args[1], ast.Constant) and node.args[1].value in _REGISTRATION_KINDS:
-                    return None, "dynamic registration lookup requires manual capability review"
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                continue
-            registration = _REGISTRATION_KINDS.get(node.func.attr)
-            if registration is None:
-                continue
-            kind, keyword = registration
-            name = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == keyword), None)
-            if isinstance(name, ast.Constant) and isinstance(name.value, str):
-                recorded[kind].append(name.value)
-                continue
-            if isinstance(name, ast.Name):
-                loop_values = _registration_loop_values(name.id, node, parents, assignments)
-                if loop_values is not None:
-                    recorded[kind].extend(loop_values)
-                    continue
-            return None, f"dynamic {node.func.attr} name requires manual capability review ({path.name}:{node.lineno})"
-    if model_provider and not has_provider_profile_registration:
-        return None, "model-provider plugin registered no ProviderProfile"
-    if not has_register and not model_provider:
-        return None, "no statically defined register() function"
-    return recorded, ""
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    _PROBE_SCRIPT,
+                    str(plugin_dir),
+                    _PROBE_SENTINEL,
+                    json.dumps(_probe_options(manifest)),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_PROBE_TIMEOUT,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return None, f"capability probe timed out after {_PROBE_TIMEOUT}s"
+
+    payload: Optional[dict] = None
+    for line in (result.stdout or "").splitlines():
+        if line.startswith(_PROBE_SENTINEL):
+            try:
+                payload = json.loads(line[len(_PROBE_SENTINEL):])
+            except json.JSONDecodeError:
+                payload = None
+
+    if payload is None:
+        err = (result.stderr or "").strip()
+        return None, (
+            "capability probe produced no result "
+            f"(exit {result.returncode})" + (f": {err}" if err else "")
+        )
+    if "error" in payload:
+        return None, str(payload["error"])
+    return payload, ""
 
 
 def _declared_list(manifest: dict, key: str) -> List[str]:
@@ -482,7 +373,7 @@ def _declared_list(manifest: dict, key: str) -> List[str]:
 def _check_capabilities(
     report: ValidationReport, manifest: dict, plugin_dir: Path
 ) -> Optional[dict]:
-    """Compare statically visible registration calls against declared capabilities.
+    """Probe actual registrations and diff against declared capabilities.
 
     Returns the recorded dict (for the built-in collision check) or None
     when the probe failed / was skipped.
@@ -494,16 +385,17 @@ def _check_capabilities(
         report.add("capability probe", True, "skipped (no __init__.py)")
         return None
 
-    recorded, error = _scan_capabilities(plugin_dir, model_provider=manifest.get("kind") == "model-provider")
+    recorded, error = _run_capability_probe(plugin_dir, manifest)
     if recorded is None:
         report.add("capability probe", False, error)
         return None
-    if manifest.get("kind") == "model-provider":
-        provider_names = ", ".join(recorded.get("model_providers") or [])
-        report.add("capability probe", True, f"statically registered ProviderProfile(s): {provider_names}")
+    if recorded.get("providers"):
+        report.add(
+            "capability probe", True,
+            "import registered provider(s): " + ", ".join(recorded["providers"]),
+        )
     else:
-        report.add("capability probe", True, "literal registration calls inspected without execution")
-    report.warn("Static inspection only: runtime behavior, imported registrations, capability completeness, and plugin safety are not verified.")
+        report.add("capability probe", True, "register() ran in isolation")
 
     for kind, manifest_key in (
         ("tools", "provides_tools"),
@@ -522,16 +414,16 @@ def _check_capabilities(
                 f"{', '.join(undeclared)}",
             )
         else:
-            report.add(f"declared {kind}", True, "matches statically visible calls")
+            report.add(f"declared {kind}", True, "matches registrations")
         if unregistered:
             report.warn(
                 f"{manifest_key} declares {', '.join(unregistered)} "
-                f"but no literal registration call was found"
+                f"but register() did not register them"
             )
     return recorded
 
 
-def _builtin_tool_names() -> Optional[List[str]]:
+def _builtin_tool_names() -> List[str]:
     """Return the built-in tool registry names (discovery-timing safe).
 
     ``tools.registry`` starts empty — built-in tool modules self-register on
@@ -544,7 +436,7 @@ def _builtin_tool_names() -> Optional[List[str]]:
         discover_builtin_tools()
         return list(registry.get_all_tool_names())
     except Exception:
-        return None
+        return []
 
 
 def _check_builtin_collisions(
@@ -556,11 +448,7 @@ def _check_builtin_collisions(
     if not candidate_tools:
         report.add("built-in tool collisions", True, "no tools to check")
         return
-    names = _builtin_tool_names()
-    if names is None:
-        report.add("built-in tool collisions", False, "built-in discovery unavailable")
-        return
-    builtin = set(names)
+    builtin = set(_builtin_tool_names())
     collisions = sorted(candidate_tools & builtin)
     if collisions:
         report.add(
@@ -704,15 +592,17 @@ def _validate_portable_plugin(report: ValidationReport, plugin_dir: Path) -> Val
     diagnostics (schema shape, name, supported subset).
     """
     try:
-        from hermes_cli.agent_plugins import read_agent_plugin_manifest
+        from hermes_cli.agent_plugins import load_agent_plugin
+        from hermes_platform.resolver.availability import availability
 
-        manifest, diagnostics = read_agent_plugin_manifest(plugin_dir)
+        with tempfile.TemporaryDirectory() as data_root:
+            package = load_agent_plugin(plugin_dir, Path(data_root))
+        manifest = package.manifest
+        diagnostics = package.diagnostics
     except Exception as exc:
         report.add("portable manifest", False, f"plugin.json failed validation: {exc}")
         return report
 
-    # The portable reader raises on hard failures; surviving diagnostics are
-    # advisory (unsupported-subset notes etc.) — surface them as warnings.
     for diag in diagnostics:
         scope = getattr(diag, "scope", "")
         message = getattr(diag, "message", str(diag))
@@ -725,6 +615,14 @@ def _validate_portable_plugin(report: ValidationReport, plugin_dir: Path) -> Val
         bool(name),
         "name present" if name else "plugin.json missing required 'name'",
     )
+    for server_name, server_decl in package.server_declarations.items():
+        result = availability(server_decl.declaration)
+        detail = result.state
+        if result.version:
+            detail += f", version {result.version}"
+        if result.path:
+            detail += f", path {result.path}"
+        report.add(f"server availability: {server_name}", True, detail)
     _check_security_scan(report, plugin_dir)
     check_desktop_surface(report, plugin_dir)
     return report
