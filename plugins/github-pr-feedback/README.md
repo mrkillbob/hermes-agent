@@ -591,7 +591,8 @@ Closed or merged feedback PRs use the exact `retire-feedback` command supplied b
 the card before `kanban_complete`. Retirement verifies canonical state twice
 and marks that dispatch superseded in the feedback ledger, including historical
 heads of the same closed PR. Local CI dispatches also retire when the PR becomes
-draft or its head changes. Open feedback repairs retain their pending gate.
+draft or its head changes. Open feedback repairs retain their pending gate unless the same feedback has a
+durable pending replacement dispatch on the canonically current head.
 Retirement neither posts a completion comment nor claims passing CI; raced PR
 state changes are rejected. Scheduled scans reconcile these obsolete dispatches.
 Protected terminal replay preserves the lifecycle result.

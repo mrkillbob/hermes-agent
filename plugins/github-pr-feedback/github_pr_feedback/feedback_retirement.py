@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from .ledger import LedgerStateError
 
 
-def retirement_reason(current, receipt):
+def retirement_reason(current, receipt, ledger=None):
     if current.state in {"CLOSED", "MERGED"}:
         return f"canonical PR {current.state}"
     if current.state == "OPEN" and receipt.feedback_kind == "pr_local_ci":
@@ -13,6 +13,13 @@ def retirement_reason(current, receipt):
             return "canonical PR is draft; local CI is ineligible"
         if current.head_sha != receipt.head_sha:
             return "canonical PR head changed; exact-head local CI is obsolete"
+    if current.state == "OPEN" and current.head_sha != receipt.head_sha and ledger is not None:
+        for replacement in ledger.pending_task_bindings_for_pr(receipt.repository, receipt.pr_number):
+            newer = replacement.receipt
+            if (newer.head_sha == current.head_sha
+                    and newer.feedback_kind == receipt.feedback_kind
+                    and newer.feedback_id == receipt.feedback_id):
+                return f"same feedback handed to current-head dispatch {replacement.task_id}"
     return None
 
 
@@ -22,7 +29,7 @@ def retire_closed_feedback(policy, github, ledger, receipt):
     # a card whose PR closes mid-audit has no other path to clear its pending
     # ledger row. Retire it here too rather than leaving it stuck forever.
     current = github.get_pull_request(receipt.repository, receipt.pr_number)
-    reason = retirement_reason(current, receipt)
+    reason = retirement_reason(current, receipt, ledger)
     if (not policy.enabled or reason is None
             or current.number != receipt.pr_number or current.base_repository != receipt.repository
             or not policy.admit_pull_request(replace(current, state="OPEN")).admitted):
