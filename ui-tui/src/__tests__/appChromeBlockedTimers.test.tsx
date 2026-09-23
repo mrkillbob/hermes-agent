@@ -3,7 +3,7 @@ import { PassThrough } from 'stream'
 import { renderSync } from '@hermes/ink'
 import { stripAnsi } from '@hermes/shared/ansi'
 import React from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi, waitFor } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GatewayProvider } from '../app/gatewayContext.js'
 import type { AppLayoutProps, OverlayState, UiState } from '../app/interfaces.js'
@@ -204,6 +204,22 @@ const mountLayout = (overlay: Partial<OverlayState> = {}, ui: Partial<UiState> =
 // re-arm that follows it) lands before we assert.
 const flush = () => new Promise(resolve => setTimeout(resolve, 20))
 
+// Poll until a condition is met, draining the event loop with setImmediate
+// (unaffected by the Date.now spy or setInterval spy).  Used where a single
+// flush() races against two React scheduler ticks (store → effect → re-render).
+const waitFor = async (check: () => void, { retries = 30, delayMs = 10 } = {}) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      check()
+      return
+    } catch {
+      await new Promise(resolve => setImmediate(resolve))
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+    }
+  }
+  check() // final throw on failure
+}
+
 let intervalSpy: IntervalSpy
 let nowSpy: ReturnType<typeof vi.spyOn<typeof Date, 'now'>>
 
@@ -306,14 +322,14 @@ describe('status-chrome timers under an occluding overlay', () => {
     resetOverlayState()
 
     // Caught up to real elapsed time, not stuck on the pre-overlay values.
-    // Use waitFor instead of a fixed flush: the re-render (store change →
-    // isOccluded flip → useEffect → setNow → second render) takes at least
-    // two React scheduler ticks, and a fixed 20ms races against them.
+    // Poll via setImmediate (unaffected by Date.now or setInterval spies):
+    // the re-render (store change → isOccluded flip → useEffect → setNow →
+    // second render) takes at least two React scheduler ticks.
     await waitFor(() => {
       expect(rule.output()).toContain('6m 0s')
       expect(rule.output()).toContain('✓ 5m 5s')
       expect(rule.output()).not.toContain('1m 0s')
-    }, { timeout: 1000 })
+    })
 
     // …and the clocks are running again.
     expect(oneSecondTimers(intervalSpy)).toBe(2)
