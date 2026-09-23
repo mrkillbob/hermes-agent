@@ -282,6 +282,7 @@ import { CHROMIUM_LOG_FILENAME, enableLinuxCrashDiagnostics, linuxCrashDiagnosti
 import { notifyLauncherWindowRevealed } from './linux-launcher-ready'
 import { createLocalBackendLifecycle, waitForTeardown } from './local-backend-lifecycle'
 import { ACTIVE_LOG_POLL_MS, planLogRotation, reclaimActiveLogIfOversized } from './log-rotation'
+import { installLunarCityPerfBridge } from './lunar-city-perf-install'
 import { ensureMainWindow } from './main-window-lifecycle'
 import {
   assertManagedUpdatePreflightClear,
@@ -1514,6 +1515,7 @@ function registerMediaProtocol() {
 }
 
 let mainWindow = null
+const lunarCityPerfBridge = installLunarCityPerfBridge({ buildStamp: INSTALL_STAMP, getMainWindow: () => mainWindow })
 const backendConnectionState = createBackendConnectionState<ReturnType<typeof spawn>, any>()
 
 const localBackendLifecycle = createLocalBackendLifecycle<ReturnType<typeof spawn>>({
@@ -15159,6 +15161,7 @@ function createWindow() {
       registryScoped: defaultRoute.connectionId !== null
     })
   }
+  lunarCityPerfBridge.attachWindow(createdMainWindow)
 
   // Chat-surface registration: see applyWindowTranslucency.
   translucencyBackedWindows.add(mainWindow)
@@ -17747,6 +17750,7 @@ app.on('before-quit', () => {
 // hold the event loop open or leak FDs past app teardown.
 app.on('will-quit', () => {
   sshIsolatedKeepalives.stopAll()
+  lunarCityPerfBridge.dispose()
   destroyKeepaliveAgents()
   nativeNotifications.dispose()
   quitFinalization.arm()

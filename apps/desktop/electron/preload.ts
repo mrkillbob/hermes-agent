@@ -2,7 +2,11 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 
 import type { DesktopProfileRoute } from './desktop-profile'
 import type { HudModifierApi, HudModifierStatus } from './hud-modifier-types'
+import { installLunarCityPerfPreload } from './lunar-city-perf-preload-install'
 import { customWindowControlsEnabled } from './window-controls'
+
+installLunarCityPerfPreload()
+
 
 // Which translucency the OS can back. Asked synchronously because the renderer
 // needs it before its first paint, and answered by main because deciding it
