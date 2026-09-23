@@ -139,7 +139,9 @@ import {
   ARTIFACTS_ROUTE,
   CAPABILITIES_ROUTE,
   CRON_ROUTE,
+  LUNAR_CITY_ROUTE,
   MESSAGING_ROUTE,
+  SESSION_IMPORT_ROUTE,
   SIDEBAR_NAV_AREA,
   type SidebarNavContribution
 } from '../../routes'
