@@ -43,7 +43,8 @@ def plan_discovery(spec, tasks, day, links=()):
             continue
         if len(planned) >= min(capacity, spec['max_dispatches']):
             break
-        planned.append(dict(department, creator=creator, key=key, task_title=title, active_children=active_children))
+        board = spec.get('project_boards', {}).get(department.get('project'), spec.get('board'))
+        planned.append(dict(department, board=board, creator=creator, key=key, task_title=title, active_children=active_children))
     return planned
 
 
@@ -62,15 +63,20 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     spec = json.loads((root / 'configs/federation/discovery.json').read_text(encoding="utf-8"))
-    tasks = run(args.hermes, 'kanban', '--board', spec['board'], 'list', '--json')
+    tasks = []
+    links = []
+    boards = dict.fromkeys([spec['board'], *spec.get('project_boards', {}).values()])
+    for board in boards:
+        tasks.extend(run(args.hermes, 'kanban', '--board', board, 'list', '--json'))
     day = datetime.now(timezone.utc).date().isoformat()
     sys.path.insert(0, str(root))
     from hermes_cli.kanban_db import kanban_db_path
-    connection = sqlite3.connect(kanban_db_path(spec['board']).as_uri() + '?mode=ro', uri=True)
-    try:
-        links = connection.execute('SELECT parent_id,child_id FROM task_links').fetchall()
-    finally:
-        connection.close()
+    for board in boards:
+        connection = sqlite3.connect(kanban_db_path(board).as_uri() + '?mode=ro', uri=True)
+        try:
+            links.extend(connection.execute('SELECT parent_id,child_id FROM task_links').fetchall())
+        finally:
+            connection.close()
     plan = plan_discovery(spec, tasks, day, links)
     if not args.apply:
         print(json.dumps({'status': 'planned', 'departments': plan}))
@@ -81,13 +87,14 @@ def main():
                 'LunaBot source: /Users/mikedemott/LunaBot; its library spec is '
                 '/Users/mikedemott/LunaBot/docs/superpowers/specs/2026-08-26-governed-library-librarian-design.md. '
                 'Active catalogue implementation: /Users/mikedemott/.codex/lunabot-support/worktrees/codex-library-vault-catalog-20260905. '
-                f'Lunar City sources are at {root}/apps/desktop/src/app/lunar-city and '
-                f'{root}/apps/desktop/public/lunar-city. This is a read-only discovery workspace; '
+                f'Lunar City assets are at {root}/apps/desktop/public/lunar-city; locate the current '
+                'tracked UI entrypoint before inspecting it rather than assuming a historical source path. '
+                'This is a read-only discovery workspace; '
                 'put findings in the task result/comment and assign implementation to an isolated child.\n\n'
                 + spec['instructions'] + '\nExisting active children: ' + ', '.join(department['active_children'])
                 + '\n\nDepartment assignment: ' + department['brief'])
         workspace = tempfile.mkdtemp(prefix='hermes-discovery-' + department['id'] + '-')
-        result = run(args.hermes, 'kanban', '--board', spec['board'], 'create',
+        result = run(args.hermes, 'kanban', '--board', department['board'], 'create',
                      department['task_title'],
                      '--body', body, '--assignee', department['assignee'],
                      '--project', department['project'], '--workspace', 'dir:' + workspace,

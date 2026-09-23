@@ -1031,3 +1031,27 @@ def test_scoped_repair_rejects_changed_expected_head(tmp_path):
     assert result.skipped["head_changed"] == 1
     assert not kanban.tasks
     ledger.close()
+
+
+def test_repair_scan_rejects_draft_from_listing_and_canonical_reread(tmp_path):
+    class DraftGitHub(GitHub):
+        listed_draft = True
+
+        def list_open_pull_requests(self, repository, owner):
+            return tuple(replace(p, is_draft=self.listed_draft) for p in super().list_open_pull_requests(repository, owner))
+
+        def get_merge_state(self, repository, number):
+            return replace(super().get_merge_state(repository, number), is_draft=True)
+
+    configured = policy(tmp_path)
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = Kanban()
+    github = DraftGitHub()
+    controller = RepairController(configured, ledger, github, kanban, LocalGit())
+    for listed_draft in (True, False):
+        github.listed_draft = listed_draft
+        result = controller.scan()
+        assert result.created == 0
+        assert result.skipped["draft_pr"] == 1
+    assert kanban.tasks == []
+    ledger.close()

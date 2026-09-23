@@ -363,3 +363,47 @@ def test_import_rejects_a_future_format_version(kanban_root, tmp_path):
     kanban_root("target")
     with pytest.raises(ValueError, match="newer than this Hermes"):
         kt.import_board(str(bumped))
+
+
+def test_merge_moves_all_cards_history_and_attachments(kanban_root, tmp_path):
+    target_root = kanban_root("source")
+    ids = _seed_board("source")
+    kb.create_board("target", name="Target")
+    result = kt.merge_board("source", "target", str(tmp_path / "source-backup"))
+    assert result["tasks"] == 2
+    assert result["counts"]["task_comments"] == 1
+    assert result["counts"]["task_links"] == 1
+    assert result["counts"]["task_attachments"] == 1
+    assert Path(result["backup"]).is_file()
+    assert kb.board_exists("source")
+    assert _tasks_by_title("source") == {}
+    assert set(_tasks_by_title("target")) == {"scratch task", "worktree task"}
+    with kbc.connect_closing(board="target") as conn:
+        comment = conn.execute("SELECT body FROM task_comments WHERE task_id=?", (ids["scratch"],)).fetchone()
+        attachment = conn.execute("SELECT stored_path FROM task_attachments WHERE task_id=?", (ids["scratch"],)).fetchone()
+        links = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
+    assert comment["body"] == "a comment"
+    assert target_root in Path(attachment["stored_path"]).parents
+    assert Path(attachment["stored_path"]).read_bytes() == b"hello attachment"
+    assert [(row["parent_id"], row["child_id"]) for row in links] == [(ids["scratch"], ids["worktree"])]
+
+
+def test_merge_refuses_active_source_claim_without_copying(kanban_root, tmp_path):
+    kanban_root("source")
+    ids = _seed_board("source")
+    _claim(ids["scratch"], "source")
+    kb.create_board("target", name="Target")
+    with pytest.raises(ValueError, match="live task claims"):
+        kt.merge_board("source", "target", str(tmp_path / "source-backup"))
+    assert _tasks_by_title("target") == {}
+    assert kb.board_exists("source")
+
+
+def test_merge_rejects_selection_that_splits_a_task_dependency(kanban_root, tmp_path):
+    kanban_root("source")
+    ids = _seed_board("source")
+    kb.create_board("target", name="Target")
+    with pytest.raises(ValueError, match="merge all linked cards together"):
+        kt.merge_board("source", "target", str(tmp_path / "source-backup"), task_ids=[ids["scratch"]])
+    assert _tasks_by_title("target") == {}
+    assert set(_tasks_by_title("source")) == {"scratch task", "worktree task"}

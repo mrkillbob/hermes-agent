@@ -1208,7 +1208,7 @@ class ScanController:
     def _reconcile_closed_pr_tasks(
         self, repository: str, open_pull_requests: Sequence[PullRequest]
     ) -> None:
-        """Retire dispatch cards whose PR is no longer open.
+        """Retire dispatch cards whose canonical work is obsolete.
 
         GitHub feedback scans only create work for open PRs, but a card may
         remain running after its PR is merged or closed. Reconcile those
@@ -1226,13 +1226,22 @@ class ScanController:
             if board.strip()
         )
         boards = tuple(dict.fromkeys(board for board in configured_boards if board))
-        open_numbers = {pr.number for pr in open_pull_requests}
+        from .feedback_retirement import retirement_reason
+
+        open_by_number = {pr.number: pr for pr in open_pull_requests}
         for pr_number in pending_prs(repository):
-            if pr_number in open_numbers:
-                continue
+            current = open_by_number.get(pr_number)
+            if current is None:
+                # An omitted list entry alone is not evidence of PR closure.
+                current = self._github.get_pull_request(repository, pr_number)
             for binding in self._ledger.pending_task_bindings_for_pr(
                 repository, pr_number
             ):
+                reason = retirement_reason(current, binding.receipt, self._ledger)
+                if reason is None:
+                    continue
+                if self._github.get_pull_request(repository, pr_number) != current:
+                    continue
                 archived = False
                 for board in boards:
                     try:
@@ -1246,7 +1255,7 @@ class ScanController:
                 self._ledger.supersede_stale_dispatch(
                     binding.receipt,
                     task_id=binding.task_id,
-                    reason="PR is merged or closed; stale dispatch archived",
+                    reason=f"{reason}; stale dispatch archived",
                 )
 
     def scan(self, *, apply_labels: bool = True) -> ScanResult:
@@ -3518,7 +3527,7 @@ def _governed_command_prefix(control_home: Path) -> str:
     """Pin worker callbacks to the scanner's shared control plane."""
 
     return (
-        f"env HERMES_HOME={shlex.quote(str(control_home))} "
+        f"env -u _HERMES_GATEWAY HERMES_HOME={shlex.quote(str(control_home))} "
         f"{shlex.quote(sys.executable)} -E -P -m hermes_cli.main github-pr-feedback"
     )
 

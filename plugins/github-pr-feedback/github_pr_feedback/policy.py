@@ -605,6 +605,8 @@ class PluginPolicy:
             return Admission(False, "head_repository_not_allowed")
         if pull_request.state != "OPEN":
             return Admission(False, "pull_request_not_open")
+        if pull_request.is_draft:
+            return Admission(False, "draft_pr")
         if pull_request.author_login.casefold() != target.owner_login.casefold():
             return Admission(False, "author_not_allowed")
         if target.branch_prefixes and not any(

@@ -31,3 +31,14 @@ def test_active_descendants_count_even_when_worker_authors_differ_from_root():
     tasks[-1]['status'] = 'done'
     plan = plan_discovery(spec, tasks, '2026-09-06', links)
     assert plan[0]['active_children'] == ['grandchild']
+
+
+def test_department_routes_to_its_project_board_and_keeps_cross_board_ownership():
+    spec = dict(board="legacy", project_boards={"city": "hermes", "trading": "lunabot"},
+                departments=[dict(id="arts", assignee="artist", title="Art", project="city"),
+                             dict(id="data", assignee="engineer", title="Data", project="trading")],
+                max_active=4, max_dispatches=2)
+    planned = plan_discovery(spec, [], "2026-09-23")
+    assert {item["project"]: item["board"] for item in planned} == spec["project_boards"]
+    existing = [dict(id="old", status="blocked", created_by="federation-discovery-arts", assignee="artist")]
+    assert [item["project"] for item in plan_discovery(spec, existing, "2026-09-23")] == ["trading"]

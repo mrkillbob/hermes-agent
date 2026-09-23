@@ -197,6 +197,13 @@ class RepairController:
                     continue
             if retry_receipt is not None:
                 pulls = tuple(pull for pull in pulls if pull.number == retry_receipt.pr_number)
+            eligible = []
+            for listed in pulls:
+                if listed.is_draft:
+                    skipped["draft_pr"] += 1
+                else:
+                    eligible.append(listed)
+            pulls = tuple(eligible)
             from .pr_ordering import repair_window
 
             pulls = repair_window(self._ledger, repository, pulls, _MAX_REPAIR_SNAPSHOTS_PER_SCAN)
@@ -238,6 +245,12 @@ class RepairController:
                     degraded = True
                     continue
                 pull, review, checks, checks_unavailable = snapshot
+                if pull.is_draft:
+                    skipped["draft_pr"] += 1
+                    continue
+                if pull.state != "OPEN" or pull.merged:
+                    skipped["pull_request_not_open"] += 1
+                    continue
                 if checks_unavailable:
                     skipped["check_state_unavailable"] += 1
                 if pull.head_sha != listed.head_sha:

@@ -588,10 +588,20 @@ verify label readback; incomplete file listings are rejected.
 
 
 Closed or merged feedback PRs use the exact `retire-feedback` command supplied by
-the card before `kanban_complete`. Retirement verifies canonical closure twice
-and marks that dispatch superseded in the feedback ledger. It neither posts a
-completion comment nor claims passing CI. Open, changed-head, and raced PRs keep
-their pending gate. Protected terminal replay preserves the lifecycle result.
+the card before `kanban_complete`. Retirement verifies canonical state twice
+and marks that dispatch superseded in the feedback ledger, including historical
+heads of the same closed PR. All automatic PR dispatches retire when a PR becomes draft. Local CI dispatches
+also retire when the head changes. Draft PRs are excluded from automatic
+feedback, repair, and CI admission; any explicitly requested draft continuation
+must use a separately authorized task. Open feedback repairs retain their pending gate unless the same feedback has a
+durable pending replacement dispatch on the canonically current head.
+Retirement neither posts a completion comment nor claims passing CI; raced PR
+state changes are rejected. Scheduled scans reconcile these obsolete dispatches.
+Protected terminal replay preserves the lifecycle result.
+
+Standalone scan and worker callback commands clear the inherited gateway marker.
+They resolve credentials through the shared control home; no credentials are
+copied into card instructions or assigned individually to worker profiles.
 
 Repair completion policies also gate the shared `request_review` transition. A worker must finish its durable push/reply/acknowledgement contract before handing the implementation to an independent reviewer; review and CI still remain separate requirements. Original dispatch identities remain provenance, not evidence that the published repair still has its original head.
 
