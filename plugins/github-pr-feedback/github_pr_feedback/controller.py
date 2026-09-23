@@ -1208,7 +1208,7 @@ class ScanController:
     def _reconcile_closed_pr_tasks(
         self, repository: str, open_pull_requests: Sequence[PullRequest]
     ) -> None:
-        """Retire dispatch cards whose PR is no longer open.
+        """Retire dispatch cards whose canonical work is obsolete.
 
         GitHub feedback scans only create work for open PRs, but a card may
         remain running after its PR is merged or closed. Reconcile those
@@ -1237,7 +1237,7 @@ class ScanController:
             for binding in self._ledger.pending_task_bindings_for_pr(
                 repository, pr_number
             ):
-                reason = retirement_reason(current, binding.receipt)
+                reason = retirement_reason(current, binding.receipt, self._ledger)
                 if reason is None:
                     continue
                 if self._github.get_pull_request(repository, pr_number) != current:

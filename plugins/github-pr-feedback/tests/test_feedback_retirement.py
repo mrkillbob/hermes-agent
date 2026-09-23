@@ -77,3 +77,19 @@ def test_ci_retirement_requires_canonical_ineligibility(dispatched, case):
         assert retire_closed_feedback(policy, github, ledger, receipt)["status"] == "retired"
         assert ledger.exact_pending_task_binding(receipt) is None
         assert not ledger.was_actioned_on_any_head(receipt)
+
+
+def test_open_feedback_retirement_requires_exact_current_head_handoff(dispatched):
+    policy, ledger, receipt, pull = dispatched
+    pull = replace(pull, state="OPEN", head_sha="c" * 40)
+    github = SimpleNamespace(get_pull_request=lambda *_: pull)
+    with pytest.raises(ValueError):
+        retire_closed_feedback(policy, github, ledger, receipt)
+    newer = replace(receipt, head_sha=pull.head_sha)
+    now = datetime.now(UTC)
+    lease = ledger.claim(newer, owner="new-head", claimed_at=now, stale_before=now-timedelta(minutes=5))
+    ledger.finalize(newer, "task-new", lease)
+    result = retire_closed_feedback(policy, github, ledger, receipt)
+    assert "task-new" in result["reason"]
+    assert ledger.exact_pending_task_binding(newer).task_id == "task-new"
+    assert not ledger.was_actioned_on_any_head(receipt)
