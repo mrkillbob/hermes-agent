@@ -278,3 +278,24 @@ def test_invalid_explicit_board_base_does_not_fall_back(repo, kanban_home, monke
     with pytest.raises(ValueError, match='does not resolve'):
         _make_worktree(repo, 't_missing_base')
     assert not _branch_exists(repo, 'wt/t_missing_base')
+
+
+def test_configured_remote_base_fetches_missing_tracking_ref(repo, kanban_home, monkeypatch, tmp_path):
+    import json
+    remote = tmp_path / "remote.git"
+    _git("clone", "--bare", str(repo), str(remote))
+    branch = _git("-C", str(repo), "branch", "--show-current").strip()
+    _git("-C", str(repo), "remote", "add", "source", str(remote))
+    (kanban_home / "config.yaml").write_text(json.dumps({"kanban": {"worktree_base_refs": {str(repo.resolve()): "source/" + branch}}}))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(kanban_home))
+    assert kbw._configured_worktree_base(repo) == _git("-C", str(remote), "rev-parse", "HEAD").strip()
+
+
+def test_project_worktree_root_survives_worker_profile(repo, kanban_home, monkeypatch, tmp_path):
+    import json
+    from hermes_cli.kanban_worktree_policy import project_worktree_path
+    root = repo / "worktrees"
+    (kanban_home / "config.yaml").write_text(json.dumps({"kanban": {"worktree_roots": {str(repo.resolve()): str(root)}}}))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(kanban_home))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "worker-profile"))
+    assert project_worktree_path(repo, "t_new") == root / "t_new"

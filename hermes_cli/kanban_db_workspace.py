@@ -520,6 +520,8 @@ def _configured_worktree_base(repo_root: Path) -> Optional[str]:
         return None
     if not isinstance(ref, str) or not ref.strip() or ref.startswith("-"):
         raise ValueError("configured Kanban worktree base must be a Git ref")
+    from hermes_cli.kanban_worktree_policy import refresh_configured_remote_base
+    refresh_configured_remote_base(repo_root, ref, _git)
     result = _git(repo_root, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}", timeout=20)
     if result.returncode:
         raise ValueError(f"configured Kanban worktree base does not resolve: {ref}")
@@ -528,7 +530,8 @@ def _configured_worktree_base(repo_root: Path) -> Optional[str]:
 
 def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple[Path, str]:
     """Materialize the canonical ``<repo>/.worktrees/<task-id>`` worktree."""
-    target = repo_root / ".worktrees" / task_id
+    from hermes_cli.kanban_worktree_policy import project_worktree_path
+    target = project_worktree_path(repo_root, task_id)
     _ensure_git_worktree(repo_root, target, branch_name)
     return target, branch_name
 
@@ -609,6 +612,9 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             f"task {task.id} worktree path {task.workspace_path!r} is not inside a git repo "
             "and does not point at a git repo root"
         )
+    if not requested.exists() and requested.parent.name == ".worktrees" and requested.name == task.id:
+        from hermes_cli.kanban_worktree_policy import project_worktree_path
+        requested = project_worktree_path(repo_root, task.id)
     _ensure_git_worktree(repo_root, requested, branch_name)
     return requested, branch_name
 
