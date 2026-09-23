@@ -18,6 +18,7 @@ _REPAIR_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     # because of quota exhaustion, not a PR-feedback logic error.
     (("gh auth failure", "automation credential is missing", "usage limits", "untrusted receipt", "missing hermes_cli", "audit-pr unavailable", "inspect-pr unavailable", "audit_deferred"), "hermes-maintenance-steward"),
     (("github pr feedback", "complete-feedback", "inspect-pr"), "pr-repair-steward"),
+    (("worktree audit", "worktree governance", "worktree & change governance scan"), "worktree-change-governance-steward"),
     (("federated runner", "federation", "federated"), "federation-steward"),
     (("gui_command_runner.py", "start_gui_command", "orphaned subprocess",
       "gui launch/cancel", "stale-reconciliation race", "stale reconciliation",

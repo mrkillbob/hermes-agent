@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   check-attribution:
@@ -19,18 +20,46 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          fetch-depth: 0  # Full history needed for git log
+          fetch-depth: 1
 
       - name: Check for unmapped contributor emails
         id: check-emails
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          # Get the merge base between this PR and main
-          MERGE_BASE=$(git merge-base origin/main HEAD)
+          # Read this PR's commit metadata from GitHub instead of fetching the
+          # repository's full history. Walk first parents from the PR head so
+          # imported upstream commits in reconciliation merges stay excluded.
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/commits" \
+            --jq '.[] | {sha, parents: [.parents[].sha], email: .commit.author.email, author: .commit.author.name}' \
+            > /tmp/pr-commits.jsonl
+          NEW_EMAILS=$(python3 - <<'PYEOF'
+          import json
+          import os
 
-          # Find any new author emails in this PR's commits
-          # A reconciliation PR may merge newer upstream history into the fork.
-          # First-parent keeps imported upstream authors out of the PR attribution set.
-          NEW_EMAILS=$(git log ${MERGE_BASE}..HEAD --first-parent --format='%ae' --no-merges | sort -u)
+          commits = {}
+          with open("/tmp/pr-commits.jsonl", encoding="utf-8") as source:
+              for line in source:
+                  commit = json.loads(line)
+                  commits[commit["sha"]] = commit
+
+          emails = {}
+          current = os.environ["HEAD_SHA"]
+          while current in commits:
+              commit = commits[current]
+              if len(commit["parents"]) <= 1 and commit.get("email"):
+                  emails.setdefault(commit["email"], commit.get("author") or "")
+              parents = commit["parents"]
+              if not parents:
+                  break
+              current = parents[0]
+
+          for email in sorted(emails):
+              print(f"{email}\t{emails[email]}")
+          PYEOF
+          )
 
           if [ -z "$NEW_EMAILS" ]; then
             echo "No new commits to check."
@@ -43,7 +72,7 @@ jobs:
           # (one file per email — conflict-free) or an entry in the frozen
           # legacy AUTHOR_MAP in scripts/release.py.
           MISSING=""
-          while IFS= read -r email; do
+          while IFS=$'\t' read -r email author; do
             # Skip teknium and bot emails
             case "$email" in
               *teknium*|*noreply@github.com*|*dependabot*|*github-actions*|*anthropic.com*|*cursor.com*)
@@ -59,8 +88,7 @@ jobs:
             fi
 
             if ! grep -qF "\"${email}\"" scripts/release.py 2>/dev/null; then
-              AUTHOR=$(git log --author="$email" --format='%an' -1)
-              MISSING="${MISSING}\n  ${email} (${AUTHOR})"
+              MISSING="${MISSING}\n  ${email} (${author})"
             fi
           done <<< "$NEW_EMAILS"
 

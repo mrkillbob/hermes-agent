@@ -36,7 +36,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0 # need full history for merge-base + worktree
+          # Two commits keep the PR merge base (or HEAD~1 for pushes) available.
+          # The exact PR base SHA comes from the event payload below; fetching
+          # every branch and tag made this advisory job time out on checkout.
+          fetch-depth: 2
 
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
@@ -54,14 +57,19 @@ jobs:
       - name: Determine base ref
         id: base
         env:
-          BASE_BRANCH: ${{ github.base_ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ inputs.event_name }}
         run: |
-          # For PRs, diff against the merge base with the target branch.
+          # For PRs, diff against the exact target SHA captured for this event.
           # For pushes to main, diff against the previous commit on main.
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            BASE_SHA=$(git merge-base "origin/$BASE_BRANCH" HEAD)
-            BASE_REF="origin/$BASE_BRANCH"
+            BASE_SHA="$PR_BASE_SHA"
+            if [ -z "$BASE_SHA" ]; then
+              echo "Pull request base SHA is missing" >&2
+              exit 1
+            fi
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            BASE_REF="$BASE_SHA"
           else
             BASE_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
             BASE_REF="HEAD~1"
@@ -130,7 +138,7 @@ jobs:
     # the diff comment even when enforcement fails.
     name: ruff enforcement (blocking)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -161,7 +169,7 @@ jobs:
     # See scripts/check-windows-footguns.py for the full rule list.
     name: Windows footguns (blocking)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

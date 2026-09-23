@@ -3958,8 +3958,11 @@ def route_worker_block_to_orchestrator(
         already_router = row["assignee"] in {
             "task-orchestrator", "task-intake-router", "intake-router",
         }
-        target_assignee = specialist or "task-intake-router"
-        new_status = "triage" if already_router and specialist is None else (
+        same_specialist = specialist is not None and specialist == row["assignee"]
+        target_assignee = "task-intake-router" if same_specialist else (
+            specialist or "task-intake-router"
+        )
+        new_status = "triage" if (already_router and specialist is None) or same_specialist else (
             "ready" if _parents_satisfied(conn, task_id) else "todo"
         )
         new_assignee = target_assignee

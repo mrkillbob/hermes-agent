@@ -74,9 +74,10 @@ async function openTab(
 }
 
 beforeEach(() => {
+  let nextTokenByte = 0;
   vi.stubGlobal("crypto", {
     getRandomValues: (values: Uint8Array) => {
-      values.fill(Math.floor(Math.random() * 256));
+      values.fill(++nextTokenByte);
       return values;
     },
   });
