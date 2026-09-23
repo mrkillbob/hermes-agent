@@ -8,9 +8,9 @@ from .ledger import LedgerStateError
 def retirement_reason(current, receipt, ledger=None):
     if current.state in {"CLOSED", "MERGED"}:
         return f"canonical PR {current.state}"
+    if current.state == "OPEN" and current.is_draft:
+        return "canonical PR is draft; automatic PR work is ineligible"
     if current.state == "OPEN" and receipt.feedback_kind == "pr_local_ci":
-        if current.is_draft:
-            return "canonical PR is draft; local CI is ineligible"
         if current.head_sha != receipt.head_sha:
             return "canonical PR head changed; exact-head local CI is obsolete"
     if current.state == "OPEN" and current.head_sha != receipt.head_sha and ledger is not None:
@@ -32,7 +32,7 @@ def retire_closed_feedback(policy, github, ledger, receipt):
     reason = retirement_reason(current, receipt, ledger)
     if (not policy.enabled or reason is None
             or current.number != receipt.pr_number or current.base_repository != receipt.repository
-            or not policy.admit_pull_request(replace(current, state="OPEN")).admitted):
+            or not policy.admit_pull_request(replace(current, state="OPEN", is_draft=False)).admitted):
         raise ValueError("receipt is not bound to a canonically obsolete dispatch")
     # Closure supersedes every historical head of this same canonical PR.
     # The immutable receipt key below still binds the exact original dispatch.
