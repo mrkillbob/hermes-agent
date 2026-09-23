@@ -772,7 +772,7 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Allow an exact merged PR for historical superseded-feedback resolution",
     )
-    retired = subcommands.add_parser("retire-feedback", help="Retire an exact feedback dispatch after PR closure")
+    retired = subcommands.add_parser("retire-feedback", help="Retire an exact dispatch after PR closure or loss of local CI eligibility")
     retired.add_argument("--repository", required=True)
     retired.add_argument("--pr-number", required=True, type=int)
     retired.add_argument("--feedback-kind", required=True)

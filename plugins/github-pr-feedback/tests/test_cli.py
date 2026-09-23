@@ -2586,7 +2586,9 @@ def test_cron_wrapper_invokes_only_the_fixed_scan_argv_with_an_absolute_hermes_e
         stdout = '{"status":"ok"}\n'
         stderr = ""
 
-    def run(argv: list[str], *, check: bool, capture_output: bool, text: bool) -> Completed:
+    def run(argv: list[str], *, check: bool, capture_output: bool, text: bool, env: dict[str, str]) -> Completed:
+        assert "_HERMES_GATEWAY" not in env
+        assert env["HERMES_HOME"] == str(tmp_path / "profile")
         assert capture_output is True
         assert text is True
         calls.append((argv, check))
@@ -2599,6 +2601,8 @@ def test_cron_wrapper_invokes_only_the_fixed_scan_argv_with_an_absolute_hermes_e
     executable.chmod(0o755)
     monkeypatch.setenv("HERMES_EXECUTABLE", str(executable))
 
+    monkeypatch.setenv("_HERMES_GATEWAY", "1")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
     assert module.main() == 0
     assert calls == [([str(executable), "github-pr-feedback", "scan"], False)]
 
@@ -3721,3 +3725,17 @@ def test_inspect_ci_reads_only_the_requested_repository_receipt(tmp_path, monkey
     args.pr_number = 18
     assert inspect_ci(None, args) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "ci_receipt_unavailable"
+
+
+def test_worker_callback_runs_outside_gateway_scope(tmp_path, monkeypatch):
+    from github_pr_feedback.controller import _governed_command_prefix
+
+    monkeypatch.setenv("_HERMES_GATEWAY", "1")
+    control_home = tmp_path / "control home"
+    prefix = _governed_command_prefix(control_home)
+    # Execute the actual environment prefix with a harmless child probe.
+    import shlex
+    argv = shlex.split(prefix)
+    probe = argv[:argv.index("-m")] + ["-c", "import os,json; print(json.dumps([os.getenv('_HERMES_GATEWAY'), os.getenv('HERMES_HOME')]))"]
+    result = subprocess.run(probe, capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == [None, str(control_home)]
