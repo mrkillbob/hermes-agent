@@ -93,3 +93,13 @@ def test_open_feedback_retirement_requires_exact_current_head_handoff(dispatched
     assert "task-new" in result["reason"]
     assert ledger.exact_pending_task_binding(newer).task_id == "task-new"
     assert not ledger.was_actioned_on_any_head(receipt)
+
+
+def test_draft_feedback_is_not_admitted_and_pending_dispatch_can_retire(dispatched):
+    policy, ledger, receipt, pull = dispatched
+    draft = replace(pull, state="OPEN", is_draft=True)
+    assert policy.admit_pull_request(draft).reason == "draft_pr"
+    assert policy.admit_pull_request(replace(draft, is_draft=False)).admitted
+    result = retire_closed_feedback(policy, SimpleNamespace(get_pull_request=lambda *_: draft), ledger, receipt)
+    assert "draft" in result["reason"]
+    assert not ledger.was_actioned_on_any_head(receipt)
