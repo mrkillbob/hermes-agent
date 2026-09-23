@@ -174,8 +174,13 @@ def main() -> int:
     repository_filter = os.environ.get("HERMES_PR_FEEDBACK_REPOSITORY", "").strip()
     if repository_filter:
         scan_cmd += ["--repository", repository_filter]
+    # This is a standalone governed CLI, not the parent gateway process.
+    # Preserve profile/home isolation; let Hermes resolve its own bot credential.
+    child_env = dict(os.environ)
+    child_env.pop("_HERMES_GATEWAY", None)
     completed = subprocess.run(
         scan_cmd,
+        env=child_env,
         check=False,
         capture_output=True,
         text=True,
