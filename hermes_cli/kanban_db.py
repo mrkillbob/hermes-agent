@@ -3295,14 +3295,17 @@ def complete_task(
     repository_github_client=None,
     repository_git_runner=None,
 ) -> bool:
-    """``running|ready|blocked|review -> done``; records ``result``.
+    """``triage|running|ready|blocked|review -> done``; records ``result``.
 
     ``ready`` is accepted for manual CLI completion and ``review`` for human
-    approval. A live worker claim requires ``expected_run_id`` or ``force=True``;
-    otherwise :class:`LiveClaimError`. Completions from non-review statuses
-    require non-empty result evidence; empty or whitespace-only evidence raises
-    :class:`EmptyCompletionError` after an auditable event. Review approvals are
-    exempt because the human approval itself is the record.
+    approval. A triage task can close only through this evidence-checked path;
+    never-dispatched triage tasks receive an explicit no-repository-change receipt
+    because their planned worktree has not been materialized. A live worker claim
+    requires ``expected_run_id`` or ``force=True``; otherwise :class:`LiveClaimError`.
+    Completions from non-review statuses require non-empty result evidence; empty
+    or whitespace-only evidence raises :class:`EmptyCompletionError` after an
+    auditable event. Review approvals are exempt because the human approval itself
+    is the record.
     """
     now = int(time.time())
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
@@ -3318,6 +3321,23 @@ def complete_task(
     if task is None:
         return False
 
+    never_dispatched_triage = (
+        task.status == "triage"
+        and task.started_at is None
+        and task.current_run_id is None
+        and task.worker_pid is None
+        and task.claim_lock is None
+        and conn.execute(
+            "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (task_id,),
+        ).fetchone() is None
+    )
+    if never_dispatched_triage:
+        # A triage-only verification task has a planned worktree path, not a
+        # checkout. Its explicit completion summary is the evidence; don't make
+        # it Ready just to create a worktree and accidentally dispatch a worker.
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata.setdefault("repository_changes", False)
+
     # This is the shared mutation boundary used by tools, the CLI, and internal
     # callers. Keep repository receipt enforcement here so no supported surface
     # can mark a managed worktree done by bypassing the tool handler.
@@ -3326,6 +3346,7 @@ def complete_task(
         metadata=metadata,
         github_client=repository_github_client,
         git_runner=repository_git_runner,
+        allow_unmaterialized_no_change=never_dispatched_triage,
     )
     
     # Live-claim guard: if task is running with a live worker, require expected_run_id or force
@@ -3374,9 +3395,14 @@ def complete_task(
                        block_kind   = NULL,
                        block_recurrences = 0
                  WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked', 'review')
+                   AND status IN ('triage', 'running', 'ready', 'blocked', 'review')
                 """
         params: tuple = (result, now, task_id)
+        if task.status == "triage":
+            sql += (
+                " AND status = 'triage' AND claim_lock IS NULL "
+                "AND current_run_id IS NULL AND worker_pid IS NULL"
+            )
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params = (*params, int(expected_run_id))

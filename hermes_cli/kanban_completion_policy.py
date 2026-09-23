@@ -112,6 +112,7 @@ def _authorized_github_client():
 
 def enforce_repository_handoff(
     *, task, metadata, github_client=None, git_runner: GitRunner | None = None,
+    allow_unmaterialized_no_change: bool = False,
 ) -> None:
     """Validate the terminal receipt for a dispatcher-managed Git worktree.
 
@@ -122,18 +123,22 @@ def enforce_repository_handoff(
     """
     if task is None or task.workspace_kind != "worktree":
         return
-    if not task.workspace_path:
-        raise CompletionPolicyError(
-            "repository completion receipt rejected: worktree path is unresolved"
-        )
     receipt = metadata if isinstance(metadata, dict) else {}
     changed = receipt.get("repository_changes")
     if not isinstance(changed, bool):
         raise CompletionPolicyError(
             "repository completion receipt must set metadata.repository_changes to true or false"
         )
+    if not task.workspace_path:
+        if changed is False and allow_unmaterialized_no_change:
+            return
+        raise CompletionPolicyError(
+            "repository completion receipt rejected: worktree path is unresolved"
+        )
     workspace = Path(task.workspace_path).expanduser()
     if not workspace.is_dir():
+        if changed is False and allow_unmaterialized_no_change:
+            return
         raise CompletionPolicyError(
             "repository completion receipt rejected: assigned worktree no longer exists"
         )
