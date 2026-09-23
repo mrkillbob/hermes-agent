@@ -57,7 +57,6 @@ jobs:
       - name: Determine base ref
         id: base
         env:
-          BASE_BRANCH: ${{ github.base_ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ inputs.event_name }}
         run: |
@@ -69,6 +68,7 @@ jobs:
               echo "Pull request base SHA is missing" >&2
               exit 1
             fi
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
             BASE_REF="$BASE_SHA"
           else
             BASE_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
