@@ -1204,6 +1204,7 @@ class ScanController:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._claim_lease = claim_lease
         self._label_batches: list[tuple[str, RepositoryTarget, tuple[PullRequest, ...]]] = []
+        self._kanban_task_statuses: dict[str, str] | None = None
 
     def _reconcile_closed_pr_tasks(
         self, repository: str, open_pull_requests: Sequence[PullRequest]
@@ -1228,15 +1229,48 @@ class ScanController:
         boards = tuple(dict.fromkeys(board for board in configured_boards if board))
         from .feedback_retirement import retirement_reason
 
+        pending_pr_numbers = pending_prs(repository)
+        if not pending_pr_numbers:
+            return
+        status_snapshot = getattr(self._kanban, "task_status_snapshot", None)
+        if callable(status_snapshot) and self._kanban_task_statuses is None:
+            self._kanban_task_statuses = {}
+            for board in boards:
+                self._kanban_task_statuses.update(status_snapshot(board))
+        task_statuses = self._kanban_task_statuses or {}
+
         open_by_number = {pr.number: pr for pr in open_pull_requests}
-        for pr_number in pending_prs(repository):
+        for pr_number in pending_pr_numbers:
+            bindings = self._ledger.pending_task_bindings_for_pr(
+                repository, pr_number
+            )
+            if task_statuses:
+                terminal_bindings = tuple(
+                    binding
+                    for binding in bindings
+                    if task_statuses.get(binding.task_id) in {"done", "archived"}
+                )
+                for binding in terminal_bindings:
+                    self._ledger.supersede_stale_dispatch(
+                        binding.receipt,
+                        task_id=binding.task_id,
+                        reason=(
+                            f"Kanban task already "
+                            f"{task_statuses[binding.task_id]}; no active dispatch remains"
+                        ),
+                    )
+                bindings = tuple(
+                    binding
+                    for binding in bindings
+                    if binding not in terminal_bindings
+                )
+            if not bindings:
+                continue
             current = open_by_number.get(pr_number)
             if current is None:
                 # An omitted list entry alone is not evidence of PR closure.
                 current = self._github.get_pull_request(repository, pr_number)
-            for binding in self._ledger.pending_task_bindings_for_pr(
-                repository, pr_number
-            ):
+            for binding in bindings:
                 reason = retirement_reason(current, binding.receipt, self._ledger)
                 if reason is None:
                     continue
@@ -1266,6 +1300,7 @@ class ScanController:
         required_local_ci_backlog_by_repository: dict[str, int] = {}
         local_ci_catalogue_deferred = 0
         self._label_batches = []
+        self._kanban_task_statuses = None
         if not self._policy.enabled or self._policy.not_before is None:
             return _scan_result(
                 created,
