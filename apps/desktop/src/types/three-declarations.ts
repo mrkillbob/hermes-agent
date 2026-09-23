@@ -70,7 +70,7 @@ declare module 'three' {
 }
 
 declare module 'three/examples/jsm/loaders/GLTFLoader.js' {
-  import { Object3D, Scene } from 'three'
+  import type { Object3D, Scene } from 'three'
 
   export interface GLTF {
     scene: Scene & Object3D
