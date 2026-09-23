@@ -478,6 +478,30 @@ class KanbanSubprocessClient:
             raise RuntimeError("Kanban task lookup failed")
         return status.strip()
 
+    def task_status_snapshot(self, board: str) -> dict[str, str]:
+        """Read one board's task states so retirement can skip terminal cards."""
+        result = self._runner.run(
+            ["hermes", "kanban", "--board", board, "list", "--json", "--archived"]
+        )
+        if result.returncode != 0:
+            raise RuntimeError("Kanban task status snapshot failed")
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise RuntimeError("Kanban task status snapshot failed") from error
+        if not isinstance(payload, list):
+            raise RuntimeError("Kanban task status snapshot failed")
+        statuses: dict[str, str] = {}
+        for task in payload:
+            if not isinstance(task, dict):
+                raise RuntimeError("Kanban task status snapshot failed")
+            task_id = task.get("id")
+            status = task.get("status")
+            if not isinstance(task_id, str) or not isinstance(status, str):
+                raise RuntimeError("Kanban task status snapshot failed")
+            statuses[task_id] = status
+        return statuses
+
     def archive_task(self, board: str, task_id: str) -> None:
         result = self._runner.run(
             ["hermes", "kanban", "--board", board, "archive", task_id]
