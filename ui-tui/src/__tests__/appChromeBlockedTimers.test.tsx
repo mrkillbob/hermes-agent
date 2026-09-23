@@ -3,7 +3,7 @@ import { PassThrough } from 'stream'
 import { renderSync } from '@hermes/ink'
 import { stripAnsi } from '@hermes/shared/ansi'
 import React from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, waitFor } from 'vitest'
 
 import { GatewayProvider } from '../app/gatewayContext.js'
 import type { AppLayoutProps, OverlayState, UiState } from '../app/interfaces.js'
@@ -304,14 +304,16 @@ describe('status-chrome timers under an occluding overlay', () => {
     nowSpy.mockReturnValue(T0 + 300_000)
     rule.clear()
     resetOverlayState()
-    await flush()
-
-    const resumed = rule.output()
 
     // Caught up to real elapsed time, not stuck on the pre-overlay values.
-    expect(resumed).toContain('6m 0s')
-    expect(resumed).toContain('✓ 5m 5s')
-    expect(resumed).not.toContain('1m 0s')
+    // Use waitFor instead of a fixed flush: the re-render (store change →
+    // isOccluded flip → useEffect → setNow → second render) takes at least
+    // two React scheduler ticks, and a fixed 20ms races against them.
+    await waitFor(() => {
+      expect(rule.output()).toContain('6m 0s')
+      expect(rule.output()).toContain('✓ 5m 5s')
+      expect(rule.output()).not.toContain('1m 0s')
+    }, { timeout: 1000 })
 
     // …and the clocks are running again.
     expect(oneSecondTimers(intervalSpy)).toBe(2)
