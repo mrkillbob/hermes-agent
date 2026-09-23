@@ -31,7 +31,6 @@ import {
 } from 'electron'
 
 import { classifyActiveRuntime } from './active-runtime-state'
-import { hasGitEntry } from './git-checkout'
 import {
   destroyKeepaliveAgents,
   downloadAgentFor,
@@ -226,6 +225,7 @@ import {
 } from './gateway-file-download'
 import { startGatewaysAfterUpdateAbort, stopGatewayBeforeUpdate } from './gateway-stop-before-update'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
+import { hasGitEntry } from './git-checkout'
 import { registerGitIpc } from './git-ipc'
 import {
   describeGitHubCredentialSource,
