@@ -148,10 +148,13 @@ describe('CustomEndpointsSettings', () => {
 
     render(<CustomEndpointsSettings />)
 
-    await waitFor(() => expect(getCustomEndpoints).toHaveBeenCalledWith('content-studio'))
+    // Wait for loading to finish (the form is hidden while loading=true); findBy uses waitFor
+    // internally, so it also implicitly proves getCustomEndpoints was awaited and resolved.
+    const nameInput = await screen.findByPlaceholderText('Axet Proxy')
+    expect(getCustomEndpoints).toHaveBeenCalledWith('content-studio')
     expect(screen.getByText('Applies to')).toBeTruthy()
 
-    fireEvent.change(screen.getByPlaceholderText('Axet Proxy'), { target: { value: 'Studio gateway' } })
+    fireEvent.change(nameInput, { target: { value: 'Studio gateway' } })
     fireEvent.change(screen.getByPlaceholderText('http://127.0.0.1:8081/v1'), {
       target: { value: 'https://studio.example.com/v1' }
     })

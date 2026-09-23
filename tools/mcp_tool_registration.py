@@ -549,7 +549,7 @@ def _register_connected_into_current_scope(servers: dict) -> int:
                 continue
             name = _core._server_public_names.get(key, _key_name(key))
             config = servers.get(name)
-            if config is None or not _server_enabled(config) or config_fingerprint(config) != fingerprint:
+            if config is None or not mcp_server_enabled(config) or config_fingerprint(config) != fingerprint:
                 stale_lazy.append(key)
     for key in stale_lazy:
         with _core._lock:

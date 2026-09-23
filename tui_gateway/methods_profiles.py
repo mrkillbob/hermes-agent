@@ -652,11 +652,10 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
             for srv in wanted:
                 if not isinstance(mcp_cfg.get(srv), dict) and isinstance(launch_mcp.get(srv), dict):
                     mcp_cfg[srv] = dict(launch_mcp[srv])
-                if isinstance(mcp_cfg.get(srv), dict):
-                    mcp_cfg[srv].pop("disabled", None)
             for srv, entry in mcp_cfg.items():
-                if srv not in wanted and isinstance(entry, dict):
-                    entry["disabled"] = True
+                if isinstance(entry, dict):
+                    entry["enabled"] = srv in wanted
+                    entry.pop("disabled", None)
             updates[("mcp_servers",)] = mcp_cfg
         if updates:
             try:
