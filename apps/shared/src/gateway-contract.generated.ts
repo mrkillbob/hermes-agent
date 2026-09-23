@@ -889,8 +889,21 @@ export interface ConnectionOperationTarget {
   required_env?: ConnectionTargetEnvField[] | null
   tools?: string[] | null
   hint?: string | null
+  display?: string | null
+  description?: string | null
+  tier?: CatalogTier | null
+  platforms?: string[] | null
+  repo?: string | null
+  sha?: string | null
+  subdir?: string | null
+  scan?: CatalogScan | null
+  requirements?: string[] | null
+  has_desktop_half?: boolean | null
+  target_profile?: string | null
+  app_state?: CatalogAppState | null
+  skill?: string | null
 }
-export type ConnectionTargetKind = 'connector' | 'mcp'
+export type ConnectionTargetKind = 'connector' | 'mcp' | 'plugin' | 'skill'
 export type ConnectionTargetAction = 'authorize' | 'connect' | 'enable' | 'install' | 'reconnect'
 /** ``tools/connectors/contract.py::TargetState``. */
 export type ConnectionTargetState = 'pending' | 'initiated' | 'connected' | 'skipped' | 'failed' | 'expired' | 'not_connected'
@@ -902,6 +915,15 @@ export interface ConnectionTargetEnvField {
   default: string
   prompt?: string | null
 }
+export type CatalogTier = 'official' | 'community'
+/** The catalog's security scan of the pinned commit; read-only on the card. */
+export interface CatalogScan {
+  status: CatalogScanStatus
+  summary: string
+}
+export type CatalogScanStatus = 'passed' | 'warnings' | 'failed'
+/** The desktop app a catalog plugin drives, from its ``hermes_platform`` declaration. */
+export type CatalogAppState = 'present' | 'missing_app' | 'app_not_running' | 'unknown'
 export interface ConnectionWakeResult {
   status: 'ok'
 }
@@ -1806,6 +1828,7 @@ export interface OnboardingAnswers {
   layout?: string | null
   focus?: string[] | null
   connectors?: string[] | null
+  plugins?: string[] | null
   [key: string]: unknown
 }
 export interface ProfilesRememberOnboardingResult {
@@ -3887,7 +3910,7 @@ export interface PluginsManageParams {
   accept_capabilities?: boolean | null
   values?: Record<string, unknown> | null
 }
-export type PluginsAction = 'list' | 'toggle' | 'install' | 'update' | 'remove' | 'settings'
+export type PluginsAction = 'list' | 'toggle' | 'install' | 'update' | 'remove' | 'settings' | 'onboarding'
 /** ``list`` → ``plugins`` + counts; ``toggle`` → ``ok``/``unchanged``/``restart_required``/``name`` (the canonical key written)/``plugin``; ``install`` → ``hermes_cli.plugins_cmd.dashboard_install_plugin``'s ok payload; ``toggle``/``install``/``update`` that loaded a plugin also carry ``gateway_reloaded`` (the running gateway picked it up and re-wired its handlers) and ``activation`` — the honest split of what is live now vs deferred, so ``restart_required`` is True only when no gateway answered; ``update`` → ``ok``/``unchanged``/``sha``, or ``ok=false`` + ``consent_required`` with the ``delta`` (``{surface: [added...]}``) / ``delta_lines`` a widened pin adds — nothing changed until the client retries with ``accept_capabilities``; ``remove`` → ``ok``/``name`` plus ``cleared_memory_provider`` when the removed plugin was the live ``memory.provider``. */
 export interface PluginsManageResult {
   plugins?: AgentPluginRow[] | null
@@ -3913,6 +3936,7 @@ export interface PluginsManageResult {
   delta_lines?: string[] | null
   error?: string | null
   written?: string[] | null
+  onboarding?: OnboardingCatalogPlugin[] | null
 }
 /** ``methods_tools._plugin_rows`` + ``plugins_cmd_catalog.catalog_row_fields`` provenance. */
 export interface AgentPluginRow {
@@ -3955,12 +3979,39 @@ export interface PluginSettingField {
   has_value?: boolean | null
 }
 export type PluginSettingFieldType = 'string' | 'number' | 'boolean' | 'enum' | 'secret' | 'json'
-/** What a plugin loaded mid-run does NOW vs later (``hermes_cli.plugins_activation``), ``{kind: [names]}`` with only non-empty kinds present. ``activated_now`` kinds: ``gateway_commands`` (slash names), ``gateway_transforms`` / ``hooks`` (hook names), ``callbacks`` (platforms / ``slack:<action_id>``) — live in the running gateway once it reloaded (``gateway_reloaded``). ``deferred`` kinds: ``tools`` (tool names) and ``prompt`` (section ids) apply from the next session; ``mcp_servers`` lists the plugin's mcp.json server names (exactly as ``mcp.servers.*`` know them) — not connected until ``mcp.reload``. The Desktop "Installed. Connect its servers now" card reads exactly ``deferred.mcp_servers``. */
+/** What a plugin loaded mid-run does NOW vs later (``hermes_cli.plugins_activation``). ``activated_now`` kinds (``{kind: [names]}``): ``gateway_commands`` (slash names), ``gateway_transforms`` / ``hooks`` (hook names), ``callbacks`` (platforms / ``slack:<action_id>``) — live in the running gateway once it reloaded (``gateway_reloaded``). ``live_now``: the plugin's MCP servers (connected, with their tools, or the error) and skills, usable in every open chat of the profile from its next turn — the chats also get a note listing them. ``deferred`` kinds: ``tools`` (Python tool names) and ``prompt`` (section ids) apply from the next session. */
 export interface PluginActivation {
   name: string
   key: string
   activated_now?: Record<string, string[]>
+  live_now?: PluginLiveNow | null
   deferred?: Record<string, string[]>
+}
+export interface PluginLiveNow {
+  mcp_servers?: PluginLiveServer[]
+  skills?: PluginLiveSkill[]
+}
+/** One plugin MCP server connected at activation: its callable tool names, or the reason it did not connect. */
+export interface PluginLiveServer {
+  name: string
+  connected: boolean
+  tools?: string[]
+  error?: string | null
+}
+/** One plugin skill usable now through ``skill_view`` (qualified ``<plugin>:<skill>``). */
+export interface PluginLiveSkill {
+  name: string
+  description?: string
+}
+/** A catalog plugin curated for the onboarding card (``onboarding: true``) that this OS runs. ``app_state`` is the pinned ``plugin.json`` declaration judged on this host; ``sentence`` names what is missing (empty when present or unknown). */
+export interface OnboardingCatalogPlugin {
+  name: string
+  title: string
+  description: string
+  tier: CatalogTier
+  platforms: string[]
+  app_state: CatalogAppState
+  sentence: string
 }
 /** Single question: ``question`` / ``choices`` (/ ``multi_select``); batch: ``questions``. ``answers`` rides only on a reconnect replay (locks the server already accepted). */
 export interface ClarifyRequestParams {
