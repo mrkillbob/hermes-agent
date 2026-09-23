@@ -67,7 +67,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+
+      - name: Fetch PR comparison commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: git fetch --no-tags --depth=1 origin "$BASE" "$HEAD"
 
       - name: Scan diff for critical patterns
         id: scan
@@ -81,17 +87,17 @@ jobs:
           HEAD="${{ github.event.pull_request.head.sha }}"
 
           # Added lines only, excluding lockfiles.
-          # Three-point diff (base...head) diffs from the merge base to HEAD,
-          # so only changes introduced by this PR are included — not changes
-          # that landed on main after the PR branched off.
-          DIFF=$(git diff "$BASE"..."$HEAD" -- . ':!uv.lock' ':!*.lock' ':!package-lock.json' ':!yarn.lock' || true)
+          # Compare the base and head trees directly. Fetching only these two
+          # commits avoids downloading the repository's full history while
+          # still scanning exactly the PR's net changes.
+          DIFF=$(git diff "$BASE" "$HEAD" -- . ':!uv.lock' ':!*.lock' ':!package-lock.json' ':!yarn.lock' || true)
 
           FINDINGS=""
 
           # --- .pth files (auto-execute on Python startup) ---
           # The exact mechanism used in the litellm supply chain attack:
           # https://github.com/BerriAI/litellm/issues/24512
-          PTH_FILES=$(git diff --diff-filter=d --name-only "$BASE"..."$HEAD" | grep '\.pth$' || true)
+          PTH_FILES=$(git diff --diff-filter=d --name-only "$BASE" "$HEAD" | grep '\.pth$' || true)
           if [ -n "$PTH_FILES" ]; then
             FINDINGS="${FINDINGS}
           ### 🚨 CRITICAL: .pth file added or modified
@@ -139,7 +145,7 @@ jobs:
           # auto-loaded by the interpreter via site.py. Any nested file with the
           # same name (e.g. hermes_cli/setup.py — the CLI setup wizard) is unrelated
           # and produced false positives that trained reviewers to ignore the scanner.
-          SETUP_HITS=$(git diff --diff-filter=d --name-only "$BASE"..."$HEAD" | grep -E '^(setup\.py|setup\.cfg|sitecustomize\.py|usercustomize\.py|__init__\.pth)$' || true)
+          SETUP_HITS=$(git diff --diff-filter=d --name-only "$BASE" "$HEAD" | grep -E '^(setup\.py|setup\.cfg|sitecustomize\.py|usercustomize\.py|__init__\.pth)$' || true)
           # A maintainer-applied ci-reviewed label records the manual review
           # required for intentional changes to an install hook. The scanner
           # still blocks every unreviewed addition or modification.
@@ -192,7 +198,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+
+      - name: Fetch PR comparison commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: git fetch --no-tags --depth=1 origin "$BASE" "$HEAD"
 
       - name: Check for unbounded PyPI deps
         id: bounds
@@ -203,7 +215,7 @@ jobs:
           HEAD="${{ github.event.pull_request.head.sha }}"
 
           # Only check added lines in pyproject.toml
-          ADDED=$(git diff "$BASE"..."$HEAD" -- pyproject.toml | grep '^+' | grep -v '^+++' || true)
+          ADDED=$(git diff "$BASE" "$HEAD" -- pyproject.toml | grep '^+' | grep -v '^+++' || true)
 
           if [ -z "$ADDED" ]; then
             echo "found=false" >> "$GITHUB_OUTPUT"
