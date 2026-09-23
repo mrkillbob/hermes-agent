@@ -3737,5 +3737,7 @@ def test_worker_callback_runs_outside_gateway_scope(tmp_path, monkeypatch):
     import shlex
     argv = shlex.split(prefix)
     probe = argv[:argv.index("-m")] + ["-c", "import os,json; print(json.dumps([os.getenv('_HERMES_GATEWAY'), os.getenv('HERMES_HOME')]))"]
-    result = subprocess.run(probe, capture_output=True, text=True, check=True)
+    result = subprocess.run(
+        probe, capture_output=True, text=True, encoding="utf-8", check=True
+    )
     assert json.loads(result.stdout) == [None, str(control_home)]
