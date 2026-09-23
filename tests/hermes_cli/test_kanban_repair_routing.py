@@ -51,6 +51,5 @@ def test_failed_auth_and_launch_races_have_repair_owners():
         "Behavioral test for cancel_gui_run and _reconcile_stale_active_run.",
     ) == "runtime-correctness-steward"
 
-
 def test_unknown_scope_stays_unassigned_for_explicit_triage():
     assert repair_profile_for_task("Investigate an unclear issue", "Needs more scope.") is None
