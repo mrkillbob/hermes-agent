@@ -507,6 +507,33 @@ def test_terminal_provider_exit_routes_to_intake_after_one_attempt_in_either_lan
             assert task.status == "blocked"
 
 
+def test_repair_handoff_does_not_retry_the_same_specialist(kanban_home, monkeypatch):
+    """A specialist that cannot complete its assigned repair must not receive it again."""
+    import hermes_cli.kanban_repair_routing as routing
+
+    monkeypatch.setattr(routing, "repair_profile_for_task", lambda _title, _body: "research-lab")
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="audit", assignee="research-lab")
+        claimed = kb.claim_task(conn, task_id, claimer=f"{kb._claimer_id()}:worker")
+        assert claimed is not None
+
+        routed = kb.route_worker_block_to_orchestrator(
+            conn, task_id, reason="repair protocol failure",
+            expected_run_id=claimed.current_run_id,
+        )
+
+        task = kb.get_task(conn, task_id)
+        events = [event for event in kb.list_events(conn, task_id)
+                  if event.kind == "routed_to_repair_profile"]
+
+    assert routed == (True, "triage", "task-intake-router")
+    assert task is not None
+    assert task.status == "triage"
+    assert task.assignee == "task-intake-router"
+    assert len(events) == 1
+    assert (events[0].payload or {}).get("from_assignee") == "research-lab"
+
+
 
 
 def test_provider_egress_error_parser_requires_known_signature(
