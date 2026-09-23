@@ -144,6 +144,16 @@ _BOARD_SPECS = [
         "NEW board — the slug gains a numeric suffix if it is already taken — so an import can "
         "never overwrite or merge into a board you already have."
     )),
+    _cmd("merge", [
+        _arg("slug", help="Source board"),
+        _arg("--into", required=True, help="Existing destination board"),
+        _arg("--backup", required=True, help="Recovery archive path (includes attachments and logs)"),
+        _arg("--task-id", action="append", dest="task_ids", help="Move only this card (repeatable)"),
+        _arg("--delete-source", action="store_true", help="Delete source after card and history verification"),
+    ], help="Copy cards and history into an existing board", description=(
+        "Creates a complete recovery archive, refuses live task claims, copies task history and "
+        "attachments, and verifies the destination. The source remains unless --delete-source is set."
+    )),
 ]
 
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.

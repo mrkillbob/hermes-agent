@@ -61,7 +61,7 @@ def test_generic_completion_hook_uses_its_task_id(tmp_path, monkeypatch):
     assert not (tmp_path / "github-pr-feedback" / "ledger.sqlite3").exists()
 
 
-@pytest.mark.parametrize("case", ["none", "wrong_head", "wrong_base", "stale", "valid", "non_ci", "running", "failed"])
+@pytest.mark.parametrize("case", ["none", "wrong_head", "wrong_base", "stale", "valid", "non_ci", "running", "failed", "retired"])
 def test_registered_ci_completion_gate_uses_durable_exact_dispatch(tmp_path, monkeypatch, case):
     from hermes_cli.plugins import get_pre_tool_call_block_message
     import hermes_cli.lifecycle as lifecycle
@@ -78,12 +78,14 @@ def test_registered_ci_completion_gate_uses_durable_exact_dispatch(tmp_path, mon
     try:
         claim = ledger.claim(dispatch, owner="test", claimed_at=now, stale_before=now - timedelta(minutes=5))
         ledger.finalize(dispatch, "audit-task", claim)
+        if case == "retired":
+            ledger.supersede_stale_dispatch(dispatch, task_id="audit-task", reason="canonical PR is draft")
         if case == "running":
             assert ledger.claim_ci_run(identity.repository, identity.pr_number, identity.base_sha,
                                        identity.head_sha, "f" * 64, supervisor_pid=12345,
                                        claimed_at=now, stale_before=now - timedelta(minutes=5),
                                        pid_is_alive=lambda pid: True) is not None
-        if case not in {"none", "non_ci", "running"}:
+        if case not in {"none", "non_ci", "running", "retired"}:
             actual = CIAuditIdentity(identity.repository, identity.pr_number,
                                      "c" * 40 if case == "wrong_base" else identity.base_sha,
                                      "c" * 40 if case == "wrong_head" else identity.head_sha)
@@ -101,7 +103,7 @@ def test_registered_ci_completion_gate_uses_durable_exact_dispatch(tmp_path, mon
         monkeypatch.setattr(lifecycle, "invoke_hook", lambda name, **kw: [hook(**kw)])
         rejection = get_pre_tool_call_block_message("kanban_complete", {
             "summary": "Tests passed, invented command output", "metadata": {"receipt_id": "fabricated"}})
-        assert (rejection is None) is (case in {"valid", "non_ci"})
+        assert (rejection is None) is (case in {"valid", "non_ci", "retired"})
         assert get_pre_tool_call_block_message("kanban_block", {}) is None
     finally:
         ledger.close()

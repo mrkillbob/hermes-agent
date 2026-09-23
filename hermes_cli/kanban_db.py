@@ -1632,7 +1632,8 @@ def create_task(
                 # branch, instead of the random ``wt/<id>`` worker fallback.
                 if project_obj is not None and workspace_kind == "worktree":
                     if project_repo and not workspace_path:
-                        workspace_path = os.path.join(project_repo, ".worktrees", task_id)
+                        from hermes_cli.kanban_worktree_policy import project_worktree_path
+                        workspace_path = str(project_worktree_path(Path(project_repo), task_id))
                     if not branch_name:
                         branch_name = _project_branch_name(project_obj, task_id, title)
 

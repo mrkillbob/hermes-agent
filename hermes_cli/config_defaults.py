@@ -1906,6 +1906,8 @@ DEFAULT_CONFIG = {
         # Explicit source refs for carried project integrations; keys are absolute repo paths.
         # Unconfigured projects retain remote-default-branch worktree behavior.
         "worktree_base_refs": {},
+        # Optional shared project worktree directories, keyed by absolute repository path.
+        "worktree_roots": {},
         # Auto-claim tasks in the review column and spawn the assigned profile with the bundled
         # sdlc-review skill. Disable where every review is done manually from the dashboard.
         "review_dispatch": True,

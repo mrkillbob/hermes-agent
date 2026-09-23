@@ -63,13 +63,16 @@ def guard_completion(ctx, *, tool_name: str = "", args=None, task_id=None, **_kw
             # One snapshot covers both task ownership and evidence; never create/migrate a ledger here.
             connection.execute("BEGIN")
             bindings = connection.execute(
-                "SELECT repository, pr_number, feedback_id, head_sha, claimed_at "
+                "SELECT repository, pr_number, feedback_id, head_sha, claimed_at, status, action_status "
                 "FROM feedback_receipts WHERE task_id = ? AND feedback_kind = 'pr_local_ci'",
                 (target,),
             ).fetchall()
             if not bindings:
                 return None
-            if all(_has_receipt(connection, binding) for binding in bindings):
+            if all(
+                (binding[5] == "completed" and binding[6] == "superseded")
+                or _has_receipt(connection, binding[:5]) for binding in bindings
+            ):
                 return None
         reason = "no typed passing durable CI receipt matches this task's exact PR head/base and dispatch"
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):

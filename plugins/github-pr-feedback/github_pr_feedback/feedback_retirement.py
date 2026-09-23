@@ -5,17 +5,37 @@ from datetime import UTC, datetime
 from .ledger import LedgerStateError
 
 
+def retirement_reason(current, receipt, ledger=None):
+    if current.state in {"CLOSED", "MERGED"}:
+        return f"canonical PR {current.state}"
+    if current.state == "OPEN" and current.is_draft:
+        return "canonical PR is draft; automatic PR work is ineligible"
+    if current.state == "OPEN" and receipt.feedback_kind == "pr_local_ci":
+        if current.head_sha != receipt.head_sha:
+            return "canonical PR head changed; exact-head local CI is obsolete"
+    if current.state == "OPEN" and current.head_sha != receipt.head_sha and ledger is not None:
+        for replacement in ledger.pending_task_bindings_for_pr(receipt.repository, receipt.pr_number):
+            newer = replacement.receipt
+            if (newer.head_sha == current.head_sha
+                    and newer.feedback_kind == receipt.feedback_kind
+                    and newer.feedback_id == receipt.feedback_id):
+                return f"same feedback handed to current-head dispatch {replacement.task_id}"
+    return None
+
+
 def retire_closed_feedback(policy, github, ledger, receipt):
     # pr_local_ci normally completes through audit-pr's own typed-receipt flow,
     # not this one -- but audit-pr rejects a non-OPEN PR identity outright, so
     # a card whose PR closes mid-audit has no other path to clear its pending
     # ledger row. Retire it here too rather than leaving it stuck forever.
     current = github.get_pull_request(receipt.repository, receipt.pr_number)
-    if (not policy.enabled or current.state not in {"CLOSED", "MERGED"}
-            or current.head_sha != receipt.head_sha
+    reason = retirement_reason(current, receipt, ledger)
+    if (not policy.enabled or reason is None
             or current.number != receipt.pr_number or current.base_repository != receipt.repository
-            or not policy.admit_pull_request(replace(current, state="OPEN")).admitted):
-        raise ValueError("receipt is not bound to a closed canonical PR")
+            or not policy.admit_pull_request(replace(current, state="OPEN", is_draft=False)).admitted):
+        raise ValueError("receipt is not bound to a canonically obsolete dispatch")
+    # Closure supersedes every historical head of this same canonical PR.
+    # The immutable receipt key below still binds the exact original dispatch.
     # Re-read after admission: a reopened or changed PR must keep its pending gate.
     if github.get_pull_request(receipt.repository, receipt.pr_number) != current:
         raise ValueError("canonical PR changed during retirement")
@@ -32,10 +52,10 @@ def retire_closed_feedback(policy, github, ledger, receipt):
                 "UPDATE feedback_receipts SET action_status = 'superseded', actioned_at = ?, "
                 "last_error = ? WHERE repository = ? AND pr_number = ? AND feedback_kind = ? "
                 "AND feedback_id = ? AND head_sha = ? AND action_status = 'pending'",
-                (datetime.now(UTC).isoformat(), f"canonical PR {current.state}; repair superseded", *receipt.key),
+                (datetime.now(UTC).isoformat(), f"{reason}; dispatch superseded", *receipt.key),
             )
     return {"status": "retired", "task_id": row[0], "repository": receipt.repository,
-            "pr_number": receipt.pr_number, "head_sha": receipt.head_sha, "pr_state": current.state}
+            "pr_number": receipt.pr_number, "head_sha": receipt.head_sha, "observed_head_sha": current.head_sha, "pr_state": current.state, "reason": reason}
 
 
 def run_retirement(ctx, args):

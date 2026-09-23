@@ -682,7 +682,7 @@ BROWSER_VAULT_SAVE_LOGIN_SCHEMA = {
 BROWSER_VAULT_ENTER_CODE_SCHEMA = {
     "name": "browser_vault_enter_code",
     "description": (
-        "The page asks for a one-time / verification / 2FA code after the password: call this. If the saved login "
+        "The page asks for a one-time / verification / 2FA code after entering the password. Call this tool. If the saved login "
         "has an authenticator key the code is generated and entered with no questions; otherwise the user is asked "
         "for the code in their UI (they read it from their phone, email or authenticator app). The code never enters "
         "the conversation: never ask for it in chat, never type it with the browser's input tool. no_code_field means "

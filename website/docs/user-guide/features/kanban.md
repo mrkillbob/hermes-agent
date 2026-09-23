@@ -1450,3 +1450,17 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
+
+### Shared project worktree policy
+
+The control home's `kanban.worktree_roots` mapping selects an absolute worktree
+directory for each absolute repository path. Worker profiles use this shared
+mapping, so project tasks keep the same location across profile boundaries.
+Existing materialized worktrees are preserved; unmaterialized legacy task paths
+use the configured root at dispatch. Without a mapping, `.worktrees` remains the
+default.
+
+`kanban.worktree_base_refs` can pin a project's source branch. When it names a
+configured remote branch (for example `origin/stable`), admission fetches that
+exact branch before resolving its commit. Fetch failure stops admission instead
+of silently using a stale or unrelated base.
