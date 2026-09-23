@@ -46,6 +46,10 @@ def test_known_repair_scopes_bypass_router_profiles():
 def test_failed_auth_and_launch_races_have_repair_owners():
     assert repair_profile_for_task("Hermes github-pr-feedback gh auth failure", "") == "hermes-maintenance-steward"
     assert repair_profile_for_task("Cancellation race", "start_gui_command before process registration") == "runtime-correctness-steward"
+    assert repair_profile_for_task(
+        "Independently verify GUI launch/cancel and stale-reconciliation race",
+        "Behavioral test for cancel_gui_run and _reconcile_stale_active_run.",
+    ) == "runtime-correctness-steward"
 
 
 def test_unknown_scope_stays_unassigned_for_explicit_triage():
