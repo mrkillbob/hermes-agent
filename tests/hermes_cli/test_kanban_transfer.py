@@ -365,7 +365,7 @@ def test_import_rejects_a_future_format_version(kanban_root, tmp_path):
         kt.import_board(str(bumped))
 
 
-def test_merge_copies_all_cards_history_and_attachments_and_keeps_source(kanban_root, tmp_path):
+def test_merge_moves_all_cards_history_and_attachments(kanban_root, tmp_path):
     target_root = kanban_root("source")
     ids = _seed_board("source")
     kb.create_board("target", name="Target")
@@ -376,6 +376,7 @@ def test_merge_copies_all_cards_history_and_attachments_and_keeps_source(kanban_
     assert result["counts"]["task_attachments"] == 1
     assert Path(result["backup"]).is_file()
     assert kb.board_exists("source")
+    assert _tasks_by_title("source") == {}
     assert set(_tasks_by_title("target")) == {"scratch task", "worktree task"}
     with kbc.connect_closing(board="target") as conn:
         comment = conn.execute("SELECT body FROM task_comments WHERE task_id=?", (ids["scratch"],)).fetchone()

@@ -120,17 +120,21 @@ def _cmd_boards_merge(args: argparse.Namespace) -> int:
                 live = conn.execute("SELECT id FROM tasks WHERE status='running' OR claim_lock IS NOT NULL OR current_run_id IS NOT NULL LIMIT 1").fetchone()
             if remaining or live:
                 raise ValueError("source board still has cards or live claims after merge")
+            workspace_backup = kanban_transfer.export_board_workspaces(
+                args.slug, args.backup.removesuffix(".tar.gz").removesuffix(".tgz") + "-workspaces"
+            )
             removed = kb.remove_board(args.slug, archive=False)
             if removed.get("action") != "deleted":
                 raise RuntimeError("source board did not delete after verified merge")
     except Exception as exc:
         return _err(f"kanban boards merge: {exc}")
-    print(f"Merged {result['tasks']} cards from {result['source']!r} into "
+    print(f"Moved {result['tasks']} cards from {result['source']!r} into "
           f"{result['destination']!r}; backup: {result['backup']}")
     if args.delete_source:
         print(f"Deleted source board {result['source']!r} after count and identity verification.")
+        print(f"Workspace files preserved: {workspace_backup['archive']} ({workspace_backup['files']} files)")
     else:
-        print("Source board remains intact; delete it only after reviewing the migration.")
+        print("Unselected cards remain on the source board.")
     print("Copied rows: " + ", ".join(f"{name}={count}" for name, count in result["counts"].items()))
     return 0
 
