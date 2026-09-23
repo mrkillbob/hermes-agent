@@ -1,6 +1,7 @@
 """Tests for ``hermes plugins validate`` (hermes_cli/plugin_validate.py).
 
-Static checks never execute candidate code.
+Static manifest checks + subprocess-isolated capability probing against a
+recording stub context.
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ def test_portable_validation_fails_orphan_and_reports_availability(tmp_path: Pat
     )
     report = validate_plugin_dir(declared)
     assert any(
-        name == "server availability: worker" and ok and detail in {"missing_app", "unsupported_os"}
+        name == "server availability: worker" and ok and detail.startswith(("missing_app", "unsupported_os"))
         for name, ok, detail in report.checks
     )
 
@@ -104,38 +105,6 @@ def test_admission_runs_the_install_scanner(tmp_path):
 
 
 class TestCapabilityProbe:
-    def test_static_reexport_and_literal_registration_loops_are_inspected(self, tmp_path):
-        plugin = _make_plugin(
-            tmp_path,
-            manifest=dict(
-                BASE_MANIFEST,
-                provides_tools=["table_tool_a", "table_tool_b"],
-                provides_hooks=["table_hook_a", "table_hook_b"],
-            ),
-            init_py=(
-                "try:\n"
-                "    from .impl import register\n"
-                "except ImportError:\n"
-                "    from impl import register\n"
-            ),
-        )
-        (plugin / "impl.py").write_text(
-            "TOOLS = [('table_tool_a', None), ('table_tool_b', None)]\n"
-            "HOOKS = ('table_hook_a', 'table_hook_b')\n"
-            "def register(ctx):\n"
-            "    for name, _handler in TOOLS:\n"
-            "        ctx.register_tool(name, schema={}, handler=lambda **kw: None)\n"
-            "    for hook in HOOKS:\n"
-            "        ctx.register_hook(hook, lambda **kw: None)\n",
-            encoding="utf-8",
-        )
-
-        report = validate_plugin_dir(plugin)
-
-        assert report.ok, report.failures
-        assert ("declared tools", True, "matches statically visible calls") in report.checks
-        assert ("declared hooks", True, "matches statically visible calls") in report.checks
-
     def test_undeclared_tool_registration_fails_with_diff(self, tmp_path):
         init = (
             "def register(ctx):\n"
@@ -252,34 +221,6 @@ class TestModelProviderKind:
             for name, _ok, detail in report.checks
         ), report.checks
 
-    def test_static_provider_subclass_instances_and_factory_are_resolved(self, tmp_path):
-        d = _make_plugin(
-            tmp_path,
-            manifest={**BASE_MANIFEST, "name": "static-provider", "kind": "model-provider"},
-            init_py=(
-                "from providers import register_provider\n"
-                "from providers.base import ProviderProfile\n"
-                "class DirectProfile(ProviderProfile):\n    pass\n"
-                "profile = DirectProfile(name='direct_fixture')\n"
-                "FACTORY_NAME = 'factory_fixture'\n"
-                "register_provider(profile)\n"
-                "def build_profile():\n"
-                "    class FactoryProfile(ProviderProfile):\n        pass\n"
-                "    return FactoryProfile(name=FACTORY_NAME)\n"
-                "register_provider(build_profile())\n"
-            ),
-        )
-
-        report = validate_plugin_dir(d)
-
-        assert report.ok, report.failures
-        assert any(
-            name == "capability probe"
-            and "direct_fixture" in detail
-            and "factory_fixture" in detail
-            for name, _ok, detail in report.checks
-        ), report.checks
-
     def test_provider_plugin_that_registers_nothing_fails(self, tmp_path):
         d = _make_plugin(
             tmp_path,
@@ -305,45 +246,9 @@ class TestRequiresHermesSpec:
         ), report.failures
 
 
-def test_validation_never_executes_candidate_import_or_registration(tmp_path, monkeypatch):
-    marker = tmp_path / "executed"
-    monkeypatch.setenv("SECRET_PROBE_TOKEN", "should-not-leak")
-    init = f"from pathlib import Path\nimport os\nPath({str(marker)!r}).write_text(os.environ['SECRET_PROBE_TOKEN'])\ndef register(ctx):\n    Path({str(marker)!r}).write_text('registered')\n"
-    plugin = _make_plugin(tmp_path, manifest=BASE_MANIFEST, init_py=init)
-    report = validate_plugin_dir(plugin)
-    assert report.ok
-    assert not marker.exists()
-    assert any("runtime behavior" in warning for warning in report.warnings)
-
-
-def test_dynamic_registration_names_require_manual_review(tmp_path):
-    plugin = _make_plugin(tmp_path, manifest=BASE_MANIFEST,
-                          init_py="def register(ctx):\n    ctx.register_tool(ctx.get_config('name'), schema={})\n")
-    report = validate_plugin_dir(plugin)
-    assert not report.ok
-    assert any("manual capability review" in failure for failure in report.failures)
-    for body in ("f = ctx.register_tool; f(name)", "getattr(ctx, 'register_tool')(name)"):
-        (plugin / "__init__.py").write_text(f"def register(ctx):\n    {body}\n", encoding="utf-8")
-        assert not validate_plugin_dir(plugin).ok
-
-    mutable_table = _make_plugin(
-        tmp_path,
-        manifest={**BASE_MANIFEST, "name": "mutable-table", "provides_tools": ["static_tool"]},
-    )
-    (mutable_table / "tools.py").write_text(
-        "TOOLS = [('static_tool', None)]\n"
-        "TOOLS.append((runtime_name, None))\n"
-        "def register(ctx):\n"
-        "    for name, _handler in TOOLS:\n"
-        "        ctx.register_tool(name, schema={})\n",
-        encoding="utf-8",
-    )
-    mutable_report = validate_plugin_dir(mutable_table)
-    assert not mutable_report.ok
-    assert any("manual capability review" in failure for failure in mutable_report.failures)
-
 class TestDesktopSurface:
-    """Catalog-listed desktop plugins must stay inside the SDK surface."""
+    """Catalog-listed desktop plugins must stay inside the SDK surface: the renderer loader gives
+    plugin.js full app authority, so prototype patching / app-chunk imports are refused at admission."""
 
     def _desktop_plugin(self, tmp_path, js: str) -> Path:
         d = tmp_path / "desk"
@@ -388,6 +293,7 @@ class TestDesktopSurface:
         assert "prototype patching (desktop/plugin.js:2)" in failed["desktop surface"]
         assert "dynamic import outside the SDK (desktop/plugin.js:3)" in failed["desktop surface"]
         assert ":4)" not in failed["desktop surface"]
+
     def test_node_sidecar_and_test_mjs_outside_desktop_are_not_the_surface(self, tmp_path):
         """A tools plugin with a Node sidecar (``sidecar/*.mjs`` lazily importing a lockfile-pinned
         dependency) and ``tests/*.test.mjs`` has no Desktop surface: the lint stays silent, and the
