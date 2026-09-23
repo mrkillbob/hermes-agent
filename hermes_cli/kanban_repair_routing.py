@@ -30,6 +30,8 @@ _REPAIR_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     # White Knight intake owns upstream issue relevance and workspace admission.
     (("white knight", "issue relevance intake"), "hermes-white-knight"),
     (("upstream pr", "upstream issue", "nousresearch", "upstream/main"), "hermes-upstream-auditor"),
+    # Cross-department completion evidence is owned by the review verifier.
+    (("cross-dept handoff audit", "missing steward evidence"), "review-verification-steward"),
     # Research findings are handed to the lab director, who can decompose them
     # into bounded experiments for the producer and runner profiles.
     (("research cycle", "research-scout priority finding", "phase 18"), "lunabot-research-lab-director"),
