@@ -1,6 +1,7 @@
+import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
-import { fleetStatusbarCopy, formatThroughput, groupFleetNodes, metricIsFresh } from './fleet-status'
+import { FleetStatusbar, fleetStatusbarCopy, formatThroughput, groupFleetNodes, metricIsFresh } from './fleet-status'
 
 describe('federated fleet status metrics', () => {
   it('aggregates profile measurements without double-counting tokens', () => {
@@ -79,5 +80,16 @@ describe('federated fleet status metrics', () => {
         updated_at: now
       }]
     })).toBe('Kanban 1 · mac 60 t/s')
+  })
+
+  it('renders the bottom-bar contribution with a card title for quick inspection', () => {
+    render(<FleetStatusbar status={{ enabled: true, reachable: true, runners: [], tasks: [{
+      task_id: 'task-1', title: 'Build', status: 'running', node_id: 'windows',
+      runner_profile: 'coding', attempt: 1, updated_at: 100
+    }] }} />)
+
+    const button = screen.getByRole('button', { name: 'Federated Kanban runner status' })
+    expect(button.textContent).toContain('Kanban 1')
+    expect(button.getAttribute('title')).toBe('Build · windows')
   })
 })
