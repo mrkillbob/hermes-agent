@@ -358,6 +358,5 @@ class TestCLI:
 
         assert titlesA == ["Task A"]
         assert titlesB == ["Task B"]
-    assert titlesD == []
-
+        assert titlesD == []
 
