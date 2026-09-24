@@ -7,7 +7,14 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from hermes_cli.fleet_protocol import FleetTask, RunnerCapability, TaskRequirement, encode_message
+from hermes_cli.fleet_protocol import (
+    FleetTask,
+    RunnerCapability,
+    RunnerTelemetry,
+    TaskRequirement,
+    TaskTelemetry,
+    encode_message,
+)
 from hermes_cli.fleet_store import TaskClaim, TaskRecord
 from hermes_cli.urllib_security import open_credentialed_url
 
@@ -61,12 +68,19 @@ class FleetClient:
             ).get("ok")
         )
 
-    def heartbeat_runner(self, capability: RunnerCapability, *, now: float | None = None, ttl: float = 30.0) -> bool:
+    def heartbeat_runner(
+        self,
+        capability: RunnerCapability,
+        *,
+        telemetry: RunnerTelemetry | None = None,
+        now: float | None = None,
+        ttl: float = 30.0,
+    ) -> bool:
         return bool(
             self._request(
                 "POST",
                 f"/v1/fleet/runners/{capability.node_id}/{capability.profile}/heartbeat",
-                {"now": now, "ttl": ttl},
+                {"now": now, "ttl": ttl, "telemetry": telemetry.to_dict() if telemetry else None},
             ).get("ok")
         )
 
@@ -105,12 +119,25 @@ class FleetClient:
         claim = payload.get("claim")
         return TaskClaim(**claim) if isinstance(claim, dict) else None
 
-    def complete_task(self, task_id: str, claim_id: str, *, result: str = "", now: float | None = None) -> bool:
+    def complete_task(
+        self,
+        task_id: str,
+        claim_id: str,
+        *,
+        result: str = "",
+        telemetry: TaskTelemetry | None = None,
+        now: float | None = None,
+    ) -> bool:
         return bool(
             self._request(
                 "POST",
                 f"/v1/fleet/tasks/{task_id}/complete",
-                {"claim_id": claim_id, "result": result, "now": now},
+                {
+                    "claim_id": claim_id,
+                    "result": result,
+                    "telemetry": telemetry.to_dict() if telemetry else None,
+                    "now": now,
+                },
             ).get("ok")
         )
 
@@ -155,4 +182,7 @@ def _record_from_dict(value: dict[str, Any]) -> TaskRecord:
         error=value.get("error"),
         created_at=value["created_at"],
         updated_at=value["updated_at"],
+        output_tokens=value.get("output_tokens"),
+        duration_ms=value.get("duration_ms"),
+        output_tps=value.get("output_tps"),
     )

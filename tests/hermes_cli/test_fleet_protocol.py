@@ -4,10 +4,46 @@ from hermes_cli.fleet_protocol import (
     FleetTask,
     ProtocolError,
     RunnerCapability,
+    RunnerTelemetry,
     TaskRequirement,
+    TaskTelemetry,
     decode_message,
     encode_message,
 )
+
+
+def test_task_telemetry_round_trips_and_derives_output_tps():
+    telemetry = TaskTelemetry(output_tokens=240, duration_ms=4_000)
+
+    assert telemetry.output_tps == 60.0
+    assert TaskTelemetry.from_dict(telemetry.to_dict()) == telemetry
+
+
+def test_task_telemetry_omits_tps_when_no_positive_measurement_exists():
+    assert TaskTelemetry(output_tokens=0, duration_ms=4_000).output_tps is None
+    assert TaskTelemetry(output_tokens=240, duration_ms=0).output_tps is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"output_tokens": -1, "duration_ms": 1},
+        {"output_tokens": 1, "duration_ms": -1},
+        {"output_tokens": 1, "duration_ms": 1, "output_tps": float("inf")},
+        {"output_tokens": 1, "duration_ms": 1, "output_tps": -1.0},
+    ],
+)
+def test_task_telemetry_rejects_invalid_measurements(kwargs):
+    with pytest.raises(ProtocolError, match="telemetry"):
+        TaskTelemetry(**kwargs)
+
+
+def test_runner_telemetry_accepts_an_absent_last_measurement():
+    telemetry = RunnerTelemetry.from_dict({"metrics_updated_at": 123.5})
+
+    assert telemetry.last_output_tokens is None
+    assert telemetry.last_output_tps is None
+    assert telemetry.to_dict() == {"metrics_updated_at": 123.5}
 
 
 def test_runner_capability_round_trips_through_wire_format():

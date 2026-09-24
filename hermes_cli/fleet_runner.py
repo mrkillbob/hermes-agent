@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import platform
 import subprocess
 import threading
@@ -9,7 +10,34 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-from hermes_cli.fleet_protocol import RunnerCapability
+from hermes_cli.fleet_protocol import RunnerCapability, TaskTelemetry
+
+
+def _parse_stream_json_result(stdout: str) -> tuple[str, TaskTelemetry | None]:
+    """Extract the authoritative one-shot result without scraping human output."""
+    terminal: dict[str, Any] | None = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            terminal = event
+
+    if terminal is None:
+        return stdout.strip(), None
+
+    tokens = terminal.get("tokens")
+    if not isinstance(tokens, dict):
+        return str(terminal.get("text") or ""), None
+    try:
+        telemetry = TaskTelemetry(
+            output_tokens=tokens.get("output", 0),
+            duration_ms=terminal.get("duration_ms", 0),
+        )
+    except (TypeError, ValueError):
+        telemetry = None
+    return str(terminal.get("text") or ""), telemetry
 
 
 class FleetRunner:
@@ -107,7 +135,13 @@ class FleetRunner:
             if result.returncode == 0:
                 text = (result.stdout or "").strip()
                 self._results[claim.task_id] = text
-                self.coordinator.complete_task(claim.task_id, claim.claim_id, result=text, now=now)
+                self.coordinator.complete_task(
+                    claim.task_id,
+                    claim.claim_id,
+                    result=text,
+                    telemetry=getattr(result, "telemetry", None),
+                    now=now,
+                )
             else:
                 error = (result.stderr or result.stdout or "Hermes exited with a failure").strip()
                 self.coordinator.fail_task(claim.task_id, claim.claim_id, error=error, now=now)
@@ -140,8 +174,13 @@ class FleetRunner:
             if provider:
                 argv.extend(["--provider", provider])
             argv.extend(["-m", models[0]])
-        argv.extend(["-z", body])
-        return self._executor(argv)
+        argv.extend(["-q", body, "--format", "stream-json"])
+        result = self._executor(argv)
+        if result.returncode == 0:
+            result.stdout, result.telemetry = _parse_stream_json_result(result.stdout or "")
+        else:
+            result.telemetry = None
+        return result
 
     @staticmethod
     def _execute(argv: list[str]):

@@ -1,4 +1,4 @@
-from hermes_cli.fleet_protocol import FleetTask, RunnerCapability, TaskRequirement
+from hermes_cli.fleet_protocol import FleetTask, RunnerCapability, TaskRequirement, TaskTelemetry
 from hermes_cli.fleet_store import FleetStore
 
 
@@ -65,9 +65,69 @@ def test_lease_renewal_and_completion_require_the_current_claim(tmp_path):
     assert renewed is not None
     assert renewed.lease_expires_at == 135.0
     assert store.complete_task("task-1", "wrong-claim", result="ignored") is False
-    assert store.complete_task("task-1", claim.claim_id, result="done", now=106.0) is True
+    telemetry = TaskTelemetry(output_tokens=240, duration_ms=4000)
+    assert store.complete_task("task-1", claim.claim_id, result="done", telemetry=telemetry, now=106.0) is True
     assert store.complete_task("task-1", claim.claim_id, result="done", now=107.0) is True
-    assert store.list_tasks()[0].status == "completed"
+    record = store.list_tasks()[0]
+    assert record.status == "completed"
+    assert record.output_tokens == 240
+    assert record.duration_ms == 4000
+    assert record.output_tps == 60.0
+
+
+def test_runner_status_retains_latest_completed_telemetry(tmp_path):
+    store = FleetStore(tmp_path / "fleet.db")
+    store.register_runner(_runner(), now=100.0, ttl=30.0)
+    store.submit_task(_task("task-1"), now=100.0)
+    claim = store.claim_task(_runner(), now=101.0)
+    assert claim is not None
+
+    telemetry = TaskTelemetry(output_tokens=120, duration_ms=3000)
+    assert store.complete_task(
+        "task-1", claim.claim_id, telemetry=telemetry, now=106.0
+    ) is True
+
+    runner = store.list_runners()[0]
+    assert runner["last_output_tokens"] == 120
+    assert runner["last_output_duration_ms"] == 3000
+    assert runner["last_output_tps"] == 40.0
+    assert runner["metrics_updated_at"] == 106.0
+
+
+def test_existing_fleet_schema_receives_telemetry_columns(tmp_path):
+    path = tmp_path / "fleet.db"
+    connection = __import__("sqlite3").connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE fleet_runners (
+            node_id TEXT NOT NULL, profile TEXT NOT NULL, capability_json TEXT NOT NULL,
+            last_seen REAL NOT NULL, expires_at REAL NOT NULL, active_load INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (node_id, profile)
+        );
+        CREATE TABLE fleet_tasks (
+            task_id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+            requirement_json TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL, claim_id TEXT, node_id TEXT, runner_profile TEXT,
+            lease_expires_at REAL, attempt INTEGER NOT NULL DEFAULT 0, result TEXT,
+            error TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
+        );
+        CREATE TABLE fleet_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT,
+            event_type TEXT NOT NULL, event_time REAL NOT NULL, detail TEXT
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    FleetStore(path)
+
+    connection = __import__("sqlite3").connect(path)
+    runner_columns = {row[1] for row in connection.execute("PRAGMA table_info(fleet_runners)")}
+    task_columns = {row[1] for row in connection.execute("PRAGMA table_info(fleet_tasks)")}
+    connection.close()
+    assert {"last_output_tokens", "last_output_duration_ms", "last_output_tps", "metrics_updated_at"} <= runner_columns
+    assert {"output_tokens", "duration_ms", "output_tps"} <= task_columns
 
 
 def test_expired_claim_is_reclaimed_with_a_new_attempt(tmp_path):

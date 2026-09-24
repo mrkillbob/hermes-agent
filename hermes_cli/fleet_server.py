@@ -14,6 +14,8 @@ from hermes_cli.fleet_protocol import (
     MAX_MESSAGE_BYTES,
     FleetTask,
     RunnerCapability,
+    RunnerTelemetry,
+    TaskTelemetry,
     decode_message,
 )
 from hermes_cli.fleet_store import FleetStore
@@ -181,9 +183,15 @@ class _FleetHandler(BaseHTTPRequestHandler):
             if len(parts) != 7:
                 raise ValueError("invalid heartbeat path")
             body = self._json_body()
+            telemetry = (
+                RunnerTelemetry.from_dict(body["telemetry"])
+                if body.get("telemetry") is not None
+                else None
+            )
             updated = self.fleet.store.heartbeat_runner(
                 parts[4],
                 parts[5],
+                telemetry=telemetry,
                 now=body.get("now"),
                 ttl=float(body.get("ttl", 30.0)),
             )
@@ -219,11 +227,25 @@ class _FleetHandler(BaseHTTPRequestHandler):
                 self._respond(HTTPStatus.OK, {"claim": _claim_dict(claim) if claim else None})
                 return
             if action == "complete":
+                telemetry = (
+                    TaskTelemetry.from_dict(body["telemetry"])
+                    if body.get("telemetry") is not None
+                    else None
+                )
                 ok = self.fleet.store.complete_task(
-                    task_id, body["claim_id"], result=str(body.get("result", "")), now=body.get("now")
+                    task_id,
+                    body["claim_id"],
+                    result=str(body.get("result", "")),
+                    telemetry=telemetry,
+                    now=body.get("now"),
                 )
                 if ok:
-                    self.fleet.notify_task_update(task_id, "completed", result=body.get("result"))
+                    self.fleet.notify_task_update(
+                        task_id,
+                        "completed",
+                        result=body.get("result"),
+                        telemetry=telemetry,
+                    )
                 self._respond(HTTPStatus.OK, {"ok": ok})
                 return
             if action == "fail":
@@ -266,4 +288,7 @@ def _record_dict(record) -> dict:
         "error": record.error,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
+        "output_tokens": record.output_tokens,
+        "duration_ms": record.duration_ms,
+        "output_tps": record.output_tps,
     }
