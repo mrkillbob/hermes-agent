@@ -43,6 +43,8 @@ class FakeTerminal {
 
   clearSelection() {}
 
+  clearTextureAtlas() {}
+
   dispose() {}
 
   focus() {}
@@ -454,6 +456,46 @@ describe("ChatPage side panel collapse", () => {
     expect(
       container.querySelector('[aria-label="Collapse chat side panel"]'),
     ).not.toBeNull();
+  });
+});
+
+describe("ChatPage bundled font swap-in", () => {
+  it("redraws the terminal with the bundled font once it finishes loading", async () => {
+    let releaseFont!: () => void;
+    const fontGate = new Promise<void>((resolve) => {
+      releaseFont = resolve;
+    });
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: {
+        check: () => false,
+        load: async () => {
+          await fontGate;
+          return [{}];
+        },
+      },
+    });
+    const clearAtlas = vi.spyOn(FakeTerminal.prototype, "clearTextureAtlas");
+    try {
+      const { default: ChatPage } = await import("./ChatPage");
+      await render(
+        <MemoryRouter initialEntries={["/chat"]}>
+          <ChatPage isActive />
+        </MemoryRouter>,
+      );
+      expect(clearAtlas).not.toHaveBeenCalled();
+
+      await act(async () => {
+        releaseFont();
+        await fontGate;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(clearAtlas).toHaveBeenCalledTimes(1);
+    } finally {
+      clearAtlas.mockRestore();
+      delete (document as { fonts?: unknown }).fonts;
+    }
   });
 });
 
