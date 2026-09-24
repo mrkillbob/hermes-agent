@@ -87,6 +87,13 @@ class CodexReasoningReplaySegment:
 
 
 @dataclass(frozen=True, slots=True)
+class AnthropicThinkingReplaySegment:
+    """Opaque provider-issued thinking signature replayed only to Anthropic."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class GeneratedContextKey:
     """Application-owned JSON key for generated provider tool schemas."""
 
@@ -133,6 +140,7 @@ class OutboundText:
         | SanitizedSegment
         | GeneratedContextSegment
         | CodexReasoningReplaySegment
+        | AnthropicThinkingReplaySegment
         | ValidatedToolSyntaxSegment
         | SourceBoundSegment
         | SourcePresentationSegment
@@ -240,6 +248,17 @@ _CHUNKED_BASE64_CANDIDATE = re.compile(
 _HERMES_TASK_ID = re.compile(r"^t_[0-9a-f]{8}$")
 _PROMPT_CACHE_KEY = re.compile(r"^pck_[0-9a-f]{24}$")
 _CODEX_ENCRYPTED_REASONING_REPLAY = re.compile(r"^gAAAA[A-Za-z0-9_=-]{20,}$")
+# Anthropic's extended-thinking `signature` field is a provider-issued
+# cryptographic value on each `thinking` content block. It has no fixed
+# magic prefix like Codex's Fernet-wrapped `encrypted_content`, so this
+# shape check only bounds it to the real base64 alphabet (standard,
+# unpadded-or-padded) at a length consistent with observed signatures; the
+# actual trust boundary is the caller only constructing this segment type
+# for a `signature` key inside a `type: "thinking"` block on the Anthropic
+# route (see `allow_anthropic_thinking_replay` in llm_egress_classifier.py).
+# It must round-trip byte-exact on replay, so it cannot be redacted like an
+# ordinary base64-shaped string without breaking the Anthropic API contract.
+_ANTHROPIC_THINKING_SIGNATURE_REPLAY = re.compile(r"^[A-Za-z0-9+/]{20,8192}={0,2}$")
 _BOUNDED_DURATION = re.compile(r"^(?:0|[1-9][0-9]{0,6})(?:ms|s|m|h)$")
 _BOUNDED_CLI_WORD = re.compile(r"^--[a-z]+(?:-[a-z]+)*$")
 _SAFE_DIAGNOSTIC_STATUS_WORDS = frozenset({
@@ -1706,6 +1725,12 @@ def _is_strict_sanitized_only_payload(
             and _CODEX_ENCRYPTED_REASONING_REPLAY.fullmatch(value.text) is not None,
             1 if isinstance(value.text, str) else 0,
         )
+    if isinstance(value, AnthropicThinkingReplaySegment):
+        return (
+            isinstance(value.text, str)
+            and _ANTHROPIC_THINKING_SIGNATURE_REPLAY.fullmatch(value.text) is not None,
+            1 if isinstance(value.text, str) else 0,
+        )
     if isinstance(value, UntrustedProvenanceSegment):
         return False, 0
     if isinstance(value, ValidatedToolSyntaxSegment):
@@ -2162,6 +2187,7 @@ class LLMEgressFirewall:
                 | SanitizedSegment
                 | GeneratedContextSegment
                 | CodexReasoningReplaySegment
+                | AnthropicThinkingReplaySegment
                 | ValidatedToolSyntaxSegment
                 | SourceBoundSegment
                 | SourcePresentationSegment
@@ -2219,6 +2245,21 @@ class LLMEgressFirewall:
                 # is typed only for a reasoning item on that route. It must be
                 # replayed verbatim for cache and reasoning continuity, but it
                 # is not an independently usable credential payload.
+                return segment.text
+            if isinstance(segment, AnthropicThinkingReplaySegment):
+                if not _ANTHROPIC_THINKING_SIGNATURE_REPLAY.fullmatch(segment.text):
+                    reasons.append("invalid_anthropic_thinking_replay")
+                    return ""
+                # This signature is produced by the Anthropic Messages API for
+                # a `thinking` content block and must be replayed byte-exact
+                # on a later turn (Anthropic rejects a re-signed or altered
+                # thinking block). It is provider-issued protocol data, not
+                # user-supplied or model-generated free text, so it is exempt
+                # from the base64 encoding scan the same way the Codex
+                # `encrypted_content` replay token and the GitHub legacy
+                # GraphQL node id are: the classifier's job is to catch
+                # secrets smuggled through free text, not to flag a value the
+                # provider itself round-trips as opaque binding data.
                 return segment.text
             if isinstance(segment, ValidatedToolSyntaxSegment):
                 try:
@@ -2296,6 +2337,7 @@ class LLMEgressFirewall:
                     SanitizedSegment,
                     GeneratedContextSegment,
                     CodexReasoningReplaySegment,
+                    AnthropicThinkingReplaySegment,
                     ValidatedToolSyntaxSegment,
                     SourceBoundSegment,
                     SourcePresentationSegment,
@@ -2341,6 +2383,7 @@ class LLMEgressFirewall:
                             SanitizedSegment,
                             GeneratedContextSegment,
                             CodexReasoningReplaySegment,
+                            AnthropicThinkingReplaySegment,
                             ValidatedToolSyntaxSegment,
                         ),
                     ):

@@ -827,6 +827,14 @@ def authorize_agent_sdk_kwargs(
                 or _is_codex_responses_replay_body(body)
             )
         ),
+        # Anthropic's Messages API returns a `signature` on each `thinking`
+        # block, and Hermes must replay it byte-exact on a later turn (the
+        # API rejects a request whose prior thinking block was altered).
+        # Only the Anthropic route needs this opaque-replay exemption, same
+        # as the Codex reasoning replay above being scoped to that route.
+        allow_anthropic_thinking_replay=(
+            str(route_provider or "").strip().lower() == "anthropic"
+        ),
         registry=registry if isinstance(registry, SourceProvenanceRegistry) else None,
         request_identity=(session_id, turn_id, request_id, policy_digest),
     )

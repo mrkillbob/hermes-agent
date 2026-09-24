@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from agent.llm_egress_firewall import (
+    AnthropicThinkingReplaySegment,
     CodexReasoningReplaySegment,
     GeneratedContextKey,
     GeneratedContextSegment,
@@ -472,6 +473,7 @@ def _typed_payload_mapping(
     generated_context: bool = False,
     redact_generated_context: bool = False,
     allow_codex_reasoning_replay: bool = False,
+    allow_anthropic_thinking_replay: bool = False,
     registry: SourceProvenanceRegistry | None = None,
     request_identity: tuple[str, str, str, str] = ("", "", "", ""),
 ) -> Any:
@@ -794,6 +796,18 @@ def _typed_payload_mapping(
             and isinstance(value.get("encrypted_content"), str)
             and isinstance(value.get("summary", []), list)
         )
+        # Anthropic replays a prior turn's signed `thinking` block verbatim on
+        # a later turn (required for cache/reasoning continuity); only the
+        # `signature` field on that exact block shape earns the opaque replay
+        # type, mirroring the Codex `reasoning`/`encrypted_content` handling
+        # above. The `thinking` text itself stays ordinary free text so it
+        # still gets normal secret/path scanning.
+        is_anthropic_thinking_replay = (
+            allow_anthropic_thinking_replay
+            and value.get("type") == "thinking"
+            and isinstance(value.get("signature"), str)
+            and isinstance(value.get("thinking", ""), str)
+        )
         mapping_state = locals()
         for key, item in value.items():
             _typed_payload_mapping_item(mapping_state, key, item, typed)
@@ -846,6 +860,7 @@ def _typed_payload_mapping_item(
     generated_context = state['generated_context']
     redact_generated_context = state['redact_generated_context']
     allow_codex_reasoning_replay = state['allow_codex_reasoning_replay']
+    allow_anthropic_thinking_replay = state['allow_anthropic_thinking_replay']
     registry = state['registry']
     request_identity = state['request_identity']
     combined_github_list_limit = state['combined_github_list_limit']
@@ -859,6 +874,7 @@ def _typed_payload_mapping_item(
     github_list_limit = state['github_list_limit']
     handled_tool_result = state['handled_tool_result']
     is_codex_reasoning_replay = state['is_codex_reasoning_replay']
+    is_anthropic_thinking_replay = state['is_anthropic_thinking_replay']
     is_elided_kanban_tool_result = state['is_elided_kanban_tool_result']
     is_file_mutation_replay_call = state['is_file_mutation_replay_call']
     is_file_mutation_replay_result = state['is_file_mutation_replay_result']
@@ -914,6 +930,9 @@ def _typed_payload_mapping_item(
     )
     if is_codex_reasoning_replay and key == "encrypted_content":
         typed[typed_key] = CodexReasoningReplaySegment(item)
+        return True
+    if is_anthropic_thinking_replay and key == "signature":
+        typed[typed_key] = AnthropicThinkingReplaySegment(item)
         return True
     if is_codex_reasoning_replay and key == "summary":
         typed[typed_key] = _typed_payload(
@@ -985,6 +1004,7 @@ def _typed_payload_mapping_item(
         ),
         redact_generated_context=redact_generated_context,
         allow_codex_reasoning_replay=allow_codex_reasoning_replay,
+        allow_anthropic_thinking_replay=allow_anthropic_thinking_replay,
         registry=registry,
         request_identity=request_identity,
     )
@@ -1930,6 +1950,7 @@ def _typed_payload_violation_locations(
         LiteralSegment,
         ValidatedToolSyntaxSegment,
         CodexReasoningReplaySegment,
+        AnthropicThinkingReplaySegment,
         SourcePresentationSegment,
         SourceBoundSegment,
         UntrustedProvenanceSegment,
