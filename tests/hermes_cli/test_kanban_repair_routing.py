@@ -13,6 +13,10 @@ def test_known_repair_scopes_bypass_router_profiles():
         "Compare NousResearch upstream/main and the current PR head.",
     ) == "hermes-upstream-auditor"
     assert repair_profile_for_task(
+        "Cross-dept handoff audit: t_e4ca69b2 / t_e181340d missing steward evidence",
+        "Blocked cross-dept tasks assigned review-verification-steward; no sign-off evidence found.",
+    ) == "review-verification-steward"
+    assert repair_profile_for_task(
         "Local PR CI audit",
         "Run the exact local CI audit for this pull request.",
     ) == "pr-local-ci-auditor"
