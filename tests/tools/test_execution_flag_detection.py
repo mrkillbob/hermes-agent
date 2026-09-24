@@ -1,5 +1,7 @@
 """Execution-bearing option detection across interpreters and read-only tools."""
 
+import os
+import shlex
 import shutil
 import subprocess
 import sys

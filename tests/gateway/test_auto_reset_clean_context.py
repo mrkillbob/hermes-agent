@@ -26,6 +26,10 @@ transcript for the new session_id, never the bloated child's transcript.
 
 from __future__ import annotations
 
+import ast
+import inspect
+
+from gateway import run_turn as gateway_run_turn
 from gateway.config import GatewayConfig, Platform
 from gateway.session import SessionSource, SessionStore
 from hermes_state import SessionDB

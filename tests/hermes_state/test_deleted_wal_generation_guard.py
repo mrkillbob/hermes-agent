@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_state
 import hermes_state_dbfile
 import hermes_state_readpool
 import hermes_state_wal

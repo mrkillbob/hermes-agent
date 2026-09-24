@@ -850,11 +850,10 @@ class WebhookAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(e))
 
     def _find_adapter(self, target_platform: Platform, profile: Optional[str] = None):
-        """Find an adapter in the route's profile only; never cross-deliver through another profile."""
-        if profile and profile != "default":
-            adapters = (getattr(self.gateway_runner, "_profile_adapters", None) or {}).get(profile, {})
-            return adapters.get(target_platform) if isinstance(adapters, dict) else None
-        return self.gateway_runner.adapters.get(target_platform)
+        """The routed profile's own adapter, fail-closed. A ``/p/<profile>/`` route must never post as
+        another profile's bot, and a bare (default-bound) route must not borrow a platform parked only on
+        a secondary profile — both directions leaked before #65939."""
+        return self.gateway_runner._authorization_adapter(target_platform, profile)
 
     async def _deliver_cross_platform(self, platform_name: str, content: str, delivery: dict) -> SendResult:
         """Route response to another platform (telegram, discord, etc.)."""

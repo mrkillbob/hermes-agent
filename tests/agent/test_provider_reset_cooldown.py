@@ -1,11 +1,12 @@
 """Provider-declared reset windows govern primary fallback cooldowns (#117484)."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent.error_classifier import FailoverReason
+from agent.turn_recovery import route_classified_error
 from run_agent import AIAgent
 
 

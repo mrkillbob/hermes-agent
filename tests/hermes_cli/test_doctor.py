@@ -1104,7 +1104,19 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
 class TestGitHubTokenCheck:
     """Tests for GitHub token / gh auth detection in doctor."""
 
+    @staticmethod
+    def _isolate_home(monkeypatch, home):
+        """Point doctor at the temp HERMES_HOME.
 
+        ``run_doctor`` reads the module-level ``HERMES_HOME`` constant (cached
+        at import time), NOT the env var — so ``setenv("HERMES_HOME")`` alone
+        leaves doctor probing the REAL ~/.hermes. On a dev machine with a
+        large state.db that meant a multi-minute ``PRAGMA integrity_check``
+        that blew the 300s per-file budget and killed the whole file.
+        """
+        monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+        monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+        monkeypatch.setenv("HERMES_HOME", str(home))
 
     def test_dedicated_hermes_bot_token_shows_ok_without_shared_token(self, monkeypatch, tmp_path):
         home = tmp_path / ".hermes"

@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 from hermes_state import SessionDB
-from gateway.config import Platform, GatewayConfig, PlatformConfig
+from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
 from gateway.platforms.event import MessageEvent
 from gateway.session import (
     SessionEntry,

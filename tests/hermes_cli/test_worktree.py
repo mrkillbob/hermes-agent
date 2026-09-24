@@ -5,6 +5,7 @@ Verifies worktree creation, cleanup, .worktreeinclude handling,
 """
 
 import os
+import shutil
 import subprocess
 import pytest
 
@@ -75,7 +76,278 @@ def git_repo_no_remote(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+
+@pytest.fixture
+def git_repo_remote_no_tracking(tmp_path):
+    """Create a temporary git repo with a remote but no remote-tracking refs."""
+    repo = tmp_path / "test-repo-remote-no-tracking"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo, capture_output=True,
+    )
+    (repo / "README.md").write_text("# Test Repo\n")
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"],
+        cwd=repo, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.com/test-repo.git"],
+        cwd=repo, capture_output=True,
+    )
+    return repo
+
+
+# ---------------------------------------------------------------------------
+# Lightweight reimplementations for testing (avoid importing cli.py)
+# ---------------------------------------------------------------------------
+
+def _git_repo_root(cwd=None):
+    """Test version of _git_repo_root."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+            cwd=cwd,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _setup_worktree(repo_root):
+    """Test version of _setup_worktree — creates a worktree."""
+    import uuid
+    short_id = uuid.uuid4().hex[:8]
+    wt_name = f"hermes-{short_id}"
+    branch_name = f"hermes/{wt_name}"
+
+    worktrees_dir = Path(repo_root) / ".worktrees"
+    worktrees_dir.mkdir(parents=True, exist_ok=True)
+    wt_path = worktrees_dir / wt_name
+
+    result = subprocess.run(
+        ["git", "worktree", "add", str(wt_path), "-b", branch_name, "HEAD"],
+        capture_output=True, text=True, timeout=30, cwd=repo_root,
+    )
+    if result.returncode != 0:
+        return None
+
+    return {
+        "path": str(wt_path),
+        "branch": branch_name,
+        "repo_root": repo_root,
+    }
+
+
+def _has_unpushed_commits(worktree_path, timeout=10):
+    """Test version of the worktree unpushed-commit helper."""
+    try:
+        remote_refs = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname)", "refs/remotes"],
+            capture_output=True, text=True, timeout=timeout, cwd=worktree_path,
+        )
+        if remote_refs.returncode != 0:
+            return True
+        if not remote_refs.stdout.strip():
+            return False
+
+        result = subprocess.run(
+            ["git", "log", "--oneline", "HEAD", "--not", "--remotes"],
+            capture_output=True, text=True, timeout=timeout, cwd=worktree_path,
+        )
+        if result.returncode != 0:
+            return True
+        return bool(result.stdout.strip())
+    except Exception:
+        return True
+
+
+def _cleanup_worktree(info):
+    """Test version of _cleanup_worktree.
+
+    Preserves the worktree only if it has unpushed commits.
+    Dirty working tree alone is not enough to keep it.
+    """
+    wt_path = info["path"]
+    branch = info["branch"]
+    repo_root = info["repo_root"]
+
+    if not Path(wt_path).exists():
+        return
+
+    if _has_unpushed_commits(wt_path, timeout=10):
+        return False  # Did not clean up — has unpushed commits
+
+    subprocess.run(
+        ["git", "worktree", "remove", wt_path, "--force"],
+        capture_output=True, text=True, timeout=15, cwd=repo_root,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", branch],
+        capture_output=True, text=True, timeout=10, cwd=repo_root,
+    )
+    return True  # Cleaned up
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestGitRepoDetection:
+    """Test git repo root detection."""
+
+    def test_detects_git_repo(self, git_repo):
+        root = _git_repo_root(cwd=str(git_repo))
+        assert root is not None
+        assert Path(root).resolve() == git_repo.resolve()
+
+
+    def test_returns_none_outside_repo(self, tmp_path):
+        # tmp_path itself is not a git repo
+        bare_dir = tmp_path / "not-a-repo"
+        bare_dir.mkdir()
+        root = _git_repo_root(cwd=str(bare_dir))
+        assert root is None
+
+
+class TestWorktreeCreation:
+    """Test worktree setup."""
+
+    def test_creates_worktree(self, git_repo):
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+        assert Path(info["path"]).exists()
+        assert info["branch"].startswith("hermes/hermes-")
+        assert info["repo_root"] == str(git_repo)
+
+        # Verify it's a valid git worktree
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, cwd=info["path"],
+        )
+        assert result.stdout.strip() == "true"
+
+    def test_worktree_has_own_branch(self, git_repo):
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        # Check branch name in worktree
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, cwd=info["path"],
+        )
+        assert result.stdout.strip() == info["branch"]
+
+    def test_worktree_is_independent(self, git_repo):
+        """Two worktrees from the same repo are independent."""
+        info1 = _setup_worktree(str(git_repo))
+        info2 = _setup_worktree(str(git_repo))
+        assert info1 is not None
+        assert info2 is not None
+        assert info1["path"] != info2["path"]
+        assert info1["branch"] != info2["branch"]
+
+        # Create a file in worktree 1
+        (Path(info1["path"]) / "only-in-wt1.txt").write_text("hello")
+
+        # It should NOT appear in worktree 2
+        assert not (Path(info2["path"]) / "only-in-wt1.txt").exists()
+
+
+
+
+class TestWorktreeCleanup:
+    """Test worktree cleanup on exit."""
+
+    def test_clean_worktree_removed(self, git_repo):
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+        assert Path(info["path"]).exists()
+
+        result = _cleanup_worktree(info)
+        assert result is True
+        assert not Path(info["path"]).exists()
+
+
+
+
+
+    def test_branch_deleted_on_cleanup(self, git_repo):
+        info = _setup_worktree(str(git_repo))
+        branch = info["branch"]
+
+        _cleanup_worktree(info)
+
+        # Branch should be gone
+        result = subprocess.run(
+            ["git", "branch", "--list", branch],
+            capture_output=True, text=True, cwd=str(git_repo),
+        )
+        assert branch not in result.stdout
+
+    def test_cleanup_nonexistent_worktree(self, git_repo):
+        """Cleanup should handle already-removed worktrees gracefully."""
+        info = {
+            "path": str(git_repo / ".worktrees" / "nonexistent"),
+            "branch": "hermes/nonexistent",
+            "repo_root": str(git_repo),
+        }
+        # Should not raise
+        _cleanup_worktree(info)
+
+
+class TestWorktreeInclude:
+    """Test .worktreeinclude file handling."""
+
+    def test_copies_included_files(self, git_repo):
+        """Files listed in .worktreeinclude should be copied to the worktree."""
+        # Create a .env file (gitignored)
+        (git_repo / ".env").write_text("SECRET=abc123")
+        (git_repo / ".gitignore").write_text(".env\n.worktrees/\n")
+        subprocess.run(
+            ["git", "add", ".gitignore"],
+            cwd=str(git_repo), capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add gitignore"],
+            cwd=str(git_repo), capture_output=True,
+        )
+
+        # Create .worktreeinclude
+        (git_repo / ".worktreeinclude").write_text(".env\n")
+
+        # Import and use the real _setup_worktree logic for include handling
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        # Manually copy .worktreeinclude entries (mirrors cli.py logic)
+        include_file = git_repo / ".worktreeinclude"
+        wt_path = Path(info["path"])
+        for line in include_file.read_text().splitlines():
+            entry = line.strip()
+            if not entry or entry.startswith("#"):
+                continue
+            src = git_repo / entry
+            dst = wt_path / entry
+            if src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+
+        # Verify .env was copied
+        assert (wt_path / ".env").exists()
+        assert (wt_path / ".env").read_text() == "SECRET=abc123"
+
         # Should not crash — just skip all lines
+
 
 
 class TestGitignoreManagement:

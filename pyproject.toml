@@ -533,6 +533,7 @@ google-auth-httplib2 = false
 google-auth-oauthlib = false
 google-cloud-pubsub = false
 h2 = false
+hindsight-client = false
 honcho-ai = false
 httplib2 = false
 httpx = false
