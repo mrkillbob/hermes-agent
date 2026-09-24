@@ -1755,19 +1755,7 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
             job_id, "auth" if is_auth else "transient network", resolve_exc,
             "trying fallback" if chain else (
                 "not falling back: the job is pinned" if _job_route_pinned(job) else "no fallback configured"))
-        from cron.scheduler_provider import _scheduled_fallback_route_is_local, _scheduled_model_route_is_local
-        if chain and not _scheduled_model_route_is_local(
-                job.get("provider"), job.get("base_url"), model=job.get("model"), cfg=jc.cfg):
-            fallback_chain = [e for e in chain if not _scheduled_fallback_route_is_local(e, jc.cfg)]
-        else:
-            fallback_chain = chain
-        skipped_local = len(chain) - len(fallback_chain)
-        if skipped_local:
-            logger.info(
-                "Job '%s': skipped %d local scheduled fallback route(s); pin a local provider "
-                "on the job to authorize them",
-                job_id, skipped_local)
-        for entry in fallback_chain:
+        for entry in chain:
             if not isinstance(entry, dict):
                 continue
             fb_provider = str(entry.get("provider") or "").strip()
@@ -2403,14 +2391,8 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
         job, _cfg if isinstance(_cfg, dict) else {}, str(setup.model)
     )
     # Mid-run provider ladder: same rule as resolution above, so a pinned job cannot be swapped
-    # onto the global chain by a 5xx/429 either; cloud-first orchestration also excludes local
-    # routes unless the job's own primary route is itself local.
-    from cron.scheduler_provider import _scheduled_fallback_route_is_local, _scheduled_model_route_is_local
-    _mid_run_chain = _job_fallback_chain(job, _cfg) or []
-    if _mid_run_chain and not _scheduled_model_route_is_local(
-            job.get("provider"), job.get("base_url"), model=job.get("model"), cfg=_cfg):
-        _mid_run_chain = [e for e in _mid_run_chain if not _scheduled_fallback_route_is_local(e, _cfg)]
-    setup.fallback_model = _mid_run_chain or None
+    # onto the global chain by a 5xx/429 either.
+    setup.fallback_model = _job_fallback_chain(job, _cfg)
     setup.credential_pool = _load_credential_pool(setup.runtime, job_id)
     # MCP servers must be registered before AIAgent is constructed.
     _init_cron_mcp_tools(job_id)

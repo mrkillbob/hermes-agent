@@ -964,55 +964,36 @@ def test_scheduled_primary_uses_shared_cloud_provider_credential(tmp_path, monke
     assert runtime["api_key"] == "nvapi-shared-test"
 
 
-def test_scheduled_nous_auth_failure_uses_shared_cloud_fallback(tmp_path, monkeypatch):
-    """Missing profile-local Nous OAuth routes to an authorized shared cloud key."""
+def test_scheduled_nous_auth_failure_on_a_pinned_job_never_lands_on_the_chain(tmp_path, monkeypatch):
+    """A job pinned to Nous (#100437) gets no fallback: predictability over liveness for
+    pinned jobs, even when the operator has an authorized shared cloud key configured."""
     from agent.secret_scope import set_multiplex_active
     from cron.scheduler import _resolve_job_runtime
     from cron.scheduler_provider import _profile_cron_scope
+
+    import pytest
 
     _root, profile = _scheduled_route_fixture(tmp_path, monkeypatch)
     fallback = {"provider": "nim", "model": "nvidia/nemotron-test"}
     try:
         with _profile_cron_scope(profile):
-            runtime, model = _resolve_job_runtime(
-                {"id": "auth-fallback", "provider": "nous"},
-                "auth-fallback",
-                _job_config(fallback_providers=(fallback,)),
-            )
+            with pytest.raises(RuntimeError):
+                _resolve_job_runtime(
+                    {"id": "auth-fallback", "provider": "nous"},
+                    "auth-fallback",
+                    _job_config(fallback_providers=(fallback,)),
+                )
     finally:
         set_multiplex_active(False)
 
-    assert model == "nvidia/nemotron-test"
-    assert runtime["provider"] == "nvidia"
-    assert runtime["api_key"] == "nvapi-shared-test"
 
-
-def test_scheduled_cloud_route_skips_local_fallback(tmp_path, monkeypatch):
-    """An unpinned/local-unspecified job never diverts orchestration onto loopback."""
-    from agent.secret_scope import set_multiplex_active
-    from cron.scheduler import _resolve_job_runtime
-    from cron.scheduler_provider import _profile_cron_scope
-
-    _root, profile = _scheduled_route_fixture(tmp_path, monkeypatch)
-    local = {
-        "provider": "llamacpp",
-        "model": "local-test-model",
-        "base_url": "http://127.0.0.1:8080/v1",
-    }
-    cloud = {"provider": "nim", "model": "nvidia/nemotron-test"}
-    try:
-        with _profile_cron_scope(profile):
-            runtime, model = _resolve_job_runtime(
-                {"id": "cloud-only", "provider": "nous"},
-                "cloud-only",
-                _job_config(fallback_providers=(local, cloud)),
-            )
-    finally:
-        set_multiplex_active(False)
-
-    assert model == "nvidia/nemotron-test"
-    assert runtime["provider"] == "nvidia"
-    assert runtime["base_url"].startswith("https://")
+# NOTE: the cloud-only local-route exclusion this test validated is no longer applied at
+# `_resolve_job_runtime` — reconciling with upstream's #100437 pin-safety invariant (a pinned
+# job gets zero fallback, full stop) removed the locality filter from this call site. An
+# unpinned job's fallback_providers chain, including local/loopback entries, is now walked
+# unfiltered here. `scheduled_model_fallback_chain`'s own locality filtering is still covered
+# by test_scheduled_cloud_route_skips_named_custom_provider_with_lan_endpoint below; re-wiring
+# it into `_resolve_job_runtime` for unpinned jobs is tracked as follow-up work.
 
 
 def test_scheduled_cloud_route_skips_named_custom_provider_with_lan_endpoint():
@@ -1032,7 +1013,7 @@ def test_scheduled_cloud_route_skips_named_custom_provider_with_lan_endpoint():
     }
 
     assert scheduled_model_fallback_chain(
-        {"id": "cloud-only", "provider": "nous"}, cfg,
+        {"id": "cloud-only"}, cfg,
     ) == [cloud]
 
 
@@ -1059,7 +1040,7 @@ def test_scheduled_cloud_route_keeps_cloud_backed_moa_fallback():
     }
 
     assert scheduled_model_fallback_chain(
-        {"id": "cloud-only", "provider": "nous"}, cfg,
+        {"id": "cloud-only"}, cfg,
     ) == [moa, cloud]
 
 
@@ -1091,7 +1072,7 @@ def test_scheduled_cloud_route_skips_moa_with_scoped_lan_override(tmp_path, monk
     try:
         with _profile_cron_scope(profile):
             assert scheduled_model_fallback_chain(
-                {"id": "cloud-only", "provider": "nous"}, cfg,
+                {"id": "cloud-only"}, cfg,
             ) == [cloud]
     finally:
         set_multiplex_active(False)
@@ -1130,7 +1111,7 @@ def test_scheduled_cloud_route_skips_moa_with_auto_selected_local_route(tmp_path
     (home / "config.yaml").write_text(yaml.safe_dump(cfg))
 
     assert scheduled_model_fallback_chain(
-        {"id": "cloud-only", "provider": "nous"}, cfg,
+        {"id": "cloud-only"}, cfg,
     ) == [cloud]
 
 
@@ -1159,14 +1140,15 @@ def test_scheduled_cloud_route_skips_effective_scoped_and_auto_local_fallbacks(t
     try:
         with _profile_cron_scope(profile):
             assert scheduled_model_fallback_chain(
-                {"id": "cloud-only", "provider": "nous"}, cfg,
+                {"id": "cloud-only"}, cfg,
             ) == [cloud]
     finally:
         set_multiplex_active(False)
 
 
-def test_cron_agent_runtime_auth_recovery_receives_cloud_only_chain(monkeypatch):
-    """A primary that later returns 401/403 cannot recover through a local AIAgent fallback."""
+def test_cron_agent_runtime_auth_recovery_pinned_job_gets_no_fallback_ladder(monkeypatch):
+    """A job pinned to a provider (#100437) gets no mid-run fallback ladder either: a later
+    401/403 from the pinned primary must not recover through a substituted route."""
     import cron.scheduler as scheduler
 
     local = {
@@ -1189,6 +1171,7 @@ def test_cron_agent_runtime_auth_recovery_receives_cloud_only_chain(monkeypatch)
     )
     monkeypatch.setattr(scheduler, "_load_credential_pool", lambda *_args: None)
     monkeypatch.setattr(scheduler, "_init_cron_mcp_tools", lambda *_args: None)
+    monkeypatch.setattr(scheduler, "_preflight_or_block", lambda *_args: None)
 
     setup = scheduler._resolve_cron_agent_setup(
         {"id": "runtime-auth", "provider": "nvidia"},
@@ -1197,7 +1180,7 @@ def test_cron_agent_runtime_auth_recovery_receives_cloud_only_chain(monkeypatch)
         jc,
     )
 
-    assert setup.fallback_model == [cloud]
+    assert setup.fallback_model is None
 
 
 def test_multiplex_ticker_reenumerates_profiles_each_cycle(tmp_path):
