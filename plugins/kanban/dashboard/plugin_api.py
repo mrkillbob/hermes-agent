@@ -1106,6 +1106,9 @@ def fleet_status():
                     "attempt": task.attempt,
                     "updated_at": task.updated_at,
                     "error": task.error,
+                    "output_tokens": getattr(task, "output_tokens", None),
+                    "duration_ms": getattr(task, "duration_ms", None),
+                    "output_tps": getattr(task, "output_tps", None),
                 }
                 for task in tasks
             ],

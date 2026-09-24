@@ -215,6 +215,10 @@ export interface FleetRunnerStatus {
   expires_at: number
   active_load: number
   online: boolean
+  last_output_tokens?: number | null
+  last_output_duration_ms?: number | null
+  last_output_tps?: number | null
+  metrics_updated_at?: number | null
 }
 
 export interface FleetTaskStatus {
@@ -226,6 +230,9 @@ export interface FleetTaskStatus {
   attempt: number
   updated_at: number
   error?: null | string
+  output_tokens?: number | null
+  duration_ms?: number | null
+  output_tps?: number | null
 }
 
 export interface FleetStatusResponse {
