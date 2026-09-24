@@ -95,7 +95,36 @@ def test_violation_budget_trip_routes_to_intake(kanban_home):
         task = kb.get_task(conn, tid)
         assert task.status in ("ready", "triage")
         assert task.assignee == "task-intake-router"
-        assert task.consecutive_failures < 10
+    assert task.consecutive_failures < 10
+
+
+def test_guardrail_strategy_failure_routes_to_intake_instead_of_blocking(kanban_home):
+    """A loop guardrail is recoverable worker behavior, not a human blocker."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="paper safety", assignee="paper-safety-guardian")
+        host = kb._claimer_id().split(":", 1)[0]
+        claimed = kb.claim_task(conn, tid, claimer=f"{host}:guardrail")
+        assert claimed is not None
+        conn.execute(
+            "UPDATE tasks SET worker_pid=?, worker_started_at=? WHERE id=?",
+            (71099, int(time.time()) - 120, tid),
+        )
+        conn.commit()
+        log = kb.worker_log_path(tid)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            "Tool guardrail halted terminal: identical_call_streak_halt\n"
+            f"{KANBAN_WORKER_EXIT_TRAILER}1\n",
+            encoding="utf-8",
+        )
+
+        kbd.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    assert task.status in {"ready", "triage"}
+    assert task.status != "blocked"
+    assert task.assignee == "task-intake-router"
 
 
 def test_plain_budget_trip_still_auto_recovers(kanban_home):

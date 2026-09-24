@@ -140,7 +140,6 @@ import {
   ARTIFACTS_ROUTE,
   CAPABILITIES_ROUTE,
   CRON_ROUTE,
-  LUNAR_CITY_ROUTE,
   MESSAGING_ROUTE,
   SESSION_IMPORT_ROUTE,
   SIDEBAR_NAV_AREA,
@@ -242,12 +241,6 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     route: CRON_ROUTE,
     keybindActionId: 'nav.cron',
     tier: 'advanced'
-  },
-  {
-    id: 'lunar-city',
-    label: 'Lunar City',
-    icon: props => <Codicon name="globe" {...props} />,
-    route: LUNAR_CITY_ROUTE
   },
   {
     id: 'session-import',

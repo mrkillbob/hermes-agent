@@ -507,8 +507,8 @@ def test_terminal_provider_exit_routes_to_intake_after_one_attempt_in_either_lan
             assert task.status == "blocked"
 
 
-def test_repair_handoff_does_not_retry_the_same_specialist(kanban_home, monkeypatch):
-    """A specialist that cannot complete its assigned repair must not receive it again."""
+def test_repair_handoff_gives_intake_router_one_recovery_attempt(kanban_home, monkeypatch):
+    """A specialist failure is retryable before unknown-scope triage is used."""
     import hermes_cli.kanban_repair_routing as routing
 
     monkeypatch.setattr(routing, "repair_profile_for_task", lambda _title, _body: "research-lab")
@@ -526,9 +526,9 @@ def test_repair_handoff_does_not_retry_the_same_specialist(kanban_home, monkeypa
         events = [event for event in kb.list_events(conn, task_id)
                   if event.kind == "routed_to_repair_profile"]
 
-    assert routed == (True, "triage", "task-intake-router")
+    assert routed == (True, "ready", "task-intake-router")
     assert task is not None
-    assert task.status == "triage"
+    assert task.status == "ready"
     assert task.assignee == "task-intake-router"
     assert len(events) == 1
     assert (events[0].payload or {}).get("from_assignee") == "research-lab"
