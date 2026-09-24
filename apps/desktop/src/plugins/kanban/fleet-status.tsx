@@ -33,6 +33,9 @@ export function formatThroughput(tps: number | null | undefined): string {
 }
 
 export function fleetStatusbarCopy(status: FleetStatusResponse): string {
+  if (!status.reachable) {
+    return status.error ? 'Kanban · unavailable' : 'Kanban · connecting…'
+  }
   const active = status.tasks.filter(task => task.status === 'pending' || task.status === 'running').length
   const nodes = groupFleetNodes(status.runners)
   const throughput = nodes
@@ -41,7 +44,7 @@ export function fleetStatusbarCopy(status: FleetStatusResponse): string {
   return [`Kanban ${active}`, ...throughput].join(' · ')
 }
 
-export function groupFleetNodes(runners: FleetRunnerStatus[]): FleetNode[] {
+export function groupFleetNodes(runners: FleetRunnerStatus[], nowSeconds = Date.now() / 1000): FleetNode[] {
   const nodes = new Map<string, FleetNode>()
 
   for (const runner of runners) {
@@ -68,7 +71,8 @@ export function groupFleetNodes(runners: FleetRunnerStatus[]): FleetNode[] {
     existing.projects.push(...(runner.capability.projects ?? []))
     if (
       typeof runner.last_output_tokens === 'number' && runner.last_output_tokens >= 0 &&
-      typeof runner.last_output_duration_ms === 'number' && runner.last_output_duration_ms >= 0
+      typeof runner.last_output_duration_ms === 'number' && runner.last_output_duration_ms >= 0 &&
+      metricIsFresh(runner.metrics_updated_at, nowSeconds)
     ) {
       existing.outputTokens += runner.last_output_tokens
       existing.outputDurationMs += runner.last_output_duration_ms

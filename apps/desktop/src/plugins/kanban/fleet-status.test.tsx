@@ -32,12 +32,35 @@ describe('federated fleet status metrics', () => {
         expires_at: 200,
         last_seen: 101
       }
-    ])
+    ], 101)
 
     expect(nodes).toHaveLength(1)
     expect(nodes[0].outputTokens).toBe(280)
     expect(nodes[0].outputDurationMs).toBe(6000)
     expect(nodes[0].outputTps).toBeCloseTo(46.67, 2)
+  })
+
+  it('does not combine stale profile measurements with fresh ones', () => {
+    const nodes = groupFleetNodes([
+      {
+        active_load: 0, capability: { platform: 'darwin' }, last_output_duration_ms: 4000,
+        last_output_tokens: 240, last_output_tps: 60, metrics_updated_at: 0, node_id: 'mac',
+        online: true, profile: 'stale', expires_at: 300, last_seen: 100
+      },
+      {
+        active_load: 0, capability: { platform: 'darwin' }, last_output_duration_ms: 2000,
+        last_output_tokens: 40, last_output_tps: 20, metrics_updated_at: 201, node_id: 'mac',
+        online: true, profile: 'fresh', expires_at: 300, last_seen: 201
+      }
+    ], 201)
+
+    expect(nodes[0].outputTokens).toBe(40)
+    expect(nodes[0].outputTps).toBe(20)
+  })
+
+  it('reports coordinator availability distinctly in the bottom bar', () => {
+    expect(fleetStatusbarCopy({ enabled: true, reachable: false, error: 'offline', runners: [], tasks: [] }))
+      .toBe('Kanban · unavailable')
   })
 
   it('formats unavailable and measured throughput distinctly', () => {

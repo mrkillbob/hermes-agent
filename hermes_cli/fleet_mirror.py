@@ -10,7 +10,14 @@ from hermes_cli import kanban_db_connect as kbc
 _log = logging.getLogger(__name__)
 
 
-def mirror_fleet_task(task_id: str, status: str, *, result: str | None = None, error: str | None = None) -> bool:
+def mirror_fleet_task(
+    task_id: str,
+    status: str,
+    *,
+    result: str | None = None,
+    error: str | None = None,
+    telemetry: object | None = None,
+) -> bool:
     """Apply a remote terminal state to its reserved local fleet card.
 
     This runs only on the coordinator host. The Windows runner never opens or
@@ -37,4 +44,3 @@ def mirror_fleet_task(task_id: str, status: str, *, result: str | None = None, e
                 kind="transient" if status == "failed" else "needs_input",
             )
     return False
-
