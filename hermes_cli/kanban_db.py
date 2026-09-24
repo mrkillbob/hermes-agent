@@ -482,6 +482,39 @@ def _require_slug(slug: str) -> str:
     return normed
 
 
+def _configured_board_allowlist() -> Optional[set[str]]:
+    """Return the configured board allowlist, or ``None`` when unrestricted.
+
+    Board creation is shared by the CLI, dashboard, and gateway integrations.
+    Keeping this check at the common creation boundary prevents one surface
+    from silently bypassing an installation's board topology policy.  The
+    setting is intentionally optional so Hermes remains a general multi-board
+    library for installations that do not opt into a fixed topology.
+    """
+    from hermes_cli.config import load_config
+
+    raw = (load_config() or {}).get("kanban", {}).get("allowed_boards")
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple, set)):
+        raise ValueError("kanban.allowed_boards must be a list of board slugs")
+    allowed: set[str] = set()
+    for value in raw:
+        normalized = _normalize_board_slug(str(value))
+        if normalized:
+            allowed.add(normalized)
+    # The bundled default is an empty list, meaning the installation has not
+    # opted into a fixed topology. A non-empty list is the enforcement mode.
+    return allowed or None
+
+
+def _enforce_configured_board_allowlist(slug: str) -> None:
+    allowed = _configured_board_allowlist()
+    if allowed is not None and slug not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise ValueError(f"board {slug!r} is not allowed by kanban.allowed_boards ({choices})")
+
+
 def kanban_home() -> Path:
     """``HERMES_KANBAN_HOME`` else ``get_default_hermes_root()``. Shared across
     profiles BY DESIGN: resolving through the active profile's HERMES_HOME would
@@ -788,6 +821,7 @@ def create_board(
 ) -> dict:
     """Create board dir + DB + metadata (``mkdir -p`` semantics: existing board returns its metadata)."""
     normed = _require_slug(slug)
+    _enforce_configured_board_allowlist(normed)
     meta = write_board_metadata(
         normed, name=name, description=description, icon=icon, color=color,
         default_workdir=default_workdir, project_id=project_id,
