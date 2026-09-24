@@ -949,6 +949,13 @@ def _canonical_base64_candidate(candidate: str) -> bool:
         return False
     if not 4 <= len(candidate) <= _MAX_BASE64_CANDIDATE_CHARS:
         return False
+    if len(set(candidate)) == 1:
+        # A single character repeated any number of times is a multiple of 4 in length
+        # about a quarter of the time, and a base64-alphabet character (there are 64 of
+        # them) round-trips through decode/re-encode trivially — filler/padding text
+        # ("xxxx...", separators, ASCII art) is not an encoding channel just because it
+        # happens to satisfy that arithmetic coincidence.
+        return False
     # Short words and word-shaped structural fragments frequently round-trip
     # mathematically as unpadded Base64. Their bounded lexical form is the
     # disambiguating signal; padding, digits, mixed punctuation, and long
