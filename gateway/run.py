@@ -1128,6 +1128,8 @@ def _build_replay_entry(
     providers.
     """
     entry: Dict[str, Any] = {"role": role, "content": content}
+    if role == "user" and isinstance(msg.get("display_metadata"), dict):
+        entry["display_metadata"] = msg["display_metadata"]
     # api_content sidecar keeps the request prefix byte-stable — ONLY if this pipeline did not rewrite
     # content. The caller renders timestamps AFTER this check so a stamp alone never drops the sidecar.
     _sidecar = msg.get("api_content")
@@ -1300,10 +1302,19 @@ def _build_gateway_agent_history(
                 entry.pop("api_content", None)  # prefix rewrite: the sidecar no longer matches
             agent_history.append(entry)
 
+    display_metadata_by_content = {
+        msg.get("content"): msg["display_metadata"]
+        for msg in agent_history
+        if msg.get("role") == "user" and isinstance(msg.get("display_metadata"), dict)
+    }
     # Keep gateway resume byte-identical to the TUI resume and send paths. The
     # canonicalizer owns interrupted-block, dangling-tail, and stale-confirmation
     # cleanup together so a middle-of-history rewrite cannot break the prefix cache.
     agent_history = canonicalize_replay_history(agent_history)
+    for entry in agent_history:
+        metadata = display_metadata_by_content.get(entry.get("content"))
+        if entry.get("role") == "user" and metadata is not None:
+            entry["display_metadata"] = metadata
 
     observed_context = "\n".join(observed_group_context).strip() or None
     return agent_history, observed_context
@@ -4285,6 +4296,7 @@ class GatewayRunner(
             scope_id=str(getattr(context.source, "scope_id", "") or ""),
             parent_chat_id=str(getattr(context.source, "parent_chat_id", "") or ""),
             session_key=context.session_key,
+            cwd=context.cwd or "",
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,

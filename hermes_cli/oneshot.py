@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 import dataclasses
 from dataclasses import dataclass
@@ -448,11 +449,8 @@ def _load_resume_target(session_db, resume: Optional[str]) -> tuple[Optional[str
     --create-if-missing`` must fill the titled session it created, not mint a fresh id
     (same contract as the interactive /resume of an empty session).
 
-    The resolved row is also reopened (best effort): the previous run stamped ``ended_at``,
-    the existing-row upsert never clears the end fields, and ``end_session()`` only writes
-    rows whose ``ended_at`` is null — so without this step the resumed turn would be recorded
-    under a session that stays closed and its new lifecycle boundary would be lost (same
-    reason the interactive resume calls ``reopen_session()`` before continuing).
+    Loading is read-only. The resolved row is reopened later, after provider, MCP, and skill
+    setup succeeds, so a failed pre-agent setup cannot leave an ended session falsely active.
     """
     if not resume:
         return None, [], None
@@ -465,10 +463,6 @@ def _load_resume_target(session_db, resume: Optional[str]) -> tuple[Optional[str
     session_db.assert_resume_safe(resolved, tip_only=True)
     restored, _display = session_db.get_resume_conversations(resolved)
     history = [m for m in restored if m.get("role") != "session_meta"]
-    try:
-        session_db.reopen_session(resolved)
-    except Exception:
-        logging.debug("reopen_session failed for resumed one-shot session %s", resolved, exc_info=True)
     return resolved, history, session_meta
 
 
@@ -495,6 +489,43 @@ def _apply_stored_session_runtime(
     if stored_api_mode:
         choice.api_mode = str(stored_api_mode)
     return choice
+
+
+def _create_fallback_resume_session(session_db, resume_meta: dict, history: list) -> tuple[str, list]:
+    """Copy a loaded transcript into a new durable session when the ended target cannot reopen.
+
+    The fallback is a new session rather than an append to the still-closed target. Reloading the
+    copied rows after insertion is important: ``get_resume_conversations`` supplies the new row ids
+    and persistence markers, so the next turn does not either lose history or append it twice.
+    """
+    fallback_id = f"oneshot-resume-{uuid.uuid4().hex}"
+    model_config = resume_meta.get("model_config")
+    if isinstance(model_config, str):
+        try:
+            model_config = json.loads(model_config)
+        except (TypeError, ValueError):
+            model_config = None
+    session_db.create_session(
+        fallback_id,
+        source=resume_meta.get("source") or "cli",
+        model=resume_meta.get("model"),
+        model_config=model_config if isinstance(model_config, dict) else None,
+        system_prompt=resume_meta.get("_system_prompt_resolved") or resume_meta.get("system_prompt"),
+        display_name=resume_meta.get("display_name"),
+    )
+    rows = [
+        {key: value for key, value in message.items()
+         if key not in {"_row_id", "_db_persisted", "message_id"}}
+        for message in history if isinstance(message, dict)
+    ]
+    try:
+        session_db.append_messages_batch(fallback_id, rows)
+        restored, _display = session_db.get_resume_conversations(fallback_id)
+    except BaseException:
+        _quietly("failed fallback session cleanup", lambda: session_db.end_session(
+            fallback_id, "oneshot_setup_failed"))
+        raise
+    return fallback_id, restored
 
 
 def _run_agent(
@@ -570,7 +601,20 @@ def _run_agent(
     # The try spans agent construction (not just ``chat``) so the store is always closed, even when
     # ``AIAgent(...)`` raises — the one-shot exit path hard-exits via os._exit and skips finalizers.
     agent = None
+    reopened_resume = False
+    fallback_created = False
     try:
+        if resume_sid:
+            try:
+                session_db.reopen_session(resume_sid)
+                reopened_resume = True
+            except Exception:
+                logging.debug("reopen_session failed for resumed one-shot session %s", resume_sid, exc_info=True)
+        if resume_sid and not reopened_resume:
+            resume_sid, conversation_history = _create_fallback_resume_session(
+                session_db, resume_meta or {}, conversation_history)
+            fallback_created = True
+        agent_session_id = resume_sid
         agent = AIAgent(
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
@@ -582,7 +626,7 @@ def _run_agent(
             quiet_mode=True,
             platform="cli",
             session_db=session_db,
-            session_id=resume_sid,
+            session_id=agent_session_id,
             credential_pool=runtime.get("credential_pool"),
             fallback_model=get_fallback_chain(cfg) or None,
             ephemeral_system_prompt=skills_prompt,
@@ -604,6 +648,9 @@ def _run_agent(
                                     fallback_session_id=agent.session_id or resume_sid)
         return (result.get("final_response") or "", result)
     finally:
+        if agent is None and (reopened_resume or fallback_created) and session_db is not None:
+            _quietly("failed resumed session cleanup", lambda: session_db.end_session(
+                resume_sid, "oneshot_setup_failed"))
         _close_agent(agent, session_db)
 
 

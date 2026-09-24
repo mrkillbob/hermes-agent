@@ -1,6 +1,8 @@
 """Tests for the kanban CLI surface (hermes_cli.kanban)."""
 
 from __future__ import annotations
+from hermes_cli import kanban_worker_process as worker_process
+from hermes_cli import kanban_db_dispatch as dispatch_impl
 
 import argparse
 import json
@@ -58,6 +60,28 @@ def test_kanban_list_json_includes_session_id(kanban_home):
     )
 
 
+def test_kanban_list_json_includes_worker_execution_settings(kanban_home):
+    """JSON output must expose the settings that govern worker safety."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    with _hermes_cli_kanban_db_connect.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="local worker",
+            assignee="ci-static-fixer",
+            max_runtime_seconds=3600,
+            model_override="qwen3.5:4b",
+            provider_override="ollama-launch",
+            reasoning_effort="none",
+        )
+
+    payload = json.loads(kc.run_slash(f"show {task_id} --json"))
+    task = payload["task"]
+    assert task["max_runtime_seconds"] == 3600
+    assert task["model_override"] == "qwen3.5:4b"
+    assert task["provider_override"] == "ollama-launch"
+    assert task["reasoning_effort"] == "none"
+
+
 def test_kanban_show_json_includes_runtime_limit(kanban_home):
     with kbc.connect() as conn:
         bounded_id = kb.create_task(
@@ -70,8 +94,6 @@ def test_kanban_show_json_includes_runtime_limit(kanban_home):
 
     assert bounded["task"]["max_runtime_seconds"] == 2700
     assert uncapped["task"]["max_runtime_seconds"] is None
-
-
 def test_kanban_show_text_renders_graph_with_open_connection(kanban_home):
     with kbc.connect_closing() as conn:
         parent_id = kb.create_task(conn, title="parent task")
@@ -178,6 +200,22 @@ def test_board_override_is_isolated_per_concurrent_call(kanban_home, monkeypatch
     assert beta_titles == ["beta-task"]
 
 
+def test_dispatch_fails_closed_when_config_cannot_be_loaded(kanban_home, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: (_ for _ in ()).throw(RuntimeError("invalid config")),
+    )
+    args = argparse.Namespace(
+        dry_run=True, max=None, json=True, failure_limit=3,
+    )
+
+    assert kc._cmd_dispatch(args) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "RuntimeError",
+        "status": "config_unavailable",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Integration with the COMMAND_REGISTRY
 # ---------------------------------------------------------------------------
@@ -191,11 +229,23 @@ def test_board_override_is_isolated_per_concurrent_call(kanban_home, monkeypatch
 # reclaim + reassign CLI smoke tests
 # ---------------------------------------------------------------------------
 
-def test_run_slash_reclaim_running_task(kanban_home):
+def test_run_slash_reclaim_running_task(kanban_home, monkeypatch):
     import re
     import time
     import secrets
     from hermes_cli import kanban_db_connect as kbc
+
+    monkeypatch.setattr(
+        kb,
+        "_terminate_reclaimed_worker",
+        lambda pid, lock, **_kwargs: {
+            "prev_pid": pid,
+            "host_local": True,
+            "termination_attempted": True,
+            "terminated": True,
+            "sigkill": False,
+        },
+    )
 
     out1 = kc.run_slash("create 'stuck worker task' --assignee broken-model")
     m = re.search(r"(t_[a-f0-9]+)", out1)
@@ -229,6 +279,43 @@ def test_run_slash_reclaim_running_task(kanban_home):
     assert "ready" in out2.lower()
 
 
+def test_unblock_reason_records_operator_outside_worker(kanban_home, monkeypatch):
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    monkeypatch.setenv("HERMES_PROFILE_NAME", "default")
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    with _hermes_cli_kanban_db_connect.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="validated intake")
+        assert kb.block_task(conn, task_id, reason="awaiting operator")
+
+    output = kc.run_slash(f"unblock {task_id} --reason 'validated for local repair'")
+
+    assert f"Unblocked {task_id}" in output
+    with _hermes_cli_kanban_db_connect.connect_closing() as conn:
+        comments = kb.list_comments(conn, task_id)
+    assert [(comment.author, comment.body) for comment in comments] == [
+        ("operator", "UNBLOCK: validated for local repair")
+    ]
+
+
+def test_unblock_is_orchestrator_only_inside_worker(kanban_home, monkeypatch):
+    """A Kanban worker cannot self-unblock a task; it must hand off to the orchestrator."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    monkeypatch.setenv("HERMES_PROFILE_NAME", "repair-worker")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_12345678")
+    with _hermes_cli_kanban_db_connect.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="worker retry")
+        assert kb.block_task(conn, task_id, reason="transient")
+
+    output = kc.run_slash(f"unblock {task_id} --reason 'worker retry'")
+
+    assert "orchestrator-only" in output
+    with _hermes_cli_kanban_db_connect.connect_closing() as conn:
+        task = kb.get_task(conn, task_id)
+        comments = kb.list_comments(conn, task_id)
+    assert task.status == "blocked"
+    assert comments == []
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -239,5 +326,3 @@ def test_run_slash_reclaim_running_task(kanban_home):
 # ---------------------------------------------------------------------------
 # /kanban help / no-args / unknown-action UX (issue #21794)
 # ---------------------------------------------------------------------------
-
-

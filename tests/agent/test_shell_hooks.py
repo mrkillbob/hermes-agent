@@ -44,6 +44,13 @@ class TestParseResponse:
         )
         assert r == {"action": "block", "message": "nope"}
 
+    def test_pre_kanban_invalid_decision_is_preserved_for_validation(self):
+        r = shell_hooks._parse_response(
+            "pre_kanban_complete",
+            '{"action": "blok"}',
+        )
+        assert r == {"action": "blok"}
+
     @pytest.mark.parametrize("stdout, expected", [
         ('{"action": "approve", "message": "  needs a human ", "rule_key": " terminal:rm "}',
          {"action": "approve", "message": "needs a human", "rule_key": "terminal:rm"}),
@@ -149,6 +156,34 @@ class TestCallbackSubprocess:
         )
         assert msg == "blocked-by-shell"
 
+    def test_completion_hook_spawn_error_fails_closed_by_default(self, tmp_path, monkeypatch):
+        """Completion gates must not disappear when their command cannot spawn."""
+        from hermes_cli import plugins
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("HERMES_ACCEPT_HOOKS", "1")
+        plugins._plugin_manager = plugins.PluginManager()
+
+        missing = tmp_path / "missing-hook"
+        registered = shell_hooks.register_from_config(
+            {"hooks": {"pre_kanban_complete": [{"command": str(missing)}]}},
+            accept_hooks=True,
+        )
+        assert len(registered) == 1
+
+        results = plugins.invoke_hook("pre_kanban_complete", task_id="task-1")
+
+        assert results == [{"action": "block", "message": f"hook {missing} failed closed: command not found"}]
+
+    def test_completion_hook_timeout_fails_closed_by_default(self):
+        spec = shell_hooks.ShellHookSpec(event="pre_kanban_complete", command="/tmp/hook.sh")
+
+        result = shell_hooks._evaluate_result(spec, _spawn_result(timed_out=True))
+
+        assert result is not None
+        assert result["action"] == "block"
+        assert "failed closed" in result["message"]
+
     def test_approve_reaches_the_human_gate_through_plugin_manager(self, tmp_path, monkeypatch):
         """End to end: a shell hook's approve directive escalates to request_tool_approval with its
         message and rule_key, and the gate's denial blocks the tool (#92553)."""
@@ -174,6 +209,7 @@ class TestCallbackSubprocess:
         monkeypatch.setattr("tools.approval.request_tool_approval", _gate)
         assert plugins.resolve_pre_tool_block("terminal", {"command": "rm"}) == "denied by human"
         assert seen == [("terminal", "risky", "terminal:rm")]
+
 
     def test_matcher_regex_filters_callback(self, tmp_path, monkeypatch):
         """A matcher set to 'terminal' must not fire for 'web_search'."""
@@ -566,11 +602,12 @@ class TestEvaluateResult:
         )
         assert r is None
 
-    def test_empty_stdout_passes_fail_closed(self):
+    def test_completion_empty_stdout_fails_closed_with_missing_decision(self):
         r = shell_hooks._evaluate_result(
-            self._spec(fail_closed=True), _spawn_result(stdout=""),
+            self._spec(event="pre_kanban_complete"), _spawn_result(stdout=""),
         )
-        assert r is None
+        assert r["action"] == "block"
+        assert "missing decision" in r["message"]
 
     def test_fail_closed_on_non_blocking_event_still_fails_open(self):
         """Defense in depth: even if a spec sneaks past parsing with

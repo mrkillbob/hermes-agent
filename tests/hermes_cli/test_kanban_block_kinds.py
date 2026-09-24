@@ -86,9 +86,87 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
         assert payload.get("kind") == "capability"
 
 
+def test_machine_pr_feedback_block_returns_to_dispatcher(kanban_home: Path) -> None:
+    """Recoverable PR/CI worker failures never become human-sticky blocks."""
+
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    with _hermes_cli_kanban_db_connect.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="GitHub PR feedback: acme/widgets#17",
+            assignee="pr-repair-steward",
+            idempotency_key="github-pr-feedback:abc123",
+            initial_status="running",
+        )
+        assert kb.claim_task(conn, tid, claimer="pr-repair-steward") is not None
+        kb.block_task(conn, tid, reason="start validation", kind="needs_input")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
+        events = [event.kind for event in kb.list_events(conn, tid)]
+        assert "machine_handoff" in events
+
+
+def test_db_accepts_synthetic_assignee_for_internal_worker(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (kanban_home / "profiles").mkdir()
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="Review worker", assignee="worker")
+        assert task_id.startswith("t_")
+
+
+def test_intent_review_needs_input_triage_stays_human_gated(kanban_home: Path) -> None:
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    with _hermes_cli_kanban_db_connect.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Operator intent required: PR #17",
+            body="Record only the operator intent decision.",
+            assignee="task-orchestrator",
+            idempotency_key="github-pr-feedback:intent-review:repo:17:abc",
+            initial_status="running",
+        )
+        assert kb.claim_task(conn, tid, claimer="task-orchestrator") is not None
+        kb.block_task(conn, tid, reason="operator intent", kind="needs_input")
+        kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid, claimer="task-orchestrator") is not None
+        kb.block_task(conn, tid, reason="operator intent", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+
+        promoted = kb.recompute_ready(conn)
+
+        assert promoted == 0
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "triage"
+
+
+def test_live_home_preserves_external_assignee_lane(kanban_home: Path) -> None:
+    (kanban_home / "profiles").mkdir()
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="Review worker", assignee="worker")
+        assert kb.get_task(conn, task_id).assignee == "worker"
+
+
 # ---------------------------------------------------------------------------
 # Dependency routing
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("finished_parent", [False, True])
+def test_dependency_without_pending_parent_stays_blocked(kanban_home, finished_parent):
+    with kbc.connect_closing() as conn:
+        if finished_parent:
+            parent = _running_task(conn, title="finished prerequisite")
+            kb.complete_task(conn, parent, result="done")
+            child = kb.create_task(conn, title="missing external prerequisite", assignee="worker")
+            kb.link_tasks(conn, parent_id=parent, child_id=child)
+            assert kb.claim_task(conn, child, claimer="worker") is not None
+        else:
+            child = _running_task(conn, title="missing external prerequisite")
+        assert kb.block_task(conn, child, reason="source unavailable", kind="dependency")
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, child).status == "blocked"
+        assert kb.claim_task(conn, child, claimer="worker") is None
 
 
 def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
@@ -196,5 +274,3 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
 # ---------------------------------------------------------------------------
 # Validation + back-compat
 # ---------------------------------------------------------------------------
-
-

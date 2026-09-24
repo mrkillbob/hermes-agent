@@ -63,6 +63,24 @@ def test_promote_stuck_todo_succeeds(conn):
     assert kb.get_task(conn, child).status == "ready"
 
 
+def test_promote_fully_specified_triage_task_succeeds(conn):
+    task_id = kb.create_task(
+        conn, title="worktree governance", body="Run the bounded governance sample.",
+        assignee="task-intake-router", triage=True,
+    )
+    ok, err = kb.promote_task(conn, task_id, actor="tester", reason="scope is concrete")
+    assert ok and err is None
+    assert kb.get_task(conn, task_id).status == "ready"
+
+
+def test_promote_underspecified_triage_task_stays_in_triage(conn):
+    task_id = kb.create_task(conn, title="needs scope", assignee="task-intake-router", triage=True)
+    ok, err = kb.promote_task(conn, task_id, actor="tester")
+    assert not ok
+    assert "specify" in err
+    assert kb.get_task(conn, task_id).status == "triage"
+
+
 def test_promote_refuses_undone_parent_and_names_the_real_remedy(conn):
     # #106195: promotion must never report a 'ready' that the first claim reverts.
     child, (parent,) = _stuck_todo(conn, parents_done=False)
@@ -109,5 +127,4 @@ def test_cli_promote_bulk_ids_promotes_all(kanban_home, capsys):
     with kbc.connect() as conn:
         for c in children:
             assert kb.get_task(conn, c).status == "ready"
-
 

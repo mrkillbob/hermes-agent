@@ -24,6 +24,12 @@ from agent.lsp.servers import (
 )
 
 
+# These E2E cases intentionally launch the fixed in-process mock LSP child;
+# allow its lifecycle signals without the repository-wide foreign-process
+# guard misclassifying an exited/reparented child on macOS.
+pytestmark = pytest.mark.live_system_guard_bypass
+
+
 MOCK_SERVER = str(Path(__file__).parent / "_mock_lsp_server.py")
 
 

@@ -268,13 +268,18 @@ def named_profile_home(path: str | Path) -> Path | None:
     Requires ``<name>`` not to start with ``.`` and the ``profiles`` parent to be a real Hermes home;
     a default home whose path merely contains a ``profiles`` segment is not a named profile.
     """
-    current = Path(path)
-    for candidate in (current, *current.parents):
-        if (candidate.parent.name == "profiles" and not candidate.name.startswith(".")
-                and _is_hermes_profiles_root(candidate.parent)):
-            return candidate
-        if candidate.name == ".hermes":  # default home: a coincidental profiles/ ancestor is not a root
-            return None
+    current = Path(path).expanduser()
+    try:
+        resolved = current.resolve(strict=False)
+    except (OSError, RuntimeError):
+        resolved = current
+    for walked in (resolved, current):
+        for candidate in (walked, *walked.parents):
+            if (candidate.parent.name == "profiles" and not candidate.name.startswith(".")
+                    and _is_hermes_profiles_root(candidate.parent)):
+                return candidate
+            if candidate.name == ".hermes":  # default home: a coincidental profiles/ ancestor is not a root
+                break
     return None
 
 
@@ -316,7 +321,9 @@ def named_profile_is_deleted(profile_home: str | Path) -> bool:
 # Runtime side-effects (cron heartbeats, log rotation, caches) create dirs that carry
 # none of these; a pre-tombstone ghost shell or a stray infrastructure dir must never be
 # listed, served, ticked, or seeded with the default install's credentials.
-_PROFILE_IDENTITY_MARKERS = ("config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db")
+_PROFILE_IDENTITY_MARKERS = (
+    "config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db", "federation_role.json",
+)
 # Canonical named-profile id grammar; every profile-directory gate imports this one object.
 PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 

@@ -141,6 +141,7 @@ import {
   CAPABILITIES_ROUTE,
   CRON_ROUTE,
   MESSAGING_ROUTE,
+  SESSION_IMPORT_ROUTE,
   SIDEBAR_NAV_AREA,
   type SidebarNavContribution
 } from '../../routes'
@@ -241,6 +242,12 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     route: CRON_ROUTE,
     keybindActionId: 'nav.cron',
     tier: 'advanced'
+  },
+  {
+    id: 'session-import',
+    label: '',
+    icon: props => <Codicon name="cloud-download" {...props} />,
+    route: SESSION_IMPORT_ROUTE
   }
 ]
 

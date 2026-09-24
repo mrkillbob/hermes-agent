@@ -97,7 +97,7 @@ def _credential_fill(origin: str) -> Optional[tuple[str, str]]:
     env.pop("GIT_ASKPASS", None)
     env.pop("SSH_ASKPASS", None)
     parsed = urllib.parse.urlsplit(origin)
-    request = f"protocol=https\nhost={parsed.netloc}\n\n"
+    request = f"protocol={parsed.scheme}\nhost={parsed.netloc}\npath={parsed.path.lstrip('/')}\n\n"
     try:
         result = subprocess.run(
             [git, "-c", "core.askPass=", "credential", "fill"], input=request, capture_output=True,
@@ -126,7 +126,8 @@ def iter_git_basic_auth(url: str) -> Iterator[tuple[str, tuple[str, str]]]:
     if urllib.parse.urlsplit(origin).hostname in _GITHUB_HOSTS:
         sources += [("GITHUB_TOKEN/GH_TOKEN", lambda: _token_pair(_env_github_token())),
                     ("gh auth token", lambda: _token_pair(_gh_cli_token()))]
-    sources.append(("git credential helper", lambda: _credential_fill(origin)))
+    credential_url = origin + urllib.parse.urlsplit(url).path
+    sources.append(("git credential helper", lambda: _credential_fill(credential_url)))
     for source, lookup in sources:
         auth = lookup()
         if auth is not None and auth not in seen:

@@ -144,6 +144,16 @@ _BOARD_SPECS = [
         "NEW board — the slug gains a numeric suffix if it is already taken — so an import can "
         "never overwrite or merge into a board you already have."
     )),
+    _cmd("merge", [
+        _arg("slug", help="Source board"),
+        _arg("--into", required=True, help="Existing destination board"),
+        _arg("--backup", required=True, help="Recovery archive path (includes attachments and logs)"),
+        _arg("--task-id", action="append", dest="task_ids", help="Move only this card (repeatable)"),
+        _arg("--delete-source", action="store_true", help="Delete source after card and history verification"),
+    ], help="Copy cards and history into an existing board", description=(
+        "Creates a complete recovery archive, refuses live task claims, copies task history and "
+        "attachments, and verifies the destination. The source remains unless --delete-source is set."
+    )),
 ]
 
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
@@ -159,6 +169,8 @@ _SPECS = [
          )),
     _cmd("create", [
         _arg("title", help="Task title"),
+        _arg("--federated", action="store_true",
+             help="Submit an unassigned task to the opt-in Mac/Windows runner pool"),
         _arg("--body", help="Optional opening post"),
         _arg("--body-file", metavar="PATH",
              help="Read the opening post from a file ('-' = stdin), so bodies with embedded "
@@ -203,6 +215,8 @@ _SPECS = [
         _arg("--provider", dest="provider_override",
              help="Provider the --model belongs to (passed as --provider <name> to "
                   "the worker). Requires --model."),
+        _arg("--reasoning", "--reasoning-effort", dest="reasoning_effort",
+             help="Pin the worker reasoning effort (for example: none, low, medium, or high)."),
         _arg("--completion-contract", metavar="CONTRACT",
              help="local-only (default), OWNER/REPO for publication, or exact GitHub PR URL; required CI gates done."),
         _arg("--goal", action="store_true", dest="goal_mode",
@@ -214,9 +228,8 @@ _SPECS = [
         _arg("--goal-max-turns", type=int, metavar="N", dest="goal_max_turns",
              help="Turn budget for --goal workers (default 20). Ignored without --goal."),
         _arg("--initial-status", choices=sorted(kb.VALID_INITIAL_STATUSES), default="running",
-             help="Initial card status. Use 'blocked' for cards "
-                  "that require immediate human ops (R3 gate) "
-                  "to skip the brief running-to-blocked transition."),
+             help="Initial card status. Use 'todo' to stage a task safely before dispatch, "
+                  "or 'blocked' only when immediate human input is required."),
         _json_flag(help="Emit JSON output"),
     ], help="Create a new task"),
     _cmd("swarm", [
@@ -250,6 +263,8 @@ _SPECS = [
          help="Show a task with comments + events"),
     _cmd("assign", [_TASK_ID, _arg("profile", help="Profile name (or 'none' to unassign)")],
          help="Assign or reassign a task"),
+    _cmd("set-reasoning", [_TASK_ID, _arg("effort", help="Reasoning effort or inherit to use the profile default")],
+         help="Set reasoning effort for the next task dispatch"),
     _cmd("set-model", [
         _TASK_ID,
         _arg("model", nargs="?", help="Model to pin the worker to (or 'none' to clear the override)"),
@@ -353,7 +368,7 @@ _SPECS = [
         _bulk_ids("promote"),
         _arg("--dry-run", action="store_true", help="Validate the promotion without mutating state"),
         _arg("--json", dest="json", action="store_true", help="Emit machine-readable JSON result"),
-    ], help="Manually move one or more todo/blocked tasks to ready (recovery path)"),
+    ], help="Manually move fully specified todo/blocked/triage tasks to ready (recovery path)"),
     _cmd("archive", [
         _arg("task_ids", nargs="*", help="Task ids to archive (default mode)"),
         _arg("--rm", dest="purge_ids", nargs="+",

@@ -217,6 +217,16 @@ def _receipt_reports_stale_runtime(receipt: dict, expected_sha: str | None = Non
     if not expected_sha:
         return False
 
+    # An unfinished receipt is evidence for the update generation it was
+    # attempting to install, not for every later commit in the checkout.  A
+    # normal development commit after a controlled restart must not resurrect
+    # the old receipt as a live mixed-runtime warning; a new update will write
+    # its own marker/receipt for that generation.
+    plan = receipt.get("plan")
+    planned_sha = plan.get("expected_sha") if isinstance(plan, dict) else None
+    if planned_sha and str(planned_sha) != str(expected_sha):
+        return False
+
     def _sha_mismatch(code_sha) -> bool:
         return bool(code_sha) and str(code_sha) != str(expected_sha)
 
@@ -233,7 +243,6 @@ def _receipt_reports_stale_runtime(receipt: dict, expected_sha: str | None = Non
 
     if not _receipt_looks_unfinished(receipt):
         return False
-    plan = receipt.get("plan")
     if not isinstance(plan, dict):
         return False
     return any(
@@ -2078,6 +2087,14 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
                 if _ur._current is not None:
                     _ur._current.data["runtime_outcomes"] = _runtime_outcomes
 
+    if update_complete and not restart.incomplete:
+        try:
+            from hermes_cli.gateway_migrate import maybe_auto_migrate_after_update
+            maybe_auto_migrate_after_update()
+        except Exception:
+            logger.exception("Automatic gateway migration failed")
+            restart.incomplete = True
+
     with _best_effort('Update receipt finalize failed: %s'):
         from hermes_cli.update_receipt import finalize_update_receipt
         _receipt_path = finalize_update_receipt(
@@ -2092,11 +2109,6 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
         # doesn't treat the fleet as healthy; leave the pending marker for catch-up.
         sys.exit(1)
     _clear_fleet_restart_pending_marker()
-    # Fleet is healthy on the new code: fold per-profile gateways into one multiplexer when nothing
-    # blocks it (deterministic; never prompts), else print the blockers and the one-liner to run later.
-    with _best_effort('Multiplex auto-migration after update failed: %s'):
-        from hermes_cli.gateway_migrate import maybe_auto_migrate_after_update
-        maybe_auto_migrate_after_update()
 
 
 def _restart_phase_failure_is_incomplete(surviving, pre_restart_pids) -> bool:

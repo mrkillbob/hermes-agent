@@ -311,6 +311,7 @@ export interface SubagentSteerParams {
   profile?: string | null
   subagent_id: string
   text: string
+  expected_generation?: string | null
 }
 /** ``queued`` is not ``delivered``: a child past its final tool batch surfaces ``missed_steer``. */
 export interface SubagentSteerResult {
@@ -1230,6 +1231,10 @@ export interface DisplayLeaseReleaseParams {
   viewer_id?: string | null
   force?: boolean | null
 }
+/** Passthrough respond methods carry a free-form payload. */
+export type RespondParams = Record<string, never>
+/** Passthrough respond methods return nothing structured. */
+export type RespondResult = Record<string, never>
 export interface GroupsCapabilitiesParams {
   profile?: string | null
 }
@@ -2083,13 +2088,35 @@ export interface SubagentSnapshot {
 }
 /** Lifecycle of one delegated child (``tools/delegate_tool_child_run.py``); ``failed`` / ``error`` / ``timeout`` / ``interrupted`` / ``completed`` are terminal. */
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'error' | 'timeout' | 'interrupted'
-export interface SubagentIdParams {
+export interface SubagentInterruptParams {
+  session_id: string
+  profile?: string | null
+  subagent_id: string
+  expected_generation?: string | null
+}
+export interface SubagentInterruptResult {
+  found: boolean
+  subagent_id: string
+}
+export interface SubagentStatusParams {
   session_id: string
   profile?: string | null
   subagent_id: string
 }
-export interface SubagentInterruptResult {
+export interface SubagentStatusResult {
   found: boolean
+  subagent?: SubagentStatusEntry | null
+}
+export interface SubagentStatusEntry {
+  generation: string
+  subagent_id: string
+  parent_id?: string | null
+  status: string
+  [key: string]: unknown
+}
+export interface SubagentIdParams {
+  session_id: string
+  profile?: string | null
   subagent_id: string
 }
 /** ``available`` is false while the child has no live transcript yet (or it was cleaned up). */
@@ -2588,14 +2615,6 @@ export interface ClarifyLockResult {
   remaining?: string[] | null
 }
 export type ClarifyLockStatus = 'ok' | 'expired'
-export interface RequestAnswerParams {
-  id: string
-  result: Record<string, unknown>
-  profile?: string | null
-}
-export interface RequestAnswerResult {
-  status: ClarifyLockStatus
-}
 export interface ApprovalPendingParams {
   session_id: string
   profile?: string | null
@@ -3307,6 +3326,23 @@ export interface LlmOneshotParams {
 }
 export interface LlmOneshotResult {
   text: string
+}
+export interface SessionWorktreeCleanupParams {
+  session_id: string
+  action?: string
+  profile?: string | null
+}
+export interface SessionWorktreeCleanupResult {
+  allowed: boolean
+  reasons: string[]
+  removed: boolean
+  root_session_id: string
+  path: string
+  branch: string
+  base_commit: string
+  state: string
+  failure_phase?: string | null
+  failure_message?: string | null
 }
 export interface SystemBatteryParams {
   profile?: string | null
@@ -4840,6 +4876,8 @@ export interface RpcMethods {
   'mcp.servers.status': { params: ProfileParams; result: McpServersStatusResult }
   /** Connect, list tools, disconnect — an OAuth server with no token on disk is reported as not ok. */
   'mcp.servers.test': { params: McpServerNameParams; result: McpServersTestResult }
+  /** MCP setup respond passthrough */
+  'mcp.setup.respond': { params: RespondParams; result: RespondResult }
   /** Set/clear one author's emoji reaction on a message; returns the row's full reaction list. */
   'message.react': { params: MessageReactParams; result: MessageReactResult }
   /** Remove every credential (env keys and OAuth state) for a provider. */
@@ -4892,6 +4930,10 @@ export interface RpcMethods {
   'plugins.list': { params: PluginsListParams; result: PluginsListResult }
   /** Plugins Hub backend: list installed plugins, toggle, git-install, re-pin a catalog install, or remove a user install. */
   'plugins.manage': { params: PluginsManageParams; result: PluginsManageResult }
+  /** Preview act respond passthrough */
+  'preview.act.respond': { params: RespondParams; result: RespondResult }
+  /** Preview read respond passthrough */
+  'preview.read.respond': { params: RespondParams; result: RespondResult }
   /** Spawn a hidden agent that brings the desktop preview's dev server back up. */
   'preview.restart': { params: PreviewRestartParams; result: TaskIdResult }
   /** Kill one background process the caller's session owns and return its output snapshot. */
@@ -4956,14 +4998,14 @@ export interface RpcMethods {
   'reload.env': { params: ReloadEnvParams; result: ReloadEnvResult }
   /** Tear down and rediscover MCP servers for every live session (prompt cache is invalidated). */
   'reload.mcp': { params: ReloadMcpParams; result: ReloadMcpResult }
-  /** Answer an open server→client request from a client that never received the frame. */
-  'request.answer': { params: RequestAnswerParams; result: RequestAnswerResult }
   /** Diff between a checkpoint and the working tree, with an ANSI rendering sized to the TUI. */
   'rollback.diff': { params: RollbackDiffParams; result: RollbackDiffResult }
   /** Checkpoints for the session's cwd; ``enabled: false`` when checkpointing is off. */
   'rollback.list': { params: RollbackListParams; result: RollbackListResult }
   /** Restore the working tree (or one file) to a checkpoint by hash or 1-based index. */
   'rollback.restore': { params: RollbackRestoreParams; result: RollbackRestoreResult }
+  /** Secret respond passthrough */
+  'secret.respond': { params: RespondParams; result: RespondResult }
   /** Attach the frontend to a live session without closing the previously focused one. */
   'session.activate': { params: SessionActivateParams; result: SessionActivateResult }
   /** Live sessions in this process, insertion order (not a DB browser). */
@@ -5024,6 +5066,8 @@ export interface RpcMethods {
   'session.usage': { params: SessionUsageParams; result: SessionUsageResult }
   /** Re-home a stored session's workspace; git identity is replaced and a live agent follows. */
   'session.workspace.move': { params: SessionWorkspaceMoveParams; result: SessionWorkspaceMoveResult }
+  /** Inspect or explicitly remove one managed conversation worktree. */
+  'session.worktree_cleanup': { params: SessionWorktreeCleanupParams; result: SessionWorktreeCleanupResult }
   /** Strict provider check through the same runtime resolution the agent uses on session creation. */
   'setup.runtime_check': { params: SetupRuntimeCheckParams; result: SetupRuntimeCheckResult }
   /** Loose provider check: is ANY provider auth state discoverable for the (launch or named) profile. */
@@ -5043,9 +5087,11 @@ export interface RpcMethods {
   /** Persist a finished delegation tree snapshot under the session's spawn-trees dir. */
   'spawn_tree.save': { params: SpawnTreeSaveParams; result: SpawnTreeSaveResult }
   /** Hard-interrupt one owned child; ``found`` is false when it already finished. */
-  'subagent.interrupt': { params: SubagentIdParams; result: SubagentInterruptResult }
+  'subagent.interrupt': { params: SubagentInterruptParams; result: SubagentInterruptResult }
   /** Live children owned by this session (other sessions' children never leak). */
   'subagent.list': { params: SessionParams; result: SubagentListResult }
+  /** Return the authority receipt for one owned child; ``found`` is false when not owned by this session. */
+  'subagent.status': { params: SubagentStatusParams; result: SubagentStatusResult }
   /** Queue steering text into a live delegated child owned by this session. */
   'subagent.steer': { params: SubagentSteerParams; result: SubagentSteerResult }
   /** Last 16KB of an owned child's live transcript. */
@@ -5060,8 +5106,12 @@ export interface RpcMethods {
   'subscription.state': { params: ProfileParams; result: SubscriptionStateResult }
   /** Prorate, charge and flip the plan (billing:manage, idempotent). */
   'subscription.upgrade': { params: SubscriptionUpgradeParams; result: SubscriptionUpgradeResult }
+  /** Sudo respond passthrough */
+  'sudo.respond': { params: RespondParams; result: RespondResult }
   /** Host battery for the status bar; always resolves, ``available: false`` when unreadable. */
   'system.battery': { params: SystemBatteryParams; result: SystemBatteryResult }
+  /** Terminal read respond passthrough */
+  'terminal.read.respond': { params: RespondParams; result: RespondResult }
   /** Record the client's column width for server-side rendering. */
   'terminal.resize': { params: TerminalResizeParams; result: TerminalResizeResult }
   /** Persist a toolset / MCP enable-disable change and rebuild the session agent so it takes effect now. */
@@ -5072,6 +5122,8 @@ export interface RpcMethods {
   'tools.show': { params: _SessionScoped; result: ToolsShowResult }
   /** Toolset summaries (no tool names) for the desktop Toolsets tab. */
   'toolsets.list': { params: _SessionScoped; result: ToolsetsListResult }
+  /** Tour respond passthrough */
+  'tour.respond': { params: RespondParams; result: RespondResult }
   /** Two-bar dollar usage view shared by /usage, /topup and /subscription; fail-open to unavailable. */
   'usage.bars': { params: ProfileParams; result: UsageModel }
   /** Add a login / payment / address item to the local vault. */
@@ -5108,6 +5160,8 @@ export interface RpcMethods {
   'wake.status': { params: WakeStatusParams; result: WakeStatusResult }
   /** Stop this surface's listener; persist also writes wake_word.enabled: false. */
   'wake.stop': { params: WakeStopParams; result: WakeStopResult }
+  /** Window read respond passthrough */
+  'window.read.respond': { params: RespondParams; result: RespondResult }
 }
 export type RpcMethod = keyof RpcMethods
 export const RPC_METHODS = [
@@ -5212,6 +5266,7 @@ export const RPC_METHODS = [
   'mcp.servers.set_api_key',
   'mcp.servers.status',
   'mcp.servers.test',
+  'mcp.setup.respond',
   'message.react',
   'model.disconnect',
   'model.options',
@@ -5238,6 +5293,8 @@ export const RPC_METHODS = [
   'ping',
   'plugins.list',
   'plugins.manage',
+  'preview.act.respond',
+  'preview.read.respond',
   'preview.restart',
   'process.kill',
   'process.list',
@@ -5270,10 +5327,10 @@ export const RPC_METHODS = [
   'prompt.submit',
   'reload.env',
   'reload.mcp',
-  'request.answer',
   'rollback.diff',
   'rollback.list',
   'rollback.restore',
+  'secret.respond',
   'session.activate',
   'session.active_list',
   'session.branch',
@@ -5304,6 +5361,7 @@ export const RPC_METHODS = [
   'session.undo',
   'session.usage',
   'session.workspace.move',
+  'session.worktree_cleanup',
   'setup.runtime_check',
   'setup.status',
   'shell.exec',
@@ -5315,6 +5373,7 @@ export const RPC_METHODS = [
   'spawn_tree.save',
   'subagent.interrupt',
   'subagent.list',
+  'subagent.status',
   'subagent.steer',
   'subagent.tail',
   'subscription.change',
@@ -5322,12 +5381,15 @@ export const RPC_METHODS = [
   'subscription.resume',
   'subscription.state',
   'subscription.upgrade',
+  'sudo.respond',
   'system.battery',
+  'terminal.read.respond',
   'terminal.resize',
   'tools.configure',
   'tools.list',
   'tools.show',
   'toolsets.list',
+  'tour.respond',
   'usage.bars',
   'vault.add',
   'vault.list',
@@ -5345,7 +5407,8 @@ export const RPC_METHODS = [
   'wake.resume',
   'wake.start',
   'wake.status',
-  'wake.stop'
+  'wake.stop',
+  'window.read.respond'
 ] as const satisfies readonly RpcMethod[]
 
 // ── Server→client requests ──

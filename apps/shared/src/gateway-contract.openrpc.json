@@ -1825,6 +1825,24 @@
       }
     },
     {
+      "name": "mcp.setup.respond",
+      "summary": "MCP setup respond passthrough",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/RespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/RespondResult"
+        }
+      }
+    },
+    {
       "name": "message.react",
       "summary": "Set/clear one author's emoji reaction on a message; returns the row's full reaction list.",
       "params": [
@@ -2289,6 +2307,42 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/PluginsManageResult"
+        }
+      }
+    },
+    {
+      "name": "preview.act.respond",
+      "summary": "Preview act respond passthrough",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/RespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/RespondResult"
+        }
+      }
+    },
+    {
+      "name": "preview.read.respond",
+      "summary": "Preview read respond passthrough",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/RespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/RespondResult"
         }
       }
     },
@@ -2869,24 +2923,6 @@
       }
     },
     {
-      "name": "request.answer",
-      "summary": "Answer an open server\u2192client request from a client that never received the frame.",
-      "params": [
-        {
-          "name": "params",
-          "schema": {
-            "$ref": "#/components/schemas/RequestAnswerParams"
-          }
-        }
-      ],
-      "result": {
-        "name": "result",
-        "schema": {
-          "$ref": "#/components/schemas/RequestAnswerResult"
-        }
-      }
-    },
-    {
       "name": "rollback.diff",
       "summary": "Diff between a checkpoint and the working tree, with an ANSI rendering sized to the TUI.",
       "params": [
@@ -2937,6 +2973,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/RollbackRestoreResult"
+        }
+      }
+    },
+    {
+      "name": "secret.respond",
+      "summary": "Secret respond passthrough",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/RespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/RespondResult"
         }
       }
     },
@@ -3481,6 +3535,24 @@
       }
     },
     {
+      "name": "session.worktree_cleanup",
+      "summary": "Inspect or explicitly remove one managed conversation worktree.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionWorktreeCleanupParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionWorktreeCleanupResult"
+        }
+      }
+    },
+    {
       "name": "setup.runtime_check",
       "summary": "Strict provider check through the same runtime resolution the agent uses on session creation.",
       "params": [
@@ -3649,7 +3721,7 @@
         {
           "name": "params",
           "schema": {
-            "$ref": "#/components/schemas/SubagentIdParams"
+            "$ref": "#/components/schemas/SubagentInterruptParams"
           }
         }
       ],
@@ -3675,6 +3747,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/SubagentListResult"
+        }
+      }
+    },
+    {
+      "name": "subagent.status",
+      "summary": "Return the authority receipt for one owned child; ``found`` is false when not owned by this session.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SubagentStatusParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SubagentStatusResult"
         }
       }
     },
@@ -3805,6 +3895,24 @@
       }
     },
     {
+      "name": "sudo.respond",
+      "summary": "Sudo respond passthrough",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/RespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/RespondResult"
+        }
+      }
+    },
+    {
       "name": "system.battery",
       "summary": "Host battery for the status bar; always resolves, ``available: false`` when unreadable.",
       "params": [
@@ -3819,6 +3927,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/SystemBatteryResult"
+        }
+      }
+    },
+    {
+      "name": "terminal.read.respond",
+      "summary": "Terminal read respond passthrough",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/RespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/RespondResult"
         }
       }
     },
@@ -3909,6 +4035,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/ToolsetsListResult"
+        }
+      }
+    },
+    {
+      "name": "tour.respond",
+      "summary": "Tour respond passthrough",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/RespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/RespondResult"
         }
       }
     },
@@ -4233,6 +4377,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/WakeStopResult"
+        }
+      }
+    },
+    {
+      "name": "window.read.respond",
+      "summary": "Window read respond passthrough",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/RespondParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/RespondResult"
         }
       }
     }
@@ -25993,51 +26155,6 @@
         "title": "RepoDiscoveryPolicyParams",
         "type": "object"
       },
-      "RequestAnswerParams": {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "result": {
-            "additionalProperties": true,
-            "title": "Result",
-            "type": "object"
-          },
-          "profile": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Profile"
-          }
-        },
-        "required": [
-          "id",
-          "result"
-        ],
-        "title": "RequestAnswerParams",
-        "type": "object"
-      },
-      "RequestAnswerResult": {
-        "additionalProperties": false,
-        "properties": {
-          "status": {
-            "$ref": "#/components/schemas/ClarifyLockStatus"
-          }
-        },
-        "required": [
-          "status"
-        ],
-        "title": "RequestAnswerResult",
-        "type": "object"
-      },
       "RequestCancelPayload": {
         "additionalProperties": false,
         "properties": {
@@ -26060,6 +26177,20 @@
           "reason"
         ],
         "title": "RequestCancelPayload",
+        "type": "object"
+      },
+      "RespondParams": {
+        "additionalProperties": false,
+        "description": "Passthrough respond methods carry a free-form payload.",
+        "properties": {},
+        "title": "RespondParams",
+        "type": "object"
+      },
+      "RespondResult": {
+        "additionalProperties": false,
+        "description": "Passthrough respond methods return nothing structured.",
+        "properties": {},
+        "title": "RespondResult",
         "type": "object"
       },
       "ResumePhaseStatus": {
@@ -30801,6 +30932,113 @@
         "title": "SessionWorkspaceMoveResult",
         "type": "object"
       },
+      "SessionWorktreeCleanupParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "action": {
+            "default": "inspect",
+            "title": "Action",
+            "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "SessionWorktreeCleanupParams",
+        "type": "object"
+      },
+      "SessionWorktreeCleanupResult": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed": {
+            "title": "Allowed",
+            "type": "boolean"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "boolean"
+          },
+          "root_session_id": {
+            "title": "Root Session Id",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "branch": {
+            "title": "Branch",
+            "type": "string"
+          },
+          "base_commit": {
+            "title": "Base Commit",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "failure_phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failure Phase"
+          },
+          "failure_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failure Message"
+          }
+        },
+        "required": [
+          "allowed",
+          "reasons",
+          "removed",
+          "root_session_id",
+          "path",
+          "branch",
+          "base_commit",
+          "state"
+        ],
+        "title": "SessionWorktreeCleanupResult",
+        "type": "object"
+      },
       "SetupReadyPayload": {
         "additionalProperties": true,
         "description": "``hermes_cli/free_tier_bootstrap.py::SetupRecord.as_payload``.",
@@ -32588,6 +32826,49 @@
         "title": "SubagentIdParams",
         "type": "object"
       },
+      "SubagentInterruptParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "subagent_id": {
+            "title": "Subagent Id",
+            "type": "string"
+          },
+          "expected_generation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expected Generation"
+          }
+        },
+        "required": [
+          "session_id",
+          "subagent_id"
+        ],
+        "title": "SubagentInterruptParams",
+        "type": "object"
+      },
       "SubagentInterruptResult": {
         "additionalProperties": false,
         "properties": {
@@ -32803,6 +33084,98 @@
         "title": "SubagentStatus",
         "type": "string"
       },
+      "SubagentStatusEntry": {
+        "additionalProperties": true,
+        "properties": {
+          "generation": {
+            "title": "Generation",
+            "type": "string"
+          },
+          "subagent_id": {
+            "title": "Subagent Id",
+            "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Parent Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "subagent_id",
+          "status"
+        ],
+        "title": "SubagentStatusEntry",
+        "type": "object"
+      },
+      "SubagentStatusParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "subagent_id": {
+            "title": "Subagent Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "subagent_id"
+        ],
+        "title": "SubagentStatusParams",
+        "type": "object"
+      },
+      "SubagentStatusResult": {
+        "additionalProperties": false,
+        "properties": {
+          "found": {
+            "title": "Found",
+            "type": "boolean"
+          },
+          "subagent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SubagentStatusEntry"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "found"
+        ],
+        "title": "SubagentStatusResult",
+        "type": "object"
+      },
       "SubagentSteerParams": {
         "additionalProperties": false,
         "properties": {
@@ -32829,6 +33202,18 @@
           "text": {
             "title": "Text",
             "type": "string"
+          },
+          "expected_generation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expected Generation"
           }
         },
         "required": [

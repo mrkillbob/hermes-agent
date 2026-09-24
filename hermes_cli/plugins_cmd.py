@@ -21,7 +21,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import noninteractive_git_env
 from hermes_cli.cli_output import line_input
 from hermes_cli.config import cfg_get
-from hermes_cli.plugin_capabilities import _child_dict
+from hermes_cli.plugin_capabilities import _child_dict, _write_raw_config_value, _write_raw_config_values
 from hermes_cli.secret_prompt import masked_secret_prompt
 from utils import atomic_write_text, rmtree_readonly
 
@@ -115,11 +115,7 @@ def _config_str(*keys: str, default: str) -> str:
 
 
 def _write_config_value(section: str, key: str, value: Any) -> None:
-    """Persist ``config[section][key] = value`` to config.yaml (creating the section)."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
-    config.setdefault(section, {})[key] = value
-    save_config(config)
+    _write_raw_config_value((section, key), value)
 
 
 def _scan_on_install_enabled() -> bool:
@@ -1151,8 +1147,11 @@ def _save_enabled_set(enabled: set) -> None:
 
 
 def _save_plugin_sets(enabled: set, disabled: set) -> None:
-    _save_enabled_set(enabled)
-    _save_disabled_set(disabled)
+    """Persist both plugin lists atomically after preflighting both keys."""
+    _write_raw_config_values({
+        ("plugins", "enabled"): sorted(enabled),
+        ("plugins", "disabled"): sorted(disabled),
+    })
 
 
 _BASIC_AUTH_PLUGIN_KEYS = frozenset({"basic", "dashboard_auth/basic"})
@@ -1271,11 +1270,7 @@ def _resolve_plugin_key_and_source(name: str) -> Optional[tuple]:
 
 def _set_plugin_entry_flag(plugin_id: str, key: str, value: bool) -> None:
     """Write ``plugins.entries.<plugin_id>.<key> = value`` into config.yaml."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
-    entry = _child_dict(_child_dict(_child_dict(config, "plugins"), "entries"), plugin_id)
-    entry[key] = bool(value)
-    save_config(config)
+    _write_raw_config_value(("plugins", "entries", plugin_id, key), bool(value))
 
 
 def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
@@ -2118,11 +2113,11 @@ def _toggle_plugin_toolset(name: str, *, enable: bool) -> None:
     toolset_key = _get_plugin_toolset_key(name)
     if not toolset_key:
         return
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_config
     from hermes_cli.toolset_validation import parse_platform_toolsets_value
     config = load_config()
     platform_toolsets = _child_dict(config, "platform_toolsets")
-    changed = False
+    changed_toolsets = {}
     for platform, raw in list(platform_toolsets.items()):
         # A list-literal string (older `hermes config set`) is the user's real selection; toggling
         # it re-saves the entry as a proper list so the string never persists.
@@ -2130,13 +2125,34 @@ def _toggle_plugin_toolset(name: str, *, enable: bool) -> None:
         if ts_list is not None and enable != (toolset_key in ts_list):
             (ts_list.append if enable else ts_list.remove)(toolset_key)
             platform_toolsets[platform] = ts_list
-            changed = True
+            changed_toolsets[platform] = ts_list
     # Enabling with no platform lists yet: seed "cli" at minimum.
-    if enable and not changed and not platform_toolsets:
+    if enable and not changed_toolsets and not platform_toolsets:
         platform_toolsets["cli"] = [toolset_key]
-        changed = True
-    if changed:
-        save_config(config)
+        changed_toolsets["cli"] = platform_toolsets["cli"]
+    for platform, toolsets in changed_toolsets.items():
+        _write_raw_config_value(("platform_toolsets", platform), toolsets)
+
+
+def _managed_plugin_toggle_keys(name: str, *, enable: bool) -> list[str]:
+    """Return administrator-managed config keys this toggle would write."""
+    from hermes_cli import managed_scope
+    from hermes_cli.config import load_config
+
+    keys = ["plugins.enabled", "plugins.disabled"]
+    toolset_key = _get_plugin_toolset_key(name)
+    if toolset_key:
+        platform_toolsets = load_config().get("platform_toolsets")
+        if not isinstance(platform_toolsets, dict):
+            platform_toolsets = {}
+        changed_platforms = [
+            platform for platform, toolsets in platform_toolsets.items()
+            if isinstance(toolsets, list) and enable != (toolset_key in toolsets)
+        ]
+        if enable and not changed_platforms and not platform_toolsets:
+            changed_platforms.append("cli")
+        keys.extend(f"platform_toolsets.{platform}" for platform in changed_platforms)
+    return [key for key in keys if managed_scope.is_key_managed(key)]
 
 
 def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str, Any]:
@@ -2147,6 +2163,15 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
     key = _resolve_plugin_key(name)
     if key is None:
         return {"ok": False, "error": f"Plugin '{name}' is not installed or bundled."}
+    managed_keys = _managed_plugin_toggle_keys(name, enable=enabled)
+    if managed_keys:
+        return {
+            "ok": False,
+            "error": (
+                "Cannot change plugin enablement: "
+                f"{', '.join(managed_keys)} is managed by your administrator."
+            ),
+        }
     changed = _activate_key(key, enable=enabled)
     if changed:
         _toggle_plugin_toolset(key, enable=enabled)

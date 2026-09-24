@@ -24,6 +24,8 @@ from collections import deque
 from contextlib import nullcontext, suppress
 from typing import Any, Deque, Dict, List, Optional
 
+from hermes_cli.github_identity import GitHubIdentityError, run_as_github_automation
+
 try:
     from aiohttp import web
 
@@ -65,8 +67,6 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "ip6-localhost", "
 _V2_REPLAY_WINDOW_SECONDS = 300
 _TEMPLATE_KEY_RE = re.compile(r"\{([a-zA-Z0-9_.]+)\}")
 _REPO_RE = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
-# Credentials `gh` reads; a routed profile's github_comment must use its own, never the process env's.
-_GH_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 
 
 def _is_loopback_host(host: Optional[str]) -> bool:
@@ -228,9 +228,6 @@ class WebhookAdapter(BasePlatformAdapter):
         app.router.add_post("/webhooks/{route_name}", self._handle_webhook)
         # /p/<profile>/ routes the event to that profile (honored only under gateway.multiplex_profiles).
         app.router.add_post("/p/{profile}/webhooks/{route_name}", self._handle_webhook)
-        # Without an api_server listener this port is the shared listener: forward a secondary's
-        # inbound-port platforms (Twilio, LINE, Teams, ...) registered in shared-listener mode.
-        app.router.add_route("*", "/p/{profile}/{tail:.*}", self._handle_profile_ingress)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         try:
@@ -241,8 +238,7 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.error("[webhook] Could not bind %s:%d: %s. Set a different host or port in config.yaml under "
                          "platforms.webhook.extra.", self._host or "all IPv4+IPv6 interfaces", self._port, exc)
             return False
-        from gateway.platforms.shared_ingress import listener_base_url
-        self._mark_connected(listener_base=listener_base_url(self._host, self._port))
+        self._mark_connected()
         logger.info("[webhook] Listening on %s:%d — routes: %s", self._host or "* (all interfaces, IPv4+IPv6)",
                     self._port, ", ".join(self._routes.keys()) or "(none configured)")
         self._wire_plugin_handlers(None)
@@ -393,14 +389,6 @@ class WebhookAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("[webhook] Failed to reload dynamic routes: %s", e)
 
-    async def _handle_profile_ingress(self, request: "web.Request") -> "web.StreamResponse":
-        profile = self._resolve_request_profile(request)
-        if profile is _PROFILE_REJECTED or profile is None:
-            return _json_error("Unknown or unconfigured profile", 404)
-        from gateway.platforms.shared_ingress import dispatch_profile_ingress
-        return await dispatch_profile_ingress(
-            self.gateway_runner, profile, request.match_info.get("tail", ""), request)
-
     def _resolve_request_profile(self, request: "web.Request"):
         """Resolve + validate the /p/<profile>/ URL prefix: None (no prefix, or multiplexing off and the
         prefix names this gateway's own profile), the profile name (served under multiplexing), or
@@ -423,6 +411,16 @@ class WebhookAdapter(BasePlatformAdapter):
         except Exception:
             return _PROFILE_REJECTED
         return profile if profile in served else _PROFILE_REJECTED
+
+    async def _handle_profile_ingress(self, request: "web.Request") -> "web.StreamResponse":
+        """Forward a shared-listener profile path to the matching adapter app."""
+        from gateway.platforms.shared_ingress import dispatch_profile_ingress
+        return await dispatch_profile_ingress(
+            self.gateway_runner,
+            request.match_info.get("profile"),
+            request.match_info.get("tail", ""),
+            request,
+        )
 
     @staticmethod
     def _route_allows_profile(route_config: dict, request_profile: Optional[str]) -> bool:
@@ -626,12 +624,15 @@ class WebhookAdapter(BasePlatformAdapter):
         if route_config.get("deliver_only"):
             return await self._handle_deliver_only(prompt, payload, route_config, route_name, event_type, delivery_id,
                                                    profile)
-        coalesce = route_config.get("coalesce")
-        if isinstance(coalesce, dict) and self._coalescer.enqueue(
-                route_name=route_name, coalesce=coalesce, payload=payload, event_type=event_type, prompt=prompt,
-                delivery_id=delivery_id, now=now, route_config=route_config, profile=profile):
-            return web.json_response({"status": "coalesced", "route": route_name, "event": event_type,
-                                      "delivery_id": delivery_id}, status=202)
+        if route_config.get("coalesce"):
+            buffered = self._coalescer.enqueue(
+                route_name=route_name, coalesce=route_config["coalesce"], payload=payload,
+                event_type=event_type, prompt=prompt, delivery_id=delivery_id, now=now,
+                route_config=route_config, profile=profile,
+            )
+            if buffered:
+                return web.json_response({"status": "coalesced", "route": route_name, "event": event_type,
+                                          "delivery_id": delivery_id}, status=202)
         return self._dispatch_agent_run(request, route_config, route_name, profile, payload, prompt, event_type,
                                         delivery_id, now)
 
@@ -650,8 +651,6 @@ class WebhookAdapter(BasePlatformAdapter):
         """Record delivery info and fire the agent run (shared by the immediate and coalesced paths)."""
         # delivery_id in the session key → concurrent webhooks on one route get independent runs.
         session_chat_id = f"webhook:{route_name}:{delivery_id}"
-        # ``profile`` rides along so the reply leg (``send`` → ``_deliver_cross_platform``) egresses through
-        # THIS profile's adapter, home channel and secrets — not the first profile that has the platform.
         self._delivery_info[session_chat_id] = {
             "deliver": route_config.get("deliver", "log"), "profile": profile,
             "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload),
@@ -819,10 +818,22 @@ class WebhookAdapter(BasePlatformAdapter):
             # Running it inline froze every adapter and timer on the gateway event loop for the duration
             # (Pattern A, #91912 class). asyncio.to_thread keeps the loop serving while the subprocess runs;
             # the worker thread is bounded by the subprocess timeout below.
-            result = await asyncio.to_thread(
-                subprocess.run, ["gh", "pr", "comment", str(pr_int), "--repo", repo, "--body", content],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30,
-                env=self._github_env(delivery.get("profile")))
+            # Verified through the governed Hermes bot identity, not the ambient `gh` viewer —
+            # this delivery path posts as automation, not the operator (see hermes_cli.github_identity).
+            profile = delivery.get("profile")
+            with self._profile_scope(profile):
+                automation_env = None
+                if profile and profile != "default":
+                    from agent.secret_scope import current_secret_scope
+                    secrets = current_secret_scope() or {}
+                    automation_env = dict(os.environ)
+                    for name in ("HERMES_GITHUB_BOT_LOGIN", "HERMES_GITHUB_BOT_TOKEN"):
+                        if name in secrets:
+                            automation_env[name] = secrets[name]
+                result = await asyncio.to_thread(
+                    run_as_github_automation,
+                    ["gh", "pr", "comment", str(pr_int), "--repo", repo, "--body", content],
+                    timeout=30, environ=automation_env)
             if result.returncode == 0:
                 logger.info("[webhook] Posted comment on %s#%s", repo, pr_number)
                 return SendResult(success=True)
@@ -831,30 +842,19 @@ class WebhookAdapter(BasePlatformAdapter):
         except FileNotFoundError:
             logger.error("[webhook] 'gh' CLI not found — install GitHub CLI for github_comment delivery")
             return SendResult(success=False, error="gh CLI not installed")
+        except GitHubIdentityError as e:
+            logger.error("[webhook] github_comment identity verification failed: %s", e)
+            return SendResult(success=False, error=str(e))
         except Exception as e:
             logger.error("[webhook] github_comment delivery error: %s", e)
             return SendResult(success=False, error=str(e))
 
-    def _github_env(self, profile: Optional[str]) -> Optional[dict]:
-        """``gh`` environment for a delivery: a routed profile authenticates with ITS ``GH_TOKEN`` /
-        ``GITHUB_TOKEN`` from the profile secret scope; under multiplex ``os.environ`` carries the default
-        profile's, so those keys are dropped when the profile has none (fail closed, ``gh`` then falls to
-        its own stored login). ``None`` (inherit) for bare/default-bound routes."""
-        if not profile or not isinstance(profile, str) or profile == "default":
-            return None
-        from agent.secret_scope import get_secret
-        env = {k: v for k, v in os.environ.items() if k not in _GH_TOKEN_VARS}
-        with self._profile_scope(profile):
-            for name in _GH_TOKEN_VARS:
-                if value := get_secret(name):
-                    env[name] = value
-        return env
-
-    def _find_adapter(self, target_platform: Platform, profile: Optional[str]):
-        """The routed profile's own adapter, fail-closed. A ``/p/<profile>/`` route must never post as
-        another profile's bot, and a bare (default-bound) route must not borrow a platform parked only on
-        a secondary profile — both directions leaked before #65939."""
-        return self.gateway_runner._authorization_adapter(target_platform, profile)
+    def _find_adapter(self, target_platform: Platform, profile: Optional[str] = None):
+        """Find an adapter in the route's profile only; never cross-deliver through another profile."""
+        if profile and profile != "default":
+            adapters = (getattr(self.gateway_runner, "_profile_adapters", None) or {}).get(profile, {})
+            return adapters.get(target_platform) if isinstance(adapters, dict) else None
+        return self.gateway_runner.adapters.get(target_platform)
 
     async def _deliver_cross_platform(self, platform_name: str, content: str, delivery: dict) -> SendResult:
         """Route response to another platform (telegram, discord, etc.)."""
@@ -865,14 +865,11 @@ class WebhookAdapter(BasePlatformAdapter):
         except ValueError:
             return SendResult(success=False, error=f"Unknown platform: {platform_name}")
         profile = delivery.get("profile")
-        if not (adapter := self._find_adapter(target_platform, profile)):
-            return SendResult(success=False, error=f"Platform {platform_name} not connected")
-        extra = delivery.get("deliver_extra", {})
-        chat_id = extra.get("chat_id", "")
-        # Whole leg under the routed profile's scope: the home channel comes from THAT profile's config
-        # (``self.gateway_runner.config`` is the default profile's), and the adapter's send reads its
-        # credentials through the profile secret scope.
         with self._profile_scope(profile):
+            if not (adapter := self._find_adapter(target_platform, profile)):
+                return SendResult(success=False, error=f"Platform {platform_name} not connected")
+            extra = delivery.get("deliver_extra", {})
+            chat_id = extra.get("chat_id", "")
             if not chat_id:
                 home = self._delivery_config(profile).get_home_channel(target_platform)
                 if not home:

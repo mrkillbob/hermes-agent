@@ -21,6 +21,8 @@ from pathlib import Path
 from agent.file_safety import get_nt_namespace_error, get_read_block_error
 from agent.tool_result_classification import GUARDRAIL_REFUSAL_KEY
 from tools.binary_extensions import has_binary_extension
+from agent.source_provenance_tools import issue_active_read_provenance
+from agent.source_provenance import SourceProvenanceRegistry
 from tools.skill_provenance import is_background_review
 from tools.file_operations import (
     ShellFileOperations, normalize_read_pagination, normalize_search_pagination)
@@ -28,7 +30,8 @@ from tools.file_operations_common import DEFAULT_READ_LIMIT, count_conflict_bloc
 from tools import file_state
 from agent.redact import _is_secret_file_arg, redact_sensitive_text
 from tools.file_tools_paths import (
-    _expand_tilde, _path_resolution_warning, _resolve_base_dir, _resolve_path_for_task)
+    _expand_tilde, _path_resolution_warning, _resolve_base_dir, _resolve_path_for_task,
+    _uses_container_paths)
 from tools.file_tools_write_guards import (
     _READ_DEDUP_STATUS_MESSAGE, _check_approval_required_write, _check_binary_document_write,
     _check_cross_profile_path, _check_protected_instruction_write, _check_sensitive_path,
@@ -41,6 +44,44 @@ from tools.file_tools_read_tracking import (
     _record_patch_failure, _reset_patch_failures, _task_data, _update_read_timestamp)
 
 logger = logging.getLogger(__name__)
+
+
+_CONTAINER_PATH_BACKENDS_FALLBACK = frozenset(
+    {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}
+)
+
+
+def _uses_container_paths(task_id: str = "default") -> bool:
+    """Return whether *task_id* resolves paths inside a terminal backend."""
+    try:
+        from tools.terminal_tool import (
+            _active_environments,
+            _env_lock,
+            _get_env_config,
+            _is_container_backend,
+            _resolve_container_task_id,
+        )
+
+        try:
+            container_key = _resolve_container_task_id(task_id)
+        except Exception:
+            container_key = task_id
+        with _env_lock:
+            env = _active_environments.get(container_key) or _active_environments.get(
+                task_id
+            )
+        if env is not None:
+            backend = getattr(env, "_hermes_backend_name", None)
+            if not isinstance(backend, str) or not backend:
+                backend = env.__class__.__name__.lower()
+            return _is_container_backend(backend) or backend in _CONTAINER_PATH_BACKENDS_FALLBACK
+        config = _get_env_config()
+        backend = str(
+            config.get("env_type") or os.getenv("TERMINAL_ENV") or "local"
+        ).lower()
+        return _is_container_backend(backend) or backend in _CONTAINER_PATH_BACKENDS_FALLBACK
+    except Exception:
+        return str(os.getenv("TERMINAL_ENV") or "local").lower() in _CONTAINER_PATH_BACKENDS_FALLBACK
 
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
@@ -620,6 +661,11 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
                 f"Cannot read '{path}': this is a device file that would "
                 "block or produce infinite output.")
 
+        _source_path = None
+        if not _uses_container_paths(task_id):
+            _source_path = Path(_expand_tilde(path))
+            if not _source_path.is_absolute():
+                _source_path = Path(_resolve_base_dir(task_id)) / _source_path
         _resolved = _resolve_path_for_task(path, task_id)
 
         # A read on a FIFO/socket blocks until the exec timeout: a self-shipped DoS.
@@ -694,6 +740,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
             result.content = _apply_char_budget(
                 result_dict, result.content or "", offset,
                 result_dict.get("total_lines", "unknown"), max_chars)
+        content_before_redaction = result.content or ""
         redacted = False
         if result.content:
             unredacted = result.content
@@ -701,6 +748,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
                 unredacted, file_read=True, secret_file=_is_secret_file_arg(resolved_str))
             redacted = result.content != unredacted
             result_dict["content"] = result.content
+        else:
+            redacted = False
 
         if result.content:
             conflicts = count_conflict_blocks(result.content)
@@ -743,6 +792,16 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
                 f"You have read this exact file region {count} times consecutively. "
                 "The content has not changed since your last read. Use the information you already have. "
                 "If you are stuck in a loop, stop reading and proceed with writing or responding.")
+        if result.content == content_before_redaction:
+            issue_active_read_provenance(
+                resolved=_resolved,
+                source_path=_source_path,
+                offset=offset,
+                limit=limit,
+                returned_content=result.content,
+                result_dict=result_dict,
+                file_ops=file_ops,
+            )
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         return tool_error(str(e))
@@ -1143,7 +1202,7 @@ READ_FILE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
+            "path": {"type": "string", "description": "Path to the file to read (absolute or relative)"},
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
             "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 2000, max: 2000). Reads are additionally capped at a ~100K-character budget with a next_offset continuation.", "default": DEFAULT_READ_LIMIT, "maximum": 2000}
         },

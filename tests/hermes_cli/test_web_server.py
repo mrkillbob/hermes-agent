@@ -716,12 +716,12 @@ class TestWebServerEndpoints:
         seen = {}
 
         def _pid(pid_path=None, **kw):
-            # The served-profile probe also verifies the DEFAULT home's gateway identity; the
-            # contract here is that the worker's OWN pid file is what the scoped rung reads.
+            seen["pid_path"] = pid_path
             seen.setdefault("pid_paths", []).append(pid_path)
             return None
 
         def _runtime(path=None):
+            seen["status_path"] = path
             seen.setdefault("status_paths", []).append(path)
             return None
 
@@ -740,7 +740,8 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert worker_home / "gateway.pid" in seen["pid_paths"]
         assert worker_home / "gateway_state.json" in seen["status_paths"]
-        assert worker_home in seen["expected_homes"]
+        assert seen["expected_homes"]
+        assert set(seen["expected_homes"]) == {worker_home}
 
 
     def test_gateway_drain_bad_action_400(self):
@@ -4911,6 +4912,26 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert called.wait(3.0), "expected cron tick under a Desktop-owned backend"
+
+    def test_ticker_does_not_run_in_desktop_pool_backend(
+        self, monkeypatch, _isolate_hermes_home
+    ):
+        import threading
+        import hermes_cli.web_server as web_server
+
+        called = threading.Event()
+        monkeypatch.setenv("HERMES_DESKTOP", "1")
+        monkeypatch.setenv("HERMES_DESKTOP_POOL", "1")
+        monkeypatch.setattr(
+            web_server,
+            "_start_desktop_cron_ticker",
+            lambda *_args, **_kwargs: called.set(),
+        )
+
+        with self._client():
+            assert not called.wait(0.25), (
+                "pooled profile backends must not become duplicate cron authorities"
+            )
 
 
 class TestServeIndexMissingIndex:

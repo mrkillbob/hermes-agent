@@ -316,7 +316,13 @@ class MCPServerTransportMixin:
         command = config.get("command")
         if not command:
             raise ValueError(f"MCP server '{self.name}' has no 'command' in config")
-        command, safe_env = _config._resolve_stdio_command(command, _config._build_safe_env(config.get("env")))
+        command, safe_env = _config._resolve_stdio_command(
+            command,
+            _config._build_safe_env(
+                config.get("env"),
+                external_env=config.get(_config._CONNECTION_EXTERNAL_ENV_KEY),
+            ),
+        )
         # OSV malware preflight, then the cached-npx swap (ordering enforced there).
         command, args = await _core._preflight_stdio_command(self.name, command, config.get("args", []))
         # A stdio child inherits this process's cwd when none is configured. Hosted sessions (ACP,

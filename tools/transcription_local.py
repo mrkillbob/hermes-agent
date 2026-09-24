@@ -103,6 +103,29 @@ def _sysctl_value(name: str) -> str:
         return ""
 
 
+# Module-level cache for the HuggingFace Hub cache-miss exception class.
+# This avoids re-importing the optional dependency on every call.
+_HUB_CACHE_MISS_ERROR: type | None = None
+
+
+def _hub_cache_miss_error() -> type:
+    """Return the exception type raised by ``huggingface_hub`` on a local cache miss.
+
+    The exception is ``huggingface_hub.errors.EntryNotFoundError``. If the
+    ``huggingface_hub`` package is not available we fall back to ``RuntimeError``,
+    which matches the broad catch used downstream.
+    """
+    global _HUB_CACHE_MISS_ERROR
+    if _HUB_CACHE_MISS_ERROR is not None:
+        return _HUB_CACHE_MISS_ERROR
+    try:
+        from huggingface_hub.errors import EntryNotFoundError
+        _HUB_CACHE_MISS_ERROR = EntryNotFoundError
+    except Exception:
+        _HUB_CACHE_MISS_ERROR = RuntimeError
+    return _HUB_CACHE_MISS_ERROR
+
+
 def _should_force_faster_whisper_cpu() -> bool:
     """Force CPU on Apple Silicon (incl. x86_64 under Rosetta), where ctranslate2's
     ``device="auto"`` can abort inside native code before Python can catch it."""
@@ -120,19 +143,6 @@ def _get_idle_unload_seconds(local_cfg: Dict[str, Any]) -> int:
     return max(_config_number(local_cfg, "unload_after_idle_seconds", 0, int), 0)
 
 
-def _hub_cache_miss_error() -> type:
-    """Exception faster-whisper raises for a model missing from the local Hub cache.
-
-    ``huggingface_hub`` is an optional dependency (it arrives with faster-whisper); when it is
-    absent, its ``LocalEntryNotFoundError`` base class ``OSError`` is the closest match.
-    """
-    try:
-        from huggingface_hub.errors import LocalEntryNotFoundError
-    except ImportError:
-        return OSError
-    return LocalEntryNotFoundError
-
-
 def _create_whisper_model(model_name: str, *, device: str, compute_type: str):
     """Use a cached model without contacting the Hub, downloading only on a cache miss."""
     from faster_whisper import WhisperModel
@@ -141,18 +151,15 @@ def _create_whisper_model(model_name: str, *, device: str, compute_type: str):
     try:
         return WhisperModel(model_name, local_files_only=True, **kwargs)
     except (_hub_cache_miss_error(), RuntimeError) as exc:
-        # An interrupted first download leaves a snapshot folder without the weights;
-        # snapshot_download still returns it and ctranslate2 raises "Unable to open file".
-        if isinstance(exc, RuntimeError) and "Unable to open file" not in str(exc):
+        if isinstance(exc, RuntimeError) and not any(
+            marker in str(exc) for marker in ("Unable to open file", "not cached")
+        ):
             raise
         logger.info("faster-whisper model '%s' is not cached; downloading it from the Hugging Face Hub", model_name)
 
-    # huggingface_hub surfaces every Hub/network failure as an OSError subclass
-    # (LocalEntryNotFoundError wrapping the ConnectTimeout, HfHubHTTPError). Anything else
-    # (CUDA runtime, invalid model size) is not a download problem and propagates untouched.
     try:
         return WhisperModel(model_name, local_files_only=False, **kwargs)
-    except OSError as exc:
+    except (_hub_cache_miss_error(), OSError) as exc:
         raise RuntimeError(
             f"Unable to download faster-whisper model '{model_name}': {exc}. "
             "If huggingface.co is unreachable, set HF_ENDPOINT to an accessible mirror; "
@@ -160,7 +167,9 @@ def _create_whisper_model(model_name: str, *, device: str, compute_type: str):
         ) from exc
 
 
-def _load_local_whisper_model(model_name: str, device: str = "auto", compute_type: str = "auto"):
+def _load_local_whisper_model(
+    model_name: str, device: str = "auto", compute_type: str = "auto", *, force_cpu: Optional[bool] = None,
+):
     """Load faster-whisper with graceful CUDA → CPU fallback. ``device="auto"`` picks CUDA
     whenever the ctranslate2 wheel ships CUDA libs, even on hosts without the NVIDIA runtime (WSL2,
     headless servers): try the requested config first; on a CUDA library load failure fall back to
@@ -168,8 +177,13 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
 
     ``device`` / ``compute_type`` default to ``"auto"`` so the historical behaviour is unchanged; pass
     explicit values from ``stt.local.device`` / ``stt.local.compute_type`` to pin a configuration (#9088).
+
+    ``force_cpu`` defaults to ``_should_force_faster_whisper_cpu()``'s own verdict; callers may pass
+    an explicit override (tests neutralizing Apple Silicon's forced-CPU path to exercise the
+    requested device/compute_type instead).
     """
-    force_cpu = _should_force_faster_whisper_cpu()
+    if force_cpu is None:
+        force_cpu = _should_force_faster_whisper_cpu()
     if force_cpu:
         # Importing ctranslate2 can itself abort on Apple Silicon/Rosetta when
         # multiple Intel OpenMP runtimes are loaded — set before the import.

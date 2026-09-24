@@ -1213,6 +1213,11 @@ class TestAnthropicStreamCallbacks:
         )
         agent.api_mode = "anthropic_messages"
         agent._interrupt_requested = False
+        from agent.source_provenance import DEFAULT_POLICY_DIGEST
+        agent.session_id = "stream-session"
+        agent._current_turn_id = "stream-turn"
+        agent._current_api_request_id = "stream-turn:api:1"
+        agent._llm_egress_policy_digest = DEFAULT_POLICY_DIGEST
 
         # Text already reached the user, so only the mid-tool-call retry path may re-open the
         # stream; a tool_use that never registers as in flight is stubbed instead.
@@ -1245,7 +1250,11 @@ class TestAnthropicStreamCallbacks:
         agent._create_request_anthropic_client = lambda *a, **k: agent._anthropic_client
         tools = [{"name": "cronjob_manage", "input_schema": {"type": "object"}}]
 
-        response = agent._interruptible_streaming_api_call({"model": agent.model, "tools": tools})
+        response = agent._interruptible_streaming_api_call({
+            "model": agent.model,
+            "messages": [{"role": "user", "content": "Please run the cron job."}],
+            "tools": tools,
+        })
 
         assert response is repaired_message
         assert agent._anthropic_client.messages.create.call_count == 0
@@ -1269,6 +1278,11 @@ class TestAnthropicStreamCallbacks:
         )
         agent.api_mode = "anthropic_messages"
         agent._interrupt_requested = False
+        from agent.source_provenance import DEFAULT_POLICY_DIGEST
+        agent.session_id = "stream-session"
+        agent._current_turn_id = "stream-turn"
+        agent._current_api_request_id = "stream-turn:api:1"
+        agent._llm_egress_policy_digest = DEFAULT_POLICY_DIGEST
 
         attempts = [
             _AnthropicEventStream([SimpleNamespace(type="content_block_start",
@@ -1287,7 +1301,11 @@ class TestAnthropicStreamCallbacks:
         agent.stream_delta_callback = emitted.append
 
         response = agent._interruptible_streaming_api_call(
-            {"model": agent.model, "tools": [{"name": "old_tool", "input_schema": {"type": "object"}}]})
+            {
+                "model": agent.model,
+                "messages": [{"role": "user", "content": "Please run the old tool."}],
+                "tools": [{"name": "old_tool", "input_schema": {"type": "object"}}],
+            })
 
         assert agent._anthropic_client.messages.stream.call_count == 2
         assert "old_tool" not in (response.choices[0].message.content or "")
@@ -1337,6 +1355,7 @@ class TestAnthropicStreamCallbacks:
         That must be normalized to EmptyStreamError and retried as
         transient — not surface as a raw AssertionError."""
         from agent.errors import EmptyStreamError
+        from agent.source_provenance import DEFAULT_POLICY_DIGEST
         from run_agent import AIAgent
 
         agent = AIAgent(
@@ -1350,6 +1369,12 @@ class TestAnthropicStreamCallbacks:
         )
         agent.api_mode = "anthropic_messages"
         agent._interrupt_requested = False
+        # This is a protected remote route, so exercise the real egress path
+        # with the same identity and bounded user payload a live turn carries.
+        agent.session_id = "stream-session"
+        agent._current_turn_id = "stream-turn"
+        agent._current_api_request_id = "stream-turn:api:1"
+        agent._llm_egress_policy_digest = DEFAULT_POLICY_DIGEST
 
         empty_stream = MagicMock()
         empty_stream.__enter__ = MagicMock(return_value=empty_stream)
@@ -1362,7 +1387,9 @@ class TestAnthropicStreamCallbacks:
         agent._create_request_anthropic_client = lambda *a, **k: agent._anthropic_client
 
         with pytest.raises(EmptyStreamError):
-            agent._interruptible_streaming_api_call({})
+            agent._interruptible_streaming_api_call(
+                {"messages": [{"role": "user", "content": "hello"}]}
+            )
 
         assert agent._anthropic_client.messages.stream.call_count == 3
         assert mock_replace.call_count == 0

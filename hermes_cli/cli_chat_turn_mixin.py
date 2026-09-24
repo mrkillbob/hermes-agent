@@ -57,13 +57,27 @@ class CLIChatTurnMixin:
         the concise voice-response prefix, #65827)
         """
         from cli import ChatConsole, _ChatTurn, _DIM, _RST, _accent_hex, _cprint, set_secret_capture_callback
-        from tools.process_registry_notifications import TimelineNotification
+        from tools.process_registry_notifications import SubagentNotification
+        # Test doubles subclass CLIChatTurnMixin alone (no worktree mixin), so bind only when
+        # the method exists instead of assuming the full HermesCLI MRO.
+        ensure_binding = getattr(self, "_ensure_conversation_worktree_binding", None)
+        if ensure_binding is not None:
+            ensure_binding()
         # Single-query and direct chat callers do not go through run().
         set_secret_capture_callback(self._secret_capture_callback)
         # Reset per turn; only a real interrupt flips it, so early returns leave it False.
         self._last_turn_interrupted = False
 
         if not self._ensure_runtime_credentials():
+            # A Kanban worker supervisor distinguishes a failed one-shot turn from a process
+            # that exited without a terminal Kanban call via _last_turn_result; leaving it
+            # unset here made an early credential failure look like a clean protocol exit
+            # and get retried as if the task itself were broken.
+            self._last_turn_result = {
+                "failed": True,
+                "failure_reason": "credentials",
+                "error": "runtime credentials unavailable",
+            }
             return None
 
         turn_route = self._resolve_turn_agent_config(message)
@@ -80,7 +94,7 @@ class CLIChatTurnMixin:
         self._sync_fallback_chain_with_config(agent)  # chain added after this chat opened reaches this turn
         message = self._chat_route_images(message, images)
 
-        if isinstance(message, str) and not isinstance(message, TimelineNotification):
+        if isinstance(message, str) and not isinstance(message, SubagentNotification):
             message, blocked = self._chat_expand_context_references(message)
             if blocked is not None:
                 return blocked
@@ -89,7 +103,7 @@ class CLIChatTurnMixin:
             message = _sanitize_surrogates(message)
 
         self._chat_stage_user_message(agent, message)
-        if isinstance(message, TimelineNotification):
+        if isinstance(message, SubagentNotification):
             message = str(message)  # UI metadata is on the staged row, never in model content.
 
         ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")

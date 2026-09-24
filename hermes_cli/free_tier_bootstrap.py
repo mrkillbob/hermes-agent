@@ -146,6 +146,17 @@ def _inventory_other_providers() -> bool:
     seen by the next :func:`reconcile_record`.
     """
     global _inventory_stamp
+    from hermes_cli.config import load_config
+
+    model_cfg = (load_config() or {}).get("model")
+    if (isinstance(model_cfg, dict)
+            and str(model_cfg.get("provider") or "").strip().lower() == "custom"
+            and str(model_cfg.get("base_url") or "").strip()):
+        # ``resolve_provider('auto')`` only treats registry providers as config pins;
+        # custom endpoints are an explicit, valid inference route handled by the runtime
+        # provider resolver and must also lift the post-setup gate.
+        _inventory_stamp = _config_stamp()
+        return True
     from hermes_cli.auth import resolve_provider
     _inventory_stamp = _config_stamp()
     try:
@@ -156,6 +167,13 @@ def _inventory_other_providers() -> bool:
 
 
 def _resolve_inference() -> str:
+    from hermes_cli.config import load_config
+
+    model_cfg = (load_config() or {}).get("model")
+    if (isinstance(model_cfg, dict)
+            and str(model_cfg.get("provider") or "").strip().lower() == "custom"
+            and str(model_cfg.get("base_url") or "").strip()):
+        return "custom"
     from hermes_cli.auth import resolve_provider
     try:
         return str(resolve_provider("auto") or "")
@@ -206,11 +224,15 @@ def run_bootstrap(*, announce: bool = True) -> SetupRecord:
     with _lock:
         if _record is not None:
             return _record
-        if _started:
-            _done.wait(SETUP_READY_WAIT_SECONDS)
+        already_started = _started
+        _started = True
+    if already_started:
+        # The owner needs this lock to publish the record and signal completion.
+        _done.wait(SETUP_READY_WAIT_SECONDS)
+        with _lock:
             if _record is not None:
                 return _record
-        _started = True
+        return SetupRecord(False, "", False, False, False, error="bootstrap still in progress")
 
     record = _build_record(other=_inventory_other_providers(), force=False)
     with _lock:

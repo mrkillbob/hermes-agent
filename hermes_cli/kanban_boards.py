@@ -108,6 +108,36 @@ def _cmd_boards_rm(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _cmd_boards_merge(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_transfer
+
+    try:
+        result = kanban_transfer.merge_board(args.slug, args.into, args.backup, task_ids=args.task_ids)
+        if args.delete_source:
+            with kbc.connect_closing(board=args.slug) as conn:
+                remaining = int(conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
+                live = conn.execute("SELECT id FROM tasks WHERE status='running' OR claim_lock IS NOT NULL OR current_run_id IS NOT NULL LIMIT 1").fetchone()
+            if remaining or live:
+                raise ValueError("source board still has cards or live claims after merge")
+            workspace_backup = kanban_transfer.export_board_workspaces(
+                args.slug, args.backup.removesuffix(".tar.gz").removesuffix(".tgz") + "-workspaces"
+            )
+            removed = kb.remove_board(args.slug, archive=False)
+            if removed.get("action") != "deleted":
+                raise RuntimeError("source board did not delete after verified merge")
+    except Exception as exc:
+        return _err(f"kanban boards merge: {exc}")
+    print(f"Moved {result['tasks']} cards from {result['source']!r} into "
+          f"{result['destination']!r}; backup: {result['backup']}")
+    if args.delete_source:
+        print(f"Deleted source board {result['source']!r} after count and identity verification.")
+        print(f"Workspace files preserved: {workspace_backup['archive']} ({workspace_backup['files']} files)")
+    else:
+        print("Unselected cards remain on the source board.")
+    print("Copied rows: " + ", ".join(f"{name}={count}" for name, count in result["counts"].items()))
+    return 0
+
 def _cmd_boards_switch(args: argparse.Namespace) -> int:
     normed, rc = _board_slug_arg(args, "switch", must_exist=False)
     if rc:
@@ -211,4 +241,5 @@ _BOARD_HANDLERS = {
     "set-default-workdir": _cmd_boards_set_default_workdir,
     "export": _cmd_boards_export,
     "import": _cmd_boards_import,
+    "merge": _cmd_boards_merge,
 }

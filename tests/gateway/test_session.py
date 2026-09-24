@@ -36,6 +36,7 @@ class TestSessionSourceRoundtrip:
             user_id="99",
             user_name="alice",
             thread_id="t1",
+            _session_key_lane="discord-voice:dedicated-room",
         )
         d = source.to_dict()
         restored = SessionSource.from_dict(d)
@@ -47,6 +48,7 @@ class TestSessionSourceRoundtrip:
         assert restored.user_id == "99"
         assert restored.user_name == "alice"
         assert restored.thread_id == "t1"
+        assert restored._session_key_lane == "discord-voice:dedicated-room"
 
 
 
@@ -56,6 +58,45 @@ class TestSessionSourceRoundtrip:
 
 
 class TestBuildSessionContextPrompt:
+    def test_prompt_identifies_certified_conversation_worktree(self):
+        config = GatewayConfig()
+        source = SessionSource(platform=Platform.LOCAL, chat_id="cli")
+        entry = SessionEntry(
+            session_key="local", session_id="session", created_at=datetime.now(),
+            updated_at=datetime.now(), origin=source, platform=Platform.LOCAL,
+            conversation_worktree={"worktree_path": "/repo/.worktrees/session"},
+        )
+
+        prompt = build_session_context_prompt(build_session_context(source, config, entry))
+
+        assert "certified worktree" in prompt
+        assert "/repo/.worktrees/session" in prompt
+
+    def test_telegram_prompt_contains_platform_and_chat(self):
+        config = GatewayConfig(
+            platforms={
+                Platform.TELEGRAM: PlatformConfig(
+                    enabled=True,
+                    token="fake-token",
+                    home_channel=HomeChannel(
+                        platform=Platform.TELEGRAM,
+                        chat_id="111",
+                        name="Home Chat",
+                    ),
+                ),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="111",
+            chat_name="Home Chat",
+            chat_type="dm",
+        )
+        ctx = build_session_context(source, config)
+        prompt = build_session_context_prompt(ctx)
+
+        assert "Telegram" in prompt
+        assert "Home Chat" in prompt
 
 
     def test_discord_prompt_stable_across_message_id(self):
@@ -491,6 +532,38 @@ class TestSessionStoreLookup:
         assert store.lookup_by_session_key(entry.session_key) is entry
         assert store.lookup_by_session_key("agent:main:telegram:dm:missing") is None
         assert store.lookup_by_session_key("") is None
+
+    def test_private_voice_lane_never_recovers_peer_transcript(self, store):
+        """A same-chat fallback must not erase an intentional voice boundary."""
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="voice-text-channel",
+            chat_type="channel",
+            user_id="voice-user",
+        )
+        source._session_key_lane = "discord-voice:dedicated-room"
+        store._db = MagicMock()
+        store._db.get_compression_tip.side_effect = lambda session_id: session_id
+
+        def _find(**kwargs):
+            # Model the real DB: the old session is discoverable only through
+            # the platform/chat peer fallback, not by the new lane key.
+            if kwargs["chat_id"] is not None:
+                return {
+                    "id": "legacy-voice-session",
+                    "started_at": datetime.now().timestamp(),
+                    "last_activity_at": datetime.now().timestamp(),
+                }
+            return None
+
+        store._db.find_latest_gateway_session_for_peer.side_effect = _find
+
+        entry = store.get_or_create_session(source)
+
+        assert entry.session_id != "legacy-voice-session"
+        call = store._db.find_latest_gateway_session_for_peer.call_args
+        assert call.kwargs["chat_id"] is None
+        assert call.kwargs["chat_type"] is None
 
 
 
@@ -1531,5 +1604,3 @@ class TestGatewayRoutingTable:
         recovered = restarted.get_or_create_session(self._source())
         assert recovered.session_id == entry.session_id
         restarted._db.close()
-
-

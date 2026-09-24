@@ -391,6 +391,7 @@ from hermes_cli.subcommands.gui import build_gui_parser
 from hermes_cli.subcommands.logs import build_logs_parser
 from hermes_cli.subcommands.prompt_size import build_prompt_size_parser
 from hermes_cli.subcommands.memory import build_memory_parser
+from hermes_cli.subcommands.engineering_memory import build_engineering_memory_parser
 from hermes_cli.subcommands.acp import build_acp_parser
 from hermes_cli.subcommands.tools import build_tools_parser
 from hermes_cli.subcommands.insights import build_insights_parser
@@ -402,8 +403,11 @@ from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
 from hermes_cli.subcommands.vault import build_vault_parser
+from hermes_cli.subcommands.federation import build_federation_parser
+from hermes_cli.subcommands.fleet import build_parser as build_fleet_parser
 from hermes_cli.subcommands.moa import build_moa_parser
 from hermes_cli.subcommands.fallback import build_fallback_parser
+from hermes_cli.federation import cmd_federation
 from hermes_cli.subcommands.worktree import build_worktree_parser
 from hermes_cli.subcommands.browser import build_browser_parser
 from hermes_cli.subcommands.secrets import build_secrets_parser
@@ -782,6 +786,7 @@ from hermes_cli.main_agent_cmds import (
     cmd_skills,
     cmd_tools,
 )
+from hermes_cli.engineering_memory_commands import cmd_engineering_memory
 from hermes_cli.main_platform_setup import (
     cmd_slack,
     cmd_sync,
@@ -3415,6 +3420,7 @@ def _build_cli_parser():
 
     from hermes_cli.subcommands.peer import build_peer_parser
     build_peer_parser(subparsers)
+    build_fleet_parser(subparsers)
 
     from hermes_cli.portal_cli import add_parser as _add_portal_parser
     _add_portal_parser(subparsers)
@@ -3429,6 +3435,12 @@ def _build_cli_parser():
     build_doctor_parser(subparsers, cmd_doctor=cmd_doctor)
     build_verify_parser(subparsers, cmd_verify=cmd_verify)
     build_security_parser(subparsers, cmd_security=cmd_security)
+    build_federation_parser(subparsers, cmd_federation=cmd_federation)
+    from hermes_cli import secure_worker_cli
+    secure_worker_parser = subparsers.add_parser(
+        "secure-worker", help="Audit and run fail-closed remote workers"
+    )
+    secure_worker_cli.register_cli(secure_worker_parser)
     build_approvals_parser(subparsers, cmd_approvals=cmd_approvals)
     build_dump_parser(subparsers, cmd_dump=cmd_dump)
     build_debug_parser(subparsers, cmd_debug=cmd_debug)
@@ -3450,6 +3462,7 @@ def _build_cli_parser():
     build_pets_parser(subparsers)
     build_journey_parser(subparsers)
     build_memory_parser(subparsers, cmd_memory=cmd_memory)
+    build_engineering_memory_parser(subparsers, cmd_engineering_memory=cmd_engineering_memory)
     build_tools_parser(subparsers, cmd_tools=cmd_tools)
     build_computer_use_parser(subparsers)
     build_mcp_parser(subparsers, cmd_mcp=cmd_mcp)

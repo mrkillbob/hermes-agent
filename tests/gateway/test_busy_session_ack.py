@@ -523,5 +523,3 @@ class TestLongRunningNotificationOwnership:
         assert runner._should_emit_long_running_notification("sess", agent, executor_task=None) is True
         setattr(runner, flag, True)
         assert runner._should_emit_long_running_notification("sess", agent, executor_task=None) is False
-
-

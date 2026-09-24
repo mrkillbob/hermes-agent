@@ -55,8 +55,12 @@ def _runner(tmp_path, monkeypatch):
 
     async def _start(profile_name, profile_home, claimed):
         started.append(profile_name)
-        token = (profile_home / ".env").read_text(encoding="utf-8") if (profile_home / ".env").exists() else ""
+        token = (profile_home / ".env").read_text() if (profile_home / ".env").exists() else ""
         if "DISCORD_BOT_TOKEN" not in token:
+            stale = runner._profile_adapters.get(profile_name, {}).pop(Platform.DISCORD, None)
+            if stale is not None:
+                from gateway.run import _write_runtime_status_quiet
+                _write_runtime_status_quiet(drop_platforms=[f"{profile_name}:discord"])
             return 0
         runner._profile_adapters.setdefault(profile_name, {})[Platform.DISCORD] = _Adapter(token)
         return 1
@@ -70,8 +74,8 @@ def _runner(tmp_path, monkeypatch):
 def _mkprofile(home, name, env=""):
     d = home / "profiles" / name
     d.mkdir(parents=True, exist_ok=True)
-    (d / "config.yaml").write_text("model: {default: m}\n", encoding="utf-8")
-    (d / ".env").write_text(env, encoding="utf-8")
+    (d / "config.yaml").write_text("model: {default: m}\n")
+    (d / ".env").write_text(env)
     return d
 
 
@@ -205,7 +209,7 @@ async def test_created_then_credentialed_profile_is_served_without_restart(tmp_p
         assert Platform.DISCORD not in runner._profile_adapters.get("gamma", {})
 
         # 2. Token added afterwards: the rescan builds the adapter (never "adapter-less forever").
-        (gamma_dir / ".env").write_text("DISCORD_BOT_TOKEN=gamma-token\n", encoding="utf-8")
+        (gamma_dir / ".env").write_text("DISCORD_BOT_TOKEN=gamma-token\n")
         result = await runner.reconcile_served_profiles()
         assert result["rescanned"] == ["gamma"]
         assert runner._profile_adapters["gamma"][Platform.DISCORD].token.strip().endswith("gamma-token")
@@ -379,3 +383,19 @@ async def test_hot_added_profile_cannot_double_claim_a_live_secondary_token(tmp_
         await runner.reconcile_served_profiles()
     fp = GatewayRunner._adapter_credential_fingerprint(_Adapter("shared"))
     assert seen_claims["dupe"].get((Platform.DISCORD, fp)) == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_rescan_drops_removed_platform_status_and_preserves_other_profiles(tmp_path, monkeypatch):
+    from gateway.status import write_runtime_status
+    runner, home = _runner(tmp_path, monkeypatch)
+    gamma = _mkprofile(home, 'gamma', 'DISCORD_BOT_TOKEN=gamma-token\n')
+    with patch('hermes_cli.profiles.get_active_profile_name', return_value='default'):
+        await runner._start_secondary_profile_adapters()
+        write_runtime_status(platform='gamma:discord', platform_state='connected')
+        write_runtime_status(platform='alpha:discord', platform_state='connected')
+        (gamma / '.env').write_text('')
+        await runner.reconcile_served_profiles()
+    platforms = json.loads((home / 'gateway_state.json').read_text())['platforms']
+    assert 'gamma:discord' not in platforms
+    assert platforms['alpha:discord']['state'] == 'connected'

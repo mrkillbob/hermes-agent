@@ -226,18 +226,40 @@ class SessionLifecycleMixin:
         cutoff = _now() - timedelta(days=max_age_days)
         with self._lock:
             self._ensure_loaded_locked()
-            removed_keys = [
-                key for key, entry in list(self._entries.items())
+            removed_entries = [
+                entry for entry in list(self._entries.values())
                 if not entry.suspended
                 # The callback is keyed by session_key, NOT session_id.
                 and not self._has_active_processes_safe(entry.session_key, context="prune")
                 and entry.updated_at < cutoff
             ]
-            for key in removed_keys:
-                self._entries.pop(key, None)
-            if removed_keys:
+            for entry in removed_entries:
+                self._entries.pop(entry.session_key, None)
+            if removed_entries:
                 self._save()
-        if removed_keys:
+        for entry in removed_entries:
+            self.reconcile_conversation_root_transition(entry, None)
+        if removed_entries:
             logger.info("SessionStore pruned %d entries older than %d days",
-                        len(removed_keys), max_age_days)
-        return len(removed_keys)
+                        len(removed_entries), max_age_days)
+        return len(removed_entries)
+
+    def suspend_recently_active(self, max_age_seconds: int = 120) -> int:
+        """Mark sessions active within *max_age_seconds* as ``resume_pending`` after a crash/fast
+        restart (already-pending and suspended entries are skipped). Returns the number marked.
+
+        Called on gateway startup after a crash or fast restart to preserve in-flight sessions instead of
+        destroying their conversation history (#7536). Only marks sessions updated within *max_age_seconds*
+        to avoid touching long-idle sessions. Sets ``resume_pending=True`` so the next incoming message on
+        the same session_key auto-resumes from the existing transcript.
+        """
+        cutoff = _now() - timedelta(seconds=max_age_seconds)
+
+        def _mark(entry: SessionEntry) -> bool:
+            if entry.resume_pending or entry.suspended or entry.updated_at < cutoff:
+                return False
+            entry.resume_pending = True
+            entry.resume_reason = "restart_interrupted"
+            entry.last_resume_marked_at = _now()
+            return True
+        return self._update_all_entries_locked(_mark)

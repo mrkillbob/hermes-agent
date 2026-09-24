@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from aiohttp.test_utils import TestClient, TestServer
 import pytest
+aiohttp = pytest.importorskip("aiohttp", reason="requires aiohttp [messaging] extra")
+if not isinstance(getattr(aiohttp, "__version__", None), str): pytest.skip("requires real aiohttp [messaging] extra", allow_module_level=True)
+
+from aiohttp.test_utils import TestClient, TestServer
+
 
 from agent.compaction_display import project_compaction_message_for_display
 from agent.context_compressor import (

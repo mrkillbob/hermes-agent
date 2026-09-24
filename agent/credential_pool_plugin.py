@@ -81,8 +81,6 @@ def recover_failed_plugin_refresh(
         logger.debug("%s refresh failed but the pool store has newer tokens — adopting", pool.provider)
         return True, pool._adopt(synced, **_MARK_OK)
     if is_terminal_plugin_refresh_error(exc):
-        # WARNING, not debug: this is the moment a login is lost. Benching for a TTL would replay
-        # the dead token every cooldown at DEBUG with no trace for the user.
         logger.warning(
             "%s refresh token for %s is terminally invalid (%s); the credential leaves rotation. "
             "Re-run 'hermes auth add %s' to sign in again.",

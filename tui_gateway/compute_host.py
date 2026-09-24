@@ -143,7 +143,9 @@ class ComputeHost:
             if sid in skip:
                 continue
             with contextlib.suppress(Exception):
-                server._finalize_session(session, end_reason=f"compute_host_{reason}")
+                with server._session_prompt_submit_lock(session):
+                    if server._sessions.get(sid) is session:
+                        server._finalize_session(session, end_reason=f"compute_host_{reason}")
 
     def handle_frame(self, frame: dict[str, Any]) -> None:
         kind = str(frame.get("type") or "")
@@ -314,6 +316,8 @@ class ComputeHost:
             for key in ("cwd", "profile_home"):
                 if frame.get(key):
                     session[key] = str(frame[key])
+            if isinstance(frame.get("conversation_worktree"), dict):
+                session["conversation_worktree"] = dict(frame["conversation_worktree"])
         else:
             session = self._build_server_session(server, frame, sid)
         if isinstance(frame.get("attached_images"), list):
@@ -352,9 +356,11 @@ class ComputeHost:
                 service_tier_override=frame.get("service_tier_override"),
                 platform_override=frame.get("source"),
                 cwd_override=str(frame.get("cwd") or "") or None,
+                auth_user_id=frame.get("auth_user_id"),
                 context_cwd_is_launch_artifact=bool(
                     frame.get("context_cwd_is_launch_artifact", False)),
-                session_db=session_db, auth_user_id=frame.get("auth_user_id"))
+                conversation_worktree=frame.get("conversation_worktree"),
+                session_db=session_db)
             if server._transfer_db_to_agent(agent, session_db):
                 owns_db = False
         finally:
@@ -375,7 +381,8 @@ class ComputeHost:
                 server._init_session(
                     sid, key, agent, list(history), cols=int(frame.get("cols") or 80),
                     cwd=str(frame.get("cwd") or "") or None, session_db=session_db,
-                    source=frame.get("source"))
+                    source=frame.get("source"),
+                    conversation_worktree=frame.get("conversation_worktree"))
             finally:
                 reset_transport(token)
         except Exception:
@@ -388,6 +395,7 @@ class ComputeHost:
                 "created_at": time.time(), "last_active": time.time(), "running": False,
                 "attached_images": [], "image_counter": 0,
                 "cwd": str(frame.get("cwd") or os.getcwd()), "cols": int(frame.get("cols") or 80),
+                "conversation_worktree": dict(frame.get("conversation_worktree") or {}),
                 "slash_worker": None, "show_reasoning": server._load_show_reasoning(),
                 "tool_progress_mode": server._load_tool_progress_mode(), "edit_snapshots": {},
                 "tool_started_at": {}, "model_override": frame.get("model_override"),

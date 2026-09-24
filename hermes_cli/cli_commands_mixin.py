@@ -1310,6 +1310,16 @@ class CLICommandsMixin:
         if target_id == self.session_id:
             return _cp("  Already on that session.")
         old_session_id = self.session_id
+        managed_resume_prepared = False
+        try:
+            # Resolve/acquire the target root before ending the active session. A
+            # failed worktree handoff must leave the current conversation usable.
+            if getattr(self, "_conversation_worktree_manager", None) is not None:
+                self._restore_managed_conversation_cwd(session_id=target_id)
+                managed_resume_prepared = True
+        except Exception as exc:
+            _cp(f"  Could not prepare resumed conversation worktree: {exc}")
+            return
         _end_current_session(self, "resumed_other")
         self.session_id, self._resumed, self._pending_title = target_id, True, None
         _sync_process_session_id(target_id)
@@ -1339,7 +1349,8 @@ class CLICommandsMixin:
         # -c`/`--resume`. The startup resume paths already call this; without it, the terminal/code-exec
         # tools and relative-path resolution keep operating in the wrong repo. Idempotent and a no-op when
         # the session recorded no cwd. See #38562.
-        self._restore_session_cwd(session_meta)
+        if not managed_resume_prepared:
+            self._restore_session_cwd(session_meta)
         self._restore_session_yolo(session_meta)
         self._restore_session_model(session_meta)
 
@@ -1418,11 +1429,19 @@ class CLICommandsMixin:
             with suppress(Exception):
                 parent_prompt = (self._session_db.get_session(parent_session_id) or {}).get("system_prompt")
         try:
-            self._session_db.create_session(
-                session_id=new_session_id, source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
-                model=self.model, parent_session_id=parent_session_id, system_prompt=parent_prompt or None,
-                model_config={"max_iterations": self.max_turns, "reasoning_config": self.reasoning_config,
-                              "_branched_from": parent_session_id})
+            def persist_branch():
+                self._session_db.create_session(
+                    session_id=new_session_id, source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                    model=self.model, parent_session_id=parent_session_id, cwd=os.getcwd(),
+                    system_prompt=parent_prompt or None,
+                    model_config={"max_iterations": self.max_turns, "reasoning_config": self.reasoning_config,
+                                  "_branched_from": parent_session_id})
+
+            if getattr(self, "_conversation_worktree_manager", None) is not None:
+                if not self._prepare_conversation_root(new_session_id, before_commit=persist_branch):
+                    return
+            else:
+                persist_branch()
         except Exception as e:
             return _cp(f"  Failed to create branch session: {e}")
         _end_current_session(self, "branched")
@@ -1517,6 +1536,11 @@ class CLICommandsMixin:
     def _worktree_new(self, repo_root: str, rest: str) -> None:
         import cli as _cli
         from hermes_cli.config import load_config
+        if getattr(self, "_conversation_worktree_manager", None) is not None:
+            return _pr(
+                "  ❌ /worktree new is unavailable while conversation isolation is active.",
+                "  Use /new for a fresh isolated conversation or /branch for an independent copy.",
+            )
         try:
             sync_base = bool(load_config().get("worktree_sync", True))
         except Exception:

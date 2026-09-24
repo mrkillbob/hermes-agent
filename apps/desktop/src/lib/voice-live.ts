@@ -299,6 +299,12 @@ export class VoiceLiveSession {
       audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true }
     })
 
+    if (this.finalized) {
+      this.stopMicrophone()
+
+      return
+    }
+
     for (const track of this.microphone.getAudioTracks()) {
       connection.addTrack(track, this.microphone)
     }
@@ -504,6 +510,9 @@ export class VoiceLiveSession {
       return
     }
 
+    // Local capture ends immediately; the data channel stays alive for usage accounting.
+    this.stopMicrophone()
+
     if (!this.send({ type: 'session.close' })) {
       this.finish('close_requested', null)
 
@@ -511,6 +520,11 @@ export class VoiceLiveSession {
     }
 
     this.closeTimer = window.setTimeout(() => this.finish('close_requested', null), CLOSE_TIMEOUT_MS)
+  }
+
+  private stopMicrophone(): void {
+    this.microphone?.getTracks().forEach(track => track.stop())
+    this.microphone = null
   }
 
   private finish(reason: string, usageSeconds: null | number): void {
@@ -532,7 +546,7 @@ export class VoiceLiveSession {
 
     this.analyser?.disconnect()
     void this.audioContext?.close().catch(() => undefined)
-    this.microphone?.getTracks().forEach(track => track.stop())
+    this.stopMicrophone()
     this.events?.close()
     this.peer?.close()
     this.audio.srcObject = null

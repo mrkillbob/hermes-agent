@@ -16,8 +16,10 @@ import logging
 import os
 import shutil
 import shlex
+import stat
 import threading
 import time
+import uuid
 import webbrowser  # noqa: F401  (tests patch auth_mod.webbrowser.open; same module object)
 
 from contextlib import ExitStack, contextmanager
@@ -30,7 +32,7 @@ from urllib.parse import urlparse
 
 from hermes_constants import OPENROUTER_BASE_URL, hermes_home_key, secure_parent_dir
 from agent.credential_persistence import sanitize_borrowed_credential_payload
-from utils import atomic_json_write, env_float, file_signature, is_truthy_value  # noqa: F401  (env_float: agent.credential_pool reads auth_mod.env_float)
+from utils import atomic_json_write, atomic_replace, env_float, file_signature, is_truthy_value  # noqa: F401  (env_float: agent.credential_pool reads auth_mod.env_float)
 from hermes_cli.auth_zai_kimi import (  # noqa: F401  re-exported
     KIMI_CODE_BASE_URL, ZAI_ENDPOINTS, _normalize_lmstudio_runtime_base_url, _resolve_kimi_base_url,
     _resolve_zai_base_url, detect_zai_endpoint)
@@ -713,6 +715,41 @@ def _save_private_json(target: Path, data: Any, *, fsync_dir: bool = False, **du
     mkdir_under_hermes_home(target.parent)
     secure_parent_dir(target)
     atomic_json_write(target, data, mode=0o600, fsync_dir=fsync_dir, **dump_kwargs)
+
+
+def _write_private_file_atomic(
+    target: Path, payload: str, *, replace: Optional[Callable[[Any, Any], Any]] = None,
+    fsync_dir: bool = False) -> None:
+    """Write *payload* to *target* via a 0o600 temp file + atomic rename.
+
+    ``os.open(O_EXCL, 0o600)`` closes the TOCTOU window where ``write_text()`` + post-write
+    ``chmod`` briefly exposed tokens at process umask."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    secure_parent_dir(target)
+    tmp_path = target.with_name(f"{target.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    try:
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        (replace or atomic_replace)(tmp_path, target)
+        if fsync_dir:
+            try:
+                dir_fd = os.open(str(target.parent), os.O_RDONLY)
+            except OSError:
+                pass
+            else:
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = None) -> Path:

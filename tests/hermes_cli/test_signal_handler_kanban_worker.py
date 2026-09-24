@@ -31,6 +31,12 @@ import time
 import pytest
 
 
+# These tests intentionally signal a process group that they created. Bypass
+# the suite's live-system guard so cleanup reaches that group instead of
+# raising before ``communicate()`` and leaking the synthetic worker to PID 1.
+pytestmark = pytest.mark.live_system_guard_bypass
+
+
 def _synthetic_worker_script() -> str:
     """A standalone script that mirrors cli.py's single-query SIGTERM handler.
 
@@ -181,7 +187,6 @@ def test_sigterm_with_kanban_task_env_terminates_quickly():
         )
     finally:
         _cleanup(proc)
-
 
 
 

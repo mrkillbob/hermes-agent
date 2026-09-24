@@ -9,6 +9,7 @@ from . import (  # noqa: F401
     connectors_operation,
     display,
     events,
+    fork_methods,
     groups_bot_relay,
     liveness,
     profiles_vault_complete_foreign_subagents,

@@ -440,6 +440,12 @@ def _print_ticker_health(pids: list, restart_command: str = "hermes gateway rest
             elif _cron_is_fd_exhaustion_text(last_error):
                 print(color(_FD_EXHAUSTION_HINT, Colors.YELLOW))
         print("  Check the gateway log for 'Cron tick error'.")
+    elif ok_age is None and pid_line is None:
+        # A fresh heartbeat with no PID (Desktop-embedded ticker, #87033) and no success marker
+        # ever recorded is liveness only, not proof jobs can fire — unlike a PID-bearing gateway
+        # just past a restart, there is no "process just started" grace period to lean on here.
+        _warn("⚠ A cron ticker is alive, but no tick has succeeded yet.")
+        print("  Cron jobs will fire once the first tick succeeds.")
     else:
         print(color("✓ Gateway is running — cron jobs will fire automatically", Colors.GREEN))
         if pid_line:
@@ -474,6 +480,7 @@ def cron_status():
             host = host_gateway_serving(active)
         pids = [] if host is not None else find_gateway_pids()
         gateway_alive_via_lock = False
+        desktop_ticker_alive = False
         served_by_multiplexer = False
         if host is None and not pids:
             # The pid scan transiently misses a live gateway right after a restart; the runtime
@@ -489,12 +496,20 @@ def cron_status():
             # Multiplexer identity does not establish the active profile's ticker health.
             if not gateway_alive_via_lock:
                 served_by_multiplexer = named_profile_served_by_running_multiplexer()
+                if not served_by_multiplexer:
+                    # The Desktop `serve` backend owns an in-process ticker but
+                    # does not hold the gateway runtime lock or appear in the
+                    # gateway PID scan. A fresh heartbeat is its liveness signal;
+                    # _print_ticker_health still distinguishes alive from able
+                    # to fire by requiring a recent successful tick for green.
+                    from cron.jobs import get_ticker_heartbeat_age
+                    desktop_ticker_alive = _ticker_age_is_fresh(get_ticker_heartbeat_age())
         if host is not None:
             print(f"  Scheduler host: {host.describe()}")
             # `hermes gateway restart` exits 78 for a served NAMED profile
             # (_guard_named_profile_under_multiplexer): the one host process is the default's.
             _print_ticker_health([host.pid], restart_command="hermes --profile default gateway restart")
-        elif pids or gateway_alive_via_lock or served_by_multiplexer:
+        elif pids or gateway_alive_via_lock or served_by_multiplexer or desktop_ticker_alive:
             if served_by_multiplexer:
                 print("  Scheduler host: the host gateway (multiplexing this profile)")
                 _print_ticker_health([], restart_command="hermes --profile default gateway restart")

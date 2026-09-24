@@ -110,6 +110,7 @@ class TestStripBlockedTools(unittest.TestCase):
             "cronjob",
             "delegation",
             "memory",
+            "inter_agent",
         ):
             self.assertIn(toolset_name, disabled)
         # code_execution is deliberately NOT denied — children keep
@@ -321,9 +322,7 @@ class TestDelegateTask(unittest.TestCase):
                 child_db = kwargs["session_db"]
                 self.assertIsInstance(child_db, SessionDB)
                 self.assertIsNot(child_db, parent_db)
-                self.assertEqual(
-                    str(child_db.db_path), str(parent_db.db_path)
-                )
+                self.assertTrue(os.path.samefile(child_db.db_path, parent_db.db_path))
             finally:
                 if child_db is not None:
                     child_db.close()

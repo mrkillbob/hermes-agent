@@ -227,6 +227,18 @@ _ENV_ASSIGN_LOWER_RE = re.compile(
     rf"(?<![a-z0-9_])([a-z0-9_]+(?:_|^)(?:key|pass|pw|token|secret|password|passwd|credential|auth)(?=[^a-z0-9_]|$))\s*=\s*(['\"]?)(\S+)\2",
     re.IGNORECASE,
 )
+# Inline credential assignments commonly arrive embedded in JSON/stringified
+# provider payloads, where a line-start anchor is unavailable. Require a
+# structural delimiter before the key so prose, dotted technical settings,
+# relative URLs, and form bodies remain available to their dedicated passes.
+_INLINE_SECRET_KEY_NAMES = r"(?:token|secret|password|passwd|pass|pw|credential|auth|api[_-]?key)"
+_INLINE_SECRET_ASSIGN_RE = re.compile(
+    rf"(^|[{{[(,;:|]\s*|\s+(?={_INLINE_SECRET_KEY_NAMES}\s*=)|[\"'])"
+    rf"({_INLINE_SECRET_KEY_NAMES})"
+    r"(\s*=\s*)(?!<redacted(?:-[^>]+)?>)"
+    r"((?:'[^']*'|\"[^\"]*\"|os\.(?:getenv|environ)\([^)]*\)|process\.env(?:\.[A-Za-z_]\w*|\[[^]]+\])|\$ENV\{[^}]+\}|[^\s,;&|\"')\]}]+))",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Lowercase / dotted config-file keys (``spring.datasource.password=x``,
 # line-start ``password=x``). Carve-outs vs prose/code/URLs: values stop at
@@ -242,12 +254,6 @@ _ENV_ASSIGN_LOWER_RE = re.compile(
 # bare secret-word key only at line start (optionally after ``export``), so conversational ``I have
 # password=foo`` mid-sentence is left alone.
 _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
-# Rendered line-number prefix: ``5|line`` (read_file), ``6:line`` (grep -n), ``7-line`` (grep -A/-B/-C
-# context lines) and ``     8\tline`` (cat -n / nl: right-aligned number + TAB). Callers put the ONLY
-# leading ``[ \t]*`` in front of it — stacking a second whitespace run around an optional gutter made
-# the anchored passes quadratic on long indented lines (2s per 5k spaces).
-_LINE_NUMBER_GUTTER = r"(?:[0-9]+(?:[|:\-]|\t)[ \t]*)?"
-_CFG_VALUE = r"(['\"]?)([^\s&]+?)\2(?=[\s&]|$)"
 # Linear pre-gate for the _CFG_*_RE subs: no secret keyword => neither can match.
 _CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 
@@ -263,7 +269,7 @@ _CFG_DOTTED_RE = re.compile(
     rf"(?<![A-Za-z0-9_.\-])"
     rf"([A-Za-z0-9_\-]++\.[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*+"
     rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]++)"
-    rf"={_CFG_VALUE}",
+    rf"=",
     re.IGNORECASE,
 )
 # Line-anchored bare key: ``password=…`` / ``export api_key=…`` at start of line.
@@ -272,7 +278,7 @@ _CFG_DOTTED_RE = re.compile(
 # and ``cat -n`` emits ``     7\tADS_API_TOKEN: …``. Anchored at ``^`` without it, none of those
 # matched, so the rendered read of a secret-bearing file leaked what the raw text masked.
 _CFG_ANCHORED_RE = re.compile(
-    rf"(^[ \t]*{_LINE_NUMBER_GUTTER}(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)={_CFG_VALUE}",
+    rf"(^[ \t]*(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)=",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -283,6 +289,7 @@ _CFG_ANCHORED_RE = re.compile(
 # matches via ``token``. Quoted values defer to _JSON_FIELD_RE (lookahead).
 # NOTE(perf): possessive where the successor is disjoint; the leading class
 # stays backtrackable (see _CFG_DOTTED_RE).
+_LINE_NUMBER_GUTTER = r"(?:[0-9]+(?:[|:\-]|\t)[ \t]*)?"
 _YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
 _YAML_ASSIGN_RE = re.compile(
     rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(?!['\"])([^\s&]++)",
@@ -317,7 +324,7 @@ _KEY_KEYWORD_RE = re.compile(
 # are gated on value shape (_looks_like_opaque_credential).
 _STRONG_KEY_KEYWORD_RE = re.compile(
     r"(?:api|auth|access|refresh|session|id|bearer)[ _.\\-]?(?:key|token)"
-    r"|key[ _.\\-]?material|secret|passwd|password|pass|pw|credential|auth|bearer",
+    r"|key[ _.\\-]?material|secret|passwd|password|pass|pw|credential|bearer|auth",
     re.IGNORECASE,
 )
 # Password-class keys mask any literal value; for other keys a value that starts like ``$HOME/...``,
@@ -390,6 +397,11 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
     """Shared gate for the ENV / JSON / YAML assignment passes: skip programmatic env
     lookups used as values, optionally require a word-bounded keyword in the key,
     then redact when the key is unambiguously credential-bearing or the value looks opaque."""
+    # Already-redacted sentinels must not be re-processed: ``mask(«redacted:ghp_…»)`` returns
+    # the generic «redacted-secret» sentinel, stripping the prefix label that the caller
+    # specifically preserved. An already-masked value cannot be a secret any more.
+    if value == "***" or value.startswith("«redacted"):
+        return False
     # Programmatic env lookups reference variable *names*, not secret values — masking them corrupts code
     # snippets in prose/log contexts (issue #2852): ``KEY=os.getenv('X')``.
     # Same programmatic-env-lookup exception as _redact_env above (issue #2852): "apiKey": "os.getenv('X')"
@@ -398,10 +410,7 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
     # a code snippet, not a leaked secret value.
     if _ENV_LOOKUP_VALUE_RE.match(value):
         return False
-    # An earlier pass already masked this value (``***`` or the ``«redacted:…»`` sentinel). Masking it
-    # again only erases what the sentinel deliberately kept — the vendor label (``Digest ***`` →
-    # ``***``, ``«redacted:ghp_…»`` → ``«redacted-secret»``). Same guard _redact_python_repr_fields uses.
-    if value == "***" or value.startswith("«redacted"):
+    if key.casefold() == "auth" and value.casefold() == "none":
         return False
     if check_keyword and not _key_has_secret_keyword(key):
         return False
@@ -416,6 +425,18 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
             return False
     return (_has_word_bounded_keyword(key, _STRONG_KEY_KEYWORD_RE)
             or _looks_like_opaque_credential(value))
+
+
+def _should_redact_inline_assignment(key: str, value: str) -> bool:
+    """Redact an ordinary-whitespace inline assignment without swallowing prose scalars."""
+    if _ENV_LOOKUP_VALUE_RE.match(value) or (
+        key.casefold() == "auth" and value.casefold() == "none"
+    ):
+        return False
+    return (
+        _has_word_bounded_keyword(key, _STRONG_KEY_KEYWORD_RE)
+        or _looks_like_opaque_credential(value)
+    )
 
 
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
@@ -492,7 +513,9 @@ _PYTHON_EXCEPTION_LINE_RE = re.compile(
 # name and scheme word preserved. The credential class excludes quotes: pulling
 # a closing quote into the mask turns value corruption into SYNTAX corruption
 # (unterminated quote → shell EOF / SyntaxError).
-_AUTH_HEADER_RE = re.compile(r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s+)?([^\s\"']+)", re.IGNORECASE)
+# A header name cannot begin inside a Python identifier such as
+# ``submit_authorization``: masking its annotation can fabricate a syntax error.
+_AUTH_HEADER_RE = re.compile(r"(?<![\w-])((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s+)?([^\s\"']+)", re.IGNORECASE)
 
 # API-key style headers (single opaque value, no scheme word): non-vendor-prefix
 # values would otherwise leak when a curl command is echoed into tool output.
@@ -791,6 +814,128 @@ def _mask_token_nonreusable(token: str) -> str:
     return f"«redacted:{label}…»" if label else "«redacted-secret»"
 
 
+_CFG_KEY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+
+
+def _cfg_pipe_starts_assignment(text: str, pipe_index: int) -> bool:
+    """Return whether a pipe begins the next compact ``key=value`` field."""
+    i = pipe_index + 1
+    start = i
+    while i < len(text) and text[i] in _CFG_KEY_CHARS:
+        i += 1
+    return i > start and i < len(text) and text[i] == "="
+
+
+def _cfg_quote_is_field_opener(text: str, quote_index: int) -> bool:
+    """Return whether a quote follows the value marker of a pipe field."""
+    if quote_index < 2 or text[quote_index - 1] != "=":
+        return False
+    i = quote_index - 2
+    while i >= 0 and text[i] in _CFG_KEY_CHARS:
+        i -= 1
+    return i >= 0 and text[i] == "|" and i + 1 < quote_index - 1
+
+
+def _scan_cfg_adjacent_fragments(text: str, start: int) -> tuple[int, str]:
+    """Consume shell fragments immediately following a closed quoted fragment.
+
+    Delimiters are meaningful only between fragments: quoted fragments must be
+    scanned through their matching quote, including whitespace, ``&``, and
+    pipes that are part of the credential.
+    """
+    parts: list[str] = []
+    i = start
+    while i < len(text) and not text[i].isspace() and text[i] not in "&|":
+        if text[i] in "'\"":
+            quote = text[i]
+            i += 1
+            fragment_start = i
+            while i < len(text):
+                if quote == '"' and text[i] == "\\" and i + 1 < len(text):
+                    i += 2
+                    continue
+                if text[i] == quote:
+                    break
+                i += 1
+            parts.append(text[fragment_start:i])
+            if i < len(text) and text[i] == quote:
+                i += 1
+            else:
+                break
+            continue
+        fragment_start = i
+        while i < len(text) and not text[i].isspace() and text[i] not in "&|":
+            i += 1
+        parts.append(text[fragment_start:i])
+    return i, "".join(parts)
+
+
+def _scan_cfg_value(text: str, start: int) -> tuple[int, str, str | None, bool]:
+    """Scan one config value without regex backtracking.
+
+    Unquoted values stop at any shell/form delimiter. Quoted values may contain
+    pipes and escaped quotes; an unterminated quote stops at whitespace, ``&``,
+    a compact pipe-delimited assignment, or end-of-input.
+    """
+    if start >= len(text) or text[start] not in "'\"":
+        i = start
+        while i < len(text) and not text[i].isspace() and text[i] not in "&|":
+            i += 1
+        return i, text[start:i], None, False
+
+    quote = text[start]
+    value_start = start + 1
+    i = value_start
+    boundary = None
+    field_quote_open = False
+    while i < len(text):
+        char = text[i]
+        if quote == '"' and char == "\\" and i + 1 < len(text):
+            i += 2
+            continue
+        if char == quote and _cfg_quote_is_field_opener(text, i):
+            field_quote_open = True
+            i += 1
+            continue
+        if char == quote and field_quote_open:
+            field_quote_open = False
+            i += 1
+            continue
+        if char == quote:
+            adjacent_end, adjacent_value = _scan_cfg_adjacent_fragments(text, i + 1)
+            return adjacent_end, text[value_start:i] + adjacent_value, quote, True
+        if char.isspace() or char == "&":
+            return i, text[value_start:i], quote, False
+        if char == "|" and _cfg_pipe_starts_assignment(text, i):
+            boundary = i if boundary is None else boundary
+        i += 1
+    if boundary is not None:
+        return boundary, text[value_start:boundary], quote, False
+    return i, text[value_start:i], quote, False
+
+
+def _redact_config_assignments(text: str, pattern: "re.Pattern[str]", *, mask_nonreusable: bool = False) -> str:
+    """Redact matches from a key regex using the linear config-value scanner."""
+    mask = _mask_token_nonreusable if mask_nonreusable else _mask_token
+    pieces: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        if match.start() < cursor:
+            continue
+        value_end, value, quote, closed = _scan_cfg_value(text, match.end())
+        key = match.group(1)
+        pieces.append(text[cursor:match.start()])
+        if _should_redact_assignment(key, value, check_keyword=True):
+            quote_text = quote or ""
+            closing_quote = quote_text if closed else ""
+            pieces.append(f"{match.group(0)}{quote_text}{mask(value)}{closing_quote}")
+        else:
+            pieces.append(text[match.start():value_end])
+        cursor = value_end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _assignment_sub(render, *, check_keyword: bool):
     """re.sub callback: keep the match unless the key/value pair (groups[0], groups[-1]) needs redaction."""
     def _sub(m):
@@ -812,7 +957,10 @@ def _redact_assignments(text: str, *, mask_nonreusable: bool = False) -> str:
     truncated key and could write it back as a dead credential (#35519)."""
     mask = _mask_token_nonreusable if mask_nonreusable else _mask_token
     if "=" in text:
-        _redact_env = _assignment_sub(lambda g: f"{g[0]}={g[1]}{mask(g[2])}{g[1]}", check_keyword=True)
+        _redact_env = _assignment_sub(
+            lambda g: f"{g[0]}={g[1]}{mask(g[2])}{g[1]}",
+            check_keyword=True,
+        )
         text = _ENV_ASSIGN_RE.sub(_redact_env, text)
         if "://" not in text:  # lowercase names would match URL params
             # Skip URLs — the query string may contain ``token=``/``key=`` params that are intentionally
@@ -820,18 +968,31 @@ def _redact_assignments(text: str, *, mask_nonreusable: bool = False) -> str:
             # handles the opt-in case). The uppercase regex above is all-caps-only, so it never matches URL
             # params; the lowercase one would (issue #77484).
             text = _ENV_ASSIGN_LOWER_RE.sub(_redact_env, text)
-        # The keyword pre-gate is exact and matters: _CFG_DOTTED_RE backtracks
-        # quadratically on long unbroken [A-Za-z0-9_.\-] runs.
+            def _redact_inline_assignment(match):
+                should_redact = (
+                    _should_redact_inline_assignment(match.group(2), match.group(4))
+                    if match.group(1).isspace()
+                    else _should_redact_assignment(
+                        match.group(2), match.group(4), check_keyword=True
+                    )
+                )
+                if not should_redact:
+                    return match.group(0)
+                return f"{match.group(1)}{match.group(2)}{match.group(3)}{mask(match.group(4)) if mask_nonreusable else '***'}"
+
+            text = _INLINE_SECRET_ASSIGN_RE.sub(_redact_inline_assignment, text)
+        # The keyword pre-gate is exact and keeps the config-key scan off text
+        # that cannot contain a sensitive assignment.
         # Lowercase/dotted config keys (issue #16413). Skip URLs entirely — web-URL query params are
         # intentionally passed through (see note near the bottom of this function); _DB_CONNSTR_RE still
         # guards connection-string passwords. Extra gate: every _CFG_*_RE match requires a secret keyword in
         # the key, so a text without any secret keyword cannot match — skipping is exact. This matters
-        # because _CFG_DOTTED_RE backtracks quadratically on long unbroken [A-Za-z0-9_.\-] runs (e.g.
-        # base64/hex blobs in compaction payloads); the linear keyword scan prevents that pathological path
-        # on secret-free text.
+        # because long compaction payloads commonly contain unbroken dotted
+        # runs. Values are scanned separately so quoted pipes cannot trigger
+        # regex backtracking or consume following fields.
         if "://" not in text and _CFG_SECRET_WORD_RE.search(text):
-            text = _CFG_DOTTED_RE.sub(_redact_env, text)
-            text = _CFG_ANCHORED_RE.sub(_redact_env, text)
+            text = _redact_config_assignments(text, _CFG_DOTTED_RE, mask_nonreusable=mask_nonreusable)
+            text = _redact_config_assignments(text, _CFG_ANCHORED_RE, mask_nonreusable=mask_nonreusable)
 
     if ":" in text and '"' in text:
         text = _JSON_FIELD_RE.sub(

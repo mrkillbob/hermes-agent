@@ -19,6 +19,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli.kanban_completion_policy import CompletionPolicyError
 
 
 def _git(*args: str, cwd: str | None = None) -> str:
@@ -92,69 +93,22 @@ def test_clean_pushed_worktree_removed(repo: Path) -> None:
     assert (repo / "README.md").exists()
 
 
-def test_cleanup_leaves_a_worktree_cwd_before_removal(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Windows cannot remove a worktree that is the process's current directory."""
-    wt = _make_worktree(repo, "t_cwd112425")
-    real_git = kbw._git
+def test_new_worktree_uses_remote_default_not_parked_feature_head(repo: Path) -> None:
+    _git("-C", str(repo), "branch", "-M", "main")
+    _git("-C", str(repo), "push", "-u", "origin", "main")
+    origin = Path(_git("-C", str(repo), "remote", "get-url", "origin").strip())
+    _git("-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/main")
+    _git("-C", str(repo), "remote", "set-head", "origin", "main")
+    main_sha = _git("-C", str(repo), "rev-parse", "origin/main").strip()
+    _git("-C", str(repo), "switch", "-c", "feature")
+    (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+    _git("-C", str(repo), "add", "feature.txt")
+    _git("-C", str(repo), "commit", "-m", "feature")
 
-    def windows_git(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProcess:
-        if args[:2] == ("worktree", "remove") and Path.cwd().is_relative_to(wt):
-            return subprocess.CompletedProcess(
-                ["git", *args], 1, stderr="Permission denied: current directory"
-            )
-        return real_git(repo_root, *args, timeout=timeout)
+    wt = _make_worktree(repo, "t_remote_default")
 
-    monkeypatch.setattr(kbw, "_git", windows_git)
-    monkeypatch.chdir(wt)
-    kbw._cleanup_worktree_workspace("t_cwd112425", str(wt))
-
-    assert Path.cwd() == repo
-    assert not wt.exists()
-
-
-def test_cleanup_proceeds_when_cwd_was_deleted(
-    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Deferred parent cleanup (#33774) runs after the child's scratch cwd was
-    rmtree'd; a dead cwd must not preserve a clean, pushed worktree."""
-    wt = _make_worktree(repo, "t_deadcwd113073")
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    monkeypatch.chdir(scratch)
-    scratch.rmdir()
-
-    kbw._cleanup_worktree_workspace("t_deadcwd113073", str(wt))
-
-    assert not wt.exists()
-    assert not _branch_exists(repo, "wt/t_deadcwd113073")
-
-
-def test_cleanup_retries_worktree_removal_once(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A brief Windows directory-handle delay gets one safe retry."""
-    wt = _make_worktree(repo, "t_retry112425")
-    real_git = kbw._git
-    attempts = 0
-
-    def delayed_remove(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProcess:
-        nonlocal attempts
-        if args[:2] == ("worktree", "remove"):
-            attempts += 1
-            if attempts == 1:
-                return subprocess.CompletedProcess(
-                    ["git", *args], 1, stderr="Permission denied: handle pending"
-                )
-        return real_git(repo_root, *args, timeout=timeout)
-
-    monkeypatch.setattr(kbw, "_git", delayed_remove)
-    monkeypatch.setattr(kbw.time, "sleep", lambda _delay: None)
-    kbw._cleanup_worktree_workspace("t_retry112425", str(wt))
-
-    assert attempts == 2
-    assert not wt.exists()
+    assert _git("-C", str(wt), "rev-parse", "HEAD").strip() == main_sha
+    assert not (wt / "feature.txt").exists()
 
 
 def test_dirty_worktree_preserved(repo: Path) -> None:
@@ -233,6 +187,7 @@ def _worktree_task(conn, repo: Path, title: str = "wt-task") -> tuple[str, Path]
             "branch_name=? WHERE id=?",
             (str(wt), f"wt/{tid}", tid),
         )
+    kbw.set_worktree_base(conn, tid, wt, f"wt/{tid}")
     return tid, wt
 
 
@@ -242,19 +197,25 @@ def test_complete_task_reaps_clean_worktree(kanban_home: Path, repo: Path) -> No
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
         assert kb.claim_task(conn, tid, claimer="worker") is not None
-        assert kb.complete_task(conn, tid, summary="done")
+        assert kb.complete_task(
+            conn, tid, summary="done", metadata={"repository_changes": False},
+        )
     assert not wt.exists()
     assert not _branch_exists(repo, f"wt/{tid}")
 
 
-def test_complete_task_preserves_dirty_worktree(kanban_home: Path, repo: Path) -> None:
+def test_complete_task_rejects_and_preserves_dirty_worktree(kanban_home: Path, repo: Path) -> None:
     with kbc.connect_closing() as conn:
         tid, wt = _worktree_task(conn, repo)
         (wt / "wip.txt").write_text("unsaved\n", encoding="utf-8")
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
         assert kb.claim_task(conn, tid, claimer="worker") is not None
-        assert kb.complete_task(conn, tid, summary="done")
+        with pytest.raises(CompletionPolicyError, match="uncommitted changes"):
+            kb.complete_task(
+                conn, tid, summary="done", metadata={"repository_changes": False},
+            )
+        assert kb.get_task(conn, tid).status == "running"
     assert wt.is_dir()
     assert (wt / "wip.txt").exists()
 
@@ -277,7 +238,10 @@ def test_parent_worktree_deferred_until_children_done(
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (parent,))
         assert kb.claim_task(conn, parent, claimer="worker") is not None
-        assert kb.complete_task(conn, parent, summary="parent done")
+        assert kb.complete_task(
+            conn, parent, summary="parent done",
+            metadata={"repository_changes": False},
+        )
         # child still active -> parent worktree must survive for handoff
         assert parent_wt.is_dir()
 
@@ -287,3 +251,51 @@ def test_parent_worktree_deferred_until_children_done(
         assert kb.complete_task(conn, child, summary="child done")
     # last child terminal -> deferred parent worktree reaped
     assert not parent_wt.exists()
+
+
+def test_explicit_board_base_keeps_carried_source_across_worker_profiles(repo, kanban_home, monkeypatch, tmp_path):
+    import json
+    _git('-C', str(repo), 'switch', '-c', 'carried-integration')
+    (repo / 'carried.txt').write_text('required project capability\n')
+    _git('-C', str(repo), 'add', 'carried.txt')
+    _git('-C', str(repo), 'commit', '-m', 'carried integration')
+    expected = _git('-C', str(repo), 'rev-parse', 'HEAD').strip()
+    (repo / 'unrelated-wip.txt').write_text('preserve\n')
+    (kanban_home / 'config.yaml').write_text(json.dumps({'kanban': {'worktree_base_refs': {str(repo.resolve()): 'carried-integration'}}}))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(kanban_home))
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'worker-profile'))
+    wt = _make_worktree(repo, 't_carried')
+    assert _git('-C', str(wt), 'rev-parse', 'HEAD').strip() == expected
+    assert (wt / 'carried.txt').read_text() == 'required project capability\n'
+    assert not (wt / 'unrelated-wip.txt').exists()
+    assert (repo / 'unrelated-wip.txt').read_text() == 'preserve\n'
+
+
+def test_invalid_explicit_board_base_does_not_fall_back(repo, kanban_home, monkeypatch):
+    import json
+    (kanban_home / 'config.yaml').write_text(json.dumps({'kanban': {'worktree_base_refs': {str(repo.resolve()): 'missing-carried-branch'}}}))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(kanban_home))
+    with pytest.raises(ValueError, match='does not resolve'):
+        _make_worktree(repo, 't_missing_base')
+    assert not _branch_exists(repo, 'wt/t_missing_base')
+
+
+def test_configured_remote_base_fetches_missing_tracking_ref(repo, kanban_home, monkeypatch, tmp_path):
+    import json
+    remote = tmp_path / "remote.git"
+    _git("clone", "--bare", str(repo), str(remote))
+    branch = _git("-C", str(repo), "branch", "--show-current").strip()
+    _git("-C", str(repo), "remote", "add", "source", str(remote))
+    (kanban_home / "config.yaml").write_text(json.dumps({"kanban": {"worktree_base_refs": {str(repo.resolve()): "source/" + branch}}}))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(kanban_home))
+    assert kbw._configured_worktree_base(repo) == _git("-C", str(remote), "rev-parse", "HEAD").strip()
+
+
+def test_project_worktree_root_survives_worker_profile(repo, kanban_home, monkeypatch, tmp_path):
+    import json
+    from hermes_cli.kanban_worktree_policy import project_worktree_path
+    root = repo / "worktrees"
+    (kanban_home / "config.yaml").write_text(json.dumps({"kanban": {"worktree_roots": {str(repo.resolve()): str(root)}}}))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(kanban_home))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "worker-profile"))
+    assert project_worktree_path(repo, "t_new") == root / "t_new"

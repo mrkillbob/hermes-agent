@@ -115,7 +115,11 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "Free-form dict of structured facts about this "
                 "attempt — {\"changed_files\": [...], \"tests_run\": 12, "
                 "\"findings\": [...]}. Surfaced to downstream "
-                "workers alongside ``summary``."
+                "workers alongside ``summary``. For an assigned Git worktree, "
+                "always include ``repository_changes``. Set it to false for "
+                "read-only/no-change work. When true, also include the exact "
+                "``commit_sha``, ``pushed_branch``, ``repository`` (OWNER/REPO), "
+                "``base_branch``, and ``pr_url``."
         )),
         "result": _prop("string", (
                 "Short result log line (legacy field, maps to "
@@ -438,6 +442,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "exists, return that task's id instead of creating "
                 "a duplicate. Useful for retry-safe automation."
         )),
+        "max_retries": _prop("integer", "Consecutive-failure limit: 1 stops after the first failure; omit to use the dispatcher default."),
         "max_runtime_seconds": _prop("integer", (
                 "Per-task runtime cap. When exceeded, the "
                 "dispatcher SIGTERMs the worker and re-queues the "

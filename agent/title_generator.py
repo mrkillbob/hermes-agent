@@ -669,6 +669,11 @@ def maybe_auto_title(
     UNSTARTED for the caller to hand to ``start_title_upgrade`` once the turn's model request settled."""
     if not session_db or not session_id or not user_message:
         return None
+    session = session_db.get_session(session_id)
+    if session and session.get("source") == "kanban":
+        # Dispatcher workers are named from their board card by the gateway. Do not persist
+        # the first task instruction as an instant title when that card lookup is unavailable.
+        return None
     # History may be pre- or post-message. Past the opening turn, skip once the session holds an
     # ``llm``/``user`` name: count alone left a machinery-opened session nameless, and a ``derived``
     # name is still a placeholder (instant slice, or the model's greeting title for a bare "hi") that

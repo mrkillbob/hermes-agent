@@ -194,6 +194,7 @@ import {
   uninstallArgsForMode
 } from './desktop-uninstall'
 import { describeDevCdpDecision, resolveDevCdpPort } from './dev-cdp'
+import { ensureKanbanDispatcherReady } from './dispatcher-readiness'
 import { installEmbedReferer } from './embed-referer'
 import { createAmbientClaimArbiter } from './event-dedupe'
 import {
@@ -227,6 +228,7 @@ import {
 } from './gateway-file-download'
 import { startGatewaysAfterUpdateAbort, stopGatewayBeforeUpdate } from './gateway-stop-before-update'
 import { probeGatewayWebSocket, spawnedBackendProbeOptions } from './gateway-ws-probe'
+import { hasGitEntry } from './git-checkout'
 import { registerGitIpc } from './git-ipc'
 import {
   describeGitHubCredentialSource,
@@ -282,6 +284,7 @@ import { CHROMIUM_LOG_FILENAME, enableLinuxCrashDiagnostics, linuxCrashDiagnosti
 import { notifyLauncherWindowRevealed } from './linux-launcher-ready'
 import { createLocalBackendLifecycle, waitForTeardown } from './local-backend-lifecycle'
 import { ACTIVE_LOG_POLL_MS, planLogRotation, reclaimActiveLogIfOversized } from './log-rotation'
+import { installLunarCityPerfBridge } from './lunar-city-perf-install'
 import { ensureMainWindow } from './main-window-lifecycle'
 import {
   assertManagedUpdatePreflightClear,
@@ -1514,6 +1517,7 @@ function registerMediaProtocol() {
 }
 
 let mainWindow = null
+const lunarCityPerfBridge = installLunarCityPerfBridge({ buildStamp: INSTALL_STAMP, getMainWindow: () => mainWindow })
 const backendConnectionState = createBackendConnectionState<ReturnType<typeof spawn>, any>()
 
 const localBackendLifecycle = createLocalBackendLifecycle<ReturnType<typeof spawn>>({
@@ -1550,6 +1554,7 @@ const registryDispatchRevalidation = new RemoteRevalidationCoordinator()
 // lifecycles, so concurrent dials for one (connectionId, profile) scope
 // coalesce here — the second caller awaits the first spawn's result.
 const backendDialClaims = new BackendDialClaims()
+
 // True while connection-config:apply soft-rehomes the primary — suppresses the
 // backend-exit toast so an intentional kill doesn't look like a crash.
 let softRehomeInProgress = false
@@ -3239,7 +3244,7 @@ function resolveUpdateRoot() {
     isHermesSourceRoot(ACTIVE_HERMES_ROOT) ? ACTIVE_HERMES_ROOT : null
   ].filter(Boolean)
 
-  return candidates.find(c => directoryExists(path.join(c, '.git'))) || candidates[0] || ACTIVE_HERMES_ROOT
+  return candidates.find(c => hasGitEntry(c)) || candidates[0] || ACTIVE_HERMES_ROOT
 }
 
 function runGit(args, options: any = {}): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -3339,9 +3344,7 @@ async function resolveHealedBranch(updateRoot, branch) {
 async function checkUpdates({ force = false }: { force?: boolean } = {}) {
   const updateRoot = resolveUpdateRoot()
   let { branch } = readDesktopUpdateConfig()
-  const gitDir = path.join(updateRoot, '.git')
-
-  if (!directoryExists(gitDir)) {
+  if (!hasGitEntry(updateRoot)) {
     return {
       supported: false,
       reason: 'not-a-git-checkout',
@@ -4578,7 +4581,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
   const updateRoot = resolveUpdateRoot()
   const { branch: configuredBranch } = readDesktopUpdateConfig()
 
-  const branch = directoryExists(path.join(updateRoot, '.git'))
+  const branch = hasGitEntry(updateRoot)
     ? await resolveHealedBranch(updateRoot, configuredBranch || DEFAULT_UPDATE_BRANCH)
     : configuredBranch || DEFAULT_UPDATE_BRANCH
 
@@ -13696,6 +13699,9 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
       )
     }
 
+    await advanceBootProgress('backend.dispatcher', 'Verifying Kanban dispatcher readiness', 92)
+    await ensureKanbanDispatcherReady(baseUrl, authToken, fetchJson)
+
     updateBootProgress({
       phase: 'backend.ready',
       message: 'Hermes backend is ready. Finalizing desktop startup',
@@ -15187,6 +15193,7 @@ function createWindow() {
       registryScoped: defaultRoute.connectionId !== null
     })
   }
+  lunarCityPerfBridge.attachWindow(createdMainWindow)
 
   // Chat-surface registration: see applyWindowTranslucency.
   translucencyBackedWindows.add(mainWindow)
@@ -17787,6 +17794,7 @@ app.on('before-quit', () => {
 // hold the event loop open or leak FDs past app teardown.
 app.on('will-quit', () => {
   sshIsolatedKeepalives.stopAll()
+  lunarCityPerfBridge.dispose()
   destroyKeepaliveAgents()
   nativeNotifications.dispose()
   quitFinalization.arm()

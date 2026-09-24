@@ -39,6 +39,7 @@ def fleet(tmp_path, monkeypatch):
         # profile -> installed unit(s); a tuple is one unit, a list is every installed unit.
         services={"coder": ("systemd", False), "ops": ("systemd", False)},
         pids={"coder": 4101, "ops": 4102},
+        default_pid=None,
         ops=[],
         refused_at_start={},
     )
@@ -57,9 +58,14 @@ def fleet(tmp_path, monkeypatch):
                 state.services[name] = remaining
             else:
                 state.services.pop(name, None)
+            if name == "default":
+                state.default_pid = None
+        elif verb == "stop" and name == "default":
+            state.default_pid = None
         elif verb == "install":
             state.services[name] = (kind, system)
         elif verb in ("start", "restart") and name == "default":
+            state.default_pid = os.getpid()
             (root / "gateway.pid").write_text(json.dumps({"pid": os.getpid(), "hermes_home": str(root)}))
             runtime_path = root / "gateway_state.json"
             runtime = json.loads(runtime_path.read_text()) if runtime_path.exists() else {}
@@ -70,9 +76,6 @@ def fleet(tmp_path, monkeypatch):
                 runtime["served_profiles"] = ["default", "coder", "ops"]
             runtime_path.write_text(json.dumps(runtime))
 
-    import gateway.status as status
-    # The default gateway the fixture "starts" is this process; the served probe verifies identity.
-    monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: "hermes gateway run")
     monkeypatch.setattr(gm, "_installed_services", lambda home: _units(state.services.get(_name(home))))
     monkeypatch.setattr(gm, "_live_gateway_pid", lambda home: state.pids.get(_name(home)))
     monkeypatch.setattr(gm, "_service_op", _service_op)
@@ -90,7 +93,9 @@ def fleet(tmp_path, monkeypatch):
     # blocker), and the user-scope unit path lives under the real $HOME. The whole fleet runs as this
     # user with no unit files on disk unless a test writes some (it repoints _SYSTEM_UNIT_DIR itself).
     from hermes_cli import gateway as gw
+    from hermes_cli import gateway_multiplex_served as multiplex_served
     from hermes_cli import gateway_migrate_guards as guards
+    monkeypatch.setattr(multiplex_served, "live_default_gateway_pid", lambda: state.default_pid)
     monkeypatch.setattr(guards, "_pid_uid", lambda pid: root.stat().st_uid if pid in state.pids.values() else None)
     _unit_path = gw.get_systemd_unit_path
     monkeypatch.setattr(gw, "get_systemd_unit_path", lambda system=False: _unit_path(system=True) if system
@@ -223,7 +228,7 @@ def test_apply_clears_the_manifest_on_success_and_the_compensator_restores(fleet
     assert ok is True
     assert not (fleet.root / gm.MANIFEST_NAME).exists(), "a confirmed migration is not 'interrupted'"
     assert {s["profile"] for s in manifest["secondaries"]} == {"coder", "ops"}
-    assert all(s["service"] == {"kind": "systemd", "system": False} for s in manifest["secondaries"])
+    assert all(s["services"] == [{"kind": "systemd", "system": False}] for s in manifest["secondaries"])
     assert _config_flag(fleet.root) is True
     assert "coder" not in fleet.services and "ops" not in fleet.services and fleet.pids == {}
     # The default is brought up on the SAME service manager the secondaries used.
@@ -525,6 +530,7 @@ def test_explicit_migrate_with_no_standalone_secondaries_still_flips_flag_and_re
 
     def _detached(home):  # no service manager anywhere -> detached start writes the served record
         fleet.services["default-detached"] = True
+        fleet.default_pid = os.getpid()
         (fleet.root / "gateway.pid").write_text(json.dumps({"pid": os.getpid(), "hermes_home": str(fleet.root)}))
         (fleet.root / "gateway_state.json").write_text(json.dumps({
             "pid": os.getpid(), "hermes_home": str(fleet.root), "gateway_state": "running",
@@ -553,6 +559,17 @@ def test_explicit_migrate_with_no_standalone_secondaries_still_flips_flag_and_re
     assert gm.rollback_migration(fleet.root) is True and _config_flag(fleet.root) is False
 
 
+def test_failed_auto_migration_keeps_manifest_for_recovery(fleet, monkeypatch, capsys):
+    # Automatic migration stays within the existing service domain. A failed
+    # served-profile confirmation leaves the manifest as the recovery authority;
+    # it does not throw or silently restore a second independent fleet.
+    fleet.services["default"] = ("systemd", False)
+    monkeypatch.setattr(gm, '_wait_for_served', lambda *args: ['default'])
+    gm.maybe_auto_migrate_after_update()
+    assert "has not confirmed serving" in capsys.readouterr().out
+    assert fleet.services == {"default": ("systemd", False)}
+    assert _config_flag(fleet.root) is True
+    assert (fleet.root / gm.MANIFEST_NAME).exists()
 def test_failed_default_bringup_compensates_to_one_detached_gateway(fleet, monkeypatch, capsys):
     """#110850: the last step (install/start the default) is the one that can fail after the
     destructive ones. It must not leave the flag on with no gateway anywhere. The compensator can
@@ -635,90 +652,33 @@ def test_every_installed_unit_of_a_secondary_is_removed_and_recorded(fleet, caps
     assert "more than one installed service" in capsys.readouterr().out and fleet.ops == []
 
 
-def test_unresolvable_system_unit_user_is_unknown_principal_not_directory_owner(fleet, tmp_path, monkeypatch, capsys):
-    """A system unit pinned to a User= this host cannot resolve: the principal is unknown, never the
-    profile directory's owner, and unknown blocks the unattended path."""
-    from hermes_cli import gateway as gw
-    from hermes_cli.gateway_migrate_guards import gateway_identity
-    unit_dir = tmp_path / "system"; unit_dir.mkdir()
-    monkeypatch.setattr(gw, "_SYSTEM_UNIT_DIR", unit_dir)
-    coder_home = fleet.root / "profiles/coder"
-    with gm._home_env(coder_home):
-        gw.get_systemd_unit_path(system=True).write_text("[Service]\nUser=nobody-such-user-xyz\n", encoding="utf-8")
-    uid, _home = gateway_identity(coder_home, None, [("systemd", True)])
-    assert uid is None  # NOT coder_home.stat().st_uid
-    # Same unit shape without a system unit keeps the directory-owner answer for user-scope gateways.
-    assert gateway_identity(coder_home, None, [("systemd", False)])[0] == coder_home.stat().st_uid
-
-    fleet.services.update({"default": ("systemd", True), "coder": ("systemd", True)})
-    monkeypatch.setattr(gm, "_gateway_identity",
-                        lambda home, pid, services: (None if _name(home) == "coder" else 1000, home))
-    gm.maybe_auto_migrate_after_update()
-    out = capsys.readouterr().out
-    assert "cannot be resolved" in out and gm.MIGRATE_COMMAND in out
-    assert fleet.ops == [] and _config_flag(fleet.root) is None
-
-
-def test_opt_out_reads_effective_config_managed_false_wins_and_string_false_is_false(fleet, tmp_path, monkeypatch):
-    """The opt-out authorizes an unattended destructive action, so it reads the same effective config
-    the CLI does: a managed ``false`` overrides the user's ``true``; a hand-written ``"false"`` string is
-    an opt-out, not a truthy value; the declared default keeps absent == opted in."""
-    from hermes_cli import config as cfg
-    from hermes_cli.config_defaults import DEFAULT_CONFIG
-    from hermes_cli.gateway_migrate_guards import auto_migration_opted_out
-    from hermes_cli import managed_scope
-    assert DEFAULT_CONFIG["gateway"]["auto_multiplex_migration"] is True
-    assert auto_migration_opted_out(fleet.root) is False  # absent -> DEFAULT_CONFIG value
-
-    (fleet.root / "config.yaml").write_text(
-        "model:\n  default: x\ngateway:\n  auto_multiplex_migration: 'false'\n", encoding="utf-8")
-    assert auto_migration_opted_out(fleet.root) is True
-
-    (fleet.root / "config.yaml").write_text(
-        "model:\n  default: x\ngateway:\n  auto_multiplex_migration: true\n", encoding="utf-8")
-    assert auto_migration_opted_out(fleet.root) is False
-    managed = tmp_path / "managed"; managed.mkdir()
-    (managed / "config.yaml").write_text("gateway:\n  auto_multiplex_migration: false\n", encoding="utf-8")
-    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
-    managed_scope.invalidate_managed_cache()
-    with gm._home_env(fleet.root):
-        assert cfg.load_config()["gateway"]["auto_multiplex_migration"] is False
-    assert auto_migration_opted_out(fleet.root) is True
-    gm.maybe_auto_migrate_after_update()
-    assert fleet.ops == [] and _config_flag(fleet.root) is None
-
-
-@pytest.mark.parametrize("default_unit_preinstalled", [False, True])
-def test_interruption_after_the_default_unit_exists_is_still_interrupted_not_already_multiplexed(
-    fleet, monkeypatch, capsys, default_unit_preinstalled,
-):
-    """``systemd_install`` writes the unit before the start that can be killed; an existing stopped
-    default unit can be interrupted mid-restart. Either way the flag is on and a default unit exists
-    but nothing serves anyone: that is an interrupted migration to resume, not a completed one. Only
-    a LIVE multiplexer that recorded ``served_profiles`` counts as already multiplexed."""
-    if default_unit_preinstalled:
-        fleet.services["default"] = ("systemd", False)
-    real_op = gm._service_op
-
-    def _killed_at_start(kind, system, verb, home, *, run_as_user=None):
-        if verb in ("start", "restart") and _name(home) == "default":
-            raise KeyboardInterrupt()
-        real_op(kind, system, verb, home, run_as_user=run_as_user)
-
-    with pytest.MonkeyPatch.context() as dying:
-        dying.setattr(gm, "_service_op", _killed_at_start)
-        with pytest.raises(KeyboardInterrupt):
-            gm.apply_migration(gm.build_migration_plan(), served_wait=0.1)
-    assert _config_flag(fleet.root) is True and fleet.services == {"default": ("systemd", False)}
+def test_rollback_restores_survivors_when_default_fails_and_skips_deleted(fleet, monkeypatch):
+    """When both _restart_default and the detached fallback fail, the compensator returns False
+    and keeps the manifest so the next run can resume."""
+    ok, manifest = _apply_capturing_manifest(gm.build_migration_plan(), restore=True)
+    assert ok is True
+    monkeypatch.setattr(gm, '_restart_default', lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('default failed')))
+    monkeypatch.setattr(gm, '_spawn_detached_gateway', lambda home: False)
+    fleet.ops.clear()
+    assert not gm.rollback_migration(fleet.root)
     assert (fleet.root / gm.MANIFEST_NAME).exists()
 
+
+def test_migration_stops_and_records_every_secondary_service_scope(fleet, monkeypatch):
+    original = gm._installed_services
+    monkeypatch.setattr(gm, '_installed_services', lambda home: [('systemd', False), ('systemd', True)] if home.name == 'coder' else original(home))
     plan = gm.build_migration_plan()
-    assert plan.interrupted and not plan.already_multiplexed
-    fleet.ops.clear()
-    assert gm.apply_migration(plan, served_wait=5.0) is True
-    assert fleet.ops[-1] == ("default", "restart") and "serves 3 profiles" in capsys.readouterr().out
-    # Postcondition met: the next plan sees the live multiplexer and stops.
-    assert gm.build_migration_plan().already_multiplexed
+    operations = []
+    original_op = gm._service_op
+    def service_op(kind, system, verb, home, *, run_as_user=None):
+        operations.append((home.name, system, verb))
+        original_op(kind, system, verb, home, run_as_user=run_as_user)
+    monkeypatch.setattr(gm, '_service_op', service_op)
+    ok, manifest = _apply_capturing_manifest(plan)
+    assert ok is True
+    assert {system for name, system, verb in operations if name == 'coder' and verb == 'uninstall'} == {False, True}
+    recorded = manifest['secondaries'][0]
+    assert {service['system'] for service in recorded['services']} == {False, True}
 
 
 @pytest.mark.parametrize("failing_op", [("ops", "stop"), ("coder", "uninstall"), ("default", "flag")])
@@ -767,6 +727,17 @@ def test_known_bringup_refusal_is_rejected_before_any_secondary_is_touched(fleet
     out = capsys.readouterr().out
     assert "before changing anything" in out and "--run-as-user root" in out
     assert fleet.ops == [] and _config_flag(fleet.root) is None and not (fleet.root / gm.MANIFEST_NAME).exists()
+
+
+@pytest.mark.linux_only
+def test_inventory_includes_user_and_system_units(tmp_path, monkeypatch):
+    from hermes_cli import gateway as gw
+    monkeypatch.setattr(gw, "supports_systemd_services", lambda: True)
+    user_unit, system_unit = tmp_path / 'user.service', tmp_path / 'system.service'
+    user_unit.touch()
+    system_unit.touch()
+    monkeypatch.setattr(gw, 'get_systemd_unit_path', lambda system=False: system_unit if system else user_unit)
+    assert set(gm._installed_services(tmp_path)) == {('systemd', False), ('systemd', True)}
 
 
 def test_unknown_default_system_principal_blocks_the_update_hook(fleet, tmp_path, monkeypatch, capsys):

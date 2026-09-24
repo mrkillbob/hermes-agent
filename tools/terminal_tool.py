@@ -161,10 +161,10 @@ TERMINAL_TOOL_DESCRIPTION = """Execute shell commands. The host OS, shell, and t
 Do NOT use cat/head/tail (use read_file), grep/rg/find/ls (use search_files), sed/awk (use patch), or echo/heredoc file creation (use write_file). Reserve terminal for: builds, installs, git, processes, scripts, network, package managers — anything that needs a shell. Output is auto-truncated with the full text saved to a file — never pipe through tail/head to shorten it.
 Environment state persists: activate a virtualenv or export variables once per session, not before every command.
 
-Foreground (default): returns INSTANTLY when the command finishes, even with a high timeout — set timeout generously for long builds and fixed waits.
-Background: set background=true (returns a session_id) only for commands that must keep running independently after this tool call returns; add notify=true for bounded tasks, leave silent only for servers/daemons that never exit. Do not start sleep, timers, cooldowns, delays, or polling loops with background=true — to wait a fixed time, run the wait as a normal foreground command with a high enough timeout. After starting a server, verify readiness with a health check in a separate call (no blind sleep loops); manage with process(action="poll"/"wait").
+Foreground (default): returns INSTANTLY when the command finishes, even with a high timeout — set timeout generously for long builds.
+Background: set background=true (returns a session_id); add notify=true for bounded tasks, leave silent only for servers/daemons that never exit. After starting a server, verify readiness with a health check in a separate call (no blind sleep loops); manage with process_manage(action="poll"/"wait").
 Working directory: use 'workdir' for per-command cwd; when a command changes the session cwd (cd, pushd), trust the result's "cwd" field instead of prefixing every command with 'cd'.
-PTY: pty=true + background=true for interactive CLIs (they hang without a terminal); drive them with process(action="write"/"submit"). Local backend only.
+PTY: pty=true + background=true for interactive CLIs (they hang without a terminal); drive them with process_manage(action="write"/"submit"). Local backend only.
 """
 
 # Environment lifecycle state.
@@ -844,6 +844,22 @@ def _resolve_command_cwd(
     Same guard class as the env-creation sanitizers (#50636, #54447); this is the per-command sibling site.
     """
     if workdir:
+        # Container backends run the command inside their own filesystem namespace:
+        # HERMES_KANBAN_WORKSPACE and os.path.isdir/commonpath below all resolve against
+        # the HOST filesystem, so mapping an explicit in-container workdir (e.g.
+        # /workspace/subdir) through them would silently substitute the host workspace
+        # root and drop the subdirectory. Pass it through verbatim instead.
+        if not _is_container_backend(env_type):
+            from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+            worker_cwd = resolve_kanban_worker_cwd(workdir)
+            if worker_cwd is not None:
+                # A model commonly sends ``workdir="."``. Passing that relative
+                # value through lets a stale profile-owned LocalEnvironment
+                # interpret it against the stable checkout instead of the
+                # dispatcher-owned task worktree. Resolve it to an absolute path
+                # while the worker process is still anchored in its workspace.
+                return os.path.abspath(os.path.expanduser(worker_cwd))
         return workdir
     recorded = get_session_cwd(session_key)
     if recorded and _is_container_backend(env_type) and _is_unusable_container_cwd(recorded):
@@ -853,6 +869,15 @@ def _resolve_command_cwd(
             recorded, env_type, default_cwd,
         )
         return default_cwd
+    # A recorded session cwd predates the dispatcher assigning this process a Kanban task
+    # (e.g. a stable profile-owned snapshot from before the worker was spawned) and must not
+    # win over the worker's own workspace — same guard as the explicit-workdir branch above.
+    if not _is_container_backend(env_type):
+        from agent.runtime_cwd import resolve_kanban_worker_cwd
+
+        worker_cwd = resolve_kanban_worker_cwd(recorded)
+        if worker_cwd is not None:
+            return os.path.abspath(os.path.expanduser(worker_cwd))
     return recorded or default_cwd
 
 
@@ -1220,7 +1245,7 @@ def _pre_exec_block(
 _PTY_DISABLED_REASON = (
     "PTY disabled for this command because it expects piped stdin/EOF "
     "(for example gh auth login --with-token). For local background "
-    "processes, call process(action='close') after writing so it receives "
+    "processes, call process_manage(action='close') after writing so it receives "
     "EOF."
 )
 
@@ -1434,6 +1459,15 @@ def _handle_terminal(args, **kw):
             "command in 'command'. Use execute_code(code=...) for Python; "
             "for shell, retry as terminal(command=...)."
         )
+    # Models sometimes send a structured command_class/argv list instead of a
+    # single shell string; name the stray argument instead of failing on
+    # command=None ("Invalid command: expected string, got NoneType").
+    if "command" not in args and "command_class" in args:
+        return tool_error(
+            "terminal received a 'command_class' parameter, but it requires "
+            "a single shell command string in 'command'. Retry as "
+            "terminal(command=\"...\")."
+        )
     # `notify` is the advertised interface (true → notify_on_complete,
     # [...] → watch_patterns); the legacy args stay accepted, explicit
     # `notify` wins. Background-only modifiers on a foreground call fail
@@ -1454,7 +1488,7 @@ def _handle_terminal(args, **kw):
         if args.get("pty", False):
             return tool_error(
                 "pty requires background=true (a PTY session is interacted "
-                "with via process(action='write'/'submit'), which needs a "
+                "with via process_manage(action='write'/'submit'), which needs a "
                 "tracked background process). Retry as terminal(command=..., "
                 "background=true, pty=true)."
             )

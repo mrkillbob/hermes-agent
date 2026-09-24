@@ -24,7 +24,7 @@ from hermes_constants import (
 
 logger = logging.getLogger(__name__)
 
-_PROFILE_ID_RE = PROFILE_ID_RE  # legacy alias; hermes_constants.PROFILE_ID_RE is canonical
+_PROFILE_ID_RE = PROFILE_ID_RE  # canonical grammar is owned by hermes_constants
 
 # Directories bootstrapped inside every new profile. ``home`` is the back-compat/Docker
 # HOME for tool subprocesses (host subprocesses keep the real HOME so CLI credentials
@@ -69,9 +69,6 @@ _CLONE_ALL_DEFAULT_EXCLUDE_ROOT: frozenset[str] = frozenset({
 # (+wal/shm, can reach many GB), session dirs, `hermes backup` archives, quick-backup
 # snapshots, checkpoints. Inheriting them is never useful (restoring one inside the
 # clone would resurrect the SOURCE profile's state) and can balloon the copy by tens of GB.
-# ``cron`` is scheduled work bound to the source profile and its origin channel: a clone
-# that inherits jobs.json runs every job twice (two gateways, same job ids, double spend,
-# duplicate deliveries) the moment its gateway starts. The empty dir is recreated below.
 _CLONE_ALL_HISTORY_EXCLUDE_ROOT: frozenset[str] = frozenset({
     "state.db", "state.db-wal", "state.db-shm", "sessions", "backups", "state-snapshots", "checkpoints",
     "cron",
@@ -1088,6 +1085,28 @@ def _resolve_clone_source(clone_from: Optional[str]) -> Path:
     return source_dir
 
 
+def _refuse_clone_channels_from_live_multiplexer(source_dir: Path, source_label: str) -> None:
+    """Reject a cross-surface channel clone when the live multiplexer already serves its source."""
+    from hermes_cli.gateway_multiplex_served import live_default_gateway_pid, recorded_served_profiles
+    from hermes_cli.profile_channels import channel_platforms_configured
+    if live_default_gateway_pid() is None:
+        return
+    served = recorded_served_profiles()
+    if served is None:
+        return
+    source_name = normalize_profile_name(source_label)
+    if source_name not in {normalize_profile_name(name) for name in served}:
+        return
+    platforms = channel_platforms_configured(source_dir)
+    if platforms:
+        raise ValueError(
+            f"--clone-channels would copy {', '.join(platforms)} from '{source_label}', which the running "
+            "multiplexed gateway already serves: the bot can only belong to one profile, so the copy would be "
+            "parked as a duplicate credential. Clone without --clone-channels and give the new profile its own bot "
+            "(hermes -p <name> setup), or route its chats with gateway.profile_routes instead."
+        )
+
+
 def _seed_file_if_missing(path: Path, text: str, mode: Optional[int] = None) -> None:
     """Best-effort: write *text* to *path* unless it already exists; never raises."""
     if path.exists():
@@ -1287,33 +1306,32 @@ def create_profile(
         if refusal:
             raise ValueError(refusal)
     clear_named_profile_deleted(profile_dir)
-    # Build in a hidden sibling and publish with one rename: a running multiplexer rescans profiles/
-    # on every create and every 30 s, and ``_iter_named_profile_dirs`` only lists valid ids (no leading
-    # dot), so it can never adopt the half-copied tree and start adapters on credentials the strip
-    # below has not removed yet.
-    staging = _clone_staging_dir(profile_dir)
-    try:
-        if clone_all and source_dir:
-            _clone_all_into(source_dir, staging, canon)
-        else:
-            _bootstrap_profile_dir(staging, source_dir, sync_imports=sync_imports)
-        if source_dir is not None and not clone_channels:
-            from hermes_cli.profile_channels import strip_channel_settings
-            stripped = strip_channel_settings(staging, include_state=clone_all, source_dir=source_dir)
-            if stripped:
-                logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
-        _finish_profile_layout(staging, no_skills=no_skills, clone_all=clone_all, description=description)
-        os.rename(staging, profile_dir)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    source_dir = None
+    if clone_from is not None or clone_all or clone_config:
+        source_dir = _resolve_clone_source(clone_from)
+        if clone_channels:
+            _refuse_clone_channels_from_live_multiplexer(
+                source_dir, clone_from or get_active_profile_name()
+            )
+    if clone_all and source_dir:
+        _clone_all_into(source_dir, profile_dir, canon)
+    else:
+        _bootstrap_profile_dir(profile_dir, source_dir, sync_imports=sync_imports)
+    _finish_profile_layout(
+        profile_dir, no_skills=no_skills, clone_all=clone_all, description=description,
+    )
+    if source_dir is not None and not clone_channels:
+        from hermes_cli.profile_channels import strip_channel_settings
+        stripped = strip_channel_settings(profile_dir, include_state=clone_all, source_dir=source_dir)
+        if stripped:
+            logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
 
     # Inside a container under s6, register the gateway as a runtime s6 service so
     # `hermes -p <profile> gateway start` supervises via `s6-svc -u` instead of a bare
     # process. No-op on host (systemd/launchd/windows unit generation handles lifecycle).
     _maybe_register_gateway_service(canon)
     # A running multiplexer enumerates profiles/ at boot: ask it to serve this one now (it also
-    # rescans periodically, so a missed signal only delays serving).
+    # rescans periodically, so a missed signal only delegates serving).
     _notify_multiplexer(canon)
     return profile_dir
 
@@ -1512,7 +1530,13 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
     except Exception:
         current_user = None
     pids: list[int] = []
-    for proc in psutil.process_iter(["pid", "name", "username", "cmdline"]):
+    try:
+        processes = list(psutil.process_iter(["pid", "name", "username", "cmdline"]))
+    except Exception:
+        # Process enumeration itself can be denied on macOS hardened hosts. The caller
+        # can still remove the profile after the best-effort backend cleanup.
+        return []
+    for proc in processes:
         try:
             info = proc.info
             pid = info.get("pid")
@@ -1739,10 +1763,8 @@ def delete_profile(name: str, yes: bool = False) -> Path:
         if _released:
             print(f"✓ Released {_released} memory-store connection(s) held by this process")
     with contextlib.suppress(Exception):
-        from hermes_state_registry import close_all_under as _close_session_dbs_under
-        _closed = _close_session_dbs_under(profile_dir)
-        if _closed:
-            print(f"✓ Released {_closed} session database connection(s) held by this process")
+        from hermes_state_registry import close_all_under
+        close_all_under(profile_dir)
 
     # The Desktop serve process routes its agent/errors logs for every profile through one
     # QueueListener. On Windows those ConcurrentRotatingFileHandler instances retain their

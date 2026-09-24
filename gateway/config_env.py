@@ -21,7 +21,7 @@ from gateway.config import (
     PlatformConfig,
     _getenv_str,
     _has_usable_api_server_key,
-    SHARED_LISTENER_MIRROR_PLATFORMS,
+    platform_binds_port,
 )
 from utils import is_truthy_value
 
@@ -184,10 +184,11 @@ def _enable_from_env(
 ) -> PlatformConfig:
     """Enable *platform* on env credentials unless config.yaml explicitly disabled it.
 
-    A multiplex secondary profile may pin ``enabled: false`` yet inherit the process env; without
-    this guard env presence would force-enable it. By default the ``_enabled_explicit`` marker is
-    READ (the plugin-enable and relay passes still need it) and the disable is warned once;
-    api_server/webhook POP it (terminal branch) and stay silent.
+    A multiplex secondary profile pins ``enabled: false`` to share the default profile's listener
+    yet inherits the process env; without this guard env presence would force-enable it and trip
+    MultiplexConfigError. By default the ``_enabled_explicit`` marker is READ (the plugin-enable
+    and relay passes still need it) and the disable is warned once; port-binding platforms POP it
+    (terminal branch) and stay silent.
     """
     platform_config = config.platforms.setdefault(platform, PlatformConfig())
     extra = platform_config.extra
@@ -195,12 +196,12 @@ def _enable_from_env(
     if platform_config.enabled:
         return platform_config
     if not explicit and not (
-        platform.value in SHARED_LISTENER_MIRROR_PLATFORMS and _loading_secondary_under_multiplexer()
+        platform_binds_port(platform.value, extra) and _loading_secondary_under_multiplexer()
     ):
-        # A secondary's API_SERVER_KEY / WEBHOOK_ENABLED (the docs require the key in its .env for
-        # /p/<profile>/ auth) must not turn into listener intent: the default profile's listener already
-        # mirrors those two at /p/<profile>/ (#100397). The credential still lands in ``extra`` for it.
-        # Every other inbound-port platform IS enabled for a secondary: it runs in shared-listener mode.
+        # A secondary's port-binding credential (the docs require API_SERVER_KEY in its .env for
+        # /p/<profile>/ auth) must not turn into listener intent: the default profile owns the one
+        # shared listener and ``_load_secondary_profile_config`` skips the WHOLE profile for it (#100397).
+        # The credential itself still lands in ``extra`` for the shared adapter to authenticate with.
         platform_config.enabled = True
     elif warn:
         _warn_explicit_disable_beats_env(platform)
@@ -473,7 +474,11 @@ def _relay(config: GatewayConfig) -> None:
     if relay_url_val:
         relay_config = _enable_from_env(config, Platform.RELAY)
         relay_config.extra["relay_url"] = relay_url_val.rstrip("/")
-        # An opted-out relay does not own this profile's native connections.
+
+        # An explicit YAML disable vetoes the deployment URL.  In that case the
+        # connector is not the owner of ingress, so it must not suppress native
+        # adapters either; direct delivery remains available exactly as before
+        # the connector stamp was added.
         if not relay_config.enabled:
             return
 

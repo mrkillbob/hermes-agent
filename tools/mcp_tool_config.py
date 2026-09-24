@@ -20,9 +20,8 @@ _mcp_stderr_log_lock = threading.Lock()
 
 
 def _get_mcp_stderr_log() -> Any:
-    """Shared append-mode handle for MCP subprocess stderr, cached until shutdown PER PROFILE HOME (a
-    multiplexed gateway's secondary profile must log under ITS ``logs/``, not the launch profile's). Must
-    expose a real fd (asyncio wires the child's stderr to it); falls back to ``/dev/null``, then real stderr."""
+    """Shared append-mode handle for MCP subprocess stderr, opened once per process. Must expose a
+    real fd (asyncio wires the child's stderr to it); falls back to ``/dev/null``, then real stderr."""
     from hermes_constants import get_hermes_home, hermes_home_key, mkdir_under_hermes_home
     home_key = hermes_home_key()
     with _mcp_stderr_log_lock:
@@ -85,6 +84,46 @@ _SAFE_ENV_KEYS_CASE_INSENSITIVE = frozenset({
 # ${VAR_NAME} interpolation; any non-} chars allowed so MY-VAR / my.var work.
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
+# Private connection metadata: unlike ``config.env``, these values are injected
+# automatically by an external secret source and therefore must participate in
+# scoped stdio connection reuse decisions.
+_CONNECTION_EXTERNAL_ENV_KEY = "_hermes_external_secret_env"
+
+
+def _external_secret_env() -> dict[str, str]:
+    """Return external-secret values from the active profile's immutable home snapshot."""
+    try:
+        from agent.secret_scope import current_secret_scope, is_multiplex_active
+        from hermes_cli.env_loader import get_secret_source, get_secret_source_values
+        from hermes_constants import get_hermes_home
+    except Exception:  # pragma: no cover - early bootstrap/import fallback
+        return {}
+
+    home_values = get_secret_source_values(get_hermes_home())
+    scope = current_secret_scope()
+    if scope is not None:
+        return {
+            key: value for key, value in home_values.items()
+            if isinstance(value, str) and scope.get(key) == value
+        }
+    if is_multiplex_active():
+        return {}
+    if home_values:
+        return {key: value for key, value in home_values.items() if isinstance(value, str)}
+    return {
+        key: value for key, value in os.environ.items()
+        if get_secret_source(key)
+    }
+
+
+def _connection_config(config: dict) -> dict:
+    """Capture automatic external-secret values on a stdio config before it enters a server task."""
+    if "command" not in config or "url" in config or _CONNECTION_EXTERNAL_ENV_KEY in config:
+        return config
+    prepared = dict(config)
+    prepared[_CONNECTION_EXTERNAL_ENV_KEY] = _external_secret_env()
+    return prepared
+
 
 def _workspace_folder() -> str:
     """Absolute workspace root for ``${workspaceFolder}``: the session's authoritative root
@@ -108,22 +147,15 @@ _CONTEXT_VAR_RESOLVERS = {
     "workspaceFolderBasename": _workspace_basename, "pathSeparator": lambda: os.sep, "/": lambda: os.sep}
 
 
-def _build_safe_env(user_env: Optional[dict]) -> dict:
+def _build_safe_env(user_env: Optional[dict], *, external_env: Optional[dict] = None) -> dict:
     """Filtered env for stdio subprocesses so API keys/tokens don't leak: the safe baseline
     keys, ``XDG_*``, vars injected by an external secret source (users configured that backend
     precisely so subprocesses can consume them), plus the server config's own ``env``."""
-    from agent.secret_scope import get_secret
-    from hermes_cli.env_loader import secret_source_names
     env = {
         key: value for key, value in os.environ.items()
-        if key in _SAFE_ENV_KEYS or key.upper() in _SAFE_ENV_KEYS_CASE_INSENSITIVE or key.startswith("XDG_")}
-    # Source-tagged names are process-wide (any profile's hydration tags them) while os.environ
-    # holds only the LAUNCH profile's values, so the value must come from the active profile's
-    # secret scope; a profile that lacks the name gets nothing, never another profile's token.
-    for key in secret_source_names():
-        value = get_secret(key)
-        if value is not None:
-            env[key] = value
+        if key in _SAFE_ENV_KEYS or key.upper() in _SAFE_ENV_KEYS_CASE_INSENSITIVE
+        or key.startswith("XDG_")}
+    env.update(_external_secret_env() if external_env is None else external_env)
     for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD"):
         if key in os.environ:
             env[key] = os.environ[key]

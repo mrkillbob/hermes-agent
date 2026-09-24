@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Mapping
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -19,12 +20,76 @@ from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
 
 
+def federated_enabled(config: Mapping[str, object] | None) -> bool:
+    """Return the explicit opt-in for the cross-machine Kanban lane."""
+    if not isinstance(config, Mapping):
+        return False
+    # Callers may provide the full config or the already-selected ``kanban``
+    # section (the CLI uses the latter).
+    section = config.get("kanban") if isinstance(config.get("kanban"), Mapping) else config
+    federated = section.get("federated") if isinstance(section, Mapping) else None
+    return bool(isinstance(federated, Mapping) and federated.get("enabled") is True)
+
+
+def fleet_task_from_kanban(task) -> "FleetTask":
+    """Convert a local Kanban row to metadata safe to send to the coordinator."""
+    from hermes_cli.fleet_protocol import FleetTask, TaskRequirement
+
+    body = str(task.body or task.title or "").strip()
+    if not body:
+        raise ValueError("federated Kanban tasks require a title or body")
+    return FleetTask(
+        task_id=str(task.id),
+        title=str(task.title),
+        body=body,
+        requirement=TaskRequirement(
+            models=(task.model_override,) if task.model_override else (),
+            project=task.project_id or None,
+            workspace_kind=task.workspace_kind or None,
+        ),
+        idempotency_key=f"kanban:{task.id}",
+    )
+
+
+def federated_create_options(args) -> dict[str, object]:
+    """Return the local-row overrides for an unassigned federated card."""
+    if getattr(args, "assignee", None):
+        raise ValueError("federated Kanban tasks must not specify --assignee")
+    # ``create_task`` accepts ``running`` as the non-blocked admission input
+    # and resolves it to the durable ``ready`` state after parent checks.
+    return {"assignee": None, "initial_status": "running", "created_by": "fleet"}
+
+
+def submit_federated_task(task, config: Mapping[str, object] | None = None):
+    """Submit task metadata using the configured coordinator and secret token."""
+    from hermes_cli.fleet_client import FleetClient
+
+    config = _kanban_config() if config is None else config
+    section = (
+        config.get("kanban")
+        if isinstance(config, Mapping) and isinstance(config.get("kanban"), Mapping)
+        else config
+    )
+    federated = section.get("federated") if isinstance(section, Mapping) else None
+    if not isinstance(federated, Mapping):
+        raise RuntimeError("kanban.federated is not configured")
+    url = str(federated.get("coordinator_url") or "").strip()
+    token = os.environ.get("HERMES_FLEET_TOKEN", "").strip()
+    if not url or not token:
+        raise RuntimeError(
+            "federated Kanban requires kanban.federated.coordinator_url and HERMES_FLEET_TOKEN"
+        )
+    return FleetClient(url, token=token).submit_task(fleet_task_from_kanban(task))
+
+
 def _kanban_config() -> dict:
     """``config.yaml`` ``kanban:`` section, or ``{}`` when config can't be loaded."""
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
-        return (cfg.get("kanban", {}) if isinstance(cfg, dict) else {}) or {}
+        return kbd.shared_kanban_config(
+            (cfg.get("kanban", {}) if isinstance(cfg, dict) else {}) or {}
+        )
     except Exception:
         return {}
 
@@ -64,23 +129,31 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     try:
         from hermes_cli.config import load_config
         _cfg = load_config()
-        _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
+        _kanban_cfg = kbd.shared_kanban_config(
+            (_cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}) or {}
+        )
         default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
         max_in_progress_per_profile = kbd._positive_int(
             _kanban_cfg.get("max_in_progress_per_profile"), None
         )
         # Memory-derived default when unset — same fallback the gateway applies.
-        max_in_progress = kbd.resolve_max_in_progress(
-            kbd._positive_int(_kanban_cfg.get("max_in_progress"), None)
+        max_in_progress = kbd.resolve_global_max_in_progress(
+            kbd._positive_int(_kanban_cfg.get("max_in_progress"), None),
+        )
+        local_model_cap = kbd.resolve_priority_runtime_local_cap(
+            _kanban_cfg.get("priority_runtime_guard", {})
         )
         # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
         cli_max = getattr(args, "max", None)
         max_spawn = (
             cli_max if cli_max is not None else kbd._positive_int(_kanban_cfg.get("max_spawn"), None)
         )
-    except Exception:
-        default_assignee = max_in_progress_per_profile = max_in_progress = None
-        max_spawn = getattr(args, "max", None)
+    except Exception as exc:
+        if getattr(args, "json", False):
+            _print_json({"error": type(exc).__name__, "status": "config_unavailable"})
+        else:
+            print(f"Dispatch paused: configuration unavailable ({type(exc).__name__}).")
+        return 1
     with kbc.connect_closing() as conn:
         res = kbd.dispatch_once(
             conn,
@@ -90,6 +163,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            max_in_progress_by_profile=_kanban_cfg.get("max_in_progress_by_profile"),
+            max_in_progress_per_model=_kanban_cfg.get("max_in_progress_per_model"),
+            max_in_progress_by_model=_kanban_cfg.get("max_in_progress_by_model"),
+            local_model_cap=local_model_cap,
         )
     if getattr(args, "json", False):
         _print_json({

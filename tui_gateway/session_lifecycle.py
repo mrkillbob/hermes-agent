@@ -5,11 +5,12 @@ globals at install time (method_ctx.bind_module), so they reference server.py gl
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
-import contextlib
-
 from .method_ctx import bind_module
+
+logger = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
@@ -339,24 +340,12 @@ def _lifecycle_own_sid(session: dict, sid_hint: str = "") -> str:
     return own_sid
 
 
-def _lock_vault_managers(session: dict) -> None:
-    """A per-session unlock ends with the session that made it; siblings in the same profile keep theirs."""
-    try:
-        from agent.vault_backends import unlock
-
-        if sid := session.get("_sid"):
-            unlock.release_session(sid)
-    except Exception:
-        logging.getLogger(__name__).debug("vault manager lock on session end failed", exc_info=True)
-
-
 def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
     """Best-effort finalize hook + memory commit; mirrors the CLI exit path so a force-quit mid-turn (double
     Ctrl-C, terminal close, SIGHUP) loses nothing."""
     if not session or session.get("_finalized"):
         return
     session["_finalized"] = True
-    _lock_vault_managers(session)
     if (history_ready := session.get("resume_history_ready")) is not None and not history_ready.is_set():
         session["resume_history_error"] = "session resume cancelled"
         history_ready.set()
@@ -437,6 +426,18 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     with contextlib.suppress(Exception):
         if worker := session.get("slash_worker"):
             worker.close()
+    _retry_failed_conversation_root_leases()
+    root_lease = session.get("conversation_root_lease")
+    if root_lease is not None:
+        try:
+            root_lease.release()
+        except Exception:
+            # Keep the handle for the next teardown; popping it here would make a
+            # transient registry failure permanently unrepairable in this process.
+            _remember_failed_conversation_root_lease(root_lease)
+            logger.warning("Failed to release TUI conversation root lease", exc_info=True)
+        else:
+            session.pop("conversation_root_lease", None)
 
 
 # End reasons where the BACKEND reclaimed a session the client never asked to close (else its next prompt fails
@@ -506,6 +507,28 @@ def _pop_session_by_id(sid: str) -> dict | None:
     return session
 
 
+def _claim_session_for_teardown(
+    sid: str, *, predicate: Callable[[dict], bool] | None = None,
+) -> dict | None:
+    """Claim one session for teardown after prompt admission has drained.
+
+    Prompt submission takes ``prompt_submit_lock -> resume_lock`` before it
+    materializes a turn. Teardown must use that same order before popping the
+    registry entry; otherwise a submit can pass its first liveness check and
+    bind a root after teardown has already claimed the session.
+    """
+    with _sessions_lock:
+        candidate = _sessions.get(sid)
+    if candidate is None:
+        return None
+    with _session_prompt_submit_lock(candidate), _session_resume_lock, _sessions_lock:
+        if _sessions.get(sid) is not candidate:
+            return None
+        if predicate is not None and not predicate(candidate):
+            return None
+        return _pop_session_by_id(sid)
+
+
 def _teardown_popped_session(session: dict | None, *, end_reason: str = "tui_close") -> bool:
     """Finish a close after the caller has atomically detached the session."""
     if session is None:
@@ -569,11 +592,7 @@ def _close_session_by_id(
     ``_session_resume_lock`` and call ``_teardown_popped_session`` after releasing it). Automatic reapers pass
     ``predicate`` to revalidate under ``_sessions_lock`` right before the claim, so a stale scan can't close a
     session that reattached."""
-    with _sessions_lock:  # RLock: predicate + claim in one critical section
-        current = _sessions.get(sid)
-        if predicate is not None and (current is None or not predicate(current)):
-            return False
-        session = _pop_session_by_id(sid)
+    session = _claim_session_for_teardown(sid, predicate=predicate)
     return _teardown_popped_session(session, end_reason=end_reason)
 
 
@@ -606,9 +625,8 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
         session.pop("queued_prompts", None)
         session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
     if should_interrupt:
-        # Sibling of gateway/run_agent_cache.py::_interrupt_and_clear_session: a user-initiated stop of a
-        # live TUI/desktop turn is the same "loop is gone" event for plugins holding per-turn external
-        # resources. Observer-only; dispatch failures never break the interrupt.
+        # A user stop ends the agent loop for plugin lifecycle purposes even
+        # when the UI backend owns the actual interrupt operation.
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _invoke_hook(
@@ -658,9 +676,8 @@ def _session_has_active_delegations(sid: str, session: dict | None = None) -> bo
     if session_id:
         # Only when this session may end its durable row by key — never for gateway-originated sessions (TUI is a
         # viewer there). Unknown DB state -> assume ownership.
-        # The row lives in the session's OWN store (a named-profile session's row is invisible to
-        # the launch handle, which would leave this guard permanently dead).
-        with contextlib.suppress(Exception), _session_db(session) as db:
+        with contextlib.suppress(Exception):
+            db = _get_db()
             if db is not None and _is_gateway_owned_source((db.get_session(session_id) or {}).get("source", "")):
                 owned_session_key = ""
     if not own_sid and not owned_session_key:
@@ -756,17 +773,23 @@ def _schedule_ws_orphan_reap(
         return
 
     def _reap() -> None:
-        # Serialize the re-check against session.resume (rebinds under _session_resume_lock). Claim teardown by popping
-        # under both locks, then release the resume lock before slow finalization. Order: resume_lock -> sessions_lock.
+        # Serialize the re-check against prompt.submit and session.resume. Claim teardown by popping under the
+        # same prompt admission -> resume -> registry order as prompt.submit, then release both before finalization.
         reschedule_delay = interrupt_session = session = None
-        with _session_resume_lock, _sessions_lock:
+        with _sessions_lock:
+            candidate = _sessions.get(sid)
+        if candidate is None:
+            with _session_resume_lock, _sessions_lock:
+                if _pending_ws_reaps.get(sid) is timer:
+                    _pending_ws_reaps.pop(sid, None)
+            return
+        with _session_prompt_submit_lock(candidate), _session_resume_lock, _sessions_lock:
             # Keep ownership through interrupt I/O and continuation registration. A cancelled
             # callback may already be dispatched, but cannot act on a later detachment.
             if _pending_ws_reaps.get(sid) is not timer:
                 return
             current = _sessions.get(sid)
-            if current is None:
-                _pending_ws_reaps.pop(sid, None)
+            if current is not candidate:
                 return
             if not _ws_session_is_detached(current):
                 # This Timer is abandoning the interrupt claim because another
@@ -848,9 +871,9 @@ def _close_sessions_for_transport(transport, *, end_reason: str = "ws_disconnect
     for sid, session in clientless:
         claimed_for_teardown = None
         should_schedule_reap = False
-        # session.resume fast-path attaches under _session_resume_lock: take it so a reconnect can't attach
-        # between the detach above and the claim.
-        with _session_resume_lock, _sessions_lock:
+        # Prompt admission must win or drain before a disconnect can claim the session. Then serialize the
+        # reconnect check and pop with the same prompt -> resume -> registry order as prompt.submit.
+        with _session_prompt_submit_lock(session), _session_resume_lock, _sessions_lock:
             current = _sessions.get(sid)
             if current is not session:
                 continue

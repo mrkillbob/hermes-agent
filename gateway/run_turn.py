@@ -1781,6 +1781,11 @@ class GatewayTurnMixin:
             logger.info("Auto-resetting session %s after compression exhaustion.", session_entry.session_id)
             new_entry = await self.async_session_store.reset_session(session_key)
             self._evict_cached_agent(session_key)
+            if new_entry is not None:
+                # The bloated compressed child (session_entry) may hold a conversation-worktree
+                # root lease that differs from the fresh session's; release it now, or the old
+                # root stays leased with nothing left to use it (#35809 follow-up).
+                self.session_store.reconcile_conversation_root_transition(session_entry, new_entry)
             # Conversation boundary: the funnel clears every conversation-scoped per-session dict.
             self._clear_conversation_scope(session_key, reason="compression_exhausted_reset")
             if new_entry is not None:
@@ -2386,7 +2391,11 @@ class GatewayTurnMixin:
             override = adapter.toolsets_for_source(source) if adapter is not None else None
         except Exception:
             override = None
-        if override and isinstance(override, list):
+        # An empty list is an intentional source-scoped deny (voice fast lane),
+        # not the absence of an override.
+        if isinstance(override, list) and not override:
+            return []
+        if isinstance(override, list):
             pts = dict(user_config.get("platform_toolsets") or {})
             pts[platform_key] = [str(x) for x in override]
             user_config = {**user_config, "platform_toolsets": pts}
@@ -2582,7 +2591,11 @@ class GatewayTurnMixin:
         try:
             from tools.mcp_tool_lifecycle import shutdown_mcp_servers
             from tools.mcp_tool_discovery import discover_mcp_tools
-            from tools.mcp_tool import _servers, _lock, _server_visible_in_scope
+            from tools.mcp_tool import (
+                _servers, _lock, _mcp_tool_server_names_by_scope, _server_public_names,
+                _server_visible_in_scope,
+            )
+            from tools.mcp_tool_scope import _key_name
             from tools.mcp_tool_agent import reprobe_tool_availability
             from tools.mcp_tool_scope import _key_name
             from tools.registry import registry
@@ -2591,10 +2604,16 @@ class GatewayTurnMixin:
 
             def _scoped_server_names() -> set:
                 with _lock:
-                    return {
-                        _key_name(key) for key in _servers
-                        if _server_visible_in_scope(key, reload_scope)
+                    names = {
+                        _server_public_names.get(name, _key_name(name)) for name in _servers
+                        if _server_visible_in_scope(name, reload_scope)
                     }
+                    if reload_scope is not None:
+                        names.update(
+                            _server_public_names.get(owner, _key_name(owner))
+                            for owner in _mcp_tool_server_names_by_scope.get(reload_scope, {}).values()
+                        )
+                    return names
 
             old_servers = _scoped_server_names()
             await self._run_in_executor_with_context(lambda: shutdown_mcp_servers(scope=reload_scope))
@@ -2608,9 +2627,15 @@ class GatewayTurnMixin:
 
             connected_servers = _scoped_server_names()
             if reload_scope is not None:
-                from tools.mcp_tool import _mcp_tool_server_names
+                from tools.mcp_tool import _mcp_tool_server_names_by_scope
                 with _lock:
-                    new_tools = [n for n in new_tools if _mcp_tool_server_names.get(n) in connected_servers]
+                    provenance = _mcp_tool_server_names_by_scope.get(reload_scope, {})
+                    new_tools = [
+                        n for n in new_tools
+                        if _server_public_names.get(
+                            provenance.get(n), _key_name(provenance.get(n)) if provenance.get(n) is not None else n
+                        ) in connected_servers
+                    ]
             # (label, i18n key, names); i18n lines list reconnected first, the injected note added first.
             changes = (
                 ("Reconnected", "gateway.reload_mcp.reconnected", connected_servers & old_servers),

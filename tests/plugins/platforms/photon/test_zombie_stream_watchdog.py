@@ -65,6 +65,20 @@ def _run_staleness_harness(script: str) -> Dict[str, Any]:
     return json.loads(run.stdout)
 
 
+def _run_upstream_probe_harness(script: str) -> Dict[str, Any]:
+    probe_module = (_MODULE.parent / "upstream-probe.mjs").as_uri()
+    harness = f"import {{ probeUpstream }} from {json.dumps(probe_module)};\n" + script
+    run = subprocess.run(
+        ["node", "--input-type=module", "-e", harness],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    return json.loads(run.stdout)
+
+
 def test_probe_message_id_is_guid_shaped_and_unique() -> None:
     out = _run_staleness_harness(
         """
@@ -247,3 +261,34 @@ async def test_inconclusive_probes_never_accumulate_toward_respawn(
     assert adapter._probe_failures == 0
 
 
+def test_probe_upstream_uses_a_guid_shaped_id() -> None:
+    """Exercise the production probe with a fake Spectrum client (#117390)."""
+    out = _run_upstream_probe_harness(
+        """
+        let messageId = null;
+        const app = { stop() {} };
+        const imessage = () => ({
+          space: {
+            get: async () => ({
+              getMessage: async (id) => {
+                messageId = id;
+                throw { code: 5, message: "NOT_FOUND: synthetic probe id" };
+              },
+            }),
+          },
+        });
+        const staleness = {};
+        const outcome = await probeUpstream({
+          app, imessage, spaceId: "probe-space", timeoutMs: 1000, staleness,
+        });
+        process.stdout.write(JSON.stringify({ messageId, outcome, staleness }));
+        """
+    )
+    guid_re = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    assert re.fullmatch(guid_re, out["messageId"])
+    assert out["outcome"] == {
+        "alive": True,
+        "hung": False,
+        "reason": "not-found round-trip",
+    }
+    assert out["staleness"]["lastProbeOutcome"] == "alive"

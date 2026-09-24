@@ -217,7 +217,8 @@ edge-tts = ["edge-tts==7.2.7"]
 modal = ["modal==1.3.4"]
 daytona = ["daytona==0.155.0"]
 vercel = ["vercel==0.7.2"]
-dev = ["debugpy==1.8.20", "pytest==9.1.1", "pytest-asyncio==1.3.0", "mcp==2.0.0", "httpx2==2.7.0", "starlette==1.3.1", "ty==0.0.21", "ruff==0.15.10", "setuptools==83.0.0"]  # starlette: CVE-2026-48710; setuptools: 83 (torch >=2.13 requires setuptools 83)
+hindsight = ["hindsight-client==0.6.1"]
+dev = ["debugpy==1.8.20", "pytest==9.1.1", "pytest-asyncio==1.3.0", "mcp==2.0.0", "httpx2==2.12.0", "starlette==1.3.1", "ty==0.0.21", "ruff==0.15.10", "setuptools==83.0.0"]  # starlette: CVE-2026-48710; setuptools: 83 (torch >=2.13 requires setuptools 83)
 messaging = ["python-telegram-bot[webhooks]==22.8", "discord.py[voice]==2.7.1", "aiohttp==3.14.3", "brotlicffi==1.2.0.2", "slack-bolt==1.30.0", "slack-sdk==3.44.1", "qrcode==7.4.2"]  # aiohttp 3.14.3: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7
 cron = []  # croniter is now a core dependency; this extra kept for back-compat
 slack = ["slack-bolt==1.30.0", "slack-sdk==3.44.1", "aiohttp==3.14.3"]
@@ -291,7 +292,7 @@ pty = []
 # resolution. Hermes' own `httpx[socks]==0.28.1` in [dependencies] is
 # unaffected — the two distributions install side by side under different
 # module names.
-mcp = ["mcp==2.0.0", "httpx2==2.7.0", "starlette==1.3.1"]  # starlette: CVE-2026-48710
+mcp = ["mcp==2.0.0", "httpx2==2.12.0", "starlette==1.3.1"]  # starlette: CVE-2026-48710
 # Backwards-compatible no-op alias. Relay is a core dependency on supported
 # wheel targets and intentionally unavailable on other platforms.
 nemo-relay = []
@@ -302,7 +303,7 @@ teams = ["microsoft-teams-apps==2.0.13.4", "aiohttp==3.14.3"]  # aiohttp 3.14.3:
 # The cua-driver binary itself is installed via `hermes tools` post-setup
 # (curl install script); this extra just pins the MCP client used to talk
 # to it, which is already provided by the `mcp` extra.
-computer-use = ["mcp==2.0.0", "httpx2==2.7.0", "starlette==1.3.1"]  # starlette: CVE-2026-48710
+computer-use = ["mcp==2.0.0", "httpx2==2.12.0", "starlette==1.3.1"]  # starlette: CVE-2026-48710
 acp = ["agent-client-protocol==0.9.0"]
 # mistral: Voxtral STT + TTS. Pinned to an exact verified-clean version.
 # The `mistralai` PyPI project was quarantined 2026-05-12 after the malicious
@@ -425,7 +426,7 @@ all = [
 # PEP 517 isolated builds (uv sync / uv pip install -e .). Without wheel in
 # requires, the isolation sandbox only gets setuptools and Windows installer
 # fails with ModuleNotFoundError: wheel.cli (#96488).
-requires = ["setuptools==83.0.0", "wheel"]
+requires = ["setuptools==83.0.0", "wheel>=0.46.1,<0.48"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
@@ -608,6 +609,12 @@ include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*",
 
 [tool.setuptools.package-data]
 hermes_cli = ["observability/schemas/*.json", "data/*.json", "local_runtime/*.json"]
+
+[tool.setuptools.data-files]
+# Federation is a checked-in, user-auditable manifest rather than Python
+# code. Install it beside the environment so the CLI remains functional from
+# a wheel as well as from a source checkout.
+"configs/federation" = ["configs/federation/roles.json"]
 # gateway/assets/ ships status_phrases.yaml and the Telegram BotFather
 # screenshot. Without this, sealed venvs (uv2nix) silently lose both —
 # status phrases fall back to the tiny hardcoded set and the Telegram
@@ -621,6 +628,9 @@ plugins = ["**/plugin.yaml", "**/plugin.yml"]
 # Bot Desktop starts Xvnc + Xfce through a shell launcher and seeds the wallpaper; both are read
 # via Path(__file__).parent in tools/bot_desktop/runtime.py and vanish from sealed wheels otherwise.
 tools = ["bot_desktop/launcher.sh", "bot_desktop/wallpaper.png"]
+# The curated catalog is bare YAML data, not a Python package. Keep it in
+# sealed installs so plugin removal entries remain enforceable offline.
+"plugin-catalog" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

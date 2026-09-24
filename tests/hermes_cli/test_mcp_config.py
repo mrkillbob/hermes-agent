@@ -917,4 +917,3 @@ def test_tool_filters_keeps_explicit_empty_include():
     assert _tool_filters({"tools": {"include": []}}) == ([], None)
     assert _tool_filters({"tools": {"include": "bad", "exclude": ["x"]}}) == (None, ["x"])
     assert _tool_filters({}) == (None, None)
-

@@ -52,6 +52,37 @@ class ServerDisconnectedError(MockTransportError):
 
 # ── Test: FailoverReason enum ──────────────────────────────────────────
 
+class TestFailoverReason:
+    def test_all_reasons_have_string_values(self):
+        for reason in FailoverReason:
+            assert isinstance(reason.value, str)
+
+    def test_enum_members_exist(self):
+        expected = {
+            "auth", "auth_permanent", "billing", "rate_limit",
+            "upstream_rate_limit", "upstream_blocked",
+            "overloaded", "server_error", "timeout",
+            "ssl_cert_verification",
+            "context_overflow", "payload_too_large", "image_too_large",
+            "image_corrupt",
+            "model_not_found", "format_error", "role_alternation",
+            "invalid_encrypted_content",
+            "multimodal_tool_content_unsupported",
+            "reasoning_mandatory",
+            "provider_policy_blocked",
+            "content_policy_blocked",
+            "model_entitlement",
+            "incomplete_response",
+            "thinking_signature", "long_context_tier",
+            "oauth_long_context_beta_forbidden",
+            "llama_cpp_grammar_pattern",
+            "unknown",
+        }
+        actual = {r.value for r in FailoverReason}
+        # New failover reasons may be added as providers and policy boundaries
+        # evolve; this test protects the established public vocabulary without
+        # becoming a change-detector for the enum's current size.
+        assert expected <= actual
 
 
 # ── Test: ClassifiedError ──────────────────────────────────────────────

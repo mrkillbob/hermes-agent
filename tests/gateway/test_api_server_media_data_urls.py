@@ -10,7 +10,8 @@ import unittest
 
 import pytest
 
-pytest.importorskip("aiohttp")
+aiohttp = pytest.importorskip("aiohttp", reason="requires aiohttp [messaging] extra")
+if not isinstance(getattr(aiohttp, "__version__", None), str): pytest.skip("requires real aiohttp [messaging] extra", allow_module_level=True)
 
 from gateway.platforms.api_server import _resolve_media_to_data_urls  # noqa: E402
 

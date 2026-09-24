@@ -177,10 +177,25 @@ class GatewayProfileReconcileMixin:
             configs = getattr(self, "_profile_configs", None)
             if isinstance(configs, dict):
                 configs.pop(name, None)
-        if added:
-            await self._after_profiles_added([(n, current[n]) for n in added])
+        if added or changed:
+            await self._after_profiles_added([(n, current[n]) for n in added + changed])
         result["served_profiles"] = self.served_profile_names()
         return result
+
+    async def _reset_profile_adapters_for_rescan(self, profile_name: str) -> None:
+        """Tear down a changed profile's old adapters before rebuilding from its new config."""
+        pending = (getattr(self, "_profile_failed_platforms", None) or {}).pop(profile_name, None) or {}
+        tasks = [task for task in pending.values() if isinstance(task, asyncio.Task) and not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=self._adapter_disconnect_timeout_secs())
+        adapters = (getattr(self, "_profile_adapters", None) or {}).pop(profile_name, None) or {}
+        for platform, adapter in adapters.items():
+            await self._bounded_adapter_teardown(adapter, platform, profile=profile_name)
+
+        from gateway.run import _write_runtime_status_quiet
+        _write_runtime_status_quiet(drop_profile_platforms=profile_name)
 
     def _live_resource_claims(self, active: str) -> Dict[tuple, str]:
         """Startup's ``claimed`` map rebuilt from what is live now: primary claims plus every connected
@@ -223,6 +238,7 @@ class GatewayProfileReconcileMixin:
         profile's). Secrets are not re-hydrated: teardown must not block the loop on a source fetch.
         """
         from gateway.run import _profile_runtime_scope, _write_runtime_status_quiet
+        from hermes_constants import hermes_home_key
         pending = (getattr(self, "_profile_failed_platforms", None) or {}).pop(name, None) or {}
         tasks = [t for t in pending.values() if isinstance(t, asyncio.Task) and not t.done()]
         for task in tasks:
@@ -233,6 +249,13 @@ class GatewayProfileReconcileMixin:
             adapters = (getattr(self, "_profile_adapters", None) or {}).pop(name, None) or {}
             for platform, adapter in list(adapters.items()):
                 await self._bounded_adapter_teardown(adapter, platform, profile=name)
+            with _log_suppressed(logging.DEBUG, "MCP scope cleanup failed for deleted profile", exc_info=True):
+                from tools.mcp_tool_lifecycle import shutdown_mcp_servers
+                await asyncio.to_thread(shutdown_mcp_servers, scope=hermes_home_key(home))
+            # Plugin teardown touches importlib locks and module caches — run it on a
+            # worker thread so it can't stall the gateway event loop.
+            from hermes_cli.plugins_lifecycle import evict_profile_plugins
+            await asyncio.to_thread(evict_profile_plugins, home)
             # Its ``<name>:<platform>`` runtime entries describe a profile that no longer exists.
             _write_runtime_status_quiet(drop_profile_platforms=name)
             for attr in ("pairing_stores", "_busy_text_modes_by_profile", "_busy_input_modes_by_profile",

@@ -808,9 +808,10 @@ def _profile_cache_roots() -> List[Path]:
 def _profile_dirs() -> List[Path]:
     """Every ``<root>/profiles/<name>`` directory, read at check time."""
     try:
-        return [p for p in (_HERMES_ROOT / "profiles").iterdir() if p.is_dir()]
+        profile_dirs = [p for p in (get_hermes_home() / "profiles").iterdir() if p.is_dir()]
     except OSError:
         return []
+    return profile_dirs
 
 
 def _credential_home_roots() -> List[Path]:
@@ -847,6 +848,19 @@ def _kanban_attachment_roots() -> List[Path]:
     return roots
 
 
+def _active_profile_cache_roots() -> List[Path]:
+    """Cache roots under get_hermes_home()'s CURRENT value, not the import-time ``_HERMES_HOME``
+    snapshot baked into MEDIA_DELIVERY_SAFE_ROOTS. A profile switch after this module's import
+    (an active-profile change mid-process) must move generated-media delivery authority with it,
+    not leave the previous profile's cache dirs as the only allowlisted destination."""
+    home = get_hermes_home()
+    return [
+        *(home / d for d in (
+            "image_cache", "audio_cache", "video_cache", "document_cache", "browser_screenshots")),
+        *(home / "cache" / d for d in _MEDIA_DELIVERY_CACHE_SUBDIRS),
+    ]
+
+
 def _media_delivery_allowed_roots() -> List[Path]:
     """Return roots from which model-emitted local media may be delivered."""
     from gateway.media_policy import media_delivery_allow_dirs
@@ -854,8 +868,8 @@ def _media_delivery_allowed_roots() -> List[Path]:
         root for chunk in media_delivery_allow_dirs().split(os.pathsep)
         for raw_root in chunk.split(",")
         if (root := Path(os.path.expanduser(raw_root.strip()))).is_absolute())
-    return [*map(Path, MEDIA_DELIVERY_SAFE_ROOTS), *_profile_cache_roots(),
-            *_kanban_attachment_roots(), *operator_roots]
+    return [*map(Path, MEDIA_DELIVERY_SAFE_ROOTS), *_active_profile_cache_roots(),
+            *_profile_cache_roots(), *_kanban_attachment_roots(), *operator_roots]
 
 
 def _media_delivery_recency_seconds() -> float:

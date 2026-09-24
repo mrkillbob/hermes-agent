@@ -101,4 +101,8 @@ install_node
 
 
 
-
+def test_node_bootstrap_mirrors_the_prerelease_guard() -> None:
+    """The sourceable helper answers the same question and must agree."""
+    text = NODE_BOOTSTRAP.read_text(encoding="utf-8")
+    assert "_nb_node_is_prerelease" in text
+    assert "_nb_node_is_prerelease && return 1" in text

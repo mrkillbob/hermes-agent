@@ -248,6 +248,7 @@ def test_truncation_persists_to_the_profile_db(server, launch_db, profile_db, mo
     assert _texts(pdb.get_messages_as_conversation(SESSION_KEY)) == [
         "question 1",
         "answer 1",
+        "edited question 2",
     ]
     # ...and nothing was copied into a foreign profile under this session id.
     assert launch_db.get_messages_as_conversation(SESSION_KEY) == []
@@ -287,6 +288,7 @@ def test_truncation_does_not_copy_rows_into_the_launch_profile(
     assert _texts(pdb.get_messages_as_conversation(SESSION_KEY)) == [
         "question 1",
         "answer 1",
+        "edited question 2",
     ]
 
 
@@ -318,14 +320,18 @@ def test_truncation_surfaces_the_profile_dbs_live_row_ids(
     )
 
     assert not resp.get("error"), f"prompt.submit failed: {resp.get('error')}"
-    surviving = [
+    persisted_user_rows = [
         row["_row_id"]
         for row in pdb.get_messages_as_conversation(SESSION_KEY, include_row_ids=True)
         if row["role"] == "user"
     ]
-    assert resp["result"]["survivor_user_row_ids"] == surviving
-    # The kept prefix keeps its rows: the pre-rewind id stays valid (#82956).
-    assert surviving == [user_row_ids[0]]
+    survivors = resp["result"]["survivor_user_row_ids"]
+    assert len(survivors) == 1
+    assert survivors[0] == persisted_user_rows[0]
+    assert len(persisted_user_rows) == 2
+    assert persisted_user_rows[1] not in survivors  # the newly submitted edited prompt is not a survivor
+    # The kept prefix retains its row id; only the edited suffix gets a new id.
+    assert survivors == [user_row_ids[0]]
 
 
 def test_truncation_without_a_profile_uses_the_shared_handle(server, launch_db, monkeypatch):
@@ -350,6 +356,7 @@ def test_truncation_without_a_profile_uses_the_shared_handle(server, launch_db, 
     assert _texts(launch_db.get_messages_as_conversation(SESSION_KEY)) == [
         "question 1",
         "answer 1",
+        "edited question 2",
     ]
 
 

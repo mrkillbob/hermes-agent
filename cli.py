@@ -846,13 +846,17 @@ class _ChatTurn:
     stop_event: Optional[threading.Event] = None
     tts_normal_exit: bool = False
     voice_prefix: str = ""
+from hermes_cli.cli_conversation_worktree_mixin import (
+    CLIConversationWorktreeMixin,
+    _should_use_legacy_worktree,
+)
 from hermes_cli.cli_chat_turn_mixin import CLIChatTurnMixin
 
 
 _PASTE_REF_RE = re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
 
 
-class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMixin, CLIStatusBarMixin, CLIVoiceMixin, CLIModelSwitchMixin, CLISessionMixin, CLIStreamMixin, CLIModalMixin, CLITerminalMixin, CLIInfoMixin, CLILoopsMixin, CLIChatTurnMixin):
+class HermesCLI(CLIConversationWorktreeMixin, CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMixin, CLIStatusBarMixin, CLIVoiceMixin, CLIModelSwitchMixin, CLISessionMixin, CLIStreamMixin, CLIModalMixin, CLITerminalMixin, CLIInfoMixin, CLILoopsMixin, CLIChatTurnMixin):
     """Interactive REPL for the Hermes Agent."""
 
     # Seeded -q first message (see _should_seed_interactive); run() re-creates
@@ -877,12 +881,14 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
         checkpoints: bool = False,
         pass_session_id: bool = False,
         ignore_rules: bool = False,
+        manage_conversation_worktree: bool = True,
     ):
         """CLI args win over config; ``reasoning`` is per-run only; ``resume`` restores history from SQLite."""
         self._init_display_options(verbose, compact)
         self._init_model_routing(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
                                  checkpoints, pass_session_id, ignore_rules)
         self._init_runtime_state(resume)
+        self._initialize_conversation_worktree(CLI_CONFIG, resume, manage_conversation_worktree)
 
 
     def _claim_active_session(self, surface: str = "cli", *, stderr: bool = False) -> bool:
@@ -913,14 +919,17 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
 
     def _release_active_session(self) -> None:
         lease = getattr(self, "_active_session_lease", None)
-        if lease is None:
-            return
-        try:
-            lease.release()
-        except Exception:
-            logger.debug("Failed to release active session slot", exc_info=True)
-        finally:
-            self._active_session_lease = None
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception:
+                logger.debug("Failed to release active session slot", exc_info=True)
+            finally:
+                self._active_session_lease = None
+        self._retry_failed_conversation_root_leases()
+        root_lease = getattr(self, "_conversation_root_lease", None)
+        self._conversation_root_lease = None
+        self._release_conversation_root_lease(root_lease, context="CLI shutdown")
 
     _PET_FRAME_INTERVAL = 0.16
     _PET_CFG_INTERVAL = 2.5
@@ -1473,7 +1482,7 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
             relaunch(self._pending_relaunch, preserve_inherited=False)
 
 
-def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills):
+def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills, *, manage_conversation_worktree=True):
     """Resolve the toolset list (explicit / coding posture / platform default), construct HermesCLI, and start the background skills preload."""
     toolsets_list = None
     if isinstance(toolsets, str) and toolsets:
@@ -1512,6 +1521,7 @@ def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url
             checkpoints=checkpoints,
             pass_session_id=pass_session_id,
             ignore_rules=ignore_rules,
+            manage_conversation_worktree=manage_conversation_worktree,
         )
     except ImportError as e:
         # Direct `python cli.py` bypasses cmd_chat's partial-update ImportError handler.
@@ -1566,7 +1576,9 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
     Returns a join callable that publishes ``_active_worktree``/TERMINAL_CWD and
     schedules stale-worktree GC, or None when no worktree is wanted.
     """
-    if list_tools or list_toolsets or not (worktree or w or CLI_CONFIG.get("worktree", False)):
+    if list_tools or list_toolsets or not _should_use_legacy_worktree(
+        worktree=worktree, shorthand=w, config=CLI_CONFIG
+    ):
         return None
     # Overlap tool discovery with the I/O-bound worktree setup so show_banner() hits a warm
     # cache (~0.4s). Only on the -w path: plain `hermes` has no I/O wait to hide.

@@ -60,6 +60,11 @@ export {
 } from './data-url-read-max'
 export { compactNumber } from './format'
 export { type FuzzyMatch, fuzzyRank, fuzzyScore, fuzzyScoreMulti, type RankedItem } from './fuzzy'
+export {
+  type ConnectionRequestPayload,
+  type ModelOptionProvider,
+  type ModelOptionsResult
+} from './gateway-contract.generated'
 export * from './gateway-events'
 export {
   applyDocumentLocale,
@@ -112,15 +117,6 @@ export {
   type ReconnectBackoffOptions
 } from './reconnect-backoff'
 export { skillInvocationText } from './skill-scaffold'
-export {
-  type HermesSkin,
-  SKIN_BRANDING_TOKENS,
-  SKIN_COLOR_TOKENS,
-  type SkinBranding,
-  type SkinBrandingToken,
-  type SkinColors,
-  type SkinColorToken
-} from './skin'
 export {
   type AliasCommandDispatchResponse,
   type CommandDispatchResponse,

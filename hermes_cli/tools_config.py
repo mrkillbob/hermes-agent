@@ -69,7 +69,7 @@ CONFIGURABLE_TOOLSETS = [
     ("memory",          "💾 Memory",                    "persistent memory across sessions"),
     ("context_engine",  "🧩 Context Engine",            "runtime tools from the active context engine"),
     ("session_search",  "🔎 Session Search",            "search past conversations"),
-    ("connections",     "🔌 Connections",               "remote connector tools and account authorization"),
+    ("inter_agent",     "🤝 Inter-Agent Messaging",    "persistent messaging between Hermes agents"),
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
@@ -601,7 +601,11 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
     else:
         enabled_toolsets = _composite_toolsets(toolset_names, platform, explicitly_configured)
 
-    _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
+    # A saved platform list is an explicit allowlist. Native recovery belongs only
+    # to implicit composite resolution; otherwise [] or [file] gains capabilities
+    # the user did not select.
+    if not explicitly_configured:
+        _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
     if plugin_ts_keys:
         enabled_toolsets |= _enabled_plugin_toolsets(config, platform, toolset_names, plugin_ts_keys)
 
@@ -611,7 +615,14 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
         enabled_toolsets.add("context_engine")
 
     # Explicit non-configurable entries (custom toolsets, MCP server names) pass through.
-    explicit_passthrough = {ts for ts in toolset_names if ts not in explicit_known_keys and ts not in platform_default_keys}
+    # ``all``/``*`` are composite expansion sentinels, never toolset names to
+    # forward after the composite has already been expanded above.
+    explicit_passthrough = {
+        ts for ts in toolset_names
+        if ts not in explicit_known_keys
+        and ts not in platform_default_keys
+        and ts not in {"all", "*"}
+    }
     enabled_toolsets |= _merge_mcp_servers(config, toolset_names, explicit_passthrough, include_default_mcp_servers)
 
     # Legacy profile opt-in is a fallback only. A saved platform list (even
@@ -949,7 +960,7 @@ def _platform_menu_label(config: dict, pkey: str) -> str:
 def _print_tools_summary(config: dict, enabled_platforms: List[str]) -> None:
     """``hermes tools --summary``: enabled toolsets per platform, non-interactive."""
     total = len(_get_effective_configurable_toolsets())
-    print(color("☤ Tool Summary", Colors.CYAN, Colors.BOLD))
+    print(color("⚕ Tool Summary", Colors.CYAN, Colors.BOLD))
     print()
     for pkey, enabled in _platform_toolset_summary(config, enabled_platforms).items():
         print(color(f"  {PLATFORMS[pkey]['label']}", Colors.BOLD) + color(f"  ({len(enabled)}/{total})", Colors.DIM))
@@ -1056,7 +1067,7 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
     if getattr(args, "summary", False):
         _print_tools_summary(config, enabled_platforms)
         return
-    print(color("☤ Hermes Tool Configuration", Colors.CYAN, Colors.BOLD))
+    print(color("⚕ Hermes Tool Configuration", Colors.CYAN, Colors.BOLD))
     print(color("  Enable or disable tools per platform.", Colors.DIM))
     print(color("  Tools that need API keys will be configured when enabled.", Colors.DIM))
     print(color("  Guide: https://hermes-agent.nousresearch.com/docs/user-guide/features/tools", Colors.DIM))

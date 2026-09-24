@@ -8,7 +8,10 @@ from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
+from httpx import URL
 
+from agent.llm_egress_firewall import EgressBlocked
+from agent.llm_egress_runtime import authorize_agent_sdk_kwargs
 from agent.auxiliary_client import (
     _NOUS_MODEL,
     CodexAuxiliaryClient,
@@ -35,7 +38,539 @@ from agent.auxiliary_client import (
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
     _pool_runtime_base_url,
+    _auxiliary_egress_binding,
+    _dispatch_auxiliary_request,
+    _RELAY_AUX_CALL_CONTEXT,
+    _LadderRoute,
+    _ladder_provider_fallback,
 )
+
+
+def _aux_egress_response(content="ok"):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+        model="gpt-5.4",
+    )
+
+
+def _blocked_egress_error(reason="base64_payload"):
+    from agent.llm_egress_firewall import DestinationClass, EgressDecision
+
+    return EgressBlocked(
+        EgressDecision(
+            allowed=False,
+            destination_class=DestinationClass.REMOTE,
+            provider="openai-codex",
+            model="gpt-5.4",
+            payload_sha256="payload-digest",
+            serialized_bytes=128,
+            estimated_tokens=32,
+            source_grant_count=1,
+            source_segment_count=1,
+            session_id="session",
+            turn_id="turn",
+            request_id="request",
+            policy_digest="policy",
+            reason_codes=(reason,),
+        )
+    )
+
+
+def _run_aux_codex_call(
+    monkeypatch,
+    tmp_path,
+    *,
+    content="safe request",
+    provider="openai-codex",
+    base_url="https://chatgpt.com/backend-api/codex",
+    api_mode="codex_responses",
+    client_out=None,
+):
+    client = MagicMock()
+    client.base_url = base_url
+    client.chat.completions.create.return_value = _aux_egress_response()
+    monkeypatch.setattr("agent.auxiliary_client.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        lambda *args, **kwargs: (provider, "gpt-5.4", None, None, api_mode),
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_cached_client",
+        lambda *args, **kwargs: (client, "gpt-5.4"),
+    )
+    if client_out is not None:
+        client_out.append(client)
+    return client, call_llm(
+        task="compression",
+        provider=provider,
+        model="gpt-5.4",
+        main_runtime={"session_id": "session-aux"},
+        messages=[{"role": "user", "content": content}],
+    )
+
+
+def test_codex_auxiliary_egress_authorizes_once_with_complete_identity(
+    monkeypatch, tmp_path
+):
+    client, response = _run_aux_codex_call(monkeypatch, tmp_path)
+
+    assert response.choices[0].message.content == "ok"
+    client.chat.completions.create.assert_called_once()
+    receipt_path = tmp_path / "egress" / "llm-egress-receipts.jsonl"
+    receipt = json.loads(receipt_path.read_text().splitlines()[0])
+    assert receipt["decision"] == "allow"
+    assert receipt["provider"] == "openai-codex"
+    assert receipt["session_id"] == "session-aux"
+    assert receipt["turn_id"]
+    assert receipt["request_id"]
+    assert receipt["policy_digest"]
+
+
+def test_codex_auxiliary_egress_blocks_secret_before_provider_callback(
+    monkeypatch, tmp_path
+):
+    clients = []
+    with pytest.raises(EgressBlocked):
+        _run_aux_codex_call(
+            monkeypatch,
+            tmp_path,
+            content="token=super-secret-value",
+            client_out=clients,
+        )
+
+    assert clients[0].chat.completions.create.call_count == 0
+
+
+def test_nous_auxiliary_egress_is_provider_bound(monkeypatch, tmp_path):
+    client, response = _run_aux_codex_call(
+        monkeypatch,
+        tmp_path,
+        provider="nous",
+        base_url="https://inference-api.nousresearch.com/v1",
+        api_mode="chat_completions",
+    )
+
+    assert response.choices[0].message.content == "ok"
+    client.chat.completions.create.assert_called_once()
+    receipt = json.loads(
+        (tmp_path / "egress" / "llm-egress-receipts.jsonl").read_text().splitlines()[0]
+    )
+    assert receipt["provider"] == "nous"
+    assert receipt["destination_class"] == "remote"
+
+
+def test_nous_auxiliary_egress_blocks_secret_before_provider_callback(monkeypatch, tmp_path):
+    clients = []
+    with pytest.raises(EgressBlocked):
+        _run_aux_codex_call(
+            monkeypatch,
+            tmp_path,
+            content="token=super-secret-value",
+            provider="nous",
+            base_url="https://inference-api.nousresearch.com/v1",
+            api_mode="chat_completions",
+            client_out=clients,
+        )
+    assert clients[0].chat.completions.create.call_count == 0
+
+
+def test_nous_anthropic_messages_auxiliary_egress_blocks_secret(monkeypatch, tmp_path):
+    clients = []
+    with pytest.raises(EgressBlocked):
+        _run_aux_codex_call(
+            monkeypatch,
+            tmp_path,
+            content="token=super-secret-value",
+            provider="nous",
+            base_url="https://inference-api.nousresearch.com/anthropic",
+            api_mode="anthropic_messages",
+            client_out=clients,
+        )
+    assert clients[0].chat.completions.create.call_count == 0
+
+
+def test_direct_anthropic_auxiliary_egress_blocks_secret(monkeypatch, tmp_path):
+    clients = []
+    with pytest.raises(EgressBlocked):
+        _run_aux_codex_call(
+            monkeypatch,
+            tmp_path,
+            content="token=super-secret-value",
+            provider="anthropic",
+            base_url="https://api.anthropic.com/v1",
+            api_mode="anthropic_messages",
+            client_out=clients,
+        )
+    assert clients[0].chat.completions.create.call_count == 0
+
+
+def test_local_auxiliary_route_bypasses_remote_egress(monkeypatch, tmp_path):
+    dispatch = MagicMock(side_effect=AssertionError("local route must not use remote egress"))
+    monkeypatch.setattr("agent.llm_egress_runtime.dispatch_authorized_agent_request", dispatch)
+    client, response = _run_aux_codex_call(
+        monkeypatch,
+        tmp_path,
+        provider="custom",
+        base_url="http://127.0.0.1:11434/v1",
+        api_mode="chat_completions",
+    )
+
+    assert response.choices[0].message.content == "ok"
+    client.chat.completions.create.assert_called_once()
+    dispatch.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["nous-portal", "nousresearch"])
+def test_auxiliary_binding_protects_every_firewall_provider_not_just_three(provider):
+    """The main request path protects anthropic/openai-codex/nous AND nous-portal/nousresearch
+    (agent.llm_egress_runtime._PROTECTED_REMOTE_PROVIDERS); the auxiliary path must match that
+    exact set, not a narrower hand-copied one, or compression/vision calls routed through
+    nous-portal/nousresearch would skip authorization and sanitization entirely."""
+    client = SimpleNamespace(base_url="https://inference-api.nousresearch.com/v1")
+    binding = _auxiliary_egress_binding(
+        client, provider=provider, model="some-model", api_mode="chat_completions",
+    )
+    assert binding is not None
+
+
+def test_auxiliary_dispatch_honors_disabled_egress_posture(monkeypatch, tmp_path):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "runtime:\n  llm_egress_enforcement: disabled\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_LLM_EGRESS_ENFORCEMENT", raising=False)
+
+    client = SimpleNamespace(base_url="https://inference-api.nousresearch.com/v1")
+    request = {
+        "model": "some-model",
+        "messages": [{"role": "user", "content": "SECRET_TOKEN=operator-test"}],
+    }
+    callback = MagicMock(return_value="sent")
+
+    assert _dispatch_auxiliary_request(
+        client,
+        request,
+        callback,
+        provider="nous",
+        model="some-model",
+        api_mode="chat_completions",
+    ) == "sent"
+    callback.assert_called_once_with(request)
+
+
+def test_auxiliary_binding_protects_every_provider_under_kanban_protected_remote_marker(monkeypatch):
+    """HERMES_KANBAN_PROTECTED_REMOTE=1 makes authorize_agent_sdk_kwargs() treat EVERY provider
+    as protected on the main path (agent.llm_egress_runtime.authorize_agent_sdk_kwargs), not just
+    the exact firewall-owning ones -- a protected Kanban task's auxiliary calls (compression,
+    review, vision) must get the same treatment, even through an otherwise-unprotected provider."""
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    client = SimpleNamespace(base_url="http://127.0.0.1:11434/v1")
+    binding = _auxiliary_egress_binding(
+        client, provider="custom", model="some-local-model", api_mode="chat_completions",
+    )
+    assert binding is not None
+
+
+def test_auxiliary_binding_uses_sdk_url_objects_for_egress_identity():
+    client = SimpleNamespace(base_url=URL("https://aux.example/v1"))
+
+    _agent, route = _auxiliary_egress_binding(
+        client, provider="nous", model="some-model", api_mode="chat_completions"
+    )
+
+    assert route.base_url == "https://aux.example/v1"
+
+
+def test_auxiliary_binding_preserves_copilot_acp_marker_url(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    client = SimpleNamespace(base_url="acp://copilot")
+
+    agent, route = _auxiliary_egress_binding(
+        client, provider="copilot-acp", model="copilot-model", api_mode="chat_completions"
+    )
+
+    assert agent.base_url == "acp://copilot"
+    assert route.base_url == "acp://copilot"
+
+
+def test_external_process_registry_metadata_preserves_out_of_tree_acp_marker(monkeypatch):
+    import providers
+    from providers.base import ProviderProfile
+    from agent.llm_egress_firewall import DestinationClass, classify_destination
+
+    monkeypatch.setattr(providers, "_REGISTRY", dict(providers._REGISTRY))
+    monkeypatch.setattr(providers, "_ALIASES", dict(providers._ALIASES))
+    monkeypatch.setattr(providers, "_PROVIDER_LIST_CACHE", None)
+    providers.register_provider(
+        ProviderProfile(
+            name="seam-acp",
+            base_url="acp://seam-acp",
+            auth_type="external_process",
+        )
+    )
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    client = SimpleNamespace(base_url="acp://seam-acp")
+
+    agent, route = _auxiliary_egress_binding(
+        client, provider="seam-acp", model="seam-model", api_mode="chat_completions"
+    )
+
+    assert agent.base_url == "acp://seam-acp"
+    assert route.base_url == "acp://seam-acp"
+    assert classify_destination("seam-acp", route.base_url, route.api_mode) is DestinationClass.UNKNOWN
+
+
+def test_only_compression_auxiliary_binding_gets_larger_exact_grant_caps():
+    client = SimpleNamespace(base_url="https://chatgpt.com/backend-api/codex")
+    compression_token = _RELAY_AUX_CALL_CONTEXT.set({"task": "compression"})
+    try:
+        compression_agent, _ = _auxiliary_egress_binding(
+            client,
+            provider="openai-codex",
+            model="gpt-5.4",
+            api_mode="codex_responses",
+        )
+    finally:
+        _RELAY_AUX_CALL_CONTEXT.reset(compression_token)
+
+    vision_token = _RELAY_AUX_CALL_CONTEXT.set({"task": "vision"})
+    try:
+        vision_agent, _ = _auxiliary_egress_binding(
+            client,
+            provider="openai-codex",
+            model="gpt-5.4",
+            api_mode="codex_responses",
+        )
+    finally:
+        _RELAY_AUX_CALL_CONTEXT.reset(vision_token)
+
+    assert compression_agent._llm_egress_max_granted_serialized_bytes == 2_000_000
+    assert compression_agent._llm_egress_max_granted_conservative_tokens == 666_667
+    assert compression_agent._llm_egress_max_serialized_bytes == 2_000_000
+    assert compression_agent._llm_egress_max_conservative_tokens == 666_667
+    assert compression_agent._llm_egress_max_sanitized_bytes == 2_000_000
+    assert compression_agent._llm_egress_max_sanitized_segment_bytes == 32_768
+    assert not hasattr(vision_agent, "_llm_egress_max_granted_serialized_bytes")
+    assert not hasattr(vision_agent, "_llm_egress_max_granted_conservative_tokens")
+    assert not hasattr(vision_agent, "_llm_egress_max_sanitized_bytes")
+    assert not hasattr(vision_agent, "_llm_egress_max_sanitized_segment_bytes")
+
+
+def _bound_aux_agent(task: str, tmp_path):
+    client = SimpleNamespace(base_url="https://chatgpt.com/backend-api/codex")
+    token = _RELAY_AUX_CALL_CONTEXT.set({"task": task})
+    try:
+        agent, route = _auxiliary_egress_binding(
+            client,
+            provider="openai-codex",
+            model="gpt-5.4",
+            api_mode="codex_responses",
+        )
+    finally:
+        _RELAY_AUX_CALL_CONTEXT.reset(token)
+    agent._llm_egress_state_dir = tmp_path / task
+    return agent, route
+
+
+def _many_bounded_sanitized_messages():
+    return [
+        {"role": "user", "content": f"segment {index}. " + "ordinary sentence. " * 240}
+        for index in range(12)
+    ]
+
+
+def test_compression_allows_many_bounded_sanitized_segments_but_vision_denies(
+    tmp_path,
+):
+    request = {"model": "gpt-5.4", "messages": _many_bounded_sanitized_messages()}
+    compression_agent, compression_route = _bound_aux_agent("compression", tmp_path)
+    vision_agent, vision_route = _bound_aux_agent("vision", tmp_path)
+
+    authorized, decision = authorize_agent_sdk_kwargs(
+        compression_agent,
+        request,
+        route=compression_route,
+    )
+    assert authorized == request
+    assert decision.decision.serialized_bytes > 32_768
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        authorize_agent_sdk_kwargs(vision_agent, request, route=vision_route)
+    assert "sanitized_bytes_exceeded" in exc_info.value.decision.reason_codes
+
+
+def test_compression_splits_one_large_sanitized_segment_without_relaxing_caps(tmp_path):
+    compression_agent, compression_route = _bound_aux_agent("compression", tmp_path)
+    oversized = "ordinary sentence. " * 2_000
+
+    authorized, receipt = authorize_agent_sdk_kwargs(
+        compression_agent,
+        {"model": "gpt-5.4", "messages": [{"role": "user", "content": oversized}]},
+        route=compression_route,
+    )
+
+    assert authorized["messages"][0]["content"] == oversized
+    assert json.loads(receipt.payload_bytes)["messages"][0]["content"] == oversized
+
+
+@pytest.mark.parametrize(
+    ("unsafe", "reason"),
+    [
+        ("token=super-secret-value", "secret_detected"),
+        ("cHJpdmF0ZSBzb3VyY2UgdGhhdCBtdXN0IG5vdCBsZWF2ZQ==", "base64_payload"),
+        ("Read /Users/private/repository/file.py", "private_absolute_path"),
+    ],
+)
+def test_compression_aggregate_capacity_does_not_bypass_scans(tmp_path, unsafe, reason):
+    compression_agent, compression_route = _bound_aux_agent("compression", tmp_path)
+    messages = _many_bounded_sanitized_messages()
+    messages.append({"role": "user", "content": unsafe})
+
+    with pytest.raises(EgressBlocked) as exc_info:
+        authorize_agent_sdk_kwargs(
+            compression_agent,
+            {"model": "gpt-5.4", "messages": messages},
+            route=compression_route,
+        )
+    assert reason in exc_info.value.decision.reason_codes
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_blocked_remote_aux_call_uses_local_fallback_without_retry(monkeypatch, tmp_path, stream):
+    primary = MagicMock()
+    primary.base_url = "https://chatgpt.com/backend-api/codex"
+    primary.chat.completions.create.side_effect = _blocked_egress_error()
+    fallback = MagicMock()
+    fallback.base_url = "http://127.0.0.1:11434/v1"
+    expected = iter(["chunk"]) if stream else _aux_egress_response("fallback")
+    fallback.chat.completions.create.return_value = expected
+    monkeypatch.setattr("agent.auxiliary_client.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        lambda *args, **kwargs: ("openai-codex", "gpt-5.4", None, None, "codex_responses"),
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_cached_client",
+        lambda provider, *args, **kwargs: (primary, "gpt-5.4"),
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._try_configured_fallback_chain",
+        lambda *args, **kwargs: (None, None, ""),
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._try_main_agent_model_fallback",
+        lambda *args, **kwargs: (fallback, "local-model", "custom"),
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._transient_retry_count",
+        lambda: (_ for _ in ()).throw(AssertionError("blocked request must not retry")),
+    )
+
+    response = call_llm(
+        task="compression", stream=stream,
+        provider="openai-codex",
+        model="gpt-5.4",
+        main_runtime={"session_id": "session-fallback"},
+        messages=[{"role": "user", "content": "token=super-secret-value"}],
+    )
+
+    assert response is expected
+    if stream:
+        assert list(response) == ["chunk"]
+        assert fallback.chat.completions.create.call_args.kwargs["stream"] is True
+    primary.chat.completions.create.assert_not_called()
+    fallback.chat.completions.create.assert_called_once()
+
+
+def test_egress_blocked_fallback_continues_to_later_local_candidate(monkeypatch):
+    import agent.auxiliary_client as auxiliary
+
+    remote = SimpleNamespace(base_url="https://remote.example/v1")
+    local = SimpleNamespace(base_url="http://127.0.0.1:11434/v1")
+    configured_calls = []
+
+    def configured(*args, **kwargs):
+        configured_calls.append(kwargs.get("failed_base_url"))
+        return remote, "remote-model", "remote"
+
+    monkeypatch.setattr(auxiliary, "_try_configured_fallback_chain", configured)
+    monkeypatch.setattr(
+        auxiliary,
+        "_try_main_agent_model_fallback",
+        lambda *args, **kwargs: (local, "local-model", "local"),
+    )
+    route = _LadderRoute(
+        client=object(), task="compression", tag="", async_mode=False,
+        base_info="https://primary.example/v1", resolved_provider="custom",
+        resolved_model=None, resolved_base_url="https://primary.example/v1",
+        resolved_api_key=None, resolved_api_mode="chat_completions", final_model="primary-model",
+        main_runtime=None, route_info={},
+    )
+    ladder = _ladder_provider_fallback(ConnectionError("primary unavailable"), route)
+
+    first_step = next(ladder)
+    assert first_step.args[0] is remote
+    local_step = ladder.throw(_blocked_egress_error())
+    assert local_step.args[0] is local
+    with pytest.raises(StopIteration) as completed:
+        ladder.send("local response")
+
+    assert completed.value.value == "local response"
+    assert configured_calls[0] == "https://primary.example/v1"
+
+
+@pytest.mark.asyncio
+async def test_blocked_remote_async_aux_call_uses_local_fallback_without_retry(
+    monkeypatch, tmp_path
+):
+    primary = MagicMock()
+    primary.base_url = "https://chatgpt.com/backend-api/codex"
+    primary.chat.completions.create = AsyncMock(side_effect=_blocked_egress_error())
+    fallback = MagicMock()
+    fallback.base_url = "http://127.0.0.1:11434/v1"
+    fallback.chat.completions.create = AsyncMock(
+        return_value=_aux_egress_response("fallback")
+    )
+    monkeypatch.setattr("agent.auxiliary_client.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        lambda *args, **kwargs: (
+            "openai-codex", "gpt-5.4", None, None, "codex_responses"
+        ),
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_cached_client",
+        lambda provider, *args, **kwargs: (primary, "gpt-5.4"),
+    )
+    configured = MagicMock(return_value=(None, None, ""))
+    main_fallback = MagicMock(return_value=(fallback, "local-model", "custom"))
+    monkeypatch.setattr(
+        "agent.auxiliary_client._try_configured_fallback_chain", configured
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._try_main_agent_model_fallback", main_fallback
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._transient_retry_count",
+        lambda: (_ for _ in ()).throw(AssertionError("blocked request must not retry")),
+    )
+
+    response = await async_call_llm(
+        task="compression",
+        provider="openai-codex",
+        model="gpt-5.4",
+        main_runtime={"session_id": "session-async-fallback"},
+        messages=[{"role": "user", "content": "token=super-secret-value"}],
+    )
+
+    assert response.choices[0].message.content == "fallback"
+    primary.chat.completions.create.assert_not_awaited()
+    fallback.chat.completions.create.assert_awaited_once()
+    configured.assert_called_once()
+    main_fallback.assert_called_once()
+    assert main_fallback.call_args.kwargs["async_mode"] is True
 
 
 def _jwt_with_claims(claims: dict) -> str:
@@ -321,13 +856,26 @@ class TestMoaAggregatorSharedResolution:
             mock_client = MagicMock()
             mock_resolve.return_value = (mock_client, "anthropic/claude-opus-4.8")
 
-            client, model, label = _try_main_agent_model_fallback("anthropic", task="compression")
+            client, model, label = _try_main_agent_model_fallback(
+                "anthropic",
+                task="compression",
+                main_runtime={
+                    "provider": "moa",
+                    "model": "opus-gpt",
+                    "base_url": "moa://local",
+                    "api_key": "moa-virtual-provider",
+                    "api_mode": "chat_completions",
+                },
+            )
 
         assert client is mock_client
         assert model == "anthropic/claude-opus-4.8"
         assert label == "main-agent(openrouter)"
         assert mock_resolve.call_args.kwargs["provider"] == "openrouter"
         assert mock_resolve.call_args.kwargs["model"] == "anthropic/claude-opus-4.8"
+        assert mock_resolve.call_args.kwargs["explicit_base_url"] is None
+        assert mock_resolve.call_args.kwargs["explicit_api_key"] == ""
+        assert mock_resolve.call_args.kwargs["api_mode"] == ""
 
 
 class TestBuildCallKwargsMaxTokens:
@@ -2790,7 +3338,7 @@ class TestAuxiliaryAuthRefreshRetry:
 
 
 
-    def test_refresh_provider_credentials_force_refreshes_anthropic_oauth_and_evicts_cache(self, monkeypatch):
+    def test_refresh_provider_credentials_force_refreshes_anthropic_oauth_and_evicts_cache(self, monkeypatch, tmp_path):
         stale_client = MagicMock()
         from agent.auxiliary_client import _client_cache_key
         cache_key = _client_cache_key("anthropic", async_mode=False)
@@ -2798,6 +3346,10 @@ class TestAuxiliaryAuthRefreshRetry:
         monkeypatch.setenv("ANTHROPIC_TOKEN", "")
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        monkeypatch.setattr(
+            "agent.anthropic_credentials.claude_code_credentials_path",
+            lambda: tmp_path / ".claude" / ".credentials.json",
+        )
 
         with (
             patch("agent.auxiliary_client._client_cache", {cache_key: (stale_client, "claude-haiku-4-5-20251001", None)}),
@@ -5184,3 +5736,99 @@ class TestFastModelTier:
             _FAST_MODEL_TASKS
         )
         assert not overlap
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+def test_streaming_local_fallback_refreshes_or_skips_stale_candidate(monkeypatch, refresh):
+    import agent.auxiliary_client as auxiliary
+
+    primary = MagicMock(base_url="https://chatgpt.com/backend-api/codex")
+    stale = MagicMock(base_url="http://127.0.0.1:11434/v1")
+    stale.chat.completions.create.side_effect = _AuxAuth401("expired")
+    healthy = MagicMock(base_url="http://127.0.0.1:11435/v1")
+    expected = iter(["local chunk"])
+    healthy.chat.completions.create.return_value = expected
+    monkeypatch.setattr(auxiliary, "_get_cached_client",
+                        lambda provider, *a, **kw: (healthy if provider == "custom" else primary, "model"))
+    candidates = iter([(stale, "model", "custom"), (healthy, "model", "custom")])
+    monkeypatch.setattr(auxiliary, "_try_configured_fallback_chain", lambda *a, **kw: next(candidates))
+    monkeypatch.setattr(auxiliary, "_refresh_provider_credentials", lambda *a, **kw: refresh)
+    quarantined = MagicMock()
+    monkeypatch.setattr(auxiliary, "_mark_provider_unhealthy", quarantined)
+    result = call_llm(
+        task="compression", provider="openai-codex", model="gpt-5.4", stream=True,
+        messages=[{"role": "user", "content": "token=super-secret-value"}],
+    )
+    assert result is expected
+    assert list(result) == ["local chunk"]
+    primary.chat.completions.create.assert_not_called()
+    assert stale.chat.completions.create.call_count == 1
+    assert healthy.chat.completions.create.call_count == 1
+    assert quarantined.call_count == (0 if refresh else 1)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_local_recovery_skips_unavailable_candidate(monkeypatch, stream):
+    import agent.auxiliary_client as auxiliary
+
+    primary = MagicMock(base_url="https://chatgpt.com/backend-api/codex")
+    offline = MagicMock(base_url="http://127.0.0.1:11434/v1")
+    offline.chat.completions.create.side_effect = ConnectionError("connection refused")
+    healthy = MagicMock(base_url="http://127.0.0.1:11435/v1")
+    expected = iter(["chunk"]) if stream else _aux_egress_response("healthy")
+    healthy.chat.completions.create.return_value = expected
+    monkeypatch.setattr(auxiliary, "_get_cached_client", lambda *a, **kw: (primary, "model"))
+    candidates = iter([(offline, "model", "custom"), (healthy, "model", "custom")])
+    monkeypatch.setattr(auxiliary, "_try_configured_fallback_chain", lambda *a, **kw: next(candidates))
+    result = call_llm(task="compression", provider="openai-codex", model="gpt-5.4", stream=stream,
+                      messages=[{"role": "user", "content": "token=super-secret-value"}])
+    assert result is expected
+    primary.chat.completions.create.assert_not_called()
+    healthy.chat.completions.create.assert_called_once()
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_vision_auto_parameter_retry_keeps_concrete_provider(monkeypatch, async_mode):
+    import asyncio
+    import agent.auxiliary_client as auxiliary
+
+    client = MagicMock(base_url="https://chatgpt.com/backend-api/codex")
+    monkeypatch.setattr(auxiliary, "_resolve_call_client", lambda *a, **kw: (client, "model", "auto", "openai-codex"))
+    providers = []
+    expected = _aux_egress_response("done")
+
+    def completion(client, kwargs, *, provider, **extra):
+        providers.append(provider)
+        if len(providers) == 1:
+            raise ValueError("unsupported parameter temperature")
+        return expected
+
+    async def async_completion(*args, **kwargs):
+        return completion(*args, **kwargs)
+
+    monkeypatch.setattr(auxiliary, "_relay_sync_completion", completion)
+    monkeypatch.setattr(auxiliary, "_relay_async_completion", async_completion)
+    kwargs = dict(task="vision", provider="auto", messages=[{"role": "user", "content": "inspect"}], temperature=0.5)
+    result = asyncio.run(auxiliary.async_call_llm(**kwargs)) if async_mode else auxiliary.call_llm(**kwargs)
+    assert result is expected
+    assert providers == ["openai-codex", "openai-codex"]
+
+
+def test_local_recovery_rejects_declared_loopback_with_remote_client(monkeypatch):
+    import agent.auxiliary_client as auxiliary
+
+    primary = MagicMock(base_url="https://chatgpt.com/backend-api/codex")
+    remote = MagicMock(base_url="https://openrouter.ai/api/v1")
+    remote._hermes_fallback_destination = auxiliary._FallbackDestination(
+        "openrouter", "http://127.0.0.1:11434/v1", "chat_completions", "model")
+    healthy = MagicMock(base_url="http://127.0.0.1:11435/v1")
+    expected = _aux_egress_response("healthy")
+    healthy.chat.completions.create.return_value = expected
+    monkeypatch.setattr(auxiliary, "_get_cached_client", lambda *a, **kw: (primary, "model"))
+    candidates = iter([(remote, "model", "openrouter"), (healthy, "model", "custom")])
+    monkeypatch.setattr(auxiliary, "_try_configured_fallback_chain", lambda *a, **kw: next(candidates))
+    result = auxiliary.call_llm(task="compression", provider="openai-codex", model="gpt-5.4",
+                               messages=[{"role": "user", "content": "token=super-secret-value"}])
+    assert result is expected
+    remote.chat.completions.create.assert_not_called()
+    primary.chat.completions.create.assert_not_called()

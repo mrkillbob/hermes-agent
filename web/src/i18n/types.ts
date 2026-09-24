@@ -28,9 +28,6 @@ export interface Translations {
     delete: string;
     refresh: string;
     retry: string;
-    /** Optional — English fallback until translated. "{what}" = the noun that failed to load. */
-    loadFailed?: string;
-    loadFailedDetails?: string;
     search: string;
     loading: string;
     create: string;
@@ -277,9 +274,6 @@ export interface Translations {
 
   // ── Cron page ──
   cron: {
-    /** Optional — English fallback until translated. */
-    loadWhat?: string;
-    scriptRequired?: string;
     confirmDeleteMessage: string;
     confirmDeleteTitle: string;
     newJob: string;
@@ -472,10 +466,6 @@ export interface Translations {
   skills: {
     title: string;
     searchPlaceholder: string;
-    /** Optional — English fallback until translated. */
-    loadWhat?: string;
-    browseHub?: string;
-    createSkill?: string;
     enabledOf: string;
     all: string;
     categories: string;

@@ -6,6 +6,7 @@ handling without requiring a running terminal environment.
 
 import json
 import logging
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,6 +17,24 @@ from tools.file_tools import (
 
 
 class TestReadFileHandler:
+    @patch("tools.file_tools._get_file_ops")
+    def test_returns_file_content(self, mock_get):
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.content = "line1\nline2"
+        result_obj.to_dict.return_value = {"content": "line1\nline2", "total_lines": 2}
+        mock_ops.read_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from pathlib import Path
+
+        from tools.file_tools import read_file_tool
+        result = json.loads(read_file_tool("/tmp/test.txt"))
+        assert result["content"] == "line1\nline2"
+        assert result["total_lines"] == 2
+        # The task-resolved (symlink-resolved) path is passed through, not the raw operand —
+        # a shared backend's own cwd must not re-resolve it downstream.
+        mock_ops.read_file.assert_called_once_with(str(Path("/tmp/test.txt").resolve()), 1, 2000)
 
 
     @patch("tools.file_tools._get_file_ops")
@@ -44,7 +63,162 @@ class TestReadFileHandler:
         assert "terminal not available" in result["error"]
 
 
+def test_successful_bounded_read_issues_opaque_grant(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    source = tmp_path / "source.py"
+    source.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    registry = SourceProvenanceRegistry()
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        result = json.loads(read_file_tool(str(source), offset=2, limit=1))
+
+    assert result["content"]
+    grant = registry.grants_for_request("request-1")[0]
+    assert (grant.line_start, grant.line_end) == (2, 2)
+    assert grant.content_sha256 == __import__("hashlib").sha256(b"two\n").hexdigest()
+
+
+def test_read_errors_or_untrusted_tool_text_cannot_issue_grants(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    registry = SourceProvenanceRegistry()
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        read_file_tool(str(tmp_path / "missing.py"), offset=1, limit=1)
+
+    assert registry.grants_for_request("request-1") == ()
+
+
+def test_symlink_read_cannot_issue_a_grant(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    source = tmp_path / "source.py"
+    source.write_text("one\n", encoding="utf-8")
+    linked = tmp_path / "linked.py"
+    linked.symlink_to(source)
+    registry = SourceProvenanceRegistry()
+
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        result = json.loads(read_file_tool(str(linked), offset=1, limit=1))
+
+    assert result["content"]
+    assert registry.grants_for_request("request-1") == ()
+
+
+def test_symlinked_ancestor_read_cannot_issue_a_grant(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    source = real_dir / "source.py"
+    source.write_text("one\n", encoding="utf-8")
+    linked_dir = tmp_path / "linked"
+    linked_dir.symlink_to(real_dir, target_is_directory=True)
+    registry = SourceProvenanceRegistry()
+
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        result = json.loads(read_file_tool(str(linked_dir / "source.py"), offset=1, limit=1))
+
+    assert result["content"]
+    assert registry.grants_for_request("request-1") == ()
+
+
+def test_line_display_truncation_cannot_issue_a_grant(tmp_path):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_tools import read_file_tool
+
+    source = tmp_path / "source.py"
+    source.write_text("x" * 20_000 + "\n", encoding="utf-8")
+    registry = SourceProvenanceRegistry()
+
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        result = json.loads(read_file_tool(str(source), offset=1, limit=1))
+
+    assert result["content"]
+    assert registry.grants_for_request("request-1") == ()
+
+
+def test_forged_read_result_cannot_issue_a_grant(tmp_path, monkeypatch):
+    from agent.source_provenance import SourceProvenanceRegistry, activate_source_provenance
+    from tools.file_operations import ReadResult
+    from tools.file_tools import read_file_tool
+
+    source = tmp_path / "source.py"
+    source.write_text("actual\n", encoding="utf-8")
+
+    class ForgedFileOps:
+        env = None
+
+        @staticmethod
+        def read_file(*_args):
+            return ReadResult(content="1|forged", total_lines=1, file_size=7)
+
+        @staticmethod
+        def _add_line_numbers(content, offset):
+            return f"{offset}|{content}"
+
+    monkeypatch.setattr("tools.file_tools._get_file_ops", lambda _task_id: ForgedFileOps())
+    registry = SourceProvenanceRegistry()
+    with activate_source_provenance(
+        registry,
+        session_id="session-1",
+        turn_id="turn-1",
+        request_id="request-1",
+        policy_digest="policy-1",
+    ):
+        read_file_tool(str(source), offset=1, limit=1)
+
+    assert registry.grants_for_request("request-1") == ()
+
+
 class TestWriteFileHandler:
+    @patch("tools.file_tools._get_file_ops")
+    def test_writes_content(self, mock_get):
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"status": "ok", "path": "/tmp/out.txt", "bytes": 13}
+        mock_ops.write_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import write_file_tool
+        result = json.loads(write_file_tool("/tmp/out.txt", "hello world!\n"))
+        assert result["status"] == "ok"
+        mock_ops.write_file.assert_called_once_with(
+            os.path.realpath("/tmp/out.txt"), "hello world!\n"
+        )
 
     @patch("tools.file_tools._get_file_ops")
     def test_permission_error_returns_error_json_without_error_log(self, mock_get, caplog):
@@ -110,6 +284,23 @@ class TestWriteFileHandler:
 
 
 class TestPatchHandler:
+    @patch("tools.file_tools._get_file_ops")
+    def test_replace_mode_calls_patch_replace(self, mock_get):
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"status": "ok", "replacements": 1}
+        mock_ops.patch_replace.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import patch_tool
+        result = json.loads(patch_tool(
+            mode="replace", path="/tmp/f.py",
+            old_string="foo", new_string="bar"
+        ))
+        assert result["status"] == "ok"
+        mock_ops.patch_replace.assert_called_once_with(
+            os.path.realpath("/tmp/f.py"), "foo", "bar", False
+        )
 
 
 

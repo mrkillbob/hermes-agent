@@ -166,7 +166,7 @@ def _policy_env_keys(source_dir: Optional[Path] = None) -> Set[str]:
 
 _CREDENTIAL_SUFFIXES = (
     "_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_APP_ID", "_CLIENT_ID", "_BOT_ID", "_ACCOUNT_SID",
-    "_SERVICE_ACCOUNT_JSON", "_PROJECT_ID",
+    "_SERVICE_ACCOUNT_JSON", "_PROJECT_ID", "_ACCOUNT",
 )
 
 
@@ -282,7 +282,9 @@ def _env_key_of_line(line: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def strip_channel_env_file(env_path: Path, index: Optional[ChannelKeyIndex] = None) -> Dict[str, List[str]]:
+def strip_channel_env_file(
+    env_path: Path, index: Optional[ChannelKeyIndex] = None, *, preserve_platforms: Optional[Set[str]] = None,
+) -> Dict[str, List[str]]:
     """Drop every messaging-channel assignment from ``env_path`` in place; comments, blank lines and
     every other key survive verbatim. Returns ``{platform: [keys removed]}``."""
     if not env_path.is_file():
@@ -294,7 +296,7 @@ def strip_channel_env_file(env_path: Path, index: Optional[ChannelKeyIndex] = No
     for line in text.splitlines():
         key = _env_key_of_line(line)
         platform = index.platform_for(key) if key else None
-        if key is None or platform is None:
+        if key is None or platform is None or platform in (preserve_platforms or set()):
             kept.append(line)
         else:
             removed.setdefault(platform, []).append(key)
@@ -371,11 +373,20 @@ def _remove_entry(entry: Path) -> None:
 
 
 def strip_channel_settings(profile_dir: Path, *, include_state: bool, source_dir: Optional[Path] = None) -> Dict[str, List[str]]:
-    """Strip channel credentials/identity from a freshly cloned profile, judged in ``source_dir``'s
-    plugin scope. ``include_state`` also drops the runtime state ``--clone-all`` copied. Returns
-    ``{platform|"config"|"state": [what]}``."""
-    index = ChannelKeyIndex(source_dir)
-    stripped: Dict[str, List[str]] = dict(strip_channel_env_file(profile_dir / ".env", index))
+    """Strip channel credentials/identity from a freshly cloned profile. ``include_state`` also
+    drops the runtime state ``--clone-all`` copied. Returns ``{platform|"config"|"state": [what]}``."""
+    import shutil
+    from hermes_cli.plugins_loader import _plugin_home_scope
+    with _plugin_home_scope(source_dir or profile_dir):
+        index = ChannelKeyIndex()
+    preserve = set()
+    if not _platform_enabled_in_config(profile_dir / "config.yaml", "homeassistant"):
+        # HASS_TOKEN/HASS_URL are also the Home Assistant tool credentials. Keep them when the
+        # messaging adapter is disabled; tools_config.py treats the configured token as opt-in.
+        preserve.add("homeassistant")
+    stripped: Dict[str, List[str]] = dict(
+        strip_channel_env_file(profile_dir / ".env", index)
+    )
     config_paths = strip_channel_config(profile_dir / "config.yaml", index)
     if config_paths:
         stripped["config"] = config_paths
@@ -394,12 +405,13 @@ def channel_platforms_configured(profile_dir: Path) -> List[str]:
     what a channel-less clone of it leaves behind. Pure read, in ``profile_dir``'s plugin scope."""
     index = ChannelKeyIndex(profile_dir)
     found: Set[str] = set()
+    homeassistant_enabled = _platform_enabled_in_config(profile_dir / "config.yaml", "homeassistant")
     env_path = profile_dir / ".env"
     if env_path.is_file():
         for line in env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
             key = _env_key_of_line(line)
             platform = index.platform_for(key) if key else None
-            if platform and platform != GATEWAY_POLICY_ID:
+            if platform and (platform != "homeassistant" or homeassistant_enabled):
                 found.add(platform)
     config_path = profile_dir / "config.yaml"
     if config_path.is_file():
@@ -410,9 +422,13 @@ def channel_platforms_configured(profile_dir: Path) -> List[str]:
             for seg in path:
                 node = node[seg]
             if path[-1] == "platforms" and isinstance(node, dict):
-                found.update(str(k) for k in node)
+                found.update(
+                    str(k) for k in node
+                    if str(k) != "homeassistant" or homeassistant_enabled
+                )
             elif path[-1] in index.platforms:
-                found.add(path[-1])
+                if path[-1] != "homeassistant" or homeassistant_enabled:
+                    found.add(path[-1])
     return sorted(found)
 
 
@@ -458,6 +474,22 @@ def _config_platform_tokens(config_path: Path) -> Dict[str, str]:
     return tokens
 
 
+def _platform_enabled_in_config(config_path: Path, platform_id: str) -> bool:
+    """Whether a platform is explicitly enabled in either accepted config nesting."""
+    if not config_path.is_file():
+        return False
+    from hermes_cli.config import read_user_config_raw
+    raw = read_user_config_raw(config_path)
+    gateway = raw.get("gateway") if isinstance(raw.get("gateway"), dict) else {}
+    sections = (raw.get("platforms"), gateway.get("platforms"), raw.get(platform_id), gateway.get(platform_id))
+    for position, section in enumerate(sections):
+        if isinstance(section, dict) and platform_id in section and isinstance(section[platform_id], dict):
+            return bool(section[platform_id].get("enabled"))
+        if position >= 2 and isinstance(section, dict):
+            return bool(section.get("enabled"))
+    return False
+
+
 def shared_channel_credentials(profile_dir: Path, source_dir: Path) -> List[str]:
     """Platforms whose CONNECTING credential (bot token / app id / account) in ``profile_dir`` is
     byte-identical to ``source_dir``'s — the bots that will collide. Pure file reads: no secret
@@ -466,6 +498,11 @@ def shared_channel_credentials(profile_dir: Path, source_dir: Path) -> List[str]
     mine = _env_values(profile_dir / ".env", wanted)
     theirs = _env_values(source_dir / ".env", wanted)
     shared = {wanted[key] for key in mine if theirs.get(key) == mine[key]}
+    if "homeassistant" in shared and not (
+        _platform_enabled_in_config(profile_dir / "config.yaml", "homeassistant")
+        or _platform_enabled_in_config(source_dir / "config.yaml", "homeassistant")
+    ):
+        shared.remove("homeassistant")
     mine_cfg = _config_platform_tokens(profile_dir / "config.yaml")
     theirs_cfg = _config_platform_tokens(source_dir / "config.yaml")
     shared.update(pid for pid, token in mine_cfg.items() if theirs_cfg.get(pid) == token)

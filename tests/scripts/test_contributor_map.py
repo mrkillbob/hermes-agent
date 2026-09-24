@@ -109,8 +109,45 @@ def test_cli_entrypoint_end_to_end(tmp_path):
 # ── case-insensitive filename collisions ──────────────────────────────
 #
 # The mapping key IS the filename, so two emails differing only in case are the
-# same file on Windows and default macOS; add_contributor must refuse them.
-# scripts/check-case-collisions.py enforces the repo-wide invariant in CI.
+# same file on Windows and on default macOS. When both exist, git writes one and
+# then reports the other as modified in a FRESH clone, permanently: the repo can
+# never be checked out clean on those platforms.
+#
+# The historical agent@Agents-Mac-mini.local / agent@agents-Mac-mini.local pair
+# was removed from the tree (fcdae2cf0b), so there is no allowlist: any pair
+# is a regression. scripts/check-case-collisions.py enforces the same
+# invariant repo-wide in CI; this test keeps it visible next to the writer.
+EMAILS_DIR = REPO_ROOT / "contributors" / "emails"
+
+
+def test_no_case_insensitive_mapping_collisions():
+    groups: dict[str, set[str]] = {}
+    for entry in EMAILS_DIR.iterdir():
+        if entry.is_file():
+            groups.setdefault(entry.name.casefold(), set()).add(entry.name)
+
+    collisions = {frozenset(names) for names in groups.values() if len(names) > 1}
+
+    assert not collisions, (
+        "contributor mappings differing only in case cannot coexist on "
+        "case-insensitive filesystems (Windows, default macOS) — a fresh clone "
+        f"there is permanently dirty: {sorted(sorted(c) for c in collisions)}"
+    )
+
+
+def test_add_contributor_refuses_a_case_collision(tmp_path, monkeypatch):
+    d = tmp_path / "emails"
+    d.mkdir()
+    (d / "agent@Example-Host.local").write_text("someone\n")
+
+    import add_contributor as mod
+
+    monkeypatch.setattr(mod, "EMAILS_DIR", d)
+
+    assert mod.add_contributor("agent@example-host.local", "otherperson") == 1
+    # On case-insensitive filesystems the rejected spelling aliases the
+    # existing entry, so inspect directory names rather than Path.exists().
+    assert sorted(p.name for p in d.iterdir()) == ["agent@Example-Host.local"]
 
 
 def test_add_contributor_refuses_case_collision_even_for_same_login(emails_dir, capsys):

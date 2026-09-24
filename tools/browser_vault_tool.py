@@ -33,6 +33,19 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# A screenshot can reveal a secret even when OCR/text redaction is perfect.
+# Keep this scoped to the browser session that received a vault fill and fail
+# closed for visual capture until that session is replaced.
+_VAULT_FILLED_SESSIONS: set[str] = set()
+
+
+def _mark_vault_filled(task_id: str) -> None:
+    _VAULT_FILLED_SESSIONS.add(task_id)
+
+
+def vault_visual_capture_blocked(task_id: str) -> bool:
+    return task_id in _VAULT_FILLED_SESSIONS
+
 
 # ---------------------------------------------------------------------------
 # Availability check
@@ -363,6 +376,18 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
     code: Optional[str] = None
     source = "user"
     backend = backend_for_handle(handle) if handle else None
+    if handle:
+        try:
+            meta = backend.get_meta(handle) if backend is not None else None
+        except Exception:
+            meta = None
+        if meta is None:
+            return json.dumps({"success": False, "error_type": "unknown_handle",
+                               "error": f"No vault item with handle {handle!r}. Use browser_vault_list."})
+        if not meta.origin or meta.origin != origin:
+            return json.dumps({"success": False, "error_type": "origin_mismatch",
+                               "error": (f"Refused: current page origin ({origin}) does not match "
+                                          f"the vault item's bound origin ({meta.origin or 'none'}).")})
     if backend is not None:
         try:
             code = backend.resolve_otp(handle)
@@ -521,8 +546,9 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     # Register the secret bytes with the model-egress redaction boundary
     # BEFORE they touch the page: any later browser_* result (including
     # browser_cdp Runtime.evaluate reads) that echoes them is scrubbed.
-    # Address values are not secrets but the card fields are: register every payment value.
-    for value in (secret.values() if meta.kind == "payment" else [secret.get("password", "")]):
+    # Every resolved checkout value can be sensitive in the page result. Register
+    # the full address/card payload before any value reaches the browser.
+    for value in (secret.values() if meta.kind in {"payment", "address"} else [secret.get("password", "")]):
         register_vault_redaction_value(value)
 
     try:
@@ -558,6 +584,9 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
             }
         )
     filled = parsed.get("filled", 0) if isinstance(parsed, dict) else 0
+
+    if filled:
+        _mark_vault_filled(effective_task_id)
 
     out = {"success": bool(filled), "filled_fields": int(filled), "backend": backend.name,
            "kind": meta.kind, "origin": page_origin}
@@ -664,7 +693,7 @@ BROWSER_VAULT_SAVE_LOGIN_SCHEMA = {
 BROWSER_VAULT_ENTER_CODE_SCHEMA = {
     "name": "browser_vault_enter_code",
     "description": (
-        "The page asks for a one-time / verification / 2FA code after the password: call this. If the saved login "
+        "The page asks for a one-time / verification / 2FA code after entering the password. Call this tool. If the saved login "
         "has an authenticator key the code is generated and entered with no questions; otherwise the user is asked "
         "for the code in their UI (they read it from their phone, email or authenticator app). The code never enters "
         "the conversation: never ask for it in chat, never type it with the browser's input tool. no_code_field means "

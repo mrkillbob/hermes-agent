@@ -12,7 +12,7 @@ image: https://raw.githubusercontent.com/apoapostolov/hermes-agent-awesome-plugi
 platforms: []
 capabilities:
   provides_tools: []
-  provides_hooks: 
+  provides_hooks:
     - pre_tool_call
     - post_tool_call
     - transform_tool_result

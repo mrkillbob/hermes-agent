@@ -198,6 +198,135 @@ def _prompt_parts(agent):
         return build_system_prompt_parts(agent)
 
 
+def test_guarded_prompt_replaces_verbose_coaching_and_compacts_skills():
+    """The local profile is smaller, but never drops the execution contract."""
+    from agent.prompt_builder import (
+        OPENAI_MODEL_EXECUTION_GUIDANCE,
+        PARALLEL_TOOL_CALL_GUIDANCE,
+        TASK_COMPLETION_GUIDANCE,
+        TOOL_USE_ENFORCEMENT_GUIDANCE,
+    )
+    from agent.coding_context import CODING_AGENT_GUIDANCE
+    from agent.system_prompt import GUARDED_EXECUTION_CONTRACT
+
+    agent = _make_agent(
+        valid_tool_names=["read_file", "skills_list", "skill_view"],
+        _task_completion_guidance=True,
+        _parallel_tool_call_guidance=True,
+        _tool_use_enforcement=True,
+        _execution_guidance=True,
+        platform="desktop",
+        provider="ollama-launch",
+        model="hermes-qwen3-fast",
+    )
+    with (
+        patch("agent.coding_context.guarded_prompt_enabled", return_value=True),
+        patch("agent.prompt_builder.build_skills_system_prompt", return_value="SKILLS") as skills,
+    ):
+        stable = _stable_prompt(agent)
+
+    assert GUARDED_EXECUTION_CONTRACT in stable
+    assert CODING_AGENT_GUIDANCE not in stable
+    assert "worktree" in GUARDED_EXECUTION_CONTRACT.lower()
+    assert "verify" in GUARDED_EXECUTION_CONTRACT.lower()
+    assert TASK_COMPLETION_GUIDANCE in stable
+    assert TOOL_USE_ENFORCEMENT_GUIDANCE in stable
+    assert PARALLEL_TOOL_CALL_GUIDANCE not in stable
+    assert OPENAI_MODEL_EXECUTION_GUIDANCE not in stable
+    assert skills.call_args.kwargs["compact_all_categories"] is True
+
+
+def test_guarded_prompt_keeps_kanban_worker_lifecycle_guidance():
+    agent = _make_agent(
+        valid_tool_names=["kanban_show", "read_file"],
+        _kanban_worker_guidance="KANBAN_WORKER_LIFECYCLE",
+        platform="desktop",
+        provider="ollama-launch",
+        model="hermes-qwen3-fast",
+    )
+    with patch("agent.coding_context.guarded_prompt_enabled", return_value=True):
+        stable = _stable_prompt(agent)
+
+    assert "KANBAN_WORKER_LIFECYCLE" in stable
+
+
+def test_guarded_prompt_uses_requested_route_and_allows_only_listed_fallbacks(
+    monkeypatch, tmp_path
+):
+    from agent.system_prompt import _guarded_prompt_flags
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'workspace'\n")
+    agent = _make_agent(
+        valid_tool_names=["read_file"],
+        platform="desktop",
+        provider="custom",
+        requested_provider="ollama-launch",
+        model="hermes-qwen3-fast",
+        _fallback_chain=[{"provider": "openrouter", "model": "safe-fallback"}],
+    )
+    agent._guarded_prompt_config = {
+        "agent": {
+            "coding_context": "focus",
+            "coding_instructions": "Keep user instructions stable.",
+            "guarded_prompt_mode": {
+                "enabled": True,
+                "routes": [
+                    {"provider": "ollama-launch", "model": "hermes-qwen3-fast"},
+                    {"provider": "openrouter", "model": "safe-fallback"},
+                ],
+            },
+        }
+    }
+    with (
+        patch("agent.system_prompt.resolve_context_cwd", return_value=tmp_path),
+        patch("hermes_cli.config.load_config_readonly", side_effect=AssertionError("ambient config read")),
+    ):
+        assert _guarded_prompt_flags(agent) == (False, True)
+
+        agent._guarded_prompt_config["agent"]["guarded_prompt_mode"]["routes"].pop()
+        assert _guarded_prompt_flags(agent) == (False, False)
+
+
+def test_guarded_prompt_omits_skill_view_guidance_when_tool_is_unavailable():
+    agent = _make_agent(valid_tool_names=["read_file"], platform="desktop")
+    with patch("agent.coding_context.guarded_prompt_enabled", return_value=True):
+        stable = _stable_prompt(agent)
+
+    assert "skill_view" not in stable
+
+
+def test_remote_kanban_worker_forces_compact_path_neutral_prompt(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_remote")
+    agent = _make_agent(
+        valid_tool_names=["kanban_show", "read_file", "skill_view"],
+        _kanban_worker_guidance="KANBAN_WORKER_LIFECYCLE",
+        platform="cli",
+        provider="openai-codex",
+        model="gpt-5.4",
+    )
+    with (
+        patch("agent.coding_context.guarded_prompt_enabled", return_value=False),
+        patch("agent.prompt_builder.build_skills_system_prompt", return_value="SKILLS") as skills,
+        patch("agent.system_prompt._frozen_plugin_prompt_sections") as plugins,
+    ):
+        parts = _prompt_parts(agent)
+
+    assert "KANBAN_WORKER_LIFECYCLE" in parts["stable"]
+    assert "/Users/" not in "\n".join(parts.values())
+    assert skills.call_args.kwargs["compact_all_categories"] is True
+    plugins.assert_not_called()
+
+
+def test_computer_use_tool_does_not_require_removed_legacy_prompt_builder_api():
+    """Computer-use guidance now comes from response verdicts, not prompt_builder."""
+    agent = _make_agent(valid_tool_names=["computer_use"], platform="desktop")
+
+    stable = _stable_prompt(agent)
+
+    assert isinstance(stable, str)
+
+
 def _init_code_repo(path):
     """A git repo that actually holds code — the coding posture requires a source
     file (or manifest), not a bare ``.git`` (a prose/notes repo stays general)."""

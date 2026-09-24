@@ -124,7 +124,12 @@ def _has_positive_completion_tokens(usage: Any) -> bool:
 
 def router_timeout_shim_may_follow(text: str) -> bool:
     """True while streamed text is still a prefix of the shim sentinel (hold it back until judged)."""
-    return bool(text) and _ROUTER_TIMEOUT_SHIM.startswith(text.lstrip())
+    candidate = text.lstrip()
+    return bool(candidate) and (
+        _ROUTER_TIMEOUT_SHIM.startswith(candidate)
+        or (candidate.startswith(_ROUTER_TIMEOUT_SHIM)
+            and candidate[len(_ROUTER_TIMEOUT_SHIM):].isspace())
+    )
 
 
 def is_router_timeout_shim(response: Any) -> bool:
@@ -559,7 +564,7 @@ class ChatCompletionsTransport(ProviderTransport):
         _apply_max_tokens(api_kwargs, model, reasoning_config, params, profile_max=profile.get_max_tokens(model))
 
         extra_body_from_profile, top_level_from_profile = profile.build_api_kwargs_extras(
-            reasoning_config=reasoning_config, supports_reasoning=params.get("supports_reasoning", False),
+            reasoning_config=reasoning_config, supports_reasoning=params.get("supports_reasoning"),
             qwen_session_metadata=params.get("qwen_session_metadata"), model=model,
             base_url=params.get("base_url"), ollama_num_ctx=params.get("ollama_num_ctx"),
             session_id=params.get("session_id"),
@@ -575,6 +580,15 @@ class ChatCompletionsTransport(ProviderTransport):
         for part in (profile_body, extra_body_from_profile, params.get("extra_body_additions")):
             if part:
                 extra_body.update(part)
+        # Profiles that don't own the reasoning policy leave reasoning emission to the
+        # generic fallback — same logic as the non-profile legacy path above.
+        if (
+            not profile.owns_reasoning_policy(supports_reasoning=params.get("supports_reasoning"))
+            and params.get("supports_reasoning", False)
+            and reasoning_config is not None
+            and "reasoning" not in extra_body
+        ):
+            extra_body["reasoning"] = reasoning_config
         for k, v in (params.get("request_overrides") or {}).items():
             if k == "extra_body" and isinstance(v, dict):
                 extra_body.update(v)
@@ -594,6 +608,13 @@ class ChatCompletionsTransport(ProviderTransport):
                 extra_body = {k: v for k, v in extra_body.items() if k in ("thinking_config", "thinkingConfig")}
             if extra_body:
                 api_kwargs["extra_body"] = extra_body
+        # Apply provider-owned safety cleanup (e.g. stripping think/reasoning from
+        # non-reasoning Ollama endpoints) after all request overrides are merged.
+        api_kwargs = profile.sanitize_request_kwargs(
+            api_kwargs,
+            supports_reasoning=params.get("supports_reasoning"),
+            base_url=params.get("base_url"),
+        )
         return _finish_kwargs(
             api_kwargs, sanitized, params, supports_prompt_cache_key=bool(getattr(profile, "supports_prompt_cache_key", False)),
         )

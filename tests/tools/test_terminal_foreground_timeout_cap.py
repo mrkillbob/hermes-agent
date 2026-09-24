@@ -148,6 +148,21 @@ class TestForegroundTimeoutCap:
         assert "error" not in result or result["error"] is None
 
 
+class TestForegroundMaxTimeoutConstant:
+    """Verify the FOREGROUND_MAX_TIMEOUT constant and schema."""
+
+    def test_default_value_is_600(self):
+        """Default FOREGROUND_MAX_TIMEOUT is 600 when env var is not set."""
+        from tools.terminal_tool import FOREGROUND_MAX_TIMEOUT
+        assert FOREGROUND_MAX_TIMEOUT == 600
+
+    def test_schema_mentions_max(self):
+        """Schema explains the cap without embedding an env-derived token."""
+        from tools.terminal_tool import FOREGROUND_MAX_TIMEOUT, TERMINAL_SCHEMA
+
+        timeout_desc = TERMINAL_SCHEMA["parameters"]["properties"]["timeout"]["description"]
+        assert str(FOREGROUND_MAX_TIMEOUT) in timeout_desc
+        assert "background process" in timeout_desc
 
 
 class TestPromotionKeepsTheDetachmentGuard:

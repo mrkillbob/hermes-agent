@@ -358,11 +358,15 @@ def _poll_for_token(
             raise ValueError("Token response did not include access_token")
 
     def _error(_response, error_payload) -> Exception:
-        # Plain copy per OAuth error code; the raw ``code: description`` stays on a Details line.
-        from hermes_cli.auth_error_copy import device_flow_error
-        return device_flow_error(
-            str(error_payload.get("error", "") or ""),
-            str(error_payload.get("error_description") or "Unknown authentication error"))
+        error_code = error_payload.get("error", "")
+        if error_code == "expired_token":
+            return RuntimeError("The sign-in code expired. Run `hermes portal` to start again.")
+        if error_code == "access_denied":
+            return RuntimeError(
+                "Sign-in was denied. Restart with `hermes portal` or choose another provider with `hermes model`.")
+        description = error_payload.get("error_description") or "Unknown authentication error"
+        safe_code = str(error_code or "authentication")
+        return RuntimeError(f"Sign-in did not complete ({safe_code}): {description}")
 
     return _poll_device_token_generic(
         lambda: client.post(

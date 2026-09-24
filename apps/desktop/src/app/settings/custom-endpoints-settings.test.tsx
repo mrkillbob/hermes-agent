@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -185,7 +185,10 @@ describe('CustomEndpointsSettings', () => {
 
     render(<CustomEndpointsSettings />)
 
-    await waitFor(() => expect(getCustomEndpoints).toHaveBeenCalledWith('content-studio'))
+    // Wait for loading to finish (the form is hidden while loading=true); findBy uses waitFor
+    // internally, so it also implicitly proves getCustomEndpoints was awaited and resolved.
+    await screen.findByPlaceholderText('Axet Proxy')
+    expect(getCustomEndpoints).toHaveBeenCalledWith('content-studio')
     expect(screen.getByText('Applies to')).toBeTruthy()
 
     fireEvent.change(await screen.findByPlaceholderText('Axet Proxy'), { target: { value: 'Studio gateway' } })

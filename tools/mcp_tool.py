@@ -346,7 +346,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         self._session_proven: bool = False
         # Never cleared (unlike _ready): separates first-connect from reconnect failures.
         self._ever_connected: bool = False
-        # Latched when the Streamable HTTP -> SSE fallback connects: reconnects reuse SSE directly.
+        # Latched when Streamable HTTP falls back to SSE on initial connect.
         self._sse_fallback: bool = False
         # Status/URL/body of the last HTTP rejection the Streamable HTTP client saw; names the real
         # cause when the SDK reports only ``Server returned an error response``.
@@ -467,8 +467,8 @@ _CONNECT_RETRY_BASE_BACKOFF_SEC, _CONNECT_RETRY_MAX_BACKOFF_SEC = 30.0, 600.0
 # — they keep the count and timestamp in sync.
 _server_error_counts: Dict[Any, int] = {}
 _server_breaker_opened_at: Dict[Any, float] = {}
-# True while every strike in the current streak was the tool's own error payload (server reachable,
-# call rejected); picks the open-breaker wording, since "unreachable" was false for that case (#11113).
+# True while every strike in the current streak was the tool's own error payload
+# (server reachable, call rejected); this keeps the open-breaker wording true.
 _server_errors_all_application: Dict[Any, bool] = {}
 _CIRCUIT_BREAKER_THRESHOLD, _CIRCUIT_BREAKER_COOLDOWN_SEC = 3, 60.0
 
@@ -488,13 +488,14 @@ _TRUST_FULL, _TRUST_UNTRUSTED = "full", "untrusted"
 
 def _bump_server_error(server_name: str, *, application: bool = False) -> None:
     """Count a failure; at the threshold (re)stamp the breaker-open time. Keyed by the calling
-    scope's connection so one profile's failing server never opens another profile's breaker.
-    *application*: the call completed and the payload was an error (transport is fine)."""
+    scope's connection so one profile's failing server never opens another profile's breaker."""
     from tools.mcp_tool_scope import _resolve_server_key
     key = _resolve_server_key(server_name)
     n = _server_error_counts.get(key, 0) + 1
     _server_error_counts[key] = n
-    _server_errors_all_application[key] = application and (n == 1 or _server_errors_all_application.get(key, False))
+    _server_errors_all_application[key] = application and (
+        n == 1 or _server_errors_all_application.get(key, False)
+    )
     if n >= _CIRCUIT_BREAKER_THRESHOLD:
         _server_breaker_opened_at[key] = time.monotonic()
 
@@ -508,11 +509,15 @@ def _reset_server_error(server_name: str) -> None:
     _server_errors_all_application.pop(key, None)
 
 
-# Servers opted into parallel tool calls, keyed by the consuming profile's own key (``foo-bar``/
-# ``foo_bar`` sanitize alike but must not share policy; neither do two profiles' same-named servers).
+# Connection keys opted into parallel tool calls. Outside multiplexing these remain bare raw
+# names; under multiplexing they include the owning profile scope.
 _parallel_safe_servers: set = set()
 # registry tool name -> raw server name (the generated name is lossy; never re-parse it).
 _mcp_tool_server_names: Dict[str, str] = {}
+# Connection-key metadata is kept separately from the public registry names. Scoped keys must
+# never leak into tool errors, reload summaries, or profile-local discovery results.
+_server_public_names: Dict[Any, str] = {}
+_mcp_tool_server_names_by_scope: Dict[Optional[str], Dict[str, Any]] = {}
 
 # Dedicated event loop in a background daemon thread; _lock guards the loop handles, _servers,
 # the status maps and the PID ledgers.

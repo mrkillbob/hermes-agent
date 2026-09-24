@@ -996,7 +996,7 @@ All commands are also available as a slash command in the interactive CLI and in
 
 | Config key | Default | What it does |
 |------------|---------|--------------|
-| `kanban.max_in_progress` | unset (unlimited) | Caps the number of simultaneously running tasks. When the board already has N running, the dispatcher skips spawning more — useful for slow workers (local LLMs, resource-constrained hosts) so they finish what they have before more pile up and time out. Invalid or below-1 values log a warning and behave as unlimited. |
+| `kanban.max_in_progress` | unset (memory-derived) | Caps the number of simultaneously running tasks across all boards. When unset, Hermes derives a conservative cap from system memory where available. Invalid or below-1 values fall through to that derived default. Cloud workers use this host-wide budget even when the priority runtime guard is active. |
 | `kanban.max_in_progress_per_profile` | unset (unlimited) | Per-profile variant of `max_in_progress` — caps how many tasks any single assignee profile may run concurrently. Useful when one profile is slow or rate-limited but others should keep flowing. Applies alongside the board-wide `max_in_progress`; both must allow a spawn for it to proceed. |
 | `kanban.dispatch_profiles` | unset (any existing profile) | Per-home claim allowlist for boards shared across Hermes homes. When the key is present, this home's dispatcher only claims cards whose assignee is listed — fail-closed: an empty list, `null` or a bare `dispatch_profiles:` claims nothing, and a config read that fails logs a warning and claims nothing; other assignees land in `skipped_nonspawnable`. Only omitting the key means "any existing profile". `hermes kanban diagnostics` prints the resolved value for this home (`any`, the listed names, or `none (fail-closed: …)`). See [Shared boards across homes](#shared-boards-across-homes). |
 | `kanban.auto_promote_children` | `true` | After `decompose_triage_task()` produces children with no parent-blocker dependencies, they're automatically promoted to `ready` so the dispatcher can pick them up. Set to `false` to require manual review — children stay in `todo` until you promote them. |
@@ -1004,10 +1004,29 @@ All commands are also available as a slash command in the interactive CLI and in
 
 ```yaml
 kanban:
-  max_in_progress: 2
+  # Normal performance lane.
+  max_in_progress: 8
+  # Bound only profiles that use a host-heavy local model.
+  max_in_progress_by_profile:
+    local-builder: 1
+  # Reserve resources for local-model workers while an exact private runtime
+  # entrypoint is active. Cloud workers keep the normal global budget above.
+  priority_runtime_guard:
+    enabled: true
+    project_roots:
+      - ~/work/private-runtime
+    entrypoints:
+      - main.py
+    normal_max_in_progress: 8
+    max_in_progress: 2
   auto_promote_children: false
   default_workdir: ~/work/active-project
 ```
+
+The runtime match is path-exact: `python main.py` matches only when the
+process working directory is the configured root, and an absolute script path
+must resolve to the configured root plus entrypoint. An unrelated project with
+its own `main.py`, or text that merely mentions `main.py`, does not match.
 
 ### Scheduled task starts (`scheduled_at`)
 
@@ -1431,3 +1450,17 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
+
+### Shared project worktree policy
+
+The control home's `kanban.worktree_roots` mapping selects an absolute worktree
+directory for each absolute repository path. Worker profiles use this shared
+mapping, so project tasks keep the same location across profile boundaries.
+Existing materialized worktrees are preserved; unmaterialized legacy task paths
+use the configured root at dispatch. Without a mapping, `.worktrees` remains the
+default.
+
+`kanban.worktree_base_refs` can pin a project's source branch. When it names a
+configured remote branch (for example `origin/stable`), admission fetches that
+exact branch before resolving its commit. Fetch failure stops admission instead
+of silently using a stale or unrelated base.

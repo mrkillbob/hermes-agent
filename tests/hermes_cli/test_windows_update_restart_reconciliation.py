@@ -142,4 +142,3 @@ def test_resume_unregisters_its_own_atexit_fallback_before_running(monkeypatch):
 
     assert calls == [update_cmd_windows._resume_windows_gateways_after_update]
     assert token["resume_needed"] is False
-

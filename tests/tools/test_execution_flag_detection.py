@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
@@ -30,6 +31,51 @@ def test_real_read_tool_binaries_confirm_option_ownership(
     assert completed.stdout == expected_output
 
 
+@pytest.mark.parametrize(
+    ("tool", "args", "stdin", "needs_tty"),
+    [
+        ("rg", ["--pre", "-payload-marker", "needle", "{input}"], None, False),
+        ("rg", ["--hostname-bin=-payload-marker", "needle", "{input}"], None, False),
+        ("sort", ["--buffer-size=1K", "--compress-program", "-payload-marker"], "{bulk}", False),
+        ("ag", ["--pager=-payload-marker", "needle", "{input}"], None, True),
+        ("man", ["--pager", "-payload-marker", "ls"], None, True),
+        ("man", ["-P", "-payload-marker", "ls"], None, True),
+    ],
+)
+def test_real_binaries_execute_leading_dash_program_payload(
+    tmp_path, tool, args, stdin, needs_tty
+):
+    """A PATH marker proves these binaries do not reparse '-program' as an option."""
+    if shutil.which(tool) is None or (needs_tty and shutil.which("script") is None):
+        pytest.skip(f"{tool} or script is not installed")
+    if sys.platform == "darwin" and tool in {"sort", "man"}:
+        pytest.skip(f"{tool} execution-option integration is Linux-specific")
+
+    marker = tmp_path / "executed"
+    payload = tmp_path / "-payload-marker"
+    payload.write_text("#!/bin/sh\nprintf executed > \"$MARKER\"\ncat\n")
+    payload.chmod(0o755)
+    input_file = tmp_path / "input.txt"
+    input_file.write_text("needle\n")
+    resolved_args = [arg.format(input=str(input_file)) for arg in args]
+    input_text = (
+        "\n".join(str(number) for number in range(10_000, 0, -1)) + "\n"
+        if stdin == "{bulk}"
+        else stdin
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "MARKER": str(marker),
+        "TERM": "xterm",
+    }
+    argv = [tool, *resolved_args]
+    if needs_tty:
+        argv = ["script", "-qec", shlex.join(argv), "/dev/null"]
+
+    subprocess.run(argv, input=input_text, text=True, capture_output=True, env=env, timeout=20)
+
+    assert marker.read_text() == "executed"
 
 
 @pytest.mark.parametrize(

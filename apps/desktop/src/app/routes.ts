@@ -21,6 +21,7 @@ export const CRON_ROUTE = '/cron'
 export const PROFILES_ROUTE = '/profiles'
 export const AGENTS_ROUTE = '/agents'
 export const STARMAP_ROUTE = '/starmap'
+export const LUNAR_CITY_ROUTE = '/lunar-city'
 
 export type AppView =
   | 'session-import'

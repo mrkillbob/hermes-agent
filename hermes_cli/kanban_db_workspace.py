@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -440,26 +441,97 @@ def _repo_root_for_worktree_target(path: Path) -> Optional[Path]:
 
 def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> None:
     """Materialize ``target`` as a linked git worktree under ``repo_root``."""
+    from hermes_cli.worktree_base import resolve_worktree_base
+    from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
+    def _assigned_base_is_recorded() -> bool:
+        ref_key = f"branch.{branch_name}.hermes-kanban-base-ref"
+        sha_key = f"branch.{branch_name}.hermes-kanban-base-sha"
+        existing_ref = _git(repo_root, "config", "--get", ref_key, timeout=20)
+        existing_sha = _git(repo_root, "config", "--get", sha_key, timeout=20)
+        return existing_ref.returncode == 0 and existing_sha.returncode == 0
+
+    def _record_assigned_base(base_ref: str) -> None:
+        ref_key = f"branch.{branch_name}.hermes-kanban-base-ref"
+        sha_key = f"branch.{branch_name}.hermes-kanban-base-sha"
+        resolved = _git(
+            repo_root, "rev-parse", "--verify", "--end-of-options",
+            base_ref + "^{commit}", timeout=20,
+        )
+        if resolved.returncode != 0:
+            raise RuntimeError(f"assigned Kanban worktree base does not resolve: {base_ref}")
+        base_sha = resolved.stdout.strip()
+        for key, value in ((ref_key, base_ref), (sha_key, base_sha)):
+            configured = _git(repo_root, "config", key, value, timeout=20)
+            if configured.returncode != 0:
+                raise RuntimeError(
+                    f"could not record assigned Kanban worktree base for {branch_name}"
+                )
+
+    def _assignment_base() -> str:
+        base_ref = _configured_worktree_base(repo_root)
+        if base_ref is None:
+            base_ref, _ = resolve_worktree_base(
+                str(repo_root), prefer_current_upstream=False,
+            )
+        return base_ref
+
     target = target.expanduser()
     repo_common = _git_common_dir(repo_root)
-    if target.exists() and repo_common is not None and _path_key(_git_common_dir(target)) == _path_key(repo_common):
+    if (target.exists() and repo_common is not None
+            and _path_key(_git_common_dir(target)) == _path_key(repo_common)):
+        if not _assigned_base_is_recorded():
+            _record_assigned_base(_assignment_base())
+        bootstrap_worktree_environments(
+            repo_root, target, require_python=False, allow_venv_fallback=False,
+        )
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     if _git_branch_exists(repo_root, branch_name):
         args = ["worktree", "add", str(target), branch_name]
+        base_ref = None if _assigned_base_is_recorded() else _assignment_base()
     else:
-        args = ["worktree", "add", "-b", branch_name, str(target), "HEAD"]
+        base_ref = _assignment_base()
+        args = ["worktree", "add", "--no-track", "-b", branch_name, str(target), base_ref]
     result = _git(repo_root, *args, timeout=60)
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(
             f"git worktree add failed for {target} on branch {branch_name}: {stderr}"
         )
+    if base_ref is not None:
+        _record_assigned_base(base_ref)
+    bootstrap_worktree_environments(repo_root, target)
+
+
+def _configured_worktree_base(repo_root: Path) -> Optional[str]:
+    """A shared-board source choice must survive the worker's profile boundary."""
+    from hermes_cli.config import read_user_config_raw
+
+    config_path = _kb.kanban_home() / "config.yaml"
+    if not config_path.is_file():
+        return None
+    config = read_user_config_raw(config_path) or {}
+    refs = (config.get("kanban") or {}).get("worktree_base_refs", {})
+    if not isinstance(refs, dict):
+        raise ValueError("kanban.worktree_base_refs must map repository paths to Git refs")
+    ref = refs.get(str(repo_root.resolve()))
+    if ref is None:
+        return None
+    if not isinstance(ref, str) or not ref.strip() or ref.startswith("-"):
+        raise ValueError("configured Kanban worktree base must be a Git ref")
+    from hermes_cli.kanban_worktree_policy import refresh_configured_remote_base
+    refresh_configured_remote_base(repo_root, ref, _git)
+    result = _git(repo_root, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}", timeout=20)
+    if result.returncode:
+        raise ValueError(f"configured Kanban worktree base does not resolve: {ref}")
+    return result.stdout.strip()
 
 
 def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple[Path, str]:
     """Materialize the canonical ``<repo>/.worktrees/<task-id>`` worktree."""
-    target = repo_root / ".worktrees" / task_id
+    from hermes_cli.kanban_worktree_policy import project_worktree_path
+    target = project_worktree_path(repo_root, task_id)
     _ensure_git_worktree(repo_root, target, branch_name)
     return target, branch_name
 
@@ -506,6 +578,14 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     if requested.exists() and _is_linked_worktree_checkout(requested):
         actual_branch = _git_current_branch(requested)
         if actual_branch == branch_name:
+            from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
+            bootstrap_root = _repo_root_for_worktree_target(requested.parent)
+            common = _git_common_dir(requested)
+            if bootstrap_root is not None and common is not None and _git_common_dir(bootstrap_root) == common:
+                bootstrap_worktree_environments(
+                    bootstrap_root, requested, require_python=False, allow_venv_fallback=False,
+                )
             return requested_resolved, actual_branch
         # The requested path is an existing checkout of a DIFFERENT task's
         # branch (decompose children inherit the root's workspace_path
@@ -532,6 +612,9 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             f"task {task.id} worktree path {task.workspace_path!r} is not inside a git repo "
             "and does not point at a git repo root"
         )
+    if not requested.exists() and requested.parent.name == ".worktrees" and requested.name == task.id:
+        from hermes_cli.kanban_worktree_policy import project_worktree_path
+        requested = project_worktree_path(repo_root, task.id)
     _ensure_git_worktree(repo_root, requested, branch_name)
     return requested, branch_name
 
@@ -588,6 +671,42 @@ def set_workspace_path(conn: sqlite3.Connection, task_id: str, path: Path | str)
 
 def set_branch_name(conn: sqlite3.Connection, task_id: str, branch_name: str) -> None:
     _set_task_column(conn, task_id, "branch_name", str(branch_name))
+
+
+def set_worktree_base(
+    conn: sqlite3.Connection, task_id: str, workspace: Path, branch_name: str,
+) -> None:
+    """Copy allocator-owned base evidence into the control-plane task row."""
+    prefix = f"branch.{branch_name}.hermes-kanban-base"
+    base_ref = _git(workspace, "config", "--get", prefix + "-ref", timeout=20)
+    base_sha = _git(workspace, "config", "--get", prefix + "-sha", timeout=20)
+    sha = base_sha.stdout.strip().lower()
+    if (
+        base_ref.returncode != 0
+        or base_sha.returncode != 0
+        or not re.fullmatch(r"[0-9a-f]{40}", sha)
+    ):
+        raise RuntimeError(f"assigned Kanban worktree base is unavailable for {branch_name}")
+    ref = base_ref.stdout.strip()
+    with _kb.write_txn(conn):
+        row = conn.execute(
+            "SELECT workspace_base_ref, workspace_base_sha FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Kanban task {task_id} does not exist")
+        assigned_ref = (row["workspace_base_ref"] or "").strip()
+        assigned_sha = (row["workspace_base_sha"] or "").strip().lower()
+        if assigned_ref or assigned_sha:
+            if assigned_ref == ref and assigned_sha == sha:
+                return
+            raise RuntimeError(
+                f"assigned Kanban worktree base cannot change for task {task_id}"
+            )
+        conn.execute(
+            "UPDATE tasks SET workspace_base_ref = ?, workspace_base_sha = ? WHERE id = ?",
+            (ref, sha, task_id),
+        )
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this

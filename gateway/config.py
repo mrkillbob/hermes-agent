@@ -9,7 +9,7 @@ import os
 import re
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Mapping
 from enum import Enum
 
 from hermes_cli.config import get_hermes_home
@@ -43,7 +43,38 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
     return is_truthy_value(value, default=default)
 
 
-def _env_multiplex_profiles_override() -> "bool | None":
+def _normalize_multiplex_profile_allowlist(value: Any) -> Optional[List[str]]:
+    """Normalize the optional named-profile allowlist: ``None`` = serve all; a malformed
+    outer value fails safe to ``[]`` (default profile only); bad entries are skipped."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        logger.warning(
+            "Invalid gateway.multiplex_profile_allowlist (expected a list, got %s); "
+            "serving only the default profile",
+            type(value).__name__,
+        )
+        return []
+
+    from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+    normalized: List[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            logger.warning("Skipping invalid gateway.multiplex_profile_allowlist entry %r (expected a profile name)", entry)
+            continue
+        try:
+            name = normalize_profile_name(entry)
+            validate_profile_name(name)
+        except ValueError:
+            logger.warning("Skipping invalid gateway.multiplex_profile_allowlist entry %r", entry)
+            continue
+        if name != "default" and name not in normalized:
+            normalized.append(name)
+    return normalized
+
+
+def _env_multiplex_profiles_override(environ: Optional[Mapping[str, str]] = None) -> "bool | None":
     """GATEWAY_MULTIPLEX_PROFILES operator override: True/False for a recognized token.
 
     ``None`` when unset, blank, or unrecognized so the caller keeps the config.yaml
@@ -51,7 +82,7 @@ def _env_multiplex_profiles_override() -> "bool | None":
     a provisioned-but-unpopulated Fly secret arrives as ``""`` and must NOT shadow
     a config.yaml opt-in.
     """
-    raw = os.getenv("GATEWAY_MULTIPLEX_PROFILES")
+    raw = (environ or os.environ).get("GATEWAY_MULTIPLEX_PROFILES")
     if not (raw or "").strip():
         return None
     parsed = _bool_token(raw)
@@ -276,19 +307,17 @@ class Platform(Enum):
 # Built-in values snapshotted before any dynamic _missing_ lookup.
 _BUILTIN_PLATFORM_VALUES = frozenset(m.value for m in Platform.__members__.values())
 
-# Platforms that bind a host TCP port. In a multiplexer only the default profile binds: a SECONDARY
-# profile's port-binder is built in shared-listener mode and served at /p/<profile>/<path> on the
-# default's listener (gateway/platforms/shared_ingress.py); api_server/webhook are mirrored there.
+# Platforms that bind a host TCP port. In a multiplexer only the default profile owns the
+# shared listener, so a SECONDARY profile enabling one is a misconfiguration (single source
+# of truth for gateway/run.py and hermes_cli/web_server.py validation).
 PORT_BINDING_PLATFORM_VALUES = frozenset({
     "webhook", "api_server", "msgraph_webhook", "feishu", "wecom_callback",
     "bluebubbles", "sms", "whatsapp_cloud", "line", "teams",
 })
 # Platforms that only bind in one connection mode (Feishu's default websocket mode is outbound).
 PORT_BINDING_CONDITIONAL_MODES: dict[str, str] = {"feishu": "webhook"}
-# Port-binders whose /p/<profile>/ surface is a MIRROR served by the default's own adapter; a secondary
-# never gets an instance of these (api_server: /p/<profile>/v1/..., webhook: profile-bound routes).
+# Port-binders whose profile-prefixed surface is mirrored by the default adapter.
 SHARED_LISTENER_MIRROR_PLATFORMS = frozenset({"api_server", "webhook"})
-# Path a client appends to ``<default listener>/p/<profile>`` to reach each mirror.
 SHARED_LISTENER_MIRROR_PATHS: dict[str, str] = {"api_server": "/v1", "webhook": "/webhooks/<route>"}
 
 
@@ -415,6 +444,12 @@ PLATFORM_TOKEN_ENV_NAMES: dict["Platform", str] = {
 @dataclass
 class PlatformConfig:
     """Configuration for a single messaging platform."""
+    # Keys represented by typed fields stay out of ``extra``; every other
+    # platform-specific setting is preserved there for adapter hooks.
+    _TYPED_KEYS = frozenset({
+        "enabled", "token", "api_key", "home_channel", "reply_to_mode", "channel_overrides", "extra",
+        "gateway_restart_notification", "typing_indicator", "typing_status_text",
+    })
     enabled: bool = False
     token: Optional[str] = None
     api_key: Optional[str] = None  # API key if different from token
@@ -441,22 +476,17 @@ class PlatformConfig:
             result["channel_overrides"] = {cid: ov.to_dict() for cid, ov in self.channel_overrides.items()}
         return result
 
-    # Keys consumed by typed fields; everything else at the top of a platform block is adapter
-    # config and belongs in ``extra`` (see from_dict).
-    _TYPED_KEYS = frozenset({
-        "enabled", "token", "api_key", "home_channel", "reply_to_mode", "channel_overrides", "extra",
-        "gateway_restart_notification", "typing_indicator", "typing_status_text",
-    })
-
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PlatformConfig":
         data = _coerce_dict(data)
         home = data.get("home_channel")
-        # Adapters read their settings from ``extra`` (``config.extra.get("port")``), but users
-        # write them where the docs and ``hermes config set platforms.webhook.port`` put them:
-        # directly under the platform block. Promote every non-typed top-level key so neither
-        # spelling is silently dropped (#10206); an explicit ``extra:`` value wins on a clash.
-        extra = {**{k: v for k, v in data.items() if k not in cls._TYPED_KEYS}, **_coerce_dict(data.get("extra", {}))}
+        # Adapters read settings from ``extra`` while users commonly write
+        # them directly under the platform block. Preserve both spellings;
+        # explicit ``extra`` values win on clashes.
+        extra = {
+            **{k: v for k, v in data.items() if k not in cls._TYPED_KEYS},
+            **_coerce_dict(data.get("extra", {})),
+        }
 
         def toplevel_or_extra(key: str) -> Any:
             value = data.get(key)
@@ -835,6 +865,26 @@ def load_gateway_config() -> GatewayConfig:
             "Check %s for syntax errors. Error: %s",
             _home / "config.yaml", e,
         )
+
+    # Keep the optional Slack plugin's legacy environment bridge available even
+    # when its dependency (and therefore its hook) is not installed. This is
+    # configuration compatibility, not a platform enablement decision.
+    slack_cfg = None
+    if isinstance(gw_data, dict):
+        slack_cfg = ((gw_data.get("platforms") or {}).get("slack") or {}).get("extra")
+    if not isinstance(slack_cfg, dict):
+        with contextlib.suppress(Exception):
+            raw_yaml = config_loader.read_yaml_layers(_home)
+            slack_cfg = raw_yaml.get("slack") if isinstance(raw_yaml, dict) else None
+    secondary_profile = False
+    with contextlib.suppress(Exception):
+        from gateway.config_env import _loading_secondary_under_multiplexer
+        secondary_profile = _loading_secondary_under_multiplexer()
+    if (isinstance(slack_cfg, dict) and "ignored_channels" in slack_cfg
+            and not os.environ.get("SLACK_IGNORED_CHANNELS") and not secondary_profile):
+        ignored = slack_cfg.get("ignored_channels")
+        if isinstance(ignored, (list, tuple, set)):
+            os.environ["SLACK_IGNORED_CHANNELS"] = ",".join(str(item).strip() for item in ignored if str(item).strip())
 
     config = GatewayConfig.from_dict(gw_data)
     _apply_env_overrides(config)

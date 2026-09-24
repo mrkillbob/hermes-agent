@@ -21,8 +21,9 @@ import hermes_state_readpool
 import hermes_state_wal
 from hermes_state import (
     DeletedWalGenerationError, SessionDB, StateDbReplacedError, _close_time_checkpoint_configurable,
-    classify_persistence_error, refuse_deleted_wal_generation,
+    classify_persistence_error,
 )
+from hermes_state_holders import refuse_deleted_wal_generation
 from hermes_state_dbfile import _pread_db_header, iter_deleted_sqlite_sidecar_holders
 from tests.hermes_state._wal_generation_harness import (
     gateway_writer, integrity_ok_path, lose_sidecars, make_db, message_count, pin_wal, require_wal,
@@ -62,6 +63,40 @@ def test_clean_open_and_second_open_still_work(tmp_path, force_wal):
         assert any(m["content"] == "second-open" for m in rows)
     finally:
         reopened.close()
+
+
+def test_refactored_holder_authority_keeps_sessiondb_open_path_available(
+    tmp_path, monkeypatch
+):
+    """The holder-module split must leave both SessionDB delegates defined."""
+    calls = {"deleted": 0, "identity": 0}
+
+    def no_deleted_holders(db_path, *, include_self=True):
+        calls["deleted"] += 1
+        assert include_self is True
+        return []
+
+    def no_sidecars(db_path):
+        calls["identity"] += 1
+        return {}
+
+    monkeypatch.setattr(
+        hermes_state._state_holders,
+        "deleted_sqlite_sidecar_holders",
+        no_deleted_holders,
+    )
+    monkeypatch.setattr(
+        hermes_state._state_holders,
+        "sqlite_sidecar_identity",
+        no_sidecars,
+    )
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        assert calls["deleted"] >= 1
+        assert calls["identity"] >= 1
+    finally:
+        db.close()
 
 
 def test_delete_journal_two_writers_still_work(tmp_path, monkeypatch):
