@@ -276,6 +276,7 @@ export interface Translations {
 
   // ── Cron page ──
   cron: {
+    loadWhat?: string;
     confirmDeleteMessage: string;
     confirmDeleteTitle: string;
     newJob: string;
@@ -466,6 +467,7 @@ export interface Translations {
 
   // ── Skills page ──
   skills: {
+    loadWhat?: string;
     title: string;
     searchPlaceholder: string;
     enabledOf: string;
