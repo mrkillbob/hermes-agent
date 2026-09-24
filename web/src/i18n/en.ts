@@ -259,6 +259,7 @@ export const en: Translations = {
   },
 
   cron: {
+    loadWhat: "scheduled jobs",
     confirmDeleteMessage:
       "This removes the job from the schedule. This cannot be undone.",
     confirmDeleteTitle: "Delete scheduled job?",
@@ -454,6 +455,7 @@ export const en: Translations = {
   },
 
   skills: {
+    loadWhat: "skills",
     title: "Skills",
     searchPlaceholder: "Search skills and toolsets...",
     enabledOf: "{enabled}/{total} enabled",

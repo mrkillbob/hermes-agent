@@ -125,6 +125,28 @@ def test_admission_runs_the_install_scanner(tmp_path):
 
 
 class TestCapabilityProbe:
+    def test_probe_tears_down_helpers_before_scratch_cleanup(self, tmp_path):
+        """A plugin helper must not keep the probe's temporary HERMES_HOME alive."""
+        marker = tmp_path / "helper-started"
+        helper_code = (
+            "from pathlib import Path; import os, time; "
+            f"Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)"
+        )
+        init = (
+            "import os, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "def register(ctx):\n"
+            f"    Path({str(marker)!r}).write_text('started')\n"
+            f"    subprocess.Popen([sys.executable, '-c', {helper_code!r}], "
+            "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        )
+        d = _make_plugin(tmp_path, manifest=dict(BASE_MANIFEST), init_py=init)
+
+        report = validate_plugin_dir(d)
+
+        assert report.ok, report.failures
+        assert marker.is_file()
+
     def test_undeclared_tool_registration_fails_with_diff(self, tmp_path):
         init = (
             "def register(ctx):\n"
