@@ -7,7 +7,9 @@ the task is skipped (existing behavior preserved).
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import os
+import sys
+import tempfile
 
 import pytest
 

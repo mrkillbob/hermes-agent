@@ -7,9 +7,11 @@ advancement through multiple providers.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 
+from agent import chat_completion_helpers
 from agent.error_classifier import FailoverReason
-from run_agent import AIAgent
+from run_agent import AIAgent, _pool_may_recover_from_rate_limit
 
 
 def _make_agent(fallback_model=None):
@@ -42,8 +44,11 @@ def _mock_client(base_url="https://openrouter.ai/api/v1", api_key="fb-key"):
 
 
 class TestFallbackChainInit:
-
-
+    def test_no_fallback(self):
+        agent = _make_agent(fallback_model=None)
+        assert agent._fallback_chain == []
+        assert agent._fallback_index == 0
+        assert agent._fallback_model is None
 
     def test_invalid_entries_filtered(self):
         fbs = [
@@ -87,6 +92,8 @@ def test_fallback_reason_text_is_operator_friendly(reason, expected):
     assert chat_completion_helpers._fallback_reason_text(reason) == expected
 
 
+def test_fallback_reason_text_defaults_when_reason_is_missing():
+    assert chat_completion_helpers._fallback_reason_text(None) == "provider failure"
 
 
 def test_unsupported_thinking_never_activates_remote_fallback():
@@ -169,6 +176,26 @@ class TestFallbackChainAdvancement:
             assert agent.model == "gpt-4o"
             assert agent._fallback_activated is True
 
+    @patch("time.monotonic", return_value=1000.0)
+    def test_records_user_visible_switch_with_reason(self, _clock):
+        agent = _make_agent(
+            fallback_model={"provider": "zai", "model": "glm-5.2"},
+        )
+        agent.model = "gpt-5.6-sol"
+        agent.provider = "openai-codex"
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(_mock_client(base_url="https://api.z.ai/v1"), "glm-5.2"),
+        ):
+            assert agent._try_activate_fallback(FailoverReason.rate_limit) is True
+
+        expected = (
+            "⚠️ Model fallback: gpt-5.6-sol via openai-codex unavailable "
+            "(rate limit); using glm-5.2 via zai. "
+            "Primary retry eligible in ~60 s; recovery is not guaranteed."
+        )
+        assert agent._pending_fallback_notice == [expected]
+        assert agent._retry_status_buffer[-1] == ("status", expected)
 
     @patch("time.monotonic", return_value=1000.0)
     def test_records_sequential_switches_in_order(self, _clock):
@@ -357,7 +384,9 @@ def _pool(n_entries: int, has_available: bool = True):
     return pool
 
 
-
+class TestPoolRotationRoom:
+    def test_none_pool_returns_false(self):
+        assert _pool_may_recover_from_rate_limit(None) is False
 
 
 
