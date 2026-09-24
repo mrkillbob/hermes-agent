@@ -3962,10 +3962,18 @@ def route_worker_block_to_orchestrator(
         target_assignee = "task-intake-router" if same_specialist else (
             specialist or "task-intake-router"
         )
-        new_status = "triage" if (already_router and specialist is None) or same_specialist else (
-            "ready" if _parents_satisfied(conn, task_id) else "todo"
-        )
-        new_assignee = target_assignee
+        # A specialist's first failed attempt must not strand the card in the
+        # human-only triage column. Give the intake router one bounded chance
+        # to re-read the producer-owned assignment and choose a safe recovery
+        # path; only an unknown scope (or a router that still cannot classify
+        # it) belongs in triage.
+        if already_router and specialist is None:
+            new_status, new_assignee = "triage", "task-intake-router"
+        elif same_specialist:
+            new_status, new_assignee = "ready", "task-intake-router"
+        else:
+            new_status = "ready" if _parents_satisfied(conn, task_id) else "todo"
+            new_assignee = target_assignee
         cur = conn.execute(
             "UPDATE tasks SET status = ?, assignee = ?, claim_lock = NULL, "
             "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
@@ -4290,18 +4298,27 @@ def promote_task(
     conn: sqlite3.Connection, task_id: str, *, actor: str, reason: Optional[str] = None,
     force: bool = False, dry_run: bool = False,
 ) -> tuple[bool, Optional[str]]:
-    """Operator promotion ``todo``/``blocked`` -> ``ready`` with an audit event.
+    """Promote a recoverable task to ``ready`` with an audit event.
+
+    ``triage`` is eligible only when the card already has a concrete body and
+    assignee; genuinely underspecified intake still requires ``specify``.
     Refused while a parent is unfinished unless ``force``; ``dry_run`` only
-    validates. Returns ``(ok, reason)``."""
-    cur_status = _task_status(conn, task_id)
+    validates. Returns ``(ok, reason)``.
+    """
+    row = conn.execute(
+        "SELECT status, title, body, assignee FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    cur_status = row["status"] if row else None
     if cur_status is None:
         return False, f"task {task_id} not found"
 
-    if cur_status not in ("todo", "blocked"):
+    if cur_status not in ("todo", "blocked", "triage"):
         return False, (
             f"task {task_id} is {cur_status!r}; promote only applies to "
-            f"'todo' or 'blocked'"
+            f"'todo', 'blocked', or fully specified 'triage' tasks"
         )
+    if cur_status == "triage" and not (str(row["body"] or "").strip() and str(row["assignee"] or "").strip()):
+        return False, f"task {task_id} is triage but lacks a concrete body or assignee; specify it first"
 
     if not force:
         parents = conn.execute(
@@ -4323,7 +4340,7 @@ def promote_task(
     with write_txn(conn):
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready' "
-            "WHERE id = ? AND status IN ('todo', 'blocked')", (task_id,),
+            "WHERE id = ? AND status IN ('todo', 'blocked', 'triage')", (task_id,),
         )
         if upd.rowcount != 1:
             return False, f"task {task_id} status changed during promotion"

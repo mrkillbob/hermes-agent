@@ -947,6 +947,22 @@ _PROTOCOL_VIOLATION_FAILURE_LIMIT = 3
 # Closed runs to walk when counting the streak; it trips at a handful anyway.
 _PROTOCOL_VIOLATION_SCAN_LIMIT = 50
 
+# These are worker strategy failures, not external blockers. The model has
+# already been stopped by Hermes' loop guardrail; sending the card through the
+# normal crash breaker would strand it in ``blocked`` even though the task's
+# scope and required capability are intact.
+_WORKER_STRATEGY_FAILURE_MARKERS = (
+    "tool guardrail halted",
+    "identical_call_streak_halt",
+    "identical_cycle_halt",
+    "same_tool_failure_halt",
+)
+
+
+def _is_worker_strategy_failure(error_text: str) -> bool:
+    text = (error_text or "").casefold()
+    return any(marker in text for marker in _WORKER_STRATEGY_FAILURE_MARKERS)
+
 
 def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     """Count the task's trailing run of clean-exit protocol violations.
@@ -1314,15 +1330,30 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
             if is_systemic:
                 # Trips at 1, below any ``failure_limit``: hold it for an operator.
                 extra["sticky"] = True
-            tripped = _record_task_failure(
-                conn, tid,
-                error=error_text,
-                outcome="crashed",
-                failure_limit=1 if is_systemic else None,
-                release_claim=False,
-                end_run=False,
-                event_payload_extra=extra,
-            )
+            if _is_worker_strategy_failure(error_text):
+                routed, _, _ = _kb.route_worker_block_to_orchestrator(
+                    conn, tid,
+                    reason=f"worker strategy failure: {error_text}",
+                )
+                tripped = False if routed else _record_task_failure(
+                    conn, tid,
+                    error=error_text,
+                    outcome="crashed",
+                    failure_limit=1 if is_systemic else None,
+                    release_claim=False,
+                    end_run=False,
+                    event_payload_extra=extra,
+                )
+            else:
+                tripped = _record_task_failure(
+                    conn, tid,
+                    error=error_text,
+                    outcome="crashed",
+                    failure_limit=1 if is_systemic else None,
+                    release_claim=False,
+                    end_run=False,
+                    event_payload_extra=extra,
+                )
         if tripped:
             auto_blocked.append(tid)
     return auto_blocked
