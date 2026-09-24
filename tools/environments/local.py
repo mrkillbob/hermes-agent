@@ -742,8 +742,11 @@ def _trusted_local_terminal_session() -> bool:
 
 
 def _make_run_env(env: dict) -> dict:
-    """Build a run environment with a sane PATH and provider-var stripping."""
-    source = dict(os.environ | env)
+    """Build a run environment with a sane PATH and provider-var stripping. The process env is
+    the LAUNCH profile's; under a routed home override its ``.env`` residue is dropped first
+    (``strip_launch_profile_env``, a no-op for the launch profile) so the backend's own ``env``
+    and the served profile's declared passthrough names are what the child sees."""
+    source = dict(strip_launch_profile_env(os.environ.copy()) | env)
     result = _scrubbed_env(
         [(source, True)], frozenset(),
         lambda p: _prepend_git_bash_dirs(_append_missing_sane_path_entries(p)),
