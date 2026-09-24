@@ -4,7 +4,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { PTY_TICKET_TIMEOUT_MS } from "@/lib/pty-reconnect";
+import {
+  PTY_RECONNECT_MAX_ATTEMPTS,
+  PTY_RECONNECT_MAX_MS,
+  PTY_TICKET_TIMEOUT_MS,
+} from "@/lib/pty-reconnect";
 
 class FakeFitAddon {
   fit() {}

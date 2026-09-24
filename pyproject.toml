@@ -610,12 +610,6 @@ include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*",
 
 [tool.setuptools.package-data]
 hermes_cli = ["observability/schemas/*.json", "data/*.json", "local_runtime/*.json"]
-
-[tool.setuptools.data-files]
-# Federation is a checked-in, user-auditable manifest rather than Python
-# code. Install it beside the environment so the CLI remains functional from
-# a wheel as well as from a source checkout.
-"configs/federation" = ["configs/federation/roles.json"]
 # gateway/assets/ ships status_phrases.yaml and the Telegram BotFather
 # screenshot. Without this, sealed venvs (uv2nix) silently lose both —
 # status phrases fall back to the tiny hardcoded set and the Telegram
@@ -629,9 +623,17 @@ plugins = ["**/plugin.yaml", "**/plugin.yml"]
 # Bot Desktop starts Xvnc + Xfce through a shell launcher and seeds the wallpaper; both are read
 # via Path(__file__).parent in tools/bot_desktop/runtime.py and vanish from sealed wheels otherwise.
 tools = ["bot_desktop/launcher.sh", "bot_desktop/wallpaper.png"]
+
+[tool.setuptools.data-files]
+# Federation is a checked-in, user-auditable manifest rather than Python
+# code. Install it beside the environment so the CLI remains functional from
+# a wheel as well as from a source checkout.
+"configs/federation" = ["configs/federation/roles.json"]
 # The curated catalog is bare YAML data, not a Python package. Keep it in
 # sealed installs so plugin removal entries remain enforceable offline.
-"plugin-catalog" = ["*.yaml"]
+# data-files sources are project-root-relative, unlike package-data's
+# package-relative globs, so this must carry the directory prefix.
+"plugin-catalog" = ["plugin-catalog/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

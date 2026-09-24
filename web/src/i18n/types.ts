@@ -28,6 +28,8 @@ export interface Translations {
     delete: string;
     refresh: string;
     retry: string;
+    loadFailed?: string;
+    loadFailedDetails?: string;
     search: string;
     loading: string;
     create: string;

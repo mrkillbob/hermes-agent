@@ -10,6 +10,8 @@ export const en: Translations = {
     delete: "Delete",
     refresh: "Refresh",
     retry: "Retry",
+    loadFailed: "Could not load {what}. Check that the dashboard server is running and click Retry.",
+    loadFailedDetails: "Details: {detail}",
     search: "Search...",
     loading: "Loading...",
     create: "Create",

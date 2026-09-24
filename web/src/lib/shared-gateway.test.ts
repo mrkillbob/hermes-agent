@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { ApiError } from "./api-error";
 import {
+  gatewayActionFailedMessage,
   servedProfileRefusal,
   sharedGatewayProfiles,
 } from "./shared-gateway";
