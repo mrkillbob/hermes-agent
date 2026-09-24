@@ -183,7 +183,7 @@ def _print_manual_continuation(cmd: list[str], exc: OSError) -> None:
     print(f"    {subprocess.list2cmdline(cmd)}")
 
 
-def _post_swap_cwd() -> str:
+def _post_swap_cwd(project_root: str | Path | None = None) -> str:
     """Directory the child must start in so a stale editable finder can still import.
 
     ``python -m`` puts the process cwd on ``sys.path[0]``, not the checkout. Invoking
@@ -191,6 +191,12 @@ def _post_swap_cwd() -> str:
     installed finder. If that map is stale, the child dies in ``import hermes_cli.main``
     before the dependency sync can refresh it (#119466).
     """
+    # ``__file__`` can point into the old installed package: the updater is
+    # allowed to start from an installed console script before replacing the
+    # checkout.  The hand-off payload records the checkout that was swapped,
+    # so prefer it and avoid importing a mixed old/new module graph.
+    if project_root is not None:
+        return str(Path(project_root).resolve())
     return str(Path(__file__).resolve().parent.parent)
 
 
@@ -212,7 +218,8 @@ def continue_update_in_fresh_interpreter(payload: dict[str, Any], *, argv_tail: 
     handoff_path = write_handoff(payload)
     cmd = post_swap_command(handoff_path, argv_tail)
     env = post_swap_child_env()
-    cwd = _post_swap_cwd()
+    project_root = payload.get("project_root")
+    cwd = _post_swap_cwd(project_root) if project_root else _post_swap_cwd()
     logger.debug("Post-swap hand-off → %s", subprocess.list2cmdline(cmd))
     sys.stdout.flush()
     sys.stderr.flush()

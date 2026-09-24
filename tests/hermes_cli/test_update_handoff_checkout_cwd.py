@@ -96,6 +96,13 @@ def _run(cmd_cwd, env):
     )
 
 
+def test_payload_project_root_overrides_installed_module_location(tmp_path):
+    checkout = tmp_path / "fresh-checkout"
+    checkout.mkdir()
+
+    assert handoff._post_swap_cwd(checkout) == str(checkout.resolve())
+
+
 def test_both_handoff_launches_use_the_checkout_cwd(monkeypatch, tmp_path):
     recorded = []
     checkout = tmp_path / "checkout"

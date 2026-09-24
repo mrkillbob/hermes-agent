@@ -110,6 +110,33 @@ def test_runtime_authorizes_mixed_exact_source_and_bounded_sanitized_text(tmp_pa
     assert "policy_digest" not in wire
 
 
+def test_anthropic_replays_readonly_tool_use_without_raw_local_path(tmp_path):
+    """Provider-generated Anthropic tool history keeps its wire shape but not local paths."""
+
+    agent = _agent(tmp_path)
+    agent.provider = "anthropic"
+    agent.api_mode = "anthropic_messages"
+    local_path = str(tmp_path / "private" / "wire.txt")
+    kwargs = {
+        "model": "claude-test",
+        "messages": [{
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_read_1",
+                "name": "mcp__read_file",
+                "input": {"path": local_path},
+            }],
+        }],
+    }
+
+    authorized, _ = authorize_agent_sdk_kwargs(agent, kwargs)
+
+    block = authorized["messages"][0]["content"][0]
+    assert block["type"] == "tool_use"
+    assert block["input"]["path"] != local_path
+
+
 def test_runtime_granted_caps_default_to_the_configured_request_caps(tmp_path):
     registry = SourceProvenanceRegistry()
     path = tmp_path / "large-source.txt"

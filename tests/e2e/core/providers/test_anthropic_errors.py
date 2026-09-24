@@ -107,7 +107,7 @@ def test_stream_drop_mid_thinking_retries_without_duplicate_persisted_content(ri
     partial = "PARTIAL-THOUGHT " * 6
     rig = rig_factory([
         DropStream(Reply([Thinking(partial, "sig-never-sent"), Text("LOST-ANSWER")], chunk_chars=16), after_deltas=2),
-        Reply([Thinking("Clean retry reasoning.", "EqRetrySig+/=="), Text("RECOVERED-ANSWER")]),
+        Reply([Thinking("Clean retry reasoning.", "EqRetrySig+/AbCdEfGhIjKlMnOp=="), Text("RECOVERED-ANSWER")]),
     ], config={"agent": {"api_max_retries": 2}})
     proc = rig.run("chat", "-q", "hello", "-Q")
     assert proc.returncode == 0, proc.stderr[-2000:]
@@ -133,7 +133,7 @@ def test_stream_drop_then_next_turn_replays_only_the_completed_signature(rig_fac
     thinking byte-exact — never the dropped stream's unsigned fragment."""
     rig = rig_factory([
         DropStream(Reply([Thinking("FRAGMENT " * 8, "sig-never-sent"), Text("x")], chunk_chars=12), after_deltas=2),
-        Reply([Thinking("Completed reasoning.", "EqCompleted+/Sig=="), Text("TURN-ONE")]),
+        Reply([Thinking("Completed reasoning.", "EqCompleted+/AbCdEfGhIjKlMnOp=="), Text("TURN-ONE")]),
         Reply([Text("TURN-TWO")]),
     ], config={"agent": {"api_max_retries": 2}})
     first = rig.run("chat", "-q", "one", "-Q")
@@ -145,6 +145,6 @@ def test_stream_drop_then_next_turn_replays_only_the_completed_signature(rig_fac
     assert second.returncode == 0 and "TURN-TWO" in second.stdout, second.stderr[-2000:]
     last = rig.srv.main_requests()[-1]["body"]
     prior = [m for m in last["messages"] if m["role"] == "assistant"]
-    assert len(prior) == 1 and thinking_of(prior[0]) == [("Completed reasoning.", "EqCompleted+/Sig==")], dump(last)
+    assert len(prior) == 1 and thinking_of(prior[0]) == [("Completed reasoning.", "EqCompleted+/AbCdEfGhIjKlMnOp==")], dump(last)
     assert "FRAGMENT" not in json.dumps(last["messages"])
     assert not rig.srv.schema_errors(), rig.srv.schema_errors()

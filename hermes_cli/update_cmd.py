@@ -1395,6 +1395,7 @@ def _post_swap_payload(
 
     return {
         "swap": swap, "branch": branch, "pre_pull_sha": pre_pull_sha, "is_fork": bool(is_fork),
+        "project_root": str(_m().PROJECT_ROOT),
         "gateway_mode": bool(gateway_mode),
         "had_desktop_app_before_update": bool(had_desktop_app_before_update),
         "pre_update_snapshot_id": pre_update_snapshot_id,

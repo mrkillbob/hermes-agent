@@ -934,6 +934,28 @@ def _typed_payload_mapping_item(
     if is_anthropic_thinking_replay and key == "signature":
         typed[typed_key] = AnthropicThinkingReplaySegment(item)
         return True
+    if (
+        allow_anthropic_thinking_replay
+        and value.get("type") == "tool_use"
+        and key == "input"
+        and isinstance(direct_name, str)
+        and direct_name in _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES
+        and isinstance(item, Mapping)
+    ):
+        # Anthropic sends the assistant's prior tool_use block back verbatim on
+        # the next request.  Read-only calls have already executed locally;
+        # redact their generated arguments while preserving the object shape
+        # required by the Messages API.  This is intentionally limited to the
+        # exact read-only tool set and the provider-generated tool_use shape.
+        typed[key] = _typed_payload(
+            item,
+            grant_texts,
+            used_grants,
+            sanitized_cap=sanitized_cap,
+            generated_context=True,
+            redact_generated_context=True,
+        )
+        return True
     if is_codex_reasoning_replay and key == "summary":
         typed[typed_key] = _typed_payload(
             item,

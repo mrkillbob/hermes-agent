@@ -42,6 +42,8 @@ _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES = frozenset(
         "read_file",
         "web_extract",
         "web_search",
+        # Anthropic's OAuth adapter uses the wire alias for this built-in tool.
+        "mcp__read_file",
     }
 )
 _GITHUB_LIST_TERMINAL_MAX_ROWS = 100

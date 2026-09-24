@@ -37,7 +37,8 @@ jobs:
           sudo apt-get install -y -qq \
             xvfb \
             libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
-            xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64
+            xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64 \
+            libx11-dev
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
