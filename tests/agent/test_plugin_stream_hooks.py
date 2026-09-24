@@ -386,6 +386,9 @@ def test_finish_chat_stream_recovers_inline_reasoning_content():
 
     call = cch._StreamingCall.__new__(cch._StreamingCall)
     call.agent = _agent()
+    call._stream_stale_timeout = None
+    call._stale_kill_requested = False
+    call.last_chunk_time = {"t": time.time()}
     deltas = ["<think>", "Let me", " check config", "</think>", "The answer is 42."]
     resp = call._finish_chat_stream(None, "assistant", deltas, [], {}, "stop", "MiniMax-M3", None,
                                     flush_pending=lambda: None)
