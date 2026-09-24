@@ -113,6 +113,6 @@ describe('federated fleet status metrics', () => {
 
     const button = screen.getByRole('button', { name: 'Federated Kanban runner status' })
     expect(button.textContent).toContain('Kanban 1')
-    expect(button.getAttribute('title')).toBe('Build · windows')
+    expect(button.getAttribute('title')).toBeNull()
   })
 })

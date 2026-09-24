@@ -1,4 +1,4 @@
-import { Button, cn, Codicon, host, useQuery } from '@hermes/plugin-sdk'
+import { Button, cn, Codicon, host, Tip, useQuery } from '@hermes/plugin-sdk'
 import { useMemo } from 'react'
 
 import { fetchFleetStatus, FLEET_STATUS_KEY } from './api'
@@ -223,15 +223,16 @@ export function FleetStatusbar({ status }: { status: FleetStatusResponse }) {
     : 'No active federated Kanban cards'
 
   return (
-    <button
-      aria-label="Federated Kanban runner status"
-      className="inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground"
-      onClick={() => host.navigate('/kanban')}
-      title={title}
-      type="button"
-    >
-      <Codicon name="project" size="0.7rem" />
-      <span>{fleetStatusbarCopy(status)}</span>
-    </button>
+    <Tip label={title} placement="toolbar">
+      <button
+        aria-label="Federated Kanban runner status"
+        className="inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground"
+        onClick={() => host.navigate('/kanban')}
+        type="button"
+      >
+        <Codicon name="project" size="0.7rem" />
+        <span>{fleetStatusbarCopy(status)}</span>
+      </button>
+    </Tip>
   )
 }
