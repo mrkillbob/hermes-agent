@@ -14,6 +14,7 @@ import subprocess
 import shutil
 import sys
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,49 @@ def test_board_empty(client):
     assert data["tenants"] == []
     assert data["assignees"] == []
     assert data["latest_event_id"] == 0
+
+
+def test_fleet_status_returns_sanitized_runner_and_task_telemetry(client, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config_readonly",
+        lambda: {"kanban": {"federated": {"enabled": True, "coordinator_url": "http://fleet"}}},
+    )
+    monkeypatch.setattr("hermes_cli.config.get_env_value_prefer_dotenv", lambda _name: "secret")
+
+    class FakeFleetClient:
+        def __init__(self, _url, *, token, timeout):
+            assert token == "secret"
+            assert timeout == 2.0
+
+        def health(self):
+            return {"ok": True}
+
+        def list_runners(self):
+            return [{
+                "node_id": "mac",
+                "profile": "coding-expert",
+                "capability": {"platform": "darwin"},
+                "last_output_tokens": 240,
+                "last_output_duration_ms": 4000,
+                "last_output_tps": 60.0,
+                "metrics_updated_at": 100.0,
+            }]
+
+        def list_tasks(self):
+            return [SimpleNamespace(
+                task_id="fleet-1", title="Build", status="completed", node_id="mac",
+                runner_profile="coding-expert", attempt=1, updated_at=100.0, error=None,
+                output_tokens=240, duration_ms=4000, output_tps=60.0,
+            )]
+
+    monkeypatch.setattr("hermes_cli.fleet_client.FleetClient", FakeFleetClient)
+    response = client.get("/api/plugins/kanban/fleet/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["runners"][0]["last_output_tps"] == 60.0
+    assert data["tasks"][0]["output_tps"] == 60.0
+    assert "secret" not in json.dumps(data).lower()
 
 
 # ---------------------------------------------------------------------------

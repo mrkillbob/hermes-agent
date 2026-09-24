@@ -30,8 +30,9 @@ import {
   useValue
 } from '@hermes/plugin-sdk'
 
-import { $boardSlug, bindApi, boardKey, fetchBoard, useKanbanScope } from './api'
+import { $boardSlug, bindApi, boardKey, fetchBoard, fetchFleetStatus, FLEET_STATUS_KEY, useKanbanScope } from './api'
 import { KanbanBoardPage } from './board'
+import { FleetStatusbar } from './fleet-status'
 import { KANBAN_LOCALES } from './i18n'
 import { $newTaskLane, useKanban } from './ui'
 
@@ -78,6 +79,22 @@ function KanbanCount() {
   )
 }
 
+function KanbanStatusbar() {
+  const { data } = useQuery({
+    queryFn: fetchFleetStatus,
+    queryKey: FLEET_STATUS_KEY,
+    refetchInterval: 5_000,
+    retry: false,
+    staleTime: 2_000
+  })
+
+  if (data?.enabled) {
+    return <FleetStatusbar status={data} />
+  }
+
+  return <KanbanCount />
+}
+
 const plugin: HermesPlugin = {
   id: 'kanban',
   name: 'Kanban',
@@ -115,7 +132,39 @@ const plugin: HermesPlugin = {
         id: 'count',
         area: STATUSBAR_AREAS.right,
         order: 80,
-        render: () => <KanbanCount />
+        render: () => <KanbanStatusbar />
+      },
+      {
+        id: 'open',
+        area: PALETTE_AREA,
+        data: {
+          id: 'kanban.open',
+          label: 'Kanban: Open board',
+          keywords: ['kanban', 'board', 'tasks', 'agents'],
+          run: () => host.navigate('/kanban')
+        } satisfies PaletteContribution
+      },
+      {
+        id: 'new-task',
+        area: PALETTE_AREA,
+        data: {
+          id: 'kanban.newTask',
+          action: 'kanban.newTask',
+          label: ctx.i18n.t('newTaskCommand'),
+          keywords: ['kanban', 'task', 'new', 'create', 'triage'],
+          run: newTask
+        } satisfies PaletteContribution
+      },
+      {
+        id: 'new-task',
+        area: KEYBINDS_AREA,
+        data: {
+          id: 'kanban.newTask',
+          category: 'view',
+          defaults: ['mod+alt+n'],
+          label: ctx.i18n.t('newTaskCommand'),
+          run: newTask
+        } satisfies KeybindContribution
       }
     ])
 

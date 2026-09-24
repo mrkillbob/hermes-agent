@@ -74,7 +74,11 @@ def test_runner_uses_windows_executable_as_an_argument_vector_and_reports_comple
 
     def execute(argv):
         calls.append(argv)
-        return SimpleNamespace(returncode=0, stdout="done", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"type":"result","text":"done","tokens":{"output":240},"duration_ms":4000}\n',
+            stderr="",
+        )
 
     runner = FleetRunner(
         "windows",
@@ -94,11 +98,33 @@ def test_runner_uses_windows_executable_as_an_argument_vector_and_reports_comple
         "coding-expert",
         "-m",
         "gpt-5",
-        "-z",
+        "-q",
         "Run the build",
+        "--format",
+        "stream-json",
     ]]
     assert coordinator.completed[0][0:2] == ("global-task-1", "claim-1")
     assert coordinator.failed == []
+    assert coordinator.completed[0][2]["telemetry"].output_tps == 60.0
+
+
+def test_runner_omits_telemetry_when_stream_has_no_terminal_result():
+    coordinator = _Coordinator()
+
+    runner = FleetRunner(
+        "windows",
+        coordinator,
+        "hermes",
+        profiles=["coding-expert"],
+        projects=["LunaBot"],
+        capabilities=[coordinator.capability],
+        liveness_check=lambda: True,
+        executor=lambda _argv: SimpleNamespace(returncode=0, stdout="partial output", stderr=""),
+    )
+
+    assert runner.run_once(now=100.0) is True
+    assert coordinator.completed[0][2]["telemetry"] is None
+    assert coordinator.completed[0][2]["result"] == "partial output"
 
 
 def test_runner_does_not_register_or_claim_when_desktop_is_not_live():
