@@ -11,14 +11,17 @@ import { defineConfig } from '@playwright/test'
  *  - no visual baselines / always-on screenshots; artifacts only on failure.
  *  - one worker: every spec owns a real Electron + `hermes serve`; running
  *    them concurrently on a loaded runner is the timing margin we refuse.
- *  - 180 s per test (green runs take 6-36 s): a stalled stream fails the one
- *    test fast instead of the 30-min job timeout cancelling the whole lane
- *    before it reports.
+ *  - 360 s per test (green runs take 6-36 s on the runner this suite was
+ *    tuned against; this fork falls back to a smaller shared runner without
+ *    access to that one, see backend-health.ts/backend-ready.ts, so the two
+ *    backend-boot budgets alone can approach the old 180 s ceiling before any
+ *    actual test step runs): a stalled stream still fails the one test fast
+ *    instead of the job timeout cancelling the whole lane before it reports.
  */
 export default defineConfig({
   testDir: '.',
   testMatch: '*.spec.ts',
-  timeout: 180_000,
+  timeout: 360_000,
   expect: { timeout: 60_000 },
   retries: 0,
   workers: 1,

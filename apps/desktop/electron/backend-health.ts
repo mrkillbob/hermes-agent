@@ -1,4 +1,8 @@
-export const DEFAULT_BACKEND_READY_TIMEOUT_MS = 45_000
+// Health-check budget for the window AFTER the backend's port is already announced (that has
+// its own, longer, cold-start-aware budget in backend-ready.ts). Normally sub-second once the
+// socket is bound, but a CPU-constrained host (a shared CI runner, a busy real machine) can
+// still leave FastAPI/uvicorn finishing startup work for a while after the bind.
+export const DEFAULT_BACKEND_READY_TIMEOUT_MS = 90_000
 export const DEFAULT_BACKEND_READY_POLL_MS = 500
 // A cold backend can stall its event loop for tens of seconds while Windows
 // scans and byte-compiles the gateway import tree. At the default 15s socket
