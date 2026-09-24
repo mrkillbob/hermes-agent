@@ -52,7 +52,11 @@ jobs:
     name: Review label gate
     if: inputs.ci_review || inputs.mcp_catalog || inputs.supply_chain
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Checkout alone has been observed taking >5 min on this fork right after a
+    # large upstream-sync merge (materializing/transferring the huge
+    # refs/pull/<N>/merge synthetic commit is slow); the job's own work is
+    # seconds. Generous headroom so a slow-but-succeeding fetch isn't killed.
+    timeout-minutes: 20
     outputs:
       ci_reviewed: ${{ steps.label-check.outputs.ci_reviewed }}
       review_status: ${{ steps.build-status.outputs.review_status }}

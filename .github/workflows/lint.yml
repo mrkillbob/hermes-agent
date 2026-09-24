@@ -31,7 +31,11 @@ jobs:
     name: ruff + ty diff
     if: inputs.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Checkout alone has been observed taking >10 min on this fork right after
+    # a large upstream-sync merge (materializing/transferring the huge
+    # refs/pull/<N>/merge synthetic commit is slow); the job's own work is
+    # seconds. Generous headroom so a slow-but-succeeding fetch isn't killed.
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
