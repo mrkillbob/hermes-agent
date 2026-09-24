@@ -4,7 +4,7 @@ import time
 import pytest
 
 from hermes_cli.fleet_client import FleetClient, FleetTransportError
-from hermes_cli.fleet_protocol import FleetTask, RunnerCapability, TaskRequirement
+from hermes_cli.fleet_protocol import FleetTask, RunnerCapability, TaskRequirement, TaskTelemetry
 from hermes_cli.fleet_server import FleetServer
 from hermes_cli.fleet_store import FleetStore
 
@@ -71,7 +71,10 @@ def test_claim_cas_and_completion_authorization_are_enforced(tmp_path):
         assert first is not None
         assert second is None
         assert client.complete_task("task-1", "not-the-claim", result="bad") is False
-        assert client.complete_task("task-1", first.claim_id, result="done", now=102.0) is True
+        telemetry = TaskTelemetry(output_tokens=100, duration_ms=2000)
+        assert client.complete_task("task-1", first.claim_id, result="done", telemetry=telemetry, now=102.0) is True
+        assert client.list_tasks()[0].output_tps == 50.0
+        assert client.list_runners()[0]["last_output_tps"] == 50.0
 
 
 def test_expired_heartbeat_is_not_claimable_over_http(tmp_path):

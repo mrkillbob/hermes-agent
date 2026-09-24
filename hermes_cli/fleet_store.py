@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from hermes_cli.fleet_protocol import FleetTask, RunnerCapability, TaskRequirement
+from hermes_cli.fleet_protocol import FleetTask, RunnerCapability, RunnerTelemetry, TaskRequirement, TaskTelemetry
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,9 @@ class TaskRecord:
     error: str | None
     created_at: float
     updated_at: float
+    output_tokens: int | None = None
+    duration_ms: int | None = None
+    output_tps: float | None = None
 
 
 def _now() -> float:
@@ -94,6 +97,10 @@ class FleetStore:
                     last_seen REAL NOT NULL,
                     expires_at REAL NOT NULL,
                     active_load INTEGER NOT NULL DEFAULT 0,
+                    last_output_tokens INTEGER,
+                    last_output_duration_ms INTEGER,
+                    last_output_tps REAL,
+                    metrics_updated_at REAL,
                     PRIMARY KEY (node_id, profile)
                 );
                 CREATE TABLE IF NOT EXISTS fleet_tasks (
@@ -110,6 +117,9 @@ class FleetStore:
                     attempt INTEGER NOT NULL DEFAULT 0,
                     result TEXT,
                     error TEXT,
+                    output_tokens INTEGER,
+                    duration_ms INTEGER,
+                    output_tps REAL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -124,6 +134,28 @@ class FleetStore:
                 );
                 """
             )
+            self._ensure_columns(
+                connection,
+                "fleet_runners",
+                {
+                    "last_output_tokens": "INTEGER",
+                    "last_output_duration_ms": "INTEGER",
+                    "last_output_tps": "REAL",
+                    "metrics_updated_at": "REAL",
+                },
+            )
+            self._ensure_columns(
+                connection,
+                "fleet_tasks",
+                {"output_tokens": "INTEGER", "duration_ms": "INTEGER", "output_tps": "REAL"},
+            )
+
+    @staticmethod
+    def _ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     @property
     def journal_mode(self) -> str:
@@ -161,14 +193,40 @@ class FleetStore:
             self._event(connection, None, "runner_registered", now)
 
     def heartbeat_runner(
-        self, node_id: str, profile: str, *, now: float | None = None, ttl: float = 30.0
+        self,
+        node_id: str,
+        profile: str,
+        *,
+        telemetry: RunnerTelemetry | None = None,
+        now: float | None = None,
+        ttl: float = 30.0,
     ) -> bool:
         now = _now() if now is None else now
         with self._connection() as connection:
-            cursor = connection.execute(
-                "UPDATE fleet_runners SET last_seen=?, expires_at=? WHERE node_id=? AND profile=?",
-                (now, now + ttl, node_id, profile),
-            )
+            if telemetry is None:
+                cursor = connection.execute(
+                    "UPDATE fleet_runners SET last_seen=?, expires_at=? WHERE node_id=? AND profile=?",
+                    (now, now + ttl, node_id, profile),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE fleet_runners
+                    SET last_seen=?, expires_at=?, last_output_tokens=?, last_output_duration_ms=?,
+                        last_output_tps=?, metrics_updated_at=?
+                    WHERE node_id=? AND profile=?
+                    """,
+                    (
+                        now,
+                        now + ttl,
+                        telemetry.last_output_tokens,
+                        telemetry.last_output_duration_ms,
+                        telemetry.last_output_tps,
+                        telemetry.metrics_updated_at,
+                        node_id,
+                        profile,
+                    ),
+                )
             if cursor.rowcount:
                 self._event(connection, None, "runner_heartbeat", now)
             return bool(cursor.rowcount)
@@ -293,14 +351,30 @@ class FleetStore:
             return self._claim(row)
 
     def complete_task(
-        self, task_id: str, claim_id: str, *, result: str = "", now: float | None = None
+        self,
+        task_id: str,
+        claim_id: str,
+        *,
+        result: str = "",
+        telemetry: TaskTelemetry | None = None,
+        now: float | None = None,
     ) -> bool:
-        return self._finish(task_id, claim_id, status="completed", result=result, error=None, now=now)
+        return self._finish(
+            task_id,
+            claim_id,
+            status="completed",
+            result=result,
+            error=None,
+            telemetry=telemetry,
+            now=now,
+        )
 
     def fail_task(
         self, task_id: str, claim_id: str, *, error: str, now: float | None = None
     ) -> bool:
-        return self._finish(task_id, claim_id, status="failed", result=None, error=error, now=now)
+        return self._finish(
+            task_id, claim_id, status="failed", result=None, error=error, telemetry=None, now=now
+        )
 
     def retry_task(self, task_id: str, *, now: float | None = None) -> bool:
         now = _now() if now is None else now
@@ -308,7 +382,9 @@ class FleetStore:
             connection.execute("BEGIN IMMEDIATE")
             updated = connection.execute(
                 """
-                UPDATE fleet_tasks SET status='pending', result=NULL, error=NULL, updated_at=?
+                UPDATE fleet_tasks
+                SET status='pending', result=NULL, error=NULL, output_tokens=NULL,
+                    duration_ms=NULL, output_tps=NULL, updated_at=?
                 WHERE task_id=? AND status IN ('failed', 'cancelled')
                 """,
                 (now, task_id),
@@ -340,6 +416,7 @@ class FleetStore:
         status: str,
         result: str | None,
         error: str | None,
+        telemetry: TaskTelemetry | None,
         now: float | None,
     ) -> bool:
         now = _now() if now is None else now
@@ -354,11 +431,38 @@ class FleetStore:
                 return False
             connection.execute(
                 """
-                UPDATE fleet_tasks SET status=?, result=?, error=?, lease_expires_at=NULL, updated_at=?
+                UPDATE fleet_tasks SET status=?, result=?, error=?, output_tokens=?, duration_ms=?,
+                    output_tps=?, lease_expires_at=NULL, updated_at=?
                 WHERE task_id=? AND claim_id=? AND status='running'
                 """,
-                (status, result, error, now, task_id, claim_id),
+                (
+                    status,
+                    result,
+                    error,
+                    telemetry.output_tokens if telemetry else None,
+                    telemetry.duration_ms if telemetry else None,
+                    telemetry.output_tps if telemetry else None,
+                    now,
+                    task_id,
+                    claim_id,
+                ),
             )
+            if telemetry is not None:
+                connection.execute(
+                    """
+                    UPDATE fleet_runners
+                    SET last_output_tokens=?, last_output_duration_ms=?, last_output_tps=?, metrics_updated_at=?
+                    WHERE node_id=? AND profile=?
+                    """,
+                    (
+                        telemetry.output_tokens,
+                        telemetry.duration_ms,
+                        telemetry.output_tps,
+                        now,
+                        row["node_id"],
+                        row["runner_profile"],
+                    ),
+                )
             connection.execute(
                 """
                 UPDATE fleet_runners SET active_load=MAX(active_load-1, 0)
@@ -413,6 +517,7 @@ class FleetStore:
         with self._connection() as connection:
             rows = connection.execute(
                 "SELECT node_id, profile, capability_json, last_seen, expires_at, active_load "
+                ", last_output_tokens, last_output_duration_ms, last_output_tps, metrics_updated_at "
                 "FROM fleet_runners ORDER BY node_id, profile"
             ).fetchall()
         runners = []
@@ -427,6 +532,10 @@ class FleetStore:
                     "expires_at": row["expires_at"],
                     "active_load": row["active_load"],
                     "online": row["expires_at"] > now,
+                    "last_output_tokens": row["last_output_tokens"],
+                    "last_output_duration_ms": row["last_output_duration_ms"],
+                    "last_output_tps": row["last_output_tps"],
+                    "metrics_updated_at": row["metrics_updated_at"],
                 }
             )
         return runners
@@ -449,6 +558,9 @@ class FleetStore:
             error=row["error"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            output_tokens=row["output_tokens"],
+            duration_ms=row["duration_ms"],
+            output_tps=row["output_tps"],
         )
 
     @staticmethod
