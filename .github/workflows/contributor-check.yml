@@ -26,15 +26,31 @@ jobs:
         id: check-emails
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          # Read this PR's commit metadata from GitHub instead of fetching the
-          # repository's full history. Walk first parents from the PR head so
-          # imported upstream commits in reconciliation merges stay excluded.
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/commits" \
-            --jq '.[] | {sha, parents: [.parents[].sha], email: .commit.author.email, author: .commit.author.name}' \
-            > /tmp/pr-commits.jsonl
+          # Read commit metadata from GitHub instead of fetching the repository's full history.
+          # Pull-request runs use the PR commit list. A post-merge push has no pull_request
+          # payload, so resolve the PR associated with the merge commit first; this preserves
+          # the same first-parent walk and keeps imported upstream commits excluded.
+          if [ -z "$PR" ]; then
+            PR=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
+              --jq '.[0].number // empty')
+            if [ -n "$PR" ]; then
+              HEAD_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.head.sha')
+            fi
+          fi
+
+          if [ -n "$PR" ]; then
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/commits" \
+              --jq '.[] | {sha, parents: [.parents[].sha], email: .commit.author.email, author: .commit.author.name}' \
+              > /tmp/pr-commits.jsonl
+          else
+            # Direct pushes have no PR to enumerate; inspect the pushed commit itself.
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" \
+              --jq '{sha, parents: [.parents[].sha], email: .commit.author.email, author: .commit.author.name}' \
+              > /tmp/pr-commits.jsonl
+          fi
           NEW_EMAILS=$(python3 - <<'PYEOF'
           import json
           import os
