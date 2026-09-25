@@ -33,7 +33,6 @@ from typing import Dict, Any, Optional, List, Tuple, Set
 
 import yaml
 
-from hermes_cli.cli_output import line_input
 from hermes_cli.colors import Colors, color
 from hermes_cli import managed_scope
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
@@ -1321,7 +1320,11 @@ def _persist_migration(config: Dict[str, Any]) -> None:
 
 def _prompt_and_save_env(name: str, info: Dict[str, Any], prompt: str, results: Dict[str, Any]) -> bool:
     """Prompt for one env var (masked when ``info['password']``), save it, record it; False if skipped."""
-    value = masked_secret_prompt(prompt) if info.get("password") else line_input(prompt).strip()
+    if info.get("password"):
+        value = masked_secret_prompt(prompt)
+    else:
+        from hermes_cli.cli_output import line_input
+        value = line_input(prompt).strip()
     if not value:
         return False
     save_env_value(name, value)
@@ -1512,6 +1515,7 @@ def _offer_skill_config_vars(missing_skill_config: List[Dict[str, Any]], results
     for var in missing_skill_config:
         default = var.get("default", "")
         default_hint = f" (default: {default})" if default else ""
+        from hermes_cli.cli_output import line_input
         value = line_input(f"  {var['prompt']}{default_hint}: ").strip() or str(default or "")
         if value:
             _set_nested(config, f"{SKILL_CONFIG_PREFIX}.{var['key']}", value)
