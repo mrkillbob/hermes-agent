@@ -85,6 +85,22 @@ class TestSlugValidation:
         assert kb._normalize_board_slug("   ") is None
 
 
+class TestBoardAllowlist:
+    def test_configured_allowlist_rejects_unapproved_creation(self, fresh_home, monkeypatch):
+        import hermes_cli.config as config
+
+        monkeypatch.setattr(
+            config,
+            "load_config",
+            lambda: {"kanban": {"allowed_boards": ["hermes-agent", "lunabot"]}},
+        )
+
+        kb.create_board("hermes-agent")
+        kb.create_board("lunabot")
+        with pytest.raises(ValueError, match="not allowed"):
+            kb.create_board("research-lab")
+
+
 # ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
@@ -343,6 +359,4 @@ class TestCLI:
         assert titlesA == ["Task A"]
         assert titlesB == ["Task B"]
         assert titlesD == []
-
-
 
