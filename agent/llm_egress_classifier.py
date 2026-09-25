@@ -486,7 +486,11 @@ def _typed_payload_mapping(
                 or value.get("name") == "read_file"
             )
         )
-        output_call_id = value.get("tool_call_id") or value.get("call_id")
+        output_call_id = (
+            value.get("tool_call_id")
+            or value.get("call_id")
+            or value.get("tool_use_id")
+        )
         is_recognized_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in syntax_tool_call_ids
@@ -540,7 +544,7 @@ def _typed_payload_mapping(
             and output_call_id in read_file_projection_tool_call_ids
             and (
                 value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
+                or value.get("type") in {"function_call_output", "tool_result"}
             )
         )
         is_web_replay_tool_result = (

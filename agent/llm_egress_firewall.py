@@ -1839,7 +1839,7 @@ class LLMEgressFirewall:
         state_dir: Path | str,
         *,
         max_serialized_bytes: int = 262_144,
-        max_sanitized_bytes: int = 32_768,
+        max_sanitized_bytes: int = 262_144,
         max_sanitized_segment_bytes: int = 32_768,
         max_conservative_tokens: int = 87_382,
         max_granted_serialized_bytes: int | None = None,

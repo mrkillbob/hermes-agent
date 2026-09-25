@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 
-from hermes_cli.cli_output import line_input
 from hermes_cli.model_setup_flows_common import _say
 
 
@@ -68,6 +67,7 @@ def _whatsapp_choose_mode(get_env_value, save_env_value):
 
 def _whatsapp_allowed_users(wa_mode: str, get_env_value, save_env_value) -> None:
     """Step 3 of ``hermes whatsapp``: show / set WHATSAPP_ALLOWED_USERS."""
+    from hermes_cli.cli_output import line_input
     current_users = get_env_value("WHATSAPP_ALLOWED_USERS") or ""
     if current_users:
         print(f"✓ Allowed users: {current_users}")

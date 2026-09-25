@@ -652,7 +652,11 @@ def authorize_agent_sdk_kwargs(
         # Bounded by the same ceiling already enforced on the request as a
         # whole (max_serialized_bytes' default), never a smaller ad hoc
         # number.
-        getattr(agent, "_llm_egress_max_sanitized_bytes", 32_768)
+        getattr(
+            agent,
+            "_llm_egress_max_sanitized_bytes",
+            32_768 if getattr(agent, "_llm_egress_aux_task", "") == "vision" else 262_144,
+        )
     )
     used_grants: dict[str, SourceGrant] = {}
     # Protected providers must use the bounded-context path regardless of

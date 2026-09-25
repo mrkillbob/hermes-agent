@@ -2559,6 +2559,11 @@ def _auxiliary_egress_binding(
         "_llm_egress_policy_digest": policy_digest,
         "_llm_egress_state_dir": Path(get_hermes_home()) / "egress",
     }
+    if str(relay.get("task") or "") == "vision":
+        # Vision requests intentionally retain the strict default sanitized
+        # aggregate cap; unlike compression they must not inherit the larger
+        # allowance used for ordinary protected history.
+        attrs["_llm_egress_aux_task"] = "vision"
     if str(relay.get("task") or "") == "compression":
         attrs.update(
             _llm_egress_max_serialized_bytes=2_000_000,
