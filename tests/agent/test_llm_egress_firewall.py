@@ -694,6 +694,19 @@ def test_base64_payload_split_by_whitespace_is_still_rejected(tmp_path):
     assert "base64_payload" in exc_info.value.decision.reason_codes
 
 
+def test_ordinary_prose_with_small_count_is_not_treated_as_chunked_base64(tmp_path):
+    # A generated tool description reading "The task(s), up to 10 in
+    # parallel..." (delegate_task's schema, with the count interpolated from
+    # config) joins into "upto10in" once whitespace is removed by the chunked
+    # scanner, which happens to round-trip as canonical Base64 by coincidence.
+    # Ordinary lowercase words plus a plain small decimal count is not an
+    # encoding channel and must not block every request whose tool
+    # descriptions happen to contain such a phrase.
+    text = "The task(s), up to 10 in parallel for this user."
+    decision = firewall(tmp_path).preflight(_sanitized_request(text), _route())
+    assert "base64_payload" not in decision.reason_codes
+
+
 def _source_presentation_request(grant: SourceGrant, text: str) -> TypedOutboundRequest:
     return TypedOutboundRequest(
         payload={

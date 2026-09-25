@@ -1021,7 +1021,7 @@ def _typed_payload_mapping_item(
                 generated_context
                 or context_mapping
                 or generated_assistant_mapping
-                or key in {"instructions", "system_prompt", "tools"}
+                or key in {"instructions", "system_prompt", "system", "tools"}
             )
         ),
         redact_generated_context=redact_generated_context,

@@ -1028,6 +1028,18 @@ def _canonical_chunked_base64_candidate(candidate: str) -> bool:
         # a wrapped encoding. Without this guard, ``E501 F821 W391`` is joined
         # across spaces and can happen to decode canonically.
         return False
+    if any(chunk.isalpha() and chunk.islower() for chunk in chunks) and all(
+        (chunk.isalpha() and chunk.islower()) or (chunk.isdigit() and int(chunk) < 1000)
+        for chunk in chunks
+    ):
+        # Ordinary lowercase prose with an interpolated small count (e.g. a
+        # generated tool description reading "up to 10 in parallel", where
+        # the number comes from a config value and cannot be enumerated as a
+        # fixed literal) can coincidentally join into a canonical Base64
+        # string once spaces are removed. Genuine fixed-width encodings mix
+        # case, padding, and symbols; pure lowercase words plus a plain small
+        # decimal count is not an encoding channel.
+        return False
     width = len(chunks[0])
     if not all(len(chunk) == width for chunk in chunks[:-1]):
         return False
@@ -1251,6 +1263,12 @@ def _source_text_for_base64_scan(
             # SQL snippets in source comments/queries likewise use fixed
             # keywords whose short uppercase spelling can decode by chance.
             or source_atom in {"PROVIDER", "TOOLSETS", "OPEN", "LIKE", "YAML"}
+            # Built-in tool descriptions (delegate_task, memory/kanban entry
+            # editing, write_file, MCP tool-call batching) use these fixed
+            # words/prefixes in ordinary English guidance. They are Hermes's
+            # own generated tool schema text, not encoded payloads, even
+            # though their spelling happens to decode canonically.
+            or source_atom in {"COMPLETE", "EXISTING", "YOUR", "connectors__"}
         )
 
     def is_source_identifier_in_code(
