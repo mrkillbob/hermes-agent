@@ -279,10 +279,10 @@ def test_interactive_auth_add_normalizes_display_name_to_provider_key(
         tmp_path, provider_key="groq-cloud", name="Groq Enterprise"
     )
 
-    from hermes_cli import auth_commands
+    from hermes_cli import auth_commands, cli_output
 
     answers = iter(["Groq Enterprise", "primary"])
-    monkeypatch.setattr(auth_commands, "line_input", lambda _prompt: next(answers))
+    monkeypatch.setattr(cli_output, "line_input", lambda _prompt: next(answers))
     monkeypatch.setattr(auth_commands, "masked_secret_prompt", lambda _prompt: "gsk-test")
 
     auth_commands._interactive_add()

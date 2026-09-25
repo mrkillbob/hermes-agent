@@ -13,6 +13,27 @@ import hermes_cli.web_server_files as _web_server_files
 import hermes_cli.web_server_gateway as _web_server_gateway
 
 
+def test_gateway_start_uses_manual_run_when_no_service_is_installed(monkeypatch):
+    import asyncio
+
+    from hermes_cli import gateway
+    from hermes_cli.web_routers import ops
+
+    spawned = {}
+    monkeypatch.setattr(gateway, "_installed_service_kind", lambda: None)
+    monkeypatch.setattr(
+        ops,
+        "_spawn_hermes_action",
+        lambda command, name: spawned.update(command=command, name=name)
+        or type("Process", (), {"pid": 123})(),
+    )
+
+    result = asyncio.run(ops.start_gateway())
+
+    assert spawned == {"command": ["gateway", "run"], "name": "gateway-start"}
+    assert result == {"ok": True, "pid": 123, "name": "gateway-start"}
+
+
 def _client():
     try:
         from starlette.testclient import TestClient

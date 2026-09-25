@@ -290,8 +290,16 @@ async def start_gateway(profile: Optional[str] = None):
             detail=f"The default gateway already serves profile '{profile}' as a multiplexer; "
                    "restart it from the default profile instead of starting a separate gateway.",
         )
+    # A fresh Desktop/profile home often has no installed service yet. On Linux,
+    # `gateway start` otherwise routes to systemd merely because systemd exists,
+    # then reports success only at spawn time while the missing unit leaves the
+    # dispatcher offline. Start a detached foreground gateway in that case.
+    with _config_profile_scope(profile):
+        from hermes_cli.gateway import _installed_service_kind
+
+        verb = "start" if _installed_service_kind() is not None else "run"
     with http_failure("Failed to spawn gateway start", 500, "Failed to start gateway"):
-        proc = _spawn_hermes_action(_gateway_subcommand(profile, "start"), "gateway-start")
+        proc = _spawn_hermes_action(_gateway_subcommand(profile, verb), "gateway-start")
     return {"ok": True, "pid": proc.pid, "name": "gateway-start"}
 
 
