@@ -377,9 +377,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # N-1 = `git describe --tags --abbrev=0 HEAD~1`.
+          # Keep all commit ancestry and release tags for N-1 and the historical
+          # updater scenario, but defer unrelated historical file contents.
           fetch-depth: 0
           fetch-tags: true
+          filter: blob:none
 
       - name: Set up Node
         # `hermes update` builds the web UI / TUI workspaces.
@@ -444,6 +446,50 @@ jobs:
         uses: ./.github/actions/retry
         with:
           command: uv sync --locked --python 3.11.15 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+
+      - name: Verify and hydrate upgrade release snapshots
+        # The real upgrade clone uses --shared from this checkout. Materialize
+        # the exact N-1 and pre-handoff snapshots first, so its offline local
+        # origin has every blob those full-tree scenarios need.
+        run: |
+          source .venv/bin/activate
+          python - <<'PY'
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          from tests.e2e.core.upgrade.test_upgrade_path import _refs
+          from tests.e2e.core.upgrade.test_fresh_process_entrypoints import _pre_handoff_tag
+
+          refs = _refs()
+          assert refs.base_tag, "N-1 release tag is not reachable from HEAD"
+          pre_handoff = _pre_handoff_tag()
+          assert pre_handoff is not None, "pre-handoff release tag is not reachable from HEAD"
+
+          def hydrate(tag: str, *paths: str) -> None:
+              archive = subprocess.Popen(
+                  ["git", "archive", "--format=tar", tag, "--", *paths],
+                  stdout=subprocess.PIPE,
+              )
+              assert archive.stdout is not None
+              listing = subprocess.run(["tar", "-tf", "-"], stdin=archive.stdout, stdout=subprocess.DEVNULL)
+              archive.stdout.close()
+              assert archive.wait() == 0 and listing.returncode == 0, f"could not hydrate {tag}"
+
+          hydrate(refs.base_tag)
+          config = tomllib.loads(Path("pyproject.toml").read_text())
+          package_tops = {
+              entry.split(".", 1)[0]
+              for entry in config["tool"]["setuptools"]["packages"]["find"]["include"]
+          }
+          old_entries = subprocess.run(
+              ["git", "ls-tree", "--name-only", pre_handoff[0]],
+              capture_output=True, text=True, check=True,
+          ).stdout.splitlines()
+          old_entries = [name for name in old_entries if name.endswith(".py") or name in package_tops]
+          hydrate(pre_handoff[0], *old_entries)
+          print(f"Hydrated upgrade bases: {refs.base_tag}, {pre_handoff[0]}")
+          PY
 
       - name: Install bubblewrap
         # Every spawned updater runs in bwrap (own PID namespace, no user
