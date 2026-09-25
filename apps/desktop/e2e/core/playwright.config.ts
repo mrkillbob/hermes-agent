@@ -9,8 +9,10 @@ import { defineConfig } from '@playwright/test'
  *  - retries: 0 — a required job that retries hides exactly the flake it
  *    should expose (the old lane retried and still went red for weeks).
  *  - no visual baselines / always-on screenshots; artifacts only on failure.
- *  - one worker: every spec owns a real Electron + `hermes serve`; running
- *    them concurrently on a loaded runner is the timing margin we refuse.
+ *  - CI uses four workers: every spec owns an isolated real Electron +
+ *    `hermes serve` sandbox, so serializing the independent specs needlessly
+ *    turns backend startup budgets into a 30-minute lane on the fork runner.
+ *    Local runs stay serial to keep interactive debugging lightweight.
  *  - 360 s per test (green runs take 6-36 s on the runner this suite was
  *    tuned against; this fork falls back to a smaller shared runner without
  *    access to that one, see backend-health.ts/backend-ready.ts, so the two
@@ -24,7 +26,7 @@ export default defineConfig({
   timeout: 360_000,
   expect: { timeout: 60_000 },
   retries: 0,
-  workers: 1,
+  workers: process.env.CI ? 4 : 1,
   fullyParallel: false,
   reporter: [['list'], ['html', { open: 'never', outputFolder: '../../playwright-report/core' }]],
   outputDir: '../../test-results/core',
