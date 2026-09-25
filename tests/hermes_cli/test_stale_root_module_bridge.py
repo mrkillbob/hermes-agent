@@ -70,7 +70,13 @@ def test_drop_stale_root_modules_also_heals_stale_package_modules():
     import types
     from hermes_cli.stale_modules import drop_stale_root_modules
 
-    names = ("hermes_cli.config", "hermes_cli.tools_config", "hermes_cli.config_migrations", "gateway.status")
+    names = (
+        "hermes_cli.config",
+        "hermes_cli.tools_config",
+        "hermes_cli.config_migrations",
+        "tools.tool_backend_helpers",
+        "gateway.status",
+    )
     before = {name: sys.modules.pop(name, None) for name in names}
     try:
         for name in names:
@@ -86,6 +92,8 @@ def test_drop_stale_root_modules_also_heals_stale_package_modules():
         stale_migrations = sys.modules["hermes_cli.config_migrations"]
         stale_migrations._migrate_to_46 = lambda *_args: None
         stale_migrations.MIGRATIONS = ((45, lambda *_args: None),)
+        stale_helpers = sys.modules["tools.tool_backend_helpers"]
+        assert not hasattr(stale_helpers, "NOUS_MANAGED_PROVIDER")
         assert set(drop_stale_root_modules()) == set(names)
         assert all(name not in sys.modules for name in names)
     finally:

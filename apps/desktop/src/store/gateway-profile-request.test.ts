@@ -860,6 +860,30 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
   })
 
+  it('closes a prewarmed profile socket when activation resolves to the shared primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installDesktop(
+      vi.fn(async (profile: null | string) => ({
+        port: profile ? 5151 : 4242,
+        ...(profile ? { profile, sharedPrimary } : {}),
+        token: 't'
+      }))
+    )
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForProfile('work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await ensureGatewayForProfile('work')
+
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+    expect($gateway.get()).toBe(primary)
+  })
+
   it('closes a local registry prewarm when profile routing resolves to the shared primary', async () => {
     let sharedPrimary = false
     const primary = makePrimary()

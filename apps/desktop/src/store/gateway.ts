@@ -1921,6 +1921,10 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
   // descriptor — $activeGatewayProfile still moves to `key`, so request
   // scoping and profile-aware surfaces behave identically.
   if (await sharedPrimaryRoute(key, 'foreground')) {
+    // A hover/roster prewarm may have opened a secondary before this route
+    // resolved to the primary. Activation is another route-resolution edge,
+    // so retire both local scope identities here as well.
+    discardSupersededSharedPrimarySecondaries('local', key)
     applyActive(g.primaryProfile, activationEpoch)
 
     return
