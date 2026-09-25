@@ -3,6 +3,10 @@ name: Tests
 on:
   workflow_call:
     inputs:
+      slice_count:
+        description: Number of parallel Python test slices
+        type: number
+        default: 8
       e2e_mode:
         description: Run the short PR smoke checks or the complete E2E suite
         type: string
@@ -21,12 +25,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Run tests
+  generate:
+    name: Generate test slices
+    runs-on: ubuntu-latest
     if: inputs.run_unit
-    # Match NousResearch: one unsliced suite on a 96-core runner.
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Generate test matrix
+        id: matrix
+        run: |
+          matrix="$(python3 scripts/run_tests_parallel.py --generate-slices '${{ inputs.slice_count }}')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
+    needs: generate
+    if: inputs.run_unit
+    # The Hermes Agent fork uses the same 96-core runner pool as NousResearch.
     runs-on: ubuntu-latest-96-core
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.generate.outputs.matrix) }}
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 60 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -128,10 +153,10 @@ jobs:
         # in its own freshly-spawned `python -m pytest <file>` subprocess
         # with bounded parallelism. No xdist, no shared workers, no
         # module-level state leakage between files.
-        # The runner discovers the complete suite; there is no slice matrix.
+        #
         run: |
           source .venv/bin/activate
-          scripts/run_tests.sh
+          scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
           # One isolated test subprocess per core, matching NousResearch's
           # measured setting for this runner.
